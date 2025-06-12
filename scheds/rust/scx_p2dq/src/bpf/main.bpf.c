@@ -437,8 +437,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	// First check if last CPU is idle
-	if (taskc->all_cpus &&
-	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ?
+	if (bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ?
 				 idle_smtmask : idle_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
@@ -460,22 +459,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	 * waker.
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_struct *waker = (void *)bpf_get_current_task_btf();
-		task_ctx *waker_taskc = scx_task_data(waker);
-		// Shouldn't happen, but makes code easier to follow
-		if (!waker_taskc) {
-			cpu = prev_cpu;
-			goto found_cpu;
-		}
-
 		// Interactive tasks aren't worth migrating across LLCs.
 		if (interactive) {
-			cpu = prev_cpu;
-			if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
-				stat_inc(P2DQ_STAT_WAKE_PREV);
-				*is_idle = true;
-				goto found_cpu;
-			}
 			// Try an idle CPU in the LLC.
 			if (llcx->cpumask &&
 			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
@@ -487,24 +472,26 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
+
+		struct task_struct *waker = (void *)bpf_get_current_task_btf();
+		task_ctx *waker_taskc = scx_task_data(waker);
+		// Shouldn't happen, but makes code easier to follow
+		if (!waker_taskc) {
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+
 		if (waker_taskc->llc_id == llcx->id || !wakeup_llc_migrations) {
-			// First check if the waking task is in the same LLC
-			// and the prev cpu is idle
-			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-				cpu = prev_cpu;
-				stat_inc(P2DQ_STAT_WAKE_PREV);
-				*is_idle = true;
-				goto found_cpu;
-			}
-			// Try an idle core in the LLC.
-			if (llcx->cpumask &&
+			// Try an idle smt core in the LLC.
+			if (smt_enabled &&
+			    llcx->cpumask &&
 			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
 							 SCX_PICK_IDLE_CORE)) >= 0) {
 				stat_inc(P2DQ_STAT_WAKE_LLC);
 				*is_idle = true;
 				goto found_cpu;
 			}
-			// Try an idle core in the LLC.
+			// Try an idle cpu in the LLC.
 			if (llcx->cpumask &&
 			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
 							 0)) >= 0) {
@@ -516,6 +503,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
+
 		// If wakeup LLC are allowed then migrate to the waker llc.
 		struct llc_ctx *waker_llcx = lookup_llc_ctx(waker_taskc->llc_id);
 		if (!waker_llcx)
