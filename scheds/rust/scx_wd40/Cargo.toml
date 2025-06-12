@@ -1,6 +1,6 @@
 [package]
 name = "scx_wd40"
-version = "1.0.12"
+version = "1.0.13"
 authors = ["Emil Tsalapatis <etsal@meta.com>", "Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
 edition = "2021"
 description = "An experimental fork of the scx_rusty scheduler that uses BPF arenas to simplify scheduler development. Found in: https://github.com/sched-ext/scx/tree/main"
@@ -17,16 +17,16 @@ libbpf-rs = "=0.25.0-beta.1"
 nix = { features = ["process", "time"], default-features = false, version = "0.29" }
 log = "0.4.17"
 ordered-float = "3.4.0"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.12" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.12" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.13" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.13" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }
 serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 sorted-vec = "0.8.3"
 static_assertions = "1.1.0"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }
 
 [features]
 enable_backtrace = []

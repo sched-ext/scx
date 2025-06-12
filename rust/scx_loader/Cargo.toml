@@ -1,6 +1,6 @@
 [package]
 name = "scx_loader"
-version = "1.0.12"
+version = "1.0.13"
 authors = ["Vladislav Nepogodin <vnepogodin@cachyos.org>"]
 edition = "2021"
 description = "DBUS on-demand loader of sched-ext schedulers"
