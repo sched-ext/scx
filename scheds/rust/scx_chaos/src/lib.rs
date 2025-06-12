@@ -710,15 +710,13 @@ pub fn run(args: Args) -> Result<()> {
         return stats::monitor(Duration::from_secs_f64(intv), shutdown);
     }
 
-    let stats_thread = if let Some(intv) = args.stats {
+    let stats_thread = args.stats.map(|intv| {
         let shutdown = shutdown.clone();
 
-        Some(thread::spawn(move || -> Result<()> {
+        thread::spawn(move || -> Result<()> {
             stats::monitor(Duration::from_secs_f64(intv), shutdown)
-        }))
-    } else {
-        None
-    };
+        })
+    });
 
     let scheduler_thread = thread::spawn({
         let args = args.clone();
