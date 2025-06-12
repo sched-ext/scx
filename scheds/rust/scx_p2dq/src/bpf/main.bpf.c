@@ -460,7 +460,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		// Interactive tasks aren't worth migrating across LLCs.
-		if (interactive) {
+		if (interactive ||
+		    (nr_llcs == 2 && nr_nodes == 2)) {
 			// Try an idle CPU in the LLC.
 			if (llcx->cpumask &&
 			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
