@@ -178,11 +178,13 @@ __weak int
 scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bpfmask __arg_trusted)
 {
 	int i;
+	u64 tmp;
 
 	for (i = 0; i < sizeof(cpumask_t) / 8 && can_loop; i++) {
 		if (i >= mask_size)
 			break;
-		scx_bitmap->bits[i] = bpfmask->bits[i];
+		bpf_probe_read_kernel(&tmp, sizeof(tmp), &bpfmask->bits[i]);
+		scx_bitmap->bits[i] = (u64)tmp;
 	}
 
 	return 0;
