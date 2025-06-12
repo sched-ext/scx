@@ -50,6 +50,7 @@ const SCHEDULER_NAME: &str = "scx_flash";
 
 #[derive(PartialEq)]
 enum Powermode {
+    Turbo,
     Performance,
     Powersave,
     Any,
@@ -63,6 +64,8 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
         .values()
         .flat_map(|core| &core.cpus)
         .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
+            // Turbo mode: prioritize CPUs with the highest max frequency
+            (Powermode::Turbo, CoreType::Big { turbo: true }) |
             // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
             (Powermode::Performance, CoreType::Big { .. }) |
             // Powersave mode: add all the Little CPUs
@@ -229,6 +232,7 @@ struct Opts {
     ///
     /// Special values:
     ///  - "auto" = automatically detect the CPUs based on the active power profile
+    ///  - "turbo" = automatically detect and prioritize the CPUs with the highest max frequency
     ///  - "performance" = automatically detect and prioritize the fastest CPUs
     ///  - "powersave" = automatically detect and prioritize the slowest CPUs
     ///  - "all" = all CPUs assigned to the primary domain
@@ -455,6 +459,7 @@ impl<'a> Scheduler<'a> {
         let domain = match primary_domain {
             "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
+            "turbo" => Self::epp_to_cpumask(Powermode::Turbo)?,
             "auto" => match power_profile {
                 PowerProfile::Powersave => Self::epp_to_cpumask(Powermode::Powersave)?,
                 PowerProfile::Balanced { power: true } => {
