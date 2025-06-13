@@ -24,6 +24,9 @@ const volatile bool rr_sched;
 /* Force tasks to run strictly on the primary domain */
 const volatile bool strict_domain;
 
+/* Use the in-kernel idle CPU selection policy */
+const volatile bool builtin_idle;
+
 /*
  * Default task time slice.
  */
@@ -901,7 +904,17 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 	if (is_throttled())
 		return prev_cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
+	/*
+	 * Simply rely on the in-kernel idle CPU selection policy if the
+	 * primary domain includes all the CPUs.
+	 */
+	if (builtin_idle) {
+		if (no_wake_sync)
+			wake_flags &= ~SCX_WAKE_SYNC;
+		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	} else {
+		cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
+	}
 	if (is_idle && can_direct_dispatch(cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
