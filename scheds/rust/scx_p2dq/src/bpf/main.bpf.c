@@ -1041,8 +1041,8 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	 * from. This yields better work conservation on machines with a large
 	 * number of LLCs.
 	 */
-	left = rand_llc_ctx();
-	right = rand_llc_ctx();
+	left = nr_llcs == 2 ? lookup_llc_ctx(llc_ids[0]) : rand_llc_ctx();
+	right = nr_llcs == 2 ? lookup_llc_ctx(llc_ids[1]) : rand_llc_ctx();
 
 	if (!left || !right)
 		return -EINVAL;
@@ -1054,6 +1054,16 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		first = left;
 		second = right;
 	}
+
+	// Handle the edge case where there are two LLCs and the current has
+	// more load. Since it's already been checked start with the other LLC.
+	if (nr_llcs == 2 && first->id == cur_llcx->id) {
+		first = second;
+		second = cur_llcx;
+	}
+
+	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
+	      cpu, first->id, first->load, second->id, second->load);
 
 	// The compat macro doesn't work properly, so on older kernels best
 	// effort by moving to local directly instead of iterating.
