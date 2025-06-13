@@ -465,7 +465,7 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	pos = idx & mask;
 	data = chunk->data[pos];
-	if (likely(!data)) {
+	if (likely(data)) {
 		cast_kern(data);
 
 		data[pos] = (struct sdt_data) {
