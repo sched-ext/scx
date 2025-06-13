@@ -223,11 +223,8 @@ impl UserExitInfo {
     /// only applies when the BPF scheduler exits with scx_bpf_exit(), i.e. kind
     /// ScxExitKind::UnregBPF.
     pub fn exit_code(&self) -> Option<i64> {
-        if self.kind == ScxExitKind::UnregBPF as i32 || self.kind == ScxExitKind::UnregKern as i32 {
-            Some(self.exit_code)
-        } else {
-            None
-        }
+        (self.kind == ScxExitKind::UnregBPF as i32 || self.kind == ScxExitKind::UnregKern as i32)
+            .then_some(self.exit_code)
     }
 
     /// Test whether the BPF scheduler requested restart.
