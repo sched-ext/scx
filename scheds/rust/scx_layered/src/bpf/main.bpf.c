@@ -1229,6 +1229,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct rq *rq;
 	struct task_struct *curr;
 	const struct cpumask *idle_cpumask;
+	bool cand_idle;
 	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
@@ -1237,7 +1238,19 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
 		return false;
 
-	if (cand_cpuc->current_preempt)
+	if (cand_cpuc->preempting_task || cand_cpuc->current_preempt)
+		return false;
+
+	cand_idle = scx_bpf_test_and_clear_cpu_idle(cand);
+	if (cand_idle)
+		goto preempt;
+
+	/*
+	 * This racy check helps with reducing the incidence rate of preempting
+	 * a CPU which already has tasks queued in its local DSQ. See the
+	 * comment above preempting_task check.
+	 */
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cand))
 		return false;
 
 	rq = scx_bpf_cpu_rq(cand);
@@ -1277,6 +1290,19 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 	}
 
+preempt:
+	/*
+	 * Exclude other racing preemptors. While this significantly reduces the
+	 * number of cases where multiple tasks target the same local DSQ
+	 * simultaneously, it is still racy. e.g. The CPU might go idle between
+	 * the preceding idle check and here and selcpu/enq path may directly
+	 * dispatch to the CPU. We need kernel API updates to make this fully
+	 * race-free.
+	 */
+	if (__sync_val_compare_and_swap(&cand_cpuc->preempting_task, NULL, p))
+		return false;
+	cand_cpuc->preempting_at = scx_bpf_now();
+
 	/* preempt */
 	taskc->dsq_id = SCX_DSQ_LOCAL_ON | cand;
 	scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, SCX_ENQ_PREEMPT);
@@ -1305,12 +1331,12 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
 	}
 
-	if (!bpf_cpumask_test_cpu(cand_cpuc->cpu, idle_cpumask)) {
+	if (cand_idle) {
+		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
+	} else {
 		lstat_inc(LSTAT_PREEMPT, layer, cpuc);
 		if (flags & PREEMPT_FIRST)
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
-	} else {
-		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
 	}
 
 	scx_bpf_put_idle_cpumask(idle_cpumask);
@@ -2615,6 +2641,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 {
+	struct task_struct *preempting;
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *layer;
@@ -2657,6 +2684,17 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cpuc->used_at = now;
 	taskc->running_at = now;
 	cpuc->is_protected = layer->is_protected;
+
+	preempting = READ_ONCE(cpuc->preempting_task);
+	if (preempting) {
+		if (preempting == p)
+			WRITE_ONCE(cpuc->preempting_task, NULL);
+		else if (now - cpuc->preempting_at > CLEAR_PREEMPTING_AFTER) {
+			/* this can happen due to e.g. reenqueue_local */
+			gstat_inc(GSTAT_PREEMPTING_MISMATCH, cpuc);
+			WRITE_ONCE(cpuc->preempting_task, NULL);
+		}
+	}
 
 	/* running an owned task if the task is on the layer owning the CPU */
 	if (layer->kind == LAYER_KIND_OPEN) {
