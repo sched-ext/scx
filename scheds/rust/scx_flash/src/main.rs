@@ -247,6 +247,10 @@ struct Opts {
     #[clap(short = 'm', long, default_value = "auto")]
     primary_domain: String,
 
+    /// Force tasks to run strictly on the selected primary domain (see --primary-domain).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    strict_domain: bool,
+
     /// Disable L2 cache awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_l2: bool,
@@ -357,6 +361,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
+        skel.maps.rodata_data.strict_domain = opts.strict_domain;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.native_priority = opts.native_priority;

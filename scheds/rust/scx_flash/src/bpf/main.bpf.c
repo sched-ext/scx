@@ -21,6 +21,9 @@ const volatile bool debug;
 /* Enable round-robin mode */
 const volatile bool rr_sched;
 
+/* Force tasks to run strictly on the primary domain */
+const volatile bool strict_domain;
+
 /*
  * Default task time slice.
  */
@@ -844,10 +847,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	/*
 	 * Search for any idle CPU usable by the task.
 	 */
-	cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
-	if (cpu >= 0) {
-		*is_idle = true;
-		goto out_put_cpumask;
+	if (!strict_domain) {
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 	}
 
 out_put_cpumask:
