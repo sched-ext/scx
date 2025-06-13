@@ -576,14 +576,17 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, HI_FALLBACK_DSQ, slice_ns, 0);
+		cstat_inc(CSTAT_HI_FALLBACK_Q, tctx->cell, cctx);
 	} else if (!tctx->all_cpus_allowed) {
 		// FIXME: With cpusets, most schedules will fall into this section and
 		// not actually get distributed to the correct cell. We need to loosen
 		// the check on tctx->all_cpus_allowed
 		scx_bpf_dsq_insert(p, LO_FALLBACK_DSQ, slice_ns, 0);
+		cstat_inc(CSTAT_LO_FALLBACK_Q, tctx->cell, cctx);
 	} else {
 		scx_bpf_dsq_insert_vtime(p, tctx->cell, slice_ns, vtime,
 					 enq_flags);
+		cstat_inc(CSTAT_DEFAULT_Q, tctx->cell, cctx);
 	}
 
 	/*
