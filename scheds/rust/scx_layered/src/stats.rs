@@ -40,6 +40,8 @@ const GSTAT_FB_CPU_USAGE: usize = bpf_intf::global_stat_id_GSTAT_FB_CPU_USAGE as
 const GSTAT_ANTISTALL: usize = bpf_intf::global_stat_id_GSTAT_ANTISTALL as usize;
 const GSTAT_SKIP_PREEMPT: usize = bpf_intf::global_stat_id_GSTAT_SKIP_PREEMPT as usize;
 const GSTAT_FIXUP_VTIME: usize = bpf_intf::global_stat_id_GSTAT_FIXUP_VTIME as usize;
+const GSTAT_PREEMPTING_MISMATCH: usize =
+    bpf_intf::global_stat_id_GSTAT_PREEMPTING_MISMATCH as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
 const LSTAT_ENQ_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize;
@@ -504,6 +506,8 @@ pub struct SysStats {
     pub skip_preempt: u64,
     #[stat(desc = "Number of times vtime was out of range and fixed up")]
     pub fixup_vtime: u64,
+    #[stat(desc = "Number of times cpuc->preempting_task didn't come on the CPU")]
+    pub preempting_mismatch: u64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -561,6 +565,7 @@ impl SysStats {
             antistall: stats.bpf_stats.gstats[GSTAT_ANTISTALL],
             skip_preempt: stats.bpf_stats.gstats[GSTAT_SKIP_PREEMPT],
             fixup_vtime: stats.bpf_stats.gstats[GSTAT_FIXUP_VTIME],
+            preempting_mismatch: stats.bpf_stats.gstats[GSTAT_PREEMPTING_MISMATCH],
             fallback_cpu: fallback_cpu as u32,
             fallback_cpu_util: stats.bpf_stats.gstats[GSTAT_FB_CPU_USAGE] as f64
                 / elapsed_ns as f64
@@ -602,8 +607,8 @@ impl SysStats {
 
         writeln!(
             w,
-            "skip_preempt={} antistall={} fixup_vtime={}",
-            self.skip_preempt, self.antistall, self.fixup_vtime
+            "skip_preempt={} antistall={} fixup_vtime={} preempting_mismatch={}",
+            self.skip_preempt, self.antistall, self.fixup_vtime, self.preempting_mismatch
         )?;
 
         Ok(())
