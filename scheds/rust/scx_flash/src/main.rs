@@ -189,6 +189,13 @@ struct Opts {
     #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
     idle_resume_us: i64,
 
+    /// Use in-kernel idle CPU selection policy.
+    ///
+    /// Use the default in-kernel idle CPU selection policy, instead of the custom policy.
+    /// Turning on this option may override the effect of --primary-domain.
+    #[clap(short = 'b', long, action = clap::ArgAction::SetTrue)]
+    builtin_idle: bool,
+
     /// Enable round-robin scheduling.
     ///
     /// Each task is given a fixed time slice (defined by --slice-us-max) and run in a cyclic, fair
@@ -360,6 +367,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
+        skel.maps.rodata_data.builtin_idle = opts.builtin_idle;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.strict_domain = opts.strict_domain;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
