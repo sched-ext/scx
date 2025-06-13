@@ -34,7 +34,6 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NR_CPU_IDS;
 
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
@@ -81,12 +80,6 @@ const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
     bpf_intf::cell_stat_idx_CSTAT_LO_FALLBACK_Q,
 ];
 
-unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    unsafe {
-        ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
-    }
-}
-
 // Per cell book-keeping
 #[derive(Debug)]
 struct Cell {
@@ -95,7 +88,6 @@ struct Cell {
 
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
-    prev_percpu_cell_cycles: Vec<[u64; MAX_CELLS]>,
     monitor_interval: Duration,
     cells: HashMap<u32, Cell>,
     // These are the per-cell cstats.
@@ -125,7 +117,6 @@ impl<'a> Scheduler<'a> {
 
         Ok(Self {
             skel,
-            prev_percpu_cell_cycles: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
@@ -293,7 +284,7 @@ impl<'a> Scheduler<'a> {
 
         // We don't want to divide by zero later, but this is never expected.
         if global_queue_decisions == 0 {
-            return bail!("Error: No queueing decisions made globally");
+            bail!("Error: No queueing decisions made globally");
         }
 
         self.log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
