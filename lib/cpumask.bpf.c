@@ -71,6 +71,7 @@ scx_bitmap_vacate_cpu(scx_bitmap_t __arg_arena mask, s32 cpu)
 {
 	int off = (u32)cpu / 64;
 	int ind = (u32)cpu % 64;
+	u64 old, new;
 
 	if (cpu < 0 || cpu >= nr_cpu_ids) {
 		bpf_printk("freeing invalid cpu");
@@ -82,9 +83,14 @@ scx_bitmap_vacate_cpu(scx_bitmap_t __arg_arena mask, s32 cpu)
 		return -EINVAL;
 	}
 
-	__sync_fetch_and_or(&mask->bits[off], 1 << ind);
+	while (can_loop) {
+		old = mask->bits[off];
+		new = old | 1 << ind;
+		if (cmpxchg(&mask->bits[off], old, new) == old)
+			return 0;
+	}
 
-	return 0;
+	return -EAGAIN;
 }
 
 __weak int
