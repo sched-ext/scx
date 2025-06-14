@@ -711,10 +711,14 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		}
 
 		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-		if (interactive_fifo && taskc->dsq_index == 0)
+		if (interactive_fifo && taskc->dsq_index == 0) {
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
-		else
+		} else {
+			if ((taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) &&
+			    p->scx.dsq_vtime < llcx->dsq_max_vtime[taskc->dsq_index])
+				llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
+		}
 
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
@@ -743,6 +747,9 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		ret->fifo.enq_flags = enq_flags;
 		ret->fifo.slice_ns = taskc->slice_ns;
 	} else {
+		if ((taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) &&
+		    p->scx.dsq_vtime < llcx->dsq_max_vtime[taskc->dsq_index])
+			llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
 		ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 		ret->vtime.dsq_id = taskc->dsq_id;
 		ret->vtime.enq_flags = enq_flags;
@@ -808,13 +815,15 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 		__sync_val_compare_and_swap(&llcx->vtime, llcx->vtime, p->scx.dsq_vtime);
 	}
 
-	// For non affinitized tasks update the vtime if it is larger than the
-	// current LLC vtime. Affinitized tasks are direct dispatched and don't
-	// strictly follow vtime.
+	// If there is nothing queued then update the max vtime for the
+	// dsq index. When enqueueing the max vtime for the dsq will be
+	// updated as needed.
 	if ((taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) &&
-	    taskc->all_cpus &&
-	    p->scx.dsq_vtime > llcx->dsq_max_vtime[taskc->dsq_index])
-		llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
+	    taskc->all_cpus) {
+		if (scx_bpf_dsq_nr_queued(llcx->dsqs[taskc->dsq_index]) == 0 &&
+		    taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc)
+			llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
+	}
 
 	// Affinitized task vtime is handled separately
 	if (!taskc->all_cpus &&
