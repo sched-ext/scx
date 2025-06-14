@@ -637,12 +637,12 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * into the local DSQ.
 	 */
 	if ((p->flags & PF_KTHREAD) &&
-	    p->cpus_ptr == &p->cpus_mask &&
-	    p->nr_cpus_allowed != nr_cpus &&
-	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+	    p->nr_cpus_allowed == 1 &&
 	    kthreads_local) {
 		stat_inc(P2DQ_STAT_DIRECT);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, dsq_time_slices[0], enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, dsq_time_slices[0], enq_flags);
+		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
