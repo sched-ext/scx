@@ -189,6 +189,13 @@ struct Opts {
     #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
     idle_resume_us: i64,
 
+    /// Enable per-CPU runqueues.
+    ///
+    /// Use distinct per-CPU runqueues to reduce task migrations. This can help improve certain
+    /// cache-sensitive workload at the cost of making the system less responsive.
+    #[clap(short = 'C', long, action = clap::ArgAction::SetTrue)]
+    cpu_runqueue: bool,
+
     /// Enable round-robin scheduling.
     ///
     /// Each task is given a fixed time slice (defined by --slice-us-max) and run in a cyclic, fair
@@ -356,6 +363,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
+        skel.maps.rodata_data.pcpu_dsq = opts.cpu_runqueue;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;

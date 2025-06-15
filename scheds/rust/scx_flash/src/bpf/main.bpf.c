@@ -5,6 +5,8 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
+#define MAX_VTIME	(~0ULL)
+
 const volatile u64 __COMPAT_SCX_PICK_IDLE_IN_NODE;
 
 char _license[] SEC("license") = "GPL";
@@ -20,6 +22,9 @@ const volatile bool debug;
 
 /* Enable round-robin mode */
 const volatile bool rr_sched;
+
+/* Use per-CPU DSQs */
+const volatile bool pcpu_dsq;
 
 /*
  * Default task time slice.
@@ -385,18 +390,18 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 /*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
-static inline u64 nr_tasks_waiting(int node)
+static inline u64 nr_tasks_waiting(u64 dsq_id)
 {
-	return scx_bpf_dsq_nr_queued(node) + 1;
+	return scx_bpf_dsq_nr_queued(dsq_id) + 1;
 }
 
 /*
- * Return the time slice that can be assigned to a task queued to @node
+ * Return the time slice that can be assigned to a task queued to @dsq_id
  * DSQ.
  */
-static inline u64 task_slice(int node)
+static inline u64 task_slice(u64 dsq_id)
 {
-	return CLAMP(slice_max / nr_tasks_waiting(node), slice_min, slice_max);
+	return CLAMP(slice_max / nr_tasks_waiting(dsq_id), slice_min, slice_max);
 }
 
 /*
@@ -865,18 +870,26 @@ out_put_cpumask:
 }
 
 /*
- * Return true if we can perform a direct dispatch on @node, false
+ * Return the DSQ associated to @cpu.
+ */
+static u64 cpu_to_dsq(s32 cpu)
+{
+	return pcpu_dsq ? cpu : __COMPAT_scx_bpf_cpu_node(cpu);
+}
+
+/*
+ * Return true if we can perform a direct dispatch on @cpu, false
  * otherwise.
  */
 static inline bool can_direct_dispatch(s32 cpu)
 {
 	/*
 	 * If @local_pcpu is enabled allow direct dispatch only if there
-	 * are no other tasks queued to the node DSQ. This prevents
+	 * are no other tasks queued to the CPU DSQ. This prevents
 	 * potential starvation of per-CPU tasks.
 	 */
 	if (local_pcpu)
-		return !scx_bpf_dsq_nr_queued(__COMPAT_scx_bpf_cpu_node(cpu));
+		return !scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 
 	return true;
 }
@@ -1070,7 +1083,7 @@ out_kick:
 	/*
 	 * Kick the CPU even if we didn't directly dispatch, so it can be
 	 * clear its idle state (transitioning from idle->awake->idle) or
-	 * consume another task from the per-node DSQ.
+	 * consume another task from the CPU DSQ.
 	 */
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
@@ -1087,6 +1100,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+	u64 dsq_id = cpu_to_dsq(prev_cpu);
 
 	/*
 	 * Keep reusing the same CPU in round-robin mode.
@@ -1113,7 +1127,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags))
 		return;
 
-	scx_bpf_dsq_insert_vtime(p, node, task_slice(node), p->scx.dsq_vtime, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, task_slice(dsq_id), p->scx.dsq_vtime, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
@@ -1204,7 +1218,7 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
+	u64 dsq_id = cpu_to_dsq(cpu);
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -1216,8 +1230,38 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * Consume regular tasks from the shared DSQ, transferring them to the
 	 * local CPU DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(node))
+	if (scx_bpf_dsq_move_to_local(dsq_id))
 		return;
+
+	/*
+	 * If per-CPU DSQs are enabled attempt to consume the task with the
+	 * minimum vruntime within the same LLC.
+	 */
+	if (pcpu_dsq) {
+		u64 min_vtime = MAX_VTIME;
+		u64 min_dsq_id = dsq_id;
+		s32 other_cpu;
+
+		bpf_for(other_cpu, 0, nr_cpu_ids) {
+			const struct task_struct *p;
+
+			if (cpu == other_cpu || !cpus_share_llc(cpu, other_cpu))
+				continue;
+
+			dsq_id = cpu_to_dsq(other_cpu);
+			bpf_for_each(scx_dsq, p, dsq_id, 0) {
+				if (p->scx.dsq_vtime < min_vtime) {
+					min_vtime = p->scx.dsq_vtime;
+					min_dsq_id = dsq_id;
+				}
+				break;
+			}
+		}
+
+		if (min_vtime != MAX_VTIME &&
+		    scx_bpf_dsq_move_to_local(min_dsq_id))
+			return;
+	}
 
 	/*
 	 * If the current task expired its time slice and no other task wants
@@ -1758,6 +1802,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 {
 	struct bpf_timer *timer;
 	int err, node;
+	s32 cpu;
 	u32 key = 0;
 
 	/* Initialize amount of online and possible CPUs */
@@ -1768,13 +1813,23 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	init_cpuperf_target();
 
 	/*
-	 * Create the global shared DSQ.
+	 * Create per-CPU or per-node DSQs.
 	 */
-	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
-		err = scx_bpf_create_dsq(node, node);
-		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", node, err);
-			return err;
+	if (pcpu_dsq) {
+		bpf_for(cpu, 0, nr_cpu_ids) {
+			err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
+			if (err) {
+				scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
+				return err;
+			}
+		}
+	} else {
+		bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+			err = scx_bpf_create_dsq(node, node);
+			if (err) {
+				scx_bpf_error("failed to create DSQ %d: %d", node, err);
+				return err;
+			}
 		}
 	}
 
