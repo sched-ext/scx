@@ -384,14 +384,14 @@ impl LoadAggregator {
     fn apply_infeasible_threshold(&mut self, lambda_x: f64) {
         self.effective_max_weight = lambda_x;
         self.global_load_sum = 0.0f64;
-        for (_, dom) in self.doms.iter_mut() {
-            dom.load_sum = 0.0f64;
-            for (weight, dcycle) in dom.loads.iter() {
-                let adjusted = (*weight as f64).min(lambda_x);
-                let load = adjusted * dcycle;
 
-                dom.load_sum += load;
-            }
+        for dom in self.doms.values_mut() {
+            dom.load_sum = dom
+                .loads
+                .iter()
+                .map(|(weight, dcycle)| (*weight as f64).min(lambda_x) * dcycle)
+                .sum();
+
             self.global_load_sum += dom.load_sum;
         }
     }
