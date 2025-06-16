@@ -18,6 +18,9 @@ char _license[] SEC("license") = "GPL";
  /* Report additional debugging information */
 const volatile bool debug;
 
+/* Enable round-robin mode */
+const volatile bool rr_sched;
+
 /*
  * Default task time slice.
  */
@@ -451,6 +454,9 @@ static inline u64 scale_by_task_normalized_weight_inverse(const struct task_stru
 static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 vtime_min, max_sleep;
+
+	if (rr_sched)
+		return;
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
@@ -1083,6 +1089,16 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 
 	/*
+	 * Keep reusing the same CPU in round-robin mode.
+	 */
+	if (rr_sched) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return;
+	}
+
+	/*
 	 * Dispatch regular tasks to the shared DSQ.
 	 */
 	tctx = try_lookup_task_ctx(p);
@@ -1148,6 +1164,12 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * is disabled).
 	 */
 	if (!smt_enabled)
+		return true;
+
+	/*
+	 * Keep running on the same CPU if round-robin mode is enabled.
+	 */
+	if (rr_sched)
 		return true;
 
 	/*
@@ -1272,7 +1294,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 	 * Update the global vruntime as a new task is starting to use a
 	 * CPU.
 	 */
-	if (time_before(vtime_now, p->scx.dsq_vtime))
+	if (!rr_sched && time_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
 }
 
@@ -1289,35 +1311,37 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
+	if (!rr_sched) {
+		tctx = try_lookup_task_ctx(p);
+		if (!tctx)
+			return;
 
-	/*
-	 * Evaluate the time slice used by the task.
-	 */
-	slice = MIN(now - tctx->last_run_at, slice_max);
+		/*
+		 * Evaluate the time slice used by the task.
+		 */
+		slice = MIN(now - tctx->last_run_at, slice_max);
 
-	/*
-	 * Update task's execution time (exec_runtime), but never account
-	 * more than a scaled @run_lag of runtime to prevent excessive
-	 * de-prioritization of CPU-intensive tasks (which could lead to
-	 * starvation).
-	 *
-	 * Tasks with a higher priority have a smaller execution runtime
-	 * cap (resulting in an earlier deadline) and vice-versa for tasks
-	 * with a lower priority.
-	 */
-	max_runtime = scale_by_task_normalized_weight_inverse(p, run_lag);
-	if (tctx->exec_runtime + slice < max_runtime)
-		tctx->exec_runtime += slice;
-	else
-		tctx->exec_runtime = max_runtime;
+		/*
+		 * Update task's execution time (exec_runtime), but never
+		 * account more than a scaled @run_lag of runtime to
+		 * prevent excessive de-prioritization of CPU-intensive
+		 * tasks (which could lead to starvation).
+		 *
+		 * Tasks with a higher priority have a smaller execution
+		 * runtime cap (resulting in an earlier deadline) and
+		 * vice-versa for tasks with a lower priority.
+		 */
+		max_runtime = scale_by_task_normalized_weight_inverse(p, run_lag);
+		if (tctx->exec_runtime + slice < max_runtime)
+			tctx->exec_runtime += slice;
+		else
+			tctx->exec_runtime = max_runtime;
 
-	/*
-	 * Update task's vruntime.
-	 */
-	p->scx.dsq_vtime += scale_by_task_normalized_weight_inverse(p, slice);
+		/*
+		 * Update task's vruntime.
+		 */
+		p->scx.dsq_vtime += scale_by_task_normalized_weight_inverse(p, slice);
+	}
 
 	/*
 	 * Update CPU runtime.
@@ -1333,6 +1357,9 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
+
+	if (rr_sched)
+		return;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1367,6 +1394,9 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 	u64 now = scx_bpf_now();
 	s64 delta_t;
 	struct task_ctx *tctx;
+
+	if (rr_sched)
+		return;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1415,7 +1445,8 @@ void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 	/*
 	 * Initialize the task vruntime to the current global vruntime.
 	 */
-	p->scx.dsq_vtime = vtime_now;
+	if (!rr_sched)
+		p->scx.dsq_vtime = vtime_now;
 }
 
 static int init_cpumask(struct bpf_cpumask **cpumask)
