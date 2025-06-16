@@ -39,6 +39,7 @@ use log::trace;
 use log::warn;
 use scx_layered::*;
 use scx_stats::prelude::*;
+use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
@@ -661,6 +662,10 @@ struct Opts {
     /// --disable-percpu-kthread-preempt is not set.
     #[clap(long, default_value = "false")]
     percpu_kthread_preempt_all: bool,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -2957,6 +2962,14 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.version {
+        println!(
+            "scx_layered {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
 
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
