@@ -36,6 +36,10 @@ def get_nar_hash_and_version(repo, branch, hash):
     return (j["hash"], result.stdout.rstrip())
 
 
+def make_cgit_changelog_url(repo: str, old_hash: str, new_hash: str) -> str:
+    return f"{repo.rstrip('/')}/log/?qt=range&q={old_hash}..{new_hash}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update kernel locks")
     parser.add_argument(
@@ -51,7 +55,7 @@ if __name__ == "__main__":
             "kernel-versions.json not found. Are you running this script from the root of the scx repo?"
         ) from exc
 
-    updated_kernels = []
+    updated_kernels = {}
 
     if args.versions:
         versions_set = set(args.versions)
@@ -79,7 +83,9 @@ if __name__ == "__main__":
         v["narHash"] = narHash
         v["kernelVersion"] = kver
 
-        updated_kernels.append(k)
+        updated_kernels[k] = {
+            "changelog_url": make_cgit_changelog_url(v["repo"], old_hash, new_hash)
+        }
 
     if not updated_kernels:
         print("No changes made, exiting.")
@@ -97,7 +103,13 @@ if __name__ == "__main__":
     subprocess.run(["git", "add", "kernel-versions.json"], check=True)
 
     if len(updated_kernels) == 1:
-        commit_message = f"chore(deps): update {updated_kernels[0]} kernel\n"
+        name, meta = next(iter(updated_kernels.items()))
+        commit_message = f"chore(deps): update {name} kernel\n"
+
+        if "changelog_url" in meta:
+            commit_message += (
+                f"\nThe commit list is available at: {meta['changelog_url']}\n"
+            )
     else:
         commit_message = "chore(deps): update kernel versions\n"
 
