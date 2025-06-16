@@ -123,7 +123,7 @@ static __always_inline u64 max_dsq_time_slice(void)
 
 static __always_inline u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
 {
-	return p->scx.weight * slice_ns / 100;
+	return (p->scx.weight * slice_ns) / 100;
 }
 
 static __always_inline u64 task_dsq_slice_ns(struct task_struct *p, int dsq_index)
@@ -296,7 +296,7 @@ static __always_inline void update_vtime(struct task_struct *p,
 		u64 max_slice = max_dsq_time_slice();
 		u64 vtime_min = vtime_now - max_slice;
 
-		p->scx.dsq_vtime = max(p->scx.dsq_vtime, vtime_min);
+		p->scx.dsq_vtime = task_slice_ns(p, max(p->scx.dsq_vtime, vtime_min));
 		return;
 	}
 
@@ -847,7 +847,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 
 	last_dsq_slice_ns = taskc->slice_ns;
 	used = now - taskc->last_run_at;
-	scaled_used = used * 100 / p->scx.weight;
+	scaled_used = (used * 100) / p->scx.weight;
 
 	p->scx.dsq_vtime += scaled_used;
 	__sync_fetch_and_add(&llcx->vtime, used);
@@ -1077,21 +1077,25 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 
 	bpf_for(i, 0, nr_dsqs_per_llc) {
 		cur_dsq_id = llcx->dsqs[i];
-		bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
-			if (p->scx.dsq_vtime < min_vtime) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cur_dsq_id;
+		if (scx_bpf_dsq_nr_queued(cur_dsq_id) > 0) {
+			bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
+				if (p->scx.dsq_vtime < min_vtime) {
+					min_vtime = p->scx.dsq_vtime;
+					dsq_id = cur_dsq_id;
+				}
+				break;
 			}
-			break;
 		}
 	}
 
-	bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
-		if (p->scx.dsq_vtime < min_vtime) {
-			min_vtime = p->scx.dsq_vtime;
-			dsq_id = cpuc->affn_dsq;
+	if (scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0) {
+		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+			if (p->scx.dsq_vtime < min_vtime) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cpuc->affn_dsq;
+			}
+			break;
 		}
-		break;
 	}
 
 	trace("DISPATCH cpu[%d] cur vtime %llu min_vtime %llu dsq_id %llu",
