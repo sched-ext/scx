@@ -11,13 +11,10 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod cpu_order;
 mod stats;
-use std::cell::Cell;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::ffi::CStr;
-use std::fmt;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::str;
@@ -31,12 +28,12 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use clap_num::number_range;
+use cpu_order::CpuOrder;
 use crossbeam::channel;
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
-use itertools::iproduct;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use libc::c_char;
@@ -54,10 +51,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
 use scx_utils::Cpumask;
-use scx_utils::EnergyModel;
-use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
@@ -303,315 +297,6 @@ impl introspec {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CpuFlatId {
-    // - *_adx: an absolute index within a system scope
-    // - *_rdx: a relative index under a parent
-    //
-    // - node_adx: a NUMA domain within a system
-    // - pd_adx: a performance domain (CPU frequency domain) within a system
-    //   - llc_rdx: an LLC domain (CCX) under a NUMA domain
-    //     - core_rdx: a core under a LLC domain
-    //       - cpu_rdx: a CPU under a core
-    node_adx: usize,
-    pd_adx: usize,
-    llc_rdx: usize,
-    core_rdx: usize,
-    cpu_rdx: usize,
-    cpu_adx: usize,
-    smt_level: usize,
-    cache_size: usize,
-    cpu_cap: usize,
-    big_core: bool,
-    turbo_core: bool,
-}
-
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
-struct ComputeDomainKey {
-    node_adx: usize,
-    llc_rdx: usize,
-    is_big: bool,
-}
-
-#[derive(Debug, Clone)]
-struct ComputeDomainValue {
-    cpdom_id: usize,
-    cpdom_alt_id: Cell<usize>,
-    cpu_ids: Vec<usize>,
-    neighbor_map: RefCell<BTreeMap<usize, RefCell<Vec<usize>>>>,
-}
-
-#[derive(Debug)]
-struct FlatTopology {
-    all_cpus_mask: Cpumask,
-    cpu_fids_performance: Vec<CpuFlatId>,
-    cpu_fids_powersave: Vec<CpuFlatId>,
-    cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue>,
-    smt_enabled: bool,
-}
-
-impl fmt::Display for FlatTopology {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for cpu_fid in self.cpu_fids_performance.iter() {
-            write!(f, "\nCPU in performance: {:?}", cpu_fid).ok();
-        }
-        for cpu_fid in self.cpu_fids_powersave.iter() {
-            write!(f, "\nCPU in powersave: {:?}", cpu_fid).ok();
-        }
-        for (k, v) in self.cpdom_map.iter() {
-            write!(f, "\nCPDOM: {:?} {:?}", k, v).ok();
-        }
-        write!(f, "SMT: {}", self.smt_enabled).ok();
-        Ok(())
-    }
-}
-
-impl FlatTopology {
-    /// Build a flat-structured topology
-    pub fn new() -> Result<FlatTopology> {
-        let sys_topo = Topology::new().expect("Failed to build host topology");
-        let sys_em = EnergyModel::new();
-        debug!("{:#?}", sys_topo);
-        debug!("{:#?}", sys_em);
-
-        let cpu_fids_performance = Self::build_cpu_fids(&sys_topo, &sys_em, false).unwrap();
-        let cpu_fids_powersave = Self::build_cpu_fids(&sys_topo, &sys_em, true).unwrap();
-
-        // Note that building compute domain is not dependent to CPU orer
-        // so it is okay to use any cpu_fids_*.
-        let cpdom_map = Self::build_cpdom(&cpu_fids_performance).unwrap();
-
-        Ok(FlatTopology {
-            all_cpus_mask: sys_topo.span,
-            cpu_fids_performance,
-            cpu_fids_powersave,
-            cpdom_map,
-            smt_enabled: sys_topo.smt_enabled,
-        })
-    }
-
-    /// Build a flat-structured list of CPUs in a preference order
-    fn build_cpu_fids(
-        sys_topo: &Topology,
-        em: &Result<EnergyModel>,
-        prefer_powersave: bool,
-    ) -> Option<Vec<CpuFlatId>> {
-        let mut cpu_fids = Vec::new();
-
-        // Build a vector of cpu flat ids.
-        for (&node_adx, node) in sys_topo.nodes.iter() {
-            for (llc_rdx, (_llc_adx, llc)) in node.llcs.iter().enumerate() {
-                for (core_rdx, (_core_adx, core)) in llc.cores.iter().enumerate() {
-                    for (cpu_rdx, (cpu_adx, cpu)) in core.cpus.iter().enumerate() {
-                        let cpu_adx = *cpu_adx;
-                        let pd_adx = Self::get_pd_id(em, cpu_adx, node_adx);
-                        let cpu_fid = CpuFlatId {
-                            node_adx,
-                            pd_adx,
-                            llc_rdx,
-                            core_rdx,
-                            cpu_rdx,
-                            cpu_adx,
-                            smt_level: cpu.smt_level,
-                            cache_size: cpu.cache_size,
-                            cpu_cap: cpu.cpu_capacity,
-                            big_core: cpu.core_type != CoreType::Little,
-                            turbo_core: cpu.core_type == CoreType::Big { turbo: true },
-                        };
-                        cpu_fids.push(RefCell::new(cpu_fid));
-                    }
-                }
-            }
-        }
-
-        // Convert a vector of RefCell to a vector of plain cpu_fids
-        let mut cpu_fids2 = Vec::new();
-        for cpu_fid in cpu_fids.iter() {
-            cpu_fids2.push(cpu_fid.borrow().clone());
-        }
-        let mut cpu_fids = cpu_fids2;
-
-        // Sort the cpu_fids
-        let has_biglittle = sys_topo.has_little_cores();
-        match (prefer_powersave, has_biglittle) {
-            // 1. powersave,      no  big/little
-            //     * within the same LLC domain
-            //         - node_adx, llc_rdx,
-            //     * prefer more capable CPU with higher capacity
-            //       and larger cache
-            //         - ^cpu_cap (chip binning), ^cache_size,
-            //     * prefere the SMT core within the same performance domain
-            //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
-            (true, false) => {
-                cpu_fids.sort_by(|a, b| {
-                    a.node_adx
-                        .cmp(&b.node_adx)
-                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
-                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
-                        .then_with(|| b.cache_size.cmp(&a.cache_size))
-                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
-                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
-                        .then_with(|| b.smt_level.cmp(&a.smt_level))
-                        .then_with(|| a.cpu_rdx.cmp(&b.cpu_rdx))
-                });
-            }
-            // 2. powersave,      yes big/little
-            //     * within the same LLC domain
-            //         - node_adx, llc_rdx,
-            //     * prefer energy-efficient LITTLE CPU with a larger cache
-            //         - cpu_cap (big/little), ^cache_size,
-            //     * prefere the SMT core within the same performance domain
-            //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
-            (true, true) => {
-                cpu_fids.sort_by(|a, b| {
-                    a.node_adx
-                        .cmp(&b.node_adx)
-                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
-                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
-                        .then_with(|| b.cache_size.cmp(&a.cache_size))
-                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
-                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
-                        .then_with(|| b.smt_level.cmp(&a.smt_level))
-                        .then_with(|| a.cpu_rdx.cmp(&b.cpu_rdx))
-                });
-            }
-            // 3. performance,    no  big/little
-            // 4. performance,    yes big/little
-            //     * prefer the non-SMT core
-            //         - cpu_rdx,
-            //     * fill the same LLC domain first
-            //         - node_adx, llc_rdx,
-            //     * prefer more capable CPU with higher capacity
-            //       (chip binning or big/little) and larger cache
-            //         - ^cpu_cap, ^cache_size, smt_level
-            //     * within the same power domain
-            //         - pd_adx, core_rdx
-            _ => {
-                cpu_fids.sort_by(|a, b| {
-                    a.cpu_rdx
-                        .cmp(&b.cpu_rdx)
-                        .then_with(|| a.node_adx.cmp(&b.node_adx))
-                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
-                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
-                        .then_with(|| b.cache_size.cmp(&a.cache_size))
-                        .then_with(|| a.smt_level.cmp(&b.smt_level))
-                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
-                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
-                });
-            }
-        }
-
-        Some(cpu_fids)
-    }
-
-    /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
-    /// If the energy model is not available, use NUMA node ID instead.
-    fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, node_adx: usize) -> usize {
-        match em {
-            Ok(em) => em.get_pd(cpu_adx).unwrap().id,
-            Err(_) => node_adx,
-        }
-    }
-
-    /// Build a list of compute domains
-    fn build_cpdom(
-        cpu_fids: &Vec<CpuFlatId>,
-    ) -> Option<BTreeMap<ComputeDomainKey, ComputeDomainValue>> {
-        // Creat a compute domain map, where a compute domain is a CPUs that
-        // are under the same node and LLC and have the same core type.
-        let mut cpdom_id = 0;
-        let mut cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue> = BTreeMap::new();
-        let mut cpdom_types: BTreeMap<usize, bool> = BTreeMap::new();
-        for cpu_fid in cpu_fids.iter() {
-            let key = ComputeDomainKey {
-                node_adx: cpu_fid.node_adx,
-                llc_rdx: cpu_fid.llc_rdx,
-                is_big: cpu_fid.big_core,
-            };
-            let value = cpdom_map.entry(key.clone()).or_insert_with(|| {
-                let val = ComputeDomainValue {
-                    cpdom_id,
-                    cpdom_alt_id: Cell::new(cpdom_id),
-                    cpu_ids: Vec::new(),
-                    neighbor_map: RefCell::new(BTreeMap::new()),
-                };
-                cpdom_types.insert(cpdom_id, key.is_big);
-
-                cpdom_id += 1;
-                val
-            });
-            value.cpu_ids.push(cpu_fid.cpu_adx);
-        }
-
-        // Build a neighbor map for each compute domain, where neighbors are
-        // ordered by core type, node, and LLC.
-        for ((from_k, from_v), (to_k, to_v)) in iproduct!(cpdom_map.iter(), cpdom_map.iter()) {
-            if from_k == to_k {
-                continue;
-            }
-
-            let d = Self::dist(from_k, to_k);
-            let mut map = from_v.neighbor_map.borrow_mut();
-            match map.get(&d) {
-                Some(v) => {
-                    v.borrow_mut().push(to_v.cpdom_id);
-                }
-                None => {
-                    map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
-                }
-            }
-        }
-
-        // Fill up cpdom_alt_id for each compute domain.
-        for (k, v) in cpdom_map.iter() {
-            let mut key = k.clone();
-            key.is_big = !k.is_big;
-
-            if let Some(alt_v) = cpdom_map.get(&key) {
-                // First, try to find an alternative domain
-                // under the same node/LLC.
-                v.cpdom_alt_id.set(alt_v.cpdom_id);
-            } else {
-                // If there is no alternative domain in the same node/LLC,
-                // choose the closest one.
-                //
-                // Note that currently, the idle CPU selection (pick_idle_cpu)
-                // is not optimized for this kind of architecture, where big
-                // and LITTLE cores are in different node/LLCs.
-                'outer: for (_dist, ncpdoms) in v.neighbor_map.borrow().iter() {
-                    for ncpdom_id in ncpdoms.borrow().iter() {
-                        if let Some(is_big) = cpdom_types.get(ncpdom_id) {
-                            if *is_big == key.is_big {
-                                v.cpdom_alt_id.set(*ncpdom_id);
-                                break 'outer;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Some(cpdom_map)
-    }
-
-    /// Calculate distance from two compute domains
-    fn dist(from: &ComputeDomainKey, to: &ComputeDomainKey) -> usize {
-        let mut d = 0;
-        // code type > numa node > llc
-        if from.is_big != to.is_big {
-            d += 3;
-        }
-        if from.node_adx != to.node_adx {
-            d += 2;
-        } else {
-            if from.llc_rdx != to.llc_rdx {
-                d += 1;
-            }
-        }
-        d
-    }
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -667,11 +352,11 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize CPU topology
-        let topo = FlatTopology::new().unwrap();
-        Self::init_cpus(&mut skel, &opts, &topo);
+        let order = CpuOrder::new().unwrap();
+        Self::init_cpus(&mut skel, &opts, &order);
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts, &topo);
+        Self::init_globals(&mut skel, &opts, &order);
 
         // Attach.
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
@@ -701,11 +386,11 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn init_cpus(skel: &mut OpenBpfSkel, opts: &Opts, topo: &FlatTopology) {
-        debug!("{:#?}", topo);
+    fn init_cpus(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
+        debug!("{:#?}", order);
 
         // Initialize CPU capacity
-        for (_, cpu) in topo.cpu_fids_performance.iter().enumerate() {
+        for (_, cpu) in order.cpus_pf.iter().enumerate() {
             skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
             skel.maps.rodata_data.cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
             skel.maps.rodata_data.cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
@@ -716,19 +401,13 @@ impl<'a> Scheduler<'a> {
         // Otherwise, follow the specified CPU preference order.
         let (cpu_pf_order, cpu_ps_order) = if opts.cpu_pref_order.is_empty() {
             (
-                topo.cpu_fids_performance
-                    .iter()
-                    .map(|cpu| cpu.cpu_adx)
-                    .collect(),
-                topo.cpu_fids_powersave
-                    .iter()
-                    .map(|cpu| cpu.cpu_adx)
-                    .collect(),
+                order.cpus_pf.iter().map(|cpu| cpu.cpu_adx).collect(),
+                order.cpus_ps.iter().map(|cpu| cpu.cpu_adx).collect(),
             )
         } else {
             let cpu_list = read_cpulist(&opts.cpu_pref_order).unwrap();
             let pref_mask = Cpumask::from_cpulist(&opts.cpu_pref_order).unwrap();
-            if pref_mask != topo.all_cpus_mask {
+            if pref_mask != order.all_cpus_mask {
                 panic!("--cpu_pref_order does not cover the whole CPUs.");
             }
             (cpu_list.clone(), cpu_list)
@@ -747,7 +426,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize compute domain contexts
-        for (k, v) in topo.cpdom_map.iter() {
+        for (k, v) in order.cpdom_map.iter() {
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id.get() as u64;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].node_id = k.node_adx as u8;
@@ -776,14 +455,14 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, topo: &FlatTopology) {
+    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
         skel.maps.bss_data.no_preemption = opts.no_preemption;
         skel.maps.bss_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
         skel.maps.bss_data.is_powersave_mode = opts.powersave;
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u64;
-        skel.maps.rodata_data.is_smt_active = topo.smt_enabled;
+        skel.maps.rodata_data.is_smt_active = order.smt_enabled;
         skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
         skel.maps.rodata_data.verbose = opts.verbose;
         skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
