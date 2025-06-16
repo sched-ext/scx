@@ -518,89 +518,89 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	struct task_ctx *next_tctx, *prev_tctx;
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
-		return 0;
-
-	next_tctx = try_lookup_task_ctx(next);
 	prev_tctx = try_lookup_task_ctx(prev);
 
-	if (!(event = try_reserve_event()))
-		return -ENOMEM;
+	// We need to check if this is the tail end of a sample
+	if (prev && prev_tctx && prev_tctx->last_run_ns > 0) {
 
-	u64 now = bpf_ktime_get_ns();
-	event->type = SCHED_SWITCH;
-	event->cpu = bpf_get_smp_processor_id();
-	event->ts = now;
+		if (!(event = try_reserve_event()))
+			return -ENOMEM;
 
-	/*
-	 * Tracking vtime **and** the dsq a task was inserted to is kind of
-	 * tricky. We could read dsq_vtime directly of the sched_ext_entity on
-	 * the task_struct, but the dsq field will not be available on
-	 * sched_switch as the task is not on any dsq. The current hacky
-	 * solution is to record the dsq that the task was inserted to and
-	 * store it in a map for the task. There still needs to be handling for
-	 * when tasks are moved from iterators.
-	 */
-	event->event.sched_switch.preempt = preempt;
-	if (next) {
-		event->event.sched_switch.next_pid = next->pid;
-		event->event.sched_switch.next_tgid = next->tgid;
-		event->event.sched_switch.next_prio = (int)next->prio;
-		if (next_tctx && next_tctx->dsq_insert_time > 0) {
-			event->event.sched_switch.next_dsq_lat_us = (now - next_tctx->dsq_insert_time) / 1000;
-			event->event.sched_switch.next_dsq_id = next_tctx->dsq_id;
-			event->event.sched_switch.next_dsq_nr = scx_bpf_dsq_nr_queued(next_tctx->dsq_id);
-			/*
-			 * XXX: if a task gets moved to another dsq and the vtime is updated
-			 * then vtime should be read off the sched_ext_entity. To properly
-			 * handle vtime any time a task is inserted to a dsq or the vtime is
-			 * updated the tctx needs to be updated.
-			 */
-			// bpf_core_read(&event->dsq_vtime, sizeof(u64), &p->scx.dsq_vtime);
-			event->event.sched_switch.next_dsq_vtime = next_tctx->dsq_vtime;
+		u64 now = bpf_ktime_get_ns();
+		event->type = SCHED_SWITCH;
+		event->cpu = bpf_get_smp_processor_id();
+		event->ts = now;
+
+		next_tctx = try_lookup_task_ctx(next);
+
+		/*
+		* Tracking vtime **and** the dsq a task was inserted to is kind of
+		* tricky. We could read dsq_vtime directly of the sched_ext_entity on
+		* the task_struct, but the dsq field will not be available on
+		* sched_switch as the task is not on any dsq. The current hacky
+		* solution is to record the dsq that the task was inserted to and
+		* store it in a map for the task. There still needs to be handling for
+		* when tasks are moved from iterators.
+		*/
+		event->event.sched_switch.preempt = preempt;
+		if (next) {
+			event->event.sched_switch.next_pid = next->pid;
+			event->event.sched_switch.next_tgid = next->tgid;
+			event->event.sched_switch.next_prio = (int)next->prio;
+			if (next_tctx && next_tctx->dsq_insert_time > 0) {
+				event->event.sched_switch.next_dsq_lat_us =
+					(now - next_tctx->dsq_insert_time) / 1000;
+				event->event.sched_switch.next_dsq_id = next_tctx->dsq_id;
+				event->event.sched_switch.next_dsq_nr =
+					scx_bpf_dsq_nr_queued(next_tctx->dsq_id);
+				/*
+				* XXX: if a task gets moved to another dsq and the vtime is updated
+				* then vtime should be read off the sched_ext_entity. To properly
+				* handle vtime any time a task is inserted to a dsq or the vtime is
+				* updated the tctx needs to be updated.
+				*/
+				// bpf_core_read(&event->dsq_vtime, sizeof(u64), &p->scx.dsq_vtime);
+				event->event.sched_switch.next_dsq_vtime = next_tctx->dsq_vtime;
+			} else {
+				event->event.sched_switch.next_dsq_id = SCX_DSQ_INVALID;
+				event->event.sched_switch.next_dsq_lat_us = 0;
+				event->event.sched_switch.next_dsq_nr = 0;
+				event->event.sched_switch.next_dsq_vtime = 0;
+			}
+			record_real_comm(event->event.sched_switch.next_comm, next);
 		} else {
-			event->event.sched_switch.next_dsq_id = SCX_DSQ_INVALID;
 			event->event.sched_switch.next_dsq_lat_us = 0;
-			event->event.sched_switch.next_dsq_nr = 0;
-			event->event.sched_switch.next_dsq_vtime = 0;
+			event->event.sched_switch.next_pid = 0;
+			event->event.sched_switch.next_tgid = 0;
 		}
-		record_real_comm(event->event.sched_switch.next_comm, next);
-	} else {
-		event->event.sched_switch.next_pid = 0;
-		event->event.sched_switch.next_tgid = 0;
-	}
 
-	if (prev) {
 		event->event.sched_switch.prev_pid = prev->pid;
 		event->event.sched_switch.prev_tgid = prev->tgid;
 		event->event.sched_switch.prev_prio = (int)prev->prio;
 		event->event.sched_switch.prev_state = prev_state;
-		if (prev_tctx && prev_tctx->last_run_ns > 0) {
-			event->event.sched_switch.prev_used_slice_ns = prev_tctx->last_run_ns - now;
-			event->event.sched_switch.prev_dsq_id = prev_tctx->dsq_id;
-			event->event.sched_switch.prev_slice_ns = prev_tctx->slice_ns;
-		} else {
-			event->event.sched_switch.prev_dsq_id = SCX_DSQ_INVALID;
-		}
+		event->event.sched_switch.prev_used_slice_ns = now - prev_tctx->last_run_ns;
+		event->event.sched_switch.prev_dsq_id = prev_tctx->dsq_id;
+		event->event.sched_switch.prev_slice_ns = prev_tctx->slice_ns;
 		record_real_comm(event->event.sched_switch.prev_comm, prev);
-	} else {
-		event->event.sched_switch.prev_pid = 0;
-		event->event.sched_switch.prev_tgid = 0;
-	}
 
-	bpf_ringbuf_submit(event, 0);
+		bpf_ringbuf_submit(event, 0);
 
-	if (next_tctx) {
-		next_tctx->last_run_ns = bpf_ktime_get_ns();
-		next_tctx->dsq_vtime = 0;
-		next_tctx->dsq_insert_time = 0;
-		next_tctx->wakeup_ts = 0;
-	}
-	if (prev_tctx) {
 		prev_tctx->dsq_id = SCX_DSQ_INVALID;
 		prev_tctx->dsq_vtime = 0;
 		prev_tctx->wakeup_ts = 0;
 		prev_tctx->dsq_insert_time = 0;
+		prev_tctx->last_run_ns = 0;
+	}
+
+	// Here, we'll determine if we should kick off the next sample
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if ((next_tctx = try_lookup_task_ctx(next))) {
+		next_tctx->last_run_ns = bpf_ktime_get_ns();
+		next_tctx->dsq_vtime = 0;
+		next_tctx->dsq_insert_time = 0;
+		next_tctx->wakeup_ts = 0;
 	}
 
 	return 0;
