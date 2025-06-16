@@ -59,7 +59,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the
+This software may be used and distributed according to the terms of the 
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
@@ -464,15 +464,15 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_GENERIC_KPROBE=> {
+            bpf_intf::event_type_GENERIC_KPROBE => {
                 let generic_kprobe = unsafe { &event.event.kprobe };
 
                 Ok(Action::GenericKprobe(GenericKprobeAction {
                     ts: event.ts,
                     cpu: event.cpu,
-                    pid: generic_kprobe.pid
+                    pid: generic_kprobe.pid,
                 }))
-            },
+            }
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_PSTATE_SAMPLE => Ok(Action::PstateSample(PstateSampleAction {
                 cpu: event.cpu,
