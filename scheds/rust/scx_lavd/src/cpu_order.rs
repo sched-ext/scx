@@ -86,44 +86,61 @@ impl fmt::Display for CpuOrder {
 impl CpuOrder {
     /// Build a cpu preference order
     pub fn new() -> Result<CpuOrder> {
-        let sys_topo = Topology::new().expect("Failed to build host topology");
-        let sys_em = EnergyModel::new();
-        debug!("{:#?}", sys_topo);
-        debug!("{:#?}", sys_em);
-
-        let cpus_pf = Self::build_cpu_order(&sys_topo, &sys_em, false).unwrap();
-        let cpus_ps = Self::build_cpu_order(&sys_topo, &sys_em, true).unwrap();
+        let ctx = CpuOrderCtx::new();
+        let cpus_pf = ctx.build_topo_order(false).unwrap();
+        let cpus_ps = ctx.build_topo_order(true).unwrap();
 
         // Note that building compute domain is independent to CPU orer
         // so it is okay to use any cpus_*.
-        let cpdom_map = Self::build_cpdom(&cpus_pf).unwrap();
-
-        let has_biglittle = sys_topo.has_little_cores();
+        let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf).unwrap();
         Ok(CpuOrder {
-            all_cpus_mask: sys_topo.span,
+            all_cpus_mask: ctx.topo.span,
             cpus_pf,
             cpus_ps,
             cpdom_map,
-            smt_enabled: sys_topo.smt_enabled,
-            has_biglittle,
+            smt_enabled: ctx.smt_enabled,
+            has_biglittle: ctx.has_biglittle,
         })
+    }
+}
+
+/// CpuOrderCtx is a helper struct used to build a CpuOrder
+struct CpuOrderCtx {
+    topo: Topology,
+    em: Result<EnergyModel>,
+    smt_enabled: bool,
+    has_biglittle: bool,
+}
+
+impl CpuOrderCtx {
+    fn new() -> CpuOrderCtx {
+        let topo = Topology::new().expect("Failed to build host topology");
+        let em = EnergyModel::new();
+        let smt_enabled = topo.smt_enabled;
+        let has_biglittle = topo.has_little_cores();
+
+        debug!("{:#?}", topo);
+        debug!("{:#?}", em);
+
+        CpuOrderCtx {
+            topo,
+            em,
+            smt_enabled,
+            has_biglittle,
+        }
     }
 
     /// Build a CPU preference order based on its optimization target
-    fn build_cpu_order(
-        sys_topo: &Topology,
-        em: &Result<EnergyModel>,
-        prefer_powersave: bool,
-    ) -> Option<Vec<CpuId>> {
+    fn build_topo_order(&self, prefer_powersave: bool) -> Option<Vec<CpuId>> {
         let mut cpu_ids = Vec::new();
 
         // Build a vector of cpu ids.
-        for (&node_adx, node) in sys_topo.nodes.iter() {
+        for (&node_adx, node) in self.topo.nodes.iter() {
             for (llc_rdx, (_llc_adx, llc)) in node.llcs.iter().enumerate() {
                 for (core_rdx, (_core_adx, core)) in llc.cores.iter().enumerate() {
                     for (cpu_rdx, (cpu_adx, cpu)) in core.cpus.iter().enumerate() {
                         let cpu_adx = *cpu_adx;
-                        let pd_adx = Self::get_pd_id(em, cpu_adx, node_adx);
+                        let pd_adx = Self::get_pd_id(&self.em, cpu_adx, node_adx);
                         let cpu_id = CpuId {
                             node_adx,
                             pd_adx,
@@ -151,8 +168,7 @@ impl CpuOrder {
         let mut cpu_ids = cpu_ids2;
 
         // Sort the cpu_ids
-        let has_biglittle = sys_topo.has_little_cores();
-        match (prefer_powersave, has_biglittle) {
+        match (prefer_powersave, self.has_biglittle) {
             // 1. powersave,      no  big/little
             //     * within the same LLC domain
             //         - node_adx, llc_rdx,
@@ -221,15 +237,6 @@ impl CpuOrder {
         }
 
         Some(cpu_ids)
-    }
-
-    /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
-    /// If the energy model is not available, use NUMA node ID instead.
-    fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, node_adx: usize) -> usize {
-        match em {
-            Ok(em) => em.get_pd(cpu_adx).unwrap().id,
-            Err(_) => node_adx,
-        }
     }
 
     /// Build a list of compute domains
@@ -309,6 +316,15 @@ impl CpuOrder {
         }
 
         Some(cpdom_map)
+    }
+
+    /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
+    /// If the energy model is not available, use NUMA node ID instead.
+    fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, node_adx: usize) -> usize {
+        match em {
+            Ok(em) => em.get_pd(cpu_adx).unwrap().id,
+            Err(_) => node_adx,
+        }
     }
 
     /// Calculate distance from two compute domains
