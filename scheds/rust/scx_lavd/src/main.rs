@@ -305,12 +305,20 @@ impl introspec {
 
 #[derive(Debug, Clone)]
 struct CpuFlatId {
-    node_id: usize,
-    pd_id: usize,
-    llc_pos: usize,
-    core_pos: usize,
-    cpu_pos: usize,
-    cpu_id: usize,
+    // - *_adx: an absolute index within a system scope
+    // - *_rdx: a relative index under a parent
+    //
+    // - node_adx: a NUMA domain within a system
+    // - pd_adx: a performance domain (CPU frequency domain) within a system
+    //   - llc_rdx: an LLC domain (CCX) under a NUMA domain
+    //     - core_rdx: a core under a LLC domain
+    //       - cpu_rdx: a CPU under a core
+    node_adx: usize,
+    pd_adx: usize,
+    llc_rdx: usize,
+    core_rdx: usize,
+    cpu_rdx: usize,
+    cpu_adx: usize,
     smt_level: usize,
     cache_size: usize,
     cpu_cap: usize,
@@ -320,8 +328,8 @@ struct CpuFlatId {
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
 struct ComputeDomainKey {
-    node_id: usize,
-    llc_pos: usize,
+    node_adx: usize,
+    llc_rdx: usize,
     is_big: bool,
 }
 
@@ -384,26 +392,26 @@ impl FlatTopology {
 
     /// Build a flat-structured list of CPUs in a preference order
     fn build_cpu_fids(
-        topo: &Topology,
+        sys_topo: &Topology,
         em: &Result<EnergyModel>,
         prefer_powersave: bool,
     ) -> Option<Vec<CpuFlatId>> {
         let mut cpu_fids = Vec::new();
 
         // Build a vector of cpu flat ids.
-        for (&node_id, node) in topo.nodes.iter() {
-            for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
-                for (core_pos, (_core_id, core)) in llc.cores.iter().enumerate() {
-                    for (cpu_pos, (cpu_id, cpu)) in core.cpus.iter().enumerate() {
-                        let cpu_id = *cpu_id;
-                        let pd_id = Self::get_pd_id(em, cpu_id, node_id);
+        for (&node_adx, node) in sys_topo.nodes.iter() {
+            for (llc_rdx, (_llc_adx, llc)) in node.llcs.iter().enumerate() {
+                for (core_rdx, (_core_adx, core)) in llc.cores.iter().enumerate() {
+                    for (cpu_rdx, (cpu_adx, cpu)) in core.cpus.iter().enumerate() {
+                        let cpu_adx = *cpu_adx;
+                        let pd_adx = Self::get_pd_id(em, cpu_adx, node_adx);
                         let cpu_fid = CpuFlatId {
-                            node_id,
-                            pd_id,
-                            llc_pos,
-                            core_pos,
-                            cpu_pos,
-                            cpu_id,
+                            node_adx,
+                            pd_adx,
+                            llc_rdx,
+                            core_rdx,
+                            cpu_rdx,
+                            cpu_adx,
                             smt_level: cpu.smt_level,
                             cache_size: cpu.cache_size,
                             cpu_cap: cpu.cpu_capacity,
@@ -424,34 +432,71 @@ impl FlatTopology {
         let mut cpu_fids = cpu_fids2;
 
         // Sort the cpu_fids
-        match prefer_powersave {
-            true => {
-                // Sort the cpu_fids by node, llc, cpu_cap, ^smt_level, ^cache_size, perf_dom, core, and cpu order
+        let has_biglittle = sys_topo.has_little_cores();
+        match (prefer_powersave, has_biglittle) {
+            // 1. powersave,      no  big/little
+            //     * within the same LLC domain
+            //         - node_adx, llc_rdx,
+            //     * prefer more capable CPU with higher capacity
+            //       and larger cache
+            //         - ^cpu_cap (chip binning), ^cache_size,
+            //     * prefere the SMT core within the same performance domain
+            //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
+            (true, false) => {
                 cpu_fids.sort_by(|a, b| {
-                    a.node_id
-                        .cmp(&b.node_id)
-                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
-                        .then_with(|| b.smt_level.cmp(&a.smt_level))
+                    a.node_adx
+                        .cmp(&b.node_adx)
+                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
-                        .then_with(|| a.pd_id.cmp(&b.pd_id))
-                        .then_with(|| a.core_pos.cmp(&b.core_pos))
-                        .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
+                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
+                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
+                        .then_with(|| b.smt_level.cmp(&a.smt_level))
+                        .then_with(|| a.cpu_rdx.cmp(&b.cpu_rdx))
                 });
             }
-            false => {
-                // Sort the cpu_fids by node, llc, ^cpu_cap, cpu_pos, smt_level, ^cache_size, perf_dom, and core order
-                // For performance mode, prioritize CPU capacity over physical position for ARM big.LITTLE systems
+            // 2. powersave,      yes big/little
+            //     * within the same LLC domain
+            //         - node_adx, llc_rdx,
+            //     * prefer energy-efficient LITTLE CPU with a larger cache
+            //         - cpu_cap (big/little), ^cache_size,
+            //     * prefere the SMT core within the same performance domain
+            //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
+            (true, true) => {
                 cpu_fids.sort_by(|a, b| {
-                    a.node_id
-                        .cmp(&b.node_id) // NUMA node first
-                        .then_with(|| a.llc_pos.cmp(&b.llc_pos)) // LLC locality
-                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap)) // CPU performance first (^cpu_cap)
-                        .then_with(|| a.cpu_pos.cmp(&b.cpu_pos)) // Physical position as tie-breaker
-                        .then_with(|| a.smt_level.cmp(&b.smt_level))
+                    a.node_adx
+                        .cmp(&b.node_adx)
+                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
+                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
-                        .then_with(|| a.pd_id.cmp(&b.pd_id))
-                        .then_with(|| a.core_pos.cmp(&b.core_pos))
+                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
+                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
+                        .then_with(|| b.smt_level.cmp(&a.smt_level))
+                        .then_with(|| a.cpu_rdx.cmp(&b.cpu_rdx))
+                });
+            }
+            // 3. performance,    no  big/little
+            // 4. performance,    yes big/little
+            //     * prefer the non-SMT core
+            //         - cpu_rdx,
+            //     * fill the same LLC domain first
+            //         - node_adx, llc_rdx,
+            //     * prefer more capable CPU with higher capacity
+            //       (chip binning or big/little) and larger cache
+            //         - ^cpu_cap, ^cache_size, smt_level
+            //     * within the same power domain
+            //         - pd_adx, core_rdx
+            _ => {
+                cpu_fids.sort_by(|a, b| {
+                    a.cpu_rdx
+                        .cmp(&b.cpu_rdx)
+                        .then_with(|| a.node_adx.cmp(&b.node_adx))
+                        .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
+                        .then_with(|| b.cache_size.cmp(&a.cache_size))
+                        .then_with(|| a.smt_level.cmp(&b.smt_level))
+                        .then_with(|| a.pd_adx.cmp(&b.pd_adx))
+                        .then_with(|| a.core_rdx.cmp(&b.core_rdx))
                 });
             }
         }
@@ -461,10 +506,10 @@ impl FlatTopology {
 
     /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
     /// If the energy model is not available, use NUMA node ID instead.
-    fn get_pd_id(em: &Result<EnergyModel>, cpu_id: usize, node_id: usize) -> usize {
+    fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, node_adx: usize) -> usize {
         match em {
-            Ok(em) => em.get_pd(cpu_id).unwrap().id,
-            Err(_) => node_id,
+            Ok(em) => em.get_pd(cpu_adx).unwrap().id,
+            Err(_) => node_adx,
         }
     }
 
@@ -479,8 +524,8 @@ impl FlatTopology {
         let mut cpdom_types: BTreeMap<usize, bool> = BTreeMap::new();
         for cpu_fid in cpu_fids.iter() {
             let key = ComputeDomainKey {
-                node_id: cpu_fid.node_id,
-                llc_pos: cpu_fid.llc_pos,
+                node_adx: cpu_fid.node_adx,
+                llc_rdx: cpu_fid.llc_rdx,
                 is_big: cpu_fid.big_core,
             };
             let value = cpdom_map.entry(key.clone()).or_insert_with(|| {
@@ -495,7 +540,7 @@ impl FlatTopology {
                 cpdom_id += 1;
                 val
             });
-            value.cpu_ids.push(cpu_fid.cpu_id);
+            value.cpu_ids.push(cpu_fid.cpu_adx);
         }
 
         // Build a neighbor map for each compute domain, where neighbors are
@@ -556,10 +601,10 @@ impl FlatTopology {
         if from.is_big != to.is_big {
             d += 3;
         }
-        if from.node_id != to.node_id {
+        if from.node_adx != to.node_adx {
             d += 2;
         } else {
-            if from.llc_pos != to.llc_pos {
+            if from.llc_rdx != to.llc_rdx {
                 d += 1;
             }
         }
@@ -661,9 +706,9 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU capacity
         for (_, cpu) in topo.cpu_fids_performance.iter().enumerate() {
-            skel.maps.rodata_data.cpu_capacity[cpu.cpu_id] = cpu.cpu_cap as u16;
-            skel.maps.rodata_data.cpu_big[cpu.cpu_id] = cpu.big_core as u8;
-            skel.maps.rodata_data.cpu_turbo[cpu.cpu_id] = cpu.turbo_core as u8;
+            skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
+            skel.maps.rodata_data.cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
+            skel.maps.rodata_data.cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
         }
 
         // If cpu_pref_order is not specified, initialize CPU order
@@ -673,11 +718,11 @@ impl<'a> Scheduler<'a> {
             (
                 topo.cpu_fids_performance
                     .iter()
-                    .map(|cpu| cpu.cpu_id)
+                    .map(|cpu| cpu.cpu_adx)
                     .collect(),
                 topo.cpu_fids_powersave
                     .iter()
-                    .map(|cpu| cpu.cpu_id)
+                    .map(|cpu| cpu.cpu_adx)
                     .collect(),
             )
         } else {
@@ -705,7 +750,7 @@ impl<'a> Scheduler<'a> {
         for (k, v) in topo.cpdom_map.iter() {
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id.get() as u64;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].node_id = k.node_id as u8;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].node_id = k.node_adx as u8;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_valid = 1;
             for cpu_id in v.cpu_ids.iter() {
