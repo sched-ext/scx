@@ -153,6 +153,7 @@ struct pstate_sample_event {
 
 struct generic_kprobe_event {
 	u32             pid;
+	u64             instruction_pointer;
 };
 
 struct bpf_event {

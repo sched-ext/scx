@@ -254,6 +254,7 @@ pub struct GenericKprobeAction {
     pub ts: u64,
     pub cpu: u32,
     pub pid: u32,
+    pub instruction_pointer: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -471,6 +472,7 @@ impl TryFrom<&bpf_event> for Action {
                     ts: event.ts,
                     cpu: event.cpu,
                     pid: generic_kprobe.pid,
+                    instruction_pointer: generic_kprobe.instruction_pointer,
                 }))
             }
             #[allow(non_upper_case_globals)]
