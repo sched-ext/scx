@@ -2837,6 +2837,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_lib_selftests"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "libbpf-rs",
+ "scx_utils",
+]
+
+[[package]]
 name = "scx_loader"
 version = "1.0.13"
 dependencies = [

@@ -88,4 +88,3 @@ int arena_topology_print(void)
 
 	return 0;
 }
-
