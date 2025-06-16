@@ -59,7 +59,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the 
+This software may be used and distributed according to the terms of the
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
@@ -250,6 +250,13 @@ pub struct PstateSampleAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GenericKprobeAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MangoAppAction {
     pub pid: u32,
     pub vis_frametime: u64,
@@ -278,6 +285,7 @@ pub enum Action {
     Exec(ExecAction),
     Exit(ExitAction),
     Fork(ForkAction),
+    GenericKprobe(GenericKprobeAction),
     GpuMem(GpuMemAction),
     Help,
     HwPressure(HwPressureAction),
@@ -455,6 +463,16 @@ impl TryFrom<&bpf_event> for Action {
                     child_comm: child_comm.into(),
                 }))
             }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_GENERIC_KPROBE=> {
+                let generic_kprobe = unsafe { &event.event.kprobe };
+
+                Ok(Action::GenericKprobe(GenericKprobeAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: generic_kprobe.pid
+                }))
+            },
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_PSTATE_SAMPLE => Ok(Action::PstateSample(PstateSampleAction {
                 cpu: event.cpu,

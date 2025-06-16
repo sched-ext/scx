@@ -189,6 +189,27 @@ static int update_task_ctx(struct task_struct *p, u64 dsq, u64 vtime, u64 slice_
 	return 0;
 }
 
+SEC("kprobe/generic_kprobe")
+int generic_kprobe(struct pt_regs *ctx)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events)
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = GENERIC_KPROBE;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.kprobe.pid = bpf_get_current_pid_tgid() & 0xffffffff;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("kprobe/bpf_scx_reg")
 int BPF_KPROBE(scx_sched_reg)
 {
