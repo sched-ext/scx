@@ -250,6 +250,14 @@ pub struct PstateSampleAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct KprobeAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub instruction_pointer: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MangoAppAction {
     pub pid: u32,
     pub vis_frametime: u64,
@@ -278,6 +286,7 @@ pub enum Action {
     Exec(ExecAction),
     Exit(ExitAction),
     Fork(ForkAction),
+    Kprobe(KprobeAction),
     GpuMem(GpuMemAction),
     Help,
     HwPressure(HwPressureAction),
@@ -453,6 +462,17 @@ impl TryFrom<&bpf_event> for Action {
                     child_pid: fork.child_pid,
                     parent_comm: parent_comm.into(),
                     child_comm: child_comm.into(),
+                }))
+            }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_KPROBE => {
+                let kprobe = unsafe { &event.event.kprobe };
+
+                Ok(Action::Kprobe(KprobeAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: kprobe.pid,
+                    instruction_pointer: kprobe.instruction_pointer,
                 }))
             }
             #[allow(non_upper_case_globals)]
