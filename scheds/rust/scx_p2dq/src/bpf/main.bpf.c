@@ -808,29 +808,6 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 		__sync_val_compare_and_swap(&llcx->vtime, llcx->vtime, p->scx.dsq_vtime);
 	}
 
-	// For non affinitized tasks update the vtime if it is larger than the
-	// current LLC vtime. Affinitized tasks are direct dispatched and don't
-	// strictly follow vtime.
-	if ((taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) &&
-	    taskc->all_cpus &&
-	    p->scx.dsq_vtime > llcx->dsq_max_vtime[taskc->dsq_index])
-		llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
-
-	// Affinitized task vtime is handled separately
-	if (!taskc->all_cpus &&
-	    !(interactive_fifo && taskc->dsq_index == 0) &&
-	    !((p->flags & PF_KTHREAD) && kthreads_local) &&
-	     p->scx.dsq_vtime > llcx->affn_max_vtime &&
-	     p->scx.dsq_vtime < llcx->vtime + max_dsq_time_slice()) {
-		__sync_val_compare_and_swap(&llcx->affn_max_vtime, llcx->affn_max_vtime, p->scx.dsq_vtime);
-		cpuc->affn_max_vtime = p->scx.dsq_vtime;
-
-		u64 max_lag = llcx->vtime - max_dsq_time_slice();
-		if (cpuc->affn_max_vtime < max_lag)
-			cpuc->affn_max_vtime = max_lag;
-	}
-
-
 	// If the task is running in the least interactive DSQ, bump the
 	// frequency.
 	if (freq_control && taskc->dsq_index == nr_dsqs_per_llc-1) {
@@ -849,7 +826,6 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 {
 	task_ctx *taskc;
-	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 used, scaled_used, last_dsq_slice_ns;
 	u64 now = bpf_ktime_get_ns();
@@ -878,15 +854,9 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->load, used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 
-	if (taskc->all_cpus) {
-		__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], used);
-	} else {
+	if (!taskc->all_cpus) {
 		// Note that affinitized load is absolute load, not scaled.
 		__sync_fetch_and_add(&llcx->affn_load, used);
-
-		if ((cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p)))) {
-			cpuc->affn_max_vtime += used;
-		}
 	}
 
 	trace("STOPPING %s weight %d slice %llu used %llu scaled %llu",
@@ -1088,9 +1058,10 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 
 static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 {
+	struct task_struct *p;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
-	u64 dsq_id = 0;
+	u64 cur_dsq_id, dsq_id = 0;
 	int i;
 
 	if (!(cpuc = lookup_cpu_ctx(cpu)) ||
@@ -1105,18 +1076,26 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	u64 min_vtime = llcx->vtime;
 
 	bpf_for(i, 0, nr_dsqs_per_llc) {
-		if (llcx->dsq_max_vtime[i] < min_vtime) {
-			min_vtime = llcx->dsq_max_vtime[i];
-			dsq_id = llcx->dsqs[i];
+		cur_dsq_id = llcx->dsqs[i];
+		bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
+			if (p->scx.dsq_vtime < min_vtime) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cur_dsq_id;
+			}
+			break;
 		}
 	}
 
-	if (cpuc->affn_max_vtime < min_vtime &&
-	    llcx->affn_load < llcx->load / 2)
-		dsq_id = cpuc->affn_dsq;
+	bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+		if (p->scx.dsq_vtime < min_vtime) {
+			min_vtime = p->scx.dsq_vtime;
+			dsq_id = cpuc->affn_dsq;
+		}
+		break;
+	}
 
-	trace("DISPATCH cpu[%d] vtime %llu affn_vtime %llu min_vtime %llu dsq_id %llu",
-	      cpu, llcx->vtime, cpuc->affn_max_vtime, min_vtime, dsq_id);
+	trace("DISPATCH cpu[%d] cur vtime %llu min_vtime %llu dsq_id %llu",
+	      cpu, llcx->vtime, min_vtime, dsq_id);
 
 	if (valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
@@ -1349,7 +1328,6 @@ static s32 init_cpu(int cpu)
 	cpuc->llc_id = cpu_llc_ids[cpu];
 	cpuc->node_id = cpu_node_ids[cpu];
 	cpuc->is_big = big_core_ids[cpu] == 1;
-	cpuc->affn_max_vtime = 0;
 	cpuc->dsq_id = 0;
 	cpuc->slice_ns = 1;
 
@@ -1635,7 +1613,6 @@ static __always_inline s32 p2dq_init_impl()
 			}
 
 			llcx->dsqs[i] = dsq_id;
-			llcx->dsq_max_vtime[i] = 0;
 			llcx->vtime = 0;
 		}
 	}
