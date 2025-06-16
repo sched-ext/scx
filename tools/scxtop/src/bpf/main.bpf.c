@@ -200,7 +200,7 @@ int generic_kprobe(struct pt_regs *ctx)
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
 
-	event->type = GENERIC_KPROBE;
+	event->type = KPROBE;
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.kprobe.pid = bpf_get_current_pid_tgid() & 0xffffffff;

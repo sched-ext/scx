@@ -49,7 +49,7 @@ enum event_type {
 	TRACE_STARTED,
 	TRACE_STOPPED,
 	EVENT_MAX,
-	GENERIC_KPROBE,
+	KPROBE,
 };
 
 struct sched_switch_event {
@@ -151,7 +151,7 @@ struct pstate_sample_event {
 	u32             busy;
 };
 
-struct generic_kprobe_event {
+struct kprobe_event {
 	u32             pid;
 	u64             instruction_pointer;
 };
@@ -176,7 +176,7 @@ struct bpf_event {
 		struct	wakeup_event wakeup;
 		struct	wakeup_event waking;
 		struct  trace_started_event trace;
-		struct  generic_kprobe_event kprobe;
+		struct  kprobe_event kprobe;
 	} event;
 };
 

@@ -59,7 +59,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the 
+This software may be used and distributed according to the terms of the
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
@@ -250,7 +250,7 @@ pub struct PstateSampleAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GenericKprobeAction {
+pub struct KprobeAction {
     pub ts: u64,
     pub cpu: u32,
     pub pid: u32,
@@ -286,7 +286,7 @@ pub enum Action {
     Exec(ExecAction),
     Exit(ExitAction),
     Fork(ForkAction),
-    GenericKprobe(GenericKprobeAction),
+    Kprobe(KprobeAction),
     GpuMem(GpuMemAction),
     Help,
     HwPressure(HwPressureAction),
@@ -465,14 +465,14 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_GENERIC_KPROBE => {
-                let generic_kprobe = unsafe { &event.event.kprobe };
+            bpf_intf::event_type_KPROBE => {
+                let kprobe = unsafe { &event.event.kprobe };
 
-                Ok(Action::GenericKprobe(GenericKprobeAction {
+                Ok(Action::Kprobe(KprobeAction {
                     ts: event.ts,
                     cpu: event.cpu,
-                    pid: generic_kprobe.pid,
-                    instruction_pointer: generic_kprobe.instruction_pointer,
+                    pid: kprobe.pid,
+                    instruction_pointer: kprobe.instruction_pointer,
                 }))
             }
             #[allow(non_upper_case_globals)]
