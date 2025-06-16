@@ -483,25 +483,19 @@ impl FlatTopology {
                 llc_pos: cpu_fid.llc_pos,
                 is_big: cpu_fid.big_core,
             };
-            let mut value;
-            match cpdom_map.get(&key) {
-                Some(v) => {
-                    value = v.clone();
-                }
-                None => {
-                    value = ComputeDomainValue {
-                        cpdom_id,
-                        cpdom_alt_id: Cell::new(cpdom_id),
-                        cpu_ids: Vec::new(),
-                        neighbor_map: RefCell::new(BTreeMap::new()),
-                    };
-                    cpdom_types.insert(cpdom_id, key.is_big);
+            let value = cpdom_map.entry(key.clone()).or_insert_with(|| {
+                let val = ComputeDomainValue {
+                    cpdom_id,
+                    cpdom_alt_id: Cell::new(cpdom_id),
+                    cpu_ids: Vec::new(),
+                    neighbor_map: RefCell::new(BTreeMap::new()),
+                };
+                cpdom_types.insert(cpdom_id, key.is_big);
 
-                    cpdom_id += 1;
-                }
-            }
+                cpdom_id += 1;
+                val
+            });
             value.cpu_ids.push(cpu_fid.cpu_id);
-            cpdom_map.insert(key, value);
         }
 
         // Build a neighbor map for each compute domain, where neighbors are
