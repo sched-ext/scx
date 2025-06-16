@@ -2,10 +2,6 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-mod bpf_skel;
-pub use bpf_skel::*;
-
-pub mod bpf_intf;
 pub mod stats;
 use stats::Metrics;
 
@@ -54,6 +50,8 @@ use bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
+use scx_p2dq::bpf_intf;
+use scx_p2dq::bpf_skel::*;
 use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
 

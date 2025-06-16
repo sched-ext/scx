@@ -3,9 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 pub mod bpf_intf;
-
-mod bpf_skel;
-pub use bpf_skel::*;
+pub mod bpf_skel;
+pub use bpf_skel::types;
 
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
