@@ -212,11 +212,10 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let trace_file_prefix = config.trace_file_prefix().to_string();
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
-            info!("warming up for {}ms", trace_args.warmup_ms);
-
-            let mut tracer = Tracer::new(skel);
+            let mut tracer = Tracer::new(skel);P
             tracer.trace_async(trace_dur).await?;
             
+            info!("warming up for {}ms", trace_args.warmup_ms);
             tokio::time::sleep(Duration::from_millis(trace_args.warmup_ms)).await;
             debug!("starting trace");
             let thread_warmup = warmup_done.clone();
