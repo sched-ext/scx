@@ -57,6 +57,7 @@ const volatile u32 interactive_ratio = 10;
 const volatile u32 min_nr_queued_pick2 = 10;
 
 const volatile bool autoslice = true;
+const volatile bool deadline_scheduling = true;
 const volatile bool dispatch_pick2_disable = false;
 const volatile bool eager_load_balance = true;
 const volatile bool interactive_sticky = false;
@@ -277,6 +278,28 @@ static bool is_interactive(task_ctx *taskc)
 		return false;
 	// For now only the shortest duration DSQ is considered interactive.
 	return taskc->dsq_index == 0;
+}
+
+static void set_deadline_slice(task_ctx *taskc, struct llc_ctx *llcx)
+{
+	u64 dsq_id, nr_queued = 0;
+	int i;
+
+	bpf_for(i, 0, nr_llcs) {
+		dsq_id = llcx->dsqs[i];
+		nr_queued += scx_bpf_dsq_nr_queued(dsq_id);
+	}
+
+	const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
+	u64 nr_idle = bpf_cpumask_weight(idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	if (nr_queued >= nr_idle) {
+		if (nr_idle == 0)
+			taskc->slice_ns = max(MIN_SLICE_USEC, max_dsq_time_slice() / nr_queued);
+		else
+			taskc->slice_ns = max(MIN_SLICE_USEC, (max_dsq_time_slice() * nr_idle) / nr_queued);
+	}
 }
 
 /*
@@ -671,6 +694,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 		taskc->dsq_id = cpuc->affn_dsq;
 		update_vtime(p, cpuc, taskc, llcx->vtime);
+		if (deadline_scheduling)
+			set_deadline_slice(taskc, llcx);
 
 		// Idle affinitized tasks can be direct dispatched.
 		if (is_idle) {
@@ -709,6 +734,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
+		if (deadline_scheduling)
+			set_deadline_slice(taskc, llcx);
 
 		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 		if (interactive_fifo && taskc->dsq_index == 0)
@@ -736,6 +763,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+	if (deadline_scheduling)
+		set_deadline_slice(taskc, llcx);
 
 	if (interactive_fifo && taskc->dsq_index == 0) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
@@ -928,8 +957,12 @@ static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu)
 
 static __always_inline bool consume_llc_compat(struct llc_ctx *cur_llcx, struct llc_ctx *llcx)
 {
-	u64 dsq_id;
+	u64 dsq_id, cur_load;
 	int i;
+
+	cur_load  = cur_llcx->load + (cur_llcx->load * lb_slack_factor);
+	if (llcx->load < cur_load)
+		return false;
 
 	if (dispatch_lb_interactive &&
 	    scx_bpf_dsq_move_to_local(llcx->dsqs[0])) {
@@ -978,6 +1011,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 {
 	struct llc_ctx *first, *second, *left, *right;
 	int i;
+	u64 cur_load;
 
 	// If on a single LLC there isn't anything left to try.
 	if (nr_llcs == 1 || dispatch_pick2_disable || nr_llcs >= MAX_LLCS)
@@ -1044,11 +1078,13 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 			return 0;
 	}
 
-	if (first->load > cur_llcx->load &&
+	cur_load = cur_llcx->load + (cur_llcx->load * lb_slack_factor);
+
+	if (first->load > cur_load &&
 	    consume_llc(cur_llcx, first, cpu))
 		return 0;
 
-	if (second->load > cur_llcx->load &&
+	if (second->load > cur_load &&
 	    consume_llc(cur_llcx, second, cpu))
 		return 0;
 

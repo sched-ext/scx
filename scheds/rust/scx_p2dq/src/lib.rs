@@ -40,6 +40,10 @@ pub struct SchedulerOpts {
     #[clap(short = 'r', long, default_value = "10")]
     pub interactive_ratio: usize,
 
+    /// Enables deadline scheduling
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub deadline: bool,
+
     /// *DEPRECATED* Disables eager pick2 load balancing.
     #[clap(short = 'e', long, help="DEPRECATED", action = clap::ArgAction::SetTrue)]
     pub eager_load_balance: bool,
@@ -208,6 +212,7 @@ macro_rules! init_open_skel {
 
             $skel.maps.rodata_data.autoslice = opts.autoslice;
             $skel.maps.rodata_data.debug = verbose as u32;
+            $skel.maps.rodata_data.deadline_scheduling = opts.deadline;
             $skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
             $skel.maps.rodata_data.dispatch_lb_busy = opts.dispatch_lb_busy;
             $skel.maps.rodata_data.dispatch_lb_interactive = opts.dispatch_lb_interactive;
