@@ -162,6 +162,8 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 		new_tctx.dsq_vtime = 0;
 		new_tctx.slice_ns = 0;
 		new_tctx.last_run_ns = 0;
+		new_tctx.dsq_insert_time = 0;
+		new_tctx.wakeup_ts = 0;
 
 		if (!bpf_map_update_elem(&task_data, &tptr, &new_tctx, BPF_ANY))
 			return NULL;
