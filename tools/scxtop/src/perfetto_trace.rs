@@ -18,7 +18,8 @@ use crate::edm::ActionHandler;
 use crate::protos_gen::perfetto_scx;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    IPIAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+    SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
@@ -27,10 +28,10 @@ use crate::protos_gen::perfetto_scx::trace_packet;
 use crate::protos_gen::perfetto_scx::{
     BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent,
     FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, ProcessDescriptor,
-    SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent,
-    SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
-    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket,
-    TrackDescriptor, TrackEvent,
+    SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
+    SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
+    SchedWakingFtraceEvent, SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, ThreadDescriptor,
+    Trace, TracePacket, TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -562,6 +563,35 @@ impl PerfettoTraceManager {
             }
         });
         self.record_process_thread(*tgid, *pid, comm.to_string());
+    }
+
+    /// Adds events for on sched_migrate.
+    pub fn on_sched_migrate(&mut self, action: &SchedMigrateTaskAction) {
+        let SchedMigrateTaskAction {
+            ts,
+            cpu,
+            dest_cpu,
+            pid,
+            prio,
+            comm,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            FtraceEvent {
+                timestamp: Some(*ts),
+                pid: Some(*pid),
+                event: Some(perfetto_scx::ftrace_event::Event::SchedMigrateTask(
+                    SchedMigrateTaskFtraceEvent {
+                        comm: Some(comm.as_str().to_string()),
+                        pid: Some((*pid).try_into().unwrap()),
+                        prio: Some(*prio),
+                        dest_cpu: Some((*dest_cpu).try_into().unwrap()),
+                        ..SchedMigrateTaskFtraceEvent::default()
+                    },
+                )),
+                ..FtraceEvent::default()
+            }
+        });
     }
 
     /// Adds events for the softirq entry/exit events.

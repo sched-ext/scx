@@ -606,6 +606,29 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	return 0;
 }
 
+SEC("tp_btf/sched_migrate_task")
+int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
+{
+    struct bpf_event *event;
+
+    if (!enable_bpf_events || !should_sample())
+        return 0;
+
+    if (!(event = try_reserve_event()))
+        return -ENOMEM;
+
+    event->type = SCHED_MIGRATE;
+    event->ts = bpf_ktime_get_ns();
+    event->cpu = bpf_get_smp_processor_id();
+    event->event.migrate.pid = p->pid;
+    event->event.migrate.dest_cpu = dest_cpu;
+    event->event.migrate.prio = (int)p->prio;
+
+    bpf_ringbuf_submit(event, 0);
+
+    return 0;
+}
+
 SEC("tp_btf/softirq_entry")
 int BPF_PROG(on_softirq_entry, unsigned int nr)
 {

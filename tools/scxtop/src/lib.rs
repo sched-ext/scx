@@ -181,6 +181,16 @@ pub type SchedWakingAction = SchedWakeActionCtx;
 pub type SchedWakeupAction = SchedWakeActionCtx;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedMigrateTaskAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub dest_cpu: u32,
+    pub pid: u32,
+    pub prio: i32,
+    pub comm: SsoString,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SoftIRQAction {
     pub cpu: u32,
     pub pid: u32,
@@ -308,6 +318,7 @@ pub enum Action {
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedMigrateTask(SchedMigrateTaskAction),
     SchedReg,
     SchedStats(String),
     SchedSwitch(SchedSwitchAction),
@@ -427,6 +438,21 @@ impl TryFrom<&bpf_event> for Action {
                     pid: waking.pid,
                     tgid: waking.tgid,
                     prio: waking.prio,
+                    comm: comm.into(),
+                }))
+            }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_SCHED_MIGRATE => {
+                let migrate = unsafe { &event.event.migrate };
+
+                let comm = String::from_utf8_lossy(&migrate.comm);
+
+                Ok(Action::SchedMigrateTask(SchedMigrateTaskAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    dest_cpu: migrate.dest_cpu,
+                    pid: migrate.pid,
+                    prio: migrate.prio,
                     comm: comm.into(),
                 }))
             }
