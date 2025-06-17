@@ -218,3 +218,9 @@ programs for their instruction count.
 is a tool for inspecting CPU frequency as well as power utilization. When
 optimizing schedulers for energy performance `turbostat` can be used to
 understand the energy required per operation.
+
+### `schbench`
+[`schbench`](https://github.com/masoncl/schbench)
+is a synthetic scheduler benchmark designed to mimic production web workloads.
+It targets three key aspects: full CPU saturation, long timeslices, and low wakeup latency.
+These characteristics help reveal scheduler issues that can affect request-per-second (RPS) performance.
