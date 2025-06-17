@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use libbpf_rs::libbpf_sys::*;
 use libbpf_rs::{AsRawLibbpf, OpenProgramImpl};
 use log::warn;
+use std::env;
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -40,6 +41,9 @@ lazy_static::lazy_static! {
         read_enum("scx_pick_idle_cpu_flags", "SCX_PICK_IDLE_CORE").unwrap_or(0);
     pub static ref SCX_PICK_IDLE_IN_NODE: u64 =
         read_enum("scx_pick_idle_cpu_flags", "SCX_PICK_IDLE_IN_NODE").unwrap_or(0);
+
+    pub static ref ROOT_PREFIX: String =
+        env::var("SCX_SYSFS_PREFIX").unwrap_or("".to_string());
 }
 
 fn load_vmlinux_btf() -> &'static mut btf {
