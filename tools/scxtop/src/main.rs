@@ -213,6 +213,10 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
             info!("warming up for {}ms", trace_args.warmup_ms);
+
+            let mut tracer = Tracer::new(skel);
+            tracer.trace_async(trace_dur).await?;
+            
             tokio::time::sleep(Duration::from_millis(trace_args.warmup_ms)).await;
             debug!("starting trace");
             let thread_warmup = warmup_done.clone();
@@ -236,9 +240,6 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                     }
                 }
             });
-
-            let mut tracer = Tracer::new(skel);
-            tracer.trace_async(trace_dur).await?;
 
             // The order is important here:
             // 1) first drop the links to detach the attached BPF programs
