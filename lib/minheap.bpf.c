@@ -7,21 +7,22 @@
 #include <scx/common.bpf.h>
 
 #include <lib/sdt_task.h>
+
 #include <lib/minheap.h>
 
 __weak
-scx_minheap_t *scx_minheap_alloc(ssize_t capacity)
+u64 scx_minheap_alloc_internal(size_t capacity)
 {
-	scx_minheap_t *heap;
 	size_t alloc_size = sizeof(scx_minheap_t);
+	scx_minheap_t *heap;
 
 	alloc_size += capacity * sizeof(*heap->helems);
 
 	heap = scx_static_alloc(alloc_size, 1);
 	if (!heap)
-		return NULL;
+		return (u64)NULL;
 
-	return heap;
+	return (u64)heap;
 }
 
 static

@@ -11,7 +11,7 @@ int arena_selftest(void)
 {
 	int ret;
 
-	ret = scx_selftest_bitmap();
+	ret = scx_selftest_minheap();
 	if (ret)
 		return ret;
 

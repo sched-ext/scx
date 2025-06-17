@@ -3,6 +3,8 @@
 
 #include <lib/cpumask.h>
 
+#include "selftest.h"
+
 static
 int scx_selftest_bitmap_clear()
 {
