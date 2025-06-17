@@ -973,13 +973,11 @@ static __always_inline bool consume_llc_compat(struct llc_ctx *cur_llcx, struct 
 			return true;
 	}
 
-	if (llcx->load > cur_llcx->load) {
-		bpf_for(i, 1 , nr_dsqs_per_llc) {
-			dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
-			if (scx_bpf_dsq_move_to_local(dsq_id)) {
-				stat_inc(P2DQ_STAT_DISPATCH_PICK2);
-				return true;
-			}
+	bpf_for(i, 1 , nr_dsqs_per_llc) {
+		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
+		if (scx_bpf_dsq_move_to_local(dsq_id)) {
+			stat_inc(P2DQ_STAT_DISPATCH_PICK2);
+			return true;
 		}
 	}
 
