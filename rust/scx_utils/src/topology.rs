@@ -69,6 +69,7 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
+use crate::compat::ROOT_PREFIX;
 use crate::cpumask::read_cpulist;
 use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
@@ -273,7 +274,8 @@ impl Topology {
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
         // default node of ID 0 which contains all cores.
-        let nodes = if Path::new("/sys/devices/system/node").exists() {
+        let path = format!("{}/sys/devices/system/node", *ROOT_PREFIX);
+        let nodes = if Path::new(&path).exists() {
             create_numa_nodes(&span, &mut topo_ctx)?
         } else {
             create_default_node(&span, &mut topo_ctx, false)?
@@ -363,7 +365,7 @@ impl TopoCtx {
 }
 
 fn cpus_online() -> Result<Cpumask> {
-    let path = "/sys/devices/system/cpu/online";
+    let path = format!("{}/sys/devices/system/cpu/online", *ROOT_PREFIX);
     let online = std::fs::read_to_string(path)?;
     Cpumask::from_cpulist(&online)
 }
@@ -437,7 +439,7 @@ fn create_insert_cpu(
         return Ok(());
     }
 
-    let cpu_str = format!("/sys/devices/system/cpu/cpu{}", id);
+    let cpu_str = format!("{}/sys/devices/system/cpu/cpu{}", *ROOT_PREFIX, id);
     let cpu_path = Path::new(&cpu_str);
 
     // Physical core ID
@@ -566,13 +568,23 @@ fn create_insert_cpu(
 
 fn read_cpu_ids() -> Result<Vec<usize>> {
     let mut cpu_ids = vec![];
-    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*")?;
+    let path = format!("{}/sys/devices/system/cpu/cpu[0-9]*", *ROOT_PREFIX);
+    let cpu_paths = glob(&path)?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let cpu_str = cpu_path.to_str().unwrap().trim();
-        match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
-            Ok(val) => cpu_ids.push(val),
-            Err(_) => {
-                bail!("Failed to parse cpu ID {}", cpu_str);
+        if *ROOT_PREFIX == "" {
+            match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
+                Ok(val) => cpu_ids.push(val),
+                Err(_) => {
+                    bail!("Failed to parse cpu ID {}", cpu_str);
+                }
+            }
+        } else {
+            match sscanf!(cpu_str, "{str}/sys/devices/system/cpu/cpu{usize}") {
+                Ok((_, val)) => cpu_ids.push(val),
+                Err(_) => {
+                    bail!("Failed to parse cpu ID {}", cpu_str);
+                }
             }
         }
     }
@@ -602,18 +614,19 @@ fn get_capacity_source() -> Option<CapacitySource> {
     ];
 
     // Find the most precise source for cpu_capacity estimation.
-    let prefix = "/sys/devices/system/cpu/cpu0";
+    let prefix = format!("{}/sys/devices/system/cpu/cpu0", *ROOT_PREFIX);
     let mut raw_capacity;
     let mut suffix = sources[sources.len() - 1];
     'outer: for src in sources {
-        let path_str = [prefix, src].join("/");
+        let path_str = [prefix.clone(), src.to_string()].join("/");
         let path = Path::new(&path_str);
         raw_capacity = read_from_file(&path).unwrap_or(0_usize);
         if raw_capacity > 0 {
             // It would be an okay source...
             suffix = src;
             // But double-check if the source has meaningful information.
-            let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
+            let path = format!("{}/sys/devices/system/cpu/cpu[0-9]*", *ROOT_PREFIX);
+            let cpu_paths = glob(&path).ok()?;
             for cpu_path in cpu_paths.filter_map(Result::ok) {
                 let raw_capacity2 = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
                 if raw_capacity != raw_capacity2 {
@@ -633,7 +646,8 @@ fn get_capacity_source() -> Option<CapacitySource> {
     let mut avg_rcap = 0;
     let mut nr_cpus = 0;
     let mut has_biglittle = false;
-    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
+    let path = format!("{}/sys/devices/system/cpu/cpu[0-9]*", *ROOT_PREFIX);
+    let cpu_paths = glob(&path).ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let rcap = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
         if max_rcap < rcap {
@@ -673,7 +687,8 @@ fn get_capacity_source() -> Option<CapacitySource> {
 }
 
 fn is_smt_active() -> Option<bool> {
-    let smt_on: u8 = read_from_file(Path::new("/sys/devices/system/cpu/smt/active")).ok()?;
+    let path = format!("{}/sys/devices/system/cpu/smt/active", *ROOT_PREFIX);
+    let smt_on: u8 = read_from_file(Path::new(&path)).ok()?;
     Some(smt_on == 1)
 }
 
@@ -705,7 +720,8 @@ fn create_default_node(
         }
     }
 
-    if !Path::new("/sys/devices/system/cpu").exists() {
+    let path = format!("{}/sys/devices/system/cpu", *ROOT_PREFIX);
+    if !Path::new(&path).exists() {
         bail!("/sys/devices/system/cpu sysfs node not found");
     }
 
@@ -729,19 +745,30 @@ fn create_numa_nodes(
     #[cfg(feature = "gpu-topology")]
     let system_gpus = create_gpus();
 
-    let numa_paths = glob("/sys/devices/system/node/node*")?;
+    let path = format!("{}/sys/devices/system/node/node*", *ROOT_PREFIX);
+    let numa_paths = glob(&path)?;
     for numa_path in numa_paths.filter_map(Result::ok) {
         let numa_str = numa_path.to_str().unwrap().trim();
-        let node_id = match sscanf!(numa_str, "/sys/devices/system/node/node{usize}") {
-            Ok(val) => val,
-            Err(_) => {
-                bail!("Failed to parse NUMA node ID {}", numa_str);
+        let node_id = if *ROOT_PREFIX == "" {
+            match sscanf!(numa_str, "/sys/devices/system/node/node{usize}") {
+                Ok(val) => val,
+                Err(_) => {
+                    bail!("Failed to parse NUMA node ID {}", numa_str);
+                }
+            }
+        } else {
+            match sscanf!(numa_str, "{str}/sys/devices/system/node/node{usize}") {
+                Ok((_, val)) => val,
+                Err(_) => {
+                    bail!("Failed to parse NUMA node ID {}", numa_str);
+                }
             }
         };
+
         let distance = read_file_usize_vec(
             Path::new(&format!(
-                "/sys/devices/system/node/node{}/distance",
-                node_id
+                "{}/sys/devices/system/node/node{}/distance",
+                *ROOT_PREFIX, node_id
             )),
             ' ',
         )?;
@@ -773,10 +800,22 @@ fn create_numa_nodes(
         let mut cpu_ids = vec![];
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
-            let cpu_id = match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
-                Ok((_, val)) => val,
-                Err(_) => {
-                    bail!("Failed to parse cpu ID {}", cpu_str);
+            let cpu_id = if *ROOT_PREFIX == "" {
+                match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
+                    Ok((_, val)) => val,
+                    Err(_) => {
+                        bail!("Failed to parse cpu ID {}", cpu_str);
+                    }
+                }
+            } else {
+                match sscanf!(
+                    cpu_str,
+                    "{str}/sys/devices/system/node/node{usize}/cpu{usize}"
+                ) {
+                    Ok((_, _, val)) => val,
+                    Err(_) => {
+                        bail!("Failed to parse cpu ID {}", cpu_str);
+                    }
                 }
             };
             cpu_ids.push(cpu_id);

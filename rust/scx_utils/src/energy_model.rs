@@ -12,6 +12,7 @@
 //! which is loaded from debugfs.
 
 use crate::compat;
+use crate::compat::ROOT_PREFIX;
 use crate::misc::read_from_file;
 use crate::Cpumask;
 use anyhow::bail;
@@ -184,6 +185,11 @@ fn get_pd_paths() -> Result<Vec<(usize, String)>> {
 }
 
 fn get_em_root() -> Result<String> {
-    let root = compat::debugfs_mount().unwrap().join("energy_model");
-    Ok(root.display().to_string())
+    if *ROOT_PREFIX == "" {
+        let root = compat::debugfs_mount().unwrap().join("energy_model");
+        Ok(root.display().to_string())
+    } else {
+        let root = format!("{}/sys/kernel/debug/energy_model", *ROOT_PREFIX);
+        Ok(root)
+    }
 }
