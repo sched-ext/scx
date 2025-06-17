@@ -927,6 +927,9 @@ static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu)
 	struct task_struct *p;
 	int dispatched = 0;
 
+	if (!scx_bpf_dsq_nr_queued(dsq_id))
+		return 0;
+
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		/*
 		 * This is a workaround for the BPF verifier's pointer
