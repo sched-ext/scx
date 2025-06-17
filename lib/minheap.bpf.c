@@ -26,7 +26,7 @@ u64 scx_minheap_alloc_internal(size_t capacity)
 }
 
 static
-int scx_minheap_balance(scx_minheap_t *heap, int ind)
+int scx_minheap_balance(scx_minheap_t *heap __arg_arena, int ind)
 {
 	struct scx_minheap_elem htmp;
 	int parent;
@@ -49,7 +49,7 @@ int scx_minheap_balance(scx_minheap_t *heap, int ind)
 }
 
 __weak
-int scx_minheap_insert(scx_minheap_t *heap, u64 elem, u64 weight)
+int scx_minheap_insert(scx_minheap_t *heap __arg_arena, u64 elem, u64 weight)
 {
 	struct scx_minheap_elem helem = {
 		.elem = elem,
@@ -67,7 +67,7 @@ int scx_minheap_insert(scx_minheap_t *heap, u64 elem, u64 weight)
 }
 
 __weak
-int scx_minheap_pop(scx_minheap_t *heap, struct scx_minheap_elem *helem)
+int scx_minheap_pop(scx_minheap_t *heap __arg_arena, struct scx_minheap_elem *helem __arg_trusted)
 {
 	if (heap->size == 0)
 		return -EINVAL;

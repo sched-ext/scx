@@ -2843,6 +2843,7 @@ dependencies = [
  "anyhow",
  "libbpf-rs",
  "scx_utils",
+ "simplelog",
 ]
 
 [[package]]

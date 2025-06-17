@@ -16,6 +16,10 @@ use std::ffi::c_ulong;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::init_libbpf_logging;
 
+use simplelog::{
+    ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode,
+};
+
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
@@ -55,6 +59,13 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
 }
 
 fn main() {
+    TermLogger::init(
+        simplelog::LevelFilter::Info,
+        SimplelogConfig::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    ).unwrap();
+
     let mut open_object = MaybeUninit::uninit();
     let mut builder = BpfSkelBuilder::default();
 
