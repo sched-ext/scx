@@ -339,7 +339,7 @@ static int chaos_timer_check_queues_callback(void *map, int key, struct timer_wr
 	u64 this_next_trigger_time;
 	int cpu_idx;
 
-	bpf_for(cpu_idx, 0, nr_cpus) {
+	bpf_for(cpu_idx, 0, topo_config.nr_cpus) {
 		this_next_trigger_time = check_dsq_times(cpu_idx);
 		next_trigger_time = MAX(next_trigger_time, this_next_trigger_time);
 	}
@@ -364,7 +364,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init)
 	struct cpu_ctx *cpuc;
 	int timer_id, ret, i;
 
-	bpf_for(i, 0, nr_cpus) {
+	bpf_for(i, 0, topo_config.nr_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(i)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 			return -EINVAL;

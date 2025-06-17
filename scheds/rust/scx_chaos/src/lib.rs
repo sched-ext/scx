@@ -417,7 +417,11 @@ impl Builder<'_> {
 
         // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
         // this codepath
-        open_skel.maps.rodata_data.select_idle_in_enqueue = false;
+        open_skel
+            .maps
+            .rodata_data
+            .p2dq_config
+            .select_idle_in_enqueue = MaybeUninit::new(false);
 
         match self.requires_ppid {
             None => {
@@ -488,7 +492,7 @@ impl Builder<'_> {
                     open_skel.maps.rodata_data.cpu_freq_min = *min_freq;
                     open_skel.maps.rodata_data.cpu_freq_max = *max_freq;
                     // Don't let p2dq control frequency
-                    open_skel.maps.rodata_data.freq_control = false;
+                    open_skel.maps.rodata_data.p2dq_config.freq_control = MaybeUninit::new(false);
                 }
                 Trait::PerfDegradation {
                     frequency,
