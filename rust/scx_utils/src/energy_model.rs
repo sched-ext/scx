@@ -18,6 +18,7 @@ use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
 use glob::glob;
+use num::clamp;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -67,7 +68,7 @@ impl EnergyModel {
         Ok(EnergyModel { perf_doms })
     }
 
-    pub fn get_pd(&self, cpu_id: usize) -> Option<&PerfDomain> {
+    pub fn get_pd_by_cpu_id(&self, cpu_id: usize) -> Option<&PerfDomain> {
         for (_, pd) in self.perf_doms.iter() {
             if pd.span.test_cpu(cpu_id) {
                 return Some(&pd);
@@ -94,6 +95,21 @@ impl PerfDomain {
             span,
             perf_table,
         })
+    }
+
+    /// Lookup a performance state by a given CPU utilization.
+    /// @util is in %, ranging [0, 100].
+    pub fn select_perf_state(&self, util: f32) -> Option<&Arc<PerfState>> {
+        let util = clamp(util, 0.0, 100.0);
+        let (perf_max, _) = self.perf_table.iter().rev().next().unwrap();
+        let perf_max = *perf_max as f32;
+        let req_perf = (perf_max as f32 * (util / 100.0)) as usize;
+        for (perf, ps) in self.perf_table.iter() {
+            if *perf >= req_perf {
+                return Some(ps);
+            }
+        }
+        None
     }
 }
 

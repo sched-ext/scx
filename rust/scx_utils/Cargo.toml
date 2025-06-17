@@ -30,6 +30,8 @@ walkdir = "2.5"
 version-compare = "0.1"
 libc = "0.2.137"
 zbus = { version = "5.3.1", optional = true }
+const_format = "0.2.34"
+num = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.19.1"

@@ -322,7 +322,7 @@ impl CpuOrderCtx {
     /// If the energy model is not available, use NUMA node ID instead.
     fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, node_adx: usize) -> usize {
         match em {
-            Ok(em) => em.get_pd(cpu_adx).unwrap().id,
+            Ok(em) => em.get_pd_by_cpu_id(cpu_adx).unwrap().id,
             Err(_) => node_adx,
         }
     }
