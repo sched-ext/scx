@@ -224,3 +224,9 @@ understand the energy required per operation.
 is a synthetic scheduler benchmark designed to mimic production web workloads.
 It targets three key aspects: full CPU saturation, long timeslices, and low wakeup latency.
 These characteristics help reveal scheduler issues that can affect request-per-second (RPS) performance.
+
+### `cachyos-benchmarker`
+[`cachyos-benchmarker`](https://github.com/CachyOS/cachyos-benchmarker)
+is a lightweight benchmarking and stress testing tool, based on [mini-benchmarker](https://gitlab.com/torvic9/mini-benchmarker) by Tor Vic.
+It runs a variety of real-world and synthetic workloads, such as kernel build, ffmpeg, x265, y-cruncher, and more.
+It’s particularly useful for exposing scheduler issues under stress, and works across most Linux distributions.
