@@ -11,8 +11,14 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn new(entries: Vec<String>) -> Self {
+    pub fn new(mut entries: Vec<String>) -> Self {
+        entries.sort();
         Self { entries }
+    }
+
+    pub fn binary_search(&self, input: &str) -> Option<usize> {
+        let input = &input.to_lowercase();
+        self.entries.binary_search(&input).ok()
     }
 
     pub fn substring_search(&self, input: &str) -> Vec<String> {

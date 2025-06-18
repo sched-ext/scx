@@ -13,6 +13,7 @@ mod cpu_data;
 pub mod edm;
 mod event_data;
 mod keymap;
+mod kprobe_event;
 mod llc_data;
 pub mod mangoapp;
 mod node_data;
@@ -33,6 +34,7 @@ pub use cpu_data::CpuData;
 pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
+pub use kprobe_event::AllKprobeEvents;
 pub use llc_data::LlcData;
 pub use node_data::NodeData;
 pub use perf_event::available_perf_events;
@@ -59,7 +61,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the 
+This software may be used and distributed according to the terms of the
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
