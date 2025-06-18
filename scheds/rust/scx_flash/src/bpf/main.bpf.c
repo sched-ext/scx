@@ -988,15 +988,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	s32 cpu = prev_cpu;
 
 	/*
-	 * If a task has been re-enqueued because its assigned CPU has been
-	 * taken by a higher priority scheduling class, force it to follow
-	 * the regular scheduling path and give it a chance to run on a
-	 * different CPU.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ)
-		return false;
-
-	/*
 	 * Dispatch per-CPU kthreads directly on their assigned CPU.
 	 *
 	 * This allows to prioritize critical kernel threads that may
@@ -1020,11 +1011,26 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	/*
-	 * Try direct dispatch only if ops.select_cpu() has been skipped,
-	 * since the task already had a chance to be directly dispatched
-	 * from ops.select_cpu().
+	 * Skip direct dispatch if ops.select_cpu() was already called, as
+	 * the task has already had an opportunity for direct dispatch
+	 * there.
 	 */
 	if (__COMPAT_is_enq_cpu_selected(enq_flags))
+		return false;
+
+	/*
+	 * Skip direct dispatch if the task was already running, since we
+	 * only want to consider migrations on task wakeup.
+	 *
+	 * While this is typically handled in ops.select_cpu(), remote
+	 * wakeups (ttwu_queue) skip that callback, so we need to handle
+	 * migration here.
+	 *
+	 * However, if the task was re-enqueued due to a higher scheduling
+	 * class stealing the CPU it was previously queued on, give it a
+	 * chance to migrate to a different CPU.
+	 */
+	if (!(enq_flags & SCX_ENQ_REENQ) && scx_bpf_task_running(p))
 		return false;
 
 	/*
@@ -1044,27 +1050,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		 */
 		goto out_kick;
 	}
-
-	/*
-	 * For tasks that are not limited to run on a single CPU, check if
-	 * their previously used CPU is a full-idle SMT core and in that
-	 * case perform a direct dispatch.
-	 */
-	if (can_direct_dispatch(cpu) && is_fully_idle(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		dispatched = true;
-
-		goto out_kick;
-	}
-
-	/*
-	 * In case of a remote wakeup (ttwu_queue), the task was not
-	 * running, so attempt a task migration and dispatch to an idle
-	 * CPU.
-	 */
-	if (scx_bpf_task_running(p))
-		return false;
 
 	/*
 	 * Try to pick an idle CPU close to the one the task is using.
@@ -1119,7 +1104,13 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	update_task_deadline(p, tctx);
+	/*
+	 * No need to update the task's deadline if it was re-enqueued due
+	 * a higher scheduling class stealing the CPU (as the task didn't
+	 * actually run).
+	 */
+	if (!(enq_flags & SCX_ENQ_REENQ))
+		update_task_deadline(p, tctx);
 
 	/*
 	 * Try to dispatch the task directly, if possible.
