@@ -239,6 +239,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 }
             });
 
+            tokio::time::sleep(Duration::from_millis(trace_args.trace_ms)).await;
             tracer.clear_links()?;
             // The order is important here:
             // 1) first drop the links to detach the attached BPF programs
