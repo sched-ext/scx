@@ -269,7 +269,8 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
                 dt.to_rfc2822(),
                 (cst.lb_at_us as i64 - cst.at_us as i64) as f64 / 1000.0
             );
-            cst.format(&mut std::io::stdout())
+            cst.format(&mut std::io::stdout())?;
+            Ok(())
         },
     )
 }
