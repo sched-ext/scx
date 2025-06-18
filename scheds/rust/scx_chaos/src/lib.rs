@@ -12,6 +12,7 @@ use stats::Metrics;
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
+use scx_utils::build_id;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -580,6 +581,10 @@ pub struct Args {
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Print version and exit.
+    #[clap(long)]
+    pub version: bool,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     pub stats: Option<f64>,
@@ -692,6 +697,14 @@ impl<'a> Iterator for BuilderIterator<'a> {
 }
 
 pub fn run(args: Args) -> Result<()> {
+    if args.version {
+        println!(
+            "scx_chaos: {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
+
     let args = Arc::new(args);
 
     let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
@@ -705,6 +718,11 @@ pub fn run(args: Args) -> Result<()> {
         }
     })
     .context("Error setting Ctrl-C handler")?;
+
+    info!(
+        "Running scx_chaos (build ID: {})",
+        build_id::full_version(env!("CARGO_PKG_VERSION"))
+    );
 
     if let Some(intv) = args.monitor {
         return stats::monitor(Duration::from_secs_f64(intv), shutdown);
