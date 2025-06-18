@@ -798,14 +798,16 @@ pub fn run(args: Args) -> Result<()> {
         cvar.notify_all();
     }
 
-    if let Err(e) = scheduler_thread.join() {
-        panic::resume_unwind(e);
+    match scheduler_thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => panic::resume_unwind(e),
     }
 
-    if let Some(stats_thread) = stats_thread {
-        if let Err(e) = stats_thread.join() {
-            panic::resume_unwind(e);
-        }
+    match stats_thread.map(|t| t.join()).unwrap_or(Ok(Ok(()))) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => panic::resume_unwind(e),
     }
 
     Ok(())
