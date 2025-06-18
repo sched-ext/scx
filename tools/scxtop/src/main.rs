@@ -178,7 +178,6 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             links.push(skel.progs.on_sched_exec.attach()?);
             links.push(skel.progs.on_sched_exit.attach()?);
 
-            let trace_dur = std::time::Duration::from_millis(trace_args.trace_ms);
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
             let mut event_rbb = RingBufferBuilder::new();
@@ -212,9 +211,9 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let trace_file_prefix = config.trace_file_prefix().to_string();
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
-            let mut tracer = Tracer::new(skel);P
-            tracer.trace_async(trace_dur).await?;
-            
+            let mut tracer = Tracer::new(skel);
+            tracer.trace()?;
+
             info!("warming up for {}ms", trace_args.warmup_ms);
             tokio::time::sleep(Duration::from_millis(trace_args.warmup_ms)).await;
             debug!("starting trace");
@@ -240,6 +239,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 }
             });
 
+            tracer.clear_links()?;
             // The order is important here:
             // 1) first drop the links to detach the attached BPF programs
             // 2) set the shutdown variable to stop background tokio threads

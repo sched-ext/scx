@@ -39,7 +39,7 @@ impl<'a> Tracer<'a> {
     }
 
     /// Starts the collection of a trace, does not stop the trace.
-    pub async fn trace_async(&mut self, dur: std::time::Duration) -> Result<()> {
+    pub fn trace(&mut self) -> Result<()> {
         self.skel.maps.data_data.sample_rate = 1;
         self.skel.maps.data_data.enable_bpf_events = true;
         self.attach_trace_progs()?;
@@ -48,7 +48,10 @@ impl<'a> Tracer<'a> {
             self.trace_links.len(),
             self.skel.maps.data_data.sample_rate
         );
-        tokio::time::sleep(dur).await;
+        Ok(())
+    }
+
+    pub fn clear_links(&mut self) -> Result<()> {
         self.trace_links.clear();
         Ok(())
     }
