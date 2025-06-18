@@ -189,9 +189,9 @@ struct Opts {
     #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
     idle_resume_us: i64,
 
-    /// Enable per-CPU runqueues.
+    /// Use per-CPU runqueues only.
     ///
-    /// Use distinct per-CPU runqueues to reduce task migrations. This can help improve certain
+    /// Force using only the per-CPU runqueues to reduce task migrations. This can improve certain
     /// cache-sensitive workload at the cost of making the system less responsive.
     #[clap(short = 'C', long, action = clap::ArgAction::SetTrue)]
     cpu_runqueue: bool,
