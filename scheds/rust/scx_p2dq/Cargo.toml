@@ -1,6 +1,6 @@
 [package]
 name = "scx_p2dq"
-version = "1.0.17"
+version = "1.0.18"
 authors = ["Daniel Hodges <hodges.daniel.scott@gmail.com>"]
 edition = "2021"
 description = "scx_p2dq A simple pick two load balancing scheduler in BPF"
