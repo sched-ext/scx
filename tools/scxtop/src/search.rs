@@ -17,8 +17,7 @@ impl Search {
     }
 
     pub fn binary_search(&self, input: &str) -> Option<usize> {
-        let input = &input.to_lowercase();
-        self.entries.binary_search(&input).ok()
+        self.entries.binary_search_by(|s| s.as_str().cmp(input)).ok()
     }
 
     pub fn substring_search(&self, input: &str) -> Vec<String> {
@@ -388,5 +387,25 @@ mod tests {
         let results = search.fuzzy_search("alrMcacEL");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
+    }
+
+    #[test]
+    fn test_binary_search_basic() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result = search.binary_search("alarmtimer:alarmtimer_cancel");
+
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_binary_search_basic_2() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result = search.binary_search("syscalls:sys_enter_settimeofday");
+
+        assert_eq!(result, Some(11));
     }
 }

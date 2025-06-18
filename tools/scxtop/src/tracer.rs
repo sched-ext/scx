@@ -37,7 +37,7 @@ impl<'a> Tracer<'a> {
 
         for kprobe in kprobes {
             self.trace_links.push(
-                self.skel.progs.generic_kprobe.attach_kprobe(false, kprobe)?
+                self.skel.progs.generic_kprobe.attach_kprobe(false, kprobe.to_lowercase())?
             );
         }
 
