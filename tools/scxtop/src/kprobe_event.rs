@@ -53,12 +53,25 @@ pub fn available_kprobe_events() -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    fn get_valid_events(uppercase: bool) -> Vec<String> {
+        let kprobe_events = available_kprobe_events().unwrap();
+        let samples: Vec<String> = vec![kprobe_events.first(), kprobe_events.last()]
+            .into_iter()
+            .flatten()
+            .map(|e| e.to_string())
+            .map(|e| if uppercase { e.to_uppercase() } else { e })
+            .collect();
+
+        samples
+    }
+
     #[test]
     fn test_is_valid_kprobe_event_basic() {
         let kprobe_events = AllKprobeEvents::new().unwrap();
-        assert!(kprobe_events.is_valid_kprobe_event("k_fn"));
-        assert!(kprobe_events.is_valid_kprobe_event("bpf_scx_is_valid_access"));
-        assert!(kprobe_events.is_valid_kprobe_event("__probestub_xfs_readlink"));
+        let valid_events = get_valid_events(false);
+        for event in valid_events {
+            assert!(kprobe_events.is_valid_kprobe_event(&event));
+        }
         assert!(!kprobe_events.is_valid_kprobe_event(""));
         assert!(!kprobe_events.is_valid_kprobe_event("blahblah"));
     }
@@ -66,37 +79,26 @@ mod tests {
     #[test]
     fn test_is_valid_kprobe_event_uppercase() {
         let kprobe_events = AllKprobeEvents::new().unwrap();
-        assert!(kprobe_events.is_valid_kprobe_event("k_FN"));
-        assert!(kprobe_events.is_valid_kprobe_event("__PROBESTUB_XFS_READLINK"));
-        assert!(kprobe_events.is_valid_kprobe_event("bPf_sCx_Is_VaLiD_aCcEsS"));
+        let valid_events = get_valid_events(true);
+        for event in valid_events {
+            assert!(kprobe_events.is_valid_kprobe_event(&event));
+        }
     }
 
     #[test]
     fn test_are_valid_kprobe_events_basic() {
         let kprobe_events = AllKprobeEvents::new().unwrap();
+        let mut valid_events = get_valid_events(false);
         assert!(kprobe_events.are_valid_kprobe_events(&vec![]));
-        assert!(kprobe_events.are_valid_kprobe_events(&vec!["k_fn".to_string()]));
-        assert!(kprobe_events.are_valid_kprobe_events(&vec![
-            "k_fn".to_string(),
-            "__probestub_xfs_readlink".to_string(),
-            "bpf_scx_is_valid_access".to_string(),
-        ]));
-        assert!(!kprobe_events.are_valid_kprobe_events(&vec![
-            "k_fn".to_string(),
-            "__probestub_xfs_readlink".to_string(),
-            "bpf_scx_is_valid_access".to_string(),
-            "blahblah".to_string(),
-        ]));
+        assert!(kprobe_events.are_valid_kprobe_events(&valid_events));
+        valid_events.push("blahblah".to_string());
+        assert!(!kprobe_events.are_valid_kprobe_events(&valid_events));
     }
 
     #[test]
     fn test_are_valid_kprobe_events_uppercase() {
         let kprobe_events = AllKprobeEvents::new().unwrap();
-        assert!(kprobe_events.are_valid_kprobe_events(&vec!["k_FN".to_string()]));
-        assert!(kprobe_events.are_valid_kprobe_events(&vec![
-            "k_FN".to_string(),
-            "__PROBESTUB_XFS_READLINK".to_string(),
-            "bPf_sCx_Is_VaLiD_aCcEsS".to_string(),
-        ]));
+        let valid_events = get_valid_events(true);
+        assert!(kprobe_events.are_valid_kprobe_events(&valid_events));
     }
 }
