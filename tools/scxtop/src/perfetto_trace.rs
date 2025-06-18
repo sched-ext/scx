@@ -18,8 +18,8 @@ use crate::edm::ActionHandler;
 use crate::protos_gen::perfetto_scx;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
-    SoftIRQAction,
+    IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
@@ -31,8 +31,7 @@ use crate::protos_gen::perfetto_scx::{
     ProcessDescriptor, SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent,
     SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent,
     SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
-    SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket, TrackDescriptor,
-    TrackEvent,
+    SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket, TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -733,7 +732,7 @@ impl PerfettoTraceManager {
             ts,
             cpu,
             pid,
-            instruction_pointer
+            instruction_pointer,
         } = action;
 
         self.ftrace_events.entry(*cpu).or_default().push({
@@ -743,10 +742,8 @@ impl PerfettoTraceManager {
                 event: Some(perfetto_scx::ftrace_event::Event::KprobeEvent(
                     KprobeEvent {
                         name: Some(instruction_pointer.to_string()),
-                        r#type: Some(
-                            perfetto_scx::kprobe_event::KprobeType::Instant as i32
-                        ),
-                    }
+                        r#type: Some(perfetto_scx::kprobe_event::KprobeType::Instant as i32),
+                    },
                 )),
                 ..FtraceEvent::default()
             }

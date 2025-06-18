@@ -17,7 +17,9 @@ impl Search {
     }
 
     pub fn binary_search(&self, input: &str) -> Option<usize> {
-        self.entries.binary_search_by(|s| s.as_str().cmp(input)).ok()
+        self.entries
+            .binary_search_by(|s| s.as_str().cmp(input))
+            .ok()
     }
 
     pub fn substring_search(&self, input: &str) -> Vec<String> {

@@ -4,9 +4,9 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
+use scx_utils::compat::tracefs_mount;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use scx_utils::compat::tracefs_mount;
 
 use crate::Search;
 
@@ -17,11 +17,15 @@ pub struct AllKprobeEvents {
 impl AllKprobeEvents {
     pub fn new() -> Result<Self> {
         let kprobe_events = available_kprobe_events()?;
-        Ok(Self { entries: Search::new(kprobe_events) })
+        Ok(Self {
+            entries: Search::new(kprobe_events),
+        })
     }
 
     pub fn is_valid_kprobe_event(&self, event: &str) -> bool {
-        self.entries.binary_search(&event.to_lowercase().to_string()).is_some()
+        self.entries
+            .binary_search(&event.to_lowercase().to_string())
+            .is_some()
     }
 
     pub fn are_valid_kprobe_events(&self, events: &[String]) -> bool {
