@@ -8,31 +8,6 @@ use scx_utils::compat::tracefs_mount;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use crate::Search;
-
-pub struct AllKprobeEvents {
-    entries: Search,
-}
-
-impl AllKprobeEvents {
-    pub fn new() -> Result<Self> {
-        let kprobe_events = available_kprobe_events()?;
-        Ok(Self {
-            entries: Search::new(kprobe_events),
-        })
-    }
-
-    pub fn is_valid_kprobe_event(&self, event: &str) -> bool {
-        self.entries
-            .binary_search(&event.to_lowercase().to_string())
-            .is_some()
-    }
-
-    pub fn are_valid_kprobe_events(&self, events: &[String]) -> bool {
-        events.iter().all(|e| self.is_valid_kprobe_event(e))
-    }
-}
-
 /// Returns the available kprobe events on the system from tracefs.
 pub fn available_kprobe_events() -> Result<Vec<String>> {
     let path = tracefs_mount()?;
@@ -47,58 +22,4 @@ pub fn available_kprobe_events() -> Result<Vec<String>> {
     }
 
     Ok(events)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn get_valid_events(uppercase: bool) -> Vec<String> {
-        let kprobe_events = available_kprobe_events().unwrap();
-        let samples: Vec<String> = vec![kprobe_events.first(), kprobe_events.last()]
-            .into_iter()
-            .flatten()
-            .map(|e| e.to_string())
-            .map(|e| if uppercase { e.to_uppercase() } else { e })
-            .collect();
-
-        samples
-    }
-
-    #[test]
-    fn test_is_valid_kprobe_event_basic() {
-        let kprobe_events = AllKprobeEvents::new().unwrap();
-        let valid_events = get_valid_events(false);
-        for event in valid_events {
-            assert!(kprobe_events.is_valid_kprobe_event(&event));
-        }
-        assert!(!kprobe_events.is_valid_kprobe_event(""));
-        assert!(!kprobe_events.is_valid_kprobe_event("blahblah"));
-    }
-
-    #[test]
-    fn test_is_valid_kprobe_event_uppercase() {
-        let kprobe_events = AllKprobeEvents::new().unwrap();
-        let valid_events = get_valid_events(true);
-        for event in valid_events {
-            assert!(kprobe_events.is_valid_kprobe_event(&event));
-        }
-    }
-
-    #[test]
-    fn test_are_valid_kprobe_events_basic() {
-        let kprobe_events = AllKprobeEvents::new().unwrap();
-        let mut valid_events = get_valid_events(false);
-        assert!(kprobe_events.are_valid_kprobe_events(&vec![]));
-        assert!(kprobe_events.are_valid_kprobe_events(&valid_events));
-        valid_events.push("blahblah".to_string());
-        assert!(!kprobe_events.are_valid_kprobe_events(&valid_events));
-    }
-
-    #[test]
-    fn test_are_valid_kprobe_events_uppercase() {
-        let kprobe_events = AllKprobeEvents::new().unwrap();
-        let valid_events = get_valid_events(true);
-        assert!(kprobe_events.are_valid_kprobe_events(&valid_events));
-    }
 }

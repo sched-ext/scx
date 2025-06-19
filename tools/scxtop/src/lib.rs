@@ -34,7 +34,7 @@ pub use cpu_data::CpuData;
 pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
-pub use kprobe_event::AllKprobeEvents;
+pub use kprobe_event::available_kprobe_events;
 pub use llc_data::LlcData;
 pub use node_data::NodeData;
 pub use perf_event::available_perf_events;

@@ -22,6 +22,14 @@ impl Search {
             .ok()
     }
 
+    pub fn contains(&self, input: &str) -> bool {
+        self.binary_search(input).is_some()
+    }
+
+    pub fn contains_all(&self, inputs: &[String]) -> bool {
+        inputs.iter().all(|input| self.contains(input))
+    }
+
     pub fn substring_search(&self, input: &str) -> Vec<String> {
         let input = &input.to_lowercase();
 
@@ -409,5 +417,36 @@ mod tests {
         let result = search.binary_search("syscalls:sys_enter_settimeofday");
 
         assert_eq!(result, Some(11));
+    }
+
+    #[test]
+    fn test_contains() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result1 = search.contains("ext4:ext4_mb_new_inode_pa");
+        assert!(result1);
+
+        let result2 = search.contains("ext4:ext4_mb_new_inode");
+        assert!(!result2);
+    }
+
+    #[test]
+    fn test_contains_all() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result1 = search.contains_all(&[
+            "ext4:ext4_mb_new_inode_pa".to_string(),
+            "ext4:ext4_mb_new_inode".to_string(),
+        ]);
+        assert!(!result1);
+
+        let result2 = search.contains_all(&[
+            "syscalls:sys_enter_timerfd_settime".to_string(),
+            "alarmtimer:alarmtimer_fired".to_string(),
+            "ext4:ext4_fc_stats".to_string(),
+        ]);
+        assert!(result2);
     }
 }

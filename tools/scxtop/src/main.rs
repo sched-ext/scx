@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
+use scxtop::available_kprobe_events;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
@@ -12,12 +13,12 @@ use scxtop::mangoapp::poll_mangoapp;
 use scxtop::read_file_string;
 use scxtop::tracer::Tracer;
 use scxtop::Action;
-use scxtop::AllKprobeEvents;
 use scxtop::App;
 use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
 use scxtop::PerfettoTraceManager;
+use scxtop::Search;
 use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::{bpf_skel::*, AppState};
@@ -147,9 +148,9 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
         ColorChoice::Auto,
     )?;
 
-    let kprobe_events = AllKprobeEvents::new()?;
+    let kprobe_events = Search::new(available_kprobe_events()?);
     kprobe_events
-        .are_valid_kprobe_events(&trace_args.kprobes)
+        .contains_all(&trace_args.kprobes)
         .then_some(())
         .ok_or_else(|| anyhow!("Invalid kprobe events"))?;
 
