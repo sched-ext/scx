@@ -11,9 +11,9 @@ use anyhow::Context;
 
 use scx_utils::init_libbpf_logging;
 
-use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::ProgramInput;
 
 fn main() {
     let mut open_object = MaybeUninit::uninit();
