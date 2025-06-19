@@ -40,7 +40,7 @@ impl<'a> Tracer<'a> {
                 self.skel
                     .progs
                     .generic_kprobe
-                    .attach_kprobe(false, kprobe.to_lowercase())?,
+                    .attach_kprobe(false, kprobe)?,
             );
         }
 
