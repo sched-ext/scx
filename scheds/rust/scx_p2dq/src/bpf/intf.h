@@ -37,6 +37,8 @@ enum consts {
 
 	LOAD_BALANCE_SLACK	= 20ULL,
 
+	P2DQ_MIG_DSQ		= 1LLU << 60,
+
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,
 
