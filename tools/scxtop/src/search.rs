@@ -11,8 +11,23 @@ pub struct Search {
 }
 
 impl Search {
-    pub fn new(entries: Vec<String>) -> Self {
+    pub fn new(mut entries: Vec<String>) -> Self {
+        entries.sort();
         Self { entries }
+    }
+
+    pub fn binary_search(&self, input: &str) -> Option<usize> {
+        self.entries
+            .binary_search_by(|s| s.as_str().cmp(input))
+            .ok()
+    }
+
+    pub fn contains(&self, input: &str) -> bool {
+        self.binary_search(input).is_some()
+    }
+
+    pub fn contains_all(&self, inputs: &[String]) -> bool {
+        inputs.iter().all(|input| self.contains(input))
     }
 
     pub fn substring_search(&self, input: &str) -> Vec<String> {
@@ -382,5 +397,56 @@ mod tests {
         let results = search.fuzzy_search("alrMcacEL");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
+    }
+
+    #[test]
+    fn test_binary_search_basic() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result = search.binary_search("alarmtimer:alarmtimer_cancel");
+
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_binary_search_basic_2() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result = search.binary_search("syscalls:sys_enter_settimeofday");
+
+        assert_eq!(result, Some(11));
+    }
+
+    #[test]
+    fn test_contains() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result1 = search.contains("ext4:ext4_mb_new_inode_pa");
+        assert!(result1);
+
+        let result2 = search.contains("ext4:ext4_mb_new_inode");
+        assert!(!result2);
+    }
+
+    #[test]
+    fn test_contains_all() {
+        let events = test_events();
+        let search = Search::new(events);
+
+        let result1 = search.contains_all(&[
+            "ext4:ext4_mb_new_inode_pa".to_string(),
+            "ext4:ext4_mb_new_inode".to_string(),
+        ]);
+        assert!(!result1);
+
+        let result2 = search.contains_all(&[
+            "syscalls:sys_enter_timerfd_settime".to_string(),
+            "alarmtimer:alarmtimer_fired".to_string(),
+            "ext4:ext4_fc_stats".to_string(),
+        ]);
+        assert!(result2);
     }
 }

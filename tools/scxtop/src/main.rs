@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
+use scxtop::available_kprobe_events;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
@@ -17,6 +18,7 @@ use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
 use scxtop::PerfettoTraceManager;
+use scxtop::Search;
 use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::{bpf_skel::*, AppState};
@@ -146,6 +148,12 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
         ColorChoice::Auto,
     )?;
 
+    let kprobe_events = Search::new(available_kprobe_events()?);
+    kprobe_events
+        .contains_all(&trace_args.kprobes)
+        .then_some(())
+        .ok_or_else(|| anyhow!("Invalid kprobe events"))?;
+
     let config = Config::default_config();
     let worker_threads = config.worker_threads() as usize;
     tokio::runtime::Builder::new_multi_thread()
@@ -212,7 +220,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
             let mut tracer = Tracer::new(skel);
-            tracer.trace()?;
+            tracer.trace(&trace_args.kprobes)?;
 
             info!("warming up for {}ms", trace_args.warmup_ms);
             tokio::time::sleep(Duration::from_millis(trace_args.warmup_ms)).await;
