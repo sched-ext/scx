@@ -76,6 +76,16 @@ impl EnergyModel {
         }
         None
     }
+
+    pub fn perf_total(&self) -> usize {
+        let mut total = 0;
+
+        for (_, pd) in self.perf_doms.iter() {
+            total += pd.perf_total();
+        }
+
+        total
+    }
 }
 
 impl PerfDomain {
@@ -101,7 +111,7 @@ impl PerfDomain {
     /// @util is in %, ranging [0, 100].
     pub fn select_perf_state(&self, util: f32) -> Option<&Arc<PerfState>> {
         let util = clamp(util, 0.0, 100.0);
-        let (perf_max, _) = self.perf_table.iter().rev().next().unwrap();
+        let (perf_max, _) = self.perf_table.last_key_value().unwrap();
         let perf_max = *perf_max as f32;
         let req_perf = (perf_max as f32 * (util / 100.0)) as usize;
         for (perf, ps) in self.perf_table.iter() {
@@ -111,13 +121,16 @@ impl PerfDomain {
         }
         None
     }
+
+    pub fn perf_total(&self) -> usize {
+        let (_, ps) = self.perf_table.last_key_value().unwrap();
+        ps.performance * self.span.weight()
+    }
 }
 
 impl PartialEq for PerfDomain {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id &&
-        self.span == other.span &&
-        self.perf_table == other.perf_table
+        self.id == other.id && self.span == other.span && self.perf_table == other.perf_table
     }
 }
 
@@ -142,10 +155,10 @@ impl PerfState {
 
 impl PartialEq for PerfState {
     fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost &&
-        self.frequency == other.frequency &&
-        self.performance == other.performance &&
-        self.power == other.power
+        self.cost == other.cost
+            && self.frequency == other.frequency
+            && self.performance == other.performance
+            && self.power == other.power
     }
 }
 
