@@ -28,6 +28,9 @@ const volatile bool rr_sched;
 /* Enable per-CPU DSQs */
 const volatile bool pcpu_dsq = true;
 
+/* Enable per-node DSQs */
+const volatile bool node_dsq = true;
+
 /*
  * Default task time slice.
  */
@@ -413,7 +416,7 @@ static inline u64 nr_tasks_waiting(s32 cpu)
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
 	return (pcpu_dsq ? scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) : 0) +
-	       scx_bpf_dsq_nr_queued(node_to_dsq(node));
+	       (node_dsq ? scx_bpf_dsq_nr_queued(node_to_dsq(node)) : 0);
 }
 
 /*
@@ -1090,6 +1093,18 @@ out_kick:
 }
 
 /*
+ * Return true if @tctx is an interactive task, false otherwise.
+ */
+static bool is_interactive(const struct task_ctx *tctx)
+{
+	/*
+	 * If the task has been using the CPU for less than @slice_min,
+	 * assume it's interactive.
+	 */
+	return tctx->exec_runtime < slice_min;
+}
+
+/*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
@@ -1133,11 +1148,11 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Determine target DSQ: try to keep the interactive tasks running
-	 * on the same CPU using the per-CPU DSQ, or use the per-node DSQ
-	 * for the CPU-intensive tasks.
+	 * on the same CPU using the per-CPU DSQ (if enabled), or use the
+	 * per-node DSQ for the CPU-intensive tasks (if enabled).
 	 */
-	if (pcpu_dsq && !scx_bpf_dsq_nr_queued(node_to_dsq(node)) &&
-	    tctx->exec_runtime < slice_min) {
+	if (pcpu_dsq &&
+	    (!node_dsq || (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(tctx)))) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
@@ -1290,7 +1305,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * Consume regular tasks from the per-node DSQ, transferring them
 	 * to the local CPU DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(node_to_dsq(node)))
+	if (node_dsq && scx_bpf_dsq_move_to_local(node_to_dsq(node)))
 		return;
 
 	/*
@@ -1304,10 +1319,14 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * If the CPU is about to go idle, attempt to consume the task with
-	 * the minimum vruntime from another CPU in the same LLC.
+	 * Without per-node DSQs enabled, there's no inherent mechanism for
+	 * balancing the load across CPUs, which can lead to tasks waiting
+	 * too long for their assigned CPU to become available.
+         *
+	 * To mitigate this, when a CPU is about to go idle, try to pull
+	 * the task with the smallest vruntime from other CPUs.
 	 */
-	if (pcpu_dsq)
+	if (pcpu_dsq && !node_dsq)
 		rebalance_cpu(cpu);
 }
 
@@ -1863,11 +1882,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	}
 
 	/* Create per-node DSQs */
-	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
-		err = scx_bpf_create_dsq(node_to_dsq(node), node);
-		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", node, err);
-			return err;
+	if (node_dsq) {
+		bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+			err = scx_bpf_create_dsq(node_to_dsq(node), node);
+			if (err) {
+				scx_bpf_error("failed to create DSQ %d: %d", node, err);
+				return err;
+			}
 		}
 	}
 
