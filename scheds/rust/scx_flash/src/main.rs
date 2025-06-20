@@ -171,7 +171,7 @@ struct Opts {
     /// Decreasing this value makes the scheduler more robust and fair.
     ///
     /// (0 = disable voluntary context switch prioritization).
-    #[clap(short = 'c', long, default_value = "128")]
+    #[clap(short = 'c', long, default_value = "0")]
     max_avg_nvcsw: u64,
 
     /// Throttle the running CPUs by periodically injecting idle cycles.

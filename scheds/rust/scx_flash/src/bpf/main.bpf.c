@@ -58,7 +58,7 @@ const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
  * Maximum amount of voluntary context switches (this limit allows to prevent
  * spikes or abuse of the nvcsw dynamic).
  */
-const volatile u64 max_avg_nvcsw = 128ULL;
+const volatile u64 max_avg_nvcsw;
 
 /*
  * Ignore synchronous wakeup events.
@@ -321,24 +321,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
-}
-
-/*
- * Prevent excessive prioritization of tasks performing massive fsync()
- * operations on the filesystem. These tasks can degrade system responsiveness
- * by not being inherently latency-sensitive.
- */
-SEC("?kprobe/vfs_fsync_range")
-int kprobe_vfs_fsync_range(struct file *file, u64 start, u64 end, int datasync)
-{
-	struct task_struct *p = (void *)bpf_get_current_task_btf();
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (tctx)
-		tctx->avg_nvcsw = 0;
-
-	return 0;
 }
 
 /*
@@ -1502,6 +1484,9 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
+		return;
+
+	if (!max_avg_nvcsw)
 		return;
 
 	/*
