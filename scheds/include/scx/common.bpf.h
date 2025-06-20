@@ -24,7 +24,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <asm-generic/errno.h>
-#include "user_exit_info.h"
+#include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
 
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
