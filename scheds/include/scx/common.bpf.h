@@ -245,6 +245,7 @@ BPF_PROG(name, ##args)
  * be a pointer to the area. Use `MEMBER_VPTR(*ptr, .member)` instead of
  * `MEMBER_VPTR(ptr, ->member)`.
  */
+#ifndef MEMBER_VPTR
 #define MEMBER_VPTR(base, member) (typeof((base) member) *)			\
 ({										\
 	u64 __base = (u64)&(base);						\
@@ -261,6 +262,7 @@ BPF_PROG(name, ##args)
 		  [max]"i"(sizeof(base) - sizeof((base) member)));		\
 	__addr;									\
 })
+#endif /* MEMBER_VPTR */
 
 /**
  * ARRAY_ELEM_PTR - Obtain the verified pointer to an array element
@@ -276,6 +278,7 @@ BPF_PROG(name, ##args)
  * size of the array to compute the max, which will result in rejection by
  * the verifier.
  */
+#ifndef ARRAY_ELEM_PTR
 #define ARRAY_ELEM_PTR(arr, i, n) (typeof(arr[i]) *)				\
 ({										\
 	u64 __base = (u64)arr;							\
@@ -290,7 +293,7 @@ BPF_PROG(name, ##args)
 		  [max]"r"(sizeof(arr[0]) * ((n) - 1)));			\
 	__addr;									\
 })
-
+#endif /* ARRAY_ELEM_PTR */
 
 /*
  * BPF declarations and helpers

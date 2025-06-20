@@ -86,6 +86,10 @@ void bpf_arena_free_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym _
  * Note that cond_break can only be portably used in the body of a breakable
  * construct, whereas can_loop can be used anywhere.
  */
+#ifdef TEST
+#define can_loop true
+#define __cond_break(expr) expr
+#else
 #ifdef __BPF_FEATURE_MAY_GOTO
 #define can_loop					\
 	({ __label__ l_break, l_continue;		\
@@ -159,8 +163,9 @@ void bpf_arena_free_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym _
 	l_break: expr;					\
 	l_continue:;					\
 	})
-#endif
-#endif
+#endif /* __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ */
+#endif /* __BPF_FEATURE_MAY_GOTO */
+#endif /* TEST */
 
 #define cond_break __cond_break(break)
 #define cond_break_label(label) __cond_break(goto label)

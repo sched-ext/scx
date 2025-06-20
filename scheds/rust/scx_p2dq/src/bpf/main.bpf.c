@@ -7,6 +7,13 @@
  * algorithm.
  */
 
+/* This is still required as we only build the unittesting stuff from meson, and
+ * cargo won't find scx_test.h.
+ */
+#ifdef TEST
+#include <scx_test.h>
+#endif
+
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
@@ -1664,3 +1671,21 @@ SCX_OPS_DEFINE(p2dq,
 	       .timeout_ms		= 20000,
 	       .name			= "p2dq");
 #endif
+
+#ifdef TEST
+static void test_is_interactive(void)
+{
+	task_ctx my_taskc = {
+		.dsq_index = 0,
+	};
+
+	scx_test_assert(is_interactive(&my_taskc));
+	my_taskc.dsq_index = 1;
+	scx_test_assert(!is_interactive(&my_taskc));
+}
+
+int main(int argc, char **argv)
+{
+	test_is_interactive();
+}
+#endif /* TEST */
