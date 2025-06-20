@@ -1037,7 +1037,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * If the task can only run on a single CPU and that CPU is idle,
 	 * perform a direct dispatch.
 	 */
-	if (p->nr_cpus_allowed == 1) {
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
 		if (scx_bpf_test_and_clear_cpu_idle(cpu) && can_direct_dispatch(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
