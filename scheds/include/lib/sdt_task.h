@@ -5,7 +5,12 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
+
+#ifdef __BPF__
+#include <scx/bpf_arena_common.bpf.h>
+#else
 #include <scx/bpf_arena_common.h>
+#endif /* __BPF__ */
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))

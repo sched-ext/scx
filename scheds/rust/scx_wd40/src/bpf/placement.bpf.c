@@ -10,7 +10,7 @@
 
 #include <lib/cpumask.h>
 
-#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_common.bpf.h>
 #include <scx/bpf_arena_spin_lock.h>
 
 #include "intf.h"
@@ -18,7 +18,6 @@
 #include "lb_domain.h"
 #include "deadline.h"
 
-#include <scx/bpf_arena_common.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>

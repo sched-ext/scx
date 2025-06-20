@@ -10,14 +10,14 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/bpf_arena_common.h"
+#include "../../../../include/scx/bpf_arena_common.bpf.h"
 #include "../../../../include/lib/sdt_task.h"
 #include "../../../../include/lib/cpumask.h"
 #include "../../../../include/lib/percpu.h"
 #include "../../../../include/lib/topology.h"
 #else
 #include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_common.bpf.h>
 #include <lib/sdt_task.h>
 #include <lib/cpumask.h>
 #include <lib/percpu.h>
