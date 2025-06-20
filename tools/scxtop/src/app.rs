@@ -112,7 +112,6 @@ pub struct App<'a> {
     num_perf_events: u16,
     events_list_size: u16,
     selected_event: usize,
-    non_hw_event_active: bool,
 
     // trace related
     trace_manager: PerfettoTraceManager,
@@ -254,7 +253,6 @@ impl<'a> App<'a> {
             num_perf_events,
             events_list_size: 1,
             selected_event: 0,
-            non_hw_event_active: false,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
             trace_manager,
@@ -302,24 +300,19 @@ impl<'a> App<'a> {
     }
 
     /// Stop all active perf events.
-    fn stop_perf_events(&mut self) {
-        let default_perf_event = self.config.default_perf_event();
-        let default_perf_event_parts: Vec<&str> = default_perf_event.split(':').collect();
-
-        // We have already checked that this was a valid perf event in new(), no
-        // need to check here.
-        let subsystem = default_perf_event_parts[0].to_string();
-        let event = default_perf_event_parts[1].to_string();
-        self.active_event = PerfEvent::new(subsystem.clone(), event.clone(), 0);
-
-        self.available_events = PerfEvent::default_events();
-        let config_events = PerfEvent::from_config(&self.config).unwrap();
-        self.available_events.extend(config_events);
-
+    fn stop_perf_events(&mut self) -> Result<()> {
         for cpu_data in self.cpu_data.values_mut() {
             cpu_data.data.clear();
         }
         self.active_perf_events.clear();
+
+        self.available_events = PerfEvent::default_events();
+        let config_events = PerfEvent::from_config(&self.config).unwrap();
+        self.available_events.extend(config_events);
+        self.active_hw_event_id = 0;
+        let perf_event = &self.available_events[self.active_hw_event_id].clone();
+        self.active_event = perf_event.clone();
+        self.activate_perf_event(perf_event)
     }
 
     /// Activates the next event.
@@ -333,7 +326,6 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = perf_event.clone();
-        self.non_hw_event_active = false;
         self.activate_perf_event(perf_event)
     }
 
@@ -348,7 +340,6 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = perf_event.clone();
-        self.non_hw_event_active = false;
         self.activate_perf_event(perf_event)
     }
 
@@ -360,7 +351,10 @@ impl<'a> App<'a> {
     /// Activates a perf event, stopping any active perf events.
     fn activate_perf_event(&mut self, perf_event: &PerfEvent) -> Result<()> {
         if !self.active_perf_events.is_empty() {
-            self.stop_perf_events();
+            for cpu_data in self.cpu_data.values_mut() {
+                cpu_data.data.clear();
+            }
+            self.active_perf_events.clear();
         }
         for cpu_id in self.topo.all_cpus.keys() {
             let mut event = perf_event.clone();
@@ -2170,7 +2164,6 @@ impl<'a> App<'a> {
                 self.active_perf_events.clear();
                 self.active_event = perf_event.clone();
                 let _ = self.activate_perf_event(&perf_event);
-                self.non_hw_event_active = true;
                 let prev_state = self.prev_state.clone();
                 self.prev_state = self.state.clone();
                 self.state = prev_state;
@@ -2620,7 +2613,7 @@ impl<'a> App<'a> {
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
             }
-            Action::ClearEvent => self.stop_perf_events(),
+            Action::ClearEvent => self.stop_perf_events()?,
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
