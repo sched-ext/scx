@@ -303,6 +303,19 @@ impl<'a> App<'a> {
 
     /// Stop all active perf events.
     fn stop_perf_events(&mut self) {
+        let default_perf_event = self.config.default_perf_event();
+        let default_perf_event_parts: Vec<&str> = default_perf_event.split(':').collect();
+
+        // We have already checked that this was a valid perf event in new(), no
+        // need to check here.
+        let subsystem = default_perf_event_parts[0].to_string();
+        let event = default_perf_event_parts[1].to_string();
+        self.active_event = PerfEvent::new(subsystem.clone(), event.clone(), 0);
+
+        self.available_events = PerfEvent::default_events();
+        let config_events = PerfEvent::from_config(&self.config).unwrap();
+        self.available_events.extend(config_events);
+
         for cpu_data in self.cpu_data.values_mut() {
             cpu_data.data.clear();
         }
