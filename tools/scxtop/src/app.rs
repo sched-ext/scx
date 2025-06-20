@@ -1791,7 +1791,7 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: clear active perf event",
+                    "{}: clear active perf events",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::ClearEvent),
