@@ -1261,7 +1261,7 @@ u32 dom_node_id(u32 dom_id)
 	return *nid_ptr;
 }
 
-#if !defined(__TARGET_ARCH_arm64) && ! defined(__TARGET_ARCH_riscv)
+#if !defined(__TARGET_ARCH_arm64) && !defined(__aarch64__) && !defined(__TARGET_ARCH_riscv)
 /*
  * Returns the dom mask for a node.
  */
