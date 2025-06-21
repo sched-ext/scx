@@ -20,14 +20,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::warn;
-use log::{debug, info};
+use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
@@ -171,7 +171,7 @@ struct Opts {
     /// Decreasing this value makes the scheduler more robust and fair.
     ///
     /// (0 = disable voluntary context switch prioritization).
-    #[clap(short = 'c', long, default_value = "128")]
+    #[clap(short = 'c', long, default_value = "0")]
     max_avg_nvcsw: u64,
 
     /// Throttle the running CPUs by periodically injecting idle cycles.
@@ -189,12 +189,20 @@ struct Opts {
     #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
     idle_resume_us: i64,
 
-    /// Enable per-CPU runqueues.
+    /// Use per-CPU runqueues only.
     ///
-    /// Use distinct per-CPU runqueues to reduce task migrations. This can help improve certain
-    /// cache-sensitive workload at the cost of making the system less responsive.
+    /// Force using only per-CPU runqueues to reduce task migrations. This can improve certain
+    /// cache-sensitive workloads at the cost of making the system less responsive.
     #[clap(short = 'C', long, action = clap::ArgAction::SetTrue)]
     cpu_runqueue: bool,
+
+    /// Use per-node runqueues only.
+    ///
+    /// Force using only per-node runqueues to maximize work conservation. This can improve
+    /// system responsiveness under saturation conditions at the cost of reducing performance for
+    /// cache-sensitive workloads.
+    #[clap(short = 'N', long, action = clap::ArgAction::SetTrue)]
+    node_runqueue: bool,
 
     /// Enable round-robin scheduling.
     ///
@@ -363,7 +371,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
-        skel.maps.rodata_data.pcpu_dsq = opts.cpu_runqueue;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
@@ -374,6 +381,19 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
+
+        if !opts.cpu_runqueue && !opts.node_runqueue {
+            skel.maps.rodata_data.pcpu_dsq = true;
+            skel.maps.rodata_data.node_dsq = true;
+        } else if (opts.cpu_runqueue) {
+            skel.maps.rodata_data.pcpu_dsq = true;
+            skel.maps.rodata_data.node_dsq = false;
+        } else if (opts.node_runqueue) {
+            skel.maps.rodata_data.pcpu_dsq = false;
+            skel.maps.rodata_data.node_dsq = true;
+        } else {
+            bail!("--cpu-runqueue and --node-runqueue are mutually exclusive");
+        }
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
