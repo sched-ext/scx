@@ -181,6 +181,17 @@ struct Opts {
     #[clap(short = 't', long, default_value = "0")]
     throttle_us: u64,
 
+    /// Enable tickless mode.
+    ///
+    /// This option enables tickless mode: tasks get an infinite time slice and they are preempted
+    /// only in case of CPU contention. This can help reduce the OS noise and provide a better
+    /// level of performance isolation.
+    ///
+    /// The argument of this option defines how often the scheduler periodically checks for CPU
+    /// contention and enforce preemption when needed (0 = tickless mode disabled).
+    #[clap(short = 'T', long, default_value = "0")]
+    tickless_us: u64,
+
     /// Set CPU idle QoS resume latency in microseconds (-1 = disabled).
     ///
     /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
@@ -380,6 +391,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
+        skel.maps.rodata_data.tickless_ns = opts.tickless_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
 
         if !opts.cpu_runqueue && !opts.node_runqueue {

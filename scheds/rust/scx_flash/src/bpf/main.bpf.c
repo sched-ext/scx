@@ -140,6 +140,11 @@ static inline void set_throttled(bool state)
 }
 
 /*
+ * Tickless CPU contention check frequency.
+ */
+const volatile u64 tickless_ns;
+
+/*
  * Exit information.
  */
 UEI_DEFINE(uei);
@@ -192,6 +197,20 @@ struct {
 	__type(key, u32);
 	__type(value, struct throttle_timer);
 } throttle_timer SEC(".maps");
+
+/*
+ * Timer used in tickless mode.
+ */
+struct tickless_timer {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct numa_timer);
+} tickless_timer SEC(".maps");
 
 /*
  * Per-node context.
@@ -408,6 +427,15 @@ static inline u64 nr_tasks_waiting(s32 cpu)
 static inline u64 task_slice(s32 cpu)
 {
 	return MAX(slice_max / (nr_tasks_waiting(cpu) + 1), slice_min);
+}
+
+/*
+ * Return the maximum time slice that can be assigned to a task, or an
+ * infinite time slice if tickless mode is enabled.
+ */
+static inline u64 task_slice_max(void)
+{
+	return tickless_ns ? SCX_SLICE_INF : slice_max;
 }
 
 /*
@@ -910,7 +938,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle && can_direct_dispatch(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -996,7 +1024,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * If @local_kthreads is enabled dispatch all kthreads locally.
 	 */
 	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		dispatched = true;
 
@@ -1038,7 +1066,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
 		if (scx_bpf_test_and_clear_cpu_idle(cpu) && can_direct_dispatch(cpu)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			dispatched = true;
 		}
@@ -1058,7 +1086,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	if (can_direct_dispatch(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_max, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice_max(), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		dispatched = true;
 	}
@@ -1296,7 +1324,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU.
 	 */
 	if (prev && keep_running(prev, cpu)) {
-		prev->scx.slice = slice_max;
+		prev->scx.slice = task_slice_max();
 		return;
 	}
 
@@ -1755,6 +1783,37 @@ static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
+ * Tickless timer used to check for CPU contention and apply preemption
+ * when needed.
+ */
+static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
+{
+	s32 cpu;
+
+	/*
+	 * Check if we need to preempt the running tasks on contended CPUs.
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct task_struct *p;
+		int node = __COMPAT_scx_bpf_cpu_node(cpu);
+
+		p = scx_bpf_cpu_rq(cpu)->curr;
+		if (p->scx.slice != SCX_SLICE_INF)
+			continue;
+
+		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
+		    (pcpu_dsq && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) ||
+		    (node_dsq && scx_bpf_dsq_nr_queued(node_to_dsq(node))))
+			p->scx.slice = task_slice(cpu);
+	}
+
+	if (bpf_timer_start(timer, tickless_ns, 0))
+		scx_bpf_error("Failed to re-arm tickless timer");
+
+	return 0;
+}
+
+/*
  * Refresh NUMA statistics.
  */
 static int numa_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -1897,6 +1956,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 		err = bpf_timer_start(timer, slice_max, 0);
 		if (err) {
 			scx_bpf_error("Failed to arm throttle timer");
+			return err;
+		}
+	}
+
+	timer = bpf_map_lookup_elem(&tickless_timer, &key);
+	if (!timer) {
+		scx_bpf_error("Failed to lookup tickless timer");
+		return -ESRCH;
+	}
+
+	/*
+	 * Fire the tickless timer if tickless-mode is enabled (this timer
+	 * is used to check for CPU contention and enforce preemption if
+	 * needed).
+	 */
+	if (tickless_ns) {
+		bpf_timer_init(timer, &tickless_timer, CLOCK_BOOTTIME);
+		bpf_timer_set_callback(timer, tickless_timerfn);
+		err = bpf_timer_start(timer, tickless_ns, 0);
+		if (err) {
+			scx_bpf_error("Failed to arm tickless timer");
 			return err;
 		}
 	}
