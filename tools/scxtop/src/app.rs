@@ -112,7 +112,6 @@ pub struct App<'a> {
     num_perf_events: u16,
     events_list_size: u16,
     selected_event: usize,
-    non_hw_event_active: bool,
 
     // trace related
     trace_manager: PerfettoTraceManager,
@@ -254,7 +253,6 @@ impl<'a> App<'a> {
             num_perf_events,
             events_list_size: 1,
             selected_event: 0,
-            non_hw_event_active: false,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
             trace_manager,
@@ -309,6 +307,18 @@ impl<'a> App<'a> {
         self.active_perf_events.clear();
     }
 
+    /// Resets perf events to default
+    fn reset_perf_events(&mut self) -> Result<()> {
+        self.stop_perf_events();
+        self.available_events = PerfEvent::default_events();
+        let config_events = PerfEvent::from_config(&self.config).unwrap();
+        self.available_events.extend(config_events);
+        self.active_hw_event_id = 0;
+        let perf_event = &self.available_events[self.active_hw_event_id].clone();
+        self.active_event = perf_event.clone();
+        self.activate_perf_event(perf_event)
+    }
+
     /// Activates the next event.
     fn next_event(&mut self) -> Result<()> {
         self.active_perf_events.clear();
@@ -320,7 +330,6 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = perf_event.clone();
-        self.non_hw_event_active = false;
         self.activate_perf_event(perf_event)
     }
 
@@ -335,7 +344,6 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = perf_event.clone();
-        self.non_hw_event_active = false;
         self.activate_perf_event(perf_event)
     }
 
@@ -1778,7 +1786,7 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: clear active perf event",
+                    "{}: clear active perf events",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::ClearEvent),
@@ -2157,7 +2165,6 @@ impl<'a> App<'a> {
                 self.active_perf_events.clear();
                 self.active_event = perf_event.clone();
                 let _ = self.activate_perf_event(&perf_event);
-                self.non_hw_event_active = true;
                 let prev_state = self.prev_state.clone();
                 self.prev_state = self.state.clone();
                 self.state = prev_state;
@@ -2607,7 +2614,7 @@ impl<'a> App<'a> {
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
             }
-            Action::ClearEvent => self.stop_perf_events(),
+            Action::ClearEvent => self.reset_perf_events()?,
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
