@@ -193,7 +193,7 @@ impl<'a> App<'a> {
             })
             .collect();
 
-        let filtered_events_state = Arc::new(std::sync::Mutex::new(FilteredEventState::new()));
+        let filtered_events_state = Arc::new(std::sync::Mutex::new(FilteredEventState::default()));
 
         let mut stats_client = StatsClient::new();
         let stats_socket_path = config.stats_socket_path();

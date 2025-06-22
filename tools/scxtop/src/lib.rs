@@ -110,6 +110,7 @@ impl std::fmt::Display for ViewState {
     }
 }
 
+#[derive(Default, Debug, Clone)]
 pub struct FilteredEventState {
     pub list: Vec<String>,
     pub count: u16,
@@ -118,26 +119,11 @@ pub struct FilteredEventState {
 }
 
 impl FilteredEventState {
-    pub fn new() -> Self {
-        Self {
-            list: Vec::new(),
-            count: 0,
-            scroll: 0,
-            selected: 0,
-        }
-    }
-
     pub fn reset(&mut self) {
         self.list.clear();
         self.count = 0;
         self.scroll = 0;
         self.selected = 0;
-    }
-}
-
-impl Default for FilteredEventState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
