@@ -61,7 +61,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the
+This software may be used and distributed according to the terms of the 
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
@@ -101,6 +101,15 @@ impl ViewState {
     }
 }
 
+impl std::fmt::Display for ViewState {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ViewState::Sparkline => write!(f, "sparkline"),
+            ViewState::BarChart => write!(f, "barchart"),
+        }
+    }
+}
+
 pub struct FilteredEventState {
     pub list: Vec<String>,
     pub count: u16,
@@ -126,12 +135,9 @@ impl FilteredEventState {
     }
 }
 
-impl std::fmt::Display for ViewState {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ViewState::Sparkline => write!(f, "sparkline"),
-            ViewState::BarChart => write!(f, "barchart"),
-        }
+impl Default for FilteredEventState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
