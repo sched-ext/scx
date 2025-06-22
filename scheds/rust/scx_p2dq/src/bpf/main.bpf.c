@@ -280,6 +280,13 @@ static bool is_interactive(task_ctx *taskc)
 	return taskc->dsq_index == 0;
 }
 
+static __always_inline bool can_migrate(task_ctx *taskc)
+{
+	return (nr_llcs > 1 &&
+		taskc->all_cpus &&
+		taskc->llc_runs > min_llc_runs_pick2);
+}
+
 static void set_deadline_slice(task_ctx *taskc, struct llc_ctx *llcx)
 {
 	u64 dsq_id, nr_queued = 0;
@@ -737,7 +744,11 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (deadline_scheduling)
 			set_deadline_slice(taskc, llcx);
 
-		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+		if (can_migrate(taskc))
+			taskc->dsq_id = llcx->mig_dsq;
+		else
+			taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+
 		if (interactive_fifo && taskc->dsq_index == 0)
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
 		else
@@ -762,7 +773,12 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
-	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+
+	if (can_migrate(taskc))
+		taskc->dsq_id = llcx->mig_dsq;
+	else
+		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+
 	if (deadline_scheduling)
 		set_deadline_slice(taskc, llcx);
 
@@ -883,10 +899,9 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->load, used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 
-	if (!taskc->all_cpus) {
+	if (!taskc->all_cpus)
 		// Note that affinitized load is absolute load, not scaled.
 		__sync_fetch_and_add(&llcx->affn_load, used);
-	}
 
 	trace("STOPPING %s weight %d slice %llu used %llu scaled %llu",
 	      p->comm, p->scx.weight, last_dsq_slice_ns, used, scaled_used);
@@ -922,91 +937,18 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu)
+static __always_inline bool consume_llc(struct llc_ctx *llcx)
 {
-	struct task_struct *p;
-	int dispatched = 0;
-
-	if (!scx_bpf_dsq_nr_queued(dsq_id))
-		return 0;
-
-	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-		/*
-		 * This is a workaround for the BPF verifier's pointer
-		 * validation limitations. Once the verifier gets smarter
-		 * we can remove this bpf_task_from_pid().
-		 */
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
-			continue;
-
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-
-		if (!__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL_ON | cpu, 0)) {
-			bpf_task_release(p);
-			continue;
-		}
-		dispatched += 1;
-		stat_inc(P2DQ_STAT_DISPATCH_PICK2);
-		bpf_task_release(p);
-		break;
-	}
-
-	return dispatched;
-}
-
-static __always_inline bool consume_llc_compat(struct llc_ctx *cur_llcx, struct llc_ctx *llcx)
-{
-	u64 dsq_id, cur_load;
-	int i;
-
-	cur_load  = cur_llcx->load + (cur_llcx->load * lb_slack_factor);
-	if (llcx->load < cur_load)
+	if (!llcx)
 		return false;
 
-	if (dispatch_lb_interactive &&
-	    scx_bpf_dsq_move_to_local(llcx->dsqs[0])) {
-			stat_inc(P2DQ_STAT_DISPATCH_PICK2);
-			return true;
-	}
-
-	bpf_for(i, 1 , nr_dsqs_per_llc) {
-		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
-		if (scx_bpf_dsq_move_to_local(dsq_id)) {
-			stat_inc(P2DQ_STAT_DISPATCH_PICK2);
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static __always_inline bool consume_llc(struct llc_ctx *cur_llcx, struct llc_ctx *llcx, s32 cpu)
-{
-	u64 dsq_id;
-	int i;
-
-	if (!cur_llcx || !llcx || !bpf_ksym_exists(scx_bpf_dsq_move))
-		return false;
-
-	if (dispatch_lb_interactive &&
-	    scx_bpf_dsq_move_to_local(llcx->dsqs[0])) {
+	if (scx_bpf_dsq_move_to_local(llcx->mig_dsq)) {
 		stat_inc(P2DQ_STAT_DISPATCH_PICK2);
 		return true;
 	}
 
-	bpf_for(i, 1, nr_dsqs_per_llc) {
-		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
-		if (dispatch_cpu(dsq_id, cpu) > 0)
-			return true;
-	}
-
 	return false;
 }
-
 
 static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
 {
@@ -1037,7 +979,6 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		if (now - cur_llcx->last_period_ns < lb_backoff_ns)
 			return -EINVAL;
 	}
-
 
 	/*
 	 * For pick two load balancing we randomly choose two LLCs. We then
@@ -1070,23 +1011,14 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
 	      cpu, first->id, first->load, second->id, second->load);
 
-	// The compat macro doesn't work properly, so on older kernels best
-	// effort by moving to local directly instead of iterating.
-	if (!bpf_ksym_exists(scx_bpf_dsq_move)) {
-		if (consume_llc_compat(cur_llcx, first))
-			return 0;
-		if (consume_llc_compat(cur_llcx, second))
-			return 0;
-	}
-
 	cur_load = cur_llcx->load + (cur_llcx->load * lb_slack_factor);
 
 	if (first->load > cur_load &&
-	    consume_llc(cur_llcx, first, cpu))
+	    consume_llc(first))
 		return 0;
 
 	if (second->load > cur_load &&
-	    consume_llc(cur_llcx, second, cpu))
+	    consume_llc(second))
 		return 0;
 
 	return 0;
@@ -1101,22 +1033,35 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	u64 cur_dsq_id, dsq_id = 0;
 	int i;
 
-	if (!(cpuc = lookup_cpu_ctx(cpu)) ||
-	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+	if (!(cpuc = lookup_cpu_ctx(cpu))) {
+		scx_bpf_error("can't happen");
 		return;
+	}
 
 	if (nr_dsqs_per_llc > MAX_DSQS_PER_LLC) {
 		scx_bpf_error("can't happen");
 		return;
 	}
 
-	u64 min_vtime = llcx->vtime;
+	u64 min_vtime = 0;
 
+	// First search affinitized DSQ
+	if (scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0) {
+		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cpuc->affn_dsq;
+			}
+			break;
+		}
+	}
+
+	// Next search all DSQs
 	bpf_for(i, 0, nr_dsqs_per_llc) {
-		cur_dsq_id = llcx->dsqs[i];
+		cur_dsq_id = cpuc->dsqs[i];
 		if (scx_bpf_dsq_nr_queued(cur_dsq_id) > 0) {
 			bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
-				if (p->scx.dsq_vtime < min_vtime) {
+				if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
 					min_vtime = p->scx.dsq_vtime;
 					dsq_id = cur_dsq_id;
 				}
@@ -1125,18 +1070,19 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		}
 	}
 
-	if (scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0) {
-		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
-			if (p->scx.dsq_vtime < min_vtime) {
+	// Migration eligible
+	if (nr_llcs > 1 && scx_bpf_dsq_nr_queued(cpuc->mig_dsq) > 0) {
+		bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
+			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
 				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->affn_dsq;
+				dsq_id = cpuc->mig_dsq;
 			}
 			break;
 		}
 	}
 
-	trace("DISPATCH cpu[%d] cur vtime %llu min_vtime %llu dsq_id %llu",
-	      cpu, llcx->vtime, min_vtime, dsq_id);
+	trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu",
+	      cpu, min_vtime, dsq_id);
 
 	if (valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
@@ -1147,16 +1093,21 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 			return;
 
 	bpf_for(i, 0, nr_dsqs_per_llc) {
-		dsq_id = llcx->dsqs[i];
+		dsq_id = cpuc->dsqs[i];
 		if (dsq_id != cpuc->dsq_id &&
 		    scx_bpf_dsq_move_to_local(dsq_id))
 		    return;
 	}
 
-	if (prev && keep_running(cpuc, llcx, prev))
+	if (scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
-	if (scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
+	if (!(llcx = lookup_llc_ctx(cpuc->llc_id))) {
+		scx_bpf_error("can't happen");
+		return;
+	}
+
+	if (prev && keep_running(cpuc, llcx, prev))
 		return;
 
 	dispatch_pick_two(cpu, llcx, cpuc);
@@ -1656,6 +1607,13 @@ static __always_inline s32 p2dq_init_impl()
 			llcx->dsqs[i] = dsq_id;
 			llcx->vtime = 0;
 		}
+
+		llcx->mig_dsq = llc_index | P2DQ_MIG_DSQ;
+		ret = scx_bpf_create_dsq(llcx->mig_dsq, llcx->node_id);
+		if (ret < 0) {
+			scx_bpf_error("failed to create DSQ %llu", llcx->mig_dsq);
+			return ret;
+		}
 	}
 	struct cpu_ctx *cpuc;
 	bpf_for(i, 0, nr_cpus) {
@@ -1686,6 +1644,7 @@ static __always_inline s32 p2dq_init_impl()
 			return ret;
 		}
 		cpuc->affn_dsq = dsq_id;
+		cpuc->mig_dsq = llcx->mig_dsq;
 	}
 
 	min_slice_ns = 1000 * min_slice_us;
