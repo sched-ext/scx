@@ -20,7 +20,7 @@ struct cpu_ctx {
 	u64				ran_for;
 	u32				node_id;
 	u64				mig_dsq;
-	u64				dsqs[MAX_DSQS_PER_LLC];
+	u64				llc_dsq;
 	u64				max_load_dsq;
 };
 
@@ -31,13 +31,13 @@ struct llc_ctx {
 	u64				vtime;
 	u32				lb_llc_id;
 	u64				last_period_ns;
-	u64				load;
-	u32				index;
-	bool				all_big;
-	u64				affn_load;
+	u64				dsq;
 	u64				mig_dsq;
-	u64				dsqs[MAX_DSQS_PER_LLC];
-	u64				dsq_load[MAX_DSQS_PER_LLC];
+	u32				index;
+	u64				load;
+	u64				affn_load;
+	u64				intr_load;
+	bool				all_big;
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 	struct bpf_cpumask __kptr	*little_cpumask;

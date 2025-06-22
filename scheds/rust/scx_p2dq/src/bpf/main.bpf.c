@@ -174,18 +174,6 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
-static __always_inline u64 cpu_dsq_id(int dsq_index, struct cpu_ctx *cpuc) {
-	if (!cpuc ||
-	    dsq_index < 0 ||
-	    dsq_index > nr_dsqs_per_llc ||
-	    dsq_index >= MAX_DSQS_PER_LLC) {
-		scx_bpf_error("cpuc invalid dsq index: %d", dsq_index);
-		return 0;
-	}
-	return *MEMBER_VPTR(cpuc->dsqs, [dsq_index]);
-}
-
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -289,13 +277,7 @@ static __always_inline bool can_migrate(task_ctx *taskc)
 
 static void set_deadline_slice(task_ctx *taskc, struct llc_ctx *llcx)
 {
-	u64 dsq_id, nr_queued = 0;
-	int i;
-
-	bpf_for(i, 0, nr_llcs) {
-		dsq_id = llcx->dsqs[i];
-		nr_queued += scx_bpf_dsq_nr_queued(dsq_id);
-	}
+	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
 
 	const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
 	u64 nr_idle = bpf_cpumask_weight(idle_cpumask);
@@ -345,8 +327,6 @@ static struct llc_ctx *rand_llc_ctx(void)
 
 static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx, struct task_struct *p)
 {
-	int i;
-
 	// Only tasks in the most interactive DSQs can keep running.
 	if (!keep_running_enabled ||
 	    cpuc->dsq_index == nr_dsqs_per_llc - 1 ||
@@ -354,10 +334,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx, struct task
 	    cpuc->ran_for >= max_exec_ns)
 		return false;
 
-	int nr_queued = 0;
-	bpf_for(i, 0, nr_dsqs_per_llc) {
-		nr_queued += scx_bpf_dsq_nr_queued(llcx->dsqs[i]);
-	}
+	int nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
 
 	if (nr_queued >= llcx->nr_cpus)
 		return false;
@@ -747,7 +724,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (can_migrate(taskc))
 			taskc->dsq_id = llcx->mig_dsq;
 		else
-			taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+			taskc->dsq_id = llcx->dsq;
 
 		if (interactive_fifo && taskc->dsq_index == 0)
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
@@ -777,7 +754,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if (can_migrate(taskc))
 		taskc->dsq_id = llcx->mig_dsq;
 	else
-		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+		taskc->dsq_id = llcx->dsq;
 
 	if (deadline_scheduling)
 		set_deadline_slice(taskc, llcx);
@@ -897,7 +874,9 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += scaled_used;
 	__sync_fetch_and_add(&llcx->vtime, used);
 	__sync_fetch_and_add(&llcx->load, used);
-	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
+
+	if (taskc->dsq_index == 0)
+		__sync_fetch_and_add(&llcx->intr_load, used);
 
 	if (!taskc->all_cpus)
 		// Note that affinitized load is absolute load, not scaled.
@@ -967,7 +946,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 			if (i >= nr_dsqs_per_llc || i < 0)
 				continue;
 
-			u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [i]);
+			u64 cur_dsq_id = cur_llcx->dsq;
 			cur_queued += scx_bpf_dsq_nr_queued(cur_dsq_id);
 		}
 		if (cur_queued < min_nr_queued_pick2)
@@ -1031,7 +1010,6 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 cur_dsq_id, dsq_id = 0;
-	int i;
 
 	if (!(cpuc = lookup_cpu_ctx(cpu))) {
 		scx_bpf_error("can't happen");
@@ -1056,17 +1034,15 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		}
 	}
 
-	// Next search all DSQs
-	bpf_for(i, 0, nr_dsqs_per_llc) {
-		cur_dsq_id = cpuc->dsqs[i];
-		if (scx_bpf_dsq_nr_queued(cur_dsq_id) > 0) {
-			bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
-				if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-					min_vtime = p->scx.dsq_vtime;
-					dsq_id = cur_dsq_id;
-				}
-				break;
+	// LLC DSQ
+	cur_dsq_id = cpuc->llc_dsq;
+	if (scx_bpf_dsq_nr_queued(cur_dsq_id) > 0) {
+		bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
+			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cur_dsq_id;
 			}
+			break;
 		}
 	}
 
@@ -1084,6 +1060,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu",
 	      cpu, min_vtime, dsq_id);
 
+	// First try the DSQ with the lowest vtime for fairness.
 	if (valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
 
@@ -1092,12 +1069,8 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	    scx_bpf_dsq_move_to_local(cpuc->dsq_id))
 			return;
 
-	bpf_for(i, 0, nr_dsqs_per_llc) {
-		dsq_id = cpuc->dsqs[i];
-		if (dsq_id != cpuc->dsq_id &&
-		    scx_bpf_dsq_move_to_local(dsq_id))
-		    return;
-	}
+	if (scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+	    return;
 
 	if (scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
@@ -1177,7 +1150,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	if (taskc->all_cpus)
 		taskc->dsq_id = SCX_DSQ_INVALID;
 	else
-		taskc->dsq_id = llcx->dsqs[init_dsq_index];
+		taskc->dsq_id = llcx->dsq;
 
 	return 0;
 }
@@ -1192,6 +1165,7 @@ static int init_llc(u32 llc_index)
 	struct bpf_cpumask *cpumask, *big_cpumask, *little_cpumask, *node_cpumask;
 	struct llc_ctx *llcx;
 	u32 llc_id = llc_ids[llc_index];
+	int ret;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
 	if (!llcx) {
@@ -1203,6 +1177,21 @@ static int init_llc(u32 llc_index)
 	llcx->id = *MEMBER_VPTR(llc_ids, [llc_index]);
 	llcx->index = llc_index;
 	llcx->nr_cpus = 0;
+	llcx->vtime = 0;
+
+	llcx->dsq = llcx->id | MAX_LLCS;
+	ret = scx_bpf_create_dsq(llcx->dsq, llcx->node_id);
+	if (ret < 0) {
+		scx_bpf_error("failed to create DSQ %llu", llcx->dsq);
+		return -EINVAL;
+	}
+
+	llcx->mig_dsq = llcx->id | P2DQ_MIG_DSQ;
+	ret = scx_bpf_create_dsq(llcx->mig_dsq, llcx->node_id);
+	if (ret < 0) {
+		scx_bpf_error("failed to create DSQ %llu", llcx->mig_dsq);
+		return -EINVAL;
+	}
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask) {
@@ -1398,7 +1387,7 @@ static bool load_balance_timer(void)
 		}
 
 		load_sum += llcx->load;
-		interactive_sum += llcx->dsq_load[0];
+		interactive_sum += llcx->intr_load;
 
 		s64 load_imbalance = 0;
 		if(llcx->load > lb_llcx->load)
@@ -1454,10 +1443,10 @@ reset_load:
 			return false;
 
 		llcx->load = 0;
+		llcx->intr_load = 0;
 		llcx->affn_load = 0;
 		llcx->last_period_ns = scx_bpf_now();
 		bpf_for(j, 0, nr_dsqs_per_llc) {
-			llcx->dsq_load[j] = 0;
 			if (llc_id == 0 && autoslice) {
 				if (j > 0 && dsq_time_slices[j] < dsq_time_slices[j-1]) {
 					dsq_time_slices[j] = dsq_time_slices[j-1] << dsq_shift;
@@ -1548,8 +1537,11 @@ s32 static start_timers(void)
 
 static __always_inline s32 p2dq_init_impl()
 {
-	int i, j, ret;
 	struct bpf_cpumask *tmp_big_cpumask;
+	struct llc_ctx *llcx;
+	struct cpu_ctx *cpuc;
+	int i, ret;
+	u64 dsq_id;
 
 	tmp_big_cpumask = bpf_cpumask_create();
 	if (!tmp_big_cpumask) {
@@ -1586,36 +1578,6 @@ static __always_inline s32 p2dq_init_impl()
 	}
 
 	// Create DSQs for the LLCs
-	struct llc_ctx *llcx;
-	u64 dsq_id;
-	u32 llc_id, llc_index;
-	bpf_for(llc_index, 0, nr_llcs) {
-		llc_id = *MEMBER_VPTR(llc_ids, [llc_index]);
-		if (!(llcx = lookup_llc_ctx(llc_id)))
-			return -EINVAL;
-
-		bpf_for(i, 0, nr_dsqs_per_llc) {
-			dsq_id = ((llc_index << nr_dsqs_per_llc) | i) + 1;
-			dbg("CFG creating DSQ[%d][%llu] slice_us %llu for LLC[%u]",
-			    i, dsq_id, dsq_time_slice(i), llc_id);
-			ret = scx_bpf_create_dsq(dsq_id, llcx->node_id);
-			if (ret < 0) {
-				scx_bpf_error("failed to create DSQ %llu", dsq_id);
-				return ret;
-			}
-
-			llcx->dsqs[i] = dsq_id;
-			llcx->vtime = 0;
-		}
-
-		llcx->mig_dsq = llc_index | P2DQ_MIG_DSQ;
-		ret = scx_bpf_create_dsq(llcx->mig_dsq, llcx->node_id);
-		if (ret < 0) {
-			scx_bpf_error("failed to create DSQ %llu", llcx->mig_dsq);
-			return ret;
-		}
-	}
-	struct cpu_ctx *cpuc;
 	bpf_for(i, 0, nr_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(i)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
@@ -1630,11 +1592,7 @@ static __always_inline s32 p2dq_init_impl()
 			bpf_rcu_read_unlock();
 		}
 
-		bpf_for(j, 0, nr_dsqs_per_llc) {
-			cpuc->dsqs[j] = llcx->dsqs[j];
-			dbg("CFG CPU[%d]DSQ[%d] %llu",
-			    i, j, cpuc->dsqs[j]);
-		}
+		cpuc->llc_dsq = llcx->dsq;
 
 		dsq_id = ((MAX_DSQS_PER_LLC * MAX_LLCS) << 2) + i;
 		dbg("CFG creating affn CPU[%d]DSQ[%llu]", i, dsq_id);
