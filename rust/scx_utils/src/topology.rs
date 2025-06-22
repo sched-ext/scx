@@ -607,6 +607,7 @@ fn get_capacity_source() -> Option<CapacitySource> {
     // Sources for guessing cpu_capacity under /sys/devices/system/cpu/cpuX.
     // They should be ordered from the most precise to the least precise.
     let sources = [
+        "cpufreq/amd_pstate_prefcore_ranking",
         "cpufreq/amd_pstate_highest_perf",
         "acpi_cppc/highest_perf",
         "cpu_capacity",
