@@ -57,14 +57,14 @@ use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
@@ -74,7 +74,7 @@ pub struct App<'a> {
     hw_pressure: bool,
     localize: bool,
     locale: SystemLocale,
-    stats_client: Option<Arc<Mutex<StatsClient>>>,
+    stats_client: Option<Arc<TokioMutex<StatsClient>>>,
     sched_stats_raw: String,
 
     scheduler: String,
@@ -98,7 +98,7 @@ pub struct App<'a> {
     event_input_buffer: String,
     event_search: Search,
 
-    filtered_events_state: Arc<std::sync::Mutex<FilteredEventState>>,
+    filtered_events_state: Arc<StdMutex<FilteredEventState>>,
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
@@ -193,7 +193,7 @@ impl<'a> App<'a> {
             })
             .collect();
 
-        let filtered_events_state = Arc::new(std::sync::Mutex::new(FilteredEventState::default()));
+        let filtered_events_state = Arc::new(StdMutex::new(FilteredEventState::default()));
 
         let mut stats_client = StatsClient::new();
         let stats_socket_path = config.stats_socket_path();
@@ -207,7 +207,7 @@ impl<'a> App<'a> {
             }
             client
         });
-        let stats_client = Some(Arc::new(Mutex::new(stats_client)));
+        let stats_client = Some(Arc::new(TokioMutex::new(stats_client)));
         let sample_rate = skel.maps.data_data.sample_rate;
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
