@@ -385,10 +385,10 @@ impl<'a> Scheduler<'a> {
         if !opts.cpu_runqueue && !opts.node_runqueue {
             skel.maps.rodata_data.pcpu_dsq = true;
             skel.maps.rodata_data.node_dsq = true;
-        } else if (opts.cpu_runqueue) {
+        } else if opts.cpu_runqueue {
             skel.maps.rodata_data.pcpu_dsq = true;
             skel.maps.rodata_data.node_dsq = false;
-        } else if (opts.node_runqueue) {
+        } else if opts.node_runqueue {
             skel.maps.rodata_data.pcpu_dsq = false;
             skel.maps.rodata_data.node_dsq = true;
         } else {
