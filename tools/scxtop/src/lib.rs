@@ -110,6 +110,23 @@ impl std::fmt::Display for ViewState {
     }
 }
 
+#[derive(Default, Debug, Clone)]
+pub struct FilteredEventState {
+    pub list: Vec<String>,
+    pub count: u16,
+    pub scroll: u16,
+    pub selected: usize,
+}
+
+impl FilteredEventState {
+    pub fn reset(&mut self) {
+        self.list.clear();
+        self.count = 0;
+        self.scroll = 0;
+        self.selected = 0;
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedCpuPerfSetAction {
     pub cpu: u32,

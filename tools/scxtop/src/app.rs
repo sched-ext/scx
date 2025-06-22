@@ -15,6 +15,7 @@ use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
 use crate::EventData;
+use crate::FilteredEventState;
 use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
@@ -56,14 +57,14 @@ use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
@@ -73,7 +74,7 @@ pub struct App<'a> {
     hw_pressure: bool,
     localize: bool,
     locale: SystemLocale,
-    stats_client: Option<Arc<Mutex<StatsClient>>>,
+    stats_client: Option<Arc<TokioMutex<StatsClient>>>,
     sched_stats_raw: String,
 
     scheduler: String,
@@ -90,8 +91,6 @@ pub struct App<'a> {
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
     pstate: bool,
-    event_scroll: u16,
-
     active_event: PerfEvent,
     active_hw_event_id: usize,
     active_perf_events: BTreeMap<usize, PerfEvent>,
@@ -99,7 +98,7 @@ pub struct App<'a> {
     event_input_buffer: String,
     event_search: Search,
 
-    filtered_perf_events_list: Vec<String>,
+    filtered_events_state: Arc<StdMutex<FilteredEventState>>,
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
@@ -109,9 +108,7 @@ pub struct App<'a> {
     bpf_stats: BpfStats,
 
     // layout releated
-    num_perf_events: u16,
     events_list_size: u16,
-    selected_event: usize,
 
     // trace related
     trace_manager: PerfettoTraceManager,
@@ -195,7 +192,9 @@ impl<'a> App<'a> {
                     .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
             })
             .collect();
-        let num_perf_events: u16 = initial_perf_events_list.len() as u16;
+
+        let filtered_events_state = Arc::new(StdMutex::new(FilteredEventState::default()));
+
         let mut stats_client = StatsClient::new();
         let stats_socket_path = config.stats_socket_path();
         if !stats_socket_path.is_empty() {
@@ -208,7 +207,7 @@ impl<'a> App<'a> {
             }
             client
         });
-        let stats_client = Some(Arc::new(Mutex::new(stats_client)));
+        let stats_client = Some(Arc::new(TokioMutex::new(stats_client)));
         let sample_rate = skel.maps.data_data.sample_rate;
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
@@ -242,17 +241,14 @@ impl<'a> App<'a> {
             llc_data,
             node_data,
             dsq_data: BTreeMap::new(),
-            event_scroll: 0,
             active_hw_event_id: 0,
             active_event,
             active_perf_events,
             available_events: default_events,
             event_input_buffer: String::new(),
             event_search: Search::new(initial_perf_events_list.clone()),
-            filtered_perf_events_list: Vec::new(),
-            num_perf_events,
+            filtered_events_state,
             events_list_size: 1,
-            selected_event: 0,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
             trace_manager,
@@ -279,6 +275,11 @@ impl<'a> App<'a> {
             self.prev_state = self.state.clone();
         }
         self.state = state;
+
+        if self.state == AppState::Event {
+            self.filter_events();
+        }
+
         if self.prev_state == AppState::MangoApp {
             self.process_id = self.prev_process_id;
             // reactivate the prev perf event with the previous pid
@@ -1931,22 +1932,14 @@ impl<'a> App<'a> {
             self.events_list_size = height
         }
 
-        self.filtered_perf_events_list = self.event_search.fuzzy_search(&self.event_input_buffer);
-        self.num_perf_events = self.filtered_perf_events_list.len() as u16;
-        if (self.num_perf_events as usize) <= self.selected_event {
-            self.selected_event = (self.num_perf_events as usize) - 1;
-        }
+        let filtered_state = self.filtered_events_state.lock().unwrap();
 
-        if self.num_perf_events <= self.event_scroll {
-            self.event_scroll = self.num_perf_events - 1;
-        }
-
-        let events: Vec<Line> = self
-            .filtered_perf_events_list
+        let events: Vec<Line> = filtered_state
+            .list
             .iter()
             .enumerate()
             .map(|(i, event)| {
-                if i == self.selected_event {
+                if i == filtered_state.selected {
                     Line::from(event.clone()).fg(self.theme().text_important_color())
                 } else {
                     Line::from(event.clone()).fg(self.theme().text_color())
@@ -1972,7 +1965,7 @@ impl<'a> App<'a> {
 
         let paragraph = Paragraph::new(events.clone())
             .style(default_style)
-            .scroll((self.event_scroll, 0));
+            .scroll((filtered_state.scroll, 0));
         frame.render_widget(paragraph, chunks[1]);
 
         let input_box = Paragraph::new(format!("# > {}", self.event_input_buffer))
@@ -1986,8 +1979,8 @@ impl<'a> App<'a> {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓")),
             chunks[1],
-            &mut ScrollbarState::new(self.num_perf_events.into())
-                .position(self.event_scroll as usize),
+            &mut ScrollbarState::new(filtered_state.count.into())
+                .position(filtered_state.scroll as usize),
         );
 
         Ok(())
@@ -2118,49 +2111,61 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        if self.state == AppState::Event && self.event_scroll < self.num_perf_events - 1 {
-            self.event_scroll += 1;
-            self.selected_event += 1
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        if self.state == AppState::Event && filtered_state.scroll < filtered_state.count - 1 {
+            filtered_state.scroll += 1;
+            filtered_state.selected += 1;
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        if self.state == AppState::Event && self.event_scroll > 0 {
-            self.event_scroll -= 1;
-            self.selected_event -= 1
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        if self.state == AppState::Event && filtered_state.scroll > 0 {
+            filtered_state.scroll -= 1;
+            filtered_state.selected -= 1;
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
         if self.state == AppState::Event
-            && self.event_scroll <= self.num_perf_events - self.events_list_size
+            && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
-            self.event_scroll += self.events_list_size - 1;
-            self.selected_event += (self.events_list_size - 1) as usize;
+            filtered_state.scroll += self.events_list_size - 1;
+            filtered_state.selected += (self.events_list_size - 1) as usize;
         }
     }
 
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
         if self.state == AppState::Event {
-            if self.event_scroll > self.events_list_size {
-                self.event_scroll -= self.events_list_size - 1;
-                self.selected_event -= (self.events_list_size - 1) as usize;
+            if filtered_state.scroll > self.events_list_size {
+                filtered_state.scroll -= self.events_list_size - 1;
+                filtered_state.selected -= (self.events_list_size - 1) as usize;
             } else {
-                self.event_scroll = 0;
-                self.selected_event = 0;
+                filtered_state.scroll = 0;
+                filtered_state.selected = 0;
             }
         }
     }
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) {
-        if self.state == AppState::Event && !self.filtered_perf_events_list.is_empty() {
-            if let Some((subsystem, event)) =
-                self.filtered_perf_events_list[self.selected_event].split_once(":")
-            {
+        if self.state == AppState::Event {
+            let selected = {
+                let mut filtered_state = self.filtered_events_state.lock().unwrap();
+                if filtered_state.list.is_empty() {
+                    return;
+                }
+                let selected = filtered_state.list[filtered_state.selected].clone();
+                filtered_state.reset();
+                selected
+            };
+
+            if let Some((subsystem, event)) = selected.split_once(":") {
                 let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
                 self.active_perf_events.clear();
                 self.active_event = perf_event.clone();
@@ -2503,6 +2508,23 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("hw_pressure", *hw_pressure);
     }
 
+    pub fn filter_events(&mut self) {
+        let filtered_events_list = self.event_search.fuzzy_search(&self.event_input_buffer);
+
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+
+        filtered_state.list = filtered_events_list;
+        filtered_state.count = filtered_state.list.len() as u16;
+
+        if (filtered_state.count as usize) <= filtered_state.selected {
+            filtered_state.selected = (filtered_state.count as usize) - 1;
+        }
+
+        if filtered_state.count <= filtered_state.scroll {
+            filtered_state.scroll = filtered_state.count - 1;
+        }
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.sample_rate = sample_rate;
@@ -2652,15 +2674,16 @@ impl<'a> App<'a> {
             },
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
+                self.filter_events();
             }
             Action::Backspace => {
                 self.event_input_buffer.pop();
-                self.selected_event = 0;
-                self.event_scroll = 0;
+                self.filter_events();
             }
             Action::Esc => match self.state() {
                 AppState::Event => {
                     self.event_input_buffer.clear();
+                    self.filter_events();
                     self.handle_action(&Action::SetState(self.prev_state.clone()))?;
                 }
                 _ => self.handle_action(&Action::Quit)?,
