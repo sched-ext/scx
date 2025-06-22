@@ -196,7 +196,7 @@ int generic_kprobe(struct pt_regs *ctx)
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events)
+	if (!enable_bpf_events || !should_sample())
 		return 0;
 
 	if (!(event = try_reserve_event()))
