@@ -300,12 +300,16 @@ impl<'a> App<'a> {
     }
 
     /// Stop all active perf events.
-    fn stop_perf_events(&mut self) -> Result<()> {
+    fn stop_perf_events(&mut self) {
         for cpu_data in self.cpu_data.values_mut() {
             cpu_data.data.clear();
         }
         self.active_perf_events.clear();
+    }
 
+    /// Resets perf events to default
+    fn reset_perf_events(&mut self) -> Result<()> {
+        self.stop_perf_events();
         self.available_events = PerfEvent::default_events();
         let config_events = PerfEvent::from_config(&self.config).unwrap();
         self.available_events.extend(config_events);
@@ -351,10 +355,7 @@ impl<'a> App<'a> {
     /// Activates a perf event, stopping any active perf events.
     fn activate_perf_event(&mut self, perf_event: &PerfEvent) -> Result<()> {
         if !self.active_perf_events.is_empty() {
-            for cpu_data in self.cpu_data.values_mut() {
-                cpu_data.data.clear();
-            }
-            self.active_perf_events.clear();
+            self.stop_perf_events();
         }
         for cpu_id in self.topo.all_cpus.keys() {
             let mut event = perf_event.clone();
@@ -2613,7 +2614,7 @@ impl<'a> App<'a> {
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
             }
-            Action::ClearEvent => self.stop_perf_events()?,
+            Action::ClearEvent => self.reset_perf_events()?,
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
