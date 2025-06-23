@@ -25,6 +25,9 @@ const volatile bool debug;
 /* Enable round-robin mode */
 const volatile bool rr_sched;
 
+/* Primary domain includes all CPU */
+const volatile bool primary_all = true;
+
 /* Enable per-CPU DSQs */
 const volatile bool pcpu_dsq = true;
 
@@ -534,7 +537,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 			       s32 cpu, const struct cpumask *cpumask)
 {
 	struct bpf_cpumask *primary, *l2_domain, *l3_domain;
-	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
+	struct bpf_cpumask *mask, *l2_mask, *l3_mask;
+	const struct cpumask *p_mask;
 	struct cpu_ctx *cctx;
 
 	/*
@@ -554,8 +558,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	l2_domain = cctx->l2_cpumask;
 	l3_domain = cctx->l3_cpumask;
 
-	p_mask = tctx->cpumask;
-	if (!p_mask) {
+	mask = tctx->cpumask;
+	if (!mask) {
 		scx_bpf_error("cpumask not initialized");
 		return;
 	}
@@ -576,7 +580,12 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * Determine the task's scheduling domain.
 	 * idle CPU, re-try again with the primary scheduling domain.
 	 */
-	bpf_cpumask_and(p_mask, cpumask, cast_mask(primary));
+	if (primary_all) {
+		p_mask = cpumask;
+	} else {
+		bpf_cpumask_and(mask, cpumask, cast_mask(primary));
+		p_mask = cast_mask(mask);
+	}
 
 	/*
 	 * Determine the L2 cache domain as the intersection of the task's
@@ -584,7 +593,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * CPU.
 	 */
 	if (l2_domain)
-		bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
+		bpf_cpumask_and(l2_mask, p_mask, cast_mask(l2_domain));
 
 	/*
 	 * Determine the L3 cache domain as the intersection of the task's
@@ -592,7 +601,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * CPU.
 	 */
 	if (l3_domain)
-		bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
+		bpf_cpumask_and(l3_mask, p_mask, cast_mask(l3_domain));
 }
 
 /*
@@ -715,7 +724,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	/*
 	 * Get the task's primary scheduling domain.
 	 */
-	p_mask = cast_mask(tctx->cpumask);
+	p_mask = primary_all ? p->cpus_ptr : cast_mask(tctx->cpumask);
 
 	/*
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
@@ -891,10 +900,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	/*
 	 * Search for any idle CPU usable by the task.
 	 */
-	cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
-	if (cpu >= 0) {
-		*is_idle = true;
-		goto out_put_cpumask;
+	if (p_mask != p->cpus_ptr) {
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 	}
 
 out_put_cpumask:

@@ -20,6 +20,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -371,6 +372,17 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Determine the primary scheduling domain.
+        let power_profile = Self::power_profile();
+        let domain =
+            Self::resolve_energy_domain(&opts.primary_domain, power_profile).map_err(|err| {
+                anyhow!(
+                    "failed to resolve primary domain '{}': {}",
+                    &opts.primary_domain,
+                    err
+                )
+            })?;
+
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
@@ -393,6 +405,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.tickless_ns = opts.tickless_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
+        skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
 
         if !opts.cpu_runqueue && !opts.node_runqueue {
             skel.maps.rodata_data.pcpu_dsq = true;
@@ -429,12 +442,16 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, flash_ops, uei)?;
 
         // Initialize the primary scheduling domain and the preferred domain.
-        let power_profile = Self::power_profile();
-        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, power_profile) {
-            warn!("failed to initialize primary domain: error {}", err);
-        }
+        Self::init_energy_domain(&mut skel, &domain).map_err(|err| {
+            anyhow!(
+                "failed to initialize primary domain 0x{:x}: {}",
+                domain,
+                err
+            )
+        })?;
+
         if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, opts.cpufreq) {
-            warn!(
+            bail!(
                 "failed to initialize cpufreq performance level: error {}",
                 err
             );
@@ -499,11 +516,7 @@ impl<'a> Scheduler<'a> {
         Cpumask::from_str(&cpus_to_cpumask(&cpus))
     }
 
-    fn init_energy_domain(
-        skel: &mut BpfSkel<'_>,
-        primary_domain: &str,
-        power_profile: PowerProfile,
-    ) -> Result<()> {
+    fn resolve_energy_domain(primary_domain: &str, power_profile: PowerProfile) -> Result<Cpumask> {
         let domain = match primary_domain {
             "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
@@ -513,25 +526,30 @@ impl<'a> Scheduler<'a> {
                 PowerProfile::Balanced { power: true } => {
                     Self::epp_to_cpumask(Powermode::Powersave)?
                 }
-                PowerProfile::Balanced { power: false } => Self::epp_to_cpumask(Powermode::Any)?,
-                PowerProfile::Performance => Self::epp_to_cpumask(Powermode::Any)?,
-                PowerProfile::Unknown => Self::epp_to_cpumask(Powermode::Any)?,
+                PowerProfile::Balanced { power: false }
+                | PowerProfile::Performance
+                | PowerProfile::Unknown => Self::epp_to_cpumask(Powermode::Any)?,
             },
             "all" => Self::epp_to_cpumask(Powermode::Any)?,
             &_ => Cpumask::from_str(primary_domain)?,
         };
 
+        Ok(domain)
+    }
+
+    fn init_energy_domain(skel: &mut BpfSkel<'_>, domain: &Cpumask) -> Result<()> {
         info!("primary CPU domain = 0x{:x}", domain);
 
         // Clear the primary domain by passing a negative CPU id.
         if let Err(err) = Self::enable_primary_cpu(skel, -1) {
-            warn!("failed to reset primary domain: error {}", err);
+            bail!("failed to reset primary domain: error {}", err);
         }
+
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
             if domain.test_cpu(cpu) {
                 if let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
-                    warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
+                    bail!("failed to add CPU {} to primary domain: error {}", cpu, err);
                 }
             }
         }
