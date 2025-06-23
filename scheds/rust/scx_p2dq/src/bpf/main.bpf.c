@@ -1021,10 +1021,11 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		return;
 	}
 
+	bool has_affn_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0;
 	u64 min_vtime = 0;
 
 	// First search affinitized DSQ
-	if (scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0) {
+	if (has_affn_queued) {
 		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
 			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
 				min_vtime = p->scx.dsq_vtime;
@@ -1064,15 +1065,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	if (valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
 
-	// Try the last DSQ, this is to keep tasks sticky to their dsq type.
-	if (valid_dsq(cpuc->dsq_id) &&
-	    scx_bpf_dsq_move_to_local(cpuc->dsq_id))
-			return;
+	if (has_affn_queued && dsq_id != cpuc->affn_dsq &&
+	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
+		return;
 
-	if (scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
-	    return;
-
-	if (scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
+	if (dsq_id != cpuc->llc_dsq &&
+	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
 		return;
 
 	if (!(llcx = lookup_llc_ctx(cpuc->llc_id))) {
