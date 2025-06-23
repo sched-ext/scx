@@ -69,8 +69,8 @@ pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 pub enum AppState {
     /// Application is in the default state.
     Default,
-    /// Application is in the event state.
-    Event,
+    /// Application is in the PerfEvent list state.
+    PerfEvent,
     /// Application is in the help state.
     Help,
     /// Application is in the Llc state.
@@ -124,6 +124,25 @@ impl FilteredEventState {
         self.count = 0;
         self.scroll = 0;
         self.selected = 0;
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ProfilingEvent {
+    Perf(PerfEvent),
+}
+
+impl ProfilingEvent {
+    pub fn event_name(&self) -> &str {
+        match self {
+            ProfilingEvent::Perf(p) => p.event_name(),
+        }
+    }
+
+    pub fn value(&mut self, reset: bool) -> anyhow::Result<u64> {
+        match self {
+            ProfilingEvent::Perf(p) => p.value(reset),
+        }
     }
 }
 
@@ -577,7 +596,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
-            Action::SetState(AppState::Event) => write!(f, "AppStateEvent"),
+            Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),

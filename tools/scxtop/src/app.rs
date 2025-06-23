@@ -20,6 +20,7 @@ use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
+use crate::ProfilingEvent;
 use crate::Search;
 use crate::VecStats;
 use crate::ViewState;
@@ -91,12 +92,12 @@ pub struct App<'a> {
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
     pstate: bool,
-    active_event: PerfEvent,
+    active_event: ProfilingEvent,
     active_hw_event_id: usize,
-    active_perf_events: BTreeMap<usize, PerfEvent>,
-    available_events: Vec<PerfEvent>,
+    active_prof_events: BTreeMap<usize, ProfilingEvent>,
+    available_events: Vec<ProfilingEvent>,
     event_input_buffer: String,
-    event_search: Search,
+    perf_event_search: Search,
 
     filtered_events_state: Arc<StdMutex<FilteredEventState>>,
     cpu_data: BTreeMap<usize, CpuData>,
@@ -149,12 +150,13 @@ impl<'a> App<'a> {
         }
         let subsystem = default_perf_event_parts[0].to_string();
         let event = default_perf_event_parts[1].to_string();
-        let active_event = PerfEvent::new(subsystem.clone(), event.clone(), 0);
-        let mut active_perf_events = BTreeMap::new();
-        let mut default_events = PerfEvent::default_events();
-        let config_events = PerfEvent::from_config(&config)?;
-        default_events.extend(config_events);
-        let default_events_str: Vec<&str> = default_events
+        let active_event =
+            ProfilingEvent::Perf(PerfEvent::new(subsystem.clone(), event.clone(), 0));
+        let mut active_prof_events = BTreeMap::new();
+        let mut default_perf_events = PerfEvent::default_events();
+        let config_perf_events = PerfEvent::from_config(&config)?;
+        default_perf_events.extend(config_perf_events);
+        let default_events_str: Vec<&str> = default_perf_events
             .iter()
             .map(|event| {
                 if !event.alias.is_empty() {
@@ -164,10 +166,17 @@ impl<'a> App<'a> {
                 }
             })
             .collect();
+
+        let default_events: Vec<ProfilingEvent> = default_perf_events
+            .iter()
+            .cloned()
+            .map(ProfilingEvent::Perf)
+            .collect();
+
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new(subsystem.clone(), event.clone(), cpu.id);
             event.attach(process_id)?;
-            active_perf_events.insert(cpu.id, event);
+            active_prof_events.insert(cpu.id, ProfilingEvent::Perf(event));
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
             data.initialize_events(&default_events_str);
@@ -243,10 +252,10 @@ impl<'a> App<'a> {
             dsq_data: BTreeMap::new(),
             active_hw_event_id: 0,
             active_event,
-            active_perf_events,
+            active_prof_events,
             available_events: default_events,
             event_input_buffer: String::new(),
-            event_search: Search::new(initial_perf_events_list.clone()),
+            perf_event_search: Search::new(initial_perf_events_list.clone()),
             filtered_events_state,
             events_list_size: 1,
             prev_bpf_sample_rate: sample_rate,
@@ -271,20 +280,20 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
-        if self.state != AppState::Help && self.state != AppState::Event {
+        if self.state != AppState::Help && self.state != AppState::PerfEvent {
             self.prev_state = self.state.clone();
         }
         self.state = state;
 
-        if self.state == AppState::Event {
+        if self.state == AppState::PerfEvent {
             self.filter_events();
         }
 
         if self.prev_state == AppState::MangoApp {
             self.process_id = self.prev_process_id;
-            // reactivate the prev perf event with the previous pid
-            let perf_event = &self.available_events[self.active_hw_event_id].clone();
-            let _ = self.activate_perf_event(perf_event);
+            // reactivate the prev profiling event with the previous pid
+            let prof_event = &self.available_events[self.active_hw_event_id].clone();
+            let _ = self.activate_prof_event(prof_event);
             self.max_fps = 1;
             self.frames_since_update = 0;
         }
@@ -300,52 +309,58 @@ impl<'a> App<'a> {
         self.config.set_theme(theme)
     }
 
-    /// Stop all active perf events.
-    fn stop_perf_events(&mut self) {
+    /// Stop all active profiling events.
+    fn stop_prof_events(&mut self) {
         for cpu_data in self.cpu_data.values_mut() {
             cpu_data.data.clear();
         }
-        self.active_perf_events.clear();
+        self.active_prof_events.clear();
     }
 
-    /// Resets perf events to default
-    fn reset_perf_events(&mut self) -> Result<()> {
-        self.stop_perf_events();
-        self.available_events = PerfEvent::default_events();
+    /// Resets profiling events to default
+    fn reset_prof_events(&mut self) -> Result<()> {
+        self.stop_prof_events();
+        let mut default_events = PerfEvent::default_events();
         let config_events = PerfEvent::from_config(&self.config).unwrap();
-        self.available_events.extend(config_events);
+        default_events.extend(config_events);
+
+        self.available_events = default_events
+            .iter()
+            .cloned()
+            .map(ProfilingEvent::Perf)
+            .collect();
         self.active_hw_event_id = 0;
-        let perf_event = &self.available_events[self.active_hw_event_id].clone();
-        self.active_event = perf_event.clone();
-        self.activate_perf_event(perf_event)
+        let prof_event = &self.available_events[self.active_hw_event_id].clone();
+        self.active_event = prof_event.clone();
+        self.activate_prof_event(prof_event)
     }
 
     /// Activates the next event.
     fn next_event(&mut self) -> Result<()> {
-        self.active_perf_events.clear();
+        self.active_prof_events.clear();
         if self.active_hw_event_id == self.available_events.len() - 1 {
             self.active_hw_event_id = 0;
         } else {
             self.active_hw_event_id += 1;
         }
-        let perf_event = &self.available_events[self.active_hw_event_id].clone();
+        let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
-        self.active_event = perf_event.clone();
-        self.activate_perf_event(perf_event)
+        self.active_event = prof_event.clone();
+        self.activate_prof_event(prof_event)
     }
 
     /// Activates the previous event.
     fn prev_event(&mut self) -> Result<()> {
-        self.active_perf_events.clear();
+        self.active_prof_events.clear();
         if self.active_hw_event_id == 0 {
             self.active_hw_event_id = self.available_events.len() - 1;
         } else {
             self.active_hw_event_id -= 1;
         }
-        let perf_event = &self.available_events[self.active_hw_event_id].clone();
+        let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
-        self.active_event = perf_event.clone();
-        self.activate_perf_event(perf_event)
+        self.active_event = prof_event.clone();
+        self.activate_prof_event(prof_event)
     }
 
     /// Activates the next view state.
@@ -353,16 +368,21 @@ impl<'a> App<'a> {
         self.view_state = self.view_state.next();
     }
 
-    /// Activates a perf event, stopping any active perf events.
-    fn activate_perf_event(&mut self, perf_event: &PerfEvent) -> Result<()> {
-        if !self.active_perf_events.is_empty() {
-            self.stop_perf_events();
+    /// Activates a profiling event, stopping any active profiling events.
+    fn activate_prof_event(&mut self, prof_event: &ProfilingEvent) -> Result<()> {
+        if !self.active_prof_events.is_empty() {
+            self.stop_prof_events();
         }
-        for cpu_id in self.topo.all_cpus.keys() {
-            let mut event = perf_event.clone();
-            event.cpu = *cpu_id;
-            event.attach(self.process_id)?;
-            self.active_perf_events.insert(*cpu_id, event);
+        for &cpu_id in self.topo.all_cpus.keys() {
+            let event = match prof_event {
+                ProfilingEvent::Perf(p) => {
+                    let mut p = p.clone();
+                    p.cpu = cpu_id;
+                    p.attach(self.process_id)?;
+                    ProfilingEvent::Perf(p)
+                }
+            };
+            self.active_prof_events.insert(cpu_id, event);
         }
         Ok(())
     }
@@ -445,7 +465,7 @@ impl<'a> App<'a> {
                     .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
             llc_data.data.set_max_size(max_events);
         }
-        for cpu in self.active_perf_events.keys() {
+        for cpu in self.active_prof_events.keys() {
             let cpu_data = self.cpu_data.entry(*cpu).or_insert(CpuData::new(
                 *cpu,
                 0,
@@ -524,8 +544,10 @@ impl<'a> App<'a> {
             llc_data.add_event_data(self.active_event.event_name(), 0);
         }
 
-        for (cpu, event) in &mut self.active_perf_events {
-            let val = event.value(true)?;
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = match event {
+                ProfilingEvent::Perf(p) => p.value(true)?,
+            };
             let cpu_data = self
                 .cpu_data
                 .entry(*cpu)
@@ -1777,17 +1799,17 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: show CPU event menu ({})",
+                    "{}: show CPU perf event menu ({})",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::SetState(AppState::Event)),
+                        .action_keys_string(Action::SetState(AppState::PerfEvent)),
                     self.active_event.event_name()
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: clear active perf events",
+                    "{}: clear active profiling events",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::ClearEvent),
@@ -1796,7 +1818,7 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: next perf event",
+                    "{}: next profiling event",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::NextEvent),
@@ -1805,7 +1827,7 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: previous perf event",
+                    "{}: previous profiling event",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::PrevEvent)
@@ -1814,14 +1836,14 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: perf event list scroll up",
+                    "{}: profiling event list scroll up",
                     self.config.active_keymap.action_keys_string(Action::PageUp)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: perf event list scroll down",
+                    "{}: profiling event list scroll down",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::PageDown)
@@ -1932,6 +1954,28 @@ impl<'a> App<'a> {
             self.events_list_size = height
         }
 
+        let list_type = match self.state {
+            AppState::PerfEvent => "perf",
+            _ => bail!("Invalid AppState in event list"),
+        };
+
+        let title = Block::new()
+            .style(default_style)
+            .title_alignment(Alignment::Center)
+            .title(
+                format!(
+                    "Type to filter {} list, use ▲ ▼  ({}/{}) to scroll, {} to select, Esc to exit",
+                    list_type,
+                    self.config.active_keymap.action_keys_string(Action::PageUp),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PageDown),
+                    self.config.active_keymap.action_keys_string(Action::Enter),
+                )
+                .bold(),
+            );
+        frame.render_widget(title, chunks[0]);
+
         let filtered_state = self.filtered_events_state.lock().unwrap();
 
         let events: Vec<Line> = filtered_state
@@ -1946,22 +1990,6 @@ impl<'a> App<'a> {
                 }
             })
             .collect();
-
-        let title = Block::new()
-            .style(default_style)
-            .title_alignment(Alignment::Center)
-            .title(
-                format!(
-                    "Type to filter list, use ▲ ▼  ({}/{}) to scroll, {} to select, Esc to exit",
-                    self.config.active_keymap.action_keys_string(Action::PageUp),
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::PageDown),
-                    self.config.active_keymap.action_keys_string(Action::Enter),
-                )
-                .bold(),
-            );
-        frame.render_widget(title, chunks[0]);
 
         let paragraph = Paragraph::new(events.clone())
             .style(default_style)
@@ -2027,13 +2055,13 @@ impl<'a> App<'a> {
     /// Handles MangoApp pressure events.
     pub fn on_mangoapp(&mut self, action: &MangoAppAction) -> Result<()> {
         self.last_mangoapp_action = Some(action.clone());
-        // Update the perf event to the mangoapp event
+        // Update the profiling event to the mangoapp event
         if action.pid as i32 != self.process_id && action.pid > 0 {
             self.prev_process_id = self.process_id;
             self.process_id = action.pid as i32;
-            // reactivate the active perf event with the pid from mangoapp
-            let perf_event = &self.available_events[self.active_hw_event_id].clone();
-            let _ = self.activate_perf_event(perf_event);
+            // reactivate the active profiling event with the pid from mangoapp
+            let prof_event = &self.available_events[self.active_hw_event_id].clone();
+            let _ = self.activate_prof_event(prof_event);
         }
         Ok(())
     }
@@ -2091,7 +2119,7 @@ impl<'a> App<'a> {
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
-            AppState::Event => self.render_event_list(frame),
+            AppState::PerfEvent => self.render_event_list(frame),
             AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
@@ -2112,7 +2140,7 @@ impl<'a> App<'a> {
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::Event && filtered_state.scroll < filtered_state.count - 1 {
+        if self.state == AppState::PerfEvent && filtered_state.scroll < filtered_state.count - 1 {
             filtered_state.scroll += 1;
             filtered_state.selected += 1;
         }
@@ -2121,7 +2149,7 @@ impl<'a> App<'a> {
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::Event && filtered_state.scroll > 0 {
+        if self.state == AppState::PerfEvent && filtered_state.scroll > 0 {
             filtered_state.scroll -= 1;
             filtered_state.selected -= 1;
         }
@@ -2130,7 +2158,7 @@ impl<'a> App<'a> {
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::Event
+        if self.state == AppState::PerfEvent
             && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
             filtered_state.scroll += self.events_list_size - 1;
@@ -2141,7 +2169,7 @@ impl<'a> App<'a> {
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::Event {
+        if self.state == AppState::PerfEvent {
             if filtered_state.scroll > self.events_list_size {
                 filtered_state.scroll -= self.events_list_size - 1;
                 filtered_state.selected -= (self.events_list_size - 1) as usize;
@@ -2154,7 +2182,7 @@ impl<'a> App<'a> {
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) {
-        if self.state == AppState::Event {
+        if self.state == AppState::PerfEvent {
             let selected = {
                 let mut filtered_state = self.filtered_events_state.lock().unwrap();
                 if filtered_state.list.is_empty() {
@@ -2165,15 +2193,25 @@ impl<'a> App<'a> {
                 selected
             };
 
-            if let Some((subsystem, event)) = selected.split_once(":") {
-                let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
-                self.active_perf_events.clear();
-                self.active_event = perf_event.clone();
-                let _ = self.activate_perf_event(&perf_event);
+            let event = match self.state {
+                AppState::PerfEvent => selected.split_once(":").map(|(subsystem, event)| {
+                    ProfilingEvent::Perf(PerfEvent::new(
+                        subsystem.to_string(),
+                        event.to_string(),
+                        0,
+                    ))
+                }),
+                _ => None,
+            };
+
+            if let Some(prof_event) = event {
+                self.active_prof_events.clear();
+                self.active_event = prof_event.clone();
+                let _ = self.activate_prof_event(&prof_event);
                 let prev_state = self.prev_state.clone();
                 self.prev_state = self.state.clone();
                 self.state = prev_state;
-                self.available_events.push(perf_event.clone());
+                self.available_events.push(prof_event.clone());
             }
         }
     }
@@ -2509,7 +2547,12 @@ impl<'a> App<'a> {
     }
 
     pub fn filter_events(&mut self) {
-        let filtered_events_list = self.event_search.fuzzy_search(&self.event_input_buffer);
+        let filtered_events_list = match self.state {
+            AppState::PerfEvent => self
+                .perf_event_search
+                .fuzzy_search(&self.event_input_buffer),
+            _ => vec![],
+        };
 
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
 
@@ -2636,7 +2679,7 @@ impl<'a> App<'a> {
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
             }
-            Action::ClearEvent => self.reset_perf_events()?,
+            Action::ClearEvent => self.reset_prof_events()?,
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
@@ -2681,7 +2724,7 @@ impl<'a> App<'a> {
                 self.filter_events();
             }
             Action::Esc => match self.state() {
-                AppState::Event => {
+                AppState::PerfEvent => {
                     self.event_input_buffer.clear();
                     self.filter_events();
                     self.handle_action(&Action::SetState(self.prev_state.clone()))?;
