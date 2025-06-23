@@ -703,7 +703,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
-	bool is_prev_allowed;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -717,7 +716,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Get the task's primary scheduling domain.
 	 */
 	p_mask = cast_mask(tctx->cpumask);
-	is_prev_allowed = p_mask && bpf_cpumask_test_cpu(prev_cpu, p_mask);
 
 	/*
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
@@ -741,7 +739,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * cache hot data from the waker's CPU is more important
 		 * than cache hot data in the wakee's CPU.
 		 */
-		if (is_prev_allowed && share_llc &&
+		if (share_llc &&
 		    (smt_enabled && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -790,8 +788,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (is_prev_allowed &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
@@ -848,8 +845,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (is_prev_allowed &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
