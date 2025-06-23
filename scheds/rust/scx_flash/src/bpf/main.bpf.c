@@ -1033,15 +1033,14 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	s32 cpu = prev_cpu;
 
 	/*
-	 * Dispatch per-CPU kthreads directly on their assigned CPU.
+	 * Dispatch per-CPU kthreads directly on their assigned CPU if
+	 * @local_kthreads is enabled.
 	 *
 	 * This allows to prioritize critical kernel threads that may
 	 * potentially stall the entire system if they are blocked (i.e.,
 	 * ksoftirqd/N, rcuop/N, etc.).
-	 *
-	 * If @local_kthreads is enabled dispatch all kthreads locally.
 	 */
-	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		dispatched = true;

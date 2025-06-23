@@ -240,14 +240,11 @@ struct Opts {
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     native_priority: bool,
 
-    /// Enable kthreads prioritization (EXPERIMENTAL).
+    /// Enable per-CPU kthread prioritization.
     ///
-    /// Enabling this can improve system performance, but it may also introduce noticeable
-    /// interactivity issues or unfairness in scenarios with high kthread activity, such as heavy
-    /// I/O or network traffic.
-    ///
-    /// Use it only when conducting specific experiments or if you have a clear understanding of
-    /// its implications.
+    /// Enabling this can improve system performance, but it may also introduce interactivity
+    /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network
+    /// traffic.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
