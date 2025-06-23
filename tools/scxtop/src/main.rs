@@ -58,7 +58,7 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
         }
         Event::Key(key) => handle_key_event(app, keymap, key),
         Event::Paste(paste) => match app.state() {
-            AppState::PerfEvent => Action::InputEntry(paste),
+            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(paste),
             _ => Action::None,
         },
         _ => Action::None,
@@ -68,7 +68,7 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
 fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
     match key.code {
         Char(c) => match app.state() {
-            AppState::PerfEvent => Action::InputEntry(c.to_string()),
+            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(c.to_string()),
             _ => keymap.action(&Key::Char(c)),
         },
         _ => keymap.action(&Key::Code(key.code)),

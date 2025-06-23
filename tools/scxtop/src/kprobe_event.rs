@@ -8,6 +8,54 @@ use scx_utils::compat::tracefs_mount;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
+#[derive(Debug, Clone)]
+pub struct KprobeEvent {
+    pub cpu: usize,
+    pub event_name: String,
+    pub count: u64,
+    pub instruction_pointer: Option<u64>,
+}
+
+impl KprobeEvent {
+    pub fn new(event_name: String, cpu: usize) -> Self {
+        let instruction_pointer = resolve_kfunc_address(&event_name);
+        Self {
+            event_name,
+            cpu,
+            count: 0,
+            instruction_pointer,
+        }
+    }
+
+    pub fn increment_by(&mut self, stride: u64) {
+        self.count += stride;
+    }
+
+    pub fn value(&mut self, reset: bool) -> Result<u64> {
+        let count = self.count;
+        if reset {
+            self.count = 0;
+        }
+        Ok(count)
+    }
+}
+
+fn resolve_kfunc_address(name: &str) -> Option<u64> {
+    let file = File::open("/proc/kallsyms")
+        .expect("Failed to open /proc/kallsyms. Make sure CONFIG_KALLSYMS is enabled.");
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(std::io::Result::ok) {
+        if line.ends_with(&format!(" {}", name)) {
+            if let Some(addr_str) = line.split_whitespace().next() {
+                if let Ok(addr) = u64::from_str_radix(addr_str, 16) {
+                    return Some(addr);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Returns the available kprobe events on the system from tracefs.
 pub fn available_kprobe_events() -> Result<Vec<String>> {
     let path = tracefs_mount()?;
@@ -18,7 +66,9 @@ pub fn available_kprobe_events() -> Result<Vec<String>> {
 
     for line in reader.lines() {
         let line = line?;
-        events.push(line);
+        if let Some(func) = line.split_whitespace().next() {
+            events.push(func.to_string());
+        }
     }
 
     Ok(events)

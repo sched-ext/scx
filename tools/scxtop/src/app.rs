@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::available_kprobe_events;
 use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
@@ -16,6 +17,7 @@ use crate::AppTheme;
 use crate::CpuData;
 use crate::EventData;
 use crate::FilteredEventState;
+use crate::KprobeEvent;
 use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
@@ -29,9 +31,9 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, MangoAppAction, PstateSampleAction, SchedCpuPerfSetAction,
-    SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
-    TraceStartedAction, TraceStoppedAction,
+    HwPressureAction, IPIAction, KprobeAction, MangoAppAction, PstateSampleAction,
+    SchedCpuPerfSetAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::{bail, Result};
@@ -92,18 +94,22 @@ pub struct App<'a> {
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
     pstate: bool,
+
+    cpu_data: BTreeMap<usize, CpuData>,
+    llc_data: BTreeMap<usize, LlcData>,
+    node_data: BTreeMap<usize, NodeData>,
+    dsq_data: BTreeMap<u64, EventData>,
+
+    // Event related
     active_event: ProfilingEvent,
     active_hw_event_id: usize,
     active_prof_events: BTreeMap<usize, ProfilingEvent>,
     available_events: Vec<ProfilingEvent>,
     event_input_buffer: String,
     perf_event_search: Search,
-
+    kprobe_event_search: Search,
+    kprobe_links: Vec<Link>,
     filtered_events_state: Arc<StdMutex<FilteredEventState>>,
-    cpu_data: BTreeMap<usize, CpuData>,
-    llc_data: BTreeMap<usize, LlcData>,
-    node_data: BTreeMap<usize, NodeData>,
-    dsq_data: BTreeMap<u64, EventData>,
 
     // stats from scxtop's bpf side
     bpf_stats: BpfStats,
@@ -201,6 +207,7 @@ impl<'a> App<'a> {
                     .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
             })
             .collect();
+        let initial_kprobe_events_list = available_kprobe_events()?;
 
         let filtered_events_state = Arc::new(StdMutex::new(FilteredEventState::default()));
 
@@ -255,7 +262,9 @@ impl<'a> App<'a> {
             active_prof_events,
             available_events: default_events,
             event_input_buffer: String::new(),
-            perf_event_search: Search::new(initial_perf_events_list.clone()),
+            perf_event_search: Search::new(initial_perf_events_list),
+            kprobe_event_search: Search::new(initial_kprobe_events_list),
+            kprobe_links: Vec::new(),
             filtered_events_state,
             events_list_size: 1,
             prev_bpf_sample_rate: sample_rate,
@@ -280,12 +289,15 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
-        if self.state != AppState::Help && self.state != AppState::PerfEvent {
+        if self.state != AppState::Help
+            && self.state != AppState::PerfEvent
+            && self.state != AppState::KprobeEvent
+        {
             self.prev_state = self.state.clone();
         }
         self.state = state;
 
-        if self.state == AppState::PerfEvent {
+        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
             self.filter_events();
         }
 
@@ -320,6 +332,7 @@ impl<'a> App<'a> {
     /// Resets profiling events to default
     fn reset_prof_events(&mut self) -> Result<()> {
         self.stop_prof_events();
+        self.kprobe_links.clear();
         let mut default_events = PerfEvent::default_events();
         let config_events = PerfEvent::from_config(&self.config).unwrap();
         default_events.extend(config_events);
@@ -373,6 +386,7 @@ impl<'a> App<'a> {
         if !self.active_prof_events.is_empty() {
             self.stop_prof_events();
         }
+
         for &cpu_id in self.topo.all_cpus.keys() {
             let event = match prof_event {
                 ProfilingEvent::Perf(p) => {
@@ -380,6 +394,11 @@ impl<'a> App<'a> {
                     p.cpu = cpu_id;
                     p.attach(self.process_id)?;
                     ProfilingEvent::Perf(p)
+                }
+                ProfilingEvent::Kprobe(k) => {
+                    let mut k = k.clone();
+                    k.cpu = cpu_id;
+                    ProfilingEvent::Kprobe(k)
                 }
             };
             self.active_prof_events.insert(cpu_id, event);
@@ -547,6 +566,7 @@ impl<'a> App<'a> {
         for (cpu, event) in &mut self.active_prof_events {
             let val = match event {
                 ProfilingEvent::Perf(p) => p.value(true)?,
+                ProfilingEvent::Kprobe(k) => k.value(true)?,
             };
             let cpu_data = self
                 .cpu_data
@@ -1799,11 +1819,19 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: show CPU perf event menu ({})",
+                    "{}: show CPU perf event menu",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::SetState(AppState::PerfEvent)),
-                    self.active_event.event_name()
+                        .action_keys_string(Action::SetState(AppState::PerfEvent))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: show kprobe event menu",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::KprobeEvent))
                 ),
                 Style::default(),
             )),
@@ -1956,6 +1984,7 @@ impl<'a> App<'a> {
 
         let list_type = match self.state {
             AppState::PerfEvent => "perf",
+            AppState::KprobeEvent => "kprobe",
             _ => bail!("Invalid AppState in event list"),
         };
 
@@ -1991,7 +2020,7 @@ impl<'a> App<'a> {
             })
             .collect();
 
-        let paragraph = Paragraph::new(events.clone())
+        let paragraph = Paragraph::new(events)
             .style(default_style)
             .scroll((filtered_state.scroll, 0));
         frame.render_widget(paragraph, chunks[1]);
@@ -2119,7 +2148,7 @@ impl<'a> App<'a> {
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
-            AppState::PerfEvent => self.render_event_list(frame),
+            AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
             AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
@@ -2140,7 +2169,9 @@ impl<'a> App<'a> {
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::PerfEvent && filtered_state.scroll < filtered_state.count - 1 {
+        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+            && filtered_state.scroll < filtered_state.count - 1
+        {
             filtered_state.scroll += 1;
             filtered_state.selected += 1;
         }
@@ -2149,7 +2180,9 @@ impl<'a> App<'a> {
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::PerfEvent && filtered_state.scroll > 0 {
+        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+            && filtered_state.scroll > 0
+        {
             filtered_state.scroll -= 1;
             filtered_state.selected -= 1;
         }
@@ -2158,7 +2191,7 @@ impl<'a> App<'a> {
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::PerfEvent
+        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
             && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
             filtered_state.scroll += self.events_list_size - 1;
@@ -2169,7 +2202,7 @@ impl<'a> App<'a> {
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
         let mut filtered_state = self.filtered_events_state.lock().unwrap();
-        if self.state == AppState::PerfEvent {
+        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
             if filtered_state.scroll > self.events_list_size {
                 filtered_state.scroll -= self.events_list_size - 1;
                 filtered_state.selected -= (self.events_list_size - 1) as usize;
@@ -2181,12 +2214,12 @@ impl<'a> App<'a> {
     }
 
     /// Updates app state when the enter key is pressed.
-    fn on_enter(&mut self) {
-        if self.state == AppState::PerfEvent {
+    fn on_enter(&mut self) -> Result<()> {
+        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
             let selected = {
                 let mut filtered_state = self.filtered_events_state.lock().unwrap();
                 if filtered_state.list.is_empty() {
-                    return;
+                    return Ok(());
                 }
                 let selected = filtered_state.list[filtered_state.selected].clone();
                 filtered_state.reset();
@@ -2201,19 +2234,40 @@ impl<'a> App<'a> {
                         0,
                     ))
                 }),
+                AppState::KprobeEvent => Some(ProfilingEvent::Kprobe(KprobeEvent::new(
+                    selected.to_string(),
+                    0,
+                ))),
                 _ => None,
             };
 
             if let Some(prof_event) = event {
+                if let ProfilingEvent::Kprobe(ref k) = prof_event {
+                    let already_exists = self.available_events.iter().any(
+                        |e| matches!(e, ProfilingEvent::Kprobe(x) if x.event_name == k.event_name),
+                    );
+
+                    if !already_exists {
+                        self.kprobe_links.push(
+                            self.skel
+                                .progs
+                                .generic_kprobe
+                                .attach_kprobe(false, &k.event_name)?,
+                        );
+                    };
+                };
+
                 self.active_prof_events.clear();
                 self.active_event = prof_event.clone();
                 let _ = self.activate_prof_event(&prof_event);
                 let prev_state = self.prev_state.clone();
                 self.prev_state = self.state.clone();
                 self.state = prev_state;
-                self.available_events.push(prof_event.clone());
+                self.available_events.push(prof_event);
             }
         }
+
+        Ok(())
     }
 
     /// Attaches any BPF programs required for perfetto traces.
@@ -2546,10 +2600,25 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("hw_pressure", *hw_pressure);
     }
 
+    /// Handles kprobe events.
+    pub fn on_kprobe(&mut self, action: &KprobeAction) {
+        let cpu = action.cpu as usize;
+        let sample_rate = self.skel.maps.data_data.sample_rate as u64;
+
+        if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu) {
+            if kprobe.instruction_pointer == Some(action.instruction_pointer) {
+                kprobe.increment_by(sample_rate);
+            }
+        }
+    }
+
     pub fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
             AppState::PerfEvent => self
                 .perf_event_search
+                .fuzzy_search(&self.event_input_buffer),
+            AppState::KprobeEvent => self
+                .kprobe_event_search
                 .fuzzy_search(&self.event_input_buffer),
             _ => vec![],
         };
@@ -2583,7 +2652,10 @@ impl<'a> App<'a> {
             Action::Up => self.on_up(),
             Action::PageUp => self.on_pg_up(),
             Action::PageDown => self.on_pg_down(),
-            Action::Enter => self.on_enter(),
+            Action::Enter => {
+                self.on_enter()?;
+                self.event_input_buffer.clear();
+            }
             Action::SetState(state) => {
                 if *state == self.state {
                     self.set_state(self.prev_state.clone());
@@ -2591,7 +2663,6 @@ impl<'a> App<'a> {
                     self.set_state(state.clone());
                 }
             }
-
             Action::NextEvent => {
                 if self.next_event().is_err() {
                     // XXX handle error
@@ -2679,6 +2750,9 @@ impl<'a> App<'a> {
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
             }
+            Action::Kprobe(a) => {
+                self.on_kprobe(a);
+            }
             Action::ClearEvent => self.reset_prof_events()?,
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
@@ -2724,7 +2798,7 @@ impl<'a> App<'a> {
                 self.filter_events();
             }
             Action::Esc => match self.state() {
-                AppState::PerfEvent => {
+                AppState::PerfEvent | AppState::KprobeEvent => {
                     self.event_input_buffer.clear();
                     self.filter_events();
                     self.handle_action(&Action::SetState(self.prev_state.clone()))?;
