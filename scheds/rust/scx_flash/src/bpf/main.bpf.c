@@ -55,7 +55,7 @@ const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
  * to determine the task's maximum exec_vruntime: accumulated vruntime
  * since last sleep).
  */
-const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
+const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
 
 /*
  * Maximum amount of voluntary context switches (this limit allows to prevent

@@ -161,7 +161,7 @@ struct Opts {
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'r', long, default_value = "20000")]
+    #[clap(short = 'r', long, default_value = "200000")]
     run_us_lag: u64,
 
     /// Maximum rate of voluntary context switches.
