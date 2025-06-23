@@ -1507,14 +1507,17 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 	s64 delta_t;
 	struct task_ctx *tctx;
 
-	if (rr_sched)
+	if (rr_sched || !max_avg_nvcsw)
+		return;
+
+	/*
+	 * Update voluntary context switch rate only on task sleep events.
+	 */
+	if (!(deq_flags & SCX_DEQ_SLEEP))
 		return;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
-		return;
-
-	if (!max_avg_nvcsw)
 		return;
 
 	/*
