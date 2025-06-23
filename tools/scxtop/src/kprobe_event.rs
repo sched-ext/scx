@@ -41,7 +41,8 @@ impl KprobeEvent {
 }
 
 fn resolve_kfunc_address(name: &str) -> Option<u64> {
-    let file = File::open("/proc/kallsyms").unwrap();
+    let file = File::open("/proc/kallsyms")
+        .expect("Failed to open /proc/kallsyms. Make sure CONFIG_KALLSYMS is enabled.");
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(std::io::Result::ok) {
         if line.ends_with(&format!(" {}", name)) {
@@ -65,7 +66,9 @@ pub fn available_kprobe_events() -> Result<Vec<String>> {
 
     for line in reader.lines() {
         let line = line?;
-        events.push(line);
+        if let Some(func) = line.split_whitespace().next() {
+            events.push(func.to_string());
+        }
     }
 
     Ok(events)
