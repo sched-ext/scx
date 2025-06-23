@@ -1,14 +1,17 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
- * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2025 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
-#include <scx/bpf_arena_common.bpf.h>
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
+#endif
+
+#ifndef round_up
+#define round_up(a, b) (div_round_up((a), (b)) * (b))
 #endif
 
 typedef struct sdt_desc __arena sdt_desc_t;
@@ -72,7 +75,7 @@ struct sdt_chunk {
  * to drop the lock to allocate pages from the arena in the middle of the
  * top-level alloc. This in turn prevents races and simplifies the code.
  */
-struct sdt_alloc_stack {
+struct scx_alloc_stack {
 	__u64 idx;
 	void __arena	*stack[SDT_TASK_ALLOC_STACK_MAX];
 };
@@ -84,7 +87,7 @@ struct sdt_pool {
 	__u64		idx;
 };
 
-struct sdt_stats {
+struct scx_alloc_stats {
 	__u64		chunk_allocs;
 	__u64		data_allocs;
 	__u64		alloc_ops;
@@ -93,32 +96,14 @@ struct sdt_stats {
 	__u64		arena_pages_used;
 };
 
-struct sdt_allocator {
+struct scx_allocator {
 	struct sdt_pool	pool;
 	sdt_desc_t	*root;
 };
 
-struct sdt_static {
+struct scx_static {
 	size_t max_alloc_bytes;
 	void __arena *memory;
 	size_t off;
 };
 
-#ifdef __BPF__
-
-void __arena *sdt_task_data(struct task_struct *p);
-int sdt_task_init(__u64 data_size);
-void __arena *sdt_task_alloc(struct task_struct *p);
-void sdt_task_free(struct task_struct *p);
-void sdt_subprog_init_arena(void);
-
-int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
-u64 sdt_alloc_internal(struct sdt_allocator *alloc);
-int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
-
-#define sdt_alloc(alloc) ((struct sdt_data __arena *)sdt_alloc_internal((alloc)))
-
-void __arena *sdt_static_alloc(size_t bytes);
-int sdt_static_init(size_t max_alloc_pages);
-
-#endif /* __BPF__ */

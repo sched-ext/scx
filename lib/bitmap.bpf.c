@@ -1,3 +1,4 @@
+#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
 #include <lib/arena.h>
 #include <lib/cpumask.h>

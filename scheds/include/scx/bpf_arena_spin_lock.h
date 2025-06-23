@@ -6,7 +6,7 @@
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 
-#include "bpf_arena_common.h"
+#include "bpf_arena_common.bpf.h"
 #include "bpf_atomic.h"
 
 #define arch_mcs_spin_lock_contended_label(l, label) smp_cond_load_acquire_label(l, VAL, label)

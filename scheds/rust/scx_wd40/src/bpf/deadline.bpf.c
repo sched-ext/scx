@@ -11,7 +11,7 @@
 
 #include <lib/cpumask.h>
 
-#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_common.bpf.h>
 #include <scx/bpf_arena_spin_lock.h>
 
 #include "intf.h"
@@ -21,7 +21,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <scx/bpf_arena_common.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
