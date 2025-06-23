@@ -35,6 +35,7 @@ pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
 pub use kprobe_event::available_kprobe_events;
+pub use kprobe_event::KprobeEvent;
 pub use llc_data::LlcData;
 pub use node_data::NodeData;
 pub use perf_event::available_perf_events;
@@ -61,7 +62,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the 
+This software may be used and distributed according to the terms of the
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
@@ -71,6 +72,8 @@ pub enum AppState {
     Default,
     /// Application is in the PerfEvent list state.
     PerfEvent,
+    /// Application is in the KprobeEvent list state.
+    KprobeEvent,
     /// Application is in the help state.
     Help,
     /// Application is in the Llc state.
@@ -130,18 +133,21 @@ impl FilteredEventState {
 #[derive(Clone, Debug)]
 pub enum ProfilingEvent {
     Perf(PerfEvent),
+    Kprobe(KprobeEvent),
 }
 
 impl ProfilingEvent {
     pub fn event_name(&self) -> &str {
         match self {
             ProfilingEvent::Perf(p) => p.event_name(),
+            ProfilingEvent::Kprobe(k) => &k.event_name,
         }
     }
 
     pub fn value(&mut self, reset: bool) -> anyhow::Result<u64> {
         match self {
             ProfilingEvent::Perf(p) => p.value(reset),
+            ProfilingEvent::Kprobe(k) => k.value(reset),
         }
     }
 }
