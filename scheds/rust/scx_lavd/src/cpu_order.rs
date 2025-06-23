@@ -64,6 +64,7 @@ pub struct ComputeDomain {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PerfCpuOrder {
     pub perf_cap: usize,                 // performance in capacity
     pub perf_util: f32,                  // performance in utilization, [0, 1]
@@ -72,6 +73,7 @@ pub struct PerfCpuOrder {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CpuOrder {
     pub all_cpus_mask: Cpumask,
     pub cpuids: Vec<CpuId>,
@@ -655,7 +657,7 @@ impl<'a> EnergyModelOptimizer<'a> {
 
         // Find the best performance domains for each system utilization target.
         for &util in utils.iter() {
-            let mut best_pdsi: Option<PDSetInfo<'a>> = None;
+            let mut best_pdsi: Option<PDSetInfo<'a>>;
             let mut del_pdsi: Option<PDSetInfo<'a>> = None;
 
             match self.perf_pdsi.borrow().last_key_value() {
