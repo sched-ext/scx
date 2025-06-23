@@ -1434,7 +1434,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = scx_bpf_now(), slice, delta_runtime, max_runtime;
+	u64 now = scx_bpf_now(), slice, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -1453,19 +1453,11 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 		/*
 		 * Update task's execution time (exec_runtime), but never
-		 * account more than a scaled @run_lag of runtime to
-		 * prevent excessive de-prioritization of CPU-intensive
-		 * tasks (which could lead to starvation).
-		 *
-		 * Tasks with a higher priority have a smaller execution
-		 * runtime cap (resulting in an earlier deadline) and
-		 * vice-versa for tasks with a lower priority.
+		 * account more than @run_lag to prevent excessive
+		 * de-prioritization of CPU-intensive tasks (which could
+		 * lead to starvation).
 		 */
-		max_runtime = scale_by_task_normalized_weight_inverse(p, run_lag);
-		if (tctx->exec_runtime + slice < max_runtime)
-			tctx->exec_runtime += slice;
-		else
-			tctx->exec_runtime = max_runtime;
+		tctx->exec_runtime = MIN(tctx->exec_runtime + slice, run_lag);
 
 		/*
 		 * Update task's vruntime.
