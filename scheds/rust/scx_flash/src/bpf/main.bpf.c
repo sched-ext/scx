@@ -492,10 +492,21 @@ static inline u64 scale_by_task_normalized_weight_inverse(const struct task_stru
  */
 static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vtime_min, max_sleep;
+	u64 vtime_min, max_sleep, lag_scale;
 
 	if (rr_sched)
 		return;
+
+	/*
+	 * Evaluate the scaling factor for the maximum time budget that a
+	 * task can accumulate while sleeping proportionally to the
+	 * voluntary context switch rate.
+	 *
+	 * A task that is doing few long sleeps will get a smaller time
+	 * budget, a task that is sleeping frequently will get a bigger
+	 * time budget.
+	 */
+	lag_scale = max_avg_nvcsw ? MAX(log2_u64(tctx->avg_nvcsw), 1) : 1;
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
@@ -508,7 +519,7 @@ static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	 * long sleeps, treating short and long sleeps equally once they
 	 * exceed the threshold.
 	 */
-	max_sleep = scale_by_task_normalized_weight(p, slice_lag) * MAX(tctx->avg_nvcsw, 1);
+	max_sleep = scale_by_task_normalized_weight(p, slice_lag * lag_scale);
 	vtime_min = vtime_now > max_sleep ? vtime_now - max_sleep : 0;
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		p->scx.dsq_vtime = vtime_min;
