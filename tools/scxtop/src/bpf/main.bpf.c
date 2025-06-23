@@ -206,7 +206,7 @@ int generic_kprobe(struct pt_regs *ctx)
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.kprobe.pid = bpf_get_current_pid_tgid() & 0xffffffff;
-	event->event.kprobe.instruction_pointer = PT_REGS_IP(ctx);
+	event->event.kprobe.instruction_pointer = bpf_get_func_ip(ctx);
 
 	bpf_ringbuf_submit(event, 0);
 
