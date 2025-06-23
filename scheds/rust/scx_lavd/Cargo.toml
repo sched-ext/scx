@@ -28,6 +28,7 @@ simplelog = "0.12"
 static_assertions = "1.1.0"
 plain = "0.2.3"
 gpoint = "0.2"
+combinations = "0.1.0"
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }

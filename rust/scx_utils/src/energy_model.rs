@@ -18,12 +18,13 @@ use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
 use glob::glob;
+use num::clamp;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
 pub struct PerfState {
     pub cost: usize,
     pub frequency: usize,
@@ -32,7 +33,7 @@ pub struct PerfState {
     pub power: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
 pub struct PerfDomain {
     /// Monotonically increasing unique id.
     pub id: usize,
@@ -67,13 +68,23 @@ impl EnergyModel {
         Ok(EnergyModel { perf_doms })
     }
 
-    pub fn get_pd(&self, cpu_id: usize) -> Option<&PerfDomain> {
+    pub fn get_pd_by_cpu_id(&self, cpu_id: usize) -> Option<&PerfDomain> {
         for (_, pd) in self.perf_doms.iter() {
             if pd.span.test_cpu(cpu_id) {
                 return Some(&pd);
             }
         }
         None
+    }
+
+    pub fn perf_total(&self) -> usize {
+        let mut total = 0;
+
+        for (_, pd) in self.perf_doms.iter() {
+            total += pd.perf_total();
+        }
+
+        total
     }
 }
 
@@ -95,6 +106,32 @@ impl PerfDomain {
             perf_table,
         })
     }
+
+    /// Lookup a performance state by a given CPU utilization.
+    /// @util is in %, ranging [0, 100].
+    pub fn select_perf_state(&self, util: f32) -> Option<&Arc<PerfState>> {
+        let util = clamp(util, 0.0, 100.0);
+        let (perf_max, _) = self.perf_table.last_key_value().unwrap();
+        let perf_max = *perf_max as f32;
+        let req_perf = (perf_max as f32 * (util / 100.0)) as usize;
+        for (perf, ps) in self.perf_table.iter() {
+            if *perf >= req_perf {
+                return Some(ps);
+            }
+        }
+        None
+    }
+
+    pub fn perf_total(&self) -> usize {
+        let (_, ps) = self.perf_table.last_key_value().unwrap();
+        ps.performance * self.span.weight()
+    }
+}
+
+impl PartialEq for PerfDomain {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.span == other.span && self.perf_table == other.perf_table
+    }
 }
 
 impl PerfState {
@@ -113,6 +150,15 @@ impl PerfState {
             performance,
             power,
         })
+    }
+}
+
+impl PartialEq for PerfState {
+    fn eq(&self, other: &Self) -> bool {
+        self.cost == other.cost
+            && self.frequency == other.frequency
+            && self.performance == other.performance
+            && self.power == other.power
     }
 }
 
