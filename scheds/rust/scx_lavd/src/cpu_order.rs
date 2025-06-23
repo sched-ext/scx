@@ -63,32 +63,22 @@ pub struct ComputeDomain {
     pub neighbor_map: RefCell<BTreeMap<usize, RefCell<Vec<usize>>>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PerfCpuOrder {
+    pub perf_cap: usize,                 // performance in capacity
+    pub perf_util: f32,                  // performance in utilization, [0, 1]
+    pub cpus_perf: RefCell<Vec<usize>>,  // CPU adx order within the performance range by @perf_cap
+    pub cpus_ovflw: RefCell<Vec<usize>>, // CPU adx order beyond @perf_cap
+}
+
 #[derive(Debug)]
 pub struct CpuOrder {
     pub all_cpus_mask: Cpumask,
+    pub cpuids: Vec<CpuId>,
     pub perf_cpu_order: BTreeMap<usize, PerfCpuOrder>,
-    pub cpus_pf: Vec<CpuId>,
-    pub cpus_ps: Vec<CpuId>,
     pub cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain>,
     pub smt_enabled: bool,
     pub has_biglittle: bool,
-}
-
-impl fmt::Display for CpuOrder {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for cpu_id in self.cpus_pf.iter() {
-            write!(f, "\nCPU in performance: {:?}", cpu_id).ok();
-        }
-        for cpu_id in self.cpus_ps.iter() {
-            write!(f, "\nCPU in powersave: {:?}", cpu_id).ok();
-        }
-        for (k, v) in self.cpdom_map.iter() {
-            write!(f, "\nCPDOM: {:?} {:?}", k, v).ok();
-        }
-        write!(f, "SMT: {}", self.smt_enabled).ok();
-        write!(f, "big/LITTLE: {}", self.has_biglittle).ok();
-        Ok(())
-    }
 }
 
 impl CpuOrder {
@@ -107,9 +97,8 @@ impl CpuOrder {
 
         Ok(CpuOrder {
             all_cpus_mask: ctx.topo.span,
+            cpuids: cpus_pf,
             perf_cpu_order,
-            cpus_pf,
-            cpus_ps,
             cpdom_map,
             smt_enabled: ctx.smt_enabled,
             has_biglittle: ctx.has_biglittle,
@@ -408,14 +397,6 @@ struct PDSetInfo<'a> {
     power: usize,
     pdcpu_set: BTreeSet<PDCpu<'a>>,
     pd_id_set: BTreeSet<usize>, // pd:id:0, pd:id:1
-}
-
-#[derive(Debug, Clone)]
-struct PerfCpuOrder {
-    perf_cap: usize,                 // performance in capacity
-    perf_util: f32,                  // performance in utilization, [0, 1]
-    cpus_perf: RefCell<Vec<usize>>,  // CPU adx order within the performance range by @perf_cap
-    cpus_ovflw: RefCell<Vec<usize>>, // CPU adx order beyond @perf_cap
 }
 
 const PD_UNIT: usize = 100_000_000;

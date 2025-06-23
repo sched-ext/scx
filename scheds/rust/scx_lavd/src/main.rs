@@ -390,7 +390,7 @@ impl<'a> Scheduler<'a> {
         debug!("{:#?}", order);
 
         // Initialize CPU capacity
-        for (_, cpu) in order.cpus_pf.iter().enumerate() {
+        for cpu in order.cpuids.iter() {
             skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
             skel.maps.rodata_data.cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
             skel.maps.rodata_data.cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
@@ -400,10 +400,15 @@ impl<'a> Scheduler<'a> {
         // topologically sorted by a cpu, node, llc, max_freq, and core order.
         // Otherwise, follow the specified CPU preference order.
         let (cpu_pf_order, cpu_ps_order) = if opts.cpu_pref_order.is_empty() {
-            (
-                order.cpus_pf.iter().map(|cpu| cpu.cpu_adx).collect(),
-                order.cpus_ps.iter().map(|cpu| cpu.cpu_adx).collect(),
-            )
+            let (_, pco) = order.perf_cpu_order.first_key_value().unwrap();
+            let mut cpus_ps = pco.cpus_perf.borrow().clone();
+            cpus_ps.extend(pco.cpus_ovflw.borrow().iter().cloned());
+
+            let (_, pco) = order.perf_cpu_order.last_key_value().unwrap();
+            let mut cpus_pf = pco.cpus_perf.borrow().clone();
+            cpus_pf.extend(pco.cpus_ovflw.borrow().iter().cloned());
+
+            (cpus_pf, cpus_ps)
         } else {
             let cpu_list = read_cpulist(&opts.cpu_pref_order).unwrap();
             let pref_mask = Cpumask::from_cpulist(&opts.cpu_pref_order).unwrap();
