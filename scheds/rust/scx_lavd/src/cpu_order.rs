@@ -66,6 +66,7 @@ pub struct ComputeDomain {
 #[derive(Debug)]
 pub struct CpuOrder {
     pub all_cpus_mask: Cpumask,
+    pub perf_cpu_order: BTreeMap<usize, PerfCpuOrder>,
     pub cpus_pf: Vec<CpuId>,
     pub cpus_ps: Vec<CpuId>,
     pub cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain>,
@@ -97,14 +98,16 @@ impl CpuOrder {
         let cpus_pf = ctx.build_topo_order(false).unwrap();
         let cpus_ps = ctx.build_topo_order(true).unwrap();
         let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf).unwrap();
-
-        if ctx.em.is_ok() {
+        let perf_cpu_order = if ctx.em.is_ok() {
             let em = ctx.em.unwrap();
-            EnergyModelOptimizer::get_perf_cpu_order_table(&ctx.topo, &em, &cpus_pf);
-        }
+            EnergyModelOptimizer::get_perf_cpu_order_table(&em, &cpus_pf)
+        } else {
+            EnergyModelOptimizer::get_fake_perf_cpu_order_table(&cpus_pf, &cpus_ps)
+        };
 
         Ok(CpuOrder {
             all_cpus_mask: ctx.topo.span,
+            perf_cpu_order,
             cpus_pf,
             cpus_ps,
             cpdom_map,
@@ -463,15 +466,51 @@ impl<'a> EnergyModelOptimizer<'a> {
     }
 
     fn get_perf_cpu_order_table(
-        topo: &'a Topology,
         em: &'a EnergyModel,
         cpus_pf: &'a Vec<CpuId>,
     ) -> BTreeMap<usize, PerfCpuOrder> {
         let emo = EnergyModelOptimizer::new(em, &cpus_pf);
         emo.gen_perf_cpu_order_table();
-        let ret = emo.perf_cpu_order.borrow().clone();
+        let perf_cpu_order = emo.perf_cpu_order.borrow().clone();
 
-        ret
+        perf_cpu_order
+    }
+
+    fn get_fake_perf_cpu_order_table(
+        cpus_pf: &'a Vec<CpuId>,
+        cpus_ps: &'a Vec<CpuId>,
+    ) -> BTreeMap<usize, PerfCpuOrder> {
+        let tot_perf: usize = cpus_pf.iter().map(|cpuid| cpuid.cpu_cap).sum();
+
+        let pco_pf = Self::fake_pco(tot_perf, cpus_pf, false);
+        let pco_ps = Self::fake_pco(tot_perf, cpus_ps, true);
+
+        let mut perf_cpu_order: BTreeMap<usize, PerfCpuOrder> = BTreeMap::new();
+        perf_cpu_order.insert(pco_pf.perf_cap, pco_pf);
+        perf_cpu_order.insert(pco_ps.perf_cap, pco_ps);
+
+        perf_cpu_order
+    }
+
+    fn fake_pco(tot_perf: usize, cpuids: &'a Vec<CpuId>, powersave: bool) -> PerfCpuOrder {
+        let perf_cap;
+
+        if powersave {
+            perf_cap = cpuids[0].cpu_cap;
+        } else {
+            perf_cap = tot_perf;
+        }
+
+        let perf_util: f32 = (perf_cap as f32) / (tot_perf as f32);
+        let cpus: Vec<usize> = cpuids.iter().map(|cpuid| cpuid.cpu_adx).collect();
+        let cpus_perf: Vec<usize> = cpus[..1].iter().map(|&cpuid| cpuid).collect();
+        let cpus_ovflw: Vec<usize> = cpus[1..].iter().map(|&cpuid| cpuid).collect();
+        PerfCpuOrder {
+            perf_cap,
+            perf_util,
+            cpus_perf: cpus_perf.clone().into(),
+            cpus_ovflw: cpus_ovflw.clone().into(),
+        }
     }
 
     /// Generate the performance versus CPU preference order table based on
