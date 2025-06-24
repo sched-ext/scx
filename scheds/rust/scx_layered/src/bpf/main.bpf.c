@@ -3345,7 +3345,7 @@ int rematch_set(u64 dsq_id) {
 	bpf_rcu_read_lock();
 	
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-		if (!(taskc = lookup_task_ctx(p)))
+		if (!(taskc = lookup_task_ctx_may_fail(p)))
 			continue;
 		taskc->refresh_layer = true;
 	}
