@@ -5,8 +5,8 @@
 mod bpf_skel;
 mod stats;
 
-use cached::proc_macro::once;
 use cached::proc_macro::cached;
+use cached::proc_macro::once;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -633,6 +633,10 @@ struct Opts {
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
+
+    /// Enable rematch. Rematch all tasks every 15 seconds.
+    #[clap(long, default_value = "false")]
+    enable_rematch: bool,
 
     /// Enable match debug
     /// This stores a mapping of task tid
@@ -2105,6 +2109,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+        skel.maps.rodata_data.enable_rematch = !opts.enable_rematch;
         skel.maps.rodata_data.enable_match_debug = opts.enable_match_debug;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 

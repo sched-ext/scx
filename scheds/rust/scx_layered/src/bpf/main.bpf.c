@@ -60,6 +60,7 @@ volatile u64 layer_refresh_seq_avgruntime;
 const volatile bool enable_antistall = true;
 const volatile bool enable_match_debug = false;
 const volatile bool enable_gpu_support = false;
+const volatile bool enable_rematch = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
@@ -3334,6 +3335,46 @@ static bool antistall_scan(void)
 	return true;
 }
 
+int rematch_set(u64 dsq_id) {
+	struct task_struct *p;
+	struct task_ctx *taskc;
+
+	if (!dsq_id)
+		return 0;
+
+	bpf_rcu_read_lock();
+	
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		if (!(taskc = lookup_task_ctx(p)))
+			continue;
+		taskc->refresh_layer = true;
+	}
+	
+	bpf_rcu_read_unlock();
+	return 0;
+	
+}
+
+static bool rematch_scan(void)
+{
+	s32 llc;
+	u64 layer_id;
+
+	if (!enable_rematch)
+		return true;
+
+	bpf_for(layer_id, 0, nr_layers)
+		bpf_for(llc, 0, nr_llcs)
+			rematch_set(layer_dsq_id(layer_id, llc));
+
+	bpf_for(llc, 0, nr_llcs) {
+		rematch_set(hi_fb_dsq_id(llc));
+		rematch_set(lo_fb_dsq_id(llc));
+	}
+
+	return true;
+}
+
 bool run_timer_cb(int key)
 {
 	switch (key) {
@@ -3341,6 +3382,8 @@ bool run_timer_cb(int key)
 		return layered_monitor();
 	case ANTISTALL_TIMER:
 		return antistall_scan();
+	case REMATCH_TIMER:
+		return rematch_scan();
 	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
@@ -3351,6 +3394,7 @@ bool run_timer_cb(int key)
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+	{10LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
