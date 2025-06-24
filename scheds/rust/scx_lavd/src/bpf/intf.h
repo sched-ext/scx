@@ -53,10 +53,12 @@ enum {
 	LAVD_CPDOM_MAX_NR		= 16, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 3,  /* maximum distance from one compute domain to another */
 
-	LAVD_STATUS_STR_LEN		= 4, /* {LR: Latency-critical, Regular}
-						{HI: performance-Hungry, performance-Insensitive}
-						{BT: Big, liTtle}
-						{EG: Eligible, Greedy} */
+	LAVD_PCO_STATE_MAX		= 11, /* maximum number of performance vs. CPU order states */
+
+	LAVD_STATUS_STR_LEN		= 4,  /* {LR: Latency-critical, Regular}
+						 {HI: performance-Hungry, performance-Insensitive}
+						 {BT: Big, liTtle}
+						 {EG: Eligible, Greedy} */
 };
 
 /*

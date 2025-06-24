@@ -9,32 +9,78 @@
  */
 
 /*
- * CPU topology
+ * CPU order
  */
 static u64		LAVD_AP_LOW_UTIL;
+
+/* CPU preference order for performance and balanced mode */
+const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX];
+
+/* CPU preference order for powersave mode */
+const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX];
+
+
+/*
+ * System-wide properties of CPUs
+ */
 static bool		have_turbo_core;
 static bool		have_little_core;
 
-const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
-const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
-const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
-const volatile u8	cpu_big[LAVD_CPU_ID_MAX]; /* Is a CPU a big core? */
-const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX]; /* Is a CPU a turbo core? */
 
-static int		nr_cpdoms; /* number of compute domains */
-struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
-private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* online CPU mask for each compute domain */
+/*
+ * CPU properties
+ */
+/* CPU capacity based on 1024 */
+const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
+
+/* Is a CPU a big core? */
+const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
+
+/* Is a CPU a turbo core? */
+const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
 
 
 /*
- * Big core's compute ratio among currently active cores scaled by 1024.
+ * Compute domain properties
  */
+/* number of compute domains */
+static int		nr_cpdoms;
+
+/* contexts for compute domains */
+struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+
+/* online CPU mask for each compute domain */
+private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
+
+
+/*
+ * Performance vs. CPU order (PCO) table
+ */
+/* Do not use energy model in making CPU preference order decisions. */
+const volatile u8	no_use_em;
+
+/* The numbr of PCO states populated */
+const volatile u8	nr_pco_states;
+
+/* The upper bounds of performance capacity for each PCO state. */
+const volatile u32	pco_bounds[LAVD_PCO_STATE_MAX];
+
+/* The number of CPUs in a primary domain for each PCO state. */
+const volatile u16	pco_nr_primary[LAVD_PCO_STATE_MAX];
+
+/* The PCO table */
+const volatile u16	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];
+
+
+/*
+ * Big core's compute ratio
+ */
+/* Big core's compute ratio among currently active cores scaled by 1024. */
 static u32		cur_big_core_scale;
 
-/*
- * Big core's compute ratio when all cores are active scaled by 1024.
- */
+/* Big core's compute ratio when all cores are active scaled by 1024. */
 static u32		default_big_core_scale;
+
 
 /*
  * Statistics
