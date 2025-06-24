@@ -6,6 +6,8 @@ edition = "2021"
 description = "A dynamic affinity scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
+publish = false
+
 [dependencies]
 anyhow = "1.0.65"
 bitvec = "1.0"
