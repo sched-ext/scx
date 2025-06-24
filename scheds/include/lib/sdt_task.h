@@ -105,9 +105,10 @@ struct scx_buddy {
 };
 
 int scx_buddy_init(struct scx_buddy *buddy, size_t size);
-void scx_buddy_free(struct scx_buddy *buddy, size_t free);
+void scx_buddy_free_internal(struct scx_buddy *buddy, u64 free);
+#define scx_buddy_free(buddy, ptr) do { scx_buddy_free_internal((buddy), (u64)(ptr)); } while (0)
 u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size);
-#define scx_buddy_alloc(alloc) ((void __arena *)scx_buddy_alloc_internal((buddy, size)))
+#define scx_buddy_alloc(alloc, size) ((void __arena *)scx_buddy_alloc_internal((alloc), (size)))
 
 static inline
 int scx_ffs(__u64 word)
