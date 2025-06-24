@@ -6,6 +6,7 @@ mod bpf_skel;
 mod stats;
 
 use cached::proc_macro::once;
+use cached::proc_macro::cached;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -1305,10 +1306,11 @@ fn get_child_pids(pid: i32) -> Result<HashSet<i32>, anyhow::Error> {
             }
         }
     }
+    out.insert(pid);
     Ok(out)
 }
 
-#[once(result = true, time = 60)]
+#[once(result = true, time = 3)]
 fn write_gpu_pids_to_bpf(
     gpu_dev_node_map: &HashMap<i32, u32>,
     gpu_dev_pid_map: &HashMap<i32, HashSet<i32>>,
@@ -1339,11 +1341,17 @@ fn write_gpu_pids_to_bpf(
     Ok(())
 }
 
-#[once(result = true, time = 5)]
-fn find_one_cpu(affinity: &[u64]) -> Result<u32, anyhow::Error> {
-    for (i, &bits) in affinity.iter().enumerate() {
-        if bits != 0 {
-            return Ok((i as u32) * 64 + bits.trailing_zeros());
+#[cached(result = true, time = 5)]
+fn find_one_cpu(affinity: Vec<u64>) -> Result<u32, anyhow::Error> {
+    let mut cpu: u32 = 0;
+    for &mask in affinity.iter() {
+        let mut inner_offset: u64 = 1;
+        for _ in 0..64 {
+            if (mask & inner_offset) != 0 {
+                return Ok(cpu);
+            }
+            inner_offset = inner_offset << 1;
+            cpu += 1;
         }
     }
     anyhow::bail!("unable to get CPU from NVML bitmask");
@@ -1365,7 +1373,7 @@ pub fn gpu_dev_node_map(
     for idx in 0..device_count {
         let dev = nvml.device_by_index(idx)?;
         let cpu = dev.cpu_affinity(16)?;
-        let ideal_cpu = find_one_cpu(&cpu)?;
+        let ideal_cpu = find_one_cpu(cpu)?;
         let ideal_cpu_topo = topo.all_cpus.get(&(ideal_cpu as usize));
         if let Some(ideal_cpu_topo) = ideal_cpu_topo {
             gpu_dev_node_map.insert(idx as i32, ideal_cpu_topo.node_id as u32);
@@ -1373,12 +1381,11 @@ pub fn gpu_dev_node_map(
             error!("CPU {} not in topo for gpu numa map", ideal_cpu);
         }
     }
-
     Ok(gpu_dev_node_map)
 }
 
 // XXX maybe make this configurable
-#[once(result = true, time = 20)]
+#[once(result = true, time = 4)]
 pub fn get_gpu_pids(opts: &Opts) -> Result<HashMap<i32, HashSet<i32>>, anyhow::Error> {
     if !opts.enable_gpu_support {
         return Ok(HashMap::new());
