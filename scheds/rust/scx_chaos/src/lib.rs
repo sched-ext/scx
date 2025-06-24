@@ -529,7 +529,7 @@ pub struct CpuFreqArgs {
     #[clap(long, requires = "cpufreq_frequency")]
     pub cpufreq_min: Option<u32>,
 
-    /// Minimum CPU frequency for scaling.
+    /// Maximum CPU frequency for scaling.
     #[clap(long, requires = "cpufreq_min")]
     pub cpufreq_max: Option<u32>,
 }
