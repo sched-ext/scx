@@ -16,6 +16,9 @@ u64 scx_minheap_alloc_internal(size_t capacity)
 	size_t alloc_size = sizeof(scx_minheap_t);
 	scx_minheap_t *heap;
 
+	if (capacity > SCX_MINHEAP_MAX_CAPACITY)
+		return (u64)NULL;
+
 	heap = scx_static_alloc(alloc_size, 1);
 	if (!heap)
 		return (u64)NULL;
