@@ -40,7 +40,7 @@ use anyhow::{bail, Result};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
-use num_format::{SystemLocale, ToFormattedString};
+use num_format::{Locale, ToFormattedString};
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
@@ -76,7 +76,7 @@ pub struct App<'a> {
     config: Config,
     hw_pressure: bool,
     localize: bool,
-    locale: SystemLocale,
+    locale: Locale,
     stats_client: Option<Arc<TokioMutex<StatsClient>>>,
     sched_stats_raw: String,
 
@@ -236,7 +236,7 @@ impl<'a> App<'a> {
             config,
             localize: true,
             hw_pressure,
-            locale: SystemLocale::default()?,
+            locale: Locale::en,
             stats_client,
             sched_stats_raw: "".to_string(),
             scheduler,
