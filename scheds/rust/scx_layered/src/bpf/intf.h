@@ -260,6 +260,7 @@ enum layer_match_kind {
 	MATCH_AVG_RUNTIME,
 	MATCH_CGROUP_SUFFIX,
 	MATCH_CGROUP_CONTAINS,
+	MATCH_NV_NUMA_BIND,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -285,6 +286,7 @@ struct layer_match {
 	bool		exclude;
 	u64		min_avg_runtime_us;
 	u64		max_avg_runtime_us;
+	u64     node;
 };
 
 struct layer_match_ands {

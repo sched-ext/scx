@@ -228,6 +228,14 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
 	__type(value, u32);
+	__uint(max_entries, MAX_TASKS);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} nv_numa_bind SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u32);
+	__type(value, u32);
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tgid SEC(".maps");
@@ -2322,6 +2330,21 @@ static __noinline bool match_one(struct layer_match *match,
 				pid_present = true;
 
 			return pid_present == match->used_gpu_pid;
+	}
+	case MATCH_NV_NUMA_BIND: {
+			// when using this, layer *are* partitioned on numa nodes.
+			// this is not to be used with NodeSpread*
+			// this is where the tying of tasks to where they need to run
+			// is done. this will work poorly if numa binding is done via
+			// affinities and do not those specified via nvml.
+			u32 tgid;
+
+			tgid = p->tgid;
+
+			if (bpf_map_lookup_elem(&nv_numa_bind, &tgid))
+				return true;
+
+			return false;
 	}
 	case MATCH_AVG_RUNTIME: {
 			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);

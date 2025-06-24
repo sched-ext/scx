@@ -5,8 +5,10 @@
 mod bpf_skel;
 mod stats;
 
+use cached::proc_macro::once;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
@@ -33,10 +35,14 @@ use lazy_static::lazy_static;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use log::{debug, error};
+use nvml_wrapper::error::NvmlError;
+use nvml_wrapper::Nvml;
+use once_cell::sync::OnceCell;
+use procfs::ProcReader;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -87,6 +93,13 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
 const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
 
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
+
+static NVML: OnceCell<Nvml> = OnceCell::new();
+
+#[inline]
+fn nvml() -> Result<&'static Nvml, NvmlError> {
+    NVML.get_or_try_init(Nvml::init)
+}
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
@@ -1268,6 +1281,127 @@ struct Scheduler<'a> {
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
+    gpu_dev_node_id: HashMap<i32, u32>,
+    opts: &'a Opts,
+}
+
+fn get_child_pids(pid: i32) -> Result<HashSet<i32>, anyhow::Error> {
+    let mut reader = ProcReader::new();
+    let procs = reader.read_all_pids()?;
+    let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
+    for (pid, pidinfo) in procs {
+        if let Some(ppid) = pidinfo.stat.ppid {
+            map.entry(ppid).or_default().push(pid);
+        }
+    }
+    let mut out = HashSet::new();
+    let mut stack = vec![pid];
+    while let Some(p) = stack.pop() {
+        if let Some(children) = map.get(&p) {
+            for &c in children {
+                if out.insert(c) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[once(result = true, time = 60)]
+fn write_gpu_pids_to_bpf(
+    gpu_dev_node_map: &HashMap<i32, u32>,
+    gpu_dev_pid_map: &HashMap<i32, HashSet<i32>>,
+    skel: &mut BpfSkel,
+) -> Result<(), anyhow::Error> {
+    let mut pid_to_node = HashMap::new();
+    for (dev, pids) in gpu_dev_pid_map {
+        let node = gpu_dev_node_map
+            .get(&dev)
+            .expect("node not found in gpu_dev_pid_map");
+        for pid in pids {
+            let children = get_child_pids(pid.clone())?;
+            for child in children {
+                pid_to_node.insert(child, node);
+            }
+        }
+    }
+
+    for (pid, node) in pid_to_node {
+        let gpu_pid_map = &skel.maps.nv_numa_bind;
+        gpu_pid_map.update(
+            &(pid as u32).to_ne_bytes(),
+            &node.to_ne_bytes(),
+            libbpf_rs::MapFlags::ANY,
+        )?;
+    }
+
+    Ok(())
+}
+
+#[once(result = true, time = 5)]
+fn find_one_cpu(affinity: &[u64]) -> Result<u32, anyhow::Error> {
+    for (i, &bits) in affinity.iter().enumerate() {
+        if bits != 0 {
+            return Ok((i as u32) * 64 + bits.trailing_zeros());
+        }
+    }
+    anyhow::bail!("unable to get CPU from NVML bitmask");
+}
+
+// XXX maybe make this configurable
+#[once(result = true, time = 60)]
+pub fn gpu_dev_node_map(
+    topo: Arc<Topology>,
+    opts: &Opts,
+) -> Result<HashMap<i32, u32>, anyhow::Error> {
+    if !opts.enable_gpu_support {
+        return Ok(HashMap::new());
+    }
+    let nvml = nvml()?;
+    let device_count = nvml.device_count()?;
+    let mut gpu_dev_node_map = HashMap::new();
+
+    for idx in 0..device_count {
+        let dev = nvml.device_by_index(idx)?;
+        let cpu = dev.cpu_affinity(16)?;
+        let ideal_cpu = find_one_cpu(&cpu)?;
+        let ideal_cpu_topo = topo.all_cpus.get(&(ideal_cpu as usize));
+        if let Some(ideal_cpu_topo) = ideal_cpu_topo {
+            gpu_dev_node_map.insert(idx as i32, ideal_cpu_topo.node_id as u32);
+        } else {
+            error!("CPU {} not in topo for gpu numa map", ideal_cpu);
+        }
+    }
+
+    Ok(gpu_dev_node_map)
+}
+
+// XXX maybe make this configurable
+#[once(result = true, time = 20)]
+pub fn get_gpu_pids(opts: &Opts) -> Result<HashMap<i32, HashSet<i32>>, anyhow::Error> {
+    if !opts.enable_gpu_support {
+        return Ok(HashMap::new());
+    }
+
+    let mut map: HashMap<i32, HashSet<i32>> = HashMap::new();
+    let nvml = nvml()?;
+    for i in 0..nvml.device_count()? {
+        let device = nvml.device_by_index(i)?;
+        let mut pids = HashSet::new();
+
+        for proc in device
+            .running_compute_processes()?
+            .into_iter()
+            .chain(device.running_graphics_processes()?.into_iter())
+        {
+            pids.insert(proc.pid as i32);
+        }
+
+        map.insert(i as i32, pids);
+    }
+
+    Ok(map)
 }
 
 impl<'a> Scheduler<'a> {
@@ -1384,6 +1518,9 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
                             mt.min_avg_runtime_us = *min;
                             mt.max_avg_runtime_us = *max;
+                        }
+                        LayerMatch::NvNumaBind(node) => {
+                            mt.node = *node;
                         }
                     }
                 }
@@ -2120,9 +2257,11 @@ impl<'a> Scheduler<'a> {
             proc_reader,
             skel,
 
-            topo,
+            topo: topo.clone(),
             netdevs,
             stats_server,
+            gpu_dev_node_id: gpu_dev_node_map(topo, opts)?,
+            opts,
         };
 
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
@@ -2699,6 +2838,11 @@ impl<'a> Scheduler<'a> {
         )?;
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
+        write_gpu_pids_to_bpf(
+            &self.gpu_dev_node_id,
+            &get_gpu_pids(self.opts)?,
+            &mut self.skel,
+        )?;
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
@@ -2943,7 +3087,7 @@ fn find_cpumask(cgroup: &str) -> Cpumask {
     Cpumask::from_cpulist(&description).unwrap()
 }
 
-fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
+fn expand_template(rule: &LayerMatch, topology: &Topology) -> Result<Vec<(LayerMatch, Cpumask)>> {
     match rule {
         LayerMatch::CgroupSuffix(suffix) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
             .into_iter()
@@ -2960,6 +3104,13 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
                 )
             })
             .collect()),
+        LayerMatch::NvNumaBind(_node) => {
+            let mut result = Vec::new();
+            for (id, _) in topology.nodes.clone() {
+                result.push((LayerMatch::NvNumaBind(id as u64), Cpumask::new()));
+            }
+            Ok(result)
+        }
         _ => panic!("Unimplemented template enum {:?}", rule),
     }
 }
@@ -3051,6 +3202,7 @@ fn main() -> Result<()> {
         true => EXAMPLE_CONFIG.clone(),
         false => LayerConfig { specs: vec![] },
     };
+    let topology = Topology::new()?;
 
     for (idx, input) in opts.specs.iter().enumerate() {
         let specs = LayerSpec::parse(input)
@@ -3059,7 +3211,7 @@ fn main() -> Result<()> {
         for spec in specs {
             match spec.template {
                 Some(ref rule) => {
-                    let matches = expand_template(&rule)?;
+                    let matches = expand_template(&rule, &topology)?;
                     // in the absence of matching cgroups, have template layers
                     // behave as non-template layers do.
                     if matches.is_empty() {
@@ -3068,15 +3220,20 @@ fn main() -> Result<()> {
                         for (mt, mask) in matches {
                             let mut genspec = spec.clone();
 
-                            genspec.cpuset = Some(mask);
-
                             // Push the new "and" rule into each "or" term.
                             for orterm in &mut genspec.matches {
                                 orterm.push(mt.clone());
                             }
 
                             match &mt {
-                                LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
+                                LayerMatch::CgroupSuffix(cgroup) => {
+                                    genspec.cpuset = Some(mask);
+                                    genspec.name.push_str(cgroup);
+                                }
+                                LayerMatch::NvNumaBind(node) => {
+                                    genspec.name.push_str(&format!("node{}", node));
+                                    genspec.nodes_mut().push(usize::try_from(node.clone())?);
+                                }
                                 _ => bail!("Template match has unexpected type"),
                             }
 
