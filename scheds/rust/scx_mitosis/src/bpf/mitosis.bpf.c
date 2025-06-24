@@ -602,23 +602,14 @@ out:
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
-	u32 prev_cell, cell;
+	u32 cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
-	prev_cell = READ_ONCE(cctx->prev_cell);
 	cell = READ_ONCE(cctx->cell);
 
 	if (scx_bpf_dsq_move_to_local(HI_FALLBACK_DSQ))
-		return;
-
-	/*
-	 * cpu <=> cell assignment can change dynamically. In order to deal with
-	 * scheduling racing with assignment change, we schedule from the previous
-	 * cell first to make sure it drains.
-	 */
-	if (prev_cell != cell && scx_bpf_dsq_move_to_local(prev_cell))
 		return;
 
 	if (scx_bpf_dsq_move_to_local(cell))
@@ -691,7 +682,6 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 						      root_bpf_cpumask);
 				if (!(cctx = lookup_cpu_ctx(cpu_idx)))
 					goto out;
-				WRITE_ONCE(cctx->prev_cell, cell_idx);
 				WRITE_ONCE(cctx->cell, cell_idx);
 			}
 		}
