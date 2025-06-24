@@ -3,6 +3,8 @@
 
 #include <lib/cpumask.h>
 
+#include "selftest.h"
+
 static
 int scx_selftest_bitmap_clear()
 {
@@ -44,15 +46,6 @@ int scx_selftest_bitmap_intersects()
 {
 	return -EOPNOTSUPP;
 }
-
-#define SCX_SELFTEST(func)		\
-	do {				\
-		int ret = func();	\
-		if (ret) {		\
-			bpf_printk("SELFTEST %s FAIL: %d" #func, ret);	\
-			return ret;	\
-		}			\
-	} while (0)
 
 #define SCX_BITMAP_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_bitmap_ ## suffix)
 

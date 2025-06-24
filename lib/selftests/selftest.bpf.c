@@ -11,9 +11,13 @@ int arena_selftest(void)
 {
 	int ret;
 
-	ret = scx_selftest_bitmap();
-	if (ret)
+	ret = scx_selftest_minheap();
+	if (ret) {
+		bpf_printk("scx_selftest_minheap failed with %d", ret);
 		return ret;
+	}
+
+	bpf_printk("Selftests successful.");
 
 	return 0;
 }
