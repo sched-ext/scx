@@ -52,6 +52,7 @@ use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
+use scx_utils::EnergyModel;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
@@ -124,9 +125,14 @@ struct Opts {
     /// List of CPUs in preferred order (e.g., "0-3,7,6,5,4"). The scheduler
     /// uses the CPU preference mode only when the core compaction is enabled
     /// (i.e., balanced or powersave mode is specified as an option or chosen
-    /// in the autopilot or autopower mode).
+    /// in the autopilot or autopower mode). When "--cpu-pref-order" is given,
+    /// it implies "--no-use-em".
     #[clap(long = "cpu-pref-order", default_value = "")]
     cpu_pref_order: String,
+
+    /// Do not use the energy model in making CPU preference order decisions.
+    #[clap(long = "no-use-em", action = clap::ArgAction::SetTrue)]
+    no_use_em: bool,
 
     /// Do not boost futex holders.
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
@@ -226,13 +232,13 @@ impl Opts {
         if !self.autopilot {
             self.autopilot = self.can_autopilot();
         }
+
         if self.autopilot {
             if !self.can_autopilot() {
                 info!("Autopilot mode cannot be used with conflicting options.");
                 return None;
             }
             info!("Autopilot mode is enabled.");
-            return Some(self);
         }
 
         if self.autopower {
@@ -241,7 +247,6 @@ impl Opts {
                 return None;
             }
             info!("Autopower mode is enabled.");
-            return Some(self);
         }
 
         if self.performance {
@@ -251,7 +256,6 @@ impl Opts {
             }
             info!("Performance mode is enabled.");
             self.no_core_compaction = true;
-            return Some(self);
         }
 
         if self.powersave {
@@ -261,7 +265,6 @@ impl Opts {
             }
             info!("Powersave mode is enabled.");
             self.no_core_compaction = false;
-            return Some(self);
         }
 
         if self.balanced {
@@ -271,7 +274,11 @@ impl Opts {
             }
             info!("Balanced mode is enabled.");
             self.no_core_compaction = false;
-            return Some(self);
+        }
+
+        if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
+            self.no_use_em = true;
+            info!("Energy model won't be used for CPU preference order.");
         }
 
         Some(self)
@@ -473,6 +480,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
         skel.maps.rodata_data.slice_min_ns = opts.slice_min_us * 1000;
         skel.maps.rodata_data.preempt_shift = opts.preempt_shift;
+        skel.maps.rodata_data.no_use_em = opts.no_use_em as u8;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
             | *compat::SCX_OPS_ENQ_EXITING

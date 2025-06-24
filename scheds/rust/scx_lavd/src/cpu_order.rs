@@ -81,6 +81,7 @@ pub struct CpuOrder {
     pub cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain>,
     pub smt_enabled: bool,
     pub has_biglittle: bool,
+    pub has_energy_model: bool,
 }
 
 impl CpuOrder {
@@ -104,6 +105,7 @@ impl CpuOrder {
             cpdom_map,
             smt_enabled: ctx.smt_enabled,
             has_biglittle: ctx.has_biglittle,
+            has_energy_model: ctx.has_energy_model,
         })
     }
 }
@@ -114,6 +116,7 @@ struct CpuOrderCtx {
     em: Result<EnergyModel>,
     smt_enabled: bool,
     has_biglittle: bool,
+    has_energy_model: bool,
 }
 
 impl CpuOrderCtx {
@@ -122,6 +125,7 @@ impl CpuOrderCtx {
         let em = EnergyModel::new();
         let smt_enabled = topo.smt_enabled;
         let has_biglittle = topo.has_little_cores();
+        let has_energy_model = em.is_ok();
 
         debug!("{:#?}", topo);
         debug!("{:#?}", em);
@@ -131,6 +135,7 @@ impl CpuOrderCtx {
             em,
             smt_enabled,
             has_biglittle,
+            has_energy_model,
         }
     }
 
