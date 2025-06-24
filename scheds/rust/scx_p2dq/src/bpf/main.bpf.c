@@ -67,6 +67,7 @@ const volatile bool autoslice = true;
 const volatile bool deadline_scheduling = true;
 const volatile bool dispatch_pick2_disable = false;
 const volatile bool eager_load_balance = true;
+const volatile bool interactive_dsq = false;
 const volatile bool interactive_sticky = false;
 const volatile bool interactive_fifo = false;
 const volatile bool keep_running_enabled = true;
@@ -728,10 +729,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (deadline_scheduling)
 			set_deadline_slice(taskc, llcx);
 
-		if (can_migrate(taskc))
+		if (interactive_dsq && is_interactive(taskc) && !can_migrate(taskc)) {
+			taskc->dsq_id = llcx->intr_dsq;
+		} else if (can_migrate(taskc)) {
 			taskc->dsq_id = llcx->mig_dsq;
-		else
+		} else {
 			taskc->dsq_id = llcx->dsq;
+		}
 
 		if (interactive_fifo && taskc->dsq_index == 0)
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
@@ -758,10 +762,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	if (can_migrate(taskc))
+	if (interactive_dsq && is_interactive(taskc) && !can_migrate(taskc)) {
+		taskc->dsq_id = llcx->intr_dsq;
+	} else if (can_migrate(taskc)) {
 		taskc->dsq_id = llcx->mig_dsq;
-	else
+	} else {
 		taskc->dsq_id = llcx->dsq;
+	}
 
 	if (deadline_scheduling)
 		set_deadline_slice(taskc, llcx);
@@ -1016,7 +1023,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	struct task_struct *p;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
-	u64 cur_dsq_id, dsq_id = 0;
+	u64 dsq_id = 0;
 
 	if (!(cpuc = lookup_cpu_ctx(cpu))) {
 		scx_bpf_error("can't happen");
@@ -1029,6 +1036,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	}
 
 	bool has_affn_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0;
+	bool has_intr_queued = scx_bpf_dsq_nr_queued(cpuc->intr_dsq) > 0;
 	u64 min_vtime = 0;
 
 	// First search affinitized DSQ
@@ -1042,13 +1050,23 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		}
 	}
 
-	// LLC DSQ
-	cur_dsq_id = cpuc->llc_dsq;
-	if (scx_bpf_dsq_nr_queued(cur_dsq_id) > 0) {
-		bpf_for_each(scx_dsq, p, cur_dsq_id, 0) {
+	// Next search interactive
+	if (interactive_dsq && has_intr_queued) {
+		bpf_for_each(scx_dsq, p, cpuc->intr_dsq, 0) {
 			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
 				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cur_dsq_id;
+				dsq_id = cpuc->intr_dsq;
+			}
+			break;
+		}
+	}
+
+	// LLC DSQ
+	if (scx_bpf_dsq_nr_queued(cpuc->llc_dsq) > 0) {
+		bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
+			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cpuc->llc_dsq;
 			}
 			break;
 		}
@@ -1073,6 +1091,11 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		return;
 
 	if (has_affn_queued && dsq_id != cpuc->affn_dsq &&
+	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
+		return;
+
+	if (interactive_dsq && has_intr_queued &&
+	    dsq_id != cpuc->intr_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
@@ -1188,6 +1211,13 @@ static int init_llc(u32 llc_index)
 	ret = scx_bpf_create_dsq(llcx->dsq, llcx->node_id);
 	if (ret < 0) {
 		scx_bpf_error("failed to create DSQ %llu", llcx->dsq);
+		return -EINVAL;
+	}
+
+	llcx->intr_dsq = llcx->id | P2DQ_INTR_DSQ;
+	ret = scx_bpf_create_dsq(llcx->intr_dsq, llcx->node_id);
+	if (ret < 0) {
+		scx_bpf_error("failed to create DSQ %llu", llcx->intr_dsq);
 		return -EINVAL;
 	}
 
@@ -1608,6 +1638,7 @@ static __always_inline s32 p2dq_init_impl()
 		}
 		cpuc->affn_dsq = dsq_id;
 		cpuc->mig_dsq = llcx->mig_dsq;
+		cpuc->intr_dsq = llcx->intr_dsq;
 	}
 
 	min_slice_ns = 1000 * min_slice_us;
