@@ -7,18 +7,20 @@ pub use bpf_skel::*;
 
 use std::mem::MaybeUninit;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 
 use std::ffi::c_ulong;
 
-use scx_utils::NR_CPU_IDS;
 use scx_utils::init_libbpf_logging;
+use scx_utils::NR_CPU_IDS;
 
-use libbpf_rs::PrintLevel;
+use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
+
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
@@ -46,7 +48,7 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     let output = skel.progs.arena_init.test_run(input)?;
     if output.return_value != 0 {
         bail!(
-            "Could not initialize arenas, p2dq_setup returned {}",
+            "Could not initialize arenas, arena_init returned {}",
             output.return_value as i32
         );
     }
@@ -55,6 +57,14 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
 }
 
 fn main() {
+    TermLogger::init(
+        simplelog::LevelFilter::Info,
+        SimplelogConfig::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    )
+    .unwrap();
+
     let mut open_object = MaybeUninit::uninit();
     let mut builder = BpfSkelBuilder::default();
 
