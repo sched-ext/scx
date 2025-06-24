@@ -54,6 +54,8 @@ scx_lib_path = join_paths(meson.current_build_dir(), 'lib/', scx_lib_name)
 compile_scx_lib = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/compile_scx_lib'))
 
+# Use gnu11 as the C standard to compile vmlinux.h without errors.
+add_project_arguments('-std=gnu11', language : 'c')
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 if bpf_clang_ver == ''
