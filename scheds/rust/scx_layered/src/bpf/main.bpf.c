@@ -3394,7 +3394,7 @@ bool run_timer_cb(int key)
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{10LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+	{20LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 

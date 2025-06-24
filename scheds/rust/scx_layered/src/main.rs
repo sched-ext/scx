@@ -634,7 +634,7 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
-    /// Enable rematch. Rematch all tasks every 15 seconds.
+    /// Enable rematch. Rematch all tasks every 20 seconds.
     #[clap(long, default_value = "false")]
     enable_rematch: bool,
 
