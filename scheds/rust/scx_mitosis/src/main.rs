@@ -87,11 +87,10 @@ struct Opts {
 // Local + Default + Hi + Lo = Total Decisions
 // Affinity violations are not queue decisions, but
 // will be calculated separately and reported as a percent of the total
-const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
+const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 3] = [
     bpf_intf::cell_stat_idx_CSTAT_LOCAL,
-    bpf_intf::cell_stat_idx_CSTAT_DEFAULT_Q,
-    bpf_intf::cell_stat_idx_CSTAT_HI_FALLBACK_Q,
-    bpf_intf::cell_stat_idx_CSTAT_LO_FALLBACK_Q,
+    bpf_intf::cell_stat_idx_CSTAT_CPU_DSQ,
+    bpf_intf::cell_stat_idx_CSTAT_CELL_DSQ,
 ];
 
 // Per cell book-keeping
@@ -115,9 +114,8 @@ struct DistributionStats {
     total_decisions: u64,
     share_of_decisions_pct: f64,
     local_q_pct: f64,
-    default_q_pct: f64,
-    hi_q_pct: f64,
-    lo_q_pct: f64,
+    cpu_q_pct: f64,
+    cell_q_pct: f64,
     affn_viol_pct: f64,
 
     // for formatting
@@ -136,13 +134,12 @@ impl Display for DistributionStats {
         );
         write!(
             f,
-            "{:width$} {:5.1}% | L:{:4.1}% D:{:4.1}% hi:{:4.1}% lo:{:4.1}% | V:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
-            self.default_q_pct,
-            self.hi_q_pct,
-            self.lo_q_pct,
+            self.cpu_q_pct,
+            self.cell_q_pct,
             self.affn_viol_pct,
             width = descisions_width,
         )
@@ -236,7 +233,7 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_affn_viols as f64) / (scope_queue_decisions as f64)
         };
 
-        const EXPECTED_QUEUES: usize = 4;
+        const EXPECTED_QUEUES: usize = 3;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
                 "Expected {} queues, got {}",
@@ -249,9 +246,8 @@ impl<'a> Scheduler<'a> {
             total_decisions: scope_queue_decisions,
             share_of_decisions_pct: share_of_global,
             local_q_pct: queue_pct[0],
-            default_q_pct: queue_pct[1],
-            hi_q_pct: queue_pct[2],
-            lo_q_pct: queue_pct[3],
+            cpu_q_pct: queue_pct[1],
+            cell_q_pct: queue_pct[2],
             affn_viol_pct: affinity_violations_percent,
             global_queue_decisions,
         });
