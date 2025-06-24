@@ -9,6 +9,7 @@ fn main() {
         .enable_skel("src/bpf/main.bpf.c", "main")
         .add_source("../../lib/arena.bpf.c")
         .add_source("../../lib/bitmap.bpf.c")
+        .add_source("../../lib/dsq.bpf.c")
         .add_source("../../lib/minheap.bpf.c")
         .add_source("../../lib/sdt_alloc.bpf.c")
         .add_source("../../lib/sdt_task.bpf.c")
