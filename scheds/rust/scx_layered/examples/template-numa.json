@@ -2,7 +2,7 @@
 	{
 		"name": "template",
 		"template": { "NvNumaBind": 0 },
-		"matches": 
+		"matches": [
 			[{ "CgroupPrefix": "top_level/" }]
 		],
 		"kind": {
