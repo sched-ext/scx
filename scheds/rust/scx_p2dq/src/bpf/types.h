@@ -63,6 +63,7 @@ struct task_p2dq {
 	u64 			last_run_at;
 	u64			llc_runs; /* how many runs on the current LLC */
 	int			last_dsq_index;
+	bool			interactive;
 
 	/* The task is a workqueue worker thread */
 	bool			is_kworker;

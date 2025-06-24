@@ -435,7 +435,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	struct llc_ctx *llcx;
-	bool interactive = is_interactive(taskc);
 	s32 cpu = prev_cpu;
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -444,14 +443,14 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	if (!idle_cpumask || !idle_smtmask)
 		goto found_cpu;
 
-	if (interactive_sticky && interactive) {
+	if (interactive_sticky && taskc->interactive) {
 		cpu = prev_cpu;
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
 		goto found_cpu;
 	}
 
 	// First check if last CPU is idle
-	if (bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ?
+	if (bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !taskc->interactive) ?
 				 idle_smtmask : idle_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
@@ -474,7 +473,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		// Interactive tasks aren't worth migrating across LLCs.
-		if (interactive ||
+		if (taskc->interactive ||
 		    (nr_llcs == 2 && nr_nodes == 2)) {
 			// Try an idle CPU in the LLC.
 			if (llcx->cpumask &&
@@ -554,7 +553,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	if (has_little_cores && llcx->little_cpumask && llcx->big_cpumask) {
-		if (interactive) {
+		if (taskc->interactive) {
 			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->little_cpumask),
 							 0)) >= 0) {
 				*is_idle = true;
@@ -570,7 +569,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	// Next try in the local LLC
-	if (!interactive &&
+	if (!taskc->interactive &&
 	    llcx->cpumask &&
 	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
 					 SCX_PICK_IDLE_CORE)) >= 0) {
@@ -586,7 +585,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	// Couldn't find anything idle just return something in the local LLC
-	if (interactive && llcx->cpumask)
+	if (taskc->interactive && llcx->cpumask)
 		cpu = bpf_cpumask_any_distribute(cast_mask(llcx->cpumask));
 	else
 		// non interactive tasks stay sticky
@@ -697,7 +696,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		if (interactive_fifo && taskc->dsq_index == 0)
+		if (interactive_fifo && taskc->interactive)
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
 		else
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
@@ -733,7 +732,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		else
 			taskc->dsq_id = llcx->dsq;
 
-		if (interactive_fifo && taskc->dsq_index == 0)
+		if (interactive_fifo && taskc->interactive)
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
 		else
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
@@ -766,7 +765,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if (deadline_scheduling)
 		set_deadline_slice(taskc, llcx);
 
-	if (interactive_fifo && taskc->dsq_index == 0) {
+	if (interactive_fifo && taskc->interactive) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
 		ret->fifo.dsq_id = taskc->dsq_id;
 		ret->fifo.enq_flags = enq_flags;
@@ -826,7 +825,7 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 
 	taskc->llc_id = llcx->id;
 	taskc->node_id = llcx->node_id;
-	cpuc->interactive = taskc->dsq_index == 0;
+	cpuc->interactive = taskc->interactive;
 	cpuc->dsq_index = taskc->dsq_index;
 	cpuc->dsq_id = taskc->dsq_id;
 	cpuc->slice_ns = taskc->slice_ns;
@@ -882,7 +881,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->vtime, used);
 	__sync_fetch_and_add(&llcx->load, used);
 
-	if (taskc->dsq_index == 0)
+	if (taskc->interactive)
 		__sync_fetch_and_add(&llcx->intr_load, used);
 
 	if (!taskc->all_cpus)
@@ -920,6 +919,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		}
 		taskc->slice_ns = task_dsq_slice_ns(p, taskc->dsq_index);
 		taskc->last_run_started = 0;
+		taskc->interactive = is_interactive(taskc);
 	}
 }
 
@@ -1148,6 +1148,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	taskc->last_dsq_index = init_dsq_index;
 	taskc->slice_ns = dsq_time_slice(init_dsq_index);
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
+	taskc->interactive = is_interactive(taskc);
 	p->scx.dsq_vtime = llcx->vtime;
 
 	// When a task is initialized set the DSQ id to invalid. This causes
