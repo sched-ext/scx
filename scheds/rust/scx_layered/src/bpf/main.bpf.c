@@ -2338,11 +2338,12 @@ static __noinline bool match_one(struct layer_match *match,
 			// is done. this will work poorly if numa binding is done via
 			// affinities and do not those specified via nvml.
 			u32 tgid;
+			u32 *node;
 
 			tgid = p->tgid;
 
-			if (bpf_map_lookup_elem(&nv_numa_bind, &tgid))
-				return true;
+			if ((node = bpf_map_lookup_elem(&nv_numa_bind, &tgid)))
+				return match->node == *node;
 
 			return false;
 	}
