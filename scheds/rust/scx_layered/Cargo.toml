@@ -30,7 +30,7 @@ walkdir = "2.5"
 nvml-wrapper = "0.11.0"
 procfs = "0.17.0"
 cached = "0.48"
-
+nix = { version = "0.30.1", features = ["sched"] }
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }

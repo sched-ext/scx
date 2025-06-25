@@ -634,9 +634,10 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
-    /// Enable rematch. Rematch all tasks every 20 seconds.
+    /// Enable topology based gpu task affinitization.
+    /// Runs every 10 seconds.
     #[clap(long, default_value = "false")]
-    enable_rematch: bool,
+    enable_gpu_affinitize: bool,
 
     /// Enable match debug
     /// This stores a mapping of task tid
@@ -1314,12 +1315,15 @@ fn get_child_pids(pid: i32) -> Result<HashSet<i32>, anyhow::Error> {
     Ok(out)
 }
 
-#[once(result = true, time = 3)]
-fn write_gpu_pids_to_bpf(
+#[once(result = true, time = 10)]
+fn affinitize_gpu_pids(
     gpu_dev_node_map: &HashMap<i32, u32>,
     gpu_dev_pid_map: &HashMap<i32, HashSet<i32>>,
-    skel: &mut BpfSkel,
+    opts: &Opts,
 ) -> Result<(), anyhow::Error> {
+    if !opts.enable_gpu_affinitize {
+        return Ok(());
+    }
     let mut pid_to_node = HashMap::new();
     for (dev, pids) in gpu_dev_pid_map {
         let node = gpu_dev_node_map
@@ -1332,14 +1336,19 @@ fn write_gpu_pids_to_bpf(
             }
         }
     }
+    let nodes = Topology::new()?.nodes;
+    let mut nix_nodes = HashMap::new();
+    for (node_id, node) in nodes {
+        let mut cpuset = nix::sched::CpuSet::new();
+        for (cpu_id, _cpu) in node.all_cpus {
+            cpuset.set(cpu_id)?;
+        }
+        nix_nodes.insert(node_id, cpuset);
+    }
 
-    for (pid, node) in pid_to_node {
-        let gpu_pid_map = &skel.maps.nv_numa_bind;
-        gpu_pid_map.update(
-            &(pid as u32).to_ne_bytes(),
-            &node.to_ne_bytes(),
-            libbpf_rs::MapFlags::ANY,
-        )?;
+    for (pid, node_id) in pid_to_node {
+        let node_mask = nix_nodes.get(&(node_id.clone() as usize)).expect("missing topo node");
+        nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(pid), &node_mask)?;
     }
 
     Ok(())
@@ -1367,7 +1376,7 @@ pub fn gpu_dev_node_map(
     topo: Arc<Topology>,
     opts: &Opts,
 ) -> Result<HashMap<i32, u32>, anyhow::Error> {
-    if !opts.enable_gpu_support {
+    if !opts.enable_gpu_affinitize {
         return Ok(HashMap::new());
     }
     let nvml = nvml()?;
@@ -1391,7 +1400,7 @@ pub fn gpu_dev_node_map(
 // XXX maybe make this configurable
 #[once(result = true, time = 4)]
 pub fn get_gpu_pids(opts: &Opts) -> Result<HashMap<i32, HashSet<i32>>, anyhow::Error> {
-    if !opts.enable_gpu_support {
+    if !opts.enable_gpu_affinitize {
         return Ok(HashMap::new());
     }
 
@@ -1529,9 +1538,6 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
                             mt.min_avg_runtime_us = *min;
                             mt.max_avg_runtime_us = *max;
-                        }
-                        LayerMatch::NvNumaBind(node) => {
-                            mt.node = *node;
                         }
                     }
                 }
@@ -2109,7 +2115,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
-        skel.maps.rodata_data.enable_rematch = !opts.enable_rematch;
         skel.maps.rodata_data.enable_match_debug = opts.enable_match_debug;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
@@ -2850,10 +2855,10 @@ impl<'a> Scheduler<'a> {
         )?;
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
-        write_gpu_pids_to_bpf(
+        affinitize_gpu_pids(
             &self.gpu_dev_node_id,
             &get_gpu_pids(self.opts)?,
-            &mut self.skel,
+            self.opts,
         )?;
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
@@ -3099,7 +3104,7 @@ fn find_cpumask(cgroup: &str) -> Cpumask {
     Cpumask::from_cpulist(&description).unwrap()
 }
 
-fn expand_template(rule: &LayerMatch, topology: &Topology) -> Result<Vec<(LayerMatch, Cpumask)>> {
+fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
     match rule {
         LayerMatch::CgroupSuffix(suffix) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
             .into_iter()
@@ -3116,13 +3121,6 @@ fn expand_template(rule: &LayerMatch, topology: &Topology) -> Result<Vec<(LayerM
                 )
             })
             .collect()),
-        LayerMatch::NvNumaBind(_node) => {
-            let mut result = Vec::new();
-            for (id, _) in topology.nodes.clone() {
-                result.push((LayerMatch::NvNumaBind(id as u64), Cpumask::new()));
-            }
-            Ok(result)
-        }
         _ => panic!("Unimplemented template enum {:?}", rule),
     }
 }
@@ -3214,7 +3212,6 @@ fn main() -> Result<()> {
         true => EXAMPLE_CONFIG.clone(),
         false => LayerConfig { specs: vec![] },
     };
-    let topology = Topology::new()?;
 
     for (idx, input) in opts.specs.iter().enumerate() {
         let specs = LayerSpec::parse(input)
@@ -3223,7 +3220,7 @@ fn main() -> Result<()> {
         for spec in specs {
             match spec.template {
                 Some(ref rule) => {
-                    let matches = expand_template(&rule, &topology)?;
+                    let matches = expand_template(&rule)?;
                     // in the absence of matching cgroups, have template layers
                     // behave as non-template layers do.
                     if matches.is_empty() {
@@ -3232,20 +3229,15 @@ fn main() -> Result<()> {
                         for (mt, mask) in matches {
                             let mut genspec = spec.clone();
 
+                            genspec.cpuset = Some(mask);
+
                             // Push the new "and" rule into each "or" term.
                             for orterm in &mut genspec.matches {
                                 orterm.push(mt.clone());
                             }
 
                             match &mt {
-                                LayerMatch::CgroupSuffix(cgroup) => {
-                                    genspec.cpuset = Some(mask);
-                                    genspec.name.push_str(cgroup);
-                                }
-                                LayerMatch::NvNumaBind(node) => {
-                                    genspec.name.push_str(&format!("node{}", node));
-                                    genspec.nodes_mut().push(usize::try_from(node.clone())?);
-                                }
+                                LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
                                 _ => bail!("Template match has unexpected type"),
                             }
 

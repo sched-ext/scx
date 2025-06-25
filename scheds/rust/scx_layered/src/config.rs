@@ -96,7 +96,6 @@ pub enum LayerMatch {
     UsedGpuTid(bool),
     UsedGpuPid(bool),
     AvgRuntime(u64, u64),
-    NvNumaBind(u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
