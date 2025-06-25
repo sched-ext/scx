@@ -17,6 +17,12 @@ int arena_selftest(void)
 		return ret;
 	}
 
+	ret = scx_selftest_atq();
+	if (ret) {
+		bpf_printk("scx_selftest_atq failed with %d", ret);
+		return ret;
+	}
+
 	bpf_printk("Selftests successful.");
 
 	return 0;
