@@ -109,7 +109,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
 
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
-        for cpu in topology.all_cores.keys() {
+        for cpu in topology.all_cpus.keys() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
