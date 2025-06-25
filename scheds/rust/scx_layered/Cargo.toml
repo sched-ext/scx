@@ -14,7 +14,7 @@ clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"
 crossbeam = "0.8.4"
 ctrlc = { version = "3.1", features = ["termination"] }
 fastrand = "2.1.1"
-fb_procfs = "0.7"
+fb_procfs = "0.9"
 lazy_static = "1.5.0"
 libbpf-rs = "=0.25.0-beta.1"
 libc = "0.2.137"
@@ -30,6 +30,7 @@ walkdir = "2.5"
 nvml-wrapper = "0.11.0"
 nix = { version = "0.30.1", features = ["sched"] }
 sysinfo = "0.35.2"
+procfs = "0.17"
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }

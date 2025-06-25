@@ -22,7 +22,6 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
-use ::fb_procfs as procfs;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -34,6 +33,7 @@ use lazy_static::lazy_static;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libc::{self, c_int, c_void, syscall, SYS_move_pages};
 use log::info;
 use log::trace;
 use log::warn;
@@ -42,6 +42,7 @@ use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
+use procfs::process::MMPermissions;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -68,6 +69,8 @@ use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
+use std::ptr;
+use std::str::FromStr;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
@@ -638,6 +641,10 @@ struct Opts {
     #[clap(long, default_value = "false")]
     enable_gpu_affinitize: bool,
 
+    /// Enable numa topology based gpu task memory migration.
+    #[clap(long, default_value = "false")]
+    enable_gpu_mem_migrate: bool,
+
     /// Interval at which to reaffinitize gpu tasks to numa nodes.
     /// Defaults to 30s
     #[clap(long, default_value = "30")]
@@ -711,7 +718,7 @@ struct Opts {
     print_and_exit: bool,
 }
 
-fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
+fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
     reader
         .read_stat()
         .context("Failed to read procfs")?
@@ -719,10 +726,10 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
 }
 
-fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
+fn calc_util(curr: &fb_procfs::CpuStat, prev: &fb_procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {
         (
-            procfs::CpuStat {
+            fb_procfs::CpuStat {
                 user_usec: Some(curr_user),
                 nice_usec: Some(curr_nice),
                 system_usec: Some(curr_system),
@@ -733,7 +740,7 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 stolen_usec: Some(curr_stolen),
                 ..
             },
-            procfs::CpuStat {
+            fb_procfs::CpuStat {
                 user_usec: Some(prev_user),
                 nice_usec: Some(prev_nice),
                 system_usec: Some(prev_system),
@@ -920,7 +927,7 @@ struct Stats {
     prev_layer_usages: Vec<Vec<u64>>,
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
-    prev_total_cpu: procfs::CpuStat,
+    prev_total_cpu: fb_procfs::CpuStat,
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
@@ -946,7 +953,7 @@ impl Stats {
         layer_usages
     }
 
-    fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
+    fn new(skel: &mut BpfSkel, proc_reader: &fb_procfs::ProcReader) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
@@ -979,7 +986,7 @@ impl Stats {
     fn refresh(
         &mut self,
         skel: &mut BpfSkel,
-        proc_reader: &procfs::ProcReader,
+        proc_reader: &fb_procfs::ProcReader,
         now: Instant,
         cur_processing_dur: Duration,
     ) -> Result<()> {
@@ -1269,27 +1276,34 @@ impl Layer {
         Ok(nr_new_cpus)
     }
 }
+#[derive(Debug, Clone)]
+struct NodeInfo {
+    node_mask: nix::sched::CpuSet,
+    node_id: usize,
+}
 #[derive(Debug)]
 struct GpuTaskHandler {
-    gpu_devs_to_node_masks: HashMap<u32, nix::sched::CpuSet>,
+    gpu_devs_to_node_info: HashMap<u32, NodeInfo>,
     gpu_pids_to_devs: HashMap<Pid, u32>,
     last_process_time: Option<Instant>,
     sys: System,
     pid_map: HashMap<Pid, Vec<Pid>>,
     poll_interval: Duration,
     enable: bool,
+    enable_mem_migrate: bool,
 }
 
 impl GpuTaskHandler {
-    pub fn new(poll_interval: u64, enable: bool) -> GpuTaskHandler {
+    pub fn new(poll_interval: u64, enable: bool, enable_mem_migrate: bool) -> GpuTaskHandler {
         GpuTaskHandler {
-            gpu_devs_to_node_masks: HashMap::new(),
+            gpu_devs_to_node_info: HashMap::new(),
             gpu_pids_to_devs: HashMap::new(),
             last_process_time: None,
             sys: System::default(),
             pid_map: HashMap::new(),
             poll_interval: Duration::from_secs(poll_interval),
             enable,
+            enable_mem_migrate,
         }
     }
     fn find_one_cpu(&self, affinity: Vec<u64>) -> Result<u32, anyhow::Error> {
@@ -1321,10 +1335,15 @@ impl GpuTaskHandler {
             let dev = nvml.device_by_index(idx)?;
             let cpu = dev.cpu_affinity(16)?;
             let ideal_cpu = self.find_one_cpu(cpu)?;
-            for (_node_id, node) in topo.nodes.iter() {
+            for (node_id, node) in topo.nodes.iter() {
                 if node.all_cpus.contains_key(&(ideal_cpu as usize)) {
-                    self.gpu_devs_to_node_masks
-                        .insert(idx, self.node_to_cpuset(node)?);
+                    self.gpu_devs_to_node_info.insert(
+                        idx,
+                        NodeInfo {
+                            node_mask: self.node_to_cpuset(node)?,
+                            node_id: *node_id,
+                        },
+                    );
                 }
             }
         }
@@ -1387,25 +1406,82 @@ impl GpuTaskHandler {
             return Ok(());
         }
         for (pid, dev) in &self.gpu_pids_to_devs {
-            let node_mask = self
-                .gpu_devs_to_node_masks
+            let node_info = self
+                .gpu_devs_to_node_info
                 .get(&dev)
                 .expect("Unable to get gpu pid node mask");
             for child in self.get_child_pids_and_tids(*pid) {
                 match nix::sched::sched_setaffinity(
                     nix::unistd::Pid::from_raw(child.as_u32() as i32),
-                    &node_mask,
+                    &node_info.node_mask,
                 ) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        if self.enable_mem_migrate {
+                            match self.move_mem_node_pid(*pid, node_info.node_id as i32) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(
+                                        "Error moving memory for gpu pid {} to node {:#?} : {:#?}",
+                                        child.as_u32(),
+                                        node_info,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Err(_) => {
                         warn!(
-                            "Error affinitizing gpu pid {} to mask {:#?}",
+                            "Error affinitizing gpu pid {} to node {:#?}",
                             child.as_u32(),
-                            node_mask
+                            node_info
                         );
                     }
                 };
             }
+        }
+
+        Ok(())
+    }
+    fn move_mem_node_pid(&self, pid: Pid, target_node: i32) -> Result<(), anyhow::Error> {
+        let maps = procfs::process::Process::new(pid.as_u32() as i32)?.maps()?;
+        let mut pages = Vec::new();
+
+        for m in maps {
+            if m.perms.contains(MMPermissions::from_str("w")?)
+                && m.perms.contains(MMPermissions::from_str("p")?)
+                && !m.perms.contains(MMPermissions::from_str("x")?)
+            {
+                for addr in (m.address.0..m.address.1).step_by(4096) {
+                    pages.push(addr as *mut c_void);
+                }
+            }
+        }
+
+        if pages.is_empty() {
+            return Ok(());
+        }
+
+        let to_nodes: Vec<i32> = vec![target_node; pages.len()];
+
+        let ret = unsafe {
+            syscall(
+                SYS_move_pages,
+                pid.as_u32() as c_int,
+                pages.len() as c_int,
+                pages.as_mut_ptr(),
+                to_nodes.as_ptr(),
+                ptr::null_mut::<i32>(),
+                0,
+            )
+        };
+
+        if ret < 0 {
+            error!(
+                "move_pages failed for pid {}: {}",
+                pid,
+                std::io::Error::last_os_error()
+            );
         }
 
         Ok(())
@@ -1476,7 +1552,7 @@ struct Scheduler<'a> {
     layers: Vec<Layer>,
     idle_qos_enabled: bool,
 
-    proc_reader: procfs::ProcReader,
+    proc_reader: fb_procfs::ProcReader,
     sched_stats: Stats,
 
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
@@ -2287,7 +2363,7 @@ impl<'a> Scheduler<'a> {
         Self::init_llc_prox_map(&mut skel, &topo)?;
 
         // Other stuff.
-        let proc_reader = procfs::ProcReader::new();
+        let proc_reader = fb_procfs::ProcReader::new();
 
         // Handle setup if layered is running in a pid namespace.
         let input = ProgramInput {
@@ -2318,8 +2394,11 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
-        let mut gpu_task_handler =
-            GpuTaskHandler::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
+        let mut gpu_task_handler = GpuTaskHandler::new(
+            opts.gpu_affinitize_secs,
+            opts.enable_gpu_affinitize,
+            opts.enable_gpu_mem_migrate,
+        );
         gpu_task_handler.init(topo.clone());
         let sched = Self {
             struct_ops: Some(struct_ops),
