@@ -35,6 +35,8 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::libbpf_sys::bpf_program__set_autoattach;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::Link;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
@@ -135,11 +137,17 @@ pub enum RequiresPpid {
 }
 
 #[derive(Debug)]
+pub struct KprobeDelays {
+    pub kprobes: Vec<String>,
+    pub freq: f64,
+}
+
+#[derive(Debug)]
 /// State required to build a Scheduler configuration.
 pub struct Builder<'a> {
     pub traits: Vec<Trait>,
     pub verbose: u8,
-    pub kprobes: Vec<String>,
+    pub kprobe_delays: Option<KprobeDelays>,
     pub p2dq_opts: &'a P2dqOpts,
     pub requires_ppid: Option<RequiresPpid>,
 }
@@ -357,17 +365,25 @@ impl Builder<'_> {
     }
 
     fn attach_kprobes(&self, skel: &mut BpfSkel) -> Result<Vec<Link>> {
-        if self.kprobes.is_empty() {
+        let Some(kd) = &self.kprobe_delays else {
+            return Ok(vec![]);
+        };
+
+        if kd.kprobes.is_empty() {
             return Ok(vec![]);
         }
 
-        validate_kprobes(&self.kprobes).context("Failed to validate kprobes passed by user")?;
+        validate_kprobes(&kd.kprobes).context("Failed to validate kprobes passed by user")?;
 
         let mut links = vec![];
-        for kprobe in &self.kprobes {
-            links.push(skel.progs.generic.attach_kprobe(false, kprobe)?)
+        for k in &kd.kprobes {
+            links.push(
+                skel.progs
+                    .generic
+                    .attach_kprobe(false, k)
+                    .context(format!("Failed to attach kprobe {:?}", k))?,
+            );
         }
-
         Ok(links)
     }
 
@@ -416,6 +432,11 @@ impl Builder<'_> {
                 open_skel.maps.rodata_data.ppid_targeting_ppid = p.as_raw();
             }
         };
+
+        if let Some(kprobe_delays) = &self.kprobe_delays {
+            open_skel.maps.rodata_data.kprobe_delays_freq_frac32 =
+                (kprobe_delays.freq * 2_f64.powf(32_f64)) as u32;
+        }
 
         // Set up the frequency array. The first element means nothing, so should be what's
         // required to add up to 100%. The rest should be cumulative frequencies.
@@ -480,6 +501,12 @@ impl Builder<'_> {
             }
         }
 
+        // For now, we'll do it in this way. However, once we upgrade to libbpf_rs 0.25.0,
+        // we can use the set_autoattach method on the OpenProgramImpl to do this.
+        unsafe {
+            bpf_program__set_autoattach(open_skel.progs.generic.as_libbpf_object().as_ptr(), false)
+        };
+
         let mut skel = scx_ops_load!(open_skel, chaos, uei)?;
         scx_p2dq::init_skel!(&mut skel);
 
@@ -511,8 +538,8 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         let (links, struct_ops) = {
             let mut skel_guard = skel.skel.write().unwrap();
-            let links = b.attach_kprobes(&mut skel_guard)?;
             let struct_ops = scx_ops_attach!(skel_guard, chaos)?;
+            let links = b.attach_kprobes(&mut skel_guard)?;
             (links, struct_ops)
         };
         debug!("scx_chaos scheduler started");
@@ -571,6 +598,18 @@ pub struct PerfDegradationArgs {
     pub degradation_frac7: u64,
 }
 
+/// Delay a process when a kprobe is hit.
+#[derive(Debug, Parser)]
+pub struct KprobeArgs {
+    /// Introduce random delays in the scheduler whenever a provided kfunc is hit.
+    #[clap(long, num_args = 1.., value_parser)]
+    pub kprobes: Vec<String>,
+
+    /// Chance of kprobe random delays. Must be between 0 and 1.
+    #[clap(long, requires = "kprobes")]
+    pub kprobe_frequency: Option<f64>,
+}
+
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
 ///
 /// WARNING: This scheduler is a very early alpha, and hasn't been production tested yet. The CLI
@@ -619,11 +658,6 @@ pub struct Args {
     #[clap(long)]
     pub monitor: Option<f64>,
 
-    /// Introduce random delays in the scheduler whenever a provided kprobe is
-    /// hit.
-    #[clap(long, num_args = 1.., value_parser)]
-    pub kprobes: Vec<String>,
-
     #[command(flatten, next_help_heading = "Random Delays")]
     pub random_delay: RandomDelayArgs,
 
@@ -632,6 +666,9 @@ pub struct Args {
 
     #[command(flatten, next_help_heading = "CPU Frequency")]
     pub cpu_freq: CpuFreqArgs,
+
+    #[command(flatten, next_help_heading = "Kprobe Delays")]
+    pub kprobe_delays: KprobeArgs,
 
     #[command(flatten, next_help_heading = "General Scheduling")]
     pub p2dq: P2dqOpts,
@@ -716,10 +753,21 @@ impl<'a> Iterator for BuilderIterator<'a> {
                 None
             };
 
+            let kprobe_delays = match &self.args.kprobe_delays {
+                KprobeArgs {
+                    kprobes,
+                    kprobe_frequency,
+                } if !kprobes.is_empty() => Some(KprobeDelays {
+                    kprobes: kprobes.clone(),
+                    freq: kprobe_frequency.unwrap_or(0.1),
+                }),
+                _ => None,
+            };
+
             Some(Builder {
                 traits,
                 verbose: self.args.verbose,
-                kprobes: self.args.kprobes.clone(),
+                kprobe_delays,
                 p2dq_opts: &self.args.p2dq,
                 requires_ppid,
             })

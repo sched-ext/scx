@@ -50,6 +50,8 @@ const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
 const volatile u32 degradation_freq_frac32 = 1;
 const volatile u64 degradation_frac7 = 0;
 
+const volatile u32 kprobe_delays_freq_frac32 = 1;
+
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -89,24 +91,6 @@ static __always_inline void chaos_stat_inc(enum chaos_stat_idx stat)
 	u64 *cnt_p = bpf_map_lookup_elem(&chaos_stats, &stat);
 	if (cnt_p)
 		(*cnt_p)++;
-}
-
-SEC("kprobe/generic")
-int generic(struct pt_regs *ctx)
-{
-	struct task_struct *p;
-	struct chaos_task_ctx *taskc;
-
-	p = (struct task_struct *)bpf_get_current_task_btf();
-	if (!p)
-		return -EINVAL;
-
-	if (!(taskc = lookup_create_chaos_task_ctx(p)))
-		return -EINVAL;
-
-	taskc->next_trait = CHAOS_TRAIT_RANDOM_DELAYS;
-
-	return 0;
 }
 
 static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx *taskc)
@@ -598,3 +582,25 @@ SCX_OPS_DEFINE(chaos,
 
 	       .timeout_ms		= 30000,
 	       .name			= "chaos");
+
+SEC("kprobe/generic")
+int generic(struct pt_regs *ctx)
+{
+	struct task_struct *p;
+	struct chaos_task_ctx *taskc;
+
+	p = (struct task_struct *)bpf_get_current_task_btf();
+	if (!p)
+		return -EINVAL;
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return -EINVAL;
+
+	u32 roll = bpf_get_prandom_u32();
+	if (roll < kprobe_delays_freq_frac32) {
+		taskc->next_trait = CHAOS_TRAIT_RANDOM_DELAYS;
+		dbg("GENERIC: setting next_trait to RANDOM_DELAYS - task[%d]", p->pid);
+	}
+
+	return 0;
+}
