@@ -1326,7 +1326,7 @@ impl GpuTaskHandler {
                     self.gpu_devs_to_node_masks
                         .insert(idx, self.node_to_cpuset(node)?);
                 } else {
-                    error!("Unable to find node for cpu");
+                    error!("Unable to find node for cpu: {}", ideal_cpu);
                 }
             }
         }
