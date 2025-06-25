@@ -82,6 +82,10 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub keep_running: bool,
 
+    /// Use a separate DSQ for interactive tasks
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub interactive_dsq: bool,
+
     /// *DEPRECATED* Minimum load for load balancing on the wakeup path, 0 to disable.
     #[clap(long, default_value = "0", help="DEPRECATED", value_parser = clap::value_parser!(u64).range(0..99))]
     pub wakeup_lb_busy: u64,
@@ -219,6 +223,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
             $skel.maps.rodata_data.freq_control = opts.freq_control;
             $skel.maps.rodata_data.has_little_cores = $crate::TOPO.has_little_cores();
+            $skel.maps.rodata_data.interactive_dsq = opts.interactive_dsq;
             $skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
             $skel.maps.rodata_data.interactive_fifo = opts.interactive_fifo;
             $skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
