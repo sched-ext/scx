@@ -1321,12 +1321,12 @@ impl GpuTaskHandler {
             let dev = nvml.device_by_index(idx)?;
             let cpu = dev.cpu_affinity(16)?;
             let ideal_cpu = self.find_one_cpu(cpu)?;
-            for (_, node) in topo.nodes.iter() {
+            for (node_id, node) in topo.nodes.iter() {
                 if node.all_cpus.contains_key(&(ideal_cpu as usize)) {
                     self.gpu_devs_to_node_masks
                         .insert(idx, self.node_to_cpuset(node)?);
                 } else {
-                    error!("Unable to find node for cpu: {}", ideal_cpu);
+                    info!("Determined gpu dev {} is in node {}", idx, node_id);
                 }
             }
         }
