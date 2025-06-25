@@ -130,6 +130,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -165,6 +166,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -204,6 +206,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -241,6 +244,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -662,6 +666,14 @@ struct Opts {
     /// --disable-percpu-kthread-preempt is not set.
     #[clap(long, default_value = "false")]
     percpu_kthread_preempt_all: bool,
+
+    /// Frequency of the tick triggered on the scheduling CPUs to check for task time slice
+    /// expiration (0 == CONFIG_HZ).
+    ///
+    /// A higher frequency can increase the overall system responsiveness but it can also introduce
+    /// more scheduling overhead and context switches.
+    #[clap(long, default_value = "0")]
+    tickless_tick_freq: u64,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
@@ -1413,6 +1425,7 @@ impl<'a> Scheduler<'a> {
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
                     placement,
+                    tickless,
                     ..
                 } = spec.kind.common();
 
@@ -1435,6 +1448,10 @@ impl<'a> Scheduler<'a> {
                 layer.allow_node_aligned.write(*allow_node_aligned);
                 layer.skip_remote_node.write(*skip_remote_node);
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
+                layer.tickless.write(*tickless);
+                if *tickless {
+                    skel.maps.rodata_data.enable_tickless = *tickless;
+                }
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
@@ -1951,6 +1968,7 @@ impl<'a> Scheduler<'a> {
         } else {
             opts.slice_us * 1000 * 20
         };
+        skel.maps.rodata_data.tickless_tick_freq = opts.tickless_tick_freq;
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
