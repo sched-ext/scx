@@ -29,6 +29,7 @@ use anyhow::Result;
 use clap::Parser;
 use clap_num::number_range;
 use cpu_order::CpuOrder;
+use cpu_order::PerfCpuOrder;
 use crossbeam::channel;
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
@@ -360,7 +361,9 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU topology
         let order = CpuOrder::new().unwrap();
-        Self::init_cpus(&mut skel, &opts, &order);
+        Self::init_cpus(&mut skel, &order);
+        Self::init_cpus_xxx(&mut skel, &opts, &order); // XXX
+        Self::init_cpdoms(&mut skel, &opts, &order);
 
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &order);
@@ -393,9 +396,53 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn init_cpus(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
+    fn init_cpus(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         debug!("{:#?}", order);
 
+        // Initialize CPU capacity.
+        for cpu in order.cpuids.iter() {
+            skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
+            skel.maps.rodata_data.cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
+            skel.maps.rodata_data.cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
+        }
+
+        // Initialize performance vs. CPU order table.
+        let nr_pco_states: u8 = order.perf_cpu_order.len() as u8;
+        if nr_pco_states > LAVD_PCO_STATE_MAX as u8 {
+            panic!("Generated performance vs. CPU order stats are too complex ({nr_pco_states}) to handle");
+        }
+
+        skel.maps.rodata_data.nr_pco_states = nr_pco_states;
+        for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {
+            Self::init_pco_tuple(skel, i, &pco);
+            info!("{:#}", pco);
+        }
+
+        let (_, last_pco) = order.perf_cpu_order.last_key_value().unwrap();
+        for i in nr_pco_states..LAVD_PCO_STATE_MAX as u8 {
+            Self::init_pco_tuple(skel, i as usize, &last_pco);
+        }
+    }
+
+    fn init_pco_tuple(skel: &mut OpenBpfSkel, i: usize, pco: &PerfCpuOrder) {
+        let cpus_perf = pco.cpus_perf.borrow();
+        let cpus_ovflw = pco.cpus_ovflw.borrow();
+        let pco_nr_primary = cpus_perf.len();
+
+        skel.maps.rodata_data.pco_bounds[i] = pco.perf_cap as u32;
+        skel.maps.rodata_data.pco_nr_primary[i] = pco_nr_primary as u16;
+
+        for (j, &cpu_adx) in cpus_perf.iter().enumerate() {
+            skel.maps.rodata_data.pco_table[i][j] = cpu_adx as u16;
+        }
+
+        for (j, &cpu_adx) in cpus_ovflw.iter().enumerate() {
+            let k = j + pco_nr_primary;
+            skel.maps.rodata_data.pco_table[i][k] = cpu_adx as u16;
+        }
+    }
+
+    fn init_cpus_xxx(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
         // Initialize CPU capacity
         for cpu in order.cpuids.iter() {
             skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
@@ -436,7 +483,9 @@ impl<'a> Scheduler<'a> {
         if !opts.performance {
             info!("CPU pref order in powersave mode: {:?}", cpu_ps_order);
         }
+    }
 
+    fn init_cpdoms(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
         // Initialize compute domain contexts
         for (k, v) in order.cpdom_map.iter() {
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;

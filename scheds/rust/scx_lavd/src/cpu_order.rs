@@ -1076,3 +1076,17 @@ impl PartialEq for PerfCpuOrder {
         self.perf_cap == other.perf_cap
     }
 }
+
+impl fmt::Display for PerfCpuOrder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "capacity bound:  {} ({}%)\n",
+            self.perf_cap,
+            self.perf_util * 100.0
+        )?;
+        write!(f, "  primary CPUs:  {:?}\n", self.cpus_perf.borrow())?;
+        write!(f, "  overflow CPUs: {:?}", self.cpus_ovflw.borrow())?;
+        Ok(())
+    }
+}
