@@ -338,6 +338,7 @@ struct layer {
 	bool			allow_node_aligned;
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;
+	bool			tickless;
 	int			growth_algo;
 
 	u64			nr_tasks;
