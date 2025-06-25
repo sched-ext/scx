@@ -1,5 +1,5 @@
 e = executable('scx_p2dq_test',
-  ['src/bpf/main.bpf.c'],
+  ['src/bpf/main.test.bpf.c'],
   dependencies: [scx_test_dep],
   c_args: scx_test_c_args,
   install: false,

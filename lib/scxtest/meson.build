@@ -2,6 +2,7 @@ scxtest_lib = static_library(
   'scxtest',
   'scx_test.c',
   'overrides.c',
+  'scx_test_map.c',
   c_args: ['-DTEST'],
 )
 
