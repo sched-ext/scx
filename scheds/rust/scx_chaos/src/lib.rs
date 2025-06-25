@@ -13,12 +13,14 @@ use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
 use scx_utils::build_id;
+use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+
 use scx_utils::Core;
 use scx_utils::Llc;
 use scx_utils::Topology;
@@ -33,6 +35,7 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::Link;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -42,6 +45,9 @@ use nix::unistd::Pid;
 use scx_stats::prelude::*;
 
 use std::alloc::Layout;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
 use std::panic;
@@ -133,6 +139,7 @@ pub enum RequiresPpid {
 pub struct Builder<'a> {
     pub traits: Vec<Trait>,
     pub verbose: u8,
+    pub kprobes: Vec<String>,
     pub p2dq_opts: &'a P2dqOpts,
     pub requires_ppid: Option<RequiresPpid>,
 }
@@ -148,6 +155,7 @@ pub struct SkelWithObject {
 pub struct Scheduler {
     _arena: HeapAllocator<ArenaAllocator>,
     _struct_ops: libbpf_rs::Link,
+    _links: Vec<Link>,
     stats_server: StatsServer<(), Metrics>,
 
     // Fields are dropped in declaration order, this must be last as arena holds a reference to the
@@ -348,6 +356,21 @@ impl Builder<'_> {
         Ok(())
     }
 
+    fn attach_kprobes(&self, skel: &mut BpfSkel) -> Result<Vec<Link>> {
+        if self.kprobes.is_empty() {
+            return Ok(vec![]);
+        }
+
+        validate_kprobes(&self.kprobes).context("Failed to validate kprobes passed by user")?;
+
+        let mut links = vec![];
+        for kprobe in &self.kprobes {
+            links.push(skel.progs.generic.attach_kprobe(false, kprobe)?)
+        }
+
+        Ok(links)
+    }
+
     fn load_skel(&self) -> Result<Pin<Rc<SkelWithObject>>> {
         let mut out: Rc<MaybeUninit<SkelWithObject>> = Rc::new_uninit();
         let uninit_skel = Rc::get_mut(&mut out).expect("brand new rc should be unique");
@@ -486,16 +509,18 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
 
         let arena = HeapAllocator::new(ArenaAllocator(skel.clone()));
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
-
-        let struct_ops = {
+        let (links, struct_ops) = {
             let mut skel_guard = skel.skel.write().unwrap();
-            scx_ops_attach!(skel_guard, chaos)?
+            let links = b.attach_kprobes(&mut skel_guard)?;
+            let struct_ops = scx_ops_attach!(skel_guard, chaos)?;
+            (links, struct_ops)
         };
         debug!("scx_chaos scheduler started");
 
         Ok(Scheduler {
             _arena: arena,
             _struct_ops: struct_ops,
+            _links: links,
             stats_server,
             skel,
         })
@@ -594,6 +619,11 @@ pub struct Args {
     #[clap(long)]
     pub monitor: Option<f64>,
 
+    /// Introduce random delays in the scheduler whenever a provided kprobe is
+    /// hit.
+    #[clap(long, num_args = 1.., value_parser)]
+    pub kprobes: Vec<String>,
+
     #[command(flatten, next_help_heading = "Random Delays")]
     pub random_delay: RandomDelayArgs,
 
@@ -689,11 +719,37 @@ impl<'a> Iterator for BuilderIterator<'a> {
             Some(Builder {
                 traits,
                 verbose: self.args.verbose,
+                kprobes: self.args.kprobes.clone(),
                 p2dq_opts: &self.args.p2dq,
                 requires_ppid,
             })
         }
     }
+}
+
+pub fn validate_kprobes(kprobes: &[String]) -> Result<()> {
+    let path = tracefs_mount()?;
+    let file = File::open(path.join("available_filter_functions"))?;
+    let reader = BufReader::new(file);
+
+    let available_kprobes: HashSet<_> = reader
+        .lines()
+        .filter_map(|line| line.ok()?.split_whitespace().next().map(String::from))
+        .collect();
+
+    let missing: Vec<_> = kprobes
+        .iter()
+        .filter(|probe| !available_kprobes.contains(*probe))
+        .collect();
+
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "The following kprobes are not available: {:?}",
+            missing
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn run(args: Args) -> Result<()> {

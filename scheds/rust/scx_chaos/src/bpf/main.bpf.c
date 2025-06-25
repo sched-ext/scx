@@ -91,6 +91,24 @@ static __always_inline void chaos_stat_inc(enum chaos_stat_idx stat)
 		(*cnt_p)++;
 }
 
+SEC("kprobe/generic")
+int generic(struct pt_regs *ctx)
+{
+	struct task_struct *p;
+	struct chaos_task_ctx *taskc;
+
+	p = (struct task_struct *)bpf_get_current_task_btf();
+	if (!p)
+		return -EINVAL;
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return -EINVAL;
+
+	taskc->next_trait = CHAOS_TRAIT_RANDOM_DELAYS;
+
+	return 0;
+}
+
 static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx *taskc)
 {
 	if (taskc->match & CHAOS_MATCH_EXCLUDED) {
