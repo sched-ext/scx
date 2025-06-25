@@ -1211,7 +1211,7 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 {
 	scx_buddy_header_t *header;
 	u64 address;
-	u64 order;
+	u64 order = 0;
 	u32 idx;
 
 	bpf_for(order, order_req, SCX_BUDDY_CHUNK_MAX_ORDER) {
