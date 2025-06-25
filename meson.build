@@ -280,7 +280,8 @@ user_c_dep = [declare_dependency(
   include_directories: include_directories('scheds/include'),
 )]
 
-scx_test_c_args = ['-DTEST', '-Wno-attributes', '-Wno-unknown-pragmas']
+scx_test_c_args = ['-DTEST', '-Wno-attributes', '-Wno-unknown-pragmas',
+                   '-Wno-incompatible-pointer-types', '-Wno-unused-variable']
 
 lib_objs = []
 subdir('lib')
