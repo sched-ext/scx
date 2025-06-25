@@ -1321,12 +1321,10 @@ impl GpuTaskHandler {
             let dev = nvml.device_by_index(idx)?;
             let cpu = dev.cpu_affinity(16)?;
             let ideal_cpu = self.find_one_cpu(cpu)?;
-            for (node_id, node) in topo.nodes.iter() {
+            for (_node_id, node) in topo.nodes.iter() {
                 if node.all_cpus.contains_key(&(ideal_cpu as usize)) {
                     self.gpu_devs_to_node_masks
                         .insert(idx, self.node_to_cpuset(node)?);
-                } else {
-                    info!("Determined gpu dev {} is in node {}", idx, node_id);
                 }
             }
         }
@@ -1394,41 +1392,75 @@ impl GpuTaskHandler {
                 .get(&dev)
                 .expect("Unable to get gpu pid node mask");
             for child in self.get_child_pids_and_tids(*pid) {
-                nix::sched::sched_setaffinity(
+                match nix::sched::sched_setaffinity(
                     nix::unistd::Pid::from_raw(child.as_u32() as i32),
                     &node_mask,
-                )?;
+                ) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        warn!(
+                            "Error affinitizing gpu pid {} to mask {:#?}",
+                            child.as_u32(),
+                            node_mask
+                        );
+                    }
+                };
             }
         }
 
         Ok(())
     }
-    pub fn process(&mut self) -> Result<(), anyhow::Error> {
+    pub fn process(&mut self) {
         if !self.enable {
-            return Ok(());
+            return;
         }
         let now = Instant::now();
 
         if let Some(last_process_time) = self.last_process_time {
             if (now - last_process_time) < self.poll_interval {
-                return Ok(());
+                return;
             }
         }
 
-        self.update_gpu_pids()?;
-        self.update_process_info()?;
-        self.affinitize_gpu_pids()?;
+        match self.update_gpu_pids() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error updating GPU PIDs: {}", e);
+            }
+        };
+        match self.update_process_info() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error updating process info to affinitize GPU PIDs: {}", e);
+            }
+        };
+        match self.affinitize_gpu_pids() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error updating GPU PIDs: {}", e);
+            }
+        };
         self.last_process_time = Some(now);
-        Ok(())
+        return;
     }
-    pub fn init(&mut self, topo: Arc<Topology>) -> Result<(), anyhow::Error> {
+    pub fn init(&mut self, topo: Arc<Topology>) {
         if !self.enable || self.last_process_time.is_some() {
-            return Ok(());
+            return;
         }
 
-        self.init_dev_node_map(topo)?;
-        self.init_process_info()?;
-        Ok(())
+        match self.init_dev_node_map(topo) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error initializing gpu map: {}", e);
+            }
+        };
+        match self.init_process_info() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error initializing gpu map: {}", e);
+            }
+        }
+        return;
     }
 }
 
@@ -2288,7 +2320,7 @@ impl<'a> Scheduler<'a> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         let mut gpu_task_handler =
             GpuTaskHandler::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
-        gpu_task_handler.init(topo.clone())?;
+        gpu_task_handler.init(topo.clone());
         let sched = Self {
             struct_ops: Some(struct_ops),
             layer_specs,
@@ -2888,7 +2920,7 @@ impl<'a> Scheduler<'a> {
         )?;
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
-        self.gpu_task_handler.process()?;
+        self.gpu_task_handler.process();
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
