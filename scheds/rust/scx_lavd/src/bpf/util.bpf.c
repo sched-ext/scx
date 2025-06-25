@@ -33,7 +33,6 @@ volatile bool		no_freq_scaling;
 volatile bool		is_powersave_mode;
 volatile bool		reinit_cpumask_for_performance;
 const volatile bool	is_autopilot_on;
-const volatile bool	is_smt_active;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
 

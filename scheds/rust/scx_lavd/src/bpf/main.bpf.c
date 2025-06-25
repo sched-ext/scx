@@ -1173,6 +1173,8 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	cpu_ctx_init_online(cpuc, cpu, now);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
+	__sync_fetch_and_add(&total_capacity, cpuc->capacity);
+	update_autopilot_high_cap();
 	update_sys_stat();
 }
 
@@ -1194,6 +1196,8 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	cpu_ctx_init_offline(cpuc, cpu, now);
 
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
+	__sync_fetch_and_sub(&total_capacity, cpuc->capacity);
+	update_autopilot_high_cap();
 	update_sys_stat();
 }
 
@@ -1523,6 +1527,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initilize CPU info
 	 */
+	one_little_capacity = LAVD_SCALE;
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		if (cpu >= LAVD_CPU_ID_MAX)
 			break;
@@ -1593,8 +1598,12 @@ static s32 init_per_cpu_ctx(u64 now)
 			bpf_cpumask_set_cpu(cpu, turbo);
 			have_turbo_core = true;
 		}
+
+		if (cpuc->capacity < one_little_capacity)
+			one_little_capacity = cpuc->capacity;
 	}
 	default_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
+	total_capacity = sum_capacity;
 
 	/*
 	 * Initialize compute domain id.
@@ -1698,9 +1707,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 		return err;
 
 	/*
-	 * Initialize the low cpu watermark for autopilot mode.
+	 * Initialize the low & high cpu capacity watermarks for autopilot mode.
 	 */
-	init_autopilot_low_util();
+	init_autopilot_caps();
 
 	/*
 	 * Initilize the current logical clock and service time.
