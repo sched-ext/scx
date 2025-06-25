@@ -2510,10 +2510,14 @@ impl<'a> App<'a> {
                     .last()
                     .copied()
                     .unwrap_or(0_u64);
-                if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
+                if next_dsq_vtime.saturating_sub(last) < DSQ_VTIME_CUTOFF {
                     next_dsq_data.add_event_data(
                         "dsq_vtime_delta",
-                        if last > 0 { *next_dsq_vtime - last } else { 0 },
+                        if last > 0 {
+                            next_dsq_vtime.saturating_sub(last)
+                        } else {
+                            0
+                        },
                     );
                 }
             }
