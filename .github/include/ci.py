@@ -165,6 +165,8 @@ def run_tests_in_vm():
         ]
     )
 
+    run_command(["target/debug/scx_lib_selftests"])
+
 
 def run_all():
     """Run all CI steps in the correct order."""
