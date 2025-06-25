@@ -278,6 +278,10 @@ static bool is_interactive(task_ctx *taskc)
 
 static __always_inline bool can_migrate(task_ctx *taskc)
 {
+	if (!dispatch_lb_interactive && taskc->interactive)
+		return false;
+	if (max_dsq_pick2 && taskc->dsq_index != nr_dsqs_per_llc - 1)
+		return false;
 	return (nr_llcs > 1 &&
 		taskc->all_cpus &&
 		taskc->llc_runs > min_llc_runs_pick2);
@@ -728,7 +732,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (deadline_scheduling)
 			set_deadline_slice(taskc, llcx);
 
-		if (interactive_dsq && is_interactive(taskc) && !can_migrate(taskc)) {
+		if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
 			taskc->dsq_id = llcx->intr_dsq;
 		} else if (can_migrate(taskc)) {
 			taskc->dsq_id = llcx->mig_dsq;
@@ -761,7 +765,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	if (interactive_dsq && is_interactive(taskc) && !can_migrate(taskc)) {
+	if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
 		taskc->dsq_id = llcx->intr_dsq;
 	} else if (can_migrate(taskc)) {
 		taskc->dsq_id = llcx->mig_dsq;
@@ -1037,6 +1041,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 
 	bool has_affn_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0;
 	bool has_intr_queued = scx_bpf_dsq_nr_queued(cpuc->intr_dsq) > 0;
+
 	u64 min_vtime = 0;
 
 	// First search affinitized DSQ
@@ -1094,9 +1099,8 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
-	if (interactive_dsq && has_intr_queued &&
-	    dsq_id != cpuc->intr_dsq &&
-	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
+	if (interactive_dsq && dsq_id != cpuc->intr_dsq &&
+	    scx_bpf_dsq_move_to_local(cpuc->intr_dsq))
 		return;
 
 	if (dsq_id != cpuc->llc_dsq &&
