@@ -1122,13 +1122,13 @@ out_kick:
 /*
  * Return true if @tctx is an interactive task, false otherwise.
  */
-static bool is_interactive(const struct task_ctx *tctx)
+static bool is_interactive(const struct task_struct *p, const struct task_ctx *tctx)
 {
 	/*
 	 * If the task has been using the CPU for less than @slice_min,
 	 * assume it's interactive.
 	 */
-	return tctx->exec_runtime < slice_min;
+	return scale_by_task_normalized_weight_inverse(p, tctx->exec_runtime) < slice_min;
 }
 
 /*
@@ -1179,7 +1179,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * per-node DSQ for the CPU-intensive tasks (if enabled).
 	 */
 	if (pcpu_dsq &&
-	    (!node_dsq || (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(tctx)))) {
+	    (!node_dsq || (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(p, tctx)))) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
