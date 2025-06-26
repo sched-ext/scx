@@ -133,7 +133,7 @@ int scx_minheap_pop(void __arena *heap_ptr __arg_arena, struct scx_minheap_elem 
 		return -EINVAL;
 
 	helem->elem = heap->helems[0].elem;
-	helem->weight = heap->helems[0].elem;
+	helem->weight = heap->helems[0].weight;
 
 	heap->helems[0].elem = heap->helems[heap->size - 1].elem;
 	heap->helems[0].weight = heap->helems[heap->size - 1].weight;
