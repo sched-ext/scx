@@ -65,7 +65,7 @@ const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
  * Maximum amount of voluntary context switches (this limit allows to prevent
  * spikes or abuse of the nvcsw dynamic).
  */
-const volatile u64 max_avg_nvcsw;
+const volatile u64 max_avg_nvcsw = 128ULL;
 
 /*
  * CPU utilization threshold to consider the CPU as busy.
