@@ -2897,7 +2897,6 @@ dependencies = [
  "nix 0.30.1",
  "nvml-wrapper",
  "once_cell",
- "procfs",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",

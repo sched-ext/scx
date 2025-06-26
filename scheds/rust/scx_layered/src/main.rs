@@ -33,7 +33,6 @@ use lazy_static::lazy_static;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libc::{self, c_int, c_void, syscall, SYS_move_pages};
 use log::info;
 use log::trace;
 use log::warn;
@@ -42,7 +41,6 @@ use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
-use procfs::process::MMPermissions;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -69,8 +67,6 @@ use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
-use std::ptr;
-use std::str::FromStr;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
@@ -640,10 +636,6 @@ struct Opts {
     /// Enable numa topology based gpu task affinitization.
     #[clap(long, default_value = "false")]
     enable_gpu_affinitize: bool,
-
-    /// Enable numa topology based gpu task memory migration.
-    #[clap(long, default_value = "false")]
-    enable_gpu_mem_migrate: bool,
 
     /// Interval at which to reaffinitize gpu tasks to numa nodes.
     /// Defaults to 30s
@@ -1279,7 +1271,7 @@ impl Layer {
 #[derive(Debug, Clone)]
 struct NodeInfo {
     node_mask: nix::sched::CpuSet,
-    node_id: usize,
+    _node_id: usize,
 }
 #[derive(Debug)]
 struct GpuTaskHandler {
@@ -1290,11 +1282,10 @@ struct GpuTaskHandler {
     pid_map: HashMap<Pid, Vec<Pid>>,
     poll_interval: Duration,
     enable: bool,
-    enable_mem_migrate: bool,
 }
 
 impl GpuTaskHandler {
-    pub fn new(poll_interval: u64, enable: bool, enable_mem_migrate: bool) -> GpuTaskHandler {
+    pub fn new(poll_interval: u64, enable: bool) -> GpuTaskHandler {
         GpuTaskHandler {
             gpu_devs_to_node_info: HashMap::new(),
             gpu_pids_to_devs: HashMap::new(),
@@ -1303,7 +1294,6 @@ impl GpuTaskHandler {
             pid_map: HashMap::new(),
             poll_interval: Duration::from_secs(poll_interval),
             enable,
-            enable_mem_migrate,
         }
     }
     fn find_one_cpu(&self, affinity: Vec<u64>) -> Result<u32, anyhow::Error> {
@@ -1341,7 +1331,7 @@ impl GpuTaskHandler {
                         idx,
                         NodeInfo {
                             node_mask: self.node_to_cpuset(node)?,
-                            node_id: *node_id,
+                            _node_id: *node_id,
                         },
                     );
                 }
@@ -1415,21 +1405,7 @@ impl GpuTaskHandler {
                     nix::unistd::Pid::from_raw(child.as_u32() as i32),
                     &node_info.node_mask,
                 ) {
-                    Ok(_) => {
-                        if self.enable_mem_migrate {
-                            match self.move_mem_node_pid(*pid, node_info.node_id as i32) {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    warn!(
-                                        "Error moving memory for gpu pid {} to node {:#?} : {:#?}",
-                                        child.as_u32(),
-                                        node_info,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    Ok(_) => {}
                     Err(_) => {
                         warn!(
                             "Error affinitizing gpu pid {} to node {:#?}",
@@ -1443,49 +1419,7 @@ impl GpuTaskHandler {
 
         Ok(())
     }
-    fn move_mem_node_pid(&self, pid: Pid, target_node: i32) -> Result<(), anyhow::Error> {
-        let maps = procfs::process::Process::new(pid.as_u32() as i32)?.maps()?;
-        let mut pages = Vec::new();
 
-        for m in maps {
-            if m.perms.contains(MMPermissions::from_str("w")?)
-                && m.perms.contains(MMPermissions::from_str("p")?)
-                && !m.perms.contains(MMPermissions::from_str("x")?)
-            {
-                for addr in (m.address.0..m.address.1).step_by(4096) {
-                    pages.push(addr as *mut c_void);
-                }
-            }
-        }
-
-        if pages.is_empty() {
-            return Ok(());
-        }
-
-        let to_nodes: Vec<i32> = vec![target_node; pages.len()];
-
-        let ret = unsafe {
-            syscall(
-                SYS_move_pages,
-                pid.as_u32() as c_int,
-                pages.len() as c_int,
-                pages.as_mut_ptr(),
-                to_nodes.as_ptr(),
-                ptr::null_mut::<i32>(),
-                0,
-            )
-        };
-
-        if ret < 0 {
-            error!(
-                "move_pages failed for pid {}: {}",
-                pid,
-                std::io::Error::last_os_error()
-            );
-        }
-
-        Ok(())
-    }
     pub fn process(&mut self) {
         if !self.enable {
             return;
@@ -2394,11 +2328,8 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
-        let mut gpu_task_handler = GpuTaskHandler::new(
-            opts.gpu_affinitize_secs,
-            opts.enable_gpu_affinitize,
-            opts.enable_gpu_mem_migrate,
-        );
+        let mut gpu_task_handler =
+            GpuTaskHandler::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
         gpu_task_handler.init(topo.clone());
         let sched = Self {
             struct_ops: Some(struct_ops),
