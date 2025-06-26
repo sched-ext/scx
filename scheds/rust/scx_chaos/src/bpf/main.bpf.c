@@ -509,6 +509,12 @@ void BPF_STRUCT_OPS(chaos_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(wakee_ctx = lookup_create_chaos_task_ctx(p)))
 		return;
 
+	if (wakee_ctx->pending_trait) {
+		wakee_ctx->next_trait = wakee_ctx->pending_trait;
+		wakee_ctx->pending_trait = 0;
+		return;
+	}
+
 	wakee_ctx->next_trait = choose_chaos(wakee_ctx);
 }
 
@@ -552,6 +558,16 @@ p2dq:
 	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
 }
 
+void BPF_STRUCT_OPS(chaos_tick, struct task_struct *p)
+{
+	struct chaos_task_ctx *taskc;
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return;
+
+	if (taskc->pending_trait)
+		p->scx.slice = 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
@@ -573,6 +589,7 @@ SCX_OPS_DEFINE(chaos,
 	       .init_task		= (void *)chaos_init_task,
 	       .runnable		= (void *)chaos_runnable,
 	       .select_cpu		= (void *)chaos_select_cpu,
+		   .tick 			= (void *)chaos_tick,
 
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
@@ -598,7 +615,7 @@ int generic(struct pt_regs *ctx)
 
 	u32 roll = bpf_get_prandom_u32();
 	if (roll < kprobe_delays_freq_frac32) {
-		taskc->next_trait = CHAOS_TRAIT_RANDOM_DELAYS;
+		taskc->pending_trait = CHAOS_TRAIT_RANDOM_DELAYS;
 		dbg("GENERIC: setting next_trait to RANDOM_DELAYS - task[%d]", p->pid);
 	}
 
