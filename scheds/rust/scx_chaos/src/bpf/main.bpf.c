@@ -507,11 +507,7 @@ void BPF_STRUCT_OPS(chaos_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(wakee_ctx = lookup_create_chaos_task_ctx(p)))
 		return;
 
-	enum chaos_trait_kind t = choose_chaos(wakee_ctx);
-	if (t == CHAOS_TRAIT_NONE)
-		return;
-
-	wakee_ctx->next_trait = t;
+	wakee_ctx->next_trait = choose_chaos(wakee_ctx);
 }
 
 void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
