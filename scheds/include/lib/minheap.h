@@ -5,19 +5,10 @@ struct scx_minheap_elem {
 	u64 weight;
 };
 
-#define SCX_MINHEAP_MAX_CAPACITY (128)
-
-/*
- * XXXETSAL: We are currently splitting the keys and values into two arrays
- * because of verifier pain. The solution we need is to use an array of
- * scx_minheap_elem data structures whose size we adjust as needed.
- */
-
 struct scx_minheap {
 	u64				size;
 	u64				capacity;
-	u64				elems[SCX_MINHEAP_MAX_CAPACITY];
-	u64				weights[SCX_MINHEAP_MAX_CAPACITY];
+	struct scx_minheap_elem		__arena *helems;
 };
 
 typedef struct scx_minheap __arena scx_minheap_t;
@@ -37,11 +28,11 @@ int scx_minheap_pop(void __arena *heap_ptr __arg_arena, struct scx_minheap_elem 
 	if (heap->size == 0)
 		return -EINVAL;
 
-	helem->elem = heap->elems[0];
-	helem->weight = heap->elems[0];
+	helem->elem = heap->helems[0].elem;
+	helem->weight = heap->helems[0].elem;
 
-	heap->elems[0] = heap->elems[heap->size - 1];
-	heap->weights[0] = heap->weights[heap->size - 1];
+	heap->helems[0].elem = heap->helems[heap->size - 1].elem;
+	heap->helems[0].weight = heap->helems[heap->size - 1].weight;
 
 	heap->size -= 1;
 

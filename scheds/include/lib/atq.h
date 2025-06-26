@@ -6,6 +6,8 @@
 
 #include <lib/minheap.h>
 
+#define SCX_ATQ_MAX_CAPACITY (65536)
+
 struct scx_atq {
 	scx_minheap_t *heap;
 	arena_spinlock_t lock;

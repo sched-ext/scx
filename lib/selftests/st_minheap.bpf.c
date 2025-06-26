@@ -202,18 +202,6 @@ int scx_selftest_minheap_random(scx_minheap_t *heap)
 	return 0;
 }
 
-static
-int scx_selftest_minheap_toolarge(scx_minheap_t *heap)
-{
-	void __arena *heap2;
-
-	heap2 = scx_minheap_alloc(SCX_MINHEAP_MAX_CAPACITY + 1);
-	if (heap2)
-		return -EINVAL;
-
-	return 0;
-}
-
 #define SCX_MINHEAP_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_minheap_ ## suffix, heap)
 
 __weak
@@ -232,7 +220,6 @@ int scx_selftest_minheap(void)
 	SCX_MINHEAP_SELFTEST(descending);
 	SCX_MINHEAP_SELFTEST(alternating);
 	SCX_MINHEAP_SELFTEST(random);
-	SCX_MINHEAP_SELFTEST(toolarge);
 
 	return 0;
 }
