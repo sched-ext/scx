@@ -50,6 +50,7 @@ pub use tui::Event;
 pub use tui::Tui;
 pub use util::format_hz;
 pub use util::read_file_string;
+pub use util::sanitize_nbsp;
 
 pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
@@ -62,7 +63,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the 
+This software may be used and distributed according to the terms of the
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
