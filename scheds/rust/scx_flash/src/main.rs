@@ -182,17 +182,6 @@ struct Opts {
     #[clap(short = 't', long, default_value = "0")]
     throttle_us: u64,
 
-    /// Enable tickless mode.
-    ///
-    /// This option enables tickless mode: tasks get an infinite time slice and they are preempted
-    /// only in case of CPU contention. This can help reduce the OS noise and provide a better
-    /// level of performance isolation.
-    ///
-    /// The argument of this option defines how often the scheduler periodically checks for CPU
-    /// contention and enforce preemption when needed (0 = tickless mode disabled).
-    #[clap(short = 'T', long, default_value = "0")]
-    tickless_us: u64,
-
     /// Set CPU idle QoS resume latency in microseconds (-1 = disabled).
     ///
     /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
@@ -200,6 +189,14 @@ struct Opts {
     /// value may reduce performance, but also improve power efficiency.
     #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
     idle_resume_us: i64,
+
+    /// Enable tickless mode.
+    ///
+    /// This option enables tickless mode: tasks get an infinite time slice and they are preempted
+    /// only in case of CPU contention. This can help reduce the OS noise and provide a better
+    /// level of performance isolation.
+    #[clap(short = 'T', long, action = clap::ArgAction::SetTrue)]
+    tickless: bool,
 
     /// Use per-CPU runqueues only.
     ///
@@ -394,13 +391,13 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
+        skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
-        skel.maps.rodata_data.tickless_ns = opts.tickless_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
 
