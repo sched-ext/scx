@@ -7,6 +7,35 @@ import subprocess
 import sys
 
 
+def get_package_kernel_requirements():
+    """Get list of Rust crates with specific kernel requirements"""
+    result = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    metadata = json.loads(result.stdout)
+
+    kernel_requirements = {}
+    for pkg in metadata.get("packages", []):
+        pkg_metadata = pkg.get("metadata")
+        if not pkg_metadata:
+            continue
+        scx_metadata = pkg_metadata.get("scx")
+        if not scx_metadata:
+            continue
+        ci_metadata = scx_metadata.get("ci")
+        if not ci_metadata:
+            continue
+        kernel_metadata = ci_metadata.get("kernel")
+        if not kernel_metadata:
+            continue
+        kernel_requirements[pkg["name"]] = kernel_metadata
+
+    return kernel_requirements
+
+
 def get_kernel_trailers_from_commits():
     """Get CI-Test-Kernel trailers from commits between current HEAD and base branch."""
     # In GitHub Actions, GITHUB_BASE_REF contains the target branch name for PRs
@@ -82,13 +111,14 @@ def main():
 
     default_kernel = sys.argv[1]
 
+    kernel_reqs = get_package_kernel_requirements()
+
     trailer_kernels = get_kernel_trailers_from_commits()
 
     kernels_to_test = {default_kernel}
     kernels_to_test.update(trailer_kernels)
 
     matrix = []
-
     for kernel in kernels_to_test:
         # use a blank kernel name for the default, as the common case is to have
         # no trailers and it makes the matrix names harder to read.
@@ -98,16 +128,23 @@ def main():
             "scx_bpfland",
             "scx_chaos",
             "scx_lavd",
+            "scx_p2dq",
             "scx_rlfifo",
             "scx_rustland",
             "scx_rusty",
             "scx_tickless",
         ]:
-            matrix.append({"name": scheduler, "flags": "", "kernel": kernel_name})
+            reqs = kernel_reqs.get(scheduler, {})
+            allowlist = reqs.get("allowlist", [])
+            blocklist = reqs.get("blocklist", [])
+            if kernel in blocklist:
+                continue
+            # always allow the default kernel through, crates should specify
+            # kernel.default if they want a different one
+            if kernel != "" and allowlist and kernel not in allowlist:
+                continue
 
-        # p2dq fails on 6.12, see https://github.com/sched-ext/scx/issues/2075 for more info
-        if kernel != "stable/6_12":
-            matrix.append({"name": "scx_p2dq", "flags": "", "kernel": kernel_name})
+            matrix.append({"name": scheduler, "flags": "", "kernel": kernel_name})
 
         for flags in itertools.product(
             ["--disable-topology=false", "--disable-topology=true"],

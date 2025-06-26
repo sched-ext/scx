@@ -4,7 +4,6 @@ on:
   workflow_call:
     inputs:
       repo-name:
-        required: true
         type: string
 
 jobs:
@@ -42,16 +41,6 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - name: Load kernel
-        run: |
-          if [ -n "${{ matrix.scheduler.kernel }}" ]; then
-            KERNEL_NAME="${{ matrix.scheduler.kernel }}"
-          else
-            KERNEL_NAME="${{ inputs.repo-name }}"
-          fi
-          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
-          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
-
       - name: Install Veristat
         run: nix-env -i $(nix build --no-link --print-out-paths ./.github/include#veristat)
 
@@ -63,6 +52,27 @@ jobs:
           key: ${{ matrix.scheduler.name }}
           prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
+
+      - name: Load kernel
+        run: |
+          if [ -n "${{ matrix.scheduler.kernel }}" ]; then
+            KERNEL_NAME="${{ matrix.scheduler.kernel }}"
+          elif [ -n "${{ inputs.repo-name }}" ]; then
+            KERNEL_NAME="${{ inputs.repo-name }}"
+          else
+            KERNEL_NAME=$(cargo metadata --format-version 1 --no-deps \
+              | jq -r --arg pkg "${{ matrix.scheduler.name }}" '
+                  .packages[]?
+                  | select(.name == $pkg)
+                  | .metadata.scx?.ci?.kernel?.default
+                  // "sched_ext/for-next"
+              ')
+          fi
+
+          echo "KERNEL_NAME=$KERNEL_NAME" >> $GITHUB_ENV
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
+
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
         id: cache-virtiofsd
