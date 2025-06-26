@@ -589,7 +589,7 @@ SCX_OPS_DEFINE(chaos,
 	       .init_task		= (void *)chaos_init_task,
 	       .runnable		= (void *)chaos_runnable,
 	       .select_cpu		= (void *)chaos_select_cpu,
-		   .tick 			= (void *)chaos_tick,
+		.tick 			= (void *)chaos_tick,
 
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
@@ -614,7 +614,7 @@ int generic(struct pt_regs *ctx)
 		return -EINVAL;
 
 	u32 roll = bpf_get_prandom_u32();
-	if (roll < kprobe_delays_freq_frac32) {
+	if (roll <= kprobe_delays_freq_frac32) {
 		taskc->pending_trait = CHAOS_TRAIT_RANDOM_DELAYS;
 		dbg("GENERIC: setting pending_trait to RANDOM_DELAYS - task[%d]", p->pid);
 	}
