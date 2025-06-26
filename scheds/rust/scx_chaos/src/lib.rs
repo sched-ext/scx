@@ -137,7 +137,7 @@ pub enum RequiresPpid {
 }
 
 #[derive(Debug)]
-pub struct KprobeDelays {
+pub struct KprobeRandomDelays {
     pub kprobes: Vec<String>,
     pub freq: f64,
 }
@@ -147,7 +147,7 @@ pub struct KprobeDelays {
 pub struct Builder<'a> {
     pub traits: Vec<Trait>,
     pub verbose: u8,
-    pub kprobe_delays: Option<KprobeDelays>,
+    pub kprobe_random_delays: Option<KprobeRandomDelays>,
     pub p2dq_opts: &'a P2dqOpts,
     pub requires_ppid: Option<RequiresPpid>,
 }
@@ -365,7 +365,7 @@ impl Builder<'_> {
     }
 
     fn attach_kprobes(&self, skel: &mut BpfSkel) -> Result<Vec<Link>> {
-        let Some(kd) = &self.kprobe_delays else {
+        let Some(kd) = &self.kprobe_random_delays else {
             return Ok(vec![]);
         };
 
@@ -433,9 +433,9 @@ impl Builder<'_> {
             }
         };
 
-        if let Some(kprobe_delays) = &self.kprobe_delays {
+        if let Some(kprobe_random_delays) = &self.kprobe_random_delays {
             open_skel.maps.rodata_data.kprobe_delays_freq_frac32 =
-                (kprobe_delays.freq * 2_f64.powf(32_f64)) as u32;
+                (kprobe_random_delays.freq * 2_f64.powf(32_f64)) as u32;
         }
 
         // Set up the frequency array. The first element means nothing, so should be what's
@@ -601,13 +601,13 @@ pub struct PerfDegradationArgs {
 /// Delay a process when a kprobe is hit.
 #[derive(Debug, Parser)]
 pub struct KprobeArgs {
-    /// Introduce random delays in the scheduler whenever a provided kfunc is hit.
+    /// Introduce random delays in the scheduler whenever a provided kprobe is hit.
     #[clap(long, num_args = 1.., value_parser)]
-    pub kprobes: Vec<String>,
+    pub kprobes_for_random_delays: Vec<String>,
 
     /// Chance of kprobe random delays. Must be between 0 and 1.
-    #[clap(long, requires = "kprobes")]
-    pub kprobe_frequency: Option<f64>,
+    #[clap(long, requires = "kprobes_for_random_delays")]
+    pub kprobe_random_delay_frequency: Option<f64>,
 }
 
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
@@ -667,8 +667,8 @@ pub struct Args {
     #[command(flatten, next_help_heading = "CPU Frequency")]
     pub cpu_freq: CpuFreqArgs,
 
-    #[command(flatten, next_help_heading = "Kprobe Delays")]
-    pub kprobe_delays: KprobeArgs,
+    #[command(flatten, next_help_heading = "Kprobe Random Delays")]
+    pub kprobe_random_delays: KprobeArgs,
 
     #[command(flatten, next_help_heading = "General Scheduling")]
     pub p2dq: P2dqOpts,
@@ -753,13 +753,13 @@ impl<'a> Iterator for BuilderIterator<'a> {
                 None
             };
 
-            let kprobe_delays = match &self.args.kprobe_delays {
+            let kprobe_random_delays = match &self.args.kprobe_random_delays {
                 KprobeArgs {
-                    kprobes,
-                    kprobe_frequency,
-                } if !kprobes.is_empty() => Some(KprobeDelays {
-                    kprobes: kprobes.clone(),
-                    freq: kprobe_frequency.unwrap_or(0.1),
+                    kprobes_for_random_delays,
+                    kprobe_random_delay_frequency,
+                } if !kprobes_for_random_delays.is_empty() => Some(KprobeRandomDelays {
+                    kprobes: kprobes_for_random_delays.clone(),
+                    freq: kprobe_random_delay_frequency.unwrap_or(0.1),
                 }),
                 _ => None,
             };
@@ -767,7 +767,7 @@ impl<'a> Iterator for BuilderIterator<'a> {
             Some(Builder {
                 traits,
                 verbose: self.args.verbose,
-                kprobe_delays,
+                kprobe_random_delays,
                 p2dq_opts: &self.args.p2dq,
                 requires_ppid,
             })
