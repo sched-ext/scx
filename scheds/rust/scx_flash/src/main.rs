@@ -174,7 +174,7 @@ struct Opts {
     /// Decreasing this value makes the scheduler more robust and fair.
     ///
     /// (0 = disable voluntary context switch prioritization).
-    #[clap(short = 'c', long, default_value = "0")]
+    #[clap(short = 'c', long, default_value = "128")]
     max_avg_nvcsw: u64,
 
     /// Utilization percentage to consider a CPU as busy (-1 = auto).
