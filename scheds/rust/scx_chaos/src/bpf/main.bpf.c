@@ -599,7 +599,6 @@ int generic(struct pt_regs *ctx)
 	u32 roll = bpf_get_prandom_u32();
 	if (roll < kprobe_delays_freq_frac32) {
 		taskc->next_trait = CHAOS_TRAIT_RANDOM_DELAYS;
-		p->scx.slice = 0;
 		dbg("GENERIC: setting next_trait to RANDOM_DELAYS - task[%d]", p->pid);
 	}
 
