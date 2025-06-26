@@ -564,7 +564,7 @@ void BPF_STRUCT_OPS(chaos_tick, struct task_struct *p)
 	if (!(taskc = lookup_create_chaos_task_ctx(p)))
 		return;
 
-	if (taskc->pending_trait)
+	if (taskc->pending_trait == CHAOS_TRAIT_RANDOM_DELAYS)
 		p->scx.slice = 0;
 }
 
