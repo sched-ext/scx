@@ -122,3 +122,15 @@ int scx_minheap_insert(void __arena *heap_ptr __arg_arena, u64 elem, u64 weight)
 
 	return 0;
 }
+
+__hidden
+int scx_minheap_dump(scx_minheap_t *heap __arg_arena)
+{
+	int i;
+
+	bpf_printk("HEAP %p SIZE %ld", heap, heap->size);
+	for (i = 0; i < heap->size && can_loop; i++)
+		bpf_printk("[0] (0x%lx, %ld)", heap->helems[i].elem, heap->helems[i].weight);
+
+	return 0;
+}

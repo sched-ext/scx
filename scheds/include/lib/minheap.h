@@ -18,6 +18,7 @@ u64 scx_minheap_alloc_internal(size_t capacity);
 
 int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena);
 int scx_minheap_insert(void __arena *heap_ptr __arg_arena, u64 elem, u64 weight);
+int scx_minheap_dump(scx_minheap_t *heap __arg_arena);
 
 /* Inlined because we are passing a non-arena pointer argument. */
 static inline
