@@ -118,11 +118,8 @@ def main():
     kernels_to_test = {default_kernel}
     kernels_to_test.update(trailer_kernels)
 
-    matrix = []
+    matrix = set()
     for kernel in kernels_to_test:
-        # use a blank kernel name for the default, as the common case is to have
-        # no trailers and it makes the matrix names harder to read.
-        kernel_name = "" if kernel == default_kernel else kernel
 
         for scheduler in [
             "scx_bpfland",
@@ -144,16 +141,33 @@ def main():
             if kernel != "" and allowlist and kernel not in allowlist:
                 continue
 
-            matrix.append({"name": scheduler, "flags": "", "kernel": kernel_name})
+            # use a blank kernel name for the default, as the common case is to
+            # have no trailers and it makes the matrix names harder to read.
+            this_default = reqs.get("default", "sched_ext/for-next")
+            matrix.add(
+                (
+                    scheduler,
+                    "",
+                    "" if kernel == this_default else kernel,
+                )
+            )
 
         for flags in itertools.product(
             ["--disable-topology=false", "--disable-topology=true"],
             ["", "--disable-antistall"],
         ):
-            matrix.append(
-                {"name": "scx_layered", "flags": " ".join(flags), "kernel": kernel_name}
+            # use a blank kernel name for the default, as the common case is to
+            # have no trailers and it makes the matrix names harder to read.
+            this_default = "sched_ext/for-next"
+            matrix.add(
+                (
+                    "scx_layered",
+                    " ".join(flags),
+                    "" if kernel == this_default else kernel,
+                )
             )
 
+    matrix = [{"name": n, "flags": f, "kernel": k} for n, f, k in matrix]
     print(f"matrix={json.dumps(matrix)}")
 
 
