@@ -1461,13 +1461,13 @@ impl GpuTaskHandler {
         match self.init_dev_node_map(topo) {
             Ok(_) => {}
             Err(e) => {
-                error!("Error initializing gpu map: {}", e);
+                error!("Error initializing gpu node dev map: {}", e);
             }
         };
         match self.init_process_info() {
             Ok(_) => {}
             Err(e) => {
-                error!("Error initializing gpu map: {}", e);
+                error!("Error initializing process map: {}", e);
             }
         }
         return;
