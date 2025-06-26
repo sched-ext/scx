@@ -24,3 +24,8 @@ pub fn format_hz(hz: u64) -> String {
         _ => format!("{:.3}THz", hz as f64 / 1_000_000_000.0),
     }
 }
+
+/// Replaces non-breaking spaces with regular spaces. [TEMPORARY]
+pub fn sanitize_nbsp(s: String) -> String {
+    s.replace('\u{202F}', " ")
+}
