@@ -42,8 +42,6 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
     needs: build-kernels
     secrets: inherit
-    with:
-      repo-name: sched_ext/for-next
 
   pages:
     runs-on: ubuntu-24.04
