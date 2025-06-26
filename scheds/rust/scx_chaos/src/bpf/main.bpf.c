@@ -589,7 +589,7 @@ SCX_OPS_DEFINE(chaos,
 	       .init_task		= (void *)chaos_init_task,
 	       .runnable		= (void *)chaos_runnable,
 	       .select_cpu		= (void *)chaos_select_cpu,
-		.tick 			= (void *)chaos_tick,
+	       .tick 		    	= (void *)chaos_tick,
 
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
