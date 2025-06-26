@@ -100,7 +100,7 @@ int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 	return 0;
 }
 
-__weak
+__hidden
 int scx_minheap_insert(void __arena *heap_ptr __arg_arena, u64 elem, u64 weight)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;

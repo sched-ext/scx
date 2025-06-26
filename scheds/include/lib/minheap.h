@@ -5,7 +5,7 @@ struct scx_minheap_elem {
 	u64 weight;
 };
 
-#define SCX_MINHEAP_MAX_CAPACITY (32)
+#define SCX_MINHEAP_MAX_CAPACITY (128)
 
 /*
  * XXXETSAL: We are currently splitting the keys and values into two arrays
@@ -26,7 +26,7 @@ u64 scx_minheap_alloc_internal(size_t capacity);
 #define scx_minheap_alloc(capacity) (scx_minheap_t *)scx_minheap_alloc_internal(capacity);
 
 int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena);
-int scx_minheap_insert(void __arena *heap_ptr, u64 elem, u64 weight);
+int scx_minheap_insert(void __arena *heap_ptr __arg_arena, u64 elem, u64 weight);
 
 /* Inlined because we are passing a non-arena pointer argument. */
 static inline
