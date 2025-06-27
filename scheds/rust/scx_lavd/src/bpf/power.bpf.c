@@ -9,36 +9,81 @@
  */
 
 /*
- * CPU topology
+ * System-wide properties of CPUs
  */
-static u64		LAVD_AP_LOW_UTIL;
 static bool		have_turbo_core;
 static bool		have_little_core;
-
-const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
-const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
-const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
-const volatile u8	cpu_big[LAVD_CPU_ID_MAX]; /* Is a CPU a big core? */
-const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX]; /* Is a CPU a turbo core? */
-
-static int		nr_cpdoms; /* number of compute domains */
-struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
-private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* online CPU mask for each compute domain */
+const volatile bool	is_smt_active;
 
 
 /*
- * Big core's compute ratio among currently active cores scaled by 1024.
+ * CPU properties
  */
+/* CPU capacity based on 1024 */
+const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
+
+/* Is a CPU a big core? */
+const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
+
+/* Is a CPU a turbo core? */
+const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
+
+
+/*
+ * Compute domain properties
+ */
+/* number of compute domains */
+static int		nr_cpdoms;
+
+/* contexts for compute domains */
+struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+
+/* online CPU mask for each compute domain */
+private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
+
+
+/*
+ * Performance vs. CPU order (PCO) table
+ */
+/* Do not use energy model in making CPU preference order decisions. */
+const volatile u8	no_use_em;
+
+/* The numbr of PCO states populated */
+const volatile u8	nr_pco_states;
+
+/* The upper bounds of performance capacity for each PCO state. */
+const volatile u32	pco_bounds[LAVD_PCO_STATE_MAX];
+
+/* The number of CPUs in a primary domain for each PCO state. */
+const volatile u16	pco_nr_primary[LAVD_PCO_STATE_MAX];
+
+/* The PCO table */
+const volatile u16	pco_table[LAVD_PCO_STATE_MAX][LAVD_CPU_ID_MAX];
+
+/* The index for current PCO state */
+volatile static int	pco_idx;
+
+/*
+ * Big & LITTLE core's capacities
+ */
+/* Total compute capacity of online CPUs. */
+static u64		total_capacity;
+
+/* Capacity of one LITTLEst CPU. */
+static u64		one_little_capacity;
+
+/* Big core's compute ratio among currently active cores scaled by 1024. */
 static u32		cur_big_core_scale;
 
-/*
- * Big core's compute ratio when all cores are active scaled by 1024.
- */
+/* Big core's compute ratio when all cores are active scaled by 1024. */
 static u32		default_big_core_scale;
 
+
 /*
- * Statistics
+ * Power mode
  */
+static u64		LAVD_AP_LOW_CAP;
+static u64		LAVD_AP_HIGH_CAP;
 volatile int		power_mode;
 volatile u64		last_power_mode_clk;
 volatile u64		performance_mode_ns;
@@ -73,24 +118,19 @@ static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 
 static const volatile u16 *get_cpu_order(void)
 {
-	/*
-	 * Decide a cpu order to use according to its power mode.
-	 */
-	if (is_powersave_mode)
-		return cpu_order_powersave;
-	else
-		return cpu_order_performance;
+	int i = READ_ONCE(pco_idx);
+
+	if (i < 0 || i >= LAVD_PCO_STATE_MAX) {
+		scx_bpf_error("Incorrect PCO state: %d", i);
+		i = 0;
+	}
+
+	return pco_table[i];
 }
 
-static int calc_nr_active_cpus(void)
+static u64 calc_required_capacity(void)
 {
-	const volatile u16 *cpu_order;
-	u64 req_cap, cap_cpu, cap_sum = 0;
-	u16 cpu_id, i;
-
 	/*
-	 * Calculate the required compute capacity:
-	 *
 	 * Scaled utilization assumes all the CPUs are the fastest ones
 	 * running at the highest frequency. So the required compute capacity
 	 * given the scaled utilization is defined as follows:
@@ -99,26 +139,82 @@ static int calc_nr_active_cpus(void)
 	 *             = (nr_cpus_onln * 1024) * (avg_sc_util / 1024)
 	 *             = nr_cpus_only * scaled_utilization
 	 */
-	req_cap = nr_cpus_onln * sys_stat.avg_sc_util;
+	return nr_cpus_onln * sys_stat.avg_sc_util;
+}
+
+static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
+{
+	/*
+	 * avg_sc_util is the utilization assuming all the CPUs are the
+	 * fastest ones (i.e., capacity = 1024) at the highest frequency.
+	 * Hence, when all CPUs are 100% utilized, the avg_sc_util is not
+	 * 1024, it is the sum of capacities of all online CPUs. Printing
+	 * avg_sc_util is confusing. So, let's convert it to 100% scale when
+	 * all CPUs are 100% utilized.
+	 */
+	return (avg_sc_util * nr_cpus_onln * 1000) / total_capacity;
+}
+
+static int calc_nr_active_cpus(void)
+{
+	u64 req_cap;
+	int i;
 
 	/*
-	 * Fill the required compute capacity in the CPU preference order,
-	 * utilizing each CPU in a certain % (LAVD_CC_PER_CORE_UTIL or
-	 * LAVD_CC_PER_CORE_SHIFT).
+	 * First, calculate the required compute capacity:
 	 */
-	cpu_order = get_cpu_order();
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (i >= LAVD_CPU_ID_MAX)
-			return nr_cpu_ids;
+	req_cap = calc_required_capacity();
 
-		cpu_id = cpu_order[i];
-		if (cpu_id >= LAVD_CPU_ID_MAX)
-			return nr_cpu_ids;
+	/*
+	 * Then, determine the number of active CPUs that meet the required
+	 * compute capacity after updating the PCO index.
+	 */
+	if (no_use_em) {
+		/*
+		 * When the energy model is not available, update the PCO
+		 * index based on the power mode. Then, fill the required
+		 * compute capacity in the CPU preference order, utilizing
+		 * each CPU in a certain % (LAVD_CC_PER_CORE_UTIL or
+		 * LAVD_CC_PER_CORE_SHIFT).
+		 */
+		const volatile u16 *cpu_order = get_cpu_order();
+		u64 cap_cpu, cap_sum = 0;
+		u16 cpu_id;
 
-		cap_cpu = cpu_capacity[cpu_id];
-		cap_sum += cap_cpu >> LAVD_CC_PER_CORE_SHIFT;
-		if (cap_sum >= req_cap)
-			return i+1;
+		if (is_powersave_mode)
+			WRITE_ONCE(pco_idx, 0);
+		else
+			WRITE_ONCE(pco_idx, nr_pco_states - 1);
+
+		bpf_for(i, 0, nr_cpu_ids) {
+			if (i >= LAVD_CPU_ID_MAX)
+				break;
+
+			cpu_id = cpu_order[i];
+			if (cpu_id >= LAVD_CPU_ID_MAX)
+				break;
+
+			cap_cpu = cpu_capacity[cpu_id];
+			cap_sum += cap_cpu >> LAVD_CC_PER_CORE_SHIFT;
+			if (cap_sum >= req_cap)
+				return i + 1;
+		}
+	} else {
+		/*
+		 * When the energy model is available, all primary CPUs should
+		 * be active. First, update pco_idx to meet the required
+		 * capacity. Then, choose the number of primary CPUs for the
+		 * PCO state.
+		 */
+		bpf_for(i, 0, nr_pco_states) {
+			if (i >= LAVD_PCO_STATE_MAX)
+				break;
+
+			if (pco_bounds[i] >= req_cap) {
+				WRITE_ONCE(pco_idx, i);
+				return pco_nr_primary[i];
+			}
+		}
 	}
 
 	/* Should not be here. */
@@ -127,7 +223,7 @@ static int calc_nr_active_cpus(void)
 
 static void do_core_compaction(void)
 {
-	const volatile u16 *cpu_order = get_cpu_order();
+	const volatile u16 *cpu_order;
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	struct cpdom_ctx *cpdomc;
@@ -149,10 +245,18 @@ static void do_core_compaction(void)
 	}
 
 	/*
-	 * Assign active and overflow cores
+	 * Update the PCO index that meets the required compute capacity
+	 * if the energy model is available. Then, it decides the number of
+	 * active CPUs. Finally, obtain the CPU order list based on the current
+	 * load.
 	 */
 	nr_active_old = sys_stat.nr_active;
 	nr_active = calc_nr_active_cpus();
+	cpu_order = get_cpu_order();
+
+	/*
+	 * Assign active and overflow cores.
+	 */
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
@@ -268,9 +372,10 @@ static void update_power_mode_time(void)
 	}
 }
 
-
-static int do_set_power_profile(s32 pm, int util)
+static int do_set_power_profile(s32 pm)
 {
+	u64 hr_sc;
+
 	/*
 	 * Skip setting the mode if already in the same mode.
 	 */
@@ -286,6 +391,7 @@ static int do_set_power_profile(s32 pm, int util)
 	/*
 	 * Change the power mode.
 	 */
+	hr_sc = get_human_readable_avg_sc_util(sys_stat.avg_sc_util);
 	switch (pm) {
 	case LAVD_PM_PERFORMANCE:
 		no_core_compaction = true;
@@ -301,19 +407,22 @@ static int do_set_power_profile(s32 pm, int util)
 		 * timer handler, update_sys_stat().
 		 */
 		reinit_cpumask_for_performance = true;
-		debugln("Set the scheduler's power profile to performance mode: %d", util);
+		debugln("Set the scheduler's power profile to performance mode: %d",
+			hr_sc);
 		break;
 	case LAVD_PM_BALANCED:
 		no_core_compaction = false;
 		is_powersave_mode = false;
 		reinit_cpumask_for_performance = false;
-		debugln("Set the scheduler's power profile to balanced mode: %d", util);
+		debugln("Set the scheduler's power profile to balanced mode: %d",
+			hr_sc);
 		break;
 	case LAVD_PM_POWERSAVE:
 		no_core_compaction = false;
 		is_powersave_mode = true;
 		reinit_cpumask_for_performance = false;
-		debugln("Set the scheduler's power profile to power-save mode: %d", util);
+		debugln("Set the scheduler's power profile to power-save mode: %d",
+			hr_sc);
 		break;
 	default:
 		return -EINVAL;
@@ -325,27 +434,34 @@ static int do_set_power_profile(s32 pm, int util)
 static int do_autopilot(void)
 {
 	/*
-	 * If the CPU utiulization is very low (say <= 5%), it means high
-	 * performance is not required. We run the scheduler in powersave mode
-	 * to save energy consumption.
+	 * Calculate the required compute capacity from the scaled utilization.
 	 */
-	if (sys_stat.avg_util <= LAVD_AP_LOW_UTIL)
-		return do_set_power_profile(LAVD_PM_POWERSAVE, sys_stat.avg_util);
+	u64 req_cap = calc_required_capacity();
 
 	/*
-	 * If the CPU utiulization is moderate (say > 5%, <= 30%), we run the
-	 * scheduler in balanced mode. Actually, balanced mode can save energy
-	 * consumption only under moderate CPU load.
+	 * If the required compute capacity is very low (say that CPU
+	 * utilization is <= 5%), it means high performance is not required.
+	 * So, we run the scheduler in a power-save mode to save energy
+	 * consumption.
 	 */
-	if (sys_stat.avg_util <= LAVD_AP_HIGH_UTIL)
-		return do_set_power_profile(LAVD_PM_BALANCED, sys_stat.avg_util);
+	if (req_cap <= LAVD_AP_LOW_CAP)
+		return do_set_power_profile(LAVD_PM_POWERSAVE);
 
 	/*
-	 * If the CPU utilization is high enough (say > 30%), we run the
-	 * scheduler in performance mode. The system indeed needs perrformance
-	 * also there is little energy benefit even under balanced mode anyway.
+	 * If the required compute capacity is moderate (say that CPU
+	 * utilization is between 5% and 70%), we run the scheduler in a
+	 * balanced mode.
 	 */
-	return do_set_power_profile(LAVD_PM_PERFORMANCE, sys_stat.avg_util);
+	if (req_cap <= LAVD_AP_HIGH_CAP)
+		return do_set_power_profile(LAVD_PM_BALANCED);
+
+	/*
+	 * If the required compute capacity is high enough (say that the CPU
+	 * utilization is > 70%), we run the scheduler in a performance mode.
+	 * The system indeed needs performance; also, there is little energy
+	 * benefit even under balanced mode anyway.
+	 */
+	return do_set_power_profile(LAVD_PM_PERFORMANCE);
 }
 
 static void update_thr_perf_cri(void)
@@ -507,7 +623,7 @@ static int reinit_active_cpumask_for_performance(void)
 	}
 
 	/*
-	 * Update nr_active_cpus and cap_sum_active_cpus.
+	 * Update nr_active_cpus, cap_sum_active_cpus, and pco_idx.
 	 */
 	bpf_for(dsq_id, 0, nr_cpdoms) {
 		if (dsq_id >= LAVD_CPDOM_MAX_NR)
@@ -524,6 +640,7 @@ static int reinit_active_cpumask_for_performance(void)
 	}
 	sys_stat.nr_active = nr_cpus_onln;
 	sys_stat.nr_active_cpdoms = nr_active_cpdoms;
+	pco_idx = nr_pco_states - 1;
 
 unlock_out:
 	bpf_rcu_read_unlock();
@@ -591,28 +708,52 @@ static u64 scale_cap_freq(u64 dur, s32 cpu)
 	return scaled_dur;
 }
 
-static void init_autopilot_low_util(void)
+static void do_update_autopilot_high_cap(void)
 {
-	if (nr_cpus_big < nr_cpus_onln) {
+	u64 c;
+
+	if (is_smt_active)
+		c = (total_capacity * LAVD_AP_HIGH_UTIL_DFL_SMT_RT);
+	else
+		c = (total_capacity * LAVD_AP_HIGH_UTIL_DFL_NO_SMT_RT);
+
+	LAVD_AP_HIGH_CAP = c >> LAVD_SHIFT;
+}
+
+static void update_autopilot_high_cap(void)
+{
+	if (no_use_em)
+		do_update_autopilot_high_cap();
+}
+
+static void init_autopilot_caps(void)
+{
+	if (no_use_em) {
 		/*
-		 * When there are little cores, we move up to the balanced mode
-		 * if one little core is fully utilized.
+		 * When the energy model is not available, rely on the heuristics.
+		 * We move up to the balanced mode if one core is half utilized.
 		 */
-		LAVD_AP_LOW_UTIL = LAVD_SCALE / nr_cpus_onln;
-	}
-	else {
+		LAVD_AP_LOW_CAP = one_little_capacity / 2;
+		do_update_autopilot_high_cap();
+	} else {
 		/*
-		 * When there are only big cores, we move up to the balanced
-		 * mode if two big cores are fully utilized.
+		 * When the energy model is available, rely on the PCO table.
+		 * Use the upper bounds of the lowest performance state and
+		 * the lower bounds of the highest performance state as the
+		 * thresholds for the power save and performance modes,
+		 * respectively.
 		 */
-		LAVD_AP_LOW_UTIL = (2 * LAVD_SCALE) / nr_cpus_onln;
+		int i = max((int)nr_pco_states - 2, 0); /* second last entry */
+
+		LAVD_AP_LOW_CAP = pco_bounds[0];
+		LAVD_AP_HIGH_CAP = pco_bounds[i];
 	}
 }
 
 SEC("syscall")
 int set_power_profile(struct power_arg *input)
 {
-	return do_set_power_profile(input->power_mode, 0);
+	return do_set_power_profile(input->power_mode);
 }
 
 

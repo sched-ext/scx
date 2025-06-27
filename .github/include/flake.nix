@@ -124,6 +124,8 @@
               pyproject = false;
               dontUnpack = true;
 
+              propagatedBuildInputs = with pkgs; [ cargo ];
+
               installPhase = "install -Dm755 ${./list-integration-tests.py} $out/bin/list-integration-tests";
             };
 

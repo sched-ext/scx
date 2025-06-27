@@ -29,6 +29,7 @@ use anyhow::Result;
 use clap::Parser;
 use clap_num::number_range;
 use cpu_order::CpuOrder;
+use cpu_order::PerfCpuOrder;
 use crossbeam::channel;
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
@@ -44,14 +45,13 @@ use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::read_cpulist;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cpumask;
+use scx_utils::EnergyModel;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
@@ -124,9 +124,14 @@ struct Opts {
     /// List of CPUs in preferred order (e.g., "0-3,7,6,5,4"). The scheduler
     /// uses the CPU preference mode only when the core compaction is enabled
     /// (i.e., balanced or powersave mode is specified as an option or chosen
-    /// in the autopilot or autopower mode).
+    /// in the autopilot or autopower mode). When "--cpu-pref-order" is given,
+    /// it implies "--no-use-em".
     #[clap(long = "cpu-pref-order", default_value = "")]
     cpu_pref_order: String,
+
+    /// Do not use the energy model in making CPU preference order decisions.
+    #[clap(long = "no-use-em", action = clap::ArgAction::SetTrue)]
+    no_use_em: bool,
 
     /// Do not boost futex holders.
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
@@ -226,13 +231,13 @@ impl Opts {
         if !self.autopilot {
             self.autopilot = self.can_autopilot();
         }
+
         if self.autopilot {
             if !self.can_autopilot() {
                 info!("Autopilot mode cannot be used with conflicting options.");
                 return None;
             }
             info!("Autopilot mode is enabled.");
-            return Some(self);
         }
 
         if self.autopower {
@@ -241,7 +246,6 @@ impl Opts {
                 return None;
             }
             info!("Autopower mode is enabled.");
-            return Some(self);
         }
 
         if self.performance {
@@ -251,7 +255,6 @@ impl Opts {
             }
             info!("Performance mode is enabled.");
             self.no_core_compaction = true;
-            return Some(self);
         }
 
         if self.powersave {
@@ -261,7 +264,6 @@ impl Opts {
             }
             info!("Powersave mode is enabled.");
             self.no_core_compaction = false;
-            return Some(self);
         }
 
         if self.balanced {
@@ -271,7 +273,11 @@ impl Opts {
             }
             info!("Balanced mode is enabled.");
             self.no_core_compaction = false;
-            return Some(self);
+        }
+
+        if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
+            self.no_use_em = true;
+            info!("Energy model won't be used for CPU preference order.");
         }
 
         Some(self)
@@ -353,7 +359,8 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU topology
         let order = CpuOrder::new().unwrap();
-        Self::init_cpus(&mut skel, &opts, &order);
+        Self::init_cpus(&mut skel, &order);
+        Self::init_cpdoms(&mut skel, &order);
 
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &order);
@@ -386,50 +393,53 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn init_cpus(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
+    fn init_cpus(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         debug!("{:#?}", order);
 
-        // Initialize CPU capacity
+        // Initialize CPU capacity.
         for cpu in order.cpuids.iter() {
             skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
             skel.maps.rodata_data.cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
             skel.maps.rodata_data.cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
         }
 
-        // If cpu_pref_order is not specified, initialize CPU order
-        // topologically sorted by a cpu, node, llc, max_freq, and core order.
-        // Otherwise, follow the specified CPU preference order.
-        let (cpu_pf_order, cpu_ps_order) = if opts.cpu_pref_order.is_empty() {
-            let (_, pco) = order.perf_cpu_order.first_key_value().unwrap();
-            let mut cpus_ps = pco.cpus_perf.borrow().clone();
-            cpus_ps.extend(pco.cpus_ovflw.borrow().iter().cloned());
-
-            let (_, pco) = order.perf_cpu_order.last_key_value().unwrap();
-            let mut cpus_pf = pco.cpus_perf.borrow().clone();
-            cpus_pf.extend(pco.cpus_ovflw.borrow().iter().cloned());
-
-            (cpus_pf, cpus_ps)
-        } else {
-            let cpu_list = read_cpulist(&opts.cpu_pref_order).unwrap();
-            let pref_mask = Cpumask::from_cpulist(&opts.cpu_pref_order).unwrap();
-            if pref_mask != order.all_cpus_mask {
-                panic!("--cpu_pref_order does not cover the whole CPUs.");
-            }
-            (cpu_list.clone(), cpu_list)
-        };
-        for (pos, cpu) in cpu_pf_order.iter().enumerate() {
-            skel.maps.rodata_data.cpu_order_performance[pos] = *cpu as u16;
-        }
-        for (pos, cpu) in cpu_ps_order.iter().enumerate() {
-            skel.maps.rodata_data.cpu_order_powersave[pos] = *cpu as u16;
-        }
-        if !opts.powersave {
-            info!("CPU pref order in performance mode: {:?}", cpu_pf_order);
-        }
-        if !opts.performance {
-            info!("CPU pref order in powersave mode: {:?}", cpu_ps_order);
+        // Initialize performance vs. CPU order table.
+        let nr_pco_states: u8 = order.perf_cpu_order.len() as u8;
+        if nr_pco_states > LAVD_PCO_STATE_MAX as u8 {
+            panic!("Generated performance vs. CPU order stats are too complex ({nr_pco_states}) to handle");
         }
 
+        skel.maps.rodata_data.nr_pco_states = nr_pco_states;
+        for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {
+            Self::init_pco_tuple(skel, i, &pco);
+            info!("{:#}", pco);
+        }
+
+        let (_, last_pco) = order.perf_cpu_order.last_key_value().unwrap();
+        for i in nr_pco_states..LAVD_PCO_STATE_MAX as u8 {
+            Self::init_pco_tuple(skel, i as usize, &last_pco);
+        }
+    }
+
+    fn init_pco_tuple(skel: &mut OpenBpfSkel, i: usize, pco: &PerfCpuOrder) {
+        let cpus_perf = pco.cpus_perf.borrow();
+        let cpus_ovflw = pco.cpus_ovflw.borrow();
+        let pco_nr_primary = cpus_perf.len();
+
+        skel.maps.rodata_data.pco_bounds[i] = pco.perf_cap as u32;
+        skel.maps.rodata_data.pco_nr_primary[i] = pco_nr_primary as u16;
+
+        for (j, &cpu_adx) in cpus_perf.iter().enumerate() {
+            skel.maps.rodata_data.pco_table[i][j] = cpu_adx as u16;
+        }
+
+        for (j, &cpu_adx) in cpus_ovflw.iter().enumerate() {
+            let k = j + pco_nr_primary;
+            skel.maps.rodata_data.pco_table[i][k] = cpu_adx as u16;
+        }
+    }
+
+    fn init_cpdoms(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         // Initialize compute domain contexts
         for (k, v) in order.cpdom_map.iter() {
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
@@ -473,6 +483,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
         skel.maps.rodata_data.slice_min_ns = opts.slice_min_us * 1000;
         skel.maps.rodata_data.preempt_shift = opts.preempt_shift;
+        skel.maps.rodata_data.no_use_em = opts.no_use_em as u8;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
             | *compat::SCX_OPS_ENQ_EXITING

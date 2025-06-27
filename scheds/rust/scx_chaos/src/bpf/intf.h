@@ -38,6 +38,7 @@ struct chaos_task_ctx {
 	enum chaos_match	match;
 
 	enum chaos_trait_kind	next_trait;
+	enum chaos_trait_kind	pending_trait;
 	u64			enq_flags;
 	u64			p2dq_vtime;
 };

@@ -12,6 +12,7 @@ use crate::config::get_config_path;
 use crate::config::Config;
 use crate::format_hz;
 use crate::read_file_string;
+use crate::sanitize_nbsp;
 use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
@@ -40,7 +41,7 @@ use anyhow::{bail, Result};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
-use num_format::{Locale, ToFormattedString};
+use num_format::{SystemLocale, ToFormattedString};
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
@@ -76,7 +77,7 @@ pub struct App<'a> {
     config: Config,
     hw_pressure: bool,
     localize: bool,
-    locale: Locale,
+    locale: SystemLocale,
     stats_client: Option<Arc<TokioMutex<StatsClient>>>,
     sched_stats_raw: String,
 
@@ -236,7 +237,7 @@ impl<'a> App<'a> {
             config,
             localize: true,
             hw_pressure,
-            locale: Locale::en,
+            locale: SystemLocale::default()?,
             stats_client,
             sched_stats_raw: "".to_string(),
             scheduler,
@@ -646,7 +647,7 @@ impl<'a> App<'a> {
                 }
             )))
             .text_value(if self.localize {
-                value.to_formatted_string(&self.locale)
+                sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
                 format!("{}", value)
             })
@@ -760,9 +761,9 @@ impl<'a> App<'a> {
                             format!(
                                 "LLC {} avg {} max {} min {}",
                                 llc,
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -824,9 +825,9 @@ impl<'a> App<'a> {
                             format!(
                                 "Node {} avg {} max {} min {}",
                                 node,
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -872,9 +873,9 @@ impl<'a> App<'a> {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -914,9 +915,9 @@ impl<'a> App<'a> {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -1001,9 +1002,9 @@ impl<'a> App<'a> {
                             format!(
                                 "Node ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -1040,9 +1041,9 @@ impl<'a> App<'a> {
                             format!(
                                 "NUMA Nodes ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -1134,9 +1135,9 @@ impl<'a> App<'a> {
                             format!(
                                 "dsq {:#X} avg {} max {} min {}",
                                 dsq_id,
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -1181,15 +1182,15 @@ impl<'a> App<'a> {
                 format!(
                     "{:#X} avg {} max {} min {}",
                     dsq,
-                    avg.to_formatted_string(&self.locale),
-                    max.to_formatted_string(&self.locale),
-                    min.to_formatted_string(&self.locale)
+                    sanitize_nbsp(avg.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(max.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(min.to_formatted_string(&self.locale))
                 )
             } else {
                 format!("{:#X} avg {} max {} min {}", dsq, avg, max, min,)
             }))
             .text_value(if self.localize {
-                value.to_formatted_string(&self.locale)
+                sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
                 format!("{}", value)
             })
@@ -1217,15 +1218,15 @@ impl<'a> App<'a> {
                 format!(
                     "{} avg {} max {} min {}",
                     id,
-                    avg.to_formatted_string(&self.locale),
-                    max.to_formatted_string(&self.locale),
-                    min.to_formatted_string(&self.locale)
+                    sanitize_nbsp(avg.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(max.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(min.to_formatted_string(&self.locale))
                 )
             } else {
                 format!("{} avg {} max {} min {}", id, avg, max, min,)
             }))
             .text_value(if self.localize {
-                value.to_formatted_string(&self.locale)
+                sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
                 format!("{}", value)
             })
@@ -1370,9 +1371,9 @@ impl<'a> App<'a> {
                         "{} {} avg {} max {} min {}",
                         self.scheduler,
                         event,
-                        stats.avg.to_formatted_string(&self.locale),
-                        stats.max.to_formatted_string(&self.locale),
-                        stats.min.to_formatted_string(&self.locale),
+                        sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                        sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                        sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                     )
                 } else {
                     format!(
@@ -1487,9 +1488,9 @@ impl<'a> App<'a> {
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
                                     self.active_event.event_name(),
-                                    stats.avg.to_formatted_string(&self.locale),
-                                    stats.max.to_formatted_string(&self.locale),
-                                    stats.min.to_formatted_string(&self.locale)
+                                    sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                                 )
                             } else {
                                 format!(
@@ -1608,9 +1609,9 @@ impl<'a> App<'a> {
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
                                     self.active_event.event_name(),
-                                    stats.avg.to_formatted_string(&self.locale),
-                                    stats.max.to_formatted_string(&self.locale),
-                                    stats.min.to_formatted_string(&self.locale)
+                                    sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                                 )
                             } else {
                                 format!(

@@ -50,6 +50,8 @@ const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
 const volatile u32 degradation_freq_frac32 = 1;
 const volatile u64 degradation_frac7 = 0;
 
+const volatile u32 kprobe_delays_freq_frac32 = 1;
+
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -507,11 +509,13 @@ void BPF_STRUCT_OPS(chaos_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(wakee_ctx = lookup_create_chaos_task_ctx(p)))
 		return;
 
-	enum chaos_trait_kind t = choose_chaos(wakee_ctx);
-	if (t == CHAOS_TRAIT_NONE)
+	if (wakee_ctx->pending_trait) {
+		wakee_ctx->next_trait = wakee_ctx->pending_trait;
+		wakee_ctx->pending_trait = 0;
 		return;
+	}
 
-	wakee_ctx->next_trait = t;
+	wakee_ctx->next_trait = choose_chaos(wakee_ctx);
 }
 
 void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
@@ -554,6 +558,16 @@ p2dq:
 	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
 }
 
+void BPF_STRUCT_OPS(chaos_tick, struct task_struct *p)
+{
+	struct chaos_task_ctx *taskc;
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return;
+
+	if (taskc->pending_trait == CHAOS_TRAIT_RANDOM_DELAYS)
+		p->scx.slice = 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
@@ -575,6 +589,7 @@ SCX_OPS_DEFINE(chaos,
 	       .init_task		= (void *)chaos_init_task,
 	       .runnable		= (void *)chaos_runnable,
 	       .select_cpu		= (void *)chaos_select_cpu,
+	       .tick 		    	= (void *)chaos_tick,
 
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
@@ -584,3 +599,25 @@ SCX_OPS_DEFINE(chaos,
 
 	       .timeout_ms		= 30000,
 	       .name			= "chaos");
+
+SEC("kprobe/generic")
+int generic(struct pt_regs *ctx)
+{
+	struct task_struct *p;
+	struct chaos_task_ctx *taskc;
+
+	p = (struct task_struct *)bpf_get_current_task_btf();
+	if (!p)
+		return -EINVAL;
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return -EINVAL;
+
+	u32 roll = bpf_get_prandom_u32();
+	if (roll <= kprobe_delays_freq_frac32) {
+		taskc->pending_trait = CHAOS_TRAIT_RANDOM_DELAYS;
+		dbg("GENERIC: setting pending_trait to RANDOM_DELAYS - task[%d]", p->pid);
+	}
+
+	return 0;
+}

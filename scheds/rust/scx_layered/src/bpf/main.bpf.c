@@ -3185,19 +3185,13 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 
 
 /*
- * Timer related setup
+ * When a timer is defined it is first scheduled run after the interval_ns. The
+ * timer callback must return a non zero value to reschedule the timer. The
+ * return value is in nanoseconds.
  */
-
-static bool layered_monitor(void)
-{
-	if (monitor_disable)
-		return false;
-
-	// TODO: implement monitor
-
-	// always rerun the monitor
-	return true;
-}
+struct layered_timer layered_timers[MAX_TIMERS] = {
+	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+};
 
 /**
  * antistall_set() - set antistall flags.
@@ -3287,14 +3281,14 @@ unlock:
  * This is where antistall figures out what work, if any, needs
  * to be prioritized to keep runnable_at delay at or below antistall_sec.
  */
-static bool antistall_scan(void)
+static u64 antistall_scan(void)
 {
 	s32 llc;
 	u64 layer_id;
 	u64 jiffies_now;
 
 	if (!enable_antistall)
-		return true;
+		return 0;
 
 	jiffies_now = bpf_jiffies64();
 
@@ -3307,28 +3301,23 @@ static bool antistall_scan(void)
 		antistall_set(lo_fb_dsq_id(llc), jiffies_now);
 	}
 
-	return true;
+	return layered_timers[ANTISTALL_TIMER].interval_ns;
 }
 
-bool run_timer_cb(int key)
+/*
+ * Timer callback that runs all registered timers. If a timer returns a non
+ * zero value it is rerun after the return value (in nanosecods).
+ */
+u64 run_timer_cb(int key)
 {
 	switch (key) {
-	case LAYERED_MONITOR:
-		return layered_monitor();
 	case ANTISTALL_TIMER:
 		return antistall_scan();
-	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
-		return false;
+		return 0;
 	}
 }
-
-struct layered_timer layered_timers[MAX_TIMERS] = {
-	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{0LLU, CLOCK_BOOTTIME, 0},
-};
 
 __weak int
 init_layer_cpumasks(int layer_id)
