@@ -50,6 +50,7 @@ pub use tui::Event;
 pub use tui::Tui;
 pub use util::format_hz;
 pub use util::read_file_string;
+pub use util::sanitize_nbsp;
 
 pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.

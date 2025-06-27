@@ -32,20 +32,24 @@ struct {
 
 static int layered_timer_cb(void *map, int key, struct timer_wrapper *timerw)
 {
+	u64 intvl_ns;
+
 	if (timerw->key < 0 || timerw->key > MAX_TIMERS) {
 		return 0;
 	}
 
 	struct layered_timer *cb_timer = &layered_timers[timerw->key];
-	bool resched = run_timer_cb(timerw->key);
+	intvl_ns = run_timer_cb(timerw->key);
 
-	if (!resched || !cb_timer || cb_timer->interval_ns == 0) {
-		trace("TIMER timer %d stopped", timerw->key);
+	if (intvl_ns == 0 || !cb_timer) {
+		trace("TIMER %d stopped %llu", timerw->key, intvl_ns);
 		return 0;
 	}
 
+	trace("TIMER %d scheduled in %llu", timerw->key, intvl_ns);
+
 	bpf_timer_start(&timerw->timer,
-			cb_timer->interval_ns,
+			intvl_ns,
 			cb_timer->start_flags);
 
 	return 0;

@@ -93,15 +93,17 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
  * task_ctx is the per-task information kept by scx_mitosis
 */
 struct task_ctx {
-	// cpumask is the set of valid cpus this task can schedule on (tasks cpumask anded with its cell cpumask)
+	/* cpumask is the set of valid cpus this task can schedule on */
+	/* (tasks cpumask anded with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
-	// started_running_at for recording runtime
+	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	// cell assignment
+	/* cell assignment */
 	u32 cell;
-	// latest configuration that was applied for this task (to know if it has to be re-applied)
+	/* latest configuration that was applied for this task */
+	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
-	// Is this task allowed on all cores?
+	/* Is this task allowed on all cores? */
 	bool all_cpus_allowed;
 };
 
@@ -346,6 +348,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 		return -EINVAL;
 
 	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
+
 	return 0;
 }
 
@@ -602,23 +605,14 @@ out:
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
-	u32 prev_cell, cell;
+	u32 cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
-	prev_cell = READ_ONCE(cctx->prev_cell);
 	cell = READ_ONCE(cctx->cell);
 
 	if (scx_bpf_dsq_move_to_local(HI_FALLBACK_DSQ))
-		return;
-
-	/*
-	 * cpu <=> cell assignment can change dynamically. In order to deal with
-	 * scheduling racing with assignment change, we schedule from the previous
-	 * cell first to make sure it drains.
-	 */
-	if (prev_cell != cell && scx_bpf_dsq_move_to_local(prev_cell))
 		return;
 
 	if (scx_bpf_dsq_move_to_local(cell))
@@ -691,7 +685,6 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 						      root_bpf_cpumask);
 				if (!(cctx = lookup_cpu_ctx(cpu_idx)))
 					goto out;
-				WRITE_ONCE(cctx->prev_cell, cell_idx);
 				WRITE_ONCE(cctx->cell, cell_idx);
 			}
 		}
@@ -1115,12 +1108,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
-		struct cell *cell = &cells[i];
 
 		ret = scx_bpf_create_dsq(i, -1);
 		if (ret < 0)
 			return ret;
-		cell->dsq = i;
 
 		if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &i)))
 			return -ENOENT;

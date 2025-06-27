@@ -9,6 +9,9 @@ license = "GPL-2.0-only"
 [package.metadata.scx]
 ci.use_clippy = true
 
+ci.kernel.default = "stable/linux-rolling-stable"
+ci.kernel.blocklist = ["sched_ext/for-next"]
+
 [dependencies]
 scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.13" }
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }

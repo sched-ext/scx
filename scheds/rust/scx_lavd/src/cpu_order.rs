@@ -81,6 +81,7 @@ pub struct CpuOrder {
     pub cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain>,
     pub smt_enabled: bool,
     pub has_biglittle: bool,
+    pub has_energy_model: bool,
 }
 
 impl CpuOrder {
@@ -104,6 +105,7 @@ impl CpuOrder {
             cpdom_map,
             smt_enabled: ctx.smt_enabled,
             has_biglittle: ctx.has_biglittle,
+            has_energy_model: ctx.has_energy_model,
         })
     }
 }
@@ -114,6 +116,7 @@ struct CpuOrderCtx {
     em: Result<EnergyModel>,
     smt_enabled: bool,
     has_biglittle: bool,
+    has_energy_model: bool,
 }
 
 impl CpuOrderCtx {
@@ -122,6 +125,7 @@ impl CpuOrderCtx {
         let em = EnergyModel::new();
         let smt_enabled = topo.smt_enabled;
         let has_biglittle = topo.has_little_cores();
+        let has_energy_model = em.is_ok();
 
         debug!("{:#?}", topo);
         debug!("{:#?}", em);
@@ -131,6 +135,7 @@ impl CpuOrderCtx {
             em,
             smt_enabled,
             has_biglittle,
+            has_energy_model,
         }
     }
 
@@ -1069,5 +1074,19 @@ impl Hash for PDSetInfo<'_> {
 impl PartialEq for PerfCpuOrder {
     fn eq(&self, other: &Self) -> bool {
         self.perf_cap == other.perf_cap
+    }
+}
+
+impl fmt::Display for PerfCpuOrder {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "capacity bound:  {} ({}%)\n",
+            self.perf_cap,
+            self.perf_util * 100.0
+        )?;
+        write!(f, "  primary CPUs:  {:?}\n", self.cpus_perf.borrow())?;
+        write!(f, "  overflow CPUs: {:?}", self.cpus_ovflw.borrow())?;
+        Ok(())
     }
 }

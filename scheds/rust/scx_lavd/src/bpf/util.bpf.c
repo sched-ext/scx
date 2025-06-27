@@ -33,7 +33,6 @@ volatile bool		no_freq_scaling;
 volatile bool		is_powersave_mode;
 volatile bool		reinit_cpumask_for_performance;
 const volatile bool	is_autopilot_on;
-const volatile bool	is_smt_active;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
 
@@ -142,36 +141,50 @@ static struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
 
-static u32 calc_avg32(u32 old_val, u32 new_val)
+#define __calc_avg(old, new, decay) ({						\
+	typeof(decay) thr = 1 << (decay);					\
+	typeof(old) ret;							\
+	if (((old) < thr) || ((new) < thr)) {					\
+		if (((old) == 1) && ((new) == 0))				\
+			ret = 0;						\
+		else								\
+			ret = ((old) - ((old) >> 1)) + ((new) >> 1);		\
+	} else {								\
+		ret = ((old) - ((old) >> (decay))) + ((new) >> (decay));	\
+	}									\
+	ret;									\
+})
+
+u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
 	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
 	 */
-	return (old_val - (old_val >> 4)) + (new_val >> 4);
+	return __calc_avg(old_val, new_val, 4);
 }
 
-static u64 calc_avg(u64 old_val, u64 new_val)
+u64 __attribute__ ((noinline)) calc_avg(u64 old_val, u64 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
 	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
 	 */
-	return (old_val - (old_val >> 4)) + (new_val >> 4);
+	return __calc_avg(old_val, new_val, 4);
 }
 
-static u64 calc_asym_avg(u64 old_val, u64 new_val)
+u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
 {
 	/*
 	 * Increase fast but descrease slowly.
 	 */
 	if (old_val < new_val)
-		return (new_val - (new_val >> 2)) + (old_val >> 2);
+		return __calc_avg(new_val, old_val, 2);
 	else
-		return (old_val - (old_val >> 3)) + (new_val >> 3);
+		return __calc_avg(old_val, new_val, 3);
 }
 
-static u64 calc_avg_freq(u64 old_freq, u64 interval)
+u64 __attribute__ ((noinline)) calc_avg_freq(u64 old_freq, u64 interval)
 {
 	u64 new_freq, ewma_freq;
 
@@ -180,7 +193,7 @@ static u64 calc_avg_freq(u64 old_freq, u64 interval)
 	 * frequency with a new interval measured.
 	 */
 	new_freq = LAVD_TIME_ONE_SEC / interval;
-	ewma_freq = calc_avg(old_freq, new_freq);
+	ewma_freq = __calc_avg(old_freq, new_freq, 4);
 	return ewma_freq;
 }
 

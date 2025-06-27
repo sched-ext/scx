@@ -44,7 +44,6 @@ enum cell_stat_idx {
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
-	u32 prev_cell;
 	u32 cell;
 };
 

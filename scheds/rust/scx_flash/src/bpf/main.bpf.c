@@ -25,6 +25,9 @@ const volatile bool debug;
 /* Enable round-robin mode */
 const volatile bool rr_sched;
 
+/* Primary domain includes all CPU */
+const volatile bool primary_all = true;
+
 /* Enable per-CPU DSQs */
 const volatile bool pcpu_dsq = true;
 
@@ -52,7 +55,7 @@ const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
  * to determine the task's maximum exec_vruntime: accumulated vruntime
  * since last sleep).
  */
-const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
+const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
 
 /*
  * Maximum amount of voluntary context switches (this limit allows to prevent
@@ -94,6 +97,11 @@ const volatile bool local_pcpu;
  * normalization and uses the default Linux priority range instead.
  */
 const volatile bool native_priority;
+
+/*
+ * Enable tickless mode.
+ */
+const volatile bool tickless_sched;
 
 /*
  * The CPU frequency performance level: a negative value will not affect the
@@ -138,11 +146,6 @@ static inline void set_throttled(bool state)
 {
 	WRITE_ONCE(cpus_throttled, state);
 }
-
-/*
- * Tickless CPU contention check frequency.
- */
-const volatile u64 tickless_ns;
 
 /*
  * Exit information.
@@ -197,20 +200,6 @@ struct {
 	__type(key, u32);
 	__type(value, struct throttle_timer);
 } throttle_timer SEC(".maps");
-
-/*
- * Timer used in tickless mode.
- */
-struct tickless_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct numa_timer);
-} tickless_timer SEC(".maps");
 
 /*
  * Per-node context.
@@ -435,7 +424,7 @@ static inline u64 task_slice(s32 cpu)
  */
 static inline u64 task_slice_max(void)
 {
-	return tickless_ns ? SCX_SLICE_INF : slice_max;
+	return tickless_sched ? SCX_SLICE_INF : slice_max;
 }
 
 /*
@@ -492,10 +481,21 @@ static inline u64 scale_by_task_normalized_weight_inverse(const struct task_stru
  */
 static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vtime_min, max_sleep;
+	u64 vtime_min, max_sleep, lag_scale;
 
 	if (rr_sched)
 		return;
+
+	/*
+	 * Evaluate the scaling factor for the maximum time budget that a
+	 * task can accumulate while sleeping proportionally to the
+	 * voluntary context switch rate.
+	 *
+	 * A task that is doing few long sleeps will get a smaller time
+	 * budget, a task that is sleeping frequently will get a bigger
+	 * time budget.
+	 */
+	lag_scale = max_avg_nvcsw ? MAX(log2_u64(tctx->avg_nvcsw), 1) : 1;
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
@@ -508,7 +508,7 @@ static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	 * long sleeps, treating short and long sleeps equally once they
 	 * exceed the threshold.
 	 */
-	max_sleep = scale_by_task_normalized_weight(p, slice_lag) * MAX(tctx->avg_nvcsw, 1);
+	max_sleep = scale_by_task_normalized_weight(p, slice_lag * lag_scale);
 	vtime_min = vtime_now > max_sleep ? vtime_now - max_sleep : 0;
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		p->scx.dsq_vtime = vtime_min;
@@ -523,7 +523,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 			       s32 cpu, const struct cpumask *cpumask)
 {
 	struct bpf_cpumask *primary, *l2_domain, *l3_domain;
-	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
+	struct bpf_cpumask *mask, *l2_mask, *l3_mask;
+	const struct cpumask *p_mask;
 	struct cpu_ctx *cctx;
 
 	/*
@@ -543,8 +544,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	l2_domain = cctx->l2_cpumask;
 	l3_domain = cctx->l3_cpumask;
 
-	p_mask = tctx->cpumask;
-	if (!p_mask) {
+	mask = tctx->cpumask;
+	if (!mask) {
 		scx_bpf_error("cpumask not initialized");
 		return;
 	}
@@ -565,7 +566,12 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * Determine the task's scheduling domain.
 	 * idle CPU, re-try again with the primary scheduling domain.
 	 */
-	bpf_cpumask_and(p_mask, cpumask, cast_mask(primary));
+	if (primary_all) {
+		p_mask = cpumask;
+	} else {
+		bpf_cpumask_and(mask, cpumask, cast_mask(primary));
+		p_mask = cast_mask(mask);
+	}
 
 	/*
 	 * Determine the L2 cache domain as the intersection of the task's
@@ -573,7 +579,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * CPU.
 	 */
 	if (l2_domain)
-		bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
+		bpf_cpumask_and(l2_mask, p_mask, cast_mask(l2_domain));
 
 	/*
 	 * Determine the L3 cache domain as the intersection of the task's
@@ -581,7 +587,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * CPU.
 	 */
 	if (l3_domain)
-		bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
+		bpf_cpumask_and(l3_mask, p_mask, cast_mask(l3_domain));
 }
 
 /*
@@ -692,7 +698,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
-	bool is_prev_allowed;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -705,8 +710,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	/*
 	 * Get the task's primary scheduling domain.
 	 */
-	p_mask = cast_mask(tctx->cpumask);
-	is_prev_allowed = p_mask && bpf_cpumask_test_cpu(prev_cpu, p_mask);
+	p_mask = primary_all ? p->cpus_ptr : cast_mask(tctx->cpumask);
 
 	/*
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
@@ -730,7 +734,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * cache hot data from the waker's CPU is more important
 		 * than cache hot data in the wakee's CPU.
 		 */
-		if (is_prev_allowed && share_llc &&
+		if (share_llc &&
 		    (smt_enabled && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -779,8 +783,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (is_prev_allowed &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
@@ -837,8 +840,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (is_prev_allowed &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
@@ -884,10 +886,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	/*
 	 * Search for any idle CPU usable by the task.
 	 */
-	cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
-	if (cpu >= 0) {
-		*is_idle = true;
-		goto out_put_cpumask;
+	if (p_mask != p->cpus_ptr) {
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 	}
 
 out_put_cpumask:
@@ -1015,15 +1019,14 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	s32 cpu = prev_cpu;
 
 	/*
-	 * Dispatch per-CPU kthreads directly on their assigned CPU.
+	 * Dispatch per-CPU kthreads directly on their assigned CPU if
+	 * @local_kthreads is enabled.
 	 *
 	 * This allows to prioritize critical kernel threads that may
 	 * potentially stall the entire system if they are blocked (i.e.,
 	 * ksoftirqd/N, rcuop/N, etc.).
-	 *
-	 * If @local_kthreads is enabled dispatch all kthreads locally.
 	 */
-	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		dispatched = true;
@@ -1105,13 +1108,32 @@ out_kick:
 /*
  * Return true if @tctx is an interactive task, false otherwise.
  */
-static bool is_interactive(const struct task_ctx *tctx)
+static bool is_interactive(const struct task_struct *p, const struct task_ctx *tctx)
 {
 	/*
 	 * If the task has been using the CPU for less than @slice_min,
 	 * assume it's interactive.
 	 */
-	return tctx->exec_runtime < slice_min;
+	return scale_by_task_normalized_weight_inverse(p, tctx->exec_runtime) < slice_min;
+}
+
+/*
+ * If tickless mode is enabled, check whether the task running on @cpu
+ * needs to be preempted and, in that case, assign a regular time slice to
+ * it.
+ */
+static void preempt_curr(s32 cpu)
+{
+	struct task_struct *curr;
+
+	if (!tickless_sched)
+		return;
+
+	bpf_rcu_read_lock();
+	curr = scx_bpf_cpu_rq(cpu)->curr;
+	if (curr->scx.slice == SCX_SLICE_INF)
+		curr->scx.slice = task_slice(cpu);
+	bpf_rcu_read_unlock();
 }
 
 /*
@@ -1124,6 +1146,12 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+
+	/*
+	 * Task is going to be enqueued, so check whether its previously
+	 * used CPU needs to be preempted.
+	 */
+	preempt_curr(prev_cpu);
 
 	/*
 	 * Keep reusing the same CPU in round-robin mode.
@@ -1162,7 +1190,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * per-node DSQ for the CPU-intensive tasks (if enabled).
 	 */
 	if (pcpu_dsq &&
-	    (!node_dsq || (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(tctx)))) {
+	    (!node_dsq || (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(p, tctx)))) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
@@ -1416,7 +1444,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = scx_bpf_now(), slice, delta_runtime, max_runtime;
+	u64 now = scx_bpf_now(), slice, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -1435,19 +1463,11 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 		/*
 		 * Update task's execution time (exec_runtime), but never
-		 * account more than a scaled @run_lag of runtime to
-		 * prevent excessive de-prioritization of CPU-intensive
-		 * tasks (which could lead to starvation).
-		 *
-		 * Tasks with a higher priority have a smaller execution
-		 * runtime cap (resulting in an earlier deadline) and
-		 * vice-versa for tasks with a lower priority.
+		 * account more than @run_lag to prevent excessive
+		 * de-prioritization of CPU-intensive tasks (which could
+		 * lead to starvation).
 		 */
-		max_runtime = scale_by_task_normalized_weight_inverse(p, run_lag);
-		if (tctx->exec_runtime + slice < max_runtime)
-			tctx->exec_runtime += slice;
-		else
-			tctx->exec_runtime = max_runtime;
+		tctx->exec_runtime = MIN(tctx->exec_runtime + slice, run_lag);
 
 		/*
 		 * Update task's vruntime.
@@ -1507,14 +1527,17 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 	s64 delta_t;
 	struct task_ctx *tctx;
 
-	if (rr_sched)
+	if (rr_sched || !max_avg_nvcsw)
+		return;
+
+	/*
+	 * Update voluntary context switch rate only on task sleep events.
+	 */
+	if (!(deq_flags & SCX_DEQ_SLEEP))
 		return;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
-		return;
-
-	if (!max_avg_nvcsw)
 		return;
 
 	/*
@@ -1783,37 +1806,6 @@ static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
- * Tickless timer used to check for CPU contention and apply preemption
- * when needed.
- */
-static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
-{
-	s32 cpu;
-
-	/*
-	 * Check if we need to preempt the running tasks on contended CPUs.
-	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct task_struct *p;
-		int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
-		p = scx_bpf_cpu_rq(cpu)->curr;
-		if (p->scx.slice != SCX_SLICE_INF)
-			continue;
-
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
-		    (pcpu_dsq && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) ||
-		    (node_dsq && scx_bpf_dsq_nr_queued(node_to_dsq(node))))
-			p->scx.slice = task_slice(cpu);
-	}
-
-	if (bpf_timer_start(timer, tickless_ns, 0))
-		scx_bpf_error("Failed to re-arm tickless timer");
-
-	return 0;
-}
-
-/*
  * Refresh NUMA statistics.
  */
 static int numa_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -1956,27 +1948,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 		err = bpf_timer_start(timer, slice_max, 0);
 		if (err) {
 			scx_bpf_error("Failed to arm throttle timer");
-			return err;
-		}
-	}
-
-	timer = bpf_map_lookup_elem(&tickless_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup tickless timer");
-		return -ESRCH;
-	}
-
-	/*
-	 * Fire the tickless timer if tickless-mode is enabled (this timer
-	 * is used to check for CPU contention and enforce preemption if
-	 * needed).
-	 */
-	if (tickless_ns) {
-		bpf_timer_init(timer, &tickless_timer, CLOCK_BOOTTIME);
-		bpf_timer_set_callback(timer, tickless_timerfn);
-		err = bpf_timer_start(timer, tickless_ns, 0);
-		if (err) {
-			scx_bpf_error("Failed to arm tickless timer");
 			return err;
 		}
 	}

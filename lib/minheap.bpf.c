@@ -87,7 +87,7 @@ int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 	int ind;
 
 	for (ind = heap->size - 1; ind > 0 && can_loop; ind = parent) {
-		parent = ind % 2 ? ind / 2 : ind / 2 - 1;
+		parent = (ind - 1) >> 1;
 
 		if (heap->helems[parent].weight <= heap->helems[ind].weight)
 			break;

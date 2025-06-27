@@ -28,13 +28,11 @@ struct layered_timer {
 };
 
 enum layer_timer_callbacks {
-	LAYERED_MONITOR,
 	ANTISTALL_TIMER,
-	NOOP_TIMER,
 	MAX_TIMERS,
 };
 
-bool run_timer_cb(int key);
+u64 run_timer_cb(int key);
 int start_layered_timers(void);
 
 extern struct layered_timer layered_timers[MAX_TIMERS];
