@@ -124,6 +124,11 @@ const volatile bool local_pcpu;
 const volatile bool direct_dispatch;
 
 /*
+ * Enable built-in idle CPU selection policy.
+ */
+const volatile bool builtin_idle;
+
+/*
  * Native tasks priorities.
  *
  * By default, the scheduler normalizes task priorities to avoid large gaps
@@ -751,6 +756,33 @@ static bool cpus_share_llc(s32 this_cpu, s32 that_cpu)
 	return bpf_cpumask_test_cpu(this_cpu, llc_mask);
 }
 
+static s32 pick_idle_cpu_builtin(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
+{
+	const struct cpumask *primary;
+	s32 cpu;
+
+	if (!builtin_idle || !bpf_ksym_exists(scx_bpf_select_cpu_and))
+		return -ENOENT;
+
+	primary = cast_mask(primary_cpumask);
+	if (!primary)
+		return -EINVAL;
+
+	if (no_wake_sync)
+		wake_flags &= ~SCX_WAKE_SYNC;
+
+	cpu = primary_all ? -ENOENT :
+			scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, primary, 0);
+	if (cpu < 0) {
+		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
+		if (cpu < 0)
+			return prev_cpu;
+	}
+	*is_idle = true;
+
+	return cpu;
+}
+
 /*
  * Find an idle CPU in the system.
  *
@@ -774,6 +806,21 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	if (!primary)
 		return -EINVAL;
 
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return -ENOENT;
+
+	/*
+	 * Use the built-in idle CPU selection policy, if enabled.
+	 */
+	cpu = pick_idle_cpu_builtin(p, prev_cpu, wake_flags, is_idle);
+	if (cpu >= 0)
+		return cpu;
+
+	/*
+	 * Use the custom idle CPU selection policy if the built-in policy
+	 * is disabled.
+	 */
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return -ENOENT;
