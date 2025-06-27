@@ -569,7 +569,7 @@ impl<'a> App<'a> {
             cpu_data.add_event_data(event.event_name(), val);
             let llc_data = self
                 .llc_data
-                .get_mut(cpu_data.llc)
+                .get_mut(&cpu_data.llc)
                 .expect("LlcData should have been present");
             llc_data.add_cpu_event_data(event.event_name(), val);
             let node_data = self
@@ -2401,7 +2401,7 @@ impl<'a> App<'a> {
     fn on_cpu_perf(&mut self, cpu: u32, perf: u32) {
         let cpu_data = self
             .cpu_data
-            .get_mut(cpu)
+            .get_mut(&(cpu as usize))
             .expect("CpuData should have been present");
         cpu_data.add_event_data("perf", perf as u64);
     }
@@ -2410,7 +2410,7 @@ impl<'a> App<'a> {
         let PstateSampleAction { cpu, busy } = action;
         let cpu_data = self
             .cpu_data
-            .get_mut(cpu)
+            .get_mut(&(*cpu as usize))
             .expect("CpuData should have been present");
         cpu_data.add_event_data("pstate", *busy as u64);
     }
@@ -2470,7 +2470,7 @@ impl<'a> App<'a> {
 
         let cpu_data = self
             .cpu_data
-            .get_mut(cpu)
+            .get_mut(&(*cpu as usize))
             .expect("CpuData should have been present");
 
         let next_dsq_id = Self::classify_dsq(*next_dsq_id);
@@ -2590,7 +2590,7 @@ impl<'a> App<'a> {
 
         let cpu_data = self
             .cpu_data
-            .get_mut(cpu)
+            .get_mut(&(*cpu as usize))
             .expect("CpuData should have been present");
         cpu_data.add_event_data("hw_pressure", *hw_pressure);
     }
