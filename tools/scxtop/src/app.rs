@@ -417,7 +417,7 @@ impl<'a> App<'a> {
             let freq = read_from_file(path).unwrap_or(0_usize);
             let cpu_data = self
                 .cpu_data
-                .get_mut(cpu)
+                .get_mut(cpu_id)
                 .expect("CpuData should have been present");
             cpu_data.add_event_data("cpu_freq", freq as u64);
         }
@@ -569,7 +569,7 @@ impl<'a> App<'a> {
             cpu_data.add_event_data(event.event_name(), val);
             let llc_data = self
                 .llc_data
-                .get_mut(llc)
+                .get_mut(cpu_data.llc)
                 .expect("LlcData should have been present");
             llc_data.add_cpu_event_data(event.event_name(), val);
             let node_data = self
