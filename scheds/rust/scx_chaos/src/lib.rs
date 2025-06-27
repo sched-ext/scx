@@ -13,6 +13,7 @@ use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
@@ -110,6 +111,11 @@ pub enum Trait {
         frequency: f64,
         degradation_frac7: u64,
     },
+    FutexDelays {
+        uncontended_us: u64,
+        contended_min_us: u64,
+        contended_max_us: u64,
+    },
 }
 
 impl Trait {
@@ -118,6 +124,7 @@ impl Trait {
             Self::RandomDelays { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_RANDOM_DELAYS,
             Self::CpuFreq { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_CPU_FREQ,
             Self::PerfDegradation { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_DEGRADATION,
+            Self::FutexDelays { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_FUTEX_DELAYS,
         }
     }
 
@@ -126,6 +133,7 @@ impl Trait {
             Self::RandomDelays { frequency, .. } => *frequency,
             Self::CpuFreq { frequency, .. } => *frequency,
             Self::PerfDegradation { frequency, .. } => *frequency,
+            Self::FutexDelays { .. } => 0_f64, // triggered an alternative way
         }
     }
 }
@@ -194,6 +202,10 @@ impl Scheduler {
             trait_cpu_freq: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_CPU_FREQ as usize],
             trait_degradation: stats
                 [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_DEGRADATION as usize],
+            trait_futex_delays: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_FUTEX_DELAYS as usize],
+            trait_futex_delays_contended: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_FUTEX_DELAYS_CONTENDED as usize],
             chaos_excluded: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_EXCLUDED as usize],
             chaos_skipped: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_SKIPPED as usize],
             timer_kicks: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TIMER_KICKS as usize],
@@ -415,6 +427,19 @@ impl Builder<'_> {
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos)?;
         scx_p2dq::init_open_skel!(&mut open_skel, self.p2dq_opts, self.verbose)?;
 
+        // Enable futex tracepoint conditionally if futex delays are enabled
+        if self
+            .traits
+            .iter()
+            .any(|x| matches!(x, Trait::FutexDelays { .. }))
+            & !compat::cond_tracepoint_enable(
+                "syscalls:sys_enter_futex",
+                &open_skel.progs.rtp_sys_enter_futex,
+            )?
+        {
+            bail!("couldn't attach to sys_enter_futex and futex delays were enabled");
+        }
+
         // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
         // this codepath
         open_skel.maps.rodata_data.select_idle_in_enqueue = false;
@@ -497,6 +522,17 @@ impl Builder<'_> {
                     open_skel.maps.rodata_data.degradation_freq_frac32 =
                         (frequency * 2_f64.powf(32_f64)) as u32;
                     open_skel.maps.rodata_data.degradation_frac7 = *degradation_frac7;
+                }
+                Trait::FutexDelays {
+                    uncontended_us,
+                    contended_min_us,
+                    contended_max_us,
+                } => {
+                    open_skel.maps.rodata_data.futex_uncontended_delay_ns = uncontended_us * 1000;
+                    open_skel.maps.rodata_data.futex_contended_delay_min_ns =
+                        contended_min_us * 1000;
+                    open_skel.maps.rodata_data.futex_contended_delay_max_ns =
+                        contended_max_us * 1000;
                 }
             }
         }
@@ -610,6 +646,22 @@ pub struct KprobeArgs {
     pub kprobe_random_delay_frequency: Option<f64>,
 }
 
+/// Adds delays to futex operations to induce contention
+#[derive(Debug, Parser)]
+pub struct FutexDelayArgs {
+    /// Time to hold mutex with no contention.
+    #[clap(long, requires = "futex_contended_delay_max_us")]
+    pub futex_uncontended_delay_us: Option<u64>,
+
+    /// Minimum time to hold mutex after contention starts.
+    #[clap(long, requires = "futex_uncontended_delay_us")]
+    pub futex_contended_delay_min_us: Option<u64>,
+
+    /// Maximum time to hold mutex after contention starts.
+    #[clap(long, requires = "futex_contended_delay_min_us")]
+    pub futex_contended_delay_max_us: Option<u64>,
+}
+
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
 ///
 /// WARNING: This scheduler is a very early alpha, and hasn't been production tested yet. The CLI
@@ -669,6 +721,9 @@ pub struct Args {
 
     #[command(flatten, next_help_heading = "Kprobe Random Delays")]
     pub kprobe_random_delays: KprobeArgs,
+
+    #[command(flatten, next_help_heading = "Futex Delays")]
+    pub futex_delay: FutexDelayArgs,
 
     #[command(flatten, next_help_heading = "General Scheduling")]
     pub p2dq: P2dqOpts,
@@ -739,6 +794,19 @@ impl<'a> Iterator for BuilderIterator<'a> {
                     min_freq,
                     max_freq,
                 });
+            };
+
+            if let FutexDelayArgs {
+                futex_uncontended_delay_us: Some(uncontended_us),
+                futex_contended_delay_min_us: Some(contended_min_us),
+                futex_contended_delay_max_us: Some(contended_max_us),
+            } = self.args.futex_delay
+            {
+                traits.push(Trait::FutexDelays {
+                    uncontended_us,
+                    contended_min_us,
+                    contended_max_us,
+                })
             };
 
             let requires_ppid = if self.args.ppid_targeting {
