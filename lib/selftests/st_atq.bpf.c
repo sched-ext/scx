@@ -101,8 +101,10 @@ int scx_selftest_atq_common(bool isfifo)
 		taskc = (task_ctx *)scx_atq_pop(atq);
 		if (isfifo && taskc->pid != i) {
 			bpf_printk("Popped out unexpected element from FIFO atq (pid %ld, vtime %ld), expected %d", taskc->pid, taskc->vtime, i);
+			scx_minheap_dump(atq->heap);
 			return -EINVAL;
 		} else if (!isfifo && taskc->vtime < vtime) {
+			scx_minheap_dump(atq->heap);
 			bpf_printk("Popped out unexpected element from PRIO atq (pid %ld, vtime %ld)", taskc->pid, taskc->vtime);
 			return -EINVAL;
 		}

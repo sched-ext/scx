@@ -203,17 +203,36 @@ int scx_selftest_minheap_random(scx_minheap_t *heap)
 }
 
 static
-int scx_selftest_minheap_toolarge(scx_minheap_t *heap)
+int scx_selftest_minheap_read_back(scx_minheap_t *heap)
 {
-	void __arena *heap2;
+	struct scx_minheap_elem helem;
+	u64 elem = 5;
+	u64 weight = 12;
+	int ret;
 
-	heap2 = scx_minheap_alloc(SCX_MINHEAP_MAX_CAPACITY + 1);
-	if (heap2)
+	if (heap->size)
 		return -EINVAL;
+
+	ret = scx_minheap_insert(heap, elem, weight);
+	if (ret)
+		return ret;
+
+	ret = scx_minheap_pop(heap, &helem);
+	if (ret)
+		return ret;
+
+	if (helem.elem != elem) {
+		bpf_printk("Expected elem %ld, found %d", elem, helem.elem);
+		return -EINVAL;
+	}
+
+	if (helem.weight != weight) {
+		bpf_printk("Expected elem %ld, found %d", weight, helem.weight);
+		return -EINVAL;
+	}
 
 	return 0;
 }
-
 #define SCX_MINHEAP_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_minheap_ ## suffix, heap)
 
 __weak
@@ -228,11 +247,11 @@ int scx_selftest_minheap(void)
 	}
 
 	SCX_MINHEAP_SELFTEST(empty);
+	SCX_MINHEAP_SELFTEST(read_back);
 	SCX_MINHEAP_SELFTEST(ascending);
 	SCX_MINHEAP_SELFTEST(descending);
 	SCX_MINHEAP_SELFTEST(alternating);
 	SCX_MINHEAP_SELFTEST(random);
-	SCX_MINHEAP_SELFTEST(toolarge);
 
 	return 0;
 }

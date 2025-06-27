@@ -24,7 +24,7 @@ use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
-    const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 1;
+    const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 512;
     const TASK_SIZE: c_ulong = 42;
 
     // Allocate the arena memory from the BPF side so userspace initializes it before starting

@@ -17,7 +17,7 @@ u64 scx_atq_create_internal(bool fifo)
 	if (!atq)
 		return (u64)NULL;
 
-	atq->heap = scx_minheap_alloc(SCX_MINHEAP_MAX_CAPACITY);
+	atq->heap = scx_minheap_alloc(SCX_ATQ_MAX_CAPACITY);
 	if (!atq->heap)
 		return (u64)NULL;
 
