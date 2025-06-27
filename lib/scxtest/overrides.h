@@ -22,3 +22,6 @@
 
 #define ARRAY_ELEM_PTR(arr, i, n) \
 	(typeof(arr[i]) *)((char *)(arr) + (i) * sizeof(typeof(*(arr))))
+
+/* This is a static helper for some reason, so we have to define it here. */
+#define bpf_get_prandom_u32() 0

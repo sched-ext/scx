@@ -37,12 +37,6 @@ s32 scx_bpf_task_cpu(const struct task_struct *p)
 }
 
 __weak
-bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask)
-{
-	return false;
-}
-
-__weak
 struct task_struct *bpf_task_from_pid(s32 pid)
 {
 	return NULL;
@@ -57,12 +51,6 @@ s32 scx_bpf_dsq_nr_queued(u64 dsq_id)
 __weak
 void scx_bpf_kick_cpu(s32 cpu, u64 flags)
 {
-}
-
-__weak
-bool scx_bpf_test_and_clear_cpu_idle(s32 cpu)
-{
-	return false;
 }
 
 __weak
@@ -87,18 +75,6 @@ void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask)
 }
 
 __weak
-s32 scx_bpf_pick_idle_cpu_node(const struct cpumask *cpus_allowed, int node, u64 flags)
-{
-	return -1;
-}
-
-__weak
-s32 scx_bpf_pick_idle_cpu(const struct cpumask *cpus_allowed, u64 flags)
-{
-	return -1;
-}
-
-__weak
 u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask)
 {
 	return 0;
@@ -111,25 +87,12 @@ bool bpf_cpumask_and(struct bpf_cpumask *dst, const struct cpumask *src1, const 
 }
 
 __weak
-const struct cpumask *scx_bpf_get_idle_smtmask_node(int node)
-{
-	return NULL;
-}
-
-__weak
-const struct cpumask *scx_bpf_get_idle_smtmask(void)
-{
-	return NULL;
-}
-
-__weak
-const struct cpumask *scx_bpf_get_idle_cpumask(void)
-{
-	return NULL;
-}
-
-__weak
 u32 bpf_cpumask_weight(const struct cpumask *cpumask)
 {
 	return 0;
+}
+
+__weak
+void scx_bpf_put_cpumask(const struct cpumask *cpumask)
+{
 }

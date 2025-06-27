@@ -158,6 +158,42 @@ static int map_update_elem(struct scx_test_map *test_map, const void *key,
 	return 0;
 }
 
+void *scx_test_task_storage_get(void *map, const void *key, void *value,
+				unsigned long flags)
+{
+	void *newvalue = NULL;
+	struct scx_test_map *test_map;
+
+	void *ret = scx_test_map_lookup_elem(map, key);
+	if (ret)
+		return ret;
+
+	if (!(flags & BPF_LOCAL_STORAGE_GET_F_CREATE))
+		return NULL;
+
+	test_map = scx_test_map_lookup(map, 0);
+
+	/*
+	 * If no value is specified we have to allocate an empty value and
+	 * insert it.
+	 */
+	if (!value) {
+		newvalue = calloc(1, test_map->value_size);
+		if (!newvalue) {
+			perror("Failed to allocate empty value for scx_test_task_storage_get");
+			exit(EXIT_FAILURE);
+		}
+		value = newvalue;
+	}
+
+	map_update_elem(test_map, key, value, BPF_ANY);
+	if (newvalue)
+		free(newvalue);
+
+	return scx_test_map_lookup_elem(map, key);
+}
+
+
 int scx_test_map_update_elem(void *map, const void *key, const void *value,
 			     unsigned long flags)
 {
