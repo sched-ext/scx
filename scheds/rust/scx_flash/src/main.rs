@@ -239,6 +239,13 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
+    /// Disable in-kernel idle CPU selection policy.
+    ///
+    /// Set this option to disable the in-kernel built-in idle CPU selection policy and rely on the
+    /// custom CPU selection policy.
+    #[clap(short = 'b', long, action = clap::ArgAction::SetTrue)]
+    no_builtin_idle: bool,
+
     /// Enable per-CPU tasks prioritization.
     ///
     /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
@@ -460,6 +467,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;
         skel.maps.rodata_data.slice_lag_scaling = opts.slice_lag_scaling;
+        skel.maps.rodata_data.builtin_idle = !opts.no_builtin_idle;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
