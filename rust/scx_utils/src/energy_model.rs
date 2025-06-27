@@ -50,6 +50,13 @@ pub struct EnergyModel {
 }
 
 impl EnergyModel {
+    pub fn has_energy_model() -> bool {
+        match get_pd_paths() {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
     /// Build a complete EnergyModel
     pub fn new() -> Result<EnergyModel> {
         let mut perf_doms = BTreeMap::new();

@@ -57,14 +57,14 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 
 	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
-	c->duration = c->now - sys_stat.last_update_clk;
+	c->duration = time_delta(c->now, sys_stat.last_update_clk);
 	sys_stat.last_update_clk = c->now;
 }
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 dsq_id;
+	u64 dsq_id, cpuc_tot_sc_time, compute;
 	int cpu;
 
 	/*
@@ -100,15 +100,16 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 * Update scaled CPU utilization,
 		 * which is capacity and frequency invariant.
 		 */
-		cpuc->cur_sc_util = (cpuc->tot_sc_time << LAVD_SHIFT) / c->duration;
+		cpuc_tot_sc_time = cpuc->tot_sc_time;
+		cpuc->tot_sc_time = 0;
+		cpuc->cur_sc_util = (cpuc_tot_sc_time << LAVD_SHIFT) / c->duration;
 		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
 
 		/*
 		 * Accumulate cpus' scaled loads,
 		 * whcih is capacity and frequency invariant.
 		 */
-		c->tot_sc_time += cpuc->tot_sc_time;
-		cpuc->tot_sc_time = 0;
+		c->tot_sc_time += cpuc_tot_sc_time;
 
 		/*
 		 * Accumulate statistics.
@@ -169,7 +170,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			u64 old_clk = cpuc->idle_start_clk;
-			if (old_clk == 0)
+			if (old_clk == 0 || time_after(old_clk, c->now))
 				break;
 
 			bool ret = __sync_bool_compare_and_swap(
@@ -183,9 +184,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Calculcate per-CPU utilization.
 		 */
-		u64 compute = 0;
-		if (c->duration > cpuc->idle_total)
-			compute = c->duration - cpuc->idle_total;
+		compute = time_delta(c->duration, cpuc->idle_total);
 
 		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
 		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
@@ -214,17 +213,18 @@ static u64 clamp_time_slice_ns(u64 slice)
 static void calc_sys_stat(struct sys_stat_ctx *c)
 {
 	static int cnt = 0;
-	u64 avg_svc_time = 0;
+	u64 avg_svc_time = 0, cur_sc_util;
 
 	c->duration_total = c->duration * nr_cpus_onln;
-	if (c->duration_total > c->idle_total)
-		c->compute_total = c->duration_total - c->idle_total;
-	else
-		c->compute_total = 0;
+	c->compute_total = time_delta(c->duration_total, c->idle_total);
 	c->cur_util = (c->compute_total << LAVD_SHIFT) / c->duration_total;
-	c->cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
 
-	if (c->nr_sched == 0) {
+	cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
+	if (cur_sc_util > c->cur_util)
+		cur_sc_util = min(sys_stat.avg_sc_util, c->cur_util);
+	c->cur_sc_util = cur_sc_util;
+
+	if (c->nr_sched == 0 || c->compute_total == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.
