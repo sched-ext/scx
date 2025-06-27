@@ -779,7 +779,7 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a node.
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
-        let data = if self.llc_data.contains_key(&node) {
+        let data = if self.node_data.contains_key(&node) {
             let node_data = self
                 .node_data
                 .get(&node)
