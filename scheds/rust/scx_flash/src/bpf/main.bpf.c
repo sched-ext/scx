@@ -99,6 +99,11 @@ const volatile bool local_pcpu;
 const volatile bool native_priority;
 
 /*
+ * Enable tickless mode.
+ */
+const volatile bool tickless_sched;
+
+/*
  * The CPU frequency performance level: a negative value will not affect the
  * performance level and will be ignored.
  */
@@ -141,11 +146,6 @@ static inline void set_throttled(bool state)
 {
 	WRITE_ONCE(cpus_throttled, state);
 }
-
-/*
- * Tickless CPU contention check frequency.
- */
-const volatile u64 tickless_ns;
 
 /*
  * Exit information.
@@ -200,20 +200,6 @@ struct {
 	__type(key, u32);
 	__type(value, struct throttle_timer);
 } throttle_timer SEC(".maps");
-
-/*
- * Timer used in tickless mode.
- */
-struct tickless_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct numa_timer);
-} tickless_timer SEC(".maps");
 
 /*
  * Per-node context.
@@ -438,7 +424,7 @@ static inline u64 task_slice(s32 cpu)
  */
 static inline u64 task_slice_max(void)
 {
-	return tickless_ns ? SCX_SLICE_INF : slice_max;
+	return tickless_sched ? SCX_SLICE_INF : slice_max;
 }
 
 /*
@@ -1132,6 +1118,25 @@ static bool is_interactive(const struct task_struct *p, const struct task_ctx *t
 }
 
 /*
+ * If tickless mode is enabled, check whether the task running on @cpu
+ * needs to be preempted and, in that case, assign a regular time slice to
+ * it.
+ */
+static void preempt_curr(s32 cpu)
+{
+	struct task_struct *curr;
+
+	if (!tickless_sched)
+		return;
+
+	bpf_rcu_read_lock();
+	curr = scx_bpf_cpu_rq(cpu)->curr;
+	if (curr->scx.slice == SCX_SLICE_INF)
+		curr->scx.slice = task_slice(cpu);
+	bpf_rcu_read_unlock();
+}
+
+/*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
@@ -1141,6 +1146,12 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+
+	/*
+	 * Task is going to be enqueued, so check whether its previously
+	 * used CPU needs to be preempted.
+	 */
+	preempt_curr(prev_cpu);
 
 	/*
 	 * Keep reusing the same CPU in round-robin mode.
@@ -1795,37 +1806,6 @@ static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
- * Tickless timer used to check for CPU contention and apply preemption
- * when needed.
- */
-static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
-{
-	s32 cpu;
-
-	/*
-	 * Check if we need to preempt the running tasks on contended CPUs.
-	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct task_struct *p;
-		int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
-		p = scx_bpf_cpu_rq(cpu)->curr;
-		if (p->scx.slice != SCX_SLICE_INF)
-			continue;
-
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
-		    (pcpu_dsq && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) ||
-		    (node_dsq && scx_bpf_dsq_nr_queued(node_to_dsq(node))))
-			p->scx.slice = task_slice(cpu);
-	}
-
-	if (bpf_timer_start(timer, tickless_ns, 0))
-		scx_bpf_error("Failed to re-arm tickless timer");
-
-	return 0;
-}
-
-/*
  * Refresh NUMA statistics.
  */
 static int numa_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -1968,27 +1948,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 		err = bpf_timer_start(timer, slice_max, 0);
 		if (err) {
 			scx_bpf_error("Failed to arm throttle timer");
-			return err;
-		}
-	}
-
-	timer = bpf_map_lookup_elem(&tickless_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup tickless timer");
-		return -ESRCH;
-	}
-
-	/*
-	 * Fire the tickless timer if tickless-mode is enabled (this timer
-	 * is used to check for CPU contention and enforce preemption if
-	 * needed).
-	 */
-	if (tickless_ns) {
-		bpf_timer_init(timer, &tickless_timer, CLOCK_BOOTTIME);
-		bpf_timer_set_callback(timer, tickless_timerfn);
-		err = bpf_timer_start(timer, tickless_ns, 0);
-		if (err) {
-			scx_bpf_error("Failed to arm tickless timer");
 			return err;
 		}
 	}
