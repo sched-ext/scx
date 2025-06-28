@@ -41,25 +41,25 @@ const volatile bool primary_all = true;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
+const volatile u64 slice_max = 4096ULL * NSEC_PER_USEC;
 
 /*
  * Time slice used when system is over commissioned.
  */
-const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
+const volatile u64 slice_min = 128ULL * NSEC_PER_USEC;
 
 /*
  * Maximum runtime budget that a task can accumulate while sleeping (used
  * to determine the task's minimum vruntime).
  */
-const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
+const volatile u64 slice_lag = 4096ULL * NSEC_PER_USEC;
 
 /*
  * Maximum runtime penalty that a task can accumulate while running (used
  * to determine the task's maximum exec_vruntime: accumulated vruntime
  * since last sleep).
  */
-const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
+const volatile u64 run_lag = 32768ULL * NSEC_PER_USEC;
 
 /*
  * Maximum amount of voluntary context switches (this limit allows to prevent

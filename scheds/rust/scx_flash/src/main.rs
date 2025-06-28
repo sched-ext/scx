@@ -145,25 +145,25 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
+    #[clap(short = 's', long, default_value = "4096")]
     slice_us: u64,
 
     /// Minimum scheduling slice duration in microseconds.
-    #[clap(short = 'S', long, default_value = "1000")]
+    #[clap(short = 'S', long, default_value = "128")]
     slice_us_min: u64,
 
     /// Maximum runtime budget that a task can accumulate while sleeping (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'l', long, default_value = "20000")]
+    #[clap(short = 'l', long, default_value = "4096")]
     slice_us_lag: u64,
 
     /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'r', long, default_value = "200000")]
+    #[clap(short = 'r', long, default_value = "32768")]
     run_us_lag: u64,
 
     /// Maximum rate of voluntary context switches.
@@ -202,7 +202,7 @@ struct Opts {
     /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
     /// performance at the cost of higher power consumption. Alternatively, increasing the latency
     /// value may reduce performance, but also improve power efficiency.
-    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
+    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "32")]
     idle_resume_us: i64,
 
     /// Enable tickless mode.
