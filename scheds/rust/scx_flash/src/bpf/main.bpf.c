@@ -9,6 +9,16 @@
 
 #define DSQ_FLAG_NODE	(1LLU << 32)
 
+/*
+ * Thresholds for applying hysteresis to CPU performance scaling:
+ *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
+ *  - CPUFREQ_HIGH_THRESH: above this level, raise performance to maximum
+ *
+ * Values between the two thresholds retain the current smoothed performance level.
+ */
+#define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
+#define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
+
 const volatile u64 __COMPAT_SCX_PICK_IDLE_IN_NODE;
 
 char _license[] SEC("license") = "GPL";
@@ -1410,6 +1420,26 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 }
 
 /*
+ * Exponential weighted moving average (EWMA).
+ *
+ * Copied from scx_lavd. Returns the new average as:
+ *
+ *	new_avg := (old_avg * .75) + (new_val * .25);
+ */
+static u64 calc_avg(u64 old_val, u64 new_val)
+{
+	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+/*
+ * Evaluate the EWMA limited to the range [low ... high]
+ */
+static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
+{
+	return CLAMP(calc_avg(old_val, new_val), low, high);
+}
+
+/*
  * Update CPU load and scale target performance level accordingly.
  */
 static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
@@ -1443,13 +1473,32 @@ static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
 	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
 	if (perf_lvl >= SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
 		perf_lvl = SCX_CPUPERF_ONE;
-	cctx->perf_lvl = perf_lvl;
+
+	/*
+	 * Use a moving average to evalute the target performance level,
+	 * giving more priority to the current average, so that we can
+	 * react faster at CPU load variations and at the same time smooth
+	 * the short spikes.
+	 */
+	cctx->perf_lvl = calc_avg(perf_lvl, cctx->perf_lvl);
 
 	/*
 	 * Refresh the dynamic cpuperf scaling factor if needed.
+	 *
+	 * Apply hysteresis to the scaling factor:
+	 *  - if utilization is above the high threshold, bump to max;
+	 *  - if it's below the low threshold, scale down to half capacity;
+	 *  - otherwise, maintain the smoothed perf level.
 	 */
-	if (cpufreq_perf_lvl < 0)
-		scx_bpf_cpuperf_set(cpu, cctx->perf_lvl);
+	if (cpufreq_perf_lvl < 0) {
+		if (cctx->perf_lvl >= CPUFREQ_HIGH_THRESH)
+			perf_lvl = SCX_CPUPERF_ONE;
+		else if (cctx->perf_lvl <= CPUFREQ_LOW_THRESH)
+			perf_lvl = SCX_CPUPERF_ONE / 2;
+		else
+			perf_lvl = cctx->perf_lvl;
+		scx_bpf_cpuperf_set(cpu, perf_lvl);
+	}
 
 	cctx->last_running = now;
 	cctx->prev_runtime = cctx->tot_runtime;
@@ -1540,26 +1589,6 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 
 	tctx->exec_runtime = 0;
 	tctx->waker_pid = current->pid;
-}
-
-/*
- * Exponential weighted moving average (EWMA).
- *
- * Copied from scx_lavd. Returns the new average as:
- *
- *	new_avg := (old_avg * .75) + (new_val * .25);
- */
-static u64 calc_avg(u64 old_val, u64 new_val)
-{
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
-}
-
-/*
- * Evaluate the EWMA limited to the range [low ... high]
- */
-static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
-{
-	return CLAMP(calc_avg(old_val, new_val), low, high);
 }
 
 void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
