@@ -3091,6 +3091,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_wd40"
+version = "1.0.13"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "fb_procfs",
+ "libbpf-rs",
+ "log",
+ "nix 0.29.0",
+ "ordered-float",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+ "sorted-vec",
+ "static_assertions",
+]
+
+[[package]]
 name = "scxctl"
 version = "1.0.13"
 dependencies = [
