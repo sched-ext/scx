@@ -730,9 +730,14 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 
 		/*
 		 * If waker and wakee are on the same LLC and @prev_cpu is
-		 * idle keep using it, since there is no guarantee that the
-		 * cache hot data from the waker's CPU is more important
-		 * than cache hot data in the wakee's CPU.
+		 * idle, keep using it, since there is no guarantee that
+		 * the cache hot data from the waker's CPU is more
+		 * important than cache hot data in the wakee's CPU.
+		 *
+		 * @prev_cpu is considered idle under the following
+		 * conditions:
+		 *  - if SMT is enabled, check if it's a full-idle core;
+		 *  - if SMT is disabled, check if the CPU is idle.
 		 */
 		if (share_llc &&
 		    (!smt_enabled || bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
