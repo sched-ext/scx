@@ -54,10 +54,12 @@ const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 const volatile bool percpu_kthread_preempt_all = false;
+const volatile u64 tickless_tick_freq = 0;
 volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
+const volatile bool enable_tickless = true;
 const volatile bool enable_match_debug = false;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
@@ -1204,7 +1206,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
-		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
+		u64 slice_ns = layer->tickless ? SCX_SLICE_INF : layer->slice_ns;
+		scx_bpf_dsq_insert(p, taskc->dsq_id, slice_ns, 0);
 		return cpu;
 	}
 
@@ -1602,10 +1605,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	lstats[LLC_LSTAT_CNT]++;
 
 	taskc->dsq_id = layer_dsq_id(layer_id, llc_id);
+	u64 slice_ns = layer->tickless ? SCX_SLICE_INF : layer->slice_ns;
 	if (layer->fifo)
-		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, slice_ns, enq_flags);
 	else
-		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, slice_ns, vtime, enq_flags);
 	lstat_inc(LSTAT_ENQ_DSQ, layer, cpuc);
 
 	/*
@@ -3191,6 +3195,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
  */
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+	{1LLU * NSEC_PER_MSEC, CLOCK_BOOTTIME, 0},
 };
 
 /**
@@ -3304,6 +3309,61 @@ static u64 antistall_scan(void)
 	return layered_timers[ANTISTALL_TIMER].interval_ns;
 }
 
+static inline u64 tickless_tick_interval_ns(void)
+{
+	u64 freq = tickless_tick_freq ? : CONFIG_HZ;
+
+	return NSEC_PER_SEC / freq;
+}
+
+static void tickless_kick_layer(struct cpu_ctx *cpuc, u32 layer_id)
+{
+	u64 dsq_id = layer_dsq_id(layer_id, cpuc->llc_id);
+
+	/*
+	 * TODO: To have better throughput it would be better to track the
+	 * number of queued tasks and the number of kicked CPUs to minimize
+	 * unnecessary preemptions.
+	 */
+	if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu) &&
+	    !scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id) &&
+	    !scx_bpf_dsq_nr_queued(cpuc->hi_fb_dsq_id) &&
+	    !scx_bpf_dsq_nr_queued(dsq_id))
+		return;
+
+	trace("TICKLESS preempting cpu %d", cpuc->cpu);
+
+	scx_bpf_kick_cpu(cpuc->cpu, SCX_KICK_PREEMPT);
+}
+
+/*
+ * This function runs as a timer to implement tickless layer scheduling.
+ */
+static u64 tickless_timer(void)
+{
+	struct cpu_ctx *cpuc;
+	u64 layer_id;
+	int cpu;
+
+	if (!enable_tickless)
+		return 0;
+
+	bpf_for(cpu, 0, nr_possible_cpus) {
+		if (!(cpuc = lookup_cpu_ctx(cpu))) {
+			scx_bpf_error("failed to lookup cpu_ctx");
+			return 0;
+		}
+
+		bpf_for(layer_id, 0, nr_layers) {
+			if (cpuc->layer_id != layer_id)
+				continue;
+			tickless_kick_layer(cpuc, layer_id);
+		}
+	}
+
+	return tickless_tick_interval_ns();
+}
+
 /*
  * Timer callback that runs all registered timers. If a timer returns a non
  * zero value it is rerun after the return value (in nanosecods).
@@ -3313,6 +3373,8 @@ u64 run_timer_cb(int key)
 	switch (key) {
 	case ANTISTALL_TIMER:
 		return antistall_scan();
+	case TICKLESS_TIMER:
+		return tickless_timer();
 	case MAX_TIMERS:
 	default:
 		return 0;
