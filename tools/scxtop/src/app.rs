@@ -740,7 +740,7 @@ impl<'a> App<'a> {
         } else {
             Vec::new()
         };
-        let stats = VecStats::new(&data, true, true, true, None);
+        let stats = VecStats::new(&data, 1, None);
 
         Sparkline::default()
             .data(&data)
@@ -785,7 +785,7 @@ impl<'a> App<'a> {
         } else {
             Vec::new()
         };
-        let stats = VecStats::new(&data, true, true, true, None);
+        let stats = VecStats::new(&data, 1, None);
 
         Sparkline::default()
             .data(&data)
@@ -857,7 +857,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event_name()))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&llc_iter, true, true, true, None);
+        let stats = VecStats::new(&llc_iter, 1, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -977,7 +977,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|node_data| node_data.event_data_immut(self.active_event.event_name()))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&node_iter, true, true, true, None);
+        let stats = VecStats::new(&node_iter, 1, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -1102,7 +1102,7 @@ impl<'a> App<'a> {
             Vec::new()
         };
         // XXX: this should be max across all CPUs
-        let stats = VecStats::new(&data, true, true, true, None);
+        let stats = VecStats::new(&data, 1, None);
         Sparkline::default()
             .data(&data)
             .max(stats.max)
@@ -1204,7 +1204,7 @@ impl<'a> App<'a> {
             .map(|(dsq_id, dsq_data)| {
                 let values = dsq_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, true, true, true, None);
+                let stats = VecStats::new(&values, 1, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1240,7 +1240,7 @@ impl<'a> App<'a> {
             .map(|(llc_id, llc_data)| {
                 let values = llc_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, true, true, true, None);
+                let stats = VecStats::new(&values, 1, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1254,7 +1254,7 @@ impl<'a> App<'a> {
             .map(|(node_id, node_data)| {
                 let values = node_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, true, true, true, None);
+                let stats = VecStats::new(&values, 1, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1362,7 +1362,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|dsq_data| dsq_data.event_data_immut(event))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
+        let stats = VecStats::new(&dsq_global_iter, 1, None);
 
         let bar_block = Block::default()
             .title_top(
@@ -1479,7 +1479,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, true, true, true, None);
+                    let stats = VecStats::new(&node_iter, 1, None);
 
                     let node_block = Block::bordered()
                         .title_top(
@@ -1600,7 +1600,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, true, true, true, None);
+                    let stats = VecStats::new(&node_iter, 1, None);
 
                     let node_block = Block::bordered()
                         .title_top(
