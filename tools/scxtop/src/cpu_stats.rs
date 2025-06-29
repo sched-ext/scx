@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_integration_test() -> Result<()> {
-        let mut tracker = CpuStatTracker::new();
+        let mut tracker = CpuStatTracker::default();
         tracker.update()?;
 
         std::thread::sleep(std::time::Duration::from_secs(1));
