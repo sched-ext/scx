@@ -241,7 +241,7 @@ impl<'a> App<'a> {
             hw_pressure,
             locale: SystemLocale::default()?,
             stats_client,
-            cpu_stat_tracker: Arc::new(RwLock::new(CpuStatTracker::new())),
+            cpu_stat_tracker: Arc::new(RwLock::new(CpuStatTracker::default())),
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,

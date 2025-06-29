@@ -35,20 +35,13 @@ impl CpuStatSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct CpuStatTracker {
     pub prev: BTreeMap<usize, CpuStatSnapshot>,
     pub current: BTreeMap<usize, CpuStatSnapshot>,
 }
 
 impl CpuStatTracker {
-    pub fn new() -> Self {
-        Self {
-            prev: BTreeMap::new(),
-            current: BTreeMap::new(),
-        }
-    }
-
     pub fn update(&mut self) -> Result<()> {
         let lines = read_proc_stat_cpu_lines()?;
 
