@@ -14,6 +14,8 @@ mod stats;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fmt::Write;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -175,6 +177,19 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "0")]
     max_avg_nvcsw: u64,
 
+    /// Utilization percentage to consider a CPU as busy (-1 = auto).
+    ///
+    /// A value close to 0 forces tasks to migrate quickier, increasing work conservation and
+    /// potentially system responsiveness.
+    ///
+    /// A value close to 100 makes tasks more sticky to their CPU, increasing cache-sensivite and
+    /// server-type workloads.
+    ///
+    /// In auto mode (-1) the scheduler autoomatically tries to determine the optimal value in
+    /// function of the current workload.
+    #[clap(short = 'C', long, allow_hyphen_values = true, default_value = "-1")]
+    cpu_busy_thresh: i64,
+
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -309,6 +324,13 @@ struct Opts {
     help_stats: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CpuTimes {
+    user: u64,
+    nice: u64,
+    total: u64,
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -393,6 +415,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
+        skel.maps.rodata_data.cpu_busy_thresh = opts.cpu_busy_thresh;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
@@ -728,13 +751,68 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
+    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
+        let total_diff = curr.total.saturating_sub(prev.total);
+        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
+
+        if total_diff > 0 {
+            let user_pct = 100.0 * (user_diff as f64) / (total_diff as f64);
+            Some((user_pct * 1000.0).round() as u64)
+        } else {
+            None
+        }
+    }
+
+    fn read_cpu_times() -> Option<CpuTimes> {
+        let file = File::open("/proc/stat").ok()?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.starts_with("cpu ") {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 5 {
+                    return None;
+                }
+
+                let user: u64 = fields[1].parse().ok()?;
+                let nice: u64 = fields[2].parse().ok()?;
+
+                // Sum the first 8 fields as total time, including idle, system, etc.
+                let total: u64 = fields
+                    .iter()
+                    .skip(1)
+                    .take(8)
+                    .filter_map(|v| v.parse::<u64>().ok())
+                    .sum();
+
+                return Some(CpuTimes { user, nice, total });
+            }
+        }
+
+        None
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let (res_ch, req_ch) = self.stats_server.channels();
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if self.refresh_sched_domain() {
                 self.user_restart = true;
                 break;
             }
+
+            if self.opts.cpu_busy_thresh < 0 {
+                if let Some(curr_cputime) = Self::read_cpu_times() {
+                    if let Some(cpu_util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
+                    {
+                        self.skel.maps.bss_data.cpu_util = cpu_util;
+                    }
+                    prev_cputime = curr_cputime;
+                }
+            }
+
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}

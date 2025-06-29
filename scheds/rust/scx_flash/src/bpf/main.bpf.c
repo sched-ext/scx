@@ -68,6 +68,16 @@ const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
 const volatile u64 max_avg_nvcsw;
 
 /*
+ * CPU utilization threshold to consider the CPU as busy.
+ */
+const volatile s64 cpu_busy_thresh = -1LL;
+
+/*
+ * Current CPU user utilization (evaluated from user-space).
+ */
+volatile u64 cpu_util;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -1141,12 +1151,35 @@ out_kick:
 static bool is_cpu_busy(s32 cpu)
 {
 	const struct cpu_ctx *cctx;
+	/*
+	 * Determine whether a CPU is considered busy using the following logic:
+	 *  - if a fixed threshold is provided (@cpu_busy_thresh), use it
+	 *    directly;
+	 *  - otherwise, compute a dynamic threshold as:
+	 *        100% - global CPU user time %
+	 *
+	 * The dynamic threshold adapts to system load: when user time is
+	 * high, the threshold decreases, making the scheduler more
+	 * aggressive in migrating tasks to improve responsiveness. When
+	 * user time is low, the threshold increases, encouraging task
+	 * stickiness to improve cache locality while still preserving work
+	 * conservation, since the system isn't overloaded.
+	 *
+	 * Note that the CPU utilization percentage is represented using fixed
+	 * point, so we need to multiply the threshold percentage by 1000.
+	 */
+	u64 cpu_thresh = cpu_busy_thresh >= 0 ? cpu_busy_thresh * 1000 :
+						(100000 - cpu_util);
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
 		return false;
 
-	return cctx->perf_lvl >= SCX_CPUPERF_ONE / 2;
+	/*
+	 * Normalize the utilization in range [0 .. SCX_CPUPERF_ONE] and
+	 * check if the current utilization exceeds the target threshold.
+	 */
+	return cctx->perf_lvl >= SCX_CPUPERF_ONE * cpu_thresh / 100000;
 }
 
 /*
