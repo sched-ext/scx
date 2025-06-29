@@ -16,6 +16,7 @@ use crate::sanitize_nbsp;
 use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
+use crate::CpuStatTracker;
 use crate::EventData;
 use crate::FilteredEventState;
 use crate::KprobeEvent;
@@ -68,7 +69,7 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
@@ -79,6 +80,7 @@ pub struct App<'a> {
     localize: bool,
     locale: SystemLocale,
     stats_client: Option<Arc<TokioMutex<StatsClient>>>,
+    cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
 
     scheduler: String,
@@ -239,6 +241,7 @@ impl<'a> App<'a> {
             hw_pressure,
             locale: SystemLocale::default()?,
             stats_client,
+            cpu_stat_tracker: Arc::new(RwLock::new(CpuStatTracker::default())),
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,
@@ -518,6 +521,9 @@ impl<'a> App<'a> {
     fn on_tick(&mut self) -> Result<()> {
         // always grab updated stats
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        {
+            self.cpu_stat_tracker.write().unwrap().update()?;
+        }
 
         if self.state == AppState::Scheduler && !self.scheduler.is_empty() {
             if let Some(stats_client_read) = self.stats_client.clone() {
