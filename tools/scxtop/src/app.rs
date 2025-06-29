@@ -415,14 +415,10 @@ impl<'a> App<'a> {
             );
             let path = Path::new(&file);
             let freq = read_from_file(path).unwrap_or(0_usize);
-            let cpu_data = self.cpu_data.entry(*cpu_id).or_insert(CpuData::new(
-                *cpu_id,
-                0,
-                0,
-                0,
-                self.max_cpu_events,
-            ));
-
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu_id)
+                .expect("CpuData should have been present");
             cpu_data.add_event_data("cpu_freq", freq as u64);
         }
         Ok(())
@@ -452,8 +448,8 @@ impl<'a> App<'a> {
                         }
                         let node_data = self
                             .node_data
-                            .entry(cpu.node_id)
-                            .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                            .get_mut(&cpu.node_id)
+                            .expect("NodeData should have been present");
                         node_data.add_event_data("uncore_freq", uncore_freq as u64);
                     }
                 }
@@ -474,25 +470,22 @@ impl<'a> App<'a> {
         for node in self.topo.nodes.keys() {
             let node_data = self
                 .node_data
-                .entry(*node)
-                .or_insert(NodeData::new(*node, self.max_cpu_events));
+                .get_mut(node)
+                .expect("NodeData should have been present");
             node_data.data.set_max_size(max_events);
         }
         for llc in self.topo.all_llcs.keys() {
-            let llc_data =
-                self.llc_data
-                    .entry(*llc)
-                    .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
             llc_data.data.set_max_size(max_events);
         }
         for cpu in self.active_prof_events.keys() {
-            let cpu_data = self.cpu_data.entry(*cpu).or_insert(CpuData::new(
-                *cpu,
-                0,
-                0,
-                0,
-                self.max_cpu_events,
-            ));
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
             cpu_data.data.set_max_size(max_events);
         }
         self.max_cpu_events = max_events;
@@ -551,16 +544,16 @@ impl<'a> App<'a> {
         for node in self.topo.nodes.keys() {
             let node_data = self
                 .node_data
-                .entry(*node)
-                .or_insert(NodeData::new(*node, self.max_cpu_events));
+                .get_mut(node)
+                .expect("NodeData should have been present");
             node_data.add_event_data(self.active_event.event_name(), 0);
         }
         // Add entry for llcs
         for llc in self.topo.all_llcs.keys() {
-            let llc_data =
-                self.llc_data
-                    .entry(*llc)
-                    .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
             llc_data.add_event_data(self.active_event.event_name(), 0);
         }
 
@@ -571,20 +564,18 @@ impl<'a> App<'a> {
             };
             let cpu_data = self
                 .cpu_data
-                .entry(*cpu)
-                // XXX: fixme
-                .or_insert(CpuData::new(*cpu, 0, 0, 0, self.max_cpu_events));
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
             cpu_data.add_event_data(event.event_name(), val);
-            let llc_data = self.llc_data.entry(cpu_data.llc).or_insert(LlcData::new(
-                cpu_data.llc,
-                0,
-                self.max_cpu_events,
-            ));
+            let llc_data = self
+                .llc_data
+                .get_mut(&cpu_data.llc)
+                .expect("LlcData should have been present");
             llc_data.add_cpu_event_data(event.event_name(), val);
             let node_data = self
                 .node_data
-                .entry(cpu_data.node)
-                .or_insert(NodeData::new(cpu_data.node, self.max_cpu_events));
+                .get_mut(&cpu_data.node)
+                .expect("NodeData should have been present");
             node_data.add_cpu_event_data(event.event_name(), val);
         }
         if self.collect_cpu_freq {
@@ -598,7 +589,10 @@ impl<'a> App<'a> {
 
     /// Generates a CPU bar chart.
     fn cpu_bar(&self, cpu: usize, event: &str) -> Bar {
-        let cpu_data = self.cpu_data.get(&cpu).unwrap();
+        let cpu_data = self
+            .cpu_data
+            .get(&cpu)
+            .expect("CpuData should have been present");
         let value = cpu_data
             .event_data_immut(event)
             .last()
@@ -660,7 +654,10 @@ impl<'a> App<'a> {
         let mut hw_pressure: u64 = 0;
         let mut pstate: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
-            let cpu_data = self.cpu_data.get(&cpu).unwrap();
+            let cpu_data = self
+                .cpu_data
+                .get(&cpu)
+                .expect("CpuData should have been present");
             perf = cpu_data
                 .event_data_immut("perf")
                 .last()
@@ -735,7 +732,10 @@ impl<'a> App<'a> {
     /// creates as sparkline for a llc.
     fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&llc) {
-            let llc_data = self.llc_data.get(&llc).unwrap();
+            let llc_data = self
+                .llc_data
+                .get(&llc)
+                .expect("LlcData should have been present");
             llc_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
@@ -780,7 +780,10 @@ impl<'a> App<'a> {
     /// creates as sparkline for a node.
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&node) {
-            let node_data = self.node_data.get(&node).unwrap();
+            let node_data = self
+                .node_data
+                .get(&node)
+                .expect("NodeData should have been present");
             node_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
@@ -807,7 +810,7 @@ impl<'a> App<'a> {
                                 + format_hz(
                                     self.node_data
                                         .get(&node)
-                                        .unwrap()
+                                        .expect("NodeData should have been present")
                                         .event_data_immut("uncore_freq")
                                         .last()
                                         .copied()
@@ -1518,7 +1521,7 @@ impl<'a> App<'a> {
                                     + format_hz(
                                         self.node_data
                                             .get(&node.id)
-                                            .unwrap()
+                                            .expect("NodeData should have been present")
                                             .event_data_immut("uncore_freq")
                                             .last()
                                             .copied()
@@ -1639,7 +1642,7 @@ impl<'a> App<'a> {
                                     + format_hz(
                                         self.node_data
                                             .get(&node.id)
-                                            .unwrap()
+                                            .expect("NodeData should have been present")
                                             .event_data_immut("uncore_freq")
                                             .last()
                                             .copied()
@@ -2396,25 +2399,19 @@ impl<'a> App<'a> {
 
     /// Updates the app when a CPUs performance is changed by the scheduler.
     fn on_cpu_perf(&mut self, cpu: u32, perf: u32) {
-        let cpu_data = self.cpu_data.entry(cpu as usize).or_insert(CpuData::new(
-            cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(cpu as usize))
+            .expect("CpuData should have been present");
         cpu_data.add_event_data("perf", perf as u64);
     }
 
     fn on_pstate_sample(&mut self, action: &PstateSampleAction) {
         let PstateSampleAction { cpu, busy } = action;
-        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-            *cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(*cpu as usize))
+            .expect("CpuData should have been present");
         cpu_data.add_event_data("pstate", *busy as u64);
     }
 
@@ -2471,13 +2468,10 @@ impl<'a> App<'a> {
             return;
         }
 
-        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-            *cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(*cpu as usize))
+            .expect("CpuData should have been present");
 
         let next_dsq_id = Self::classify_dsq(*next_dsq_id);
         let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
@@ -2594,14 +2588,10 @@ impl<'a> App<'a> {
     pub fn on_hw_pressure(&mut self, action: &HwPressureAction) {
         let HwPressureAction { cpu, hw_pressure } = action;
 
-        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-            *cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
-
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(*cpu as usize))
+            .expect("CpuData should have been present");
         cpu_data.add_event_data("hw_pressure", *hw_pressure);
     }
 
