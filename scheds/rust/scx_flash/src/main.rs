@@ -175,6 +175,16 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "0")]
     max_avg_nvcsw: u64,
 
+    /// Utilization percentage to consider a CPU as busy.
+    ///
+    /// Reducing this value forces tasks to migrate quickier, increasing work conservation and
+    /// potentially system responsiveness.
+    ///
+    /// Increasing this valu this value makes tasks more sticky to their CPU, increasing
+    /// cache-sensivite and server-type workloads.
+    #[clap(short = 'C', long, default_value = "50")]
+    cpu_busy_thresh: u64,
+
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -392,6 +402,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
+        skel.maps.rodata_data.cpu_busy_thresh = opts.cpu_busy_thresh;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled

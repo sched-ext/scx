@@ -68,6 +68,11 @@ const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
 const volatile u64 max_avg_nvcsw;
 
 /*
+ * CPU utilization threshold to consider the CPU as busy.
+ */
+const volatile u64 cpu_busy_thresh = 50;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -1136,7 +1141,7 @@ static bool is_cpu_busy(s32 cpu)
 	if (!cctx)
 		return false;
 
-	return cctx->perf_lvl >= SCX_CPUPERF_ONE / 2;
+	return cctx->perf_lvl >= SCX_CPUPERF_ONE * cpu_busy_thresh / 100;
 }
 
 /*
