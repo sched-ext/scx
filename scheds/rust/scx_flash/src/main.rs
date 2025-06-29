@@ -230,6 +230,13 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
 
+    /// Enable CPU stickiness.
+    ///
+    /// Enabling this option can reduce the amount of task migrations, but it can also make
+    /// performance less consistent on systems with hybrid cores.
+    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
+    sticky_cpu: bool,
+
     /// Native tasks priorities.
     ///
     /// By default, the scheduler normalizes task priorities to avoid large gaps that could lead to
@@ -391,6 +398,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
+        skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;

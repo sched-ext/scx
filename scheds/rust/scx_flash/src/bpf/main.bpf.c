@@ -79,6 +79,12 @@ const volatile bool no_wake_sync;
 const volatile bool local_kthreads;
 
 /*
+ * If set, keep reusing the same CPU even if it's not in the primary
+ * scheduling domain.
+ */
+const volatile bool sticky_cpu;
+
+/*
  * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
  *
  * Enabling this option allows to prioritize per-CPU tasks that usually
@@ -704,6 +710,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
+	bool is_prev_allowed;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -717,6 +724,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Get the task's primary scheduling domain.
 	 */
 	p_mask = primary_all ? p->cpus_ptr : cast_mask(tctx->cpumask);
+
+	/*
+	 * Decide whether the task can continue running on the same CPU:
+	 *  - if the CPU is outside the primary domain, force a migration;
+	 *  - otherwise, allow it if the CPU is within the primary domain
+	 *    or if CPU stickiness is enabled.
+	 */
+	is_prev_allowed = (primary_all || sticky_cpu) ? true :
+				p_mask && bpf_cpumask_test_cpu(prev_cpu, p_mask);
 
 	/*
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
@@ -745,7 +761,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 *  - if SMT is enabled, check if it's a full-idle core;
 		 *  - if SMT is disabled, check if the CPU is idle.
 		 */
-		if (share_llc &&
+		if (is_prev_allowed && share_llc &&
 		    (!smt_enabled || bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -794,7 +810,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		if (is_prev_allowed &&
+		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
@@ -863,7 +880,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (is_prev_allowed &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
