@@ -735,7 +735,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * than cache hot data in the wakee's CPU.
 		 */
 		if (share_llc &&
-		    (smt_enabled && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
+		    (!smt_enabled || bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
