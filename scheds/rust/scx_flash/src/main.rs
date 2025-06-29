@@ -198,21 +198,6 @@ struct Opts {
     #[clap(short = 'T', long, action = clap::ArgAction::SetTrue)]
     tickless: bool,
 
-    /// Use per-CPU runqueues only.
-    ///
-    /// Force using only per-CPU runqueues to reduce task migrations. This can improve certain
-    /// cache-sensitive workloads at the cost of making the system less responsive.
-    #[clap(short = 'C', long, action = clap::ArgAction::SetTrue)]
-    cpu_runqueue: bool,
-
-    /// Use per-node runqueues only.
-    ///
-    /// Force using only per-node runqueues to maximize work conservation. This can improve
-    /// system responsiveness under saturation conditions at the cost of reducing performance for
-    /// cache-sensitive workloads.
-    #[clap(short = 'N', long, action = clap::ArgAction::SetTrue)]
-    node_runqueue: bool,
-
     /// Enable round-robin scheduling.
     ///
     /// Each task is given a fixed time slice (defined by --slice-us-max) and run in a cyclic, fair
@@ -409,19 +394,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
-
-        if !opts.cpu_runqueue && !opts.node_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = true;
-            skel.maps.rodata_data.node_dsq = true;
-        } else if opts.cpu_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = true;
-            skel.maps.rodata_data.node_dsq = false;
-        } else if opts.node_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = false;
-            skel.maps.rodata_data.node_dsq = true;
-        } else {
-            bail!("--cpu-runqueue and --node-runqueue are mutually exclusive");
-        }
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).

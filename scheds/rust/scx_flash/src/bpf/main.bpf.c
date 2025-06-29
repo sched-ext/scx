@@ -38,12 +38,6 @@ const volatile bool rr_sched;
 /* Primary domain includes all CPU */
 const volatile bool primary_all = true;
 
-/* Enable per-CPU DSQs */
-const volatile bool pcpu_dsq = true;
-
-/* Enable per-node DSQs */
-const volatile bool node_dsq = true;
-
 /*
  * Default task time slice.
  */
@@ -424,8 +418,8 @@ static inline u64 nr_tasks_waiting(s32 cpu)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
-	return (pcpu_dsq ? scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) : 0) +
-	       (node_dsq ? scx_bpf_dsq_nr_queued(node_to_dsq(node)) : 0);
+	return scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
+	       scx_bpf_dsq_nr_queued(node_to_dsq(node));
 }
 
 /*
@@ -1240,8 +1234,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * on the same CPU using the per-CPU DSQ (if enabled), or use the
 	 * per-node DSQ for the CPU-intensive tasks (if enabled).
 	 */
-	if (pcpu_dsq &&
-	    (!node_dsq || (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(p, tctx)))) {
+	if (!scx_bpf_dsq_nr_queued(node_to_dsq(node)) && is_interactive(p, tctx)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
@@ -1339,40 +1332,6 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return ret;
 }
 
-/*
- * Attempt to consume a task from a remote CPU within the same LLC.
- */
-static bool rebalance_cpu(s32 cpu)
-{
-	u64 min_vtime = MAX_VTIME;
-	u64 min_dsq_id = cpu_to_dsq(cpu), dsq_id;
-	s32 other_cpu;
-
-	bpf_for(other_cpu, 0, nr_cpu_ids) {
-		const struct task_struct *p;
-
-		if (cpu == other_cpu || !cpus_share_llc(cpu, other_cpu))
-			continue;
-
-		dsq_id = cpu_to_dsq(other_cpu);
-		bpf_for_each(scx_dsq, p, dsq_id, 0) {
-			if (p->scx.dsq_vtime < min_vtime &&
-			    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-				min_vtime = p->scx.dsq_vtime;
-				min_dsq_id = dsq_id;
-			}
-			break;
-		}
-	}
-
-	if (min_vtime != MAX_VTIME) {
-		scx_bpf_dsq_move_to_local(min_dsq_id);
-		return true;
-	}
-
-	return false;
-}
-
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
@@ -1384,17 +1343,15 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Consume a task from the per-CPU DSQ, transferring them to the
-	 * local CPU DSQ.
+	 * Try to consume a task from the per-CPU DSQ.
 	 */
-	if (pcpu_dsq && scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
+	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
 		return;
 
 	/*
-	 * Consume regular tasks from the per-node DSQ, transferring them
-	 * to the local CPU DSQ.
+	 * Try to consume a task from the per-node DSQ.
 	 */
-	if (node_dsq && scx_bpf_dsq_move_to_local(node_to_dsq(node)))
+	if (scx_bpf_dsq_move_to_local(node_to_dsq(node)))
 		return;
 
 	/*
@@ -1402,21 +1359,8 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * to run, simply replenish its time slice and let it run for another
 	 * round on the same CPU.
 	 */
-	if (prev && keep_running(prev, cpu)) {
+	if (prev && keep_running(prev, cpu))
 		prev->scx.slice = task_slice_max();
-		return;
-	}
-
-	/*
-	 * Without per-node DSQs enabled, there's no inherent mechanism for
-	 * balancing the load across CPUs, which can lead to tasks waiting
-	 * too long for their assigned CPU to become available.
-         *
-	 * To mitigate this, when a CPU is about to go idle, try to pull
-	 * the task with the smallest vruntime from other CPUs.
-	 */
-	if (pcpu_dsq && !node_dsq)
-		rebalance_cpu(cpu);
 }
 
 /*
@@ -1977,24 +1921,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	init_cpuperf_target();
 
 	/* Create per-CPU DSQs */
-	if (pcpu_dsq) {
-		bpf_for(cpu, 0, nr_cpu_ids) {
-			err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
-			if (err) {
-				scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
-				return err;
-			}
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
+		if (err) {
+			scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
+			return err;
 		}
 	}
 
 	/* Create per-node DSQs */
-	if (node_dsq) {
-		bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
-			err = scx_bpf_create_dsq(node_to_dsq(node), node);
-			if (err) {
-				scx_bpf_error("failed to create DSQ %d: %d", node, err);
-				return err;
-			}
+	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		err = scx_bpf_create_dsq(node_to_dsq(node), node);
+		if (err) {
+			scx_bpf_error("failed to create DSQ %d: %d", node, err);
+			return err;
 		}
 	}
 
