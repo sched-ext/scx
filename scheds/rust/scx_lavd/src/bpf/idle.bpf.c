@@ -381,8 +381,12 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	ctx->i_nm = 0;
 	test_cpu_stickable(ctx, ctx->prev_cpu, ctx->is_task_big);
 	if (ctx->wake_flags & SCX_WAKE_SYNC) {
-		ctx->sync_waker_cpu = bpf_get_smp_processor_id();
-		test_cpu_stickable(ctx, ctx->sync_waker_cpu, ctx->is_task_big);
+		s32 sync_waker_cpu = bpf_get_smp_processor_id();
+		if (ctx->prev_cpu != ctx->sync_waker_cpu) {
+			ctx->sync_waker_cpu = sync_waker_cpu;
+			test_cpu_stickable(ctx, ctx->sync_waker_cpu,
+					   ctx->is_task_big);
+		}
 	}
 
 	/*
@@ -394,15 +398,23 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 		*sticky_cpdom = ctx->cpdoms_match[0];
 		return ctx->cpus_match[0];
 	} else if (ctx->i_m == 2) {
-		q0 = ctx->cpdoms_match[0];
-		q1 = ctx->cpdoms_match[1];
+		q0 = ctx->cpdoms_match[0]; /* prev_cpu */
+		q1 = ctx->cpdoms_match[1]; /* sync_waker_cpu */
 		if (q0 != q1 &&
 		    (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1))) {
+			/*
+			 * When a waker's compute domain is chosen, let's just
+			 * stick to the waker's domain. Let's not decide to
+			 * stick to the waker's CPU at this point. Since a
+			 * single waker can trigger waking up many other tasks,
+			 * always moving to the waker's CPU could introduce a
+			 * thundering herd problem. So return -ENOENT.
+			 */
 			*sticky_cpdom = q1;
-			return ctx->cpus_match[1];
+			return -ENOENT;
 		} else {
 			*sticky_cpdom = q0;
-			return ctx->cpus_match[0];
+			return ctx->cpus_match[0]; /* prev_cpu */
 		}
 	}
 
@@ -471,9 +483,9 @@ err_out:
 }
 
 static
-bool is_sync_waker_idle(struct pick_ctx * ctx, s32 sticky_cpu)
+bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx *cpuc_waker, *cpuc_prev;
 
 	if (ctx->sync_waker_cpu < 0)
 		return false;
@@ -484,15 +496,25 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s32 sticky_cpu)
 	 * because of running this code. So, test if the waker's local DSQ is
 	 * empty to test if the waker CPU is idle.
 	 */
-	cpuc = get_cpu_ctx_id(ctx->sync_waker_cpu);
-	if (!cpuc || scx_bpf_dsq_nr_queued(cpuc->cpdom_id))
+	if (!can_run_on_cpu(ctx, ctx->sync_waker_cpu))
 		return false;
 
-	if ((sticky_cpu == ctx->sync_waker_cpu) ||
-	    can_run_on_cpu(ctx, ctx->sync_waker_cpu))
-		return true;
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | ctx->sync_waker_cpu))
+		return false;
 
-	return false;
+	cpuc_waker = get_cpu_ctx_id(ctx->sync_waker_cpu);
+	if (!cpuc_waker || scx_bpf_dsq_nr_queued(cpuc_waker->cpdom_id))
+		return false;
+
+	if (nr_cpdoms > 1) {
+		cpuc_prev = get_cpu_ctx_id(ctx->prev_cpu);
+		if (!cpuc_prev ||
+		    cpuc_prev->cpdom_id != cpuc_waker->cpdom_id)
+			return false;
+	}
+
+	*cpdom_id = cpuc_waker->cpdom_id;
+	return true;
 }
 
 static
@@ -532,10 +554,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * 
 	 * 6) Minimize cross-domain migration: Before migrating to a neighbor
 	 *    domain, try to find an (any) idle CPU on the current domain.
-	 *    Even if there is no idle CPU in the current domain, stay on the
-	 *    waker's CPU in the case of synchronous wake-up. When migrating
-	 *    to another domain, traverse neighbors in a distance order and
-	 *    find an (any) idle CPU.
+	 *    Migrate a task to another domain only when the current sticky
+	 *    domain is relatively highly overloaded (i.e., stealee) and the
+	 *    target domain is relatively under-loaded (i.e., stealer) and the
+	 *    target domain has a fully idle core. Otherwise, stay on the
+	 *    previous CPU for cache locality, hoping that the load imbalance
+	 *    (if it exists) will be resolved by the load balancing mechanism.
 	 */
 	bpf_rcu_read_lock();
 
@@ -649,14 +673,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/* NOTE: The sticky CPU is not (even partially) idle. */
 
 	/*
-	 * If the synchronous waker CPU is idle, stay on it.
-	 * Note that in this case, the waker CPU is unnecessary to be kicked
-	 * since it is busy running this code. Also, just in case the waker CPU
-	 * is in a different domain with the sticky CPU, reset sticky_cpdom.
+	 * If the synchronous waker CPU is idle and in the same domain with
+	 * the previous CPU, stay on it. Note that in this case, the waker CPU
+	 * is unnecessary to be kicked since it is busy running this code.
 	 */
-	if (!no_wake_sync && is_sync_waker_idle(ctx, sticky_cpu)) {
+	if (!no_wake_sync && is_sync_waker_idle(ctx, &sticky_cpdom)) {
 		cpu = ctx->sync_waker_cpu;
-		sticky_cpdom = -ENOENT;
 		goto unlock_out;
 	}
 	/* NOTE: The waker CPU is not (even partially) idle if there is. */
@@ -675,22 +697,21 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 
 	/*
 	 * So far, it is confirmed that
-	 *  - There is no fully idle CPU in the sticky domain.
-	 *  - The sticky CPU or waker CPU is not idle.
-	 *  - But there is at least one idle CPU in active/overflow set.
+	 *  1) There is no fully idle CPU in the sticky domain.
+	 *  2) The sticky CPU or waker CPU is not idle.
+	 *  3) But there is at least one idle CPU in active/overflow set.
 	 *
-	 * In other words, the system is underloaded, but there is no fully
-	 * idle CPU in the stikcy domain. In addition to that, if the sticky
-	 * domain is marked as a stealee domain, that means the sticky domain's
-	 * load is relatively higher than the other domains. 
+	 * If there is a fully idle core in the system (i.e., !is_smt_empty),
+	 * let's migrate a task to another domain when
+	 *  1) The sticky domain is over-loaded (cpdc->is_stealee)
+	 *  2) The target domain is under-loaded (mig_cpdc->is_stealer)
+	 *     that has a fully idle core.
 	 *
-	 * In this case, let's donate the task to an under-loaded neighboring
-	 * domain by finding a _fully_ idle CPU from neighboring domains. Note
-	 * that when a system is under-loaded, task donation works better than
-	 * task stealing because DSQs are mostly empty (i.e., it is hard to
-	 * steal from a DSQ).
+	 * Note that when a system is under-loaded, task donation works better
+	 * than task stealing because DSQs are mostly empty (i.e., it is hard
+	 * to steal from a DSQ).
 	 */
-	if (!is_smt_active)
+	if (i_smt_empty || nr_cpdoms == 1)
 		goto skip_fully_idle_neighbor;
 
 	cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]);
@@ -744,39 +765,17 @@ skip_fully_idle_neighbor:
 	cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom, 0, is_idle);
 	if (cpu >= 0)
 		goto unlock_out;
+	/* NOTE: There is no even partially idle CPU in the sticky domain. */
 
 	/*
-	 * If the sticky CPU is a waker CPU in sync wakeup, stay on it
-	 * even if it is not idle. This is the last try to stay on the
-	 * sticky domain.
+	 * Instead of chasing a partially idle CPU in neighboring domains,
+	 * let's stay on the previous CPU or the sticky domain for cache
+	 * locality, hoping that the load imbalance (if it exists) will be
+	 * resolved by the load balancing mechanism.
 	 */
-	if (sticky_cpu >= 0 && (sticky_cpu == ctx->sync_waker_cpu)) {
-		cpu = sticky_cpu;
-		goto unlock_out;
-	}
-
-	/*
-	 * If failed to find an idle CPU from the sticky domain, find an idle
-	 * CPU from the closest neighbor domain considering core type, node,
-	 * and LLC domain. For neighbors in the same distance, traverse in a
-	 * random order.
-	 */
-	cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]);
-	nuance = bpf_get_prandom_u32();
-	for (i = 0; i < LAVD_CPDOM_MAX_DIST && cpdc; i++) {
-		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
-		if (nr_nbr == 0)
-			break;
-		for (j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = sticky_cpdom + 1) {
-			if (j >= nr_nbr)
-				break;
-			sticky_cpdom  = pick_any_bit(cpdc->neighbor_bits[i], nuance);
-			if (sticky_cpdom < 0)
-				continue;
-			cpu = pick_idle_cpu_at_cpdom(ctx, sticky_cpdom, 0, is_idle);
-			if (cpu >= 0)
-				goto unlock_out;
-		}
+	if (can_run_on_cpu(ctx, ctx->prev_cpu)) {
+		cpu = ctx->prev_cpu;
+		sticky_cpdom = -ENOENT;
 	}
 
 	/*
