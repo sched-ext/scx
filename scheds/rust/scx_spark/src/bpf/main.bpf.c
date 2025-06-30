@@ -487,7 +487,7 @@ int kprobe_nvidia_poll() {
 
 SEC("kprobe/nvidia_open")
 int kprobe_nvidia_open() {
-	// bpf_printk("nvidia_open detected, saving pid/tid\n");
+	dbg_msg("nvidia_open detected, saving pid/tid\n");
 	return save_gpu_tgid_pid();
 }
 
