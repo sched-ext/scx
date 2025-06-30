@@ -481,7 +481,7 @@ struct task_ctx {
 
 SEC("kprobe/nvidia_poll")
 int kprobe_nvidia_poll() {
-	// bpf_printk("nvidia_poll detected, saving pid/tid\n");
+	dbg_msg("nvidia_poll detected, saving pid/tid\n");
 	return save_gpu_tgid_pid();
 }
 
