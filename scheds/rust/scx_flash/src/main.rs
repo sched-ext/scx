@@ -222,10 +222,11 @@ struct Opts {
 
     /// Enable per-CPU tasks prioritization.
     ///
-    /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
-    /// can't be migrated when their only usable CPU is busy). Enabling this option can introduce
-    /// unfairness and potentially trigger stalls, but it can improve performance of server-type
-    /// workloads (such as large parallel builds).
+    /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
+    /// de-prioritized, since they can't be migrated when their only usable CPU is busy. This
+    /// improves fairness, but it can also reduce the overall system throughput.
+    ///
+    /// This option is recommended for gaming or latency-sensitive workloads.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
 

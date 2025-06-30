@@ -81,11 +81,14 @@ const volatile bool local_kthreads;
 /*
  * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
  *
- * This allows to prioritize per-CPU tasks that usually tend to be
- * de-prioritized (since they can't be migrated when their only usable CPU
- * is busy). Enabling this option can introduce unfairness and potentially
- * trigger stalls, but it can improve performance of server-type workloads
- * (such as large parallel builds).
+ * Enabling this option allows to prioritize per-CPU tasks that usually
+ * tend to be de-prioritized, since they can't be migrated when their only
+ * usable CPU is busy.
+ *
+ * This is implemented by disabling direct dispatch when there are tasks
+ * queued to the per-CPU DSQ or the per-node DSQ. In this way, per-CPU
+ * tasks waiting in those queues are scheduled based solely on their
+ * deadline, avoiding further delays caused by direct dispatches.
  */
 const volatile bool local_pcpu;
 
