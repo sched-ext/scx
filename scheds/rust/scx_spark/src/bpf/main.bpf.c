@@ -146,44 +146,6 @@ static inline void set_throttled(bool state)
 UEI_DEFINE(uei);
 
 /*
- * GPU task detection maps.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, MAX_GPU_TASK_PIDS);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} gpu_tgid SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, MAX_GPU_TASK_PIDS);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} gpu_tid SEC(".maps");
-
-/*
- * Workload type detection maps.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u32);
-	__type(value, struct workload_info);
-	__uint(max_entries, MAX_WORKLOAD_PIDS);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} workload_tgid SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u32);
-	__type(value, struct workload_info);
-	__uint(max_entries, MAX_WORKLOAD_PIDS);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} workload_tid SEC(".maps");
-
-/*
  * Mask of CPUs that the scheduler can use until the system becomes saturated,
  * at which point tasks may overflow to other available CPUs.
  */
@@ -209,10 +171,12 @@ private(BPFLAND) struct bpf_cpumask __kptr *turbo_cpumask;
  */
 const volatile u32 dsq_mode = 0;
 
-/*
- * Shared DSQ ID (used when dsq_mode == DSQ_MODE_SHARED).
- */
+
 #define SHARED_DSQ_ID 0
+#define BIG_DSQ_ID 1
+#define LITTLE_DSQ_ID 2
+#define TURBO_DSQ_ID 3
+#define L3_DSQ_ID 4
 
 /*
  * Current global vruntime.
@@ -254,14 +218,11 @@ struct {
 
 
 /*
- * Detect workload type based on process name and behavior patterns.
+ * Detect workload type based on process name and behavior patterns. A temporary, placeholder implementation that functions as a proof-of-concept.
  */
-static void detect_workload_type(const struct task_struct *p, u32 pid, u32 tid) {
-	if (!enable_gpu_support)
-		return;
-		
+static void detect_workload_type(const struct task_struct *p) {
 	struct workload_info info = {0};
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	
 	if (!p)
 		return;
@@ -325,9 +286,7 @@ static void detect_workload_type(const struct task_struct *p, u32 pid, u32 tid) 
 		// bpf_printk("Workload detected: PID %u -> MODEL_LOADING\n", pid);
 	}
 	
-	if (tid)
-		bpf_map_update_elem(&workload_tid, &tid, &info, BPF_ANY);
-	bpf_map_update_elem(&workload_tgid, &pid, &info, BPF_ANY);
+
 }
 
 /*
@@ -343,71 +302,32 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
  * Save current task's PID/TID to GPU maps when GPU operations are detected.
  * Both entire processes using the GPU and single threads using the GPU will be tracked.
  */
-int save_gpu_tgid_pid() {
+int set_gpu_task() {
+	struct task_struct *current;
+
 	if (!enable_gpu_support)
 		return 0;
-	u32 pid, tid, zero;
-	struct task_struct *current;
-	zero = 0;
 
 	current = (void *)bpf_get_current_task_btf();
 	if (!current)
 		return -ENOENT;
+	struct task_ctx *task_ctx = try_lookup_task_ctx(current);
+	if (!task_ctx)
+		return -ENOENT;
+	task_ctx->is_gpu_task = true;
+	task_ctx->gpu_usage_count++;
+	task_ctx->last_gpu_access = scx_bpf_now();
 	
-	pid = current->tgid;
-	tid = current->pid;
-	
-	bpf_map_update_elem(&gpu_tid, &tid, &zero, BPF_ANY);
-	bpf_map_update_elem(&gpu_tgid, &pid, &zero, BPF_ANY);
-	
-	detect_workload_type(current, pid, tid);
 	
 	return 0;
 }
 
-
-
-/*
- * Get workload type for a task.
- */
-static u32 get_workload_type(const struct task_struct *p) {
-	if (!enable_gpu_support)
-		return WORKLOAD_TYPE_UNKNOWN;
-		
-	u32 tid = p->pid;
-	u32 tgid = p->tgid;
-	struct workload_info *info;
-	
-	/* Check thread-specific workload info first */
-	info = bpf_map_lookup_elem(&workload_tid, &tid);
-	if (info && info->workload_type != WORKLOAD_TYPE_UNKNOWN)
-		return info->workload_type;
-	
-	/* Check process-level workload info */
-	info = bpf_map_lookup_elem(&workload_tgid, &tgid);
-	if (info && info->workload_type != WORKLOAD_TYPE_UNKNOWN)
-		return info->workload_type;
-	
-	return WORKLOAD_TYPE_UNKNOWN;
-}
 
 /*
  * Check if a task is using GPU.
  */
 static bool is_gpu_task(const struct task_struct *p)
 {
-	if (!enable_gpu_support)
-		return false;
-	
-	u32 tid = p->pid;
-	u32 tgid = p->tgid;
-	
-	bool is_gpu = bpf_map_lookup_elem(&gpu_tid, &tid) != NULL ||
-	       bpf_map_lookup_elem(&gpu_tgid, &tgid) != NULL;
-	
-	if (is_gpu) {
-		bpf_printk("GPU task detected: %s (PID: %u, TID: %u)\n", p->comm, tgid, tid);
-	}
 	
 	return is_gpu;
 }
@@ -463,16 +383,7 @@ struct task_ctx {
 	 */
 	bool is_gpu_task;
 
-	/*
-	 * Workload classification fields.
-	 */
-	u32 workload_type;
-	u64 gpu_usage_count;
-	u64 cpu_usage_time;
-	u64 io_operations;
-	u64 memory_allocations;
-	u64 last_gpu_access;
-	u64 last_cpu_access;
+	struct workload_info workload_info;
 };
 
 /*
@@ -481,20 +392,17 @@ struct task_ctx {
 
 SEC("kprobe/nvidia_poll")
 int kprobe_nvidia_poll() {
-	// bpf_printk("nvidia_poll detected, saving pid/tid\n");
-	return save_gpu_tgid_pid();
+	return set_gpu_task();
 }
 
 SEC("kprobe/nvidia_open")
 int kprobe_nvidia_open() {
-	// bpf_printk("nvidia_open detected, saving pid/tid\n");
-	return save_gpu_tgid_pid();
+	return set_gpu_task();
 }
 
 SEC("kprobe/nvidia_mmap")
 int kprobe_nvidia_mmap() {
-	// bpf_printk("nvidia_mmap detected, saving pid/tid\n");
-	return save_gpu_tgid_pid();
+	return set_gpu_task();
 }
 
 /*
@@ -513,7 +421,7 @@ int kprobe_nvidia_mmap() {
 // 	struct workload_info *info = bpf_map_lookup_elem(&workload_tid, &tid);
 // 	if (info) {
 // 		info->gpu_usage_count++;
-// 		info->detection_time = bpf_ktime_get_ns();
+// 		info->detection_time = scx_bpf_now();
 // 		/* If not already classified, assume inference (most common) */
 // 		if (info->workload_type == WORKLOAD_TYPE_UNKNOWN)
 // 			info->workload_type = WORKLOAD_TYPE_INFERENCE;
@@ -535,7 +443,7 @@ int kprobe_nvidia_mmap() {
 // 	struct workload_info *info = bpf_map_lookup_elem(&workload_tid, &tid);
 // 	if (info) {
 // 		info->gpu_usage_count++;
-// 		info->detection_time = bpf_ktime_get_ns();
+// 		info->detection_time = scx_bpf_now();
 // 	}
 	
 // 	return 0;
@@ -1130,7 +1038,9 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	if (is_throttled())
 		return prev_cpu;
 
-	/* If stay_with_kthread is enabled, check if prev_cpu has an active kthread */
+	/* If stay_with_kthread is enabled, check if prev_cpu has an active (per-cpu) kthread. If it does, return the same CPU
+	* The logic here is that per-CPU kthreads tend to be quite short-lived, so cache-sensitive tasks might benefit from simply waiting for them to complete.
+	*/
 	if (stay_with_kthread) {
 		struct cpu_ctx *cctx = try_lookup_cpu_ctx(prev_cpu);
 		if (cctx && cctx->has_active_kthread) {
@@ -1470,8 +1380,8 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 
 	__sync_fetch_and_add(&nr_running, 1);
 
-	/* If stay_with_kthread is enabled, track kthread activity */
-	if (stay_with_kthread && is_kthread(p)) {
+	/* If stay_with_kthread is enabled, track cpu's (per-cpu)kthread activity */
+	if (stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
 		if (cctx) {
 			cctx->has_active_kthread = true;
@@ -1517,10 +1427,10 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_sub(&nr_running, 1);
 
 	/* If stay_with_kthread is enabled, reset kthread activity flag */
-	if (stay_with_kthread && is_kthread(p)) {
+	if (stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (cctx) {
-			cctx->has_active_kthread = false; //Maayybee racey? 
+			cctx->has_active_kthread = false; 
 		}
 	}
 
@@ -1618,15 +1528,10 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 
-	/*
-	 * Detect if this task is using GPU.
-	 */
-	if (enable_gpu_support) {
-		tctx->is_gpu_task = is_gpu_task(p);
 
+	tctx->workload_info.workload_type = WORKLOAD_TYPE_UNKNOWN;
 		/*
-		 * Initialize workload classification fields.
-		 */
+		Initialize workload classification fields.
 		detect_workload_type(p, p->pid, 0);
 		tctx->workload_type = get_workload_type(p);
 		tctx->gpu_usage_count = 0;
@@ -1635,7 +1540,8 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 		tctx->memory_allocations = 0;
 		tctx->last_gpu_access = 0;
 		tctx->last_cpu_access = 0;
-	}
+		*/
+	
 
 	/*
 	 * Create task's primary cpumask.
@@ -1867,8 +1773,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	/*
 	 * Create DSQs based on the selected mode.
 	 */
-	switch (dsq_mode) {
-	case DSQ_MODE_CPU:
+	if(dsq_mode == DSQ_MODE_CPU) {
 		/* Create per-CPU DSQs */
 		bpf_for(cpu, 0, nr_cpu_ids) {
 			err = scx_bpf_create_dsq((u64) cpu, -1);
@@ -1878,24 +1783,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 				return err;
 			}
 		}
-		break;
-	case DSQ_MODE_SHARED:
+	} else  {
 		/* Create a single shared DSQ */
 		err = scx_bpf_create_dsq(SHARED_DSQ_ID, -1);
 		if (err) {
 			scx_bpf_error("failed to create shared DSQ %d: %d", SHARED_DSQ_ID, err);
 			return err;
 		}
-		break;
-	default:
-		/* Default to shared DSQ mode */
-		err = scx_bpf_create_dsq(SHARED_DSQ_ID, -1);
-		if (err) {
-			scx_bpf_error("failed to create shared DSQ %d: %d", SHARED_DSQ_ID, err);
-			return err;
-		}
-		break;
 	}
+	
+	err = scx_bpf_create_dsq(SHARED_DSQ_ID, -1);
+	
 
 	/* Initialize the primary scheduling domain */
 	err = init_cpumask(&primary_cpumask);

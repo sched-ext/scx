@@ -2,10 +2,15 @@
 
 This is a single user-defined scheduler used within [sched_ext](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about sched_ext](https://github.com/sched-ext/scx/tree/main).
 
+scx_spark is derived from scx_bpfland, but aims to target improved performance for the NVIDIA Spark platform and its anticipated use-cases.
+
 
 ## GPU Support
 
 The scheduler includes built-in GPU support that automatically detects and prioritizes GPU-using tasks:
+
+#Workload Detection
+The scheduler aims to detect different types of machine-learning workloads and dynamically modify scheduling decisions/modes accordingly.
 
 ### Usage
 
