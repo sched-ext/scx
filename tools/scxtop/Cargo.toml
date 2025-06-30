@@ -23,19 +23,14 @@ clap = { version = "4.5.28", features = [
 clap_complete = "4.5.45"
 config = "0.14.1"
 crossterm = { version = "0.28.1", features = ["serde", "event-stream"] }
-derive_deref = "1.1.1"
-directories = "5.0.1"
 futures = "0.3.31"
 glob = "0.3.2"
-json5 = "0.4.1"
-lazy_static = "1.5.0"
 libbpf-rs = "=0.25.0-beta.1"
 libc = "0.2.137"
 log = "0.4.17"
 num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }
 perfetto_protos = "0.49.0"
 plain = "0.2.3"
-prost = "0.13.5"
 protobuf = "3.7.2"
 rand = "0.8.5"
 ratatui = { version = "0.29.0", features = ["serde", "macros"] }
@@ -46,13 +41,9 @@ simplelog = "0.12"
 serde_json = "1.0.133"
 serde = { version = "1.0.215", features = ["derive"] }
 signal-hook = "0.3.17"
-strip-ansi-escapes = "0.2.0"
 tokio-util = "0.7.13"
 tokio = { version = "1.42.0", features = ["full"] }
 toml = "0.8.19"
-tracing = "0.1.41"
-tracing-error = "0.2.1"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "serde"] }
 xdg = "2.5.2"
 log-panics = { version = "2", features = ["with-backtrace"]}
 hashbrown = "0.15.2"
@@ -67,6 +58,5 @@ name = "search_benchmark"
 harness = false
 
 [build-dependencies]
-prost-build = "0.13.5"
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.13" }
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.16" }
