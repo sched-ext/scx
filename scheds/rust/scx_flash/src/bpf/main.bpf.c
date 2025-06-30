@@ -845,6 +845,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 				goto out_put_cpumask;
 			}
 		}
+
+		/*
+		 * Search for any full-idle CPU usable by the task.
+		 */
+		if (p_mask != p->cpus_ptr) {
+			cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node,
+						SCX_PICK_IDLE_CORE);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto out_put_cpumask;
+			}
+		}
 	}
 
 	/*
