@@ -39,7 +39,6 @@ __weak
 int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;
-	u64 elem, weight;
 	int child, next;
 	int off, ind;
 
@@ -65,14 +64,7 @@ int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena)
 		if (next == ind)
 			break;
 
-		elem = heap->helems[next].elem;
-		weight = heap->helems[next].weight;
-
-		heap->helems[next].elem = heap->helems[ind].elem;
-		heap->helems[next].weight = heap->helems[ind].weight;
-
-		heap->helems[ind].elem = elem;
-		heap->helems[ind].weight= weight;
+		scx_swap_minheap_arena(&heap->helems[next], &heap->helems[ind]);
 	}
 
 	return 0;
@@ -82,7 +74,6 @@ static inline
 int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;
-	u64 elem, weight;
 	int parent;
 	int ind;
 
@@ -92,14 +83,7 @@ int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 		if (heap->helems[parent].weight <= heap->helems[ind].weight)
 			break;
 
-		elem = heap->helems[parent].elem;
-		weight = heap->helems[parent].weight;
-
-		heap->helems[parent].elem = heap->helems[ind].elem;
-		heap->helems[parent].weight = heap->helems[ind].weight;
-
-		heap->helems[ind].elem = elem;
-		heap->helems[ind].weight = weight;
+		scx_swap_minheap_arena(&heap->helems[parent], &heap->helems[ind]);
 	}
 
 	return 0;

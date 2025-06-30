@@ -5,6 +5,14 @@ struct scx_minheap_elem {
 	u64 weight;
 };
 
+static __always_inline void
+scx_swap_minheap_arena(struct scx_minheap_elem __arena *a, struct scx_minheap_elem __arena *b)
+{
+	struct scx_minheap_elem tmp = *a;
+	*a = *b;
+	*b = tmp;
+}
+
 struct scx_minheap {
 	u64				size;
 	u64				capacity;
