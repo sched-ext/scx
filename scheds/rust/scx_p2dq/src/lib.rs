@@ -75,7 +75,7 @@ pub struct SchedulerOpts {
     pub dispatch_lb_busy: u64,
 
     /// Enables pick2 load balancing on the dispatch path for interactive tasks.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub dispatch_lb_interactive: bool,
 
     /// Enable tasks to run beyond their timeslice if the CPU is idle.
