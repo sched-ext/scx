@@ -2763,6 +2763,22 @@ dependencies = [
  "simplelog",
 ]
 
+name = "scx_spark"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "libbpf-rs",
+ "log",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
 [[package]]
 name = "scx_chaos"
 version = "1.0.16"

@@ -34,6 +34,8 @@ pub enum SupportedSched {
     Tickless,
     #[serde(rename = "scx_rustland")]
     Rustland,
+    #[serde(rename = "scx_spark")]
+    Spark,
 }
 
 impl FromStr for SupportedSched {

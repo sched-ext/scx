@@ -105,6 +105,10 @@ pub fn get_default_config() -> Config {
                 "scx_rustland".to_string(),
                 get_default_sched_for_config(&SupportedSched::Rustland),
             ),
+            (
+                "scx_spark".to_string(),
+                get_default_sched_for_config(&SupportedSched::Spark),
+            ),
         ]),
     }
 }

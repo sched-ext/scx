@@ -18,6 +18,7 @@ members = [
     "scheds/rust/scx_rustland",
     "scheds/rust/scx_rusty",
     "scheds/rust/scx_tickless",
+    "scheds/rust/scx_spark"
     "tools/scxctl",
     "tools/scxtop",
     "tools/vmlinux_docify",
