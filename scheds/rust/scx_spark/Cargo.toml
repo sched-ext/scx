@@ -1,0 +1,26 @@
+[package]
+name = "scx_spark"
+version = "0.0.1"
+authors = ["Emily Soto <sotoemily03@protonmail.com>"]
+edition = "2021"
+description = "A scheduler targeting the NVIDIA SCX Spark, optimizing for AI workloads."
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1.0.65"
+ctrlc = { version = "3.1", features = ["termination"] }
+clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
+crossbeam = "0.8.4"
+libbpf-rs = "=0.25.0-beta.1"
+log = "0.4.17"
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.12" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.12" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15", features = ["autopower"] }
+serde = { version = "1.0.215", features = ["derive"] }
+simplelog = "0.12"
+
+[build-dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15" }
+
+[features]
+enable_backtrace = []
