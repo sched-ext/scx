@@ -19,7 +19,6 @@ pub mod mangoapp;
 mod node_data;
 mod perfetto_trace;
 pub mod profiling_events;
-pub mod protos;
 mod search;
 mod stats;
 mod theme;
@@ -41,7 +40,6 @@ pub use perfetto_trace::PerfettoTraceManager;
 pub use profiling_events::{
     available_kprobe_events, available_perf_events, KprobeEvent, PerfEvent, ProfilingEvent,
 };
-pub use protos::*;
 pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
