@@ -4,7 +4,6 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use prost::Message;
 use rand::rngs::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -15,24 +14,36 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::edm::ActionHandler;
-use crate::protos_gen::perfetto_scx;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
     SchedWakingAction, SoftIRQAction,
 };
 
-use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
-use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::Count as UNIT_COUNT;
-use crate::protos_gen::perfetto_scx::trace_packet;
-use crate::protos_gen::perfetto_scx::{
-    BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent,
-    FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, KprobeEvent,
-    ProcessDescriptor, SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent,
-    SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent,
-    SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
-    SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket, TrackDescriptor, TrackEvent,
+use perfetto_protos::{
+    builtin_clock::BuiltinClock,
+    clock_snapshot::{clock_snapshot::Clock, ClockSnapshot},
+    counter_descriptor::{counter_descriptor::Unit::UNIT_COUNT, CounterDescriptor},
+    cpuhp::{CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent},
+    ftrace_event::{ftrace_event, FtraceEvent},
+    ftrace_event_bundle::FtraceEventBundle,
+    generic::{kprobe_event::KprobeType, KprobeEvent},
+    gpu_mem::GpuMemTotalFtraceEvent,
+    ipi::IpiRaiseFtraceEvent,
+    irq::{SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent},
+    process_descriptor::ProcessDescriptor,
+    sched::{
+        SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
+        SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
+        SchedWakingFtraceEvent,
+    },
+    thread_descriptor::ThreadDescriptor,
+    trace::Trace,
+    trace_packet::{trace_packet, TracePacket},
+    track_descriptor::{track_descriptor::Static_or_dynamic_name, TrackDescriptor},
+    track_event::{track_event, TrackEvent},
 };
+use protobuf::{Message, SpecialFields};
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
 /// https://perfetto.dev/docs/concepts/buffers and
@@ -122,16 +133,15 @@ impl PerfettoTraceManager {
             descs.push(TrackDescriptor {
                 uuid: Some(dsq_uuid),
                 counter: Some(CounterDescriptor {
-                    unit: Some(UNIT_COUNT as i32),
+                    unit: Some(UNIT_COUNT.into()),
                     unit_name: Some(format!("DSQ {dsq} latency ns")),
                     is_incremental: Some(false),
                     ..CounterDescriptor::default()
-                }),
-                static_or_dynamic_name: Some(
-                    perfetto_scx::track_descriptor::StaticOrDynamicName::StaticName(format!(
-                        "DSQ {dsq} latency ns"
-                    )),
-                ),
+                })
+                .into(),
+                static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(format!(
+                    "DSQ {dsq} latency ns"
+                ))),
                 ..TrackDescriptor::default()
             });
 
@@ -139,16 +149,15 @@ impl PerfettoTraceManager {
             descs.push(TrackDescriptor {
                 uuid: Some(dsq_uuid + 1),
                 counter: Some(CounterDescriptor {
-                    unit: Some(UNIT_COUNT as i32),
+                    unit: Some(UNIT_COUNT.into()),
                     unit_name: Some(format!("DSQ {dsq} nr_queued")),
                     is_incremental: Some(false),
                     ..CounterDescriptor::default()
-                }),
-                static_or_dynamic_name: Some(
-                    perfetto_scx::track_descriptor::StaticOrDynamicName::StaticName(format!(
-                        "DSQ {dsq} nr_queued"
-                    )),
-                ),
+                })
+                .into(),
+                static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(format!(
+                    "DSQ {dsq} nr_queued"
+                ))),
                 ..TrackDescriptor::default()
             });
 
@@ -170,43 +179,42 @@ impl PerfettoTraceManager {
         let clock_snapshot = ClockSnapshot {
             clocks: vec![
                 Clock {
-                    clock_id: Some(BuiltinClock::Monotonic as u32),
+                    clock_id: Some(BuiltinClock::BUILTIN_CLOCK_MONOTONIC as u32),
                     timestamp: Some(self.get_clock_value(libc::CLOCK_MONOTONIC)),
                     ..Clock::default()
                 },
                 Clock {
-                    clock_id: Some(BuiltinClock::Boottime as u32),
+                    clock_id: Some(BuiltinClock::BUILTIN_CLOCK_BOOTTIME as u32),
                     timestamp: Some(self.get_clock_value(libc::CLOCK_BOOTTIME)),
                     ..Clock::default()
                 },
                 Clock {
-                    clock_id: Some(BuiltinClock::Realtime as u32),
+                    clock_id: Some(BuiltinClock::BUILTIN_CLOCK_REALTIME as u32),
                     timestamp: Some(self.get_clock_value(libc::CLOCK_REALTIME)),
                     ..Clock::default()
                 },
                 Clock {
-                    clock_id: Some(BuiltinClock::RealtimeCoarse as u32),
+                    clock_id: Some(BuiltinClock::BUILTIN_CLOCK_REALTIME_COARSE as u32),
                     timestamp: Some(self.get_clock_value(libc::CLOCK_REALTIME_COARSE)),
                     ..Clock::default()
                 },
                 Clock {
-                    clock_id: Some(BuiltinClock::MonotonicCoarse as u32),
+                    clock_id: Some(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_COARSE as u32),
                     timestamp: Some(self.get_clock_value(libc::CLOCK_MONOTONIC_COARSE)),
                     ..Clock::default()
                 },
                 Clock {
-                    clock_id: Some(BuiltinClock::MonotonicRaw as u32),
+                    clock_id: Some(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_RAW as u32),
                     timestamp: Some(self.get_clock_value(libc::CLOCK_MONOTONIC_RAW)),
                     ..Clock::default()
                 },
             ],
             primary_trace_clock: None,
+            special_fields: SpecialFields::new(),
         };
 
         self.trace.packet.push(TracePacket {
-            data: Some(perfetto_scx::trace_packet::Data::ClockSnapshot(
-                clock_snapshot,
-            )),
+            data: Some(trace_packet::Data::ClockSnapshot(clock_snapshot)),
             ..TracePacket::default()
         });
     }
@@ -270,10 +278,12 @@ impl PerfettoTraceManager {
         let trace_dsqs: Vec<u64> = self.dsq_nr_queued_events.keys().cloned().collect();
 
         fn timestamp_absolute_us(e: &TrackEvent) -> i64 {
-            use crate::protos::protos_gen::perfetto_scx::track_event::Timestamp;
+            use perfetto_protos::track_event::track_event::Timestamp;
             match e.timestamp {
                 Some(Timestamp::TimestampAbsoluteUs(t)) => t,
                 None | Some(Timestamp::TimestampDeltaUs(_)) => 0,
+                // e.timestamp is #[non-exhaustive] so we need this extra case.
+                Some(_) => 0,
             }
         }
 
@@ -301,7 +311,7 @@ impl PerfettoTraceManager {
 
             let desc = TrackDescriptor {
                 uuid: Some(uuid),
-                process: Some(process),
+                process: Some(process).into(),
                 ..TrackDescriptor::default()
             };
 
@@ -318,7 +328,7 @@ impl PerfettoTraceManager {
             let pid = thread.pid();
             let desc = TrackDescriptor {
                 parent_uuid: self.process_uuids.get(&pid).copied(),
-                thread: Some(thread),
+                thread: Some(thread).into(),
                 uuid: Some(uuid),
                 ..TrackDescriptor::default()
             };
@@ -333,9 +343,7 @@ impl PerfettoTraceManager {
         for trace_descs in self.track_descriptors().values() {
             for trace_desc in trace_descs {
                 self.trace.packet.push(TracePacket {
-                    data: Some(perfetto_scx::trace_packet::Data::TrackDescriptor(
-                        trace_desc.clone(),
-                    )),
+                    data: Some(trace_packet::Data::TrackDescriptor(trace_desc.clone())),
                     ..TracePacket::default()
                 });
             }
@@ -347,16 +355,14 @@ impl PerfettoTraceManager {
                 for dsq_lat_event in events {
                     let ts: u64 = timestamp_absolute_us(&dsq_lat_event) as u64 / 1_000;
                     self.trace.packet.push(TracePacket {
-                        data: Some(
-                            perfetto_scx::trace_packet::Data::TrackEvent(
-                                dsq_lat_event,
-                            ),
-                        ),
+                        data: Some(trace_packet::Data::TrackEvent(dsq_lat_event)),
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
-                            perfetto_scx::trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
-                            self.dsq_lat_trusted_packet_seq_uuid,
-                        )), ..TracePacket::default()
+                            trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
+                                self.dsq_lat_trusted_packet_seq_uuid,
+                            ),
+                        ),
+                        ..TracePacket::default()
                     });
                 }
             }
@@ -368,16 +374,13 @@ impl PerfettoTraceManager {
                 for dsq_lat_event in events {
                     let ts: u64 = timestamp_absolute_us(&dsq_lat_event) as u64 / 1_000;
                     self.trace.packet.push(TracePacket {
-                        data: Some(
-                            perfetto_scx::trace_packet::Data::TrackEvent(
-                                dsq_lat_event,
-                            ),
-                        ),
+                        data: Some(trace_packet::Data::TrackEvent(dsq_lat_event)),
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
-                            perfetto_scx::trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
-                            self.dsq_nr_queued_trusted_packet_seq_uuid,
-                        )),
+                            trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
+                                self.dsq_nr_queued_trusted_packet_seq_uuid,
+                            ),
+                        ),
                         ..TracePacket::default()
                     });
                 }
@@ -388,26 +391,24 @@ impl PerfettoTraceManager {
         for cpu in &trace_cpus {
             self.trace.packet.push(TracePacket {
                 trusted_pid: Some(self.trusted_pid),
-                data: Some(perfetto_scx::trace_packet::Data::FtraceEvents(
-                    FtraceEventBundle {
-                        cpu: Some(*cpu),
-                        event: self
-                            .ftrace_events
-                            .remove(cpu)
-                            .map(|mut events| {
-                                // sort by timestamp just to make sure.
-                                events.sort_by_key(|event| event.timestamp.unwrap_or(0));
-                                events
-                            })
-                            .unwrap_or_default(),
-                        ..FtraceEventBundle::default()
-                    },
-                )),
+                data: Some(trace_packet::Data::FtraceEvents(FtraceEventBundle {
+                    cpu: Some(*cpu),
+                    event: self
+                        .ftrace_events
+                        .remove(cpu)
+                        .map(|mut events| {
+                            // sort by timestamp just to make sure.
+                            events.sort_by_key(|event| event.timestamp.unwrap_or(0));
+                            events
+                        })
+                        .unwrap_or_default(),
+                    ..FtraceEventBundle::default()
+                })),
                 ..TracePacket::default()
             });
         }
 
-        let out_bytes: Vec<u8> = self.trace.encode_to_vec();
+        let out_bytes: Vec<u8> = self.trace.write_to_bytes()?;
         match output_file {
             Some(trace_file) => {
                 fs::write(trace_file, out_bytes)?;
@@ -436,12 +437,13 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::SchedProcessExit(
+                event: Some(ftrace_event::Event::SchedProcessExit(
                     SchedProcessExitFtraceEvent {
                         comm: Some(comm.as_str().to_string()),
                         pid: Some((*pid).try_into().unwrap()),
                         tgid: Some((*tgid).try_into().unwrap()),
                         prio: Some((*prio).try_into().unwrap()),
+                        special_fields: SpecialFields::new(),
                     },
                 )),
                 ..FtraceEvent::default()
@@ -464,12 +466,13 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*parent_pid),
-                event: Some(perfetto_scx::ftrace_event::Event::SchedProcessFork(
+                event: Some(ftrace_event::Event::SchedProcessFork(
                     SchedProcessForkFtraceEvent {
                         parent_comm: Some(parent_comm.as_str().to_string()),
                         parent_pid: Some((*parent_pid).try_into().unwrap()),
                         child_comm: Some(child_comm.as_str().to_string()),
                         child_pid: Some((*child_pid).try_into().unwrap()),
+                        special_fields: SpecialFields::new(),
                     },
                 )),
                 ..FtraceEvent::default()
@@ -489,7 +492,7 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*old_pid),
-                event: Some(perfetto_scx::ftrace_event::Event::SchedProcessExec(
+                event: Some(ftrace_event::Event::SchedProcessExec(
                     SchedProcessExecFtraceEvent {
                         pid: Some((*pid).try_into().unwrap()),
                         old_pid: Some((*old_pid).try_into().unwrap()),
@@ -516,15 +519,13 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::SchedWakeup(
-                    SchedWakeupFtraceEvent {
-                        comm: Some(comm.as_str().to_string()),
-                        pid: Some((*pid).try_into().unwrap()),
-                        prio: Some(*prio),
-                        target_cpu: Some((*cpu).try_into().unwrap()),
-                        ..SchedWakeupFtraceEvent::default()
-                    },
-                )),
+                event: Some(ftrace_event::Event::SchedWakeup(SchedWakeupFtraceEvent {
+                    comm: Some(comm.as_str().to_string()),
+                    pid: Some((*pid).try_into().unwrap()),
+                    prio: Some(*prio),
+                    target_cpu: Some((*cpu).try_into().unwrap()),
+                    ..SchedWakeupFtraceEvent::default()
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -551,15 +552,13 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::SchedWaking(
-                    SchedWakingFtraceEvent {
-                        comm: Some(comm.as_str().to_string()),
-                        pid: Some((*pid).try_into().unwrap()),
-                        prio: Some(*prio),
-                        target_cpu: Some((*cpu).try_into().unwrap()),
-                        ..SchedWakingFtraceEvent::default()
-                    },
-                )),
+                event: Some(ftrace_event::Event::SchedWaking(SchedWakingFtraceEvent {
+                    comm: Some(comm.as_str().to_string()),
+                    pid: Some((*pid).try_into().unwrap()),
+                    prio: Some(*prio),
+                    target_cpu: Some((*cpu).try_into().unwrap()),
+                    ..SchedWakingFtraceEvent::default()
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -581,7 +580,7 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::SchedMigrateTask(
+                event: Some(ftrace_event::Event::SchedMigrateTask(
                     SchedMigrateTaskFtraceEvent {
                         comm: Some(comm.as_str().to_string()),
                         pid: Some((*pid).try_into().unwrap()),
@@ -603,22 +602,20 @@ impl PerfettoTraceManager {
                 (FtraceEvent {
                     timestamp: Some(action.entry_ts),
                     pid: Some(action.pid),
-                    event: Some(perfetto_scx::ftrace_event::Event::SoftirqEntry(
-                        SoftirqEntryFtraceEvent {
-                            vec: Some(action.softirq_nr as u32),
-                        },
-                    )),
+                    event: Some(ftrace_event::Event::SoftirqEntry(SoftirqEntryFtraceEvent {
+                        vec: Some(action.softirq_nr as u32),
+                        special_fields: SpecialFields::new(),
+                    })),
                     ..FtraceEvent::default()
                 }),
                 // Exit event
                 (FtraceEvent {
                     timestamp: Some(action.exit_ts),
                     pid: Some(action.pid),
-                    event: Some(perfetto_scx::ftrace_event::Event::SoftirqExit(
-                        SoftirqExitFtraceEvent {
-                            vec: Some(action.softirq_nr as u32),
-                        },
-                    )),
+                    event: Some(ftrace_event::Event::SoftirqExit(SoftirqExitFtraceEvent {
+                        vec: Some(action.softirq_nr as u32),
+                        special_fields: SpecialFields::new(),
+                    })),
                     ..FtraceEvent::default()
                 }),
             ]
@@ -638,12 +635,11 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::IpiRaise(
-                    IpiRaiseFtraceEvent {
-                        reason: Some("IPI raise".to_string()),
-                        target_cpus: Some(*target_cpu),
-                    },
-                )),
+                event: Some(ftrace_event::Event::IpiRaise(IpiRaiseFtraceEvent {
+                    reason: Some("IPI raise".to_string()),
+                    target_cpus: Some(*target_cpu),
+                    special_fields: SpecialFields::new(),
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -662,13 +658,12 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::GpuMemTotal(
-                    GpuMemTotalFtraceEvent {
-                        gpu_id: Some(*gpu),
-                        pid: Some(*pid),
-                        size: Some(*size),
-                    },
-                )),
+                event: Some(ftrace_event::Event::GpuMemTotal(GpuMemTotalFtraceEvent {
+                    gpu_id: Some(*gpu),
+                    pid: Some(*pid),
+                    size: Some(*size),
+                    special_fields: SpecialFields::new(),
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -687,14 +682,12 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::CpuhpEnter(
-                    CpuhpEnterFtraceEvent {
-                        cpu: Some(*cpu),
-                        target: Some(*target),
-                        idx: Some(*state),
-                        ..CpuhpEnterFtraceEvent::default()
-                    },
-                )),
+                event: Some(ftrace_event::Event::CpuhpEnter(CpuhpEnterFtraceEvent {
+                    cpu: Some(*cpu),
+                    target: Some(*target),
+                    idx: Some(*state),
+                    ..CpuhpEnterFtraceEvent::default()
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -714,14 +707,13 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::CpuhpExit(
-                    CpuhpExitFtraceEvent {
-                        cpu: Some(*cpu),
-                        state: Some(*state),
-                        idx: Some(*idx),
-                        ret: Some(*ret),
-                    },
-                )),
+                event: Some(ftrace_event::Event::CpuhpExit(CpuhpExitFtraceEvent {
+                    cpu: Some(*cpu),
+                    state: Some(*state),
+                    idx: Some(*idx),
+                    ret: Some(*ret),
+                    special_fields: SpecialFields::new(),
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -739,12 +731,11 @@ impl PerfettoTraceManager {
             FtraceEvent {
                 timestamp: Some(*ts),
                 pid: Some(*pid),
-                event: Some(perfetto_scx::ftrace_event::Event::KprobeEvent(
-                    KprobeEvent {
-                        name: Some(instruction_pointer.to_string()),
-                        r#type: Some(perfetto_scx::kprobe_event::KprobeType::Instant as i32),
-                    },
-                )),
+                event: Some(ftrace_event::Event::KprobeEvent(KprobeEvent {
+                    name: Some(instruction_pointer.to_string()),
+                    type_: Some(KprobeType::KPROBE_TYPE_INSTANT.into()),
+                    special_fields: SpecialFields::new(),
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -776,17 +767,16 @@ impl PerfettoTraceManager {
                 pid: Some(*prev_pid),
                 // XXX: On the BPF side the prev/next pid gets set to an invalid pid (0) if the
                 // prev/next task is invalid.
-                event: Some(perfetto_scx::ftrace_event::Event::SchedSwitch(
-                    SchedSwitchFtraceEvent {
-                        next_pid: (*next_pid > 0).then_some((*next_pid).try_into().unwrap()),
-                        next_prio: (*next_pid > 0).then_some(*next_prio),
-                        next_comm: (*next_pid > 0).then(|| next_comm.as_str().to_string()),
-                        prev_pid: (*prev_pid > 0).then_some((*prev_pid).try_into().unwrap()),
-                        prev_prio: (*prev_pid > 0).then_some(*prev_prio),
-                        prev_comm: (*prev_pid > 0).then(|| prev_comm.as_str().to_string()),
-                        prev_state: (*prev_pid > 0).then(|| (*prev_state).try_into().unwrap()),
-                    },
-                )),
+                event: Some(ftrace_event::Event::SchedSwitch(SchedSwitchFtraceEvent {
+                    next_pid: (*next_pid > 0).then_some((*next_pid).try_into().unwrap()),
+                    next_prio: (*next_pid > 0).then_some(*next_prio),
+                    next_comm: (*next_pid > 0).then(|| next_comm.as_str().to_string()),
+                    prev_pid: (*prev_pid > 0).then_some((*prev_pid).try_into().unwrap()),
+                    prev_prio: (*prev_pid > 0).then_some(*prev_prio),
+                    prev_comm: (*prev_pid > 0).then(|| prev_comm.as_str().to_string()),
+                    prev_state: (*prev_pid > 0).then(|| (*prev_state).try_into().unwrap()),
+                    special_fields: SpecialFields::new(),
+                })),
                 ..FtraceEvent::default()
             }
         });
@@ -810,14 +800,12 @@ impl PerfettoTraceManager {
             .or_insert_with(|| self.rng.next_u64());
         self.dsq_lat_events.entry(*next_dsq_id).or_default().push({
             TrackEvent {
-                r#type: Some(perfetto_scx::track_event::Type::Counter as i32),
+                type_: Some(track_event::Type::TYPE_COUNTER.into()),
                 track_uuid: Some(*next_dsq_uuid),
-                counter_value_field: Some(
-                    perfetto_scx::track_event::CounterValueField::CounterValue(
-                        (*next_dsq_lat_us).try_into().unwrap(),
-                    ),
-                ),
-                timestamp: Some(perfetto_scx::track_event::Timestamp::TimestampAbsoluteUs(
+                counter_value_field: Some(track_event::Counter_value_field::CounterValue(
+                    (*next_dsq_lat_us).try_into().unwrap(),
+                )),
+                timestamp: Some(track_event::Timestamp::TimestampAbsoluteUs(
                     (*ts) as i64 / 1000,
                 )),
                 ..TrackEvent::default()
@@ -828,16 +816,14 @@ impl PerfettoTraceManager {
             .or_default()
             .push({
                 TrackEvent {
-                    r#type: Some(perfetto_scx::track_event::Type::Counter as i32),
+                    type_: Some(track_event::Type::TYPE_COUNTER.into()),
                     track_uuid: Some(*next_dsq_uuid),
                     // Each track needs a separate unique UUID, so we'll add one to the dsq for
                     // the nr_queued events.
-                    counter_value_field: Some(
-                        perfetto_scx::track_event::CounterValueField::CounterValue(
-                            *next_dsq_nr_queued as i64,
-                        ),
-                    ),
-                    timestamp: Some(perfetto_scx::track_event::Timestamp::TimestampAbsoluteUs(
+                    counter_value_field: Some(track_event::Counter_value_field::CounterValue(
+                        *next_dsq_nr_queued as i64,
+                    )),
+                    timestamp: Some(track_event::Timestamp::TimestampAbsoluteUs(
                         (*ts) as i64 / 1000,
                     )),
                     ..TrackEvent::default()

@@ -4,9 +4,6 @@
 // GNU General Public License version 2.
 
 fn main() {
-    prost_build::Config::new()
-        .compile_protos(&["src/protos/perfetto_scx.proto"], &["src/protos"])
-        .unwrap();
     scx_utils::BpfBuilder::new()
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
