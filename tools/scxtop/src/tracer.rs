@@ -28,27 +28,39 @@ impl<'a> Tracer<'a> {
     }
 
     /// Attaches any BPF programs required for perfetto traces.
-    fn attach_trace_progs(&mut self) -> Result<()> {
+    fn attach_trace_progs(&mut self, kprobes: &Vec<String>) -> Result<()> {
         self.trace_links = vec![
             self.skel.progs.on_softirq_entry.attach()?,
             self.skel.progs.on_softirq_exit.attach()?,
             self.skel.progs.on_ipi_send_cpu.attach()?,
         ];
 
+        for kprobe in kprobes {
+            self.trace_links.push(
+                self.skel
+                    .progs
+                    .generic_kprobe
+                    .attach_kprobe(false, kprobe)?,
+            );
+        }
+
         Ok(())
     }
 
     /// Starts the collection of a trace, does not stop the trace.
-    pub async fn trace_async(&mut self, dur: std::time::Duration) -> Result<()> {
+    pub fn trace(&mut self, kprobes: &Vec<String>) -> Result<()> {
         self.skel.maps.data_data.sample_rate = 1;
         self.skel.maps.data_data.enable_bpf_events = true;
-        self.attach_trace_progs()?;
+        self.attach_trace_progs(kprobes)?;
         debug!(
             "attached {} trace progs, sample_rate: {}",
             self.trace_links.len(),
             self.skel.maps.data_data.sample_rate
         );
-        tokio::time::sleep(dur).await;
+        Ok(())
+    }
+
+    pub fn clear_links(&mut self) -> Result<()> {
         self.trace_links.clear();
         Ok(())
     }

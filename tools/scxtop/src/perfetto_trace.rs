@@ -18,7 +18,8 @@ use crate::edm::ActionHandler;
 use crate::protos_gen::perfetto_scx;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
@@ -26,11 +27,11 @@ use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::Count as UNIT_COU
 use crate::protos_gen::perfetto_scx::trace_packet;
 use crate::protos_gen::perfetto_scx::{
     BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent,
-    FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, ProcessDescriptor,
-    SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent,
-    SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
-    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket,
-    TrackDescriptor, TrackEvent,
+    FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, KprobeEvent,
+    ProcessDescriptor, SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent,
+    SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent,
+    SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
+    SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket, TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -499,6 +500,7 @@ impl PerfettoTraceManager {
             }
         });
     }
+
     /// Adds events for on sched_wakeup.
     pub fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
         let SchedWakeupAction {
@@ -562,6 +564,35 @@ impl PerfettoTraceManager {
             }
         });
         self.record_process_thread(*tgid, *pid, comm.to_string());
+    }
+
+    /// Adds events for on sched_migrate.
+    pub fn on_sched_migrate(&mut self, action: &SchedMigrateTaskAction) {
+        let SchedMigrateTaskAction {
+            ts,
+            cpu,
+            dest_cpu,
+            pid,
+            prio,
+            comm,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            FtraceEvent {
+                timestamp: Some(*ts),
+                pid: Some(*pid),
+                event: Some(perfetto_scx::ftrace_event::Event::SchedMigrateTask(
+                    SchedMigrateTaskFtraceEvent {
+                        comm: Some(comm.as_str().to_string()),
+                        pid: Some((*pid).try_into().unwrap()),
+                        prio: Some(*prio),
+                        dest_cpu: Some((*dest_cpu).try_into().unwrap()),
+                        ..SchedMigrateTaskFtraceEvent::default()
+                    },
+                )),
+                ..FtraceEvent::default()
+            }
+        });
     }
 
     /// Adds events for the softirq entry/exit events.
@@ -695,6 +726,30 @@ impl PerfettoTraceManager {
             }
         });
     }
+
+    pub fn on_kprobe(&mut self, action: &KprobeAction) {
+        let KprobeAction {
+            ts,
+            cpu,
+            pid,
+            instruction_pointer,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            FtraceEvent {
+                timestamp: Some(*ts),
+                pid: Some(*pid),
+                event: Some(perfetto_scx::ftrace_event::Event::KprobeEvent(
+                    KprobeEvent {
+                        name: Some(instruction_pointer.to_string()),
+                        r#type: Some(perfetto_scx::kprobe_event::KprobeType::Instant as i32),
+                    },
+                )),
+                ..FtraceEvent::default()
+            }
+        });
+    }
+
     /// Adds events for the sched_switch event.
     pub fn on_sched_switch(&mut self, action: &SchedSwitchAction) {
         let SchedSwitchAction {
@@ -826,6 +881,9 @@ impl ActionHandler for PerfettoTraceManager {
             }
             Action::CpuhpExit(a) => {
                 self.on_cpu_hp_exit(a);
+            }
+            Action::Kprobe(a) => {
+                self.on_kprobe(a);
             }
             _ => {}
         }

@@ -30,6 +30,7 @@ struct sys_stat_ctx {
 	u64		compute_total;
 	u64		tot_svc_time;
 	u64		tot_sc_time;
+	u64		tsct_spike;
 	u64		nr_queued_task;
 	s32		max_lat_cri;
 	s32		avg_lat_cri;
@@ -57,14 +58,14 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 
 	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
-	c->duration = c->now - sys_stat.last_update_clk;
+	c->duration = time_delta(c->now, sys_stat.last_update_clk);
 	sys_stat.last_update_clk = c->now;
 }
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 dsq_id;
+	u64 dsq_id, cpuc_tot_sc_time, compute;
 	int cpu;
 
 	/*
@@ -100,15 +101,16 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 * Update scaled CPU utilization,
 		 * which is capacity and frequency invariant.
 		 */
-		cpuc->cur_sc_util = (cpuc->tot_sc_time << LAVD_SHIFT) / c->duration;
+		cpuc_tot_sc_time = cpuc->tot_sc_time;
+		cpuc->tot_sc_time = 0;
+		cpuc->cur_sc_util = (cpuc_tot_sc_time << LAVD_SHIFT) / c->duration;
 		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
 
 		/*
 		 * Accumulate cpus' scaled loads,
 		 * whcih is capacity and frequency invariant.
 		 */
-		c->tot_sc_time += cpuc->tot_sc_time;
-		cpuc->tot_sc_time = 0;
+		c->tot_sc_time += cpuc_tot_sc_time;
 
 		/*
 		 * Accumulate statistics.
@@ -169,7 +171,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			u64 old_clk = cpuc->idle_start_clk;
-			if (old_clk == 0)
+			if (old_clk == 0 || time_after(old_clk, c->now))
 				break;
 
 			bool ret = __sync_bool_compare_and_swap(
@@ -183,9 +185,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Calculcate per-CPU utilization.
 		 */
-		u64 compute = 0;
-		if (c->duration > cpuc->idle_total)
-			compute = c->duration - cpuc->idle_total;
+		compute = time_delta(c->duration, cpuc->idle_total);
 
 		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
 		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
@@ -199,6 +199,12 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		c->idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
+
+		/*
+		 * Track the scaled time when the utilization spikes happened.
+		 */
+		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
+			c->tsct_spike += cpuc_tot_sc_time;
 	}
 }
 
@@ -214,17 +220,50 @@ static u64 clamp_time_slice_ns(u64 slice)
 static void calc_sys_stat(struct sys_stat_ctx *c)
 {
 	static int cnt = 0;
-	u64 avg_svc_time = 0;
+	u64 avg_svc_time = 0, cur_sc_util, scu_spike;
 
+	/*
+	 * Calculate the CPU utilization.
+	 */
 	c->duration_total = c->duration * nr_cpus_onln;
-	if (c->duration_total > c->idle_total)
-		c->compute_total = c->duration_total - c->idle_total;
-	else
-		c->compute_total = 0;
+	c->compute_total = time_delta(c->duration_total, c->idle_total);
 	c->cur_util = (c->compute_total << LAVD_SHIFT) / c->duration_total;
-	c->cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
 
-	if (c->nr_sched == 0) {
+	cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
+	if (cur_sc_util > c->cur_util)
+		cur_sc_util = min(sys_stat.avg_sc_util, c->cur_util);
+
+	/*
+	 *
+	 * Suppose that a CPU can provide the compute capacity upto 100 and
+	 * task A running on the CPU A consumed the compute capacity 100.
+	 * Then the measured CPU utilization is of course 100%.
+	 *
+	 * However, what if task A is a CPU-bound, consuming a lot more CPU
+	 * cycles? In that case, if task A is scheduled on a more powerful
+	 * CPU B whose capacity is, say 200. Task A may consume 130 out of 200
+	 * on CPU B. In that case, the true capacity for task A should be 130,
+	 * not 100. This is what we want to measure at a given moment to
+	 * eventually calaucate the require capacity.
+	 *
+	 * In other words, when a CPU is almost fully utilized (say 90%)
+	 * during a period, we may underestimate the utilization. For example,
+	 * when the measured CPU utilization is 100%, there is a possibility
+	 * that the actual utilization is actually higher, such as 130%.
+	 *
+	 * To handle such utilization spike cases, we give a 50% premium for
+	 * the scaled CPU time where the CPU is almost fully utilized. This
+	 * overestimates the scaled CPU utilization and required compute
+	 * capacity and finally allocates more active CPUs. The over-allocated
+	 * CPUs become the breathing room.
+	 */
+	scu_spike = (c->tsct_spike << (LAVD_SHIFT - 1)) / c->duration_total;
+	c->cur_sc_util = min(cur_sc_util + scu_spike, LAVD_SCALE);
+
+	/*
+	 * Update min/max/avg.
+	 */
+	if (c->nr_sched == 0 || c->compute_total == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.

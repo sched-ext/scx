@@ -3,7 +3,7 @@
 use crate::misc::read_from_file;
 use crate::{Cpumask, NR_CPU_IDS};
 use nvml_wrapper::bitmasks::InitFlags;
-use nvml_wrapper::enum_wrappers::device::{Clock, TopologyLevel};
+use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState, TopologyLevel};
 use nvml_wrapper::Nvml;
 use nvml_wrapper_sys::bindings::NVML_AFFINITY_SCOPE_NODE;
 use std::collections::BTreeMap;
@@ -31,6 +31,10 @@ pub struct Gpu {
     // available devices in term of topology
     // connectivity (as for now in term of PCI board).
     pub nearest: Vec<GpuIndex>,
+    // Current (P)State which determines the
+    // performance level/energy consumption ratio
+    // starting with Zero being the highest.
+    pub perf_state: PerformanceState,
 }
 
 pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
@@ -110,6 +114,10 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 Vec::new()
             };
 
+            let perf_state = nvidia_gpu
+                .performance_state()
+                .unwrap_or(PerformanceState::Unknown);
+
             // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
             // uppercase bus ID values and an extra four leading 0s.
             let bus_id = pci_info.bus_id.to_lowercase();
@@ -127,14 +135,9 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 memory: memory_info.total,
                 cpu_mask,
                 nearest,
+                perf_state,
             };
-            if !gpus.contains_key(&numa_node) {
-                gpus.insert(numa_node, vec![gpu]);
-                continue;
-            }
-            if let Some(gpus) = gpus.get_mut(&numa_node) {
-                gpus.push(gpu);
-            }
+            gpus.entry(gpu.node_id).or_default().push(gpu);
         }
     }
 

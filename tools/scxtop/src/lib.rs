@@ -10,9 +10,11 @@ mod bpf_stats;
 pub mod cli;
 pub mod config;
 mod cpu_data;
+pub mod cpu_stats;
 pub mod edm;
 mod event_data;
 mod keymap;
+mod kprobe_event;
 mod llc_data;
 pub mod mangoapp;
 mod node_data;
@@ -30,9 +32,12 @@ pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
 pub use bpf_skel::*;
 pub use cpu_data::CpuData;
+pub use cpu_stats::CpuStatTracker;
 pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
+pub use kprobe_event::available_kprobe_events;
+pub use kprobe_event::KprobeEvent;
 pub use llc_data::LlcData;
 pub use node_data::NodeData;
 pub use perf_event::available_perf_events;
@@ -47,6 +52,7 @@ pub use tui::Event;
 pub use tui::Tui;
 pub use util::format_hz;
 pub use util::read_file_string;
+pub use util::sanitize_nbsp;
 
 pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
@@ -67,8 +73,10 @@ pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 pub enum AppState {
     /// Application is in the default state.
     Default,
-    /// Application is in the event state.
-    Event,
+    /// Application is in the PerfEvent list state.
+    PerfEvent,
+    /// Application is in the KprobeEvent list state.
+    KprobeEvent,
     /// Application is in the help state.
     Help,
     /// Application is in the Llc state.
@@ -104,6 +112,45 @@ impl std::fmt::Display for ViewState {
         match self {
             ViewState::Sparkline => write!(f, "sparkline"),
             ViewState::BarChart => write!(f, "barchart"),
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct FilteredEventState {
+    pub list: Vec<String>,
+    pub count: u16,
+    pub scroll: u16,
+    pub selected: usize,
+}
+
+impl FilteredEventState {
+    pub fn reset(&mut self) {
+        self.list.clear();
+        self.count = 0;
+        self.scroll = 0;
+        self.selected = 0;
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ProfilingEvent {
+    Perf(PerfEvent),
+    Kprobe(KprobeEvent),
+}
+
+impl ProfilingEvent {
+    pub fn event_name(&self) -> &str {
+        match self {
+            ProfilingEvent::Perf(p) => p.event_name(),
+            ProfilingEvent::Kprobe(k) => &k.event_name,
+        }
+    }
+
+    pub fn value(&mut self, reset: bool) -> anyhow::Result<u64> {
+        match self {
+            ProfilingEvent::Perf(p) => p.value(reset),
+            ProfilingEvent::Kprobe(k) => k.value(reset),
         }
     }
 }
@@ -181,6 +228,16 @@ pub type SchedWakingAction = SchedWakeActionCtx;
 pub type SchedWakeupAction = SchedWakeActionCtx;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedMigrateTaskAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub dest_cpu: u32,
+    pub pid: u32,
+    pub prio: i32,
+    pub comm: SsoString,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SoftIRQAction {
     pub cpu: u32,
     pub pid: u32,
@@ -250,6 +307,14 @@ pub struct PstateSampleAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct KprobeAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub instruction_pointer: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MangoAppAction {
     pub pid: u32,
     pub vis_frametime: u64,
@@ -278,6 +343,7 @@ pub enum Action {
     Exec(ExecAction),
     Exit(ExitAction),
     Fork(ForkAction),
+    Kprobe(KprobeAction),
     GpuMem(GpuMemAction),
     Help,
     HwPressure(HwPressureAction),
@@ -299,6 +365,7 @@ pub enum Action {
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedMigrateTask(SchedMigrateTaskAction),
     SchedReg,
     SchedStats(String),
     SchedSwitch(SchedSwitchAction),
@@ -421,6 +488,21 @@ impl TryFrom<&bpf_event> for Action {
                     comm: comm.into(),
                 }))
             }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_SCHED_MIGRATE => {
+                let migrate = unsafe { &event.event.migrate };
+
+                let comm = String::from_utf8_lossy(&migrate.comm);
+
+                Ok(Action::SchedMigrateTask(SchedMigrateTaskAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    dest_cpu: migrate.dest_cpu,
+                    pid: migrate.pid,
+                    prio: migrate.prio,
+                    comm: comm.into(),
+                }))
+            }
             bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
                 ts: event.ts,
                 cpu: event.cpu,
@@ -456,6 +538,17 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_KPROBE => {
+                let kprobe = unsafe { &event.event.kprobe };
+
+                Ok(Action::Kprobe(KprobeAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: kprobe.pid,
+                    instruction_pointer: kprobe.instruction_pointer,
+                }))
+            }
+            #[allow(non_upper_case_globals)]
             bpf_intf::event_type_PSTATE_SAMPLE => Ok(Action::PstateSample(PstateSampleAction {
                 cpu: event.cpu,
                 busy: unsafe { event.event.pstate.busy },
@@ -480,7 +573,7 @@ impl TryFrom<&bpf_event> for Action {
                     next_prio: sched_switch.next_prio,
                     next_comm: next_comm.into(),
                     prev_dsq_id: sched_switch.prev_dsq_id,
-                    prev_used_slice_ns: sched_switch.prev_slice_ns,
+                    prev_used_slice_ns: sched_switch.prev_used_slice_ns,
                     prev_slice_ns: sched_switch.prev_slice_ns,
                     prev_pid: sched_switch.prev_pid,
                     prev_tgid: sched_switch.prev_tgid,
@@ -512,7 +605,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
-            Action::SetState(AppState::Event) => write!(f, "AppStateEvent"),
+            Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),

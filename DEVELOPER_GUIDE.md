@@ -48,7 +48,7 @@ both updating the kernel lock and making necessary fixes to the codebase.
 We use `virtme-ng` for testing in the CI environment, and it should be possible
 to reproduce behaviour locally with the same pinned kernels. To get an identical
 kernel to the CI with Nix installed, run:
-    nix build ./.github/include#kernels.sched_ext/for-next
+    nix build ./.github/include#kernel_sched_ext/for-next
 And the kernel image will be available at `result/bzImage`. Alternatively you
 can clone the repo/commit from `kernel-versions.json`, but this isn't guaranteed
 to be reproducible.
@@ -218,3 +218,15 @@ programs for their instruction count.
 is a tool for inspecting CPU frequency as well as power utilization. When
 optimizing schedulers for energy performance `turbostat` can be used to
 understand the energy required per operation.
+
+### `schbench`
+[`schbench`](https://github.com/masoncl/schbench)
+is a synthetic scheduler benchmark designed to mimic production web workloads.
+It targets three key aspects: full CPU saturation, long timeslices, and low wakeup latency.
+These characteristics help reveal scheduler issues that can affect request-per-second (RPS) performance.
+
+### `cachyos-benchmarker`
+[`cachyos-benchmarker`](https://github.com/CachyOS/cachyos-benchmarker)
+is a lightweight benchmarking and stress testing tool, based on [mini-benchmarker](https://gitlab.com/torvic9/mini-benchmarker) by Tor Vic.
+It runs a variety of real-world and synthetic workloads, such as kernel build, ffmpeg, x265, y-cruncher, and more.
+It’s particularly useful for exposing scheduler issues under stress, and works across most Linux distributions.

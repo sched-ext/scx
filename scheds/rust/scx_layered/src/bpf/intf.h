@@ -42,6 +42,7 @@ enum consts {
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
 	RUNTIME_DECAY_FACTOR	= 4,
 	LAYER_LAT_DECAY_FACTOR	= 32,
+	CLEAR_PREEMPTING_AFTER	= 10000000,	/* 10ms */
 
 	DSQ_ID_SPECIAL_MASK	= 0xc0000000,
 	HI_FB_DSQ_BASE		= 0x40000000,
@@ -105,6 +106,7 @@ enum global_stat_id {
 	GSTAT_ANTISTALL,
 	GSTAT_SKIP_PREEMPT,
 	GSTAT_FIXUP_VTIME,
+	GSTAT_PREEMPTING_MISMATCH,
 	NR_GSTATS,
 };
 
@@ -114,6 +116,7 @@ enum layer_stat_id {
 	LSTAT_ENQ_WAKEUP,
 	LSTAT_ENQ_EXPIRE,
 	LSTAT_ENQ_REENQ,
+	LSTAT_ENQ_DSQ,
 	LSTAT_KEEP,
 	LSTAT_MIN_EXEC,
 	LSTAT_MIN_EXEC_NS,
@@ -167,6 +170,8 @@ struct cpu_ctx {
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
+	struct task_struct	*preempting_task;
+	u64			preempting_at;
 
 	bool			protect_owned;
 	bool			protect_owned_preempt;

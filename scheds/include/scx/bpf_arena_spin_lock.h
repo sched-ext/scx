@@ -6,7 +6,7 @@
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 
-#include "bpf_arena_common.h"
+#include "bpf_arena_common.bpf.h"
 #include "bpf_atomic.h"
 
 #define arch_mcs_spin_lock_contended_label(l, label) smp_cond_load_acquire_label(l, VAL, label)
@@ -70,8 +70,12 @@ struct arena_qnode {
 #define _Q_LOCKED_VAL		(1U << _Q_LOCKED_OFFSET)
 #define _Q_PENDING_VAL		(1U << _Q_PENDING_OFFSET)
 
+#ifndef likely
 #define likely(x) __builtin_expect(!!(x), 1)
+#endif
+#ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
+#endif
 
 static struct arena_qnode __arena qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
 

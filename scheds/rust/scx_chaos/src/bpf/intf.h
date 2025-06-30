@@ -38,8 +38,19 @@ struct chaos_task_ctx {
 	enum chaos_match	match;
 
 	enum chaos_trait_kind	next_trait;
+	enum chaos_trait_kind	pending_trait;
 	u64			enq_flags;
 	u64			p2dq_vtime;
+};
+
+enum chaos_stat_idx {
+	CHAOS_STAT_TRAIT_RANDOM_DELAYS,
+	CHAOS_STAT_TRAIT_CPU_FREQ,
+	CHAOS_STAT_TRAIT_DEGRADATION,
+	CHAOS_STAT_CHAOS_EXCLUDED,
+	CHAOS_STAT_CHAOS_SKIPPED,
+	CHAOS_STAT_TIMER_KICKS,
+	CHAOS_NR_STATS,
 };
 
 #endif /* __CHAOS_INTF_H */

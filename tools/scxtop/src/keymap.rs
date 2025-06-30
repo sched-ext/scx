@@ -38,7 +38,8 @@ impl Default for KeyMap {
     fn default() -> Self {
         let mut bindings = HashMap::new();
         bindings.insert(Key::Char('d'), Action::SetState(AppState::Default));
-        bindings.insert(Key::Char('e'), Action::SetState(AppState::Event));
+        bindings.insert(Key::Char('e'), Action::SetState(AppState::PerfEvent));
+        bindings.insert(Key::Char('K'), Action::SetState(AppState::KprobeEvent));
         bindings.insert(Key::Char('f'), Action::ToggleCpuFreq);
         bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
         bindings.insert(Key::Char('L'), Action::ToggleLocalization);
@@ -342,7 +343,8 @@ pub fn parse_key(key_str: &str) -> Result<Key> {
 pub fn parse_action(action_str: &str) -> Result<Action> {
     match action_str {
         "AppStateDefault" => Ok(Action::SetState(AppState::Default)),
-        "AppStateEvent" => Ok(Action::SetState(AppState::Event)),
+        "AppStatePerfEvent" => Ok(Action::SetState(AppState::PerfEvent)),
+        "AppStateKprobeEvent" => Ok(Action::SetState(AppState::KprobeEvent)),
         "ToggleCpuFreq" => Ok(Action::ToggleCpuFreq),
         "ToggleUncoreFreq" => Ok(Action::ToggleUncoreFreq),
         "ToggleLocalization" => Ok(Action::ToggleLocalization),

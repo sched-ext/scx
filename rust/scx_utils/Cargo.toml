@@ -1,6 +1,6 @@
 [package]
 name = "scx_utils"
-version = "1.0.15"
+version = "1.0.16"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -22,7 +22,7 @@ nvml-wrapper = { version = "0.11.0", optional = true }
 nvml-wrapper-sys = { version = "0.9.0", optional = true }
 paste = "1.0"
 regex = "1.11.1"
-scx_stats = { path = "../scx_stats", version = "1.0.12" }
+scx_stats = { path = "../scx_stats", version = "1.0.13" }
 serde = { version = "1.0.215", features = ["derive"] }
 sscanf = "0.4"
 tar = "0.4"
@@ -30,6 +30,8 @@ walkdir = "2.5"
 version-compare = "0.1"
 libc = "0.2.137"
 zbus = { version = "5.3.1", optional = true }
+const_format = "0.2.34"
+num = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.19.1"

@@ -53,6 +53,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
+const volatile bool percpu_kthread_preempt_all = false;
 volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
@@ -102,10 +103,15 @@ static inline s32 prio_to_nice(s32 static_prio)
 	return static_prio - 120;
 }
 
-static inline bool is_preempt_kthread(struct task_struct *p)
+static inline bool is_percpu_kthread(struct task_struct *p)
 {
-	return percpu_kthread_preempt && (p->flags & PF_KTHREAD) &&
-		p->nr_cpus_allowed == 1;
+	return (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1;
+}
+
+static inline bool is_percpu_kthread_preempting(struct task_struct *p)
+{
+	return percpu_kthread_preempt &&
+		(percpu_kthread_preempt_all || p->scx.weight > 100);
 }
 
 static inline s32 sibling_cpu(s32 cpu)
@@ -1223,6 +1229,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct rq *rq;
 	struct task_struct *curr;
 	const struct cpumask *idle_cpumask;
+	bool cand_idle;
 	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
@@ -1231,7 +1238,19 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
 		return false;
 
-	if (cand_cpuc->current_preempt)
+	if (cand_cpuc->preempting_task || cand_cpuc->current_preempt)
+		return false;
+
+	cand_idle = scx_bpf_test_and_clear_cpu_idle(cand);
+	if (cand_idle)
+		goto preempt;
+
+	/*
+	 * This racy check helps with reducing the incidence rate of preempting
+	 * a CPU which already has tasks queued in its local DSQ. See the
+	 * comment above preempting_task check.
+	 */
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cand))
 		return false;
 
 	rq = scx_bpf_cpu_rq(cand);
@@ -1247,10 +1266,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
 		return false;
 	}
-
-	/* don't preempt highpri kthreads */
-	if ((curr->flags & PF_KTHREAD) && curr->scx.weight > 100)
-		return false;
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
@@ -1274,6 +1289,19 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		lstat_inc(LSTAT_EXCL_COLLISION, layer, cpuc);
 		return false;
 	}
+
+preempt:
+	/*
+	 * Exclude other racing preemptors. While this significantly reduces the
+	 * number of cases where multiple tasks target the same local DSQ
+	 * simultaneously, it is still racy. e.g. The CPU might go idle between
+	 * the preceding idle check and here and selcpu/enq path may directly
+	 * dispatch to the CPU. We need kernel API updates to make this fully
+	 * race-free.
+	 */
+	if (__sync_val_compare_and_swap(&cand_cpuc->preempting_task, NULL, p))
+		return false;
+	cand_cpuc->preempting_at = scx_bpf_now();
 
 	/* preempt */
 	taskc->dsq_id = SCX_DSQ_LOCAL_ON | cand;
@@ -1303,12 +1331,12 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
 	}
 
-	if (!bpf_cpumask_test_cpu(cand_cpuc->cpu, idle_cpumask)) {
+	if (cand_idle) {
+		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
+	} else {
 		lstat_inc(LSTAT_PREEMPT, layer, cpuc);
 		if (flags & PREEMPT_FIRST)
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
-	} else {
-		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
 	}
 
 	scx_bpf_put_idle_cpumask(idle_cpumask);
@@ -1328,27 +1356,18 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 	taskc->qrt_llc_id = MAX_LLCS;
 }
 
-static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
+static void layer_kick_idle_cpu(struct layer *layer)
 {
-	const struct cpumask *idle_smtmask;
+	const struct cpumask *layer_cpumask, *idle_smtmask;;
 	s32 cpu;
 
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)) ||
+	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
 
-	if (layer->kind == LAYER_KIND_CONFINED) {
-		const struct cpumask *layer_cpumask;
-
-		if (!(layer_cpumask = lookup_layer_cpumask(layer->id)))
-			goto out;
-		cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer);
-	} else {
-		cpu = pick_idle_cpu_from(p->cpus_ptr, 0, idle_smtmask, layer);
-	}
-
-	if (cpu >= 0)
+	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer)) >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-out:
+
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
@@ -1419,7 +1438,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * No idle CPU, try preempting.
 	 */
-	if ((layer->preempt || is_preempt_kthread(p)) && !yielding) {
+	if (layer->preempt && !yielding) {
 		/*
 		 * See try_preempt_first block above for explanation on the
 		 * wakeup test.
@@ -1477,9 +1496,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			 * CPUs and an eligible CPU is likely to open up soon.
 			 * However, if @p is a high-priority per-cpu kthread, it
 			 * has to run soon and can only run on one particular
-			 * CPU. Preempt whatever is running on that CPU.
+			 * CPU. Preempt whatever is running on that CPU. This
+			 * can be disabled by --disable-percpu-kthread-preempt.
 			 */
-			if (p->scx.weight > 100)
+			if (is_percpu_kthread_preempting(p))
 				enq_flags |= SCX_ENQ_PREEMPT;
 		} else {
 			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
@@ -1586,6 +1606,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
 		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+	lstat_inc(LSTAT_ENQ_DSQ, layer, cpuc);
 
 	/*
 	 * Interlocked with refresh_cpumasks(). scx_bpf_dsq_insert[_vtime]()
@@ -1596,15 +1617,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Also interlocked with opportunistic disabling in
 	 * try_drain_layer_llcs(). See there.
 	 */
-	if (!layer->nr_llc_cpus[llc_id])
+	if (!layer->nr_llc_cpus[llc_id]) {
 		layer_llc_drain_enable(layer, llc_id);
-
-	/*
-	 * Interlocked with layered_update_idle(). Either we see the idle bit
-	 * set or they see @p queued in the DSQ. hi/lo_fb paths would need
-	 * something similar. Oh well...
-	 */
-	kick_idle_cpu(p, layer);
+		layer_kick_idle_cpu(layer);
+	}
 }
 
 static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
@@ -1964,17 +1980,9 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
+bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct layer *prev_layer,
+				   struct task_ctx *prev_taskc, struct cpu_ctx *cpuc)
 {
-	struct task_ctx *prev_taskc = NULL;
-	struct layer *prev_layer = NULL;
-
-	/* !NULL prev_taskc indicates runnable prev */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
-		if (!(prev_taskc = lookup_task_ctx(prev)) ||
-		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
-			return false;
-	}
 
 	/*
 	 * If the sibling CPU is running an exclusive task, keep this CPU idle
@@ -2010,7 +2018,14 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (antistall_consume(cpuc))
 		return;
 
-	if (prev && sib_keep_idle(cpu, prev, cpuc))
+	/* !NULL prev_taskc indicates runnable prev */
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		if (!(prev_taskc = lookup_task_ctx(prev)) ||
+		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
+			return;
+	}
+
+	if (prev && sib_keep_idle(cpu, prev, prev_layer, prev_taskc, cpuc))
 		return;
 
 	/*
@@ -2145,7 +2160,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 			/* CPU is in a protected layer, do not pull from other layers. */
 			if (owner_layer->is_protected)
-				return;
+				goto replenish;
 		}
 
 		/* try grouped/open preempting if not tried yet */
@@ -2160,9 +2175,10 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 	}
 
+replenish:
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
-
+	/* !NULL prev_taskc indicates runnable prev */
 	if (prev_taskc && prev_layer)
 		prev->scx.slice = prev_layer->slice_ns;
 }
@@ -2625,6 +2641,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 {
+	struct task_struct *preempting;
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *layer;
@@ -2661,11 +2678,23 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
-	cpuc->current_preempt = layer->preempt || is_preempt_kthread(p);
+	cpuc->current_preempt = layer->preempt ||
+		(is_percpu_kthread(p) && is_percpu_kthread_preempting(p));
 	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->used_at = now;
 	taskc->running_at = now;
 	cpuc->is_protected = layer->is_protected;
+
+	preempting = READ_ONCE(cpuc->preempting_task);
+	if (preempting) {
+		if (preempting == p)
+			WRITE_ONCE(cpuc->preempting_task, NULL);
+		else if (now - cpuc->preempting_at > CLEAR_PREEMPTING_AFTER) {
+			/* this can happen due to e.g. reenqueue_local */
+			gstat_inc(GSTAT_PREEMPTING_MISMATCH, cpuc);
+			WRITE_ONCE(cpuc->preempting_task, NULL);
+		}
+	}
 
 	/* running an owned task if the task is on the layer owning the CPU */
 	if (layer->kind == LAYER_KIND_OPEN) {
@@ -2927,26 +2956,12 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 {
 	struct cpu_ctx *cpuc;
-	unsigned layer_id;
-	u32 llc_id;
 
 	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)))
 		return;
 
 	cpuc->protect_owned = false;
 	cpuc->usage_at_idle = cpuc->usage;
-
-	/*
-	 * Interlocked with kick_idle_cpu() in layered_enqueue(). Either they
-	 * see idle set or we see the task in one of the DSQs.
-	 */
-	llc_id = cpu_to_llc_id(cpu);
-	bpf_for(layer_id, 0, nr_layers) {
-		if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer_id, llc_id))) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			break;
-		}
-	}
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
@@ -3170,19 +3185,13 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 
 
 /*
- * Timer related setup
+ * When a timer is defined it is first scheduled run after the interval_ns. The
+ * timer callback must return a non zero value to reschedule the timer. The
+ * return value is in nanoseconds.
  */
-
-static bool layered_monitor(void)
-{
-	if (monitor_disable)
-		return false;
-
-	// TODO: implement monitor
-
-	// always rerun the monitor
-	return true;
-}
+struct layered_timer layered_timers[MAX_TIMERS] = {
+	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+};
 
 /**
  * antistall_set() - set antistall flags.
@@ -3272,14 +3281,14 @@ unlock:
  * This is where antistall figures out what work, if any, needs
  * to be prioritized to keep runnable_at delay at or below antistall_sec.
  */
-static bool antistall_scan(void)
+static u64 antistall_scan(void)
 {
 	s32 llc;
 	u64 layer_id;
 	u64 jiffies_now;
 
 	if (!enable_antistall)
-		return true;
+		return 0;
 
 	jiffies_now = bpf_jiffies64();
 
@@ -3292,28 +3301,23 @@ static bool antistall_scan(void)
 		antistall_set(lo_fb_dsq_id(llc), jiffies_now);
 	}
 
-	return true;
+	return layered_timers[ANTISTALL_TIMER].interval_ns;
 }
 
-bool run_timer_cb(int key)
+/*
+ * Timer callback that runs all registered timers. If a timer returns a non
+ * zero value it is rerun after the return value (in nanosecods).
+ */
+u64 run_timer_cb(int key)
 {
 	switch (key) {
-	case LAYERED_MONITOR:
-		return layered_monitor();
 	case ANTISTALL_TIMER:
 		return antistall_scan();
-	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
-		return false;
+		return 0;
 	}
 }
-
-struct layered_timer layered_timers[MAX_TIMERS] = {
-	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{0LLU, CLOCK_BOOTTIME, 0},
-};
 
 __weak int
 init_layer_cpumasks(int layer_id)
@@ -3514,7 +3518,8 @@ static s32 init_layer(int layer_id)
  */
 static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		    struct bpf_cpumask *cpumask,
-		    struct bpf_cpumask *tmp_big_cpumask)
+		    struct bpf_cpumask *tmp_big_cpumask,
+		    struct bpf_cpumask *tmp_unprotected_cpumask)
 {
 	const volatile u8 *u8_ptr;
 	struct cpu_ctx *cpuc;
@@ -3532,6 +3537,13 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		return -ENOMEM;
 	}
 	cpuc->task_layer_id = MAX_LAYERS;
+
+
+	/*
+	 * By default, set all CPUs as unprotected, we'll converge eventually in
+	 * refresh_layer_cpuc.
+	 */
+	bpf_cpumask_set_cpu(cpu, tmp_unprotected_cpumask);
 
 	if ((u8_ptr = MEMBER_VPTR(all_cpus, [cpu / 8]))) {
 		if (*u8_ptr & (1 << (cpu % 8))) {
@@ -3608,7 +3620,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
-		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask);
+		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask, tmp_unprotected_cpumask);
 		if (ret != 0) {
 			bpf_cpumask_release(cpumask);
 			bpf_cpumask_release(tmp_big_cpumask);

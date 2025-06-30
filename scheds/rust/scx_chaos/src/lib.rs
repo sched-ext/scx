@@ -4,21 +4,27 @@
 // GNU General Public License version 2.
 mod bpf_intf;
 mod bpf_skel;
+pub mod stats;
 
 use bpf_skel::BpfSkel;
+use stats::Metrics;
 
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
+use scx_utils::build_id;
+use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+
 use scx_utils::Core;
 use scx_utils::Llc;
 use scx_utils::Topology;
+use scx_utils::NR_CPU_IDS;
 
 use scx_p2dq::bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY;
 use scx_p2dq::types;
@@ -28,13 +34,22 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::libbpf_sys::bpf_program__set_autoattach;
+use libbpf_rs::AsRawLibbpf;
+use libbpf_rs::Link;
+use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use nix::unistd::Pid;
+use scx_stats::prelude::*;
 
 use std::alloc::Layout;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
 use std::panic;
@@ -122,10 +137,17 @@ pub enum RequiresPpid {
 }
 
 #[derive(Debug)]
+pub struct KprobeRandomDelays {
+    pub kprobes: Vec<String>,
+    pub freq: f64,
+}
+
+#[derive(Debug)]
 /// State required to build a Scheduler configuration.
 pub struct Builder<'a> {
     pub traits: Vec<Trait>,
     pub verbose: u8,
+    pub kprobe_random_delays: Option<KprobeRandomDelays>,
     pub p2dq_opts: &'a P2dqOpts,
     pub requires_ppid: Option<RequiresPpid>,
 }
@@ -141,6 +163,8 @@ pub struct SkelWithObject {
 pub struct Scheduler {
     _arena: HeapAllocator<ArenaAllocator>,
     _struct_ops: libbpf_rs::Link,
+    _links: Vec<Link>,
+    stats_server: StatsServer<(), Metrics>,
 
     // Fields are dropped in declaration order, this must be last as arena holds a reference to the
     // skel
@@ -148,12 +172,41 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    fn get_metrics(&self) -> Metrics {
+        let mut stats = vec![0u64; bpf_intf::chaos_stat_idx_CHAOS_NR_STATS as usize];
+        let stats_map = &self.skel.skel.read().unwrap().maps.chaos_stats;
+
+        for stat in 0..bpf_intf::chaos_stat_idx_CHAOS_NR_STATS {
+            let cpu_stat_vec: Vec<Vec<u8>> = stats_map
+                .lookup_percpu(&stat.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let sum: u64 = cpu_stat_vec
+                .iter()
+                .map(|val| u64::from_ne_bytes(val.as_slice().try_into().unwrap_or([0; 8])))
+                .sum();
+            stats[stat as usize] = sum;
+        }
+
+        Metrics {
+            trait_random_delays: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_RANDOM_DELAYS as usize],
+            trait_cpu_freq: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_CPU_FREQ as usize],
+            trait_degradation: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_DEGRADATION as usize],
+            chaos_excluded: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_EXCLUDED as usize],
+            chaos_skipped: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_SKIPPED as usize],
+            timer_kicks: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TIMER_KICKS as usize],
+        }
+    }
+
     pub fn observe(
         &self,
         shutdown: &(Mutex<bool>, Condvar),
         timeout: Option<Duration>,
     ) -> Result<()> {
         let (lock, cvar) = shutdown;
+        let (res_ch, req_ch) = self.stats_server.channels();
 
         let start_time = Instant::now();
 
@@ -166,12 +219,20 @@ impl Scheduler {
                     .and_then(|_| Err(anyhow::anyhow!("scheduler exited unexpectedly")));
             }
 
+            match req_ch.recv_timeout(Duration::from_millis(500)) {
+                Ok(()) => {
+                    let _ = res_ch.send(self.get_metrics());
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(_) => {} // ignore other errors
+            }
+
             if timeout.is_some_and(|x| Instant::now().duration_since(start_time) >= x) {
                 break;
             }
 
             guard = cvar
-                .wait_timeout(guard, Duration::from_millis(500))
+                .wait_timeout(guard, Duration::from_millis(100))
                 .unwrap()
                 .0;
         }
@@ -212,8 +273,17 @@ impl Builder<'_> {
     }
 
     fn setup_topology_node(&self, skel: &mut BpfSkel, mask: &[u64]) -> Result<()> {
-        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let mut args = types::arena_alloc_mask_args {
+            bitmap: 0 as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
 
@@ -225,16 +295,27 @@ impl Builder<'_> {
             );
         }
 
-        let ptr = unsafe {
-            std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.arena_topo_setup_ptr)
-        };
+        let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap) };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
         valid_mask.clone_from_slice(mask);
 
+        let mut args = types::arena_topology_node_init_args {
+            bitmap: args.bitmap as c_ulong,
+            data_size: 0 as c_ulong,
+            id: 0 as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
+
         let output = skel.progs.arena_topology_node_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
@@ -283,6 +364,29 @@ impl Builder<'_> {
         Ok(())
     }
 
+    fn attach_kprobes(&self, skel: &mut BpfSkel) -> Result<Vec<Link>> {
+        let Some(kd) = &self.kprobe_random_delays else {
+            return Ok(vec![]);
+        };
+
+        if kd.kprobes.is_empty() {
+            return Ok(vec![]);
+        }
+
+        validate_kprobes(&kd.kprobes).context("Failed to validate kprobes passed by user")?;
+
+        let mut links = vec![];
+        for k in &kd.kprobes {
+            links.push(
+                skel.progs
+                    .generic
+                    .attach_kprobe(false, k)
+                    .context(format!("Failed to attach kprobe {:?}", k))?,
+            );
+        }
+        Ok(links)
+    }
+
     fn load_skel(&self) -> Result<Pin<Rc<SkelWithObject>>> {
         let mut out: Rc<MaybeUninit<SkelWithObject>> = Rc::new_uninit();
         let uninit_skel = Rc::get_mut(&mut out).expect("brand new rc should be unique");
@@ -328,6 +432,11 @@ impl Builder<'_> {
                 open_skel.maps.rodata_data.ppid_targeting_ppid = p.as_raw();
             }
         };
+
+        if let Some(kprobe_random_delays) = &self.kprobe_random_delays {
+            open_skel.maps.rodata_data.kprobe_delays_freq_frac32 =
+                (kprobe_random_delays.freq * 2_f64.powf(32_f64)) as u32;
+        }
 
         // Set up the frequency array. The first element means nothing, so should be what's
         // required to add up to 100%. The rest should be cumulative frequencies.
@@ -392,6 +501,12 @@ impl Builder<'_> {
             }
         }
 
+        // For now, we'll do it in this way. However, once we upgrade to libbpf_rs 0.25.0,
+        // we can use the set_autoattach method on the OpenProgramImpl to do this.
+        unsafe {
+            bpf_program__set_autoattach(open_skel.progs.generic.as_libbpf_object().as_ptr(), false)
+        };
+
         let mut skel = scx_ops_load!(open_skel, chaos, uei)?;
         scx_p2dq::init_skel!(&mut skel);
 
@@ -420,16 +535,20 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
         let skel = b.load_skel()?;
 
         let arena = HeapAllocator::new(ArenaAllocator(skel.clone()));
-
-        let struct_ops = {
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+        let (links, struct_ops) = {
             let mut skel_guard = skel.skel.write().unwrap();
-            scx_ops_attach!(skel_guard, chaos)?
+            let struct_ops = scx_ops_attach!(skel_guard, chaos)?;
+            let links = b.attach_kprobes(&mut skel_guard)?;
+            (links, struct_ops)
         };
         debug!("scx_chaos scheduler started");
 
         Ok(Scheduler {
             _arena: arena,
             _struct_ops: struct_ops,
+            _links: links,
+            stats_server,
             skel,
         })
     }
@@ -462,7 +581,7 @@ pub struct CpuFreqArgs {
     #[clap(long, requires = "cpufreq_frequency")]
     pub cpufreq_min: Option<u32>,
 
-    /// Minimum CPU frequency for scaling.
+    /// Maximum CPU frequency for scaling.
     #[clap(long, requires = "cpufreq_min")]
     pub cpufreq_max: Option<u32>,
 }
@@ -477,6 +596,18 @@ pub struct PerfDegradationArgs {
     /// Amount to degradate a process.
     #[clap(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..129))]
     pub degradation_frac7: u64,
+}
+
+/// Delay a process when a kprobe is hit.
+#[derive(Debug, Parser)]
+pub struct KprobeArgs {
+    /// Introduce random delays in the scheduler whenever a provided kprobe is hit.
+    #[clap(long, num_args = 1.., value_parser)]
+    pub kprobes_for_random_delays: Vec<String>,
+
+    /// Chance of kprobe random delays. Must be between 0 and 1.
+    #[clap(long, requires = "kprobes_for_random_delays")]
+    pub kprobe_random_delay_frequency: Option<f64>,
 }
 
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
@@ -514,6 +645,19 @@ pub struct Args {
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Print version and exit.
+    #[clap(long)]
+    pub version: bool,
+
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    pub stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    pub monitor: Option<f64>,
+
     #[command(flatten, next_help_heading = "Random Delays")]
     pub random_delay: RandomDelayArgs,
 
@@ -522,6 +666,9 @@ pub struct Args {
 
     #[command(flatten, next_help_heading = "CPU Frequency")]
     pub cpu_freq: CpuFreqArgs,
+
+    #[command(flatten, next_help_heading = "Kprobe Random Delays")]
+    pub kprobe_random_delays: KprobeArgs,
 
     #[command(flatten, next_help_heading = "General Scheduling")]
     pub p2dq: P2dqOpts,
@@ -606,9 +753,21 @@ impl<'a> Iterator for BuilderIterator<'a> {
                 None
             };
 
+            let kprobe_random_delays = match &self.args.kprobe_random_delays {
+                KprobeArgs {
+                    kprobes_for_random_delays,
+                    kprobe_random_delay_frequency,
+                } if !kprobes_for_random_delays.is_empty() => Some(KprobeRandomDelays {
+                    kprobes: kprobes_for_random_delays.clone(),
+                    freq: kprobe_random_delay_frequency.unwrap_or(0.1),
+                }),
+                _ => None,
+            };
+
             Some(Builder {
                 traits,
                 verbose: self.args.verbose,
+                kprobe_random_delays,
                 p2dq_opts: &self.args.p2dq,
                 requires_ppid,
             })
@@ -616,7 +775,40 @@ impl<'a> Iterator for BuilderIterator<'a> {
     }
 }
 
+pub fn validate_kprobes(kprobes: &[String]) -> Result<()> {
+    let path = tracefs_mount()?;
+    let file = File::open(path.join("available_filter_functions"))?;
+    let reader = BufReader::new(file);
+
+    let available_kprobes: HashSet<_> = reader
+        .lines()
+        .filter_map(|line| line.ok()?.split_whitespace().next().map(String::from))
+        .collect();
+
+    let missing: Vec<_> = kprobes
+        .iter()
+        .filter(|probe| !available_kprobes.contains(*probe))
+        .collect();
+
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "The following kprobes are not available: {:?}",
+            missing
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn run(args: Args) -> Result<()> {
+    if args.version {
+        println!(
+            "scx_chaos: {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
+
     let args = Arc::new(args);
 
     let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
@@ -630,6 +822,23 @@ pub fn run(args: Args) -> Result<()> {
         }
     })
     .context("Error setting Ctrl-C handler")?;
+
+    info!(
+        "Running scx_chaos (build ID: {})",
+        build_id::full_version(env!("CARGO_PKG_VERSION"))
+    );
+
+    if let Some(intv) = args.monitor {
+        return stats::monitor(Duration::from_secs_f64(intv), shutdown);
+    }
+
+    let stats_thread = args.stats.map(|intv| {
+        let shutdown = shutdown.clone();
+
+        thread::spawn(move || -> Result<()> {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown)
+        })
+    });
 
     let scheduler_thread = thread::spawn({
         let args = args.clone();
@@ -711,8 +920,16 @@ pub fn run(args: Args) -> Result<()> {
         cvar.notify_all();
     }
 
-    if let Err(e) = scheduler_thread.join() {
-        panic::resume_unwind(e);
+    match scheduler_thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => panic::resume_unwind(e),
+    }
+
+    match stats_thread.map(|t| t.join()).unwrap_or(Ok(Ok(()))) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => panic::resume_unwind(e),
     }
 
     Ok(())

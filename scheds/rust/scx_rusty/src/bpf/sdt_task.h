@@ -5,7 +5,7 @@
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
-#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_common.bpf.h>
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
@@ -20,7 +20,7 @@ enum sdt_consts {
 	SDT_TASK_CHUNK_BITMAP_U64S	= div_round_up(SDT_TASK_ENTS_PER_CHUNK, 64),
 	SDT_TASK_ALLOC_STACK_MIN	= 2 * SDT_TASK_LEVELS,
 	SDT_TASK_ALLOC_STACK_MAX	= SDT_TASK_ALLOC_STACK_MIN * 5,
-	SDT_TASK_MIN_ELEM_PER_ALLOC = 8,
+	SDT_TASK_MIN_ELEM_PER_ALLOC 	= 8,
 	SDT_TASK_ALLOC_ATTEMPTS		= 32,
 };
 

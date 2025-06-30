@@ -4,7 +4,6 @@ on:
   workflow_call:
     inputs:
       repo-name:
-        required: true
         type: string
 
 jobs:
@@ -14,47 +13,17 @@ jobs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Nix
         uses: ./.github/actions/install-nix
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - name: Load dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-list-tests
-
       - name: List tests
         id: output
-        run: |
-          python3 - <<EOF
-          import itertools
-          import json
-          import os
-
-          kernel = "${{ inputs.repo-name }}"
-
-          matrix = [{ "name": x, "flags": "" } for x in [
-            "scx_bpfland",
-            "scx_chaos",
-            "scx_lavd",
-            "scx_p2dq",
-            "scx_rlfifo",
-            "scx_rustland",
-            "scx_rusty",
-            "scx_tickless",
-          ]]
-
-          for flags in itertools.product(
-              ["--disable-topology=false", "--disable-topology=true"],
-              ["", "--disable-antistall"]
-          ):
-            matrix.append({ "name": "scx_layered", "flags": " ".join(flags) })
-
-          output = f"matrix={json.dumps(matrix)}"
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            print(output, file=f)
-
-          EOF
+        run: nix run ./.github/include#list-integration-tests -- "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -72,10 +41,6 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - uses: ./.github/actions/build-kernel
-        with:
-          repo-name: ${{ inputs.repo-name }}
-
       - name: Install Veristat
         run: nix-env -i $(nix build --no-link --print-out-paths ./.github/include#veristat)
 
@@ -87,6 +52,27 @@ jobs:
           key: ${{ matrix.scheduler.name }}
           prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
+
+      - name: Load kernel
+        run: |
+          if [ -n "${{ matrix.scheduler.kernel }}" ]; then
+            KERNEL_NAME="${{ matrix.scheduler.kernel }}"
+          elif [ -n "${{ inputs.repo-name }}" ]; then
+            KERNEL_NAME="${{ inputs.repo-name }}"
+          else
+            KERNEL_NAME=$(cargo metadata --format-version 1 --no-deps \
+              | jq -r --arg pkg "${{ matrix.scheduler.name }}" '
+                  .packages[]?
+                  | select(.name == $pkg)
+                  | .metadata.scx?.ci?.kernel?.default
+                  // "sched_ext/for-next"
+              ')
+          fi
+
+          echo "KERNEL_NAME=$KERNEL_NAME" >> $GITHUB_ENV
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
+
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
         id: cache-virtiofsd
@@ -126,11 +112,33 @@ jobs:
       # no symlink following here (to avoid cycle`s)
       - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
         if: always()
+      - name: Set artifact name
+        if: always()
+        run: |
+          KERNEL_SUFFIX=""
+          if [ -n "${{ matrix.scheduler.kernel }}" ]; then
+            KERNEL_CLEAN=$(echo "${{ matrix.scheduler.kernel }}" | tr '/' '_')
+            KERNEL_SUFFIX="_${KERNEL_CLEAN}"
+          fi
+          echo "ARTIFACT_NAME=${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}${KERNEL_SUFFIX}_logs_${{ github.run_id }}_${{ github.run_attempt }}" >> $GITHUB_ENV
       - name: upload debug logs, bpftrace, veristat, dmesg, etc.
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
+
+  all-success:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    needs: integration-test
+    if: always()
+    steps:
+      - name: Check all jobs succeeded
+        run: |
+          if [[ "${{ needs.integration-test.result }}" != "success" ]]; then
+            echo "Integration tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All integration tests passed successfully"

@@ -163,6 +163,8 @@ pub enum LayerKind {
     Grouped {
         util_range: (f64, f64),
         #[serde(default)]
+        util_includes_open_cputime: bool,
+        #[serde(default)]
         cpus_range: Option<(usize, usize)>,
 
         #[serde(default)]
@@ -211,6 +213,16 @@ impl LayerKind {
                 Some(*util_range)
             }
             _ => None,
+        }
+    }
+
+    pub fn util_includes_open_cputime(&self) -> bool {
+        match self {
+            LayerKind::Grouped {
+                util_includes_open_cputime,
+                ..
+            } => *util_includes_open_cputime,
+            _ => false,
         }
     }
 }

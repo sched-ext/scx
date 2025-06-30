@@ -65,13 +65,13 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct cgrp_ctx);
-} cgrp_ctx SEC(".maps");
+} cgrp_ctxs SEC(".maps");
 
 static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0, 0))) {
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, 0))) {
 		scx_bpf_error("cgrp_ctx lookup failed for cgid %llu",
 			      cgrp->kn->id);
 		return NULL;
@@ -93,15 +93,17 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
  * task_ctx is the per-task information kept by scx_mitosis
 */
 struct task_ctx {
-	// cpumask is the set of valid cpus this task can schedule on (tasks cpumask anded with its cell cpumask)
+	/* cpumask is the set of valid cpus this task can schedule on */
+	/* (tasks cpumask anded with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
-	// started_running_at for recording runtime
+	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	// cell assignment
+	/* cell assignment */
 	u32 cell;
-	// latest configuration that was applied for this task (to know if it has to be re-applied)
+	/* latest configuration that was applied for this task */
+	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
-	// Is this task allowed on all cores?
+	/* Is this task allowed on all cores? */
 	bool all_cpus_allowed;
 };
 
@@ -148,18 +150,6 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 
 	return cctx;
 }
-
-/*
- * cell is the per-cell book-keeping
-*/
-struct cell {
-	// current vtime of the cell
-	u64 vtime_now;
-	// which dsq the cell uses
-	u32 dsq;
-	// Whether or not the cell is used or not
-	u32 in_use;
-};
 
 struct cell cells[MAX_CELLS];
 
@@ -358,6 +348,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 		return -EINVAL;
 
 	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
+
 	return 0;
 }
 
@@ -507,7 +498,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
+	if (tctx->cpumask && bpf_cpumask_empty(cast_mask(tctx->cpumask))) {
 		/*
 		 * This is an affinity violation (no overlap between task cpus and cell
 		 * cpus) but we also failed to find an idle cpu in the task cpus. No
@@ -527,8 +518,9 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
 	 * valid cpu.
 	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, (const struct cpumask *)tctx->cpumask) && tctx->cpumask)
-		cpu = bpf_cpumask_any_distribute((const struct cpumask *)tctx->cpumask);
+	if (!bpf_cpumask_test_cpu(prev_cpu, cast_mask(tctx->cpumask)) &&
+	    tctx->cpumask)
+		cpu = bpf_cpumask_any_distribute(cast_mask(tctx->cpumask));
 	else
 		cpu = prev_cpu;
 
@@ -587,14 +579,17 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, HI_FALLBACK_DSQ, slice_ns, 0);
+		cstat_inc(CSTAT_HI_FALLBACK_Q, tctx->cell, cctx);
 	} else if (!tctx->all_cpus_allowed) {
 		// FIXME: With cpusets, most schedules will fall into this section and
 		// not actually get distributed to the correct cell. We need to loosen
 		// the check on tctx->all_cpus_allowed
 		scx_bpf_dsq_insert(p, LO_FALLBACK_DSQ, slice_ns, 0);
+		cstat_inc(CSTAT_LO_FALLBACK_Q, tctx->cell, cctx);
 	} else {
 		scx_bpf_dsq_insert_vtime(p, tctx->cell, slice_ns, vtime,
 					 enq_flags);
+		cstat_inc(CSTAT_DEFAULT_Q, tctx->cell, cctx);
 	}
 
 	/*
@@ -610,23 +605,14 @@ out:
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
-	u32 prev_cell, cell;
+	u32 cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
-	prev_cell = READ_ONCE(cctx->prev_cell);
 	cell = READ_ONCE(cctx->cell);
 
 	if (scx_bpf_dsq_move_to_local(HI_FALLBACK_DSQ))
-		return;
-
-	/*
-	 * cpu <=> cell assignment can change dynamically. In order to deal with
-	 * scheduling racing with assignment change, we schedule from the previous
-	 * cell first to make sure it drains.
-	 */
-	if (prev_cell != cell && scx_bpf_dsq_move_to_local(prev_cell))
 		return;
 
 	if (scx_bpf_dsq_move_to_local(cell))
@@ -699,7 +685,6 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 						      root_bpf_cpumask);
 				if (!(cctx = lookup_cpu_ctx(cpu_idx)))
 					goto out;
-				WRITE_ONCE(cctx->prev_cell, cell_idx);
 				WRITE_ONCE(cctx->cell, cell_idx);
 			}
 		}
@@ -869,11 +854,13 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 
 	int err;
 	if (bpf_core_type_matches(struct cpuset___cpumask_arr)) {
-		struct cpuset___cpumask_arr *cpuset_typed = (void *)cpuset;
+		struct cpuset___cpumask_arr *cpuset_typed =
+			(void *)bpf_core_cast(cpuset, struct cpuset);
 		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
 				    &cpuset_typed->cpus_allowed);
 	} else if (bpf_core_type_matches(struct cpuset___cpumask_ptr)) {
-		struct cpuset___cpumask_ptr *cpuset_typed = (void *)cpuset;
+		struct cpuset___cpumask_ptr *cpuset_typed =
+			(void *)bpf_core_cast(cpuset, struct cpuset);
 		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
 				    cpuset_typed->cpus_allowed);
 	} else {
@@ -925,7 +912,8 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 	int cpu_idx;
 	bpf_for(cpu_idx, 0, nr_possible_cpus)
 	{
-		if (bpf_cpumask_test_cpu(cpu_idx, (const struct cpumask *)&entry->cpumask)) {
+		if (bpf_cpumask_test_cpu(
+			    cpu_idx, (const struct cpumask *)&entry->cpumask)) {
 			struct cpu_ctx *cpu_ctx;
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx))) {
 				bpf_cpumask_release(bpf_cpumask);
@@ -962,7 +950,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
 	struct cgrp_ctx *cgc;
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0,
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
 			      cgrp->kn->id);
@@ -999,7 +987,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0,
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
 			      cgrp->kn->id);
@@ -1120,12 +1108,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
-		struct cell *cell = &cells[i];
 
 		ret = scx_bpf_create_dsq(i, -1);
 		if (ret < 0)
 			return ret;
-		cell->dsq = i;
 
 		if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &i)))
 			return -ENOENT;

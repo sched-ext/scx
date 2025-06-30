@@ -1,6 +1,6 @@
 [package]
 name = "scx_chaos"
-version = "1.0.15"
+version = "1.0.16"
 edition = "2021"
 authors = ["Jake Hillion <jake@hillion.co.uk>"]
 description = "scx_chaos A general purpose sched_ext scheduler designed to amplify race conditions"
@@ -9,20 +9,27 @@ license = "GPL-2.0-only"
 [package.metadata.scx]
 ci.use_clippy = true
 
+ci.kernel.default = "stable/linux-rolling-stable"
+ci.kernel.blocklist = ["sched_ext/for-next"]
+
 [dependencies]
-scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.12" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15" }
-scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.16" }
+scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.13" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }
+scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.17" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.13" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.13" }
 
 anyhow = "1.0.65"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
+crossbeam = "0.8.4"
 ctrlc = { version = "3.1", features = ["termination"] }
 libbpf-rs = "=0.25.0-beta.1"
 libc = "0.2.137"
 log = "0.4.17"
 nix = { version = "0.29", features = ["process"] }
+serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15" }
-scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.15" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }
+scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.17" }

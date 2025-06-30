@@ -113,6 +113,9 @@ pub struct TraceArgs {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Add a list of kprobe events to the trace.
+    #[clap(short = 'k', long, num_args = 1.., value_parser)]
+    pub kprobes: Vec<String>,
 }
 
 #[allow(clippy::large_enum_variant)]

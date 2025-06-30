@@ -113,7 +113,6 @@
 //!     use scx_utils::LoadAggregator;
 //!     use log::info;
 //!
-//!     let mut aggregator = LoadAggregator::new(32, false);
 //!     // Create a LoadAggregator object, specifying the number of CPUs on the
 //!     // system, and whether it should only aggregate duty cycle.
 //!     let mut aggregator = LoadAggregator::new(32, false);
@@ -149,7 +148,7 @@
 //! example, if we had two tasks with weight 1 in domain 0, and an additional
 //! task with weight 100 in domain 1, we would record their loads as follows:
 //!
-//!```rust,ignore
+//!```rust
 //!     // Assume the same aggregator as above.
 //!
 //!     // In this version, domain 0 has 2 tasks with weight 1.0 and duty cycle
@@ -194,7 +193,7 @@
 //!     info!("Global duty cycle sum: {}", ledger.global_dcycle_sum());
 //!
 //!     let dom_dcycles = ledger.dom_dcycle_sums();
-//!     let dom_loads = ledger.dom_dcycle_sums();
+//!     let dom_loads = ledger.dom_load_sums();
 //!     let effective_max_weight = ledger.effective_max_weight();
 //!
 //!     // ...
@@ -385,14 +384,14 @@ impl LoadAggregator {
     fn apply_infeasible_threshold(&mut self, lambda_x: f64) {
         self.effective_max_weight = lambda_x;
         self.global_load_sum = 0.0f64;
-        for (_, dom) in self.doms.iter_mut() {
-            dom.load_sum = 0.0f64;
-            for (weight, dcycle) in dom.loads.iter() {
-                let adjusted = (*weight as f64).min(lambda_x);
-                let load = adjusted * dcycle;
 
-                dom.load_sum += load;
-            }
+        for dom in self.doms.values_mut() {
+            dom.load_sum = dom
+                .loads
+                .iter()
+                .map(|(weight, dcycle)| (*weight as f64).min(lambda_x) * dcycle)
+                .sum();
+
             self.global_load_sum += dom.load_sum;
         }
     }

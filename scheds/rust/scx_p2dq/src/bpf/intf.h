@@ -33,7 +33,12 @@ enum consts {
 	MSEC_PER_SEC		= 1000ULL,
 	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC,
 
+	MIN_SLICE_USEC		= 10ULL,
+
 	LOAD_BALANCE_SLACK	= 20ULL,
+
+	P2DQ_MIG_DSQ		= 1LLU << 60,
+	P2DQ_INTR_DSQ		= 1LLU << 32,
 
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,

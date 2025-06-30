@@ -50,6 +50,8 @@ const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
 const volatile u32 degradation_freq_frac32 = 1;
 const volatile u64 degradation_frac7 = 0;
 
+const volatile u32 kprobe_delays_freq_frac32 = 1;
+
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -72,15 +74,31 @@ struct {
 	__type(value, struct chaos_task_ctx);
 } chaos_task_ctxs SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CHAOS_NR_STATS);
+	__type(key, u32);
+	__type(value, u64);
+} chaos_stats SEC(".maps");
+
 struct chaos_task_ctx *lookup_create_chaos_task_ctx(struct task_struct *p)
 {
 	return bpf_task_storage_get(&chaos_task_ctxs, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
 
+static __always_inline void chaos_stat_inc(enum chaos_stat_idx stat)
+{
+	u64 *cnt_p = bpf_map_lookup_elem(&chaos_stats, &stat);
+	if (cnt_p)
+		(*cnt_p)++;
+}
+
 static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx *taskc)
 {
-	if (taskc->match & CHAOS_MATCH_EXCLUDED)
+	if (taskc->match & CHAOS_MATCH_EXCLUDED) {
+		chaos_stat_inc(CHAOS_STAT_CHAOS_EXCLUDED);
 		return CHAOS_TRAIT_NONE;
+	}
 
 	u32 roll = bpf_get_prandom_u32();
 
@@ -245,6 +263,7 @@ __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_fla
 	}
 
 	scx_bpf_dsq_insert_vtime(p, get_cpu_delay_dsq(-1), 0, vtime, enq_flags);
+	chaos_stat_inc(CHAOS_STAT_TRAIT_RANDOM_DELAYS);
 
 	return true;
 }
@@ -260,6 +279,9 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 		break;
 
 	case CHAOS_TRAIT_NONE:
+		chaos_stat_inc(CHAOS_STAT_CHAOS_SKIPPED);
+		out = false;
+		break;
 	case CHAOS_TRAIT_CPU_FREQ:
 	case CHAOS_TRAIT_DEGRADATION:
 	case CHAOS_TRAIT_MAX:
@@ -294,9 +316,11 @@ __weak u64 check_dsq_times(int cpu_idx)
 		if (!has_kicked && p->scx.dsq_vtime < now - chaos_timer_check_queues_slack_ns) {
 			has_kicked = true;
 			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_PREEMPT);
+			chaos_stat_inc(CHAOS_STAT_TIMER_KICKS);
 		} else if (!has_kicked && p->scx.dsq_vtime < now) {
 			has_kicked = true;
 			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_IDLE);
+			chaos_stat_inc(CHAOS_STAT_TIMER_KICKS);
 		} else if (p->scx.dsq_vtime > now) {
 			next_trigger_time = p->scx.dsq_vtime;
 		}
@@ -465,12 +489,14 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 		if (promise.kind == P2DQ_ENQUEUE_PROMISE_FIFO) {
 			promise.fifo.slice_ns = ((degradation_frac7 << 7) * promise.fifo.slice_ns) >> 7;
 			dbg("CHAOS[degradation][%d] slice_ns: %llu", p, promise.fifo.slice_ns);
+			chaos_stat_inc(CHAOS_STAT_TRAIT_DEGRADATION);
 		}
 		if (promise.kind == P2DQ_ENQUEUE_PROMISE_VTIME) {
 			promise.vtime.vtime += ((degradation_frac7 << 7) * promise.vtime.slice_ns) >> 7;
 			promise.vtime.slice_ns = ((degradation_frac7 << 7) * promise.vtime.slice_ns) >> 7;
 			dbg("CHAOS[degradation][%d] vtime: %llu slice_ns: %llu",
 			    p, promise.vtime.vtime, promise.vtime.slice_ns);
+			chaos_stat_inc(CHAOS_STAT_TRAIT_DEGRADATION);
 		}
 	}
 
@@ -483,11 +509,13 @@ void BPF_STRUCT_OPS(chaos_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(wakee_ctx = lookup_create_chaos_task_ctx(p)))
 		return;
 
-	enum chaos_trait_kind t = choose_chaos(wakee_ctx);
-	if (t == CHAOS_TRAIT_NONE)
+	if (wakee_ctx->pending_trait) {
+		wakee_ctx->next_trait = wakee_ctx->pending_trait;
+		wakee_ctx->pending_trait = 0;
 		return;
+	}
 
-	wakee_ctx->next_trait = t;
+	wakee_ctx->next_trait = choose_chaos(wakee_ctx);
 }
 
 void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
@@ -508,6 +536,7 @@ void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
 		if (cpu_freq_min > 0) {
 			dbg("CHAOS[freq][%d] freq: %d", p->pid, cpu_freq_min);
 			scx_bpf_cpuperf_set(task_cpu, cpu_freq_min);
+			chaos_stat_inc(CHAOS_STAT_TRAIT_CPU_FREQ);
 		}
 	} else {
 		if (cpu_freq_max > 0)
@@ -527,6 +556,16 @@ s32 BPF_STRUCT_OPS(chaos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 
 p2dq:
 	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
+}
+
+void BPF_STRUCT_OPS(chaos_tick, struct task_struct *p)
+{
+	struct chaos_task_ctx *taskc;
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return;
+
+	if (taskc->pending_trait == CHAOS_TRAIT_RANDOM_DELAYS)
+		p->scx.slice = 0;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init_task, struct task_struct *p,
@@ -550,6 +589,7 @@ SCX_OPS_DEFINE(chaos,
 	       .init_task		= (void *)chaos_init_task,
 	       .runnable		= (void *)chaos_runnable,
 	       .select_cpu		= (void *)chaos_select_cpu,
+	       .tick 		    	= (void *)chaos_tick,
 
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
@@ -559,3 +599,25 @@ SCX_OPS_DEFINE(chaos,
 
 	       .timeout_ms		= 30000,
 	       .name			= "chaos");
+
+SEC("kprobe/generic")
+int generic(struct pt_regs *ctx)
+{
+	struct task_struct *p;
+	struct chaos_task_ctx *taskc;
+
+	p = (struct task_struct *)bpf_get_current_task_btf();
+	if (!p)
+		return -EINVAL;
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p)))
+		return -EINVAL;
+
+	u32 roll = bpf_get_prandom_u32();
+	if (roll <= kprobe_delays_freq_frac32) {
+		taskc->pending_trait = CHAOS_TRAIT_RANDOM_DELAYS;
+		dbg("GENERIC: setting pending_trait to RANDOM_DELAYS - task[%d]", p->pid);
+	}
+
+	return 0;
+}

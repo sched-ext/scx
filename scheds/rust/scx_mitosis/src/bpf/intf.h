@@ -34,6 +34,9 @@ enum consts {
 enum cell_stat_idx {
 	CSTAT_LOCAL,
 	CSTAT_GLOBAL,
+	CSTAT_LO_FALLBACK_Q,
+	CSTAT_HI_FALLBACK_Q,
+	CSTAT_DEFAULT_Q,
 	CSTAT_AFFN_VIOL,
 	NR_CSTATS,
 };
@@ -41,13 +44,24 @@ enum cell_stat_idx {
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
-	u32 prev_cell;
 	u32 cell;
 };
 
 struct cgrp_ctx {
 	u32 cell;
 	bool cell_owner;
+};
+
+/*
+ * cell is the per-cell book-keeping
+*/
+struct cell {
+	// current vtime of the cell
+	u64 vtime_now;
+	// which dsq the cell uses
+	u32 dsq;
+	// Whether or not the cell is used or not
+	u32 in_use;
 };
 
 #endif /* __INTF_H */

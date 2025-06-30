@@ -66,30 +66,31 @@ pub struct VecStats {
 impl VecStats {
     pub fn new(
         vec: &Vec<u64>,
-        calc_avg: bool,
-        calc_max: bool,
-        calc_min: bool,
+        divisor: u64,
         percentiles: Option<HashSet<StatAggregation>>,
     ) -> Self {
+        assert!(divisor != 0, "divisor must be non-zero");
+
         let mut min: u64 = u64::MAX;
         let mut max: u64 = 0;
         let mut sum: u64 = 0;
         for &val in vec {
-            if calc_min && val < min {
+            if val < min {
                 min = val;
             }
-            if calc_max && val > max {
+            if val > max {
                 max = val;
             }
-            if calc_avg {
-                sum += val;
-            }
+            sum += val;
         }
+        min /= divisor;
+        max /= divisor;
+        sum /= divisor;
         match percentiles {
             Some(ref hashset) => {
                 let mut pmap = BTreeMap::new();
                 if !hashset.is_empty() && !vec.is_empty() {
-                    let mut sorted = vec.clone();
+                    let mut sorted: Vec<u64> = vec.iter().map(|v| v / divisor).collect();
                     sorted.sort_unstable();
 
                     let n = sorted.len();
@@ -110,24 +111,24 @@ impl VecStats {
                     }
                 }
                 Self {
-                    avg: if calc_avg && !vec.is_empty() {
+                    avg: if !vec.is_empty() {
                         sum / vec.len() as u64
                     } else {
                         0
                     },
-                    max: if calc_max { max } else { 0 },
-                    min: if calc_min { min } else { 0 },
+                    max,
+                    min,
                     percentiles: Some(pmap),
                 }
             }
             None => Self {
-                avg: if calc_avg && !vec.is_empty() {
+                avg: if !vec.is_empty() {
                     sum / vec.len() as u64
                 } else {
                     0
                 },
-                max: if calc_max { max } else { 0 },
-                min: if calc_min { min } else { 0 },
+                max,
+                min,
                 percentiles: None,
             },
         }

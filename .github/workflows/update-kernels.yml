@@ -49,21 +49,18 @@ jobs:
 
       - name: Update kernel
         run: |
-          git switch -c "deps/kernel/${{ matrix.version }}"
-          nix run ./.github/include#update-kernels -- ${{ matrix.version }}
-          git diff --exit-code || echo 'modified=true' >> $GITHUB_ENV
-
-      - name: Commit
-        if: env.modified == 'true'
-        run: |
           git config --global user.email "ci-bot@sched-ext.com"
           git config --global user.name "sched-ext CI Bot"
-          git commit -am "chore(deps): update ${{ matrix.version }} kernel"
 
-      - uses: ./.github/actions/build-kernel
-        if: env.modified == 'true'
-        with:
-          repo-name: ${{ matrix.version }}
+          INITIAL_COMMIT=$(git rev-parse HEAD)
+
+          git switch -c "deps/kernel/${{ matrix.version }}"
+          nix run ./.github/include#update-kernels -- ${{ matrix.version }}
+
+          FINAL_COMMIT=$(git rev-parse HEAD)
+          if [ "$INITIAL_COMMIT" != "$FINAL_COMMIT" ]; then
+            echo 'modified=true' >> $GITHUB_ENV
+          fi
 
       - name: Open PR
         if: env.modified == 'true'

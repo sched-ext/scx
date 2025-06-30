@@ -1,6 +1,6 @@
 [package]
 name = "scx_lavd"
-version = "1.0.12"
+version = "1.0.13"
 authors = ["Changwoo Min <changwoo@igalia.com>", "Igalia"]
 edition = "2021"
 description = "A Latency-criticality Aware Virtual Deadline (LAVD) scheduler based on sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
@@ -20,17 +20,18 @@ libbpf-rs = "=0.25.0-beta.1"
 libc = "0.2.137"
 log = "0.4.17"
 ordered-float = "3.4.0"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.12" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.12" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15", features = ["autopower"] }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.13" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.13" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16", features = ["autopower"] }
 serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 static_assertions = "1.1.0"
 plain = "0.2.3"
 gpoint = "0.2"
+combinations = "0.1.0"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.15" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.16" }
 
 [features]
 enable_backtrace = []

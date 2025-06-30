@@ -679,7 +679,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
-			scx_bpf_error("Failed to look up cpu context");
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
 			return cpu_id;
 		}
 		dsq_id = cpuc->cpdom_id;
@@ -776,7 +776,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to look up cpu context");
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
 	dsq_id = cpuc->cpdom_id;
@@ -978,7 +978,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	p_taskc = get_task_ctx(p);
 	if (!p_taskc) {
-		scx_bpf_error("Failed to lookup task_ctx for task");
+		scx_bpf_error("Failed to lookup task_ctx for task %d", p->pid);
 		return;
 	}
 	p_taskc->acc_runtime = 0;
@@ -1092,7 +1092,7 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc) {
-		scx_bpf_error("Failed to lookup context for task %d ", p->pid);
+		scx_bpf_error("Failed to lookup context for task %d", p->pid);
 		return;
 	}
 
@@ -1173,6 +1173,8 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	cpu_ctx_init_online(cpuc, cpu, now);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
+	__sync_fetch_and_add(&total_capacity, cpuc->capacity);
+	update_autopilot_high_cap();
 	update_sys_stat();
 }
 
@@ -1194,6 +1196,8 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	cpu_ctx_init_offline(cpuc, cpu, now);
 
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
+	__sync_fetch_and_sub(&total_capacity, cpuc->capacity);
+	update_autopilot_high_cap();
 	update_sys_stat();
 }
 
@@ -1499,10 +1503,9 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
 	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
-	int cpu, i, j, err = 0, nr_cpus_non_zero = 0;
+	int cpu, i, j, err = 0;
 	u64 cpdom_id;
-	u32 sum_capacity = 0, avg_capacity, big_capacity = 0;
-	u16 turbo_cap;
+	u32 sum_capacity = 0, big_capacity = 0;
 
 	bpf_rcu_read_lock();
 	online_cpumask = scx_bpf_get_online_cpumask();
@@ -1515,7 +1518,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	little = little_cpumask;
 	active  = active_cpumask;
 	ovrflw  = ovrflw_cpumask;
-	if (!turbo || !big|| !little || !active || !ovrflw) {
+	if (!turbo || !big || !little || !active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		err = -ENOMEM;
 		goto unlock_out;
@@ -1524,8 +1527,12 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initilize CPU info
 	 */
+	one_little_capacity = LAVD_SCALE;
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (cpu >= LAVD_CPU_ID_MAX)
+			break;
+
+		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
 			err = -ESRCH;
@@ -1568,35 +1575,15 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->offline_clk = now;
 		cpuc->cpu_release_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
-		cpuc->capacity = get_cpuperf_cap(cpu);
+		cpuc->capacity = cpu_capacity[cpu];
+		cpuc->big_core = cpu_big[cpu];
+		cpuc->turbo_core = cpu_turbo[cpu];
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
-		if (cpuc->capacity > 0) {
-			sum_capacity += cpuc->capacity;
-			nr_cpus_non_zero++;
-		}
-	}
+		sum_capacity += cpuc->capacity;
 
-	/*
-	 * Get turbo capacitiy.
-	 */
-	turbo_cap = get_cputurbo_cap();
-
-	/*
-	 * Classify CPU into BIG or little cores based on their average capacity.
-	 */
-	avg_capacity = sum_capacity / nr_cpus_non_zero;
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-			err = -ESRCH;
-			goto unlock_out;
-		}
-
-		cpuc->big_core = cpuc->capacity >= avg_capacity;
 		if (cpuc->big_core) {
 			nr_cpus_big++;
 			big_capacity += cpuc->capacity;
@@ -1607,14 +1594,16 @@ static s32 init_per_cpu_ctx(u64 now)
 			have_little_core = true;
 		}
 
-		cpuc->turbo_core = cpuc->capacity == turbo_cap;
 		if (cpuc->turbo_core) {
 			bpf_cpumask_set_cpu(cpu, turbo);
 			have_turbo_core = true;
-			debugln("CPU %d is a turbo core.", cpu);
 		}
+
+		if (cpuc->capacity < one_little_capacity)
+			one_little_capacity = cpuc->capacity;
 	}
 	default_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
+	total_capacity = sum_capacity;
 
 	/*
 	 * Initialize compute domain id.
@@ -1668,8 +1657,10 @@ static s32 init_per_cpu_ctx(u64 now)
 			err = -ESRCH;
 			goto unlock_out;
 		}
-		debugln("cpu:%d cpdom_id: %llu alt_id: %llu",
-			cpu, cpuc->cpdom_id, cpuc->cpdom_alt_id);
+		debugln("cpu[%d] capacity: %d, big_core: %d, turbo_core: %d, "
+			"cpdom_id: %llu, alt_id: %llu",
+			cpu, cpuc->capacity, cpuc->big_core, cpuc->turbo_core,
+			cpuc->cpdom_id, cpuc->cpdom_alt_id);
 	}
 
 unlock_out:
@@ -1716,9 +1707,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 		return err;
 
 	/*
-	 * Initialize the low cpu watermark for autopilot mode.
+	 * Initialize the low & high cpu capacity watermarks for autopilot mode.
 	 */
-	init_autopilot_low_util();
+	init_autopilot_caps();
 
 	/*
 	 * Initilize the current logical clock and service time.

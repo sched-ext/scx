@@ -106,7 +106,7 @@ pub struct ClusterStats {
     pub at_us: u64,
     #[stat(desc = "timestamp of the last load balancing")]
     pub lb_at_us: u64,
-    #[stat(desc = "# sched events duringg the period")]
+    #[stat(desc = "# sched events during the period")]
     pub total: u64,
     #[stat(desc = "scheduling slice in usecs")]
     pub slice_us: u64,

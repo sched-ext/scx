@@ -1,5 +1,6 @@
 project('sched_ext schedulers', 'c',
-        version: '1.0.12',
+        default_options : ['c_std=gnu11'], # Use gnu11 as the C standard to compile vmlinux.h without errors.
+        version: '1.0.13',
         license: 'GPL-2.0',
         meson_version : '>= 1.2.0',)
 
@@ -53,7 +54,6 @@ scx_lib_name = 'lib'
 scx_lib_path = join_paths(meson.current_build_dir(), 'lib/', scx_lib_name)
 compile_scx_lib = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/compile_scx_lib'))
-
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 if bpf_clang_ver == ''
@@ -276,8 +276,18 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/bpf-compat'),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/lib'),]
 
+user_c_dep = [declare_dependency(
+  include_directories: include_directories('scheds/include'),
+)]
+
+scx_test_c_args = ['-DTEST', '-Wno-attributes', '-Wno-unknown-pragmas',
+                   '-Wno-incompatible-pointer-types', '-Wno-unused-variable']
+
 lib_objs = []
 subdir('lib')
+
+scx_test_dep = [declare_dependency(
+  dependencies: [libbpf_dep, kernel_dep, user_c_dep, scx_lib_test_dep, scxtest_dep])]
 
 #
 # Generators to build BPF skel file for C schedulers.

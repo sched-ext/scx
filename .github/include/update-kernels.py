@@ -36,6 +36,10 @@ def get_nar_hash_and_version(repo, branch, hash):
     return (j["hash"], result.stdout.rstrip())
 
 
+def make_cgit_changelog_url(repo: str, old_hash: str, new_hash: str) -> str:
+    return f"{repo.rstrip('/')}/log/?qt=range&q={old_hash}..{new_hash}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update kernel locks")
     parser.add_argument(
@@ -51,7 +55,7 @@ if __name__ == "__main__":
             "kernel-versions.json not found. Are you running this script from the root of the scx repo?"
         ) from exc
 
-    diff = False
+    updated_kernels = {}
 
     if args.versions:
         versions_set = set(args.versions)
@@ -70,17 +74,46 @@ if __name__ == "__main__":
         v["commitHash"] = new_hash
         v["lastModified"] = int(time.time())
 
-        print(f"Downloading and hashing kernel source for {k}. This will take a while...")
-        (narHash, kver) = get_nar_hash_and_version(v["repo"], v["branch"], v["commitHash"])
+        print(
+            f"Downloading and hashing kernel source for {k}. This will take a while..."
+        )
+        (narHash, kver) = get_nar_hash_and_version(
+            v["repo"], v["branch"], v["commitHash"]
+        )
         v["narHash"] = narHash
         v["kernelVersion"] = kver
 
-        diff = True
+        updated_kernels[k] = {
+            "changelog_url": make_cgit_changelog_url(v["repo"], old_hash, new_hash)
+        }
 
-    if not diff:
+    if not updated_kernels:
         print("No changes made, exiting.")
         sys.exit(0)
 
     content = json.dumps(data, indent=2)
     with open("kernel-versions.json", "w") as f:
         f.write(content)
+
+    result = subprocess.run(["git", "diff", "--cached", "--quiet"], capture_output=True)
+    if result.returncode != 0:
+        print("Error: There are staged changes. Please commit or unstage them first.")
+        sys.exit(1)
+
+    subprocess.run(["git", "add", "kernel-versions.json"], check=True)
+
+    if len(updated_kernels) == 1:
+        name, meta = next(iter(updated_kernels.items()))
+        commit_message = f"chore(deps): update {name} kernel\n"
+
+        if "changelog_url" in meta:
+            commit_message += (
+                f"\nThe commit list is available at: {meta['changelog_url']}\n"
+            )
+    else:
+        commit_message = "chore(deps): update kernel versions\n"
+
+    for kernel in updated_kernels:
+        commit_message += f"\nCI-Test-Kernel: {kernel}"
+
+    subprocess.run(["git", "commit", "-m", commit_message], check=True)

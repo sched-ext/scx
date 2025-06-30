@@ -2,10 +2,6 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-mod bpf_skel;
-pub use bpf_skel::*;
-
-pub mod bpf_intf;
 pub mod stats;
 use stats::Metrics;
 
@@ -54,6 +50,8 @@ use bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
+use scx_p2dq::bpf_intf;
+use scx_p2dq::bpf_skel::*;
 use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
 
@@ -109,7 +107,6 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
-        open_skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
@@ -193,8 +190,17 @@ impl<'a> Scheduler<'a> {
     }
 
     fn setup_topology_node(&mut self, mask: &[u64]) -> Result<()> {
-        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let mut args = types::arena_alloc_mask_args {
+            bitmap: 0 as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
 
@@ -206,16 +212,27 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        let ptr = unsafe {
-            std::mem::transmute::<u64, &mut [u64; 10]>(self.skel.maps.bss_data.arena_topo_setup_ptr)
-        };
+        let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap) };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
         valid_mask.clone_from_slice(mask);
 
+        let mut args = types::arena_topology_node_init_args {
+            bitmap: args.bitmap as c_ulong,
+            data_size: 0 as c_ulong,
+            id: 0 as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
+
         let output = self.skel.progs.arena_topology_node_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
@@ -334,7 +351,9 @@ fn main() -> Result<()> {
         _ => simplelog::LevelFilter::Trace,
     };
     let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_level(simplelog::LevelFilter::Error)
+    lcfg.set_time_offset_to_local()
+        .expect("Failed to set local time offset")
+        .set_time_level(simplelog::LevelFilter::Error)
         .set_location_level(simplelog::LevelFilter::Off)
         .set_target_level(simplelog::LevelFilter::Off)
         .set_thread_level(simplelog::LevelFilter::Off);

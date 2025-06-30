@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
+use scxtop::available_kprobe_events;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
@@ -17,6 +18,7 @@ use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
 use scxtop::PerfettoTraceManager;
+use scxtop::Search;
 use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::{bpf_skel::*, AppState};
@@ -56,7 +58,7 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
         }
         Event::Key(key) => handle_key_event(app, keymap, key),
         Event::Paste(paste) => match app.state() {
-            AppState::Event => Action::InputEntry(paste),
+            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(paste),
             _ => Action::None,
         },
         _ => Action::None,
@@ -66,7 +68,7 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
 fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
     match key.code {
         Char(c) => match app.state() {
-            AppState::Event => Action::InputEntry(c.to_string()),
+            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(c.to_string()),
             _ => keymap.action(&Key::Char(c)),
         },
         _ => keymap.action(&Key::Code(key.code)),
@@ -84,6 +86,7 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
         skel.progs.on_sched_wakeup.attach()?,
         skel.progs.on_sched_wakeup_new.attach()?,
         skel.progs.on_sched_waking.attach()?,
+        skel.progs.on_sched_migrate_task.attach()?,
     ];
 
     // 6.13 compatibility
@@ -145,6 +148,12 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
         ColorChoice::Auto,
     )?;
 
+    let kprobe_events = Search::new(available_kprobe_events()?);
+    kprobe_events
+        .contains_all(&trace_args.kprobes)
+        .then_some(())
+        .ok_or_else(|| anyhow!("Invalid kprobe events"))?;
+
     let config = Config::default_config();
     let worker_threads = config.worker_threads() as usize;
     tokio::runtime::Builder::new_multi_thread()
@@ -177,7 +186,6 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             links.push(skel.progs.on_sched_exec.attach()?);
             links.push(skel.progs.on_sched_exit.attach()?);
 
-            let trace_dur = std::time::Duration::from_millis(trace_args.trace_ms);
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
             let mut event_rbb = RingBufferBuilder::new();
@@ -211,6 +219,9 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let trace_file_prefix = config.trace_file_prefix().to_string();
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
+            let mut tracer = Tracer::new(skel);
+            tracer.trace(&trace_args.kprobes)?;
+
             info!("warming up for {}ms", trace_args.warmup_ms);
             tokio::time::sleep(Duration::from_millis(trace_args.warmup_ms)).await;
             debug!("starting trace");
@@ -236,9 +247,8 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 }
             });
 
-            let mut tracer = Tracer::new(skel);
-            tracer.trace_async(trace_dur).await?;
-
+            tokio::time::sleep(Duration::from_millis(trace_args.trace_ms)).await;
+            tracer.clear_links()?;
             // The order is important here:
             // 1) first drop the links to detach the attached BPF programs
             // 2) set the shutdown variable to stop background tokio threads

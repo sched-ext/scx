@@ -1,9 +1,10 @@
+#include "scxtest/scx_test.h"
 #include <scx/common.bpf.h>
+#include <lib/arena.h>
+#include <lib/cpumask.h>
 #include <lib/sdt_task.h>
 
-#include <lib/cpumask.h>
-
-const volatile u32 nr_cpu_ids = 64;
+const volatile u32 nr_cpu_ids = NR_CPU_IDS_UNINIT;
 
 static struct scx_allocator scx_bitmap_allocator;
 size_t mask_size;
@@ -56,8 +57,8 @@ int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena sr
 	int i;
 
 	if (unlikely(!src || !dst)) {
-		scx_bpf_error("invalid pointer args to pointer copy");
-		return 0;
+		bpf_printk("invalid pointer args to pointer copy");
+		return -EINVAL;
 	}
 
 	bpf_for(i, 0, mask_size) {
@@ -87,6 +88,30 @@ __weak
 bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
 	return mask->bits[cpu / 64] & (1ULL << (cpu % 64));
+}
+
+__weak
+bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
+{
+	u64 bit = 1ULL << (cpu % 64);
+	u32 idx = cpu / 64;
+	u64 actual;
+
+	do {
+		u64 old = mask->bits[idx];
+
+		if (!(old & bit))
+			return false;
+
+		u64 new = old & ~bit;
+		actual = cmpxchg(&mask->bits[idx], old, new);
+
+		if (actual == old)
+			return true;
+
+	} while (can_loop);
+
+	return false;
 }
 
 __weak

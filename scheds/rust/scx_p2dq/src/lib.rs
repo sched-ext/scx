@@ -3,9 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 pub mod bpf_intf;
-
-mod bpf_skel;
-pub use bpf_skel::*;
+pub mod bpf_skel;
+pub use bpf_skel::types;
 
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
@@ -40,6 +39,10 @@ pub struct SchedulerOpts {
     /// Ratio of interactive tasks for autoslice tuning, percent value from 1-99.
     #[clap(short = 'r', long, default_value = "10")]
     pub interactive_ratio: usize,
+
+    /// Enables deadline scheduling
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub deadline: bool,
 
     /// *DEPRECATED* Disables eager pick2 load balancing.
     #[clap(short = 'e', long, help="DEPRECATED", action = clap::ArgAction::SetTrue)]
@@ -78,6 +81,10 @@ pub struct SchedulerOpts {
     /// Enable tasks to run beyond their timeslice if the CPU is idle.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub keep_running: bool,
+
+    /// Use a separate DSQ for interactive tasks
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub interactive_dsq: bool,
 
     /// *DEPRECATED* Minimum load for load balancing on the wakeup path, 0 to disable.
     #[clap(long, default_value = "0", help="DEPRECATED", value_parser = clap::value_parser!(u64).range(0..99))]
@@ -201,6 +208,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
             $skel.maps.rodata_data.nr_cpus = *$crate::NR_CPU_IDS as u32;
             $skel.maps.rodata_data.nr_dsqs_per_llc = opts.dumb_queues as u32;
+            $skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
             $skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
             $skel.maps.rodata_data.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
             $skel.maps.rodata_data.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;
@@ -208,12 +216,14 @@ macro_rules! init_open_skel {
 
             $skel.maps.rodata_data.autoslice = opts.autoslice;
             $skel.maps.rodata_data.debug = verbose as u32;
+            $skel.maps.rodata_data.deadline_scheduling = opts.deadline;
             $skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
             $skel.maps.rodata_data.dispatch_lb_busy = opts.dispatch_lb_busy;
             $skel.maps.rodata_data.dispatch_lb_interactive = opts.dispatch_lb_interactive;
             $skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
             $skel.maps.rodata_data.freq_control = opts.freq_control;
             $skel.maps.rodata_data.has_little_cores = $crate::TOPO.has_little_cores();
+            $skel.maps.rodata_data.interactive_dsq = opts.interactive_dsq;
             $skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
             $skel.maps.rodata_data.interactive_fifo = opts.interactive_fifo;
             $skel.maps.rodata_data.keep_running_enabled = opts.keep_running;

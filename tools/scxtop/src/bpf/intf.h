@@ -40,6 +40,7 @@ enum event_type {
 	HW_PRESSURE,
 	IPI,
 	PSTATE_SAMPLE,
+    SCHED_MIGRATE,
 	SCHED_REG,
 	SCHED_SWITCH,
 	SCHED_UNREG,
@@ -49,6 +50,7 @@ enum event_type {
 	TRACE_STARTED,
 	TRACE_STOPPED,
 	EVENT_MAX,
+	KPROBE,
 };
 
 struct sched_switch_event {
@@ -78,6 +80,13 @@ struct wakeup_event {
 	u32		tgid;
 	int		prio;
 	u8		comm[MAX_COMM];
+};
+
+struct migrate_event {
+    u8      comm[MAX_COMM];
+    u32     pid;
+    int     prio;
+    u32     dest_cpu;
 };
 
 struct set_perf_event {
@@ -150,6 +159,11 @@ struct pstate_sample_event {
 	u32             busy;
 };
 
+struct kprobe_event {
+	u32             pid;
+	u64             instruction_pointer;
+};
+
 struct bpf_event {
 	int		type;
 	u64		ts;
@@ -169,7 +183,9 @@ struct bpf_event {
 		struct	softirq_event softirq;
 		struct	wakeup_event wakeup;
 		struct	wakeup_event waking;
+		struct  migrate_event migrate;
 		struct  trace_started_event trace;
+		struct  kprobe_event kprobe;
 	} event;
 };
 

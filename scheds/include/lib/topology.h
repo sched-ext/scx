@@ -20,14 +20,15 @@ struct topology {
 	size_t nr_children;
 	scx_bitmap_t mask;
 	enum topo_level level;
+	u64 id;
 
 	/* Generic pointer, can be used for anything. */
-	void *data;
+	void __arena *data;
 };
 
 extern volatile topo_ptr topo_all;
 
-int topo_init(scx_bitmap_t __arg_arena mask);
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id);
 int topo_contains(topo_ptr topo, u32 cpu);
 
 u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level);
@@ -40,7 +41,7 @@ struct topo_iter {
 	/* The current topology node. */
 	topo_ptr topo;
 	/*
-	 * The index for every node in the path of the tree for , -1 denotes levels > the current one. 
+	 * The index for every node in the path of the tree for , -1 denotes levels > the current one.
 	 * E.g., [0, 1, 2, 1, 2] means:
 	 * - index on level 0 (we only have one top-level node]
 	 * - index 1 on level 1 (the top-level node's second child)
@@ -75,3 +76,5 @@ static inline int topo_iter_start(struct topo_iter *iter)
 #define TOPO_FOR_EACH_LLC(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_LLC)
 #define TOPO_FOR_EACH_CORE(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_CORE)
 #define TOPO_FOR_EACH_CPU(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_CPU)
+
+extern u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];

@@ -39,6 +39,7 @@ use log::trace;
 use log::warn;
 use scx_layered::*;
 use scx_stats::prelude::*;
+use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
@@ -215,6 +216,7 @@ lazy_static! {
                 kind: LayerKind::Grouped {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
+                    util_includes_open_cputime: true,
                     protected: false,
                     cpus_range_frac: None,
                     common: LayerCommon {
@@ -654,6 +656,16 @@ struct Opts {
     /// Per-cpu kthreads are preempting by default. Make it not so.
     #[clap(long, default_value = "false")]
     disable_percpu_kthread_preempt: bool,
+
+    /// Only highpri (nice < 0) per-cpu kthreads are preempting by default.
+    /// Make every per-cpu kthread preempting. Meaningful only if
+    /// --disable-percpu-kthread-preempt is not set.
+    #[clap(long, default_value = "false")]
+    percpu_kthread_preempt_all: bool,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -1096,7 +1108,6 @@ impl Layer {
             LayerKind::Confined {
                 cpus_range,
                 cpus_range_frac,
-                util_range,
                 common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
@@ -1125,15 +1136,6 @@ impl Layer {
                             }
                         }
                     }
-                }
-
-                if util_range.0 < 0.0
-                    || util_range.0 > 1.0
-                    || util_range.1 < 0.0
-                    || util_range.1 > 1.0
-                    || util_range.0 >= util_range.1
-                {
-                    bail!("invalid util_range {:?}", util_range);
                 }
             }
             LayerKind::Grouped {
@@ -1165,6 +1167,14 @@ impl Layer {
                         }
                     }
                 }
+            }
+        }
+
+        // Util can be above 1.0 for grouped layers if
+        // util_includes_open_cputime is set.
+        if let Some(util_range) = kind.util_range() {
+            if util_range.0 < 0.0 || util_range.1 < 0.0 || util_range.0 >= util_range.1 {
+                bail!("invalid util_range {:?}", util_range);
             }
         }
 
@@ -1882,6 +1892,10 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
+        info!(
+            "Running scx_layered (build ID: {})",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
         let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
 
         // enable autoloads for conditionally loaded things
@@ -1928,6 +1942,8 @@ impl<'a> Scheduler<'a> {
         }
 
         skel.maps.rodata_data.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
+        skel.maps.rodata_data.percpu_kthread_preempt_all =
+            !opts.disable_percpu_kthread_preempt && opts.percpu_kthread_preempt_all;
         skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
         skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
@@ -2199,16 +2215,15 @@ impl<'a> Scheduler<'a> {
                     cpus_range_frac,
                     ..
                 } => {
-                    // Guide layer sizing by utilization within each layer
-                    // to avoid oversizing grouped layers. As an empty layer
-                    // can only get CPU time through fallback (counted as
-                    // owned) or open execution, add open cputime for empty
-                    // layers.
+                    // A grouped layer can choose to include open cputime
+                    // for sizing. Also, as an empty layer can only get CPU
+                    // time through fallback (counted as owned) or open
+                    // execution, add open cputime for empty layers.
                     let owned = utils[idx][LAYER_USAGE_OWNED];
                     let open = utils[idx][LAYER_USAGE_OPEN];
 
                     let mut util = owned;
-                    if layer.nr_cpus == 0 {
+                    if layer.kind.util_includes_open_cputime() || layer.nr_cpus == 0 {
                         util += open;
                     }
 
@@ -2952,6 +2967,14 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
 fn main() -> Result<()> {
     let opts = Opts::parse();
 
+    if opts.version {
+        println!(
+            "scx_layered {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
+
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
@@ -2976,7 +2999,9 @@ fn main() -> Result<()> {
         _ => simplelog::LevelFilter::Trace,
     };
     let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_level(simplelog::LevelFilter::Error)
+    lcfg.set_time_offset_to_local()
+        .expect("Failed to set local time offset")
+        .set_time_level(simplelog::LevelFilter::Error)
         .set_location_level(simplelog::LevelFilter::Off)
         .set_target_level(simplelog::LevelFilter::Off)
         .set_thread_level(simplelog::LevelFilter::Off);
@@ -3035,23 +3060,29 @@ fn main() -> Result<()> {
             match spec.template {
                 Some(ref rule) => {
                     let matches = expand_template(&rule)?;
-                    for (mt, mask) in matches {
-                        let mut genspec = spec.clone();
+                    // in the absence of matching cgroups, have template layers
+                    // behave as non-template layers do.
+                    if matches.is_empty() {
+                        layer_config.specs.push(spec);
+                    } else {
+                        for (mt, mask) in matches {
+                            let mut genspec = spec.clone();
 
-                        genspec.cpuset = Some(mask);
+                            genspec.cpuset = Some(mask);
 
-                        // Push the new "and" rule into each "or" term.
-                        for orterm in &mut genspec.matches {
-                            orterm.push(mt.clone());
+                            // Push the new "and" rule into each "or" term.
+                            for orterm in &mut genspec.matches {
+                                orterm.push(mt.clone());
+                            }
+
+                            match &mt {
+                                LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
+                                _ => bail!("Template match has unexpected type"),
+                            }
+
+                            // Push the generated layer into the config
+                            layer_config.specs.push(genspec);
                         }
-
-                        match &mt {
-                            LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
-                            _ => bail!("Template match has unexpected type"),
-                        }
-
-                        // Push the generated layer into the config
-                        layer_config.specs.push(genspec);
                     }
                 }
 

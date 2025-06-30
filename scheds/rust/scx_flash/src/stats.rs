@@ -1,10 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-//
-// Copyright (c) 2024 Andrea Righi <arighi@nvidia.com>
-
-// This software may be used and distributed according to the terms of the
-// GNU General Public License version 2.
-
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -13,18 +6,24 @@ use std::time::Duration;
 
 use anyhow::Result;
 use scx_stats::prelude::*;
+use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
+    #[stat(desc = "Number of running tasks")]
+    pub nr_running: u64,
+    #[stat(desc = "Number of online CPUs")]
+    pub nr_cpus: u64,
     #[stat(desc = "Number of kthread direct dispatches")]
     pub nr_kthread_dispatches: u64,
     #[stat(desc = "Number of task direct dispatches")]
     pub nr_direct_dispatches: u64,
-    #[stat(desc = "Number of task global dispatches")]
+    #[stat(desc = "Number of regular task dispatches")]
     pub nr_shared_dispatches: u64,
 }
 
@@ -32,11 +31,13 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] dispatch -> kthread: {:<5} direct: {:<5} shared: {:<5}",
+            "[{}] tasks -> r: {:>2}/{:<2} | dispatch -> k: {:<5} d: {:<5} s: {:<5}",
             crate::SCHEDULER_NAME,
+            self.nr_running,
+            self.nr_cpus,
             self.nr_kthread_dispatches,
             self.nr_direct_dispatches,
-            self.nr_shared_dispatches,
+            self.nr_shared_dispatches
         )?;
         Ok(())
     }
@@ -74,7 +75,7 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<Metrics>(
-        &vec![],
+        &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |metrics| metrics.format(&mut std::io::stdout()),

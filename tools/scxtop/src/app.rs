@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::available_kprobe_events;
 use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
@@ -11,14 +12,19 @@ use crate::config::get_config_path;
 use crate::config::Config;
 use crate::format_hz;
 use crate::read_file_string;
+use crate::sanitize_nbsp;
 use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
+use crate::CpuStatTracker;
 use crate::EventData;
+use crate::FilteredEventState;
+use crate::KprobeEvent;
 use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
+use crate::ProfilingEvent;
 use crate::Search;
 use crate::VecStats;
 use crate::ViewState;
@@ -27,9 +33,9 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, MangoAppAction, PstateSampleAction, SchedCpuPerfSetAction,
-    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction,
-    TraceStoppedAction,
+    HwPressureAction, IPIAction, KprobeAction, MangoAppAction, PstateSampleAction,
+    SchedCpuPerfSetAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::{bail, Result};
@@ -56,14 +62,14 @@ use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
@@ -73,7 +79,8 @@ pub struct App<'a> {
     hw_pressure: bool,
     localize: bool,
     locale: SystemLocale,
-    stats_client: Option<Arc<Mutex<StatsClient>>>,
+    stats_client: Option<Arc<TokioMutex<StatsClient>>>,
+    cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
 
     scheduler: String,
@@ -90,29 +97,28 @@ pub struct App<'a> {
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
     pstate: bool,
-    event_scroll: u16,
 
-    active_event: PerfEvent,
-    active_hw_event_id: usize,
-    active_perf_events: BTreeMap<usize, PerfEvent>,
-    available_events: Vec<PerfEvent>,
-    event_input_buffer: String,
-    event_search: Search,
-
-    filtered_perf_events_list: Vec<String>,
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
     dsq_data: BTreeMap<u64, EventData>,
 
+    // Event related
+    active_event: ProfilingEvent,
+    active_hw_event_id: usize,
+    active_prof_events: BTreeMap<usize, ProfilingEvent>,
+    available_events: Vec<ProfilingEvent>,
+    event_input_buffer: String,
+    perf_event_search: Search,
+    kprobe_event_search: Search,
+    kprobe_links: Vec<Link>,
+    filtered_events_state: Arc<StdMutex<FilteredEventState>>,
+
     // stats from scxtop's bpf side
     bpf_stats: BpfStats,
 
     // layout releated
-    num_perf_events: u16,
     events_list_size: u16,
-    selected_event: usize,
-    non_hw_event_active: bool,
 
     // trace related
     trace_manager: PerfettoTraceManager,
@@ -153,12 +159,13 @@ impl<'a> App<'a> {
         }
         let subsystem = default_perf_event_parts[0].to_string();
         let event = default_perf_event_parts[1].to_string();
-        let active_event = PerfEvent::new(subsystem.clone(), event.clone(), 0);
-        let mut active_perf_events = BTreeMap::new();
-        let mut default_events = PerfEvent::default_events();
-        let config_events = PerfEvent::from_config(&config)?;
-        default_events.extend(config_events);
-        let default_events_str: Vec<&str> = default_events
+        let active_event =
+            ProfilingEvent::Perf(PerfEvent::new(subsystem.clone(), event.clone(), 0));
+        let mut active_prof_events = BTreeMap::new();
+        let mut default_perf_events = PerfEvent::default_events();
+        let config_perf_events = PerfEvent::from_config(&config)?;
+        default_perf_events.extend(config_perf_events);
+        let default_events_str: Vec<&str> = default_perf_events
             .iter()
             .map(|event| {
                 if !event.alias.is_empty() {
@@ -168,10 +175,17 @@ impl<'a> App<'a> {
                 }
             })
             .collect();
+
+        let default_events: Vec<ProfilingEvent> = default_perf_events
+            .iter()
+            .cloned()
+            .map(ProfilingEvent::Perf)
+            .collect();
+
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new(subsystem.clone(), event.clone(), cpu.id);
             event.attach(process_id)?;
-            active_perf_events.insert(cpu.id, event);
+            active_prof_events.insert(cpu.id, ProfilingEvent::Perf(event));
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
             data.initialize_events(&default_events_str);
@@ -196,7 +210,10 @@ impl<'a> App<'a> {
                     .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
             })
             .collect();
-        let num_perf_events: u16 = initial_perf_events_list.len() as u16;
+        let initial_kprobe_events_list = available_kprobe_events()?;
+
+        let filtered_events_state = Arc::new(StdMutex::new(FilteredEventState::default()));
+
         let mut stats_client = StatsClient::new();
         let stats_socket_path = config.stats_socket_path();
         if !stats_socket_path.is_empty() {
@@ -209,7 +226,7 @@ impl<'a> App<'a> {
             }
             client
         });
-        let stats_client = Some(Arc::new(Mutex::new(stats_client)));
+        let stats_client = Some(Arc::new(TokioMutex::new(stats_client)));
         let sample_rate = skel.maps.data_data.sample_rate;
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
@@ -224,6 +241,7 @@ impl<'a> App<'a> {
             hw_pressure,
             locale: SystemLocale::default()?,
             stats_client,
+            cpu_stat_tracker: Arc::new(RwLock::new(CpuStatTracker::default())),
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,
@@ -243,18 +261,16 @@ impl<'a> App<'a> {
             llc_data,
             node_data,
             dsq_data: BTreeMap::new(),
-            event_scroll: 0,
             active_hw_event_id: 0,
             active_event,
-            active_perf_events,
+            active_prof_events,
             available_events: default_events,
             event_input_buffer: String::new(),
-            event_search: Search::new(initial_perf_events_list.clone()),
-            filtered_perf_events_list: Vec::new(),
-            num_perf_events,
+            perf_event_search: Search::new(initial_perf_events_list),
+            kprobe_event_search: Search::new(initial_kprobe_events_list),
+            kprobe_links: Vec::new(),
+            filtered_events_state,
             events_list_size: 1,
-            selected_event: 0,
-            non_hw_event_active: false,
             prev_bpf_sample_rate: sample_rate,
             trace_start: 0,
             trace_manager,
@@ -277,15 +293,23 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
-        if self.state != AppState::Help && self.state != AppState::Event {
+        if self.state != AppState::Help
+            && self.state != AppState::PerfEvent
+            && self.state != AppState::KprobeEvent
+        {
             self.prev_state = self.state.clone();
         }
         self.state = state;
+
+        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+            self.filter_events();
+        }
+
         if self.prev_state == AppState::MangoApp {
             self.process_id = self.prev_process_id;
-            // reactivate the prev perf event with the previous pid
-            let perf_event = &self.available_events[self.active_hw_event_id].clone();
-            let _ = self.activate_perf_event(perf_event);
+            // reactivate the prev profiling event with the previous pid
+            let prof_event = &self.available_events[self.active_hw_event_id].clone();
+            let _ = self.activate_prof_event(prof_event);
             self.max_fps = 1;
             self.frames_since_update = 0;
         }
@@ -301,42 +325,59 @@ impl<'a> App<'a> {
         self.config.set_theme(theme)
     }
 
-    /// Stop all active perf events.
-    fn stop_perf_events(&mut self) {
+    /// Stop all active profiling events.
+    fn stop_prof_events(&mut self) {
         for cpu_data in self.cpu_data.values_mut() {
             cpu_data.data.clear();
         }
-        self.active_perf_events.clear();
+        self.active_prof_events.clear();
+    }
+
+    /// Resets profiling events to default
+    fn reset_prof_events(&mut self) -> Result<()> {
+        self.stop_prof_events();
+        self.kprobe_links.clear();
+        let mut default_events = PerfEvent::default_events();
+        let config_events = PerfEvent::from_config(&self.config).unwrap();
+        default_events.extend(config_events);
+
+        self.available_events = default_events
+            .iter()
+            .cloned()
+            .map(ProfilingEvent::Perf)
+            .collect();
+        self.active_hw_event_id = 0;
+        let prof_event = &self.available_events[self.active_hw_event_id].clone();
+        self.active_event = prof_event.clone();
+        self.activate_prof_event(prof_event)
     }
 
     /// Activates the next event.
     fn next_event(&mut self) -> Result<()> {
-        self.active_perf_events.clear();
+        self.active_prof_events.clear();
         if self.active_hw_event_id == self.available_events.len() - 1 {
             self.active_hw_event_id = 0;
         } else {
             self.active_hw_event_id += 1;
         }
-        let perf_event = &self.available_events[self.active_hw_event_id].clone();
+        let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
-        self.active_event = perf_event.clone();
-        self.non_hw_event_active = false;
-        self.activate_perf_event(perf_event)
+        self.active_event = prof_event.clone();
+        self.activate_prof_event(prof_event)
     }
 
     /// Activates the previous event.
     fn prev_event(&mut self) -> Result<()> {
-        self.active_perf_events.clear();
+        self.active_prof_events.clear();
         if self.active_hw_event_id == 0 {
             self.active_hw_event_id = self.available_events.len() - 1;
         } else {
             self.active_hw_event_id -= 1;
         }
-        let perf_event = &self.available_events[self.active_hw_event_id].clone();
+        let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
-        self.active_event = perf_event.clone();
-        self.non_hw_event_active = false;
-        self.activate_perf_event(perf_event)
+        self.active_event = prof_event.clone();
+        self.activate_prof_event(prof_event)
     }
 
     /// Activates the next view state.
@@ -344,16 +385,27 @@ impl<'a> App<'a> {
         self.view_state = self.view_state.next();
     }
 
-    /// Activates a perf event, stopping any active perf events.
-    fn activate_perf_event(&mut self, perf_event: &PerfEvent) -> Result<()> {
-        if !self.active_perf_events.is_empty() {
-            self.stop_perf_events();
+    /// Activates a profiling event, stopping any active profiling events.
+    fn activate_prof_event(&mut self, prof_event: &ProfilingEvent) -> Result<()> {
+        if !self.active_prof_events.is_empty() {
+            self.stop_prof_events();
         }
-        for cpu_id in self.topo.all_cpus.keys() {
-            let mut event = perf_event.clone();
-            event.cpu = *cpu_id;
-            event.attach(self.process_id)?;
-            self.active_perf_events.insert(*cpu_id, event);
+
+        for &cpu_id in self.topo.all_cpus.keys() {
+            let event = match prof_event {
+                ProfilingEvent::Perf(p) => {
+                    let mut p = p.clone();
+                    p.cpu = cpu_id;
+                    p.attach(self.process_id)?;
+                    ProfilingEvent::Perf(p)
+                }
+                ProfilingEvent::Kprobe(k) => {
+                    let mut k = k.clone();
+                    k.cpu = cpu_id;
+                    ProfilingEvent::Kprobe(k)
+                }
+            };
+            self.active_prof_events.insert(cpu_id, event);
         }
         Ok(())
     }
@@ -366,14 +418,10 @@ impl<'a> App<'a> {
             );
             let path = Path::new(&file);
             let freq = read_from_file(path).unwrap_or(0_usize);
-            let cpu_data = self.cpu_data.entry(*cpu_id).or_insert(CpuData::new(
-                *cpu_id,
-                0,
-                0,
-                0,
-                self.max_cpu_events,
-            ));
-
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu_id)
+                .expect("CpuData should have been present");
             cpu_data.add_event_data("cpu_freq", freq as u64);
         }
         Ok(())
@@ -403,8 +451,8 @@ impl<'a> App<'a> {
                         }
                         let node_data = self
                             .node_data
-                            .entry(cpu.node_id)
-                            .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                            .get_mut(&cpu.node_id)
+                            .expect("NodeData should have been present");
                         node_data.add_event_data("uncore_freq", uncore_freq as u64);
                     }
                 }
@@ -425,25 +473,22 @@ impl<'a> App<'a> {
         for node in self.topo.nodes.keys() {
             let node_data = self
                 .node_data
-                .entry(*node)
-                .or_insert(NodeData::new(*node, self.max_cpu_events));
+                .get_mut(node)
+                .expect("NodeData should have been present");
             node_data.data.set_max_size(max_events);
         }
         for llc in self.topo.all_llcs.keys() {
-            let llc_data =
-                self.llc_data
-                    .entry(*llc)
-                    .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
             llc_data.data.set_max_size(max_events);
         }
-        for cpu in self.active_perf_events.keys() {
-            let cpu_data = self.cpu_data.entry(*cpu).or_insert(CpuData::new(
-                *cpu,
-                0,
-                0,
-                0,
-                self.max_cpu_events,
-            ));
+        for cpu in self.active_prof_events.keys() {
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
             cpu_data.data.set_max_size(max_events);
         }
         self.max_cpu_events = max_events;
@@ -476,6 +521,9 @@ impl<'a> App<'a> {
     fn on_tick(&mut self) -> Result<()> {
         // always grab updated stats
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        {
+            self.cpu_stat_tracker.write().unwrap().update()?;
+        }
 
         if self.state == AppState::Scheduler && !self.scheduler.is_empty() {
             if let Some(stats_client_read) = self.stats_client.clone() {
@@ -502,37 +550,38 @@ impl<'a> App<'a> {
         for node in self.topo.nodes.keys() {
             let node_data = self
                 .node_data
-                .entry(*node)
-                .or_insert(NodeData::new(*node, self.max_cpu_events));
+                .get_mut(node)
+                .expect("NodeData should have been present");
             node_data.add_event_data(self.active_event.event_name(), 0);
         }
         // Add entry for llcs
         for llc in self.topo.all_llcs.keys() {
-            let llc_data =
-                self.llc_data
-                    .entry(*llc)
-                    .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
             llc_data.add_event_data(self.active_event.event_name(), 0);
         }
 
-        for (cpu, event) in &mut self.active_perf_events {
-            let val = event.value(true)?;
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = match event {
+                ProfilingEvent::Perf(p) => p.value(true)?,
+                ProfilingEvent::Kprobe(k) => k.value(true)?,
+            };
             let cpu_data = self
                 .cpu_data
-                .entry(*cpu)
-                // XXX: fixme
-                .or_insert(CpuData::new(*cpu, 0, 0, 0, self.max_cpu_events));
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
             cpu_data.add_event_data(event.event_name(), val);
-            let llc_data = self.llc_data.entry(cpu_data.llc).or_insert(LlcData::new(
-                cpu_data.llc,
-                0,
-                self.max_cpu_events,
-            ));
+            let llc_data = self
+                .llc_data
+                .get_mut(&cpu_data.llc)
+                .expect("LlcData should have been present");
             llc_data.add_cpu_event_data(event.event_name(), val);
             let node_data = self
                 .node_data
-                .entry(cpu_data.node)
-                .or_insert(NodeData::new(cpu_data.node, self.max_cpu_events));
+                .get_mut(&cpu_data.node)
+                .expect("NodeData should have been present");
             node_data.add_cpu_event_data(event.event_name(), val);
         }
         if self.collect_cpu_freq {
@@ -546,7 +595,10 @@ impl<'a> App<'a> {
 
     /// Generates a CPU bar chart.
     fn cpu_bar(&self, cpu: usize, event: &str) -> Bar {
-        let cpu_data = self.cpu_data.get(&cpu).unwrap();
+        let cpu_data = self
+            .cpu_data
+            .get(&cpu)
+            .expect("CpuData should have been present");
         let value = cpu_data
             .event_data_immut(event)
             .last()
@@ -595,7 +647,7 @@ impl<'a> App<'a> {
                 }
             )))
             .text_value(if self.localize {
-                value.to_formatted_string(&self.locale)
+                sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
                 format!("{}", value)
             })
@@ -608,7 +660,10 @@ impl<'a> App<'a> {
         let mut hw_pressure: u64 = 0;
         let mut pstate: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
-            let cpu_data = self.cpu_data.get(&cpu).unwrap();
+            let cpu_data = self
+                .cpu_data
+                .get(&cpu)
+                .expect("CpuData should have been present");
             perf = cpu_data
                 .event_data_immut("perf")
                 .last()
@@ -683,12 +738,15 @@ impl<'a> App<'a> {
     /// creates as sparkline for a llc.
     fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&llc) {
-            let llc_data = self.llc_data.get(&llc).unwrap();
+            let llc_data = self
+                .llc_data
+                .get(&llc)
+                .expect("LlcData should have been present");
             llc_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
         };
-        let stats = VecStats::new(&data, true, true, true, None);
+        let stats = VecStats::new(&data, 1, None);
 
         Sparkline::default()
             .data(&data)
@@ -709,9 +767,9 @@ impl<'a> App<'a> {
                             format!(
                                 "LLC {} avg {} max {} min {}",
                                 llc,
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -727,13 +785,16 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a node.
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
-        let data = if self.llc_data.contains_key(&node) {
-            let node_data = self.node_data.get(&node).unwrap();
+        let data = if self.node_data.contains_key(&node) {
+            let node_data = self
+                .node_data
+                .get(&node)
+                .expect("NodeData should have been present");
             node_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
         };
-        let stats = VecStats::new(&data, true, true, true, None);
+        let stats = VecStats::new(&data, 1, None);
 
         Sparkline::default()
             .data(&data)
@@ -755,7 +816,7 @@ impl<'a> App<'a> {
                                 + format_hz(
                                     self.node_data
                                         .get(&node)
-                                        .unwrap()
+                                        .expect("NodeData should have been present")
                                         .event_data_immut("uncore_freq")
                                         .last()
                                         .copied()
@@ -773,9 +834,9 @@ impl<'a> App<'a> {
                             format!(
                                 "Node {} avg {} max {} min {}",
                                 node,
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -805,7 +866,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event_name()))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&llc_iter, true, true, true, None);
+        let stats = VecStats::new(&llc_iter, 1, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -821,9 +882,9 @@ impl<'a> App<'a> {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -863,9 +924,9 @@ impl<'a> App<'a> {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -925,7 +986,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|node_data| node_data.event_data_immut(self.active_event.event_name()))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&node_iter, true, true, true, None);
+        let stats = VecStats::new(&node_iter, 1, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -950,9 +1011,9 @@ impl<'a> App<'a> {
                             format!(
                                 "Node ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -989,9 +1050,9 @@ impl<'a> App<'a> {
                             format!(
                                 "NUMA Nodes ({}) avg {} max {} min {}",
                                 self.active_event.event_name(),
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -1050,7 +1111,7 @@ impl<'a> App<'a> {
             Vec::new()
         };
         // XXX: this should be max across all CPUs
-        let stats = VecStats::new(&data, true, true, true, None);
+        let stats = VecStats::new(&data, 1, None);
         Sparkline::default()
             .data(&data)
             .max(stats.max)
@@ -1083,9 +1144,9 @@ impl<'a> App<'a> {
                             format!(
                                 "dsq {:#X} avg {} max {} min {}",
                                 dsq_id,
-                                stats.avg.to_formatted_string(&self.locale),
-                                stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                             )
                         } else {
                             format!(
@@ -1130,15 +1191,15 @@ impl<'a> App<'a> {
                 format!(
                     "{:#X} avg {} max {} min {}",
                     dsq,
-                    avg.to_formatted_string(&self.locale),
-                    max.to_formatted_string(&self.locale),
-                    min.to_formatted_string(&self.locale)
+                    sanitize_nbsp(avg.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(max.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(min.to_formatted_string(&self.locale))
                 )
             } else {
                 format!("{:#X} avg {} max {} min {}", dsq, avg, max, min,)
             }))
             .text_value(if self.localize {
-                value.to_formatted_string(&self.locale)
+                sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
                 format!("{}", value)
             })
@@ -1152,7 +1213,7 @@ impl<'a> App<'a> {
             .map(|(dsq_id, dsq_data)| {
                 let values = dsq_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, true, true, true, None);
+                let stats = VecStats::new(&values, 1, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1166,15 +1227,15 @@ impl<'a> App<'a> {
                 format!(
                     "{} avg {} max {} min {}",
                     id,
-                    avg.to_formatted_string(&self.locale),
-                    max.to_formatted_string(&self.locale),
-                    min.to_formatted_string(&self.locale)
+                    sanitize_nbsp(avg.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(max.to_formatted_string(&self.locale)),
+                    sanitize_nbsp(min.to_formatted_string(&self.locale))
                 )
             } else {
                 format!("{} avg {} max {} min {}", id, avg, max, min,)
             }))
             .text_value(if self.localize {
-                value.to_formatted_string(&self.locale)
+                sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
                 format!("{}", value)
             })
@@ -1188,7 +1249,7 @@ impl<'a> App<'a> {
             .map(|(llc_id, llc_data)| {
                 let values = llc_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, true, true, true, None);
+                let stats = VecStats::new(&values, 1, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1202,7 +1263,7 @@ impl<'a> App<'a> {
             .map(|(node_id, node_data)| {
                 let values = node_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, true, true, true, None);
+                let stats = VecStats::new(&values, 1, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1310,7 +1371,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|dsq_data| dsq_data.event_data_immut(event))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
+        let stats = VecStats::new(&dsq_global_iter, 1, None);
 
         let bar_block = Block::default()
             .title_top(
@@ -1319,9 +1380,9 @@ impl<'a> App<'a> {
                         "{} {} avg {} max {} min {}",
                         self.scheduler,
                         event,
-                        stats.avg.to_formatted_string(&self.locale),
-                        stats.max.to_formatted_string(&self.locale),
-                        stats.min.to_formatted_string(&self.locale),
+                        sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                        sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                        sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                     )
                 } else {
                     format!(
@@ -1427,7 +1488,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, true, true, true, None);
+                    let stats = VecStats::new(&node_iter, 1, None);
 
                     let node_block = Block::bordered()
                         .title_top(
@@ -1436,9 +1497,9 @@ impl<'a> App<'a> {
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
                                     self.active_event.event_name(),
-                                    stats.avg.to_formatted_string(&self.locale),
-                                    stats.max.to_formatted_string(&self.locale),
-                                    stats.min.to_formatted_string(&self.locale)
+                                    sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                                 )
                             } else {
                                 format!(
@@ -1466,7 +1527,7 @@ impl<'a> App<'a> {
                                     + format_hz(
                                         self.node_data
                                             .get(&node.id)
-                                            .unwrap()
+                                            .expect("NodeData should have been present")
                                             .event_data_immut("uncore_freq")
                                             .last()
                                             .copied()
@@ -1548,7 +1609,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, true, true, true, None);
+                    let stats = VecStats::new(&node_iter, 1, None);
 
                     let node_block = Block::bordered()
                         .title_top(
@@ -1557,9 +1618,9 @@ impl<'a> App<'a> {
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
                                     self.active_event.event_name(),
-                                    stats.avg.to_formatted_string(&self.locale),
-                                    stats.max.to_formatted_string(&self.locale),
-                                    stats.min.to_formatted_string(&self.locale)
+                                    sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                    sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
                                 )
                             } else {
                                 format!(
@@ -1587,7 +1648,7 @@ impl<'a> App<'a> {
                                     + format_hz(
                                         self.node_data
                                             .get(&node.id)
-                                            .unwrap()
+                                            .expect("NodeData should have been present")
                                             .event_data_immut("uncore_freq")
                                             .last()
                                             .copied()
@@ -1768,17 +1829,25 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: show CPU event menu ({})",
+                    "{}: show CPU perf event menu",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::SetState(AppState::Event)),
-                    self.active_event.event_name()
+                        .action_keys_string(Action::SetState(AppState::PerfEvent))
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: clear active perf event",
+                    "{}: show kprobe event menu",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::KprobeEvent))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: clear active profiling events",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::ClearEvent),
@@ -1787,7 +1856,7 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: next perf event",
+                    "{}: next profiling event",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::NextEvent),
@@ -1796,7 +1865,7 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: previous perf event",
+                    "{}: previous profiling event",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::PrevEvent)
@@ -1805,14 +1874,14 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: perf event list scroll up",
+                    "{}: profiling event list scroll up",
                     self.config.active_keymap.action_keys_string(Action::PageUp)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: perf event list scroll down",
+                    "{}: profiling event list scroll down",
                     self.config
                         .active_keymap
                         .action_keys_string(Action::PageDown)
@@ -1923,35 +1992,19 @@ impl<'a> App<'a> {
             self.events_list_size = height
         }
 
-        self.filtered_perf_events_list = self.event_search.fuzzy_search(&self.event_input_buffer);
-        self.num_perf_events = self.filtered_perf_events_list.len() as u16;
-        if (self.num_perf_events as usize) <= self.selected_event {
-            self.selected_event = (self.num_perf_events as usize) - 1;
-        }
-
-        if self.num_perf_events <= self.event_scroll {
-            self.event_scroll = self.num_perf_events - 1;
-        }
-
-        let events: Vec<Line> = self
-            .filtered_perf_events_list
-            .iter()
-            .enumerate()
-            .map(|(i, event)| {
-                if i == self.selected_event {
-                    Line::from(event.clone()).fg(self.theme().text_important_color())
-                } else {
-                    Line::from(event.clone()).fg(self.theme().text_color())
-                }
-            })
-            .collect();
+        let list_type = match self.state {
+            AppState::PerfEvent => "perf",
+            AppState::KprobeEvent => "kprobe",
+            _ => bail!("Invalid AppState in event list"),
+        };
 
         let title = Block::new()
             .style(default_style)
             .title_alignment(Alignment::Center)
             .title(
                 format!(
-                    "Type to filter list, use ▲ ▼  ({}/{}) to scroll, {} to select, Esc to exit",
+                    "Type to filter {} list, use ▲ ▼  ({}/{}) to scroll, {} to select, Esc to exit",
+                    list_type,
                     self.config.active_keymap.action_keys_string(Action::PageUp),
                     self.config
                         .active_keymap
@@ -1962,9 +2015,24 @@ impl<'a> App<'a> {
             );
         frame.render_widget(title, chunks[0]);
 
-        let paragraph = Paragraph::new(events.clone())
+        let filtered_state = self.filtered_events_state.lock().unwrap();
+
+        let events: Vec<Line> = filtered_state
+            .list
+            .iter()
+            .enumerate()
+            .map(|(i, event)| {
+                if i == filtered_state.selected {
+                    Line::from(event.clone()).fg(self.theme().text_important_color())
+                } else {
+                    Line::from(event.clone()).fg(self.theme().text_color())
+                }
+            })
+            .collect();
+
+        let paragraph = Paragraph::new(events)
             .style(default_style)
-            .scroll((self.event_scroll, 0));
+            .scroll((filtered_state.scroll, 0));
         frame.render_widget(paragraph, chunks[1]);
 
         let input_box = Paragraph::new(format!("# > {}", self.event_input_buffer))
@@ -1978,8 +2046,8 @@ impl<'a> App<'a> {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓")),
             chunks[1],
-            &mut ScrollbarState::new(self.num_perf_events.into())
-                .position(self.event_scroll as usize),
+            &mut ScrollbarState::new(filtered_state.count.into())
+                .position(filtered_state.scroll as usize),
         );
 
         Ok(())
@@ -2026,13 +2094,13 @@ impl<'a> App<'a> {
     /// Handles MangoApp pressure events.
     pub fn on_mangoapp(&mut self, action: &MangoAppAction) -> Result<()> {
         self.last_mangoapp_action = Some(action.clone());
-        // Update the perf event to the mangoapp event
+        // Update the profiling event to the mangoapp event
         if action.pid as i32 != self.process_id && action.pid > 0 {
             self.prev_process_id = self.process_id;
             self.process_id = action.pid as i32;
-            // reactivate the active perf event with the pid from mangoapp
-            let perf_event = &self.available_events[self.active_hw_event_id].clone();
-            let _ = self.activate_perf_event(perf_event);
+            // reactivate the active profiling event with the pid from mangoapp
+            let prof_event = &self.available_events[self.active_hw_event_id].clone();
+            let _ = self.activate_prof_event(prof_event);
         }
         Ok(())
     }
@@ -2090,7 +2158,7 @@ impl<'a> App<'a> {
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
-            AppState::Event => self.render_event_list(frame),
+            AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
             AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
@@ -2110,60 +2178,106 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        if self.state == AppState::Event && self.event_scroll < self.num_perf_events - 1 {
-            self.event_scroll += 1;
-            self.selected_event += 1
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+            && filtered_state.scroll < filtered_state.count - 1
+        {
+            filtered_state.scroll += 1;
+            filtered_state.selected += 1;
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        if self.state == AppState::Event && self.event_scroll > 0 {
-            self.event_scroll -= 1;
-            self.selected_event -= 1
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+            && filtered_state.scroll > 0
+        {
+            filtered_state.scroll -= 1;
+            filtered_state.selected -= 1;
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        if self.state == AppState::Event
-            && self.event_scroll <= self.num_perf_events - self.events_list_size
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+            && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
-            self.event_scroll += self.events_list_size - 1;
-            self.selected_event += (self.events_list_size - 1) as usize;
+            filtered_state.scroll += self.events_list_size - 1;
+            filtered_state.selected += (self.events_list_size - 1) as usize;
         }
     }
 
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        if self.state == AppState::Event {
-            if self.event_scroll > self.events_list_size {
-                self.event_scroll -= self.events_list_size - 1;
-                self.selected_event -= (self.events_list_size - 1) as usize;
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+            if filtered_state.scroll > self.events_list_size {
+                filtered_state.scroll -= self.events_list_size - 1;
+                filtered_state.selected -= (self.events_list_size - 1) as usize;
             } else {
-                self.event_scroll = 0;
-                self.selected_event = 0;
+                filtered_state.scroll = 0;
+                filtered_state.selected = 0;
             }
         }
     }
 
     /// Updates app state when the enter key is pressed.
-    fn on_enter(&mut self) {
-        if self.state == AppState::Event && !self.filtered_perf_events_list.is_empty() {
-            if let Some((subsystem, event)) =
-                self.filtered_perf_events_list[self.selected_event].split_once(":")
-            {
-                let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
-                self.active_perf_events.clear();
-                self.active_event = perf_event.clone();
-                let _ = self.activate_perf_event(&perf_event);
-                self.non_hw_event_active = true;
+    fn on_enter(&mut self) -> Result<()> {
+        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+            let selected = {
+                let mut filtered_state = self.filtered_events_state.lock().unwrap();
+                if filtered_state.list.is_empty() {
+                    return Ok(());
+                }
+                let selected = filtered_state.list[filtered_state.selected].clone();
+                filtered_state.reset();
+                selected
+            };
+
+            let event = match self.state {
+                AppState::PerfEvent => selected.split_once(":").map(|(subsystem, event)| {
+                    ProfilingEvent::Perf(PerfEvent::new(
+                        subsystem.to_string(),
+                        event.to_string(),
+                        0,
+                    ))
+                }),
+                AppState::KprobeEvent => Some(ProfilingEvent::Kprobe(KprobeEvent::new(
+                    selected.to_string(),
+                    0,
+                ))),
+                _ => None,
+            };
+
+            if let Some(prof_event) = event {
+                if let ProfilingEvent::Kprobe(ref k) = prof_event {
+                    let already_exists = self.available_events.iter().any(
+                        |e| matches!(e, ProfilingEvent::Kprobe(x) if x.event_name == k.event_name),
+                    );
+
+                    if !already_exists {
+                        self.kprobe_links.push(
+                            self.skel
+                                .progs
+                                .generic_kprobe
+                                .attach_kprobe(false, &k.event_name)?,
+                        );
+                    };
+                };
+
+                self.active_prof_events.clear();
+                self.active_event = prof_event.clone();
+                let _ = self.activate_prof_event(&prof_event);
                 let prev_state = self.prev_state.clone();
                 self.prev_state = self.state.clone();
                 self.state = prev_state;
-                self.available_events.push(perf_event.clone());
+                self.available_events.push(prof_event);
             }
         }
+
+        Ok(())
     }
 
     /// Attaches any BPF programs required for perfetto traces.
@@ -2291,25 +2405,19 @@ impl<'a> App<'a> {
 
     /// Updates the app when a CPUs performance is changed by the scheduler.
     fn on_cpu_perf(&mut self, cpu: u32, perf: u32) {
-        let cpu_data = self.cpu_data.entry(cpu as usize).or_insert(CpuData::new(
-            cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(cpu as usize))
+            .expect("CpuData should have been present");
         cpu_data.add_event_data("perf", perf as u64);
     }
 
     fn on_pstate_sample(&mut self, action: &PstateSampleAction) {
         let PstateSampleAction { cpu, busy } = action;
-        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-            *cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(*cpu as usize))
+            .expect("CpuData should have been present");
         cpu_data.add_event_data("pstate", *busy as u64);
     }
 
@@ -2366,13 +2474,10 @@ impl<'a> App<'a> {
             return;
         }
 
-        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-            *cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(*cpu as usize))
+            .expect("CpuData should have been present");
 
         let next_dsq_id = Self::classify_dsq(*next_dsq_id);
         let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
@@ -2406,10 +2511,14 @@ impl<'a> App<'a> {
                     .last()
                     .copied()
                     .unwrap_or(0_u64);
-                if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
+                if next_dsq_vtime.saturating_sub(last) < DSQ_VTIME_CUTOFF {
                     next_dsq_data.add_event_data(
                         "dsq_vtime_delta",
-                        if last > 0 { *next_dsq_vtime - last } else { 0 },
+                        if last > 0 {
+                            next_dsq_vtime.saturating_sub(last)
+                        } else {
+                            0
+                        },
                     );
                 }
             }
@@ -2427,6 +2536,12 @@ impl<'a> App<'a> {
             } else {
                 prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
             }
+        }
+    }
+
+    fn on_sched_migrate(&mut self, action: &SchedMigrateTaskAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_sched_migrate(action);
         }
     }
 
@@ -2479,15 +2594,48 @@ impl<'a> App<'a> {
     pub fn on_hw_pressure(&mut self, action: &HwPressureAction) {
         let HwPressureAction { cpu, hw_pressure } = action;
 
-        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-            *cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
-
+        let cpu_data = self
+            .cpu_data
+            .get_mut(&(*cpu as usize))
+            .expect("CpuData should have been present");
         cpu_data.add_event_data("hw_pressure", *hw_pressure);
+    }
+
+    /// Handles kprobe events.
+    pub fn on_kprobe(&mut self, action: &KprobeAction) {
+        let cpu = action.cpu as usize;
+        let sample_rate = self.skel.maps.data_data.sample_rate as u64;
+
+        if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu) {
+            if kprobe.instruction_pointer == Some(action.instruction_pointer) {
+                kprobe.increment_by(sample_rate);
+            }
+        }
+    }
+
+    pub fn filter_events(&mut self) {
+        let filtered_events_list = match self.state {
+            AppState::PerfEvent => self
+                .perf_event_search
+                .fuzzy_search(&self.event_input_buffer),
+            AppState::KprobeEvent => self
+                .kprobe_event_search
+                .fuzzy_search(&self.event_input_buffer),
+            _ => vec![],
+        };
+
+        let mut filtered_state = self.filtered_events_state.lock().unwrap();
+
+        filtered_state.list = filtered_events_list;
+        filtered_state.count = filtered_state.list.len() as u16;
+
+        if (filtered_state.count as usize) <= filtered_state.selected {
+            filtered_state.selected = (filtered_state.count as usize) - 1;
+        }
+
+        if filtered_state.count <= filtered_state.scroll {
+            filtered_state.scroll = filtered_state.count - 1;
+        }
     }
 
     /// Updates the bpf bpf sampling rate.
@@ -2505,7 +2653,10 @@ impl<'a> App<'a> {
             Action::Up => self.on_up(),
             Action::PageUp => self.on_pg_up(),
             Action::PageDown => self.on_pg_down(),
-            Action::Enter => self.on_enter(),
+            Action::Enter => {
+                self.on_enter()?;
+                self.event_input_buffer.clear();
+            }
             Action::SetState(state) => {
                 if *state == self.state {
                     self.set_state(self.prev_state.clone());
@@ -2513,7 +2664,6 @@ impl<'a> App<'a> {
                     self.set_state(state.clone());
                 }
             }
-
             Action::NextEvent => {
                 if self.next_event().is_err() {
                     // XXX handle error
@@ -2568,6 +2718,9 @@ impl<'a> App<'a> {
             Action::SchedWaking(a) => {
                 self.on_sched_waking(a);
             }
+            Action::SchedMigrateTask(a) => {
+                self.on_sched_migrate(a);
+            }
             Action::SoftIRQ(a) => {
                 self.on_softirq(a);
             }
@@ -2598,7 +2751,10 @@ impl<'a> App<'a> {
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
             }
-            Action::ClearEvent => self.stop_perf_events(),
+            Action::Kprobe(a) => {
+                self.on_kprobe(a);
+            }
+            Action::ClearEvent => self.reset_prof_events()?,
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
@@ -2636,15 +2792,16 @@ impl<'a> App<'a> {
             },
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
+                self.filter_events();
             }
             Action::Backspace => {
                 self.event_input_buffer.pop();
-                self.selected_event = 0;
-                self.event_scroll = 0;
+                self.filter_events();
             }
             Action::Esc => match self.state() {
-                AppState::Event => {
+                AppState::PerfEvent | AppState::KprobeEvent => {
                     self.event_input_buffer.clear();
+                    self.filter_events();
                     self.handle_action(&Action::SetState(self.prev_state.clone()))?;
                 }
                 _ => self.handle_action(&Action::Quit)?,

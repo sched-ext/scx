@@ -50,7 +50,7 @@
 #include "types.h"
 #include "lb_domain.h"
 
-#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_common.bpf.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -1261,6 +1261,7 @@ u32 dom_node_id(u32 dom_id)
 	return *nid_ptr;
 }
 
+#if !defined(__TARGET_ARCH_arm64) && !defined(__aarch64__) && !defined(__TARGET_ARCH_riscv)
 /*
  * Returns the dom mask for a node.
  */
@@ -1279,7 +1280,6 @@ static u64 node_dom_mask(u32 node_id)
 	return mask;
 }
 
-#if !defined(__TARGET_ARCH_arm64) && ! defined(__TARGET_ARCH_riscv)
 /*
  * Sets the preferred domain mask according to the mempolicy. See man(2)
  * set_mempolicy for more details on mempolicy.

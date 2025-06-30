@@ -48,13 +48,15 @@ enum consts_internal  {
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
 	LAVD_CC_PER_CORE_SHIFT		= 1,  /* 50%: maximum per-core CPU utilization */
-	LAVD_CC_PER_CORE_UTIL		= p2s(50),  /* 50%: maximum per-core CPU utilization */
-	LAVD_CC_PER_TURBO_UTIL		= p2s(75), /* 75%: maximum per-core CPU utilization for a turbo core */
+	LAVD_CC_UTIL_SPIKE		= p2s(90), /* When the CPU utilization is almost full (90%),
+						      it is likely that the actual utilization is even
+						      higher than that. */
 	LAVD_CC_CPU_PIN_INTERVAL	= (250ULL * NSEC_PER_MSEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_AP_HIGH_UTIL		= p2s(70), /* 70%: balanced mode when 10% < cpu util <= 70%,
-							  performance mode when cpu util > 70% */
+	LAVD_AP_HIGH_UTIL_DFL_SMT_RT	= p2s(25),
+	LAVD_AP_HIGH_UTIL_DFL_NO_SMT_RT	= p2s(50), /* 50%: balanced mode when 10% < cpu util <= 50%,
+							  performance mode when cpu util > 50% */
 
 	LAVD_CPDOM_MIG_SHIFT_UL		= 2, /* when under-loaded:  1/2**2 = [-25.0%, +25.0%] */
 	LAVD_CPDOM_MIG_SHIFT		= 3, /* when midely loaded: 1/2**3 = [-12.5%, +12.5%] */
