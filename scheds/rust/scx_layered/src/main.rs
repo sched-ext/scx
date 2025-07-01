@@ -929,6 +929,7 @@ struct Stats {
     layer_slice_us: Vec<u64>,
 
     gpu_tasks_affinitized: u64,
+    gpu_task_affinitization_ms: u64,
 }
 
 impl Stats {
@@ -978,6 +979,7 @@ impl Stats {
 
             layer_slice_us: vec![0; nr_layers],
             gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
+            gpu_task_affinitization_ms: gpu_task_affinitizer.last_task_affinitization_ms,
         })
     }
 
@@ -1070,6 +1072,7 @@ impl Stats {
 
             layer_slice_us,
             gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
+            gpu_task_affinitization_ms: self.gpu_task_affinitization_ms,
         };
         Ok(())
     }
@@ -1294,6 +1297,7 @@ struct GpuTaskAffinitizer {
     poll_interval: Duration,
     enable: bool,
     tasks_affinitized: u64,
+    last_task_affinitization_ms: u64,
 }
 
 impl GpuTaskAffinitizer {
@@ -1307,6 +1311,7 @@ impl GpuTaskAffinitizer {
             poll_interval: Duration::from_secs(poll_interval),
             enable,
             tasks_affinitized: 0,
+            last_task_affinitization_ms: 0,
         }
     }
 
@@ -1466,6 +1471,8 @@ impl GpuTaskAffinitizer {
             }
         };
         self.last_process_time = Some(now);
+        self.last_task_affinitization_ms = (Instant::now() - now).as_millis() as u64;
+
         return;
     }
 

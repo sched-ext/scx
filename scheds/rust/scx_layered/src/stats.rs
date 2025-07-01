@@ -514,8 +514,10 @@ pub struct SysStats {
     pub fallback_cpu_util: f64,
     #[stat(desc = "fallback CPU util %")]
     pub layers: BTreeMap<String, LayerStats>,
-    #[stat(desc = "Number of gpu tasks affinitized")]
+    #[stat(desc = "Number of gpu tasks affinitized since scheduler start")]
     pub gpu_tasks_affinitized: u64,
+    #[stat(desc = "Time (in ms) of last affinitization run.")]
+    pub gpu_task_affinitization_ms: u64,
 }
 
 impl SysStats {
@@ -574,6 +576,7 @@ impl SysStats {
                 * 100.0,
             layers: BTreeMap::new(),
             gpu_tasks_affinitized: stats.gpu_tasks_affinitized,
+            gpu_task_affinitization_ms: stats.gpu_task_affinitization_ms,
         })
     }
 
@@ -614,7 +617,11 @@ impl SysStats {
             self.skip_preempt, self.antistall, self.fixup_vtime, self.preempting_mismatch
         )?;
 
-        writeln!(w, "gpu_tasks_affinitized={}", self.gpu_tasks_affinitized)?;
+        writeln!(
+            w,
+            "gpu_tasks_affinitized={} gpu_task_affinitization_time={}",
+            self.gpu_tasks_affinitized, self.gpu_task_affinitization_ms
+        )?;
 
         Ok(())
     }
