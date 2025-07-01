@@ -207,7 +207,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 #undef NTASKS_FOR_TEST
 }
 
-#define SCX_atq_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_atq_ ## suffix, (u64)NULL)
+#define SCX_ATQ_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_atq_ ## suffix, (u64)NULL)
 
 __weak
 int scx_selftest_atq_peek_nodestruct(u64 unused)
@@ -285,14 +285,14 @@ int scx_selftest_atq(void)
 		}
 	}
 
-	SCX_atq_SELFTEST(create);
-	SCX_atq_SELFTEST(fifo);
-	SCX_atq_SELFTEST(fail_fifo_with_weight);
-	SCX_atq_SELFTEST(vtime);
-	SCX_atq_SELFTEST(fail_vtime_without_weight);
-	SCX_atq_SELFTEST(nr_queued);
-	SCX_atq_SELFTEST(peek_nodestruct);
-	SCX_atq_SELFTEST(peek_empty);
+	SCX_ATQ_SELFTEST(create);
+	SCX_ATQ_SELFTEST(fifo);
+	SCX_ATQ_SELFTEST(fail_fifo_with_weight);
+	SCX_ATQ_SELFTEST(vtime);
+	SCX_ATQ_SELFTEST(fail_vtime_without_weight);
+	SCX_ATQ_SELFTEST(nr_queued);
+	SCX_ATQ_SELFTEST(peek_nodestruct);
+	SCX_ATQ_SELFTEST(peek_empty);
 
 	return 0;
 }
