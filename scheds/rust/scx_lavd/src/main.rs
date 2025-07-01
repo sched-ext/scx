@@ -332,11 +332,14 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
 
-        // Enable autoloads for conditionally loaded things
-        // immediately after creating skel (because this is always before loading)
+        // Enable futex tracing using ftrace if available. If the ftrace is not
+        // available, use tracepoint, which is known to be slower than ftrace.
         if !opts.no_futex_boost {
-            if Self::attach_futex_tracepoints(&mut skel)? == false {
-                info!("Fail to attach futex tracepoints.");
+            if Self::attach_futex_ftraces(&mut skel)? == false {
+                info!("Fail to attach futex ftraces. Try with tracepoints.");
+                if Self::attach_futex_tracepoints(&mut skel)? == false {
+                    info!("Fail to attach futex tracepoints.");
+                }
             }
         }
 
@@ -374,6 +377,23 @@ impl<'a> Scheduler<'a> {
             stats_server,
             mseq_id: 0,
         })
+    }
+
+    fn attach_futex_ftraces(skel: &mut OpenBpfSkel) -> Result<bool> {
+        let ftraces = vec![
+            ("__futex_wait", &skel.progs.fexit___futex_wait),
+            ("futex_wait_multiple", &skel.progs.fexit_futex_wait_multiple),
+            (
+                "futex_wait_requeue_pi",
+                &skel.progs.fexit_futex_wait_requeue_pi,
+            ),
+            ("futex_wake", &skel.progs.fexit_futex_wake),
+            ("futex_wake_op", &skel.progs.fexit_futex_wake_op),
+            ("futex_lock_pi", &skel.progs.fexit_futex_lock_pi),
+            ("futex_unlock_pi", &skel.progs.fexit_futex_unlock_pi),
+        ];
+
+        compat::cond_kprobes_enable(ftraces)
     }
 
     fn attach_futex_tracepoints(skel: &mut OpenBpfSkel) -> Result<bool> {
