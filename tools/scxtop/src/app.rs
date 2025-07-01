@@ -338,10 +338,10 @@ impl<'a> App<'a> {
         self.stop_prof_events();
         self.kprobe_links.clear();
 
-        let mut default_events = get_default_events(self.cpu_stat_tracker.clone());
+        self.available_events = get_default_events(self.cpu_stat_tracker.clone());
         let config_perf_events = PerfEvent::from_config(&self.config)?;
 
-        default_events.extend(
+        self.available_events.extend(
             config_perf_events
                 .iter()
                 .cloned()
@@ -349,7 +349,6 @@ impl<'a> App<'a> {
                 .collect::<Vec<_>>(),
         );
 
-        self.available_events = default_events;
         self.active_hw_event_id = 0;
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
         self.active_event = prof_event.clone();
@@ -881,12 +880,13 @@ impl<'a> App<'a> {
             .llc_data
             .values()
             .flat_map(|llc_data| {
-                let data = llc_data.event_data_immut(self.active_event.event_name());
                 let divisor = match self.active_event {
                     ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
                     _ => 1,
                 };
-                data.iter()
+                llc_data
+                    .event_data_immut(self.active_event.event_name())
+                    .iter()
                     .map(|&x| x / divisor as u64)
                     .collect::<Vec<u64>>()
             })
