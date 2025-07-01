@@ -516,8 +516,8 @@ impl<'a> App<'a> {
     fn reload_stats_client(&mut self) -> Result<()> {
         let stats_socket_path = self.config.stats_socket_path();
         let mut new_client = StatsClient::new();
-        new_client = new_client.connect()?;
         new_client = new_client.set_path(stats_socket_path);
+        new_client = new_client.connect()?;
         if let Some(client_ref) = &self.stats_client {
             let mut client = client_ref.blocking_lock();
             *client = new_client;
@@ -533,23 +533,23 @@ impl<'a> App<'a> {
             self.cpu_stat_tracker.write().unwrap().update()?;
         }
 
-        if self.state == AppState::Scheduler && !self.scheduler.is_empty() {
-            if let Some(stats_client_read) = self.stats_client.clone() {
+        if self.state == AppState::Scheduler {
+            if self.scheduler.is_empty() {
+                self.sched_stats_raw.clear();
+            } else if let Some(stats_client_read) = self.stats_client.clone() {
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
                     let mut client = stats_client_read.lock().await;
 
                     let result = client.request::<JsonValue>("stats", vec![]);
-                    match result {
-                        Ok(stats) => {
-                            tx.send(Action::SchedStats(
-                                serde_json::to_string_pretty(&stats).unwrap(),
-                            ))?;
-                        }
-                        Err(_) => {
-                            tx.send(Action::ReloadStatsClient)?;
-                        }
-                    }
+                    let action = match result {
+                        Ok(stats) => Action::SchedStats(
+                            serde_json::to_string_pretty(&stats)
+                                .expect("Unable to parse scheduler stats JSON."),
+                        ),
+                        Err(_) => Action::ReloadStatsClient,
+                    };
+                    tx.send(action)?;
                     Ok::<(), anyhow::Error>(())
                 });
             };
@@ -2757,7 +2757,10 @@ impl<'a> App<'a> {
                 self.stop_recording_trace(*ts)?;
             }
             Action::ReloadStatsClient => {
-                self.reload_stats_client()?;
+                tokio::task::block_in_place(|| {
+                    self.reload_stats_client()
+                        .expect("Failed to reload stats client");
+                });
             }
             Action::SaveConfig => {
                 self.on_save_config()?;
