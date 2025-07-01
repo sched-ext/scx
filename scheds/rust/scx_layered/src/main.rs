@@ -96,7 +96,6 @@ const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KI
 
 static NVML: OnceCell<Nvml> = OnceCell::new();
 
-#[inline]
 fn nvml() -> Result<&'static Nvml, NvmlError> {
     NVML.get_or_try_init(Nvml::init)
 }
@@ -928,6 +927,8 @@ struct Stats {
     prev_processing_dur: Duration,
 
     layer_slice_us: Vec<u64>,
+
+    gpu_tasks_affinitized: u64,
 }
 
 impl Stats {
@@ -945,7 +946,11 @@ impl Stats {
         layer_usages
     }
 
-    fn new(skel: &mut BpfSkel, proc_reader: &fb_procfs::ProcReader) -> Result<Self> {
+    fn new(
+        skel: &mut BpfSkel,
+        proc_reader: &fb_procfs::ProcReader,
+        gpu_task_affinitizer: &GpuTaskAffinitizer,
+    ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
@@ -972,6 +977,7 @@ impl Stats {
             prev_processing_dur: Default::default(),
 
             layer_slice_us: vec![0; nr_layers],
+            gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
         })
     }
 
@@ -981,6 +987,7 @@ impl Stats {
         proc_reader: &fb_procfs::ProcReader,
         now: Instant,
         cur_processing_dur: Duration,
+        gpu_task_affinitizer: &GpuTaskAffinitizer,
     ) -> Result<()> {
         let elapsed = now.duration_since(self.at);
         let elapsed_f64 = elapsed.as_secs_f64();
@@ -1062,6 +1069,7 @@ impl Stats {
             prev_processing_dur: cur_processing_dur,
 
             layer_slice_us,
+            gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
         };
         Ok(())
     }
@@ -1273,8 +1281,11 @@ struct NodeInfo {
     node_mask: nix::sched::CpuSet,
     _node_id: usize,
 }
+
 #[derive(Debug)]
-struct GpuTaskHandler {
+struct GpuTaskAffinitizer {
+    // This struct tracks information neccessary to numa affinitize
+    // gpu tasks periodically when needed.
     gpu_devs_to_node_info: HashMap<u32, NodeInfo>,
     gpu_pids_to_devs: HashMap<Pid, u32>,
     last_process_time: Option<Instant>,
@@ -1282,11 +1293,12 @@ struct GpuTaskHandler {
     pid_map: HashMap<Pid, Vec<Pid>>,
     poll_interval: Duration,
     enable: bool,
+    tasks_affinitized: u64,
 }
 
-impl GpuTaskHandler {
-    pub fn new(poll_interval: u64, enable: bool) -> GpuTaskHandler {
-        GpuTaskHandler {
+impl GpuTaskAffinitizer {
+    pub fn new(poll_interval: u64, enable: bool) -> GpuTaskAffinitizer {
+        GpuTaskAffinitizer {
             gpu_devs_to_node_info: HashMap::new(),
             gpu_pids_to_devs: HashMap::new(),
             last_process_time: None,
@@ -1294,52 +1306,56 @@ impl GpuTaskHandler {
             pid_map: HashMap::new(),
             poll_interval: Duration::from_secs(poll_interval),
             enable,
+            tasks_affinitized: 0,
         }
     }
-    fn find_one_cpu(&self, affinity: Vec<u64>) -> Result<u32, anyhow::Error> {
-        let mut cpu: u32 = 0;
-        for &mask in affinity.iter() {
+
+    fn find_one_cpu(&self, affinity: Vec<u64>) -> Result<u32> {
+        for (chunk, &mask) in affinity.iter().enumerate() {
             let mut inner_offset: u64 = 1;
             for _ in 0..64 {
                 if (mask & inner_offset) != 0 {
-                    return Ok(cpu);
+                    return Ok((64 * chunk + u64::trailing_zeros(inner_offset) as usize) as u32);
                 }
                 inner_offset = inner_offset << 1;
-                cpu += 1;
             }
         }
         anyhow::bail!("unable to get CPU from NVML bitmask");
     }
-    fn node_to_cpuset(&self, node: &scx_utils::Node) -> Result<CpuSet, anyhow::Error> {
+
+    fn node_to_cpuset(&self, node: &scx_utils::Node) -> Result<CpuSet> {
         let mut cpuset = CpuSet::new();
         for (cpu_id, _cpu) in &node.all_cpus {
-            cpuset.set(cpu_id.clone())?;
+            cpuset.set(*cpu_id)?;
         }
         Ok(cpuset)
     }
-    fn init_dev_node_map(&mut self, topo: Arc<Topology>) -> Result<(), anyhow::Error> {
+
+    fn init_dev_node_map(&mut self, topo: Arc<Topology>) -> Result<()> {
         let nvml = nvml()?;
         let device_count = nvml.device_count()?;
 
         for idx in 0..device_count {
             let dev = nvml.device_by_index(idx)?;
+            // For machines w/ up to 1024 CPUs.
             let cpu = dev.cpu_affinity(16)?;
             let ideal_cpu = self.find_one_cpu(cpu)?;
-            for (node_id, node) in topo.nodes.iter() {
-                if node.all_cpus.contains_key(&(ideal_cpu as usize)) {
-                    self.gpu_devs_to_node_info.insert(
-                        idx,
-                        NodeInfo {
-                            node_mask: self.node_to_cpuset(node)?,
-                            _node_id: *node_id,
-                        },
-                    );
-                }
+            if let Some(cpu) = topo.all_cpus.get(&(ideal_cpu as usize)) {
+                self.gpu_devs_to_node_info.insert(
+                    idx,
+                    NodeInfo {
+                        node_mask: self.node_to_cpuset(
+                            topo.nodes.get(&cpu.node_id).expect("topo missing node"),
+                        )?,
+                        _node_id: cpu.node_id,
+                    },
+                );
             }
         }
         Ok(())
     }
-    fn update_gpu_pids(&mut self) -> Result<(), anyhow::Error> {
+
+    fn update_gpu_pids(&mut self) -> Result<()> {
         let nvml = nvml()?;
         for i in 0..nvml.device_count()? {
             let device = nvml.device_by_index(i)?;
@@ -1351,14 +1367,10 @@ impl GpuTaskHandler {
                 self.gpu_pids_to_devs.insert(Pid::from_u32(proc.pid), i);
             }
         }
+        Ok(())
+    }
 
-        Ok(())
-    }
-    fn init_process_info(&mut self) -> Result<(), anyhow::Error> {
-        self.sys = System::new_all();
-        Ok(())
-    }
-    fn update_process_info(&mut self) -> Result<(), anyhow::Error> {
+    fn update_process_info(&mut self) -> Result<()> {
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -1372,6 +1384,7 @@ impl GpuTaskHandler {
         }
         Ok(())
     }
+
     fn get_child_pids_and_tids(&self, root_pid: Pid) -> HashSet<Pid> {
         let mut work = VecDeque::from([root_pid]);
         let mut pids_and_tids: HashSet<Pid> = HashSet::new();
@@ -1391,7 +1404,7 @@ impl GpuTaskHandler {
         pids_and_tids
     }
 
-    fn affinitize_gpu_pids(&mut self) -> Result<(), anyhow::Error> {
+    fn affinitize_gpu_pids(&mut self) -> Result<()> {
         if !self.enable {
             return Ok(());
         }
@@ -1405,7 +1418,10 @@ impl GpuTaskHandler {
                     nix::unistd::Pid::from_raw(child.as_u32() as i32),
                     &node_info.node_mask,
                 ) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // Increment the global counter for successful affinitization
+                        self.tasks_affinitized += 1;
+                    }
                     Err(_) => {
                         warn!(
                             "Error affinitizing gpu pid {} to node {:#?}",
@@ -1416,11 +1432,10 @@ impl GpuTaskHandler {
                 };
             }
         }
-
         Ok(())
     }
 
-    pub fn process(&mut self) {
+    pub fn maybe_affinitize(&mut self) {
         if !self.enable {
             return;
         }
@@ -1453,6 +1468,7 @@ impl GpuTaskHandler {
         self.last_process_time = Some(now);
         return;
     }
+
     pub fn init(&mut self, topo: Arc<Topology>) {
         if !self.enable || self.last_process_time.is_some() {
             return;
@@ -1464,12 +1480,7 @@ impl GpuTaskHandler {
                 error!("Error initializing gpu node dev map: {}", e);
             }
         };
-        match self.init_process_info() {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Error initializing process map: {}", e);
-            }
-        }
+        self.sys = System::new_all();
         return;
     }
 }
@@ -1495,7 +1506,7 @@ struct Scheduler<'a> {
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
-    gpu_task_handler: GpuTaskHandler,
+    gpu_task_handler: GpuTaskAffinitizer,
 }
 
 impl<'a> Scheduler<'a> {
@@ -2329,7 +2340,7 @@ impl<'a> Scheduler<'a> {
         let struct_ops = scx_ops_attach!(skel, layered)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         let mut gpu_task_handler =
-            GpuTaskHandler::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
+            GpuTaskAffinitizer::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
         gpu_task_handler.init(topo.clone());
         let sched = Self {
             struct_ops: Some(struct_ops),
@@ -2342,7 +2353,7 @@ impl<'a> Scheduler<'a> {
             layers,
             idle_qos_enabled,
 
-            sched_stats: Stats::new(&mut skel, &proc_reader)?,
+            sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
 
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
@@ -2927,10 +2938,11 @@ impl<'a> Scheduler<'a> {
             &self.proc_reader,
             started_at,
             self.processing_dur,
+            &self.gpu_task_handler,
         )?;
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
-        self.gpu_task_handler.process();
+        self.gpu_task_handler.maybe_affinitize();
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
@@ -2982,7 +2994,8 @@ impl<'a> Scheduler<'a> {
                         tid,
                         self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
                     );
-                    let stats = Stats::new(&mut self.skel, &self.proc_reader)?;
+                    let stats =
+                        Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
                     res_ch.send(StatsRes::Hello(stats))?;
                 }
                 Ok(StatsReq::Refresh(tid, mut stats)) => {
@@ -2998,7 +3011,13 @@ impl<'a> Scheduler<'a> {
                             (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
                     }
 
-                    stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
+                    stats.refresh(
+                        &mut self.skel,
+                        &self.proc_reader,
+                        now,
+                        self.processing_dur,
+                        &self.gpu_task_handler,
+                    )?;
                     let sys_stats =
                         self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
