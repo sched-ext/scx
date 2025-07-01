@@ -11,6 +11,7 @@ use crate::bpf_stats::BpfStats;
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::format_hz;
+use crate::get_default_events;
 use crate::read_file_string;
 use crate::sanitize_nbsp;
 use crate::AppState;
@@ -162,24 +163,23 @@ impl<'a> App<'a> {
         let active_event =
             ProfilingEvent::Perf(PerfEvent::new(subsystem.clone(), event.clone(), 0));
         let mut active_prof_events = BTreeMap::new();
-        let mut default_perf_events = PerfEvent::default_events();
-        let config_perf_events = PerfEvent::from_config(&config)?;
-        default_perf_events.extend(config_perf_events);
-        let default_events_str: Vec<&str> = default_perf_events
-            .iter()
-            .map(|event| {
-                if !event.alias.is_empty() {
-                    event.alias.as_str()
-                } else {
-                    event.event.as_str()
-                }
-            })
-            .collect();
 
-        let default_events: Vec<ProfilingEvent> = default_perf_events
+        let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let mut default_events = get_default_events(cpu_stat_tracker.clone());
+
+        let config_perf_events = PerfEvent::from_config(&config)?;
+
+        default_events.extend(
+            config_perf_events
+                .iter()
+                .cloned()
+                .map(ProfilingEvent::Perf)
+                .collect::<Vec<_>>(),
+        );
+
+        let default_events_str: Vec<&str> = default_events
             .iter()
-            .cloned()
-            .map(ProfilingEvent::Perf)
+            .map(|event| event.event_name())
             .collect();
 
         for cpu in topo.all_cpus.values() {
@@ -192,12 +192,12 @@ impl<'a> App<'a> {
             cpu_data.insert(cpu.id, data);
         }
         for llc in topo.all_llcs.values() {
-            let mut data = LlcData::new(llc.id, llc.node_id, max_cpu_events);
+            let mut data = LlcData::new(llc.id, llc.node_id, llc.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
             llc_data.insert(llc.id, data);
         }
         for node in topo.nodes.values() {
-            let mut data = NodeData::new(node.id, max_cpu_events);
+            let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
             node_data.insert(node.id, data);
         }
@@ -241,7 +241,7 @@ impl<'a> App<'a> {
             hw_pressure,
             locale: SystemLocale::default()?,
             stats_client,
-            cpu_stat_tracker: Arc::new(RwLock::new(CpuStatTracker::default())),
+            cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,
@@ -337,15 +337,18 @@ impl<'a> App<'a> {
     fn reset_prof_events(&mut self) -> Result<()> {
         self.stop_prof_events();
         self.kprobe_links.clear();
-        let mut default_events = PerfEvent::default_events();
-        let config_events = PerfEvent::from_config(&self.config).unwrap();
-        default_events.extend(config_events);
 
-        self.available_events = default_events
-            .iter()
-            .cloned()
-            .map(ProfilingEvent::Perf)
-            .collect();
+        self.available_events = get_default_events(self.cpu_stat_tracker.clone());
+        let config_perf_events = PerfEvent::from_config(&self.config)?;
+
+        self.available_events.extend(
+            config_perf_events
+                .iter()
+                .cloned()
+                .map(ProfilingEvent::Perf)
+                .collect::<Vec<_>>(),
+        );
+
         self.active_hw_event_id = 0;
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
         self.active_event = prof_event.clone();
@@ -403,6 +406,11 @@ impl<'a> App<'a> {
                     let mut k = k.clone();
                     k.cpu = cpu_id;
                     ProfilingEvent::Kprobe(k)
+                }
+                ProfilingEvent::CpuUtil(c) => {
+                    let mut c = c.clone();
+                    c.cpu = cpu_id;
+                    ProfilingEvent::CpuUtil(c)
                 }
             };
             self.active_prof_events.insert(cpu_id, event);
@@ -564,10 +572,7 @@ impl<'a> App<'a> {
         }
 
         for (cpu, event) in &mut self.active_prof_events {
-            let val = match event {
-                ProfilingEvent::Perf(p) => p.value(true)?,
-                ProfilingEvent::Kprobe(k) => k.value(true)?,
-            };
+            let val = event.value(true)?;
             let cpu_data = self
                 .cpu_data
                 .get_mut(cpu)
@@ -737,16 +742,21 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a llc.
     fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
-        let data = if self.llc_data.contains_key(&llc) {
-            let llc_data = self
-                .llc_data
-                .get(&llc)
-                .expect("LlcData should have been present");
-            llc_data.event_data_immut(self.active_event.event_name())
-        } else {
-            Vec::new()
+        let llc_data = self
+            .llc_data
+            .get(&llc)
+            .expect("LlcData should have been present");
+        let divisor = match self.active_event {
+            ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
+            _ => 1,
         };
-        let stats = VecStats::new(&data, 1, None);
+        let data = llc_data
+            .event_data_immut(self.active_event.event_name())
+            .iter()
+            .map(|x| x / divisor as u64)
+            .collect();
+
+        let stats = VecStats::new(&data, None);
 
         Sparkline::default()
             .data(&data)
@@ -785,16 +795,21 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a node.
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
-        let data = if self.node_data.contains_key(&node) {
-            let node_data = self
-                .node_data
-                .get(&node)
-                .expect("NodeData should have been present");
-            node_data.event_data_immut(self.active_event.event_name())
-        } else {
-            Vec::new()
+        let node_data = self
+            .node_data
+            .get(&node)
+            .expect("NodeData should have been present");
+        let divisor = match self.active_event {
+            ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
+            _ => 1,
         };
-        let stats = VecStats::new(&data, 1, None);
+        let data = node_data
+            .event_data_immut(self.active_event.event_name())
+            .iter()
+            .map(|x| x / divisor as u64)
+            .collect();
+
+        let stats = VecStats::new(&data, None);
 
         Sparkline::default()
             .data(&data)
@@ -864,9 +879,20 @@ impl<'a> App<'a> {
         let llc_iter = self
             .llc_data
             .values()
-            .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event_name()))
+            .flat_map(|llc_data| {
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
+                    _ => 1,
+                };
+                llc_data
+                    .event_data_immut(self.active_event.event_name())
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>()
+            })
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&llc_iter, 1, None);
+
+        let stats = VecStats::new(&llc_iter, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -984,9 +1010,20 @@ impl<'a> App<'a> {
         let node_iter = self
             .node_data
             .values()
-            .flat_map(|node_data| node_data.event_data_immut(self.active_event.event_name()))
+            .flat_map(|node_data| {
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
+                    _ => 1,
+                };
+                node_data
+                    .event_data_immut(self.active_event.event_name())
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>()
+            })
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&node_iter, 1, None);
+
+        let stats = VecStats::new(&node_iter, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -1111,7 +1148,7 @@ impl<'a> App<'a> {
             Vec::new()
         };
         // XXX: this should be max across all CPUs
-        let stats = VecStats::new(&data, 1, None);
+        let stats = VecStats::new(&data, None);
         Sparkline::default()
             .data(&data)
             .max(stats.max)
@@ -1213,7 +1250,7 @@ impl<'a> App<'a> {
             .map(|(dsq_id, dsq_data)| {
                 let values = dsq_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, 1, None);
+                let stats = VecStats::new(&values, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1247,9 +1284,17 @@ impl<'a> App<'a> {
             .iter()
             .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(event))
             .map(|(llc_id, llc_data)| {
-                let values = llc_data.event_data_immut(event);
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
+                    _ => 1,
+                };
+                let values = llc_data
+                    .event_data_immut(event)
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>();
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, 1, None);
+                let stats = VecStats::new(&values, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1261,9 +1306,17 @@ impl<'a> App<'a> {
             .iter()
             .filter(|(_node_id, node_data)| node_data.data.data.contains_key(event))
             .map(|(node_id, node_data)| {
-                let values = node_data.event_data_immut(event);
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
+                    _ => 1,
+                };
+                let values = node_data
+                    .event_data_immut(event)
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>();
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, 1, None);
+                let stats = VecStats::new(&values, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1371,7 +1424,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|dsq_data| dsq_data.event_data_immut(event))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, 1, None);
+        let stats = VecStats::new(&dsq_global_iter, None);
 
         let bar_block = Block::default()
             .title_top(
@@ -1488,7 +1541,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, 1, None);
+                    let stats = VecStats::new(&node_iter, None);
 
                     let node_block = Block::bordered()
                         .title_top(
@@ -1609,7 +1662,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, 1, None);
+                    let stats = VecStats::new(&node_iter, None);
 
                     let node_block = Block::bordered()
                         .title_top(

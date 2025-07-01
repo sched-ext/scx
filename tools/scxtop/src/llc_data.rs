@@ -13,13 +13,14 @@ use std::collections::VecDeque;
 pub struct LlcData {
     pub node: usize,
     pub llc: usize,
+    pub num_cpus: usize,
     pub data: EventData,
     pub max_data_size: usize,
 }
 
 impl LlcData {
     /// Creates a new NodeData.
-    pub fn new(llc: usize, node: usize, max_data_size: usize) -> LlcData {
+    pub fn new(llc: usize, node: usize, num_cpus: usize, max_data_size: usize) -> LlcData {
         let mut data = EventData::new(max_data_size);
         for event in PerfEvent::default_events() {
             data.event_data(&event.event);
@@ -28,6 +29,7 @@ impl LlcData {
         Self {
             llc,
             node,
+            num_cpus,
             data,
             max_data_size,
         }

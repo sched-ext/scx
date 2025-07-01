@@ -38,7 +38,8 @@ pub use llc_data::LlcData;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
 pub use profiling_events::{
-    available_kprobe_events, available_perf_events, KprobeEvent, PerfEvent, ProfilingEvent,
+    available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
+    ProfilingEvent,
 };
 pub use search::Search;
 pub use stats::StatAggregation;
