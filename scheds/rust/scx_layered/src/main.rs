@@ -637,8 +637,8 @@ struct Opts {
     enable_gpu_affinitize: bool,
 
     /// Interval at which to reaffinitize gpu tasks to numa nodes.
-    /// Defaults to 30s
-    #[clap(long, default_value = "30")]
+    /// Defaults to 900s
+    #[clap(long, default_value = "900")]
     gpu_affinitize_secs: u64,
 
     /// Enable match debug
