@@ -646,23 +646,7 @@ static bool is_wake_sync(const struct task_struct *current,
 	if (no_wake_sync)
 		return false;
 
-	if ((wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING))
-		return true;
-
-	/*
-	 * If the current task is a per-CPU kthread running on the wakee's
-	 * previous CPU, treat it as a synchronous wakeup.
-	 *
-	 * The assumption is that the wakee had queued work for the per-CPU
-	 * kthread, which has now finished, making the wakeup effectively
-	 * synchronous. An example of this behavior is seen in IO
-	 * completions.
-	 */
-	if (is_kthread(current) && (current->nr_cpus_allowed == 1) &&
-	    (prev_cpu == this_cpu))
-		return true;
-
-	return false;
+	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
 }
 
 /*
