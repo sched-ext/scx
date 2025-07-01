@@ -7,6 +7,7 @@ mod stats;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
@@ -21,7 +22,6 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
-use ::fb_procfs as procfs;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -33,10 +33,14 @@ use lazy_static::lazy_static;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use log::{debug, error};
+use nix::sched::CpuSet;
+use nvml_wrapper::error::NvmlError;
+use nvml_wrapper::Nvml;
+use once_cell::sync::OnceCell;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -62,6 +66,8 @@ use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
+use std::collections::VecDeque;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
@@ -87,6 +93,12 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
 const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
 
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
+
+static NVML: OnceCell<Nvml> = OnceCell::new();
+
+fn nvml() -> Result<&'static Nvml, NvmlError> {
+    NVML.get_or_try_init(Nvml::init)
+}
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
@@ -620,6 +632,15 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
+    /// Enable numa topology based gpu task affinitization.
+    #[clap(long, default_value = "false")]
+    enable_gpu_affinitize: bool,
+
+    /// Interval at which to reaffinitize gpu tasks to numa nodes.
+    /// Defaults to 900s
+    #[clap(long, default_value = "900")]
+    gpu_affinitize_secs: u64,
+
     /// Enable match debug
     /// This stores a mapping of task tid
     /// to layer id such that bpftool map dump
@@ -688,7 +709,7 @@ struct Opts {
     print_and_exit: bool,
 }
 
-fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
+fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
     reader
         .read_stat()
         .context("Failed to read procfs")?
@@ -696,10 +717,10 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
 }
 
-fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
+fn calc_util(curr: &fb_procfs::CpuStat, prev: &fb_procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {
         (
-            procfs::CpuStat {
+            fb_procfs::CpuStat {
                 user_usec: Some(curr_user),
                 nice_usec: Some(curr_nice),
                 system_usec: Some(curr_system),
@@ -710,7 +731,7 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 stolen_usec: Some(curr_stolen),
                 ..
             },
-            procfs::CpuStat {
+            fb_procfs::CpuStat {
                 user_usec: Some(prev_user),
                 nice_usec: Some(prev_nice),
                 system_usec: Some(prev_system),
@@ -897,7 +918,7 @@ struct Stats {
     prev_layer_usages: Vec<Vec<u64>>,
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
-    prev_total_cpu: procfs::CpuStat,
+    prev_total_cpu: fb_procfs::CpuStat,
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
@@ -906,6 +927,9 @@ struct Stats {
     prev_processing_dur: Duration,
 
     layer_slice_us: Vec<u64>,
+
+    gpu_tasks_affinitized: u64,
+    gpu_task_affinitization_ms: u64,
 }
 
 impl Stats {
@@ -923,7 +947,11 @@ impl Stats {
         layer_usages
     }
 
-    fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
+    fn new(
+        skel: &mut BpfSkel,
+        proc_reader: &fb_procfs::ProcReader,
+        gpu_task_affinitizer: &GpuTaskAffinitizer,
+    ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
@@ -950,15 +978,18 @@ impl Stats {
             prev_processing_dur: Default::default(),
 
             layer_slice_us: vec![0; nr_layers],
+            gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
+            gpu_task_affinitization_ms: gpu_task_affinitizer.last_task_affinitization_ms,
         })
     }
 
     fn refresh(
         &mut self,
         skel: &mut BpfSkel,
-        proc_reader: &procfs::ProcReader,
+        proc_reader: &fb_procfs::ProcReader,
         now: Instant,
         cur_processing_dur: Duration,
+        gpu_task_affinitizer: &GpuTaskAffinitizer,
     ) -> Result<()> {
         let elapsed = now.duration_since(self.at);
         let elapsed_f64 = elapsed.as_secs_f64();
@@ -1040,6 +1071,8 @@ impl Stats {
             prev_processing_dur: cur_processing_dur,
 
             layer_slice_us,
+            gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
+            gpu_task_affinitization_ms: gpu_task_affinitizer.last_task_affinitization_ms,
         };
         Ok(())
     }
@@ -1246,6 +1279,218 @@ impl Layer {
         Ok(nr_new_cpus)
     }
 }
+#[derive(Debug, Clone)]
+struct NodeInfo {
+    node_mask: nix::sched::CpuSet,
+    _node_id: usize,
+}
+
+#[derive(Debug)]
+struct GpuTaskAffinitizer {
+    // This struct tracks information neccessary to numa affinitize
+    // gpu tasks periodically when needed.
+    gpu_devs_to_node_info: HashMap<u32, NodeInfo>,
+    gpu_pids_to_devs: HashMap<Pid, u32>,
+    last_process_time: Option<Instant>,
+    sys: System,
+    pid_map: HashMap<Pid, Vec<Pid>>,
+    poll_interval: Duration,
+    enable: bool,
+    tasks_affinitized: u64,
+    last_task_affinitization_ms: u64,
+}
+
+impl GpuTaskAffinitizer {
+    pub fn new(poll_interval: u64, enable: bool) -> GpuTaskAffinitizer {
+        GpuTaskAffinitizer {
+            gpu_devs_to_node_info: HashMap::new(),
+            gpu_pids_to_devs: HashMap::new(),
+            last_process_time: None,
+            sys: System::default(),
+            pid_map: HashMap::new(),
+            poll_interval: Duration::from_secs(poll_interval),
+            enable,
+            tasks_affinitized: 0,
+            last_task_affinitization_ms: 0,
+        }
+    }
+
+    fn find_one_cpu(&self, affinity: Vec<u64>) -> Result<u32> {
+        for (chunk, &mask) in affinity.iter().enumerate() {
+            let mut inner_offset: u64 = 1;
+            for _ in 0..64 {
+                if (mask & inner_offset) != 0 {
+                    return Ok((64 * chunk + u64::trailing_zeros(inner_offset) as usize) as u32);
+                }
+                inner_offset = inner_offset << 1;
+            }
+        }
+        anyhow::bail!("unable to get CPU from NVML bitmask");
+    }
+
+    fn node_to_cpuset(&self, node: &scx_utils::Node) -> Result<CpuSet> {
+        let mut cpuset = CpuSet::new();
+        for (cpu_id, _cpu) in &node.all_cpus {
+            cpuset.set(*cpu_id)?;
+        }
+        Ok(cpuset)
+    }
+
+    fn init_dev_node_map(&mut self, topo: Arc<Topology>) -> Result<()> {
+        let nvml = nvml()?;
+        let device_count = nvml.device_count()?;
+
+        for idx in 0..device_count {
+            let dev = nvml.device_by_index(idx)?;
+            // For machines w/ up to 1024 CPUs.
+            let cpu = dev.cpu_affinity(16)?;
+            let ideal_cpu = self.find_one_cpu(cpu)?;
+            if let Some(cpu) = topo.all_cpus.get(&(ideal_cpu as usize)) {
+                self.gpu_devs_to_node_info.insert(
+                    idx,
+                    NodeInfo {
+                        node_mask: self.node_to_cpuset(
+                            topo.nodes.get(&cpu.node_id).expect("topo missing node"),
+                        )?,
+                        _node_id: cpu.node_id,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn update_gpu_pids(&mut self) -> Result<()> {
+        let nvml = nvml()?;
+        for i in 0..nvml.device_count()? {
+            let device = nvml.device_by_index(i)?;
+            for proc in device
+                .running_compute_processes()?
+                .into_iter()
+                .chain(device.running_graphics_processes()?.into_iter())
+            {
+                self.gpu_pids_to_devs.insert(Pid::from_u32(proc.pid), i);
+            }
+        }
+        Ok(())
+    }
+
+    fn update_process_info(&mut self) -> Result<()> {
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        self.pid_map.clear();
+        for (pid, proc_) in self.sys.processes() {
+            if let Some(ppid) = proc_.parent() {
+                self.pid_map.entry(ppid).or_default().push(*pid);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_child_pids_and_tids(&self, root_pid: Pid) -> HashSet<Pid> {
+        let mut work = VecDeque::from([root_pid]);
+        let mut pids_and_tids: HashSet<Pid> = HashSet::new();
+
+        while let Some(pid) = work.pop_front() {
+            if pids_and_tids.insert(pid) {
+                if let Some(kids) = self.pid_map.get(&pid) {
+                    work.extend(kids);
+                }
+                if let Some(proc_) = self.sys.process(pid) {
+                    if let Some(tasks) = proc_.tasks() {
+                        pids_and_tids.extend(tasks.iter().copied());
+                    }
+                }
+            }
+        }
+        pids_and_tids
+    }
+
+    fn affinitize_gpu_pids(&mut self) -> Result<()> {
+        if !self.enable {
+            return Ok(());
+        }
+        for (pid, dev) in &self.gpu_pids_to_devs {
+            let node_info = self
+                .gpu_devs_to_node_info
+                .get(&dev)
+                .expect("Unable to get gpu pid node mask");
+            for child in self.get_child_pids_and_tids(*pid) {
+                match nix::sched::sched_setaffinity(
+                    nix::unistd::Pid::from_raw(child.as_u32() as i32),
+                    &node_info.node_mask,
+                ) {
+                    Ok(_) => {
+                        // Increment the global counter for successful affinitization
+                        self.tasks_affinitized += 1;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Error affinitizing gpu pid {} to node {:#?}",
+                            child.as_u32(),
+                            node_info
+                        );
+                    }
+                };
+            }
+        }
+        Ok(())
+    }
+
+    pub fn maybe_affinitize(&mut self) {
+        if !self.enable {
+            return;
+        }
+        let now = Instant::now();
+
+        if let Some(last_process_time) = self.last_process_time {
+            if (now - last_process_time) < self.poll_interval {
+                return;
+            }
+        }
+
+        match self.update_gpu_pids() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error updating GPU PIDs: {}", e);
+            }
+        };
+        match self.update_process_info() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error updating process info to affinitize GPU PIDs: {}", e);
+            }
+        };
+        match self.affinitize_gpu_pids() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error updating GPU PIDs: {}", e);
+            }
+        };
+        self.last_process_time = Some(now);
+        self.last_task_affinitization_ms = (Instant::now() - now).as_millis() as u64;
+
+        return;
+    }
+
+    pub fn init(&mut self, topo: Arc<Topology>) {
+        if !self.enable || self.last_process_time.is_some() {
+            return;
+        }
+
+        match self.init_dev_node_map(topo) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error initializing gpu node dev map: {}", e);
+            }
+        };
+        self.sys = System::new_all();
+        return;
+    }
+}
 
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
@@ -1259,7 +1504,7 @@ struct Scheduler<'a> {
     layers: Vec<Layer>,
     idle_qos_enabled: bool,
 
-    proc_reader: procfs::ProcReader,
+    proc_reader: fb_procfs::ProcReader,
     sched_stats: Stats,
 
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
@@ -1268,6 +1513,7 @@ struct Scheduler<'a> {
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
+    gpu_task_handler: GpuTaskAffinitizer,
 }
 
 impl<'a> Scheduler<'a> {
@@ -2069,7 +2315,7 @@ impl<'a> Scheduler<'a> {
         Self::init_llc_prox_map(&mut skel, &topo)?;
 
         // Other stuff.
-        let proc_reader = procfs::ProcReader::new();
+        let proc_reader = fb_procfs::ProcReader::new();
 
         // Handle setup if layered is running in a pid namespace.
         let input = ProgramInput {
@@ -2100,7 +2346,9 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
-
+        let mut gpu_task_handler =
+            GpuTaskAffinitizer::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
+        gpu_task_handler.init(topo.clone());
         let sched = Self {
             struct_ops: Some(struct_ops),
             layer_specs,
@@ -2112,7 +2360,7 @@ impl<'a> Scheduler<'a> {
             layers,
             idle_qos_enabled,
 
-            sched_stats: Stats::new(&mut skel, &proc_reader)?,
+            sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
 
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
@@ -2123,6 +2371,7 @@ impl<'a> Scheduler<'a> {
             topo,
             netdevs,
             stats_server,
+            gpu_task_handler,
         };
 
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
@@ -2696,9 +2945,11 @@ impl<'a> Scheduler<'a> {
             &self.proc_reader,
             started_at,
             self.processing_dur,
+            &self.gpu_task_handler,
         )?;
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
+        self.gpu_task_handler.maybe_affinitize();
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
@@ -2750,7 +3001,8 @@ impl<'a> Scheduler<'a> {
                         tid,
                         self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
                     );
-                    let stats = Stats::new(&mut self.skel, &self.proc_reader)?;
+                    let stats =
+                        Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
                     res_ch.send(StatsRes::Hello(stats))?;
                 }
                 Ok(StatsReq::Refresh(tid, mut stats)) => {
@@ -2766,7 +3018,13 @@ impl<'a> Scheduler<'a> {
                             (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
                     }
 
-                    stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
+                    stats.refresh(
+                        &mut self.skel,
+                        &self.proc_reader,
+                        now,
+                        self.processing_dur,
+                        &self.gpu_task_handler,
+                    )?;
                     let sys_stats =
                         self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
