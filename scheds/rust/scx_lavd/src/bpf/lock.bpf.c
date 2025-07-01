@@ -94,6 +94,120 @@ static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
  *   time slice, we assume futex_wake() is skipped.
  * - We do not distinguish futex user addresses to lower the tracing burden.
  *
+ * We trace either trace entries or tracepoint entries. Ftrace is low-overhead,
+ * but it does not provide stability, as function entries can disappear if
+ * functions are inlined according to specific kernel configurations. Hence,
+ * the BPF offers both ftrace and tracepoint, allowing userspace to make a
+ * decision based on availability.
+ */
+
+/*
+ * We trace the folloing futex calls:
+ * - int __futex_wait(u32 *uaddr, unsigned int flags, u32 val, struct hrtimer_sleeper *to, u32 bitset)
+ * - int futex_wait_multiple(struct futex_vector *vs, unsigned int count, struct hrtimer_sleeper *to)
+ * - int futex_wait_requeue_pi(u32 *uaddr, unsigned int flags, u32 val, ktime_t *abs_time, u32 bitset, u32 *uaddr2)
+ *
+ * - int futex_wake(u32 *uaddr, unsigned int flags, int nr_wake, u32 bitset)
+ * - int futex_wake_op(u32 *uaddr1, unsigned int flags, u32 *uaddr2, int nr_wake, int nr_wake2, int op)
+ *
+ * - int futex_lock_pi(u32 *uaddr, unsigned int flags, ktime_t *time, int trylock)
+ * - int futex_unlock_pi(u32 *uaddr, unsigned int flags)
+ */
+struct futex_vector;
+struct hrtimer_sleeper;
+
+SEC("?fexit/__futex_wait")
+int BPF_PROG(fexit___futex_wait, u32 *uaddr, unsigned int flags, u32 val, struct hrtimer_sleeper *to, u32 bitset, int ret)
+{
+	if (ret == 0) {
+		/*
+		 * A futex is acquired.
+		 */
+		inc_futex_boost();
+	}
+	return 0;
+}
+
+SEC("?fexit/futex_wait_multiple")
+int BPF_PROG(fexit_futex_wait_multiple, struct futex_vector *vs, unsigned int count, struct hrtimer_sleeper *to, int ret)
+{
+	if (ret == 0) {
+		/*
+		 * All of futexes are acquired.
+		 *
+		 * We don't want to traverse futex_vector here since that's
+		 * a userspace address. Hence we just pass an invalid adderess
+		 * to consider all futex_waitv() calls are for the same address.
+		 * Thit is a conservative approximation boosting less.
+		 */
+		inc_futex_boost();
+	}
+	return 0;
+}
+
+SEC("?fexit/futex_wait_requeue_pi")
+int BPF_PROG(fexit_futex_wait_requeue_pi, u32 *uaddr, unsigned int flags, u32 val, ktime_t *abs_time, u32 bitset, u32 *uaddr2, int ret)
+{
+	if (ret == 0) {
+		/*
+		 * A futex is acquired.
+		 */
+		inc_futex_boost();
+	}
+	return 0;
+}
+
+SEC("?fexit/futex_wake")
+int BPF_PROG(fexit_futex_wake, u32 *uaddr, unsigned int flags, int nr_wake, u32 bitset, int ret)
+{
+	if (ret >= 0) {
+		/*
+		 * A futex is released.
+		 */
+		dec_futex_boost();
+	}
+	return 0;
+}
+
+
+SEC("?fexit/futex_wake_op")
+int BPF_PROG(fexit_futex_wake_op, u32 *uaddr1, unsigned int flags, u32 *uaddr2, int nr_wake, int nr_wake2, int op, int ret)
+{
+	if (ret >= 0) {
+		/*
+		 * A futex is released.
+		 */
+		dec_futex_boost();
+	}
+	return 0;
+}
+
+SEC("?fexit/futex_lock_pi")
+int BPF_PROG(fexit_futex_lock_pi, u32 *uaddr, unsigned int flags, ktime_t *time, int trylock, int ret)
+{
+	if (ret == 0) {
+		/*
+		 * A futex is acquired.
+		 */
+		inc_futex_boost();
+	}
+	return 0;
+}
+
+SEC("?fexit/futex_unlock_pi")
+int BPF_PROG(fexit_futex_unlock_pi, u32 *uaddr, unsigned int flags, int ret)
+{
+	if (ret == 0) {
+		/*
+		 * A futex is released.
+		 */
+		dec_futex_boost();
+	}
+	return 0;
+}
+
+
+/*
  * We trace the folloing futex tracepoints:
  * - sys_exit_futex
  * - sys_exit_futex_wait

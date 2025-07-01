@@ -243,6 +243,25 @@ pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result
     Ok(false)
 }
 
+pub fn cond_kprobes_enable<T>(kprobes: Vec<(&str, &OpenProgramImpl<T>)>) -> Result<bool> {
+    // Check if all the symbols exist.
+    for (sym, _) in kprobes.iter() {
+        if in_kallsyms(sym)? == false {
+            warn!("symbol {} is missing, kprobe not loaded", sym);
+            return Ok(false);
+        }
+    }
+
+    // Enable all the tracepoints.
+    for (_, ptr) in kprobes.iter() {
+        unsafe {
+            bpf_program__set_autoload(ptr.as_libbpf_object().as_ptr(), true);
+        }
+    }
+
+    Ok(true)
+}
+
 pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {
     if tracepoint_exists(tracepoint)? {
         unsafe {
@@ -258,6 +277,26 @@ pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>
 
     Ok(false)
 }
+
+pub fn cond_tracepoints_enable<T>(tracepoints: Vec<(&str, &OpenProgramImpl<T>)>) -> Result<bool> {
+    // Check if all the tracepoints exist.
+    for (tp, _) in tracepoints.iter() {
+        if tracepoint_exists(tp)? == false {
+            warn!("tradepoint {} is missing, tracepoint not loaded", tp);
+            return Ok(false);
+        }
+    }
+
+    // Enable all the tracepoints.
+    for (_, ptr) in tracepoints.iter() {
+        unsafe {
+            bpf_program__set_autoload(ptr.as_libbpf_object().as_ptr(), true);
+        }
+    }
+
+    Ok(true)
+}
+
 pub fn is_sched_ext_enabled() -> io::Result<bool> {
     let content = std::fs::read_to_string("/sys/kernel/sched_ext/state")?;
 
