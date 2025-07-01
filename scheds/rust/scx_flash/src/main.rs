@@ -14,6 +14,8 @@ mod stats;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fmt::Write;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -175,6 +177,19 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "0")]
     max_avg_nvcsw: u64,
 
+    /// Utilization percentage to consider a CPU as busy (-1 = auto).
+    ///
+    /// A value close to 0 forces tasks to migrate quickier, increasing work conservation and
+    /// potentially system responsiveness.
+    ///
+    /// A value close to 100 makes tasks more sticky to their CPU, increasing cache-sensivite and
+    /// server-type workloads.
+    ///
+    /// In auto mode (-1) the scheduler autoomatically tries to determine the optimal value in
+    /// function of the current workload.
+    #[clap(short = 'C', long, allow_hyphen_values = true, default_value = "-1")]
+    cpu_busy_thresh: i64,
+
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -198,21 +213,6 @@ struct Opts {
     #[clap(short = 'T', long, action = clap::ArgAction::SetTrue)]
     tickless: bool,
 
-    /// Use per-CPU runqueues only.
-    ///
-    /// Force using only per-CPU runqueues to reduce task migrations. This can improve certain
-    /// cache-sensitive workloads at the cost of making the system less responsive.
-    #[clap(short = 'C', long, action = clap::ArgAction::SetTrue)]
-    cpu_runqueue: bool,
-
-    /// Use per-node runqueues only.
-    ///
-    /// Force using only per-node runqueues to maximize work conservation. This can improve
-    /// system responsiveness under saturation conditions at the cost of reducing performance for
-    /// cache-sensitive workloads.
-    #[clap(short = 'N', long, action = clap::ArgAction::SetTrue)]
-    node_runqueue: bool,
-
     /// Enable round-robin scheduling.
     ///
     /// Each task is given a fixed time slice (defined by --slice-us-max) and run in a cyclic, fair
@@ -222,12 +222,20 @@ struct Opts {
 
     /// Enable per-CPU tasks prioritization.
     ///
-    /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
-    /// can't be migrated when their only usable CPU is busy). Enabling this option can introduce
-    /// unfairness and potentially trigger stalls, but it can improve performance of server-type
-    /// workloads (such as large parallel builds).
+    /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
+    /// de-prioritized, since they can't be migrated when their only usable CPU is busy. This
+    /// improves fairness, but it can also reduce the overall system throughput.
+    ///
+    /// This option is recommended for gaming or latency-sensitive workloads.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
+
+    /// Enable CPU stickiness.
+    ///
+    /// Enabling this option can reduce the amount of task migrations, but it can also make
+    /// performance less consistent on systems with hybrid cores.
+    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
+    sticky_cpu: bool,
 
     /// Native tasks priorities.
     ///
@@ -316,6 +324,13 @@ struct Opts {
     help_stats: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CpuTimes {
+    user: u64,
+    nice: u64,
+    total: u64,
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -390,6 +405,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
+        skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;
@@ -399,20 +415,8 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
+        skel.maps.rodata_data.cpu_busy_thresh = opts.cpu_busy_thresh;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
-
-        if !opts.cpu_runqueue && !opts.node_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = true;
-            skel.maps.rodata_data.node_dsq = true;
-        } else if opts.cpu_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = true;
-            skel.maps.rodata_data.node_dsq = false;
-        } else if opts.node_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = false;
-            skel.maps.rodata_data.node_dsq = true;
-        } else {
-            bail!("--cpu-runqueue and --node-runqueue are mutually exclusive");
-        }
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
@@ -747,13 +751,68 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
+    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
+        let total_diff = curr.total.saturating_sub(prev.total);
+        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
+
+        if total_diff > 0 {
+            let user_pct = 100.0 * (user_diff as f64) / (total_diff as f64);
+            Some((user_pct * 1000.0).round() as u64)
+        } else {
+            None
+        }
+    }
+
+    fn read_cpu_times() -> Option<CpuTimes> {
+        let file = File::open("/proc/stat").ok()?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.starts_with("cpu ") {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 5 {
+                    return None;
+                }
+
+                let user: u64 = fields[1].parse().ok()?;
+                let nice: u64 = fields[2].parse().ok()?;
+
+                // Sum the first 8 fields as total time, including idle, system, etc.
+                let total: u64 = fields
+                    .iter()
+                    .skip(1)
+                    .take(8)
+                    .filter_map(|v| v.parse::<u64>().ok())
+                    .sum();
+
+                return Some(CpuTimes { user, nice, total });
+            }
+        }
+
+        None
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let (res_ch, req_ch) = self.stats_server.channels();
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if self.refresh_sched_domain() {
                 self.user_restart = true;
                 break;
             }
+
+            if self.opts.cpu_busy_thresh < 0 {
+                if let Some(curr_cputime) = Self::read_cpu_times() {
+                    if let Some(cpu_util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
+                    {
+                        self.skel.maps.bss_data.cpu_util = cpu_util;
+                    }
+                    prev_cputime = curr_cputime;
+                }
+            }
+
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
