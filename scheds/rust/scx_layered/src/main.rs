@@ -1072,7 +1072,7 @@ impl Stats {
 
             layer_slice_us,
             gpu_tasks_affinitized: gpu_task_affinitizer.tasks_affinitized,
-            gpu_task_affinitization_ms: self.gpu_task_affinitization_ms,
+            gpu_task_affinitization_ms: gpu_task_affinitizer.gpu_task_affinitization_ms,
         };
         Ok(())
     }
