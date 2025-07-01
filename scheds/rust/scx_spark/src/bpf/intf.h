@@ -77,6 +77,8 @@ struct workload_info {
 	u32 workload_type;
 	u64 detection_time;
 	u64 gpu_usage_count;
+	u64 last_gpu_access;
+	u64 last_cpu_access;
 	u64 cpu_usage_time;
 	u64 io_operations;
 	u64 memory_allocations;

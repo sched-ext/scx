@@ -12,6 +12,11 @@ char _license[] SEC("license") = "GPL";
 	if (debug)					\
 		bpf_printk(_fmt, ##__VA_ARGS__);	\
 } while(0)
+#define SHARED_DSQ_ID 0
+#define BIG_DSQ_ID 1
+#define LITTLE_DSQ_ID 2
+#define TURBO_DSQ_ID 3
+#define L3_DSQ_ID 4
 
  /* Report additional debugging information */
 const volatile bool debug;
@@ -171,13 +176,6 @@ private(BPFLAND) struct bpf_cpumask __kptr *turbo_cpumask;
  */
 const volatile u32 dsq_mode = 0;
 
-
-#define SHARED_DSQ_ID 0
-#define BIG_DSQ_ID 1
-#define LITTLE_DSQ_ID 2
-#define TURBO_DSQ_ID 3
-#define L3_DSQ_ID 4
-
 /*
  * Current global vruntime.
  */
@@ -298,39 +296,6 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
 }
 
-/*
- * Save current task's PID/TID to GPU maps when GPU operations are detected.
- * Both entire processes using the GPU and single threads using the GPU will be tracked.
- */
-int set_gpu_task() {
-	struct task_struct *current;
-
-	if (!enable_gpu_support)
-		return 0;
-
-	current = (void *)bpf_get_current_task_btf();
-	if (!current)
-		return -ENOENT;
-	struct task_ctx *task_ctx = try_lookup_task_ctx(current);
-	if (!task_ctx)
-		return -ENOENT;
-	task_ctx->is_gpu_task = true;
-	task_ctx->gpu_usage_count++;
-	task_ctx->last_gpu_access = scx_bpf_now();
-	
-	
-	return 0;
-}
-
-
-/*
- * Check if a task is using GPU.
- */
-static bool is_gpu_task(const struct task_struct *p)
-{
-	
-	return is_gpu;
-}
 
 /*
  * Per-task local storage.
@@ -385,25 +350,6 @@ struct task_ctx {
 
 	struct workload_info workload_info;
 };
-
-/*
- * GPU detection kprobes.
- */
-
-SEC("kprobe/nvidia_poll")
-int kprobe_nvidia_poll() {
-	return set_gpu_task();
-}
-
-SEC("kprobe/nvidia_open")
-int kprobe_nvidia_open() {
-	return set_gpu_task();
-}
-
-SEC("kprobe/nvidia_mmap")
-int kprobe_nvidia_mmap() {
-	return set_gpu_task();
-}
 
 /*
  * ML Framework detection kprobes.
@@ -502,6 +448,49 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
 }
+
+/*
+ * Save current task's PID/TID to GPU maps when GPU operations are detected.
+ * Both entire processes using the GPU and single threads using the GPU will be tracked.
+ */
+int set_gpu_task() {
+	struct task_struct *current;
+
+	if (!enable_gpu_support)
+		return 0;
+
+	current = bpf_get_current_task_btf();
+	if (!current)
+		return -ENOENT;
+	struct task_ctx *task_ctx = try_lookup_task_ctx(current);
+	if (!task_ctx)
+		return -ENOENT;
+	task_ctx->is_gpu_task = true;
+	task_ctx->workload_info.gpu_usage_count++;
+	task_ctx->workload_info.last_gpu_access = scx_bpf_now();
+	
+	return 0;
+}
+
+/*
+ * GPU detection kprobes.
+ */
+
+SEC("kprobe/nvidia_poll")
+int kprobe_nvidia_poll() {
+	return set_gpu_task();
+}
+
+SEC("kprobe/nvidia_open")
+int kprobe_nvidia_open() {
+	return set_gpu_task();
+}
+
+SEC("kprobe/nvidia_mmap")
+int kprobe_nvidia_mmap() {
+	return set_gpu_task();
+}
+
 
 /*
  * Return true if the target task @p is a kernel thread.
@@ -797,6 +786,7 @@ static s32 pick_idle_cpu_gpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags
 {
 	const struct cpumask *big_mask;
 	const struct cpumask *turbo_mask;
+	const struct cpumask *big_l3_mask;
 	s32 cpu = -1; //If no idle CPU is found, go down the regular path for finding an idle CPU
 
 	big_mask = cast_mask(big_cpumask);
@@ -819,7 +809,7 @@ if(turbo_mask){
 		*is_idle = true;
 		return prev_cpu;
 	}
-//Select any turbo CPU :
+//Select any turbo CPU (all turbo CPUs are L3 cache siblings)
 	cpu = find_idle_cpu_in_mask(turbo_mask, 0);
 	if(cpu >= 0){
 		*is_idle = true;
@@ -834,8 +824,18 @@ if(turbo_mask){
 		return prev_cpu;
 	}
 
-	//All big CPUs are L3 cache siblings
+	//Try to use big idle CPUs that are L3 cache siblings
 	if (big_mask) {
+		struct task_ctx *tctx = try_lookup_task_ctx(p);
+		if (tctx) {
+			bpf_cpumask_and(big_l3_mask, big_mask, cast_mask(tctx->l3_cpumask));
+			cpu = find_idle_cpu_in_mask(big_l3_mask, 0);
+			if(cpu >= 0){
+				*is_idle = true;
+				return cpu;
+			}
+		}
+		//Otherwise, try using any big CPU
 		cpu = find_idle_cpu_in_mask(big_mask, 0);
 		if(cpu >= 0){
 			*is_idle = true;
@@ -1228,9 +1228,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (try_direct_dispatch(p, tctx, prev_cpu, slice, enq_flags))
 		return;
 
-	dsq_id = get_dsq_id(prev_cpu);
-	scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
-	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+if(stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1){
+	scx_bpf_dsq_insert_vtime(p, prev_cpu, slice, 0, enq_flags);
+	goto workload_statistics;
+}
 
 	/*
 	 * Track workload type dispatches.
@@ -1239,8 +1240,21 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		if (tctx->is_gpu_task) {
 			__sync_fetch_and_add(&nr_gpu_task_dispatches, 1);
 		}
-		
-		switch (tctx->workload_type) {
+
+		if(aggressive_gpu_tasks) {
+			scx_bpf_dsq_insert_vtime(p, TURBO_DSQ_ID, slice, deadline, enq_flags); //Can I make this fallback to big if turbos are taking too long?
+		}
+		goto workload_statistics;
+	}
+
+
+	dsq_id = get_dsq_id(prev_cpu);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
+	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+
+
+workload_statistics: 
+		switch (tctx->workload_info.workload_type) {
 		case WORKLOAD_TYPE_INFERENCE:
 			__sync_fetch_and_add(&nr_inference_dispatches, 1);
 			break;
@@ -1260,7 +1274,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 			__sync_fetch_and_add(&nr_model_loading_dispatches, 1);
 			break;
 		}
-	}
+	
 
 	/*
 	 * If there are idle CPUs in the system try to proactively wake up
@@ -1270,6 +1284,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!kick_idle_cpu(p, tctx, prev_cpu))
 		kick_idle_cpu(p, tctx, prev_cpu);
 }
+
 
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
@@ -1346,28 +1361,25 @@ static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
  */
 static void update_workload_stats(struct task_struct *p, struct task_ctx *tctx, u64 now)
 {
-	if (!enable_gpu_support)
-		return;
-		
 	/* Update CPU usage time */
-	if (tctx->last_cpu_access > 0) {
-		tctx->cpu_usage_time += now - tctx->last_cpu_access;
+	if (tctx->workload_info.last_cpu_access > 0) {
+		tctx->workload_info.cpu_usage_time += now - tctx->workload_info.last_cpu_access;
 	}
-	tctx->last_cpu_access = now;
+	tctx->workload_info.last_cpu_access = now;
 	
 	/* Update workload type based on behavior patterns */
-	if (tctx->workload_type == WORKLOAD_TYPE_UNKNOWN) {
+	if (tctx->workload_info.workload_type == WORKLOAD_TYPE_UNKNOWN) {
 		/* High GPU usage might indicate training */
-		if (tctx->gpu_usage_count > 100) {
-			tctx->workload_type = WORKLOAD_TYPE_TRAINING;
+		if (tctx->workload_info.gpu_usage_count > 100) {
+			tctx->workload_info.workload_type = WORKLOAD_TYPE_TRAINING;
 		}
 		/* High I/O operations might indicate data loading */
-		else if (tctx->io_operations > 50) {
-			tctx->workload_type = WORKLOAD_TYPE_DATA_LOADING;
+		else if (tctx->workload_info.io_operations > 50) {
+			tctx->workload_info.workload_type = WORKLOAD_TYPE_DATA_LOADING;
 		}
 		/* High memory allocations might indicate model loading */
-		else if (tctx->memory_allocations > 20) {
-			tctx->workload_type = WORKLOAD_TYPE_MODEL_LOADING;
+		else if (tctx->workload_info.memory_allocations > 20) {
+			tctx->workload_info.workload_type = WORKLOAD_TYPE_MODEL_LOADING;
 		}
 	}
 }
@@ -1775,7 +1787,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	 */
 	if(dsq_mode == DSQ_MODE_CPU) {
 		/* Create per-CPU DSQs */
-		bpf_for(cpu, 0, nr_cpu_ids) {
+		bpf_for(cpu, L3_DSQ_ID + 1, L3_DSQ_ID + 1 + nr_cpu_ids) {
 			err = scx_bpf_create_dsq((u64) cpu, -1);
 			if (err) {
 				scx_bpf_error("failed to create per-CPU DSQ %llu for CPU %d: %d", 
@@ -1792,8 +1804,29 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		}
 	}
 	
-	err = scx_bpf_create_dsq(SHARED_DSQ_ID, -1);
+	err = scx_bpf_create_dsq(BIG_DSQ_ID, -1);
+	if (err) {
+		scx_bpf_error("failed to create big DSQ %d: %d", BIG_DSQ_ID, err);
+		return err;
+	}
+
+	err = scx_bpf_create_dsq(LITTLE_DSQ_ID, -1);
+	if (err) {
+		scx_bpf_error("failed to create little DSQ %d: %d", LITTLE_DSQ_ID, err);
+		return err;
+	}
 	
+	err = scx_bpf_create_dsq(TURBO_DSQ_ID, -1);
+	if (err) {
+		scx_bpf_error("failed to create turbo DSQ %d: %d", TURBO_DSQ_ID, err);
+		return err;
+	}
+
+	err = scx_bpf_create_dsq(L3_DSQ_ID, -1);
+	if (err) {
+		scx_bpf_error("failed to create L3 DSQ %d: %d", L3_DSQ_ID, err);
+		return err;
+	}
 
 	/* Initialize the primary scheduling domain */
 	err = init_cpumask(&primary_cpumask);
@@ -1833,6 +1866,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 			return err;
 		}
 	}
+
 
 	return 0;
 }
