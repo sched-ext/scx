@@ -10,6 +10,20 @@
 
 #include <lib/minheap.h>
 
+static __always_inline void
+scx_minheap_swap_elems(struct scx_minheap_elem __arena *a __arg_arena,
+                       struct scx_minheap_elem __arena *b __arg_arena)
+{
+        u64 tmp_elem = a->elem;
+        u64 tmp_weight = a->weight;
+
+        a->elem = b->elem;
+        a->weight = b->weight;
+
+        b->elem = tmp_elem;
+        b->weight = tmp_weight;
+}
+
 __weak
 u64 scx_minheap_alloc_internal(size_t capacity)
 {
@@ -39,7 +53,6 @@ __weak
 int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;
-	u64 elem, weight;
 	int child, next;
 	int off, ind;
 
@@ -65,14 +78,7 @@ int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena)
 		if (next == ind)
 			break;
 
-		elem = heap->helems[next].elem;
-		weight = heap->helems[next].weight;
-
-		heap->helems[next].elem = heap->helems[ind].elem;
-		heap->helems[next].weight = heap->helems[ind].weight;
-
-		heap->helems[ind].elem = elem;
-		heap->helems[ind].weight= weight;
+		scx_minheap_swap_elems(&heap->helems[next], &heap->helems[ind]);
 	}
 
 	return 0;
@@ -82,7 +88,6 @@ static inline
 int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;
-	u64 elem, weight;
 	int parent;
 	int ind;
 
@@ -92,14 +97,7 @@ int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 		if (heap->helems[parent].weight <= heap->helems[ind].weight)
 			break;
 
-		elem = heap->helems[parent].elem;
-		weight = heap->helems[parent].weight;
-
-		heap->helems[parent].elem = heap->helems[ind].elem;
-		heap->helems[parent].weight = heap->helems[ind].weight;
-
-		heap->helems[ind].elem = elem;
-		heap->helems[ind].weight = weight;
+		scx_minheap_swap_elems(&heap->helems[parent], &heap->helems[ind]);
 	}
 
 	return 0;
