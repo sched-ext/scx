@@ -661,6 +661,9 @@ static bool cpus_share_llc(s32 this_cpu, s32 that_cpu)
 	const struct cpumask *llc_mask;
 	struct cpu_ctx *cctx;
 
+	if (this_cpu == that_cpu)
+		return true;
+
 	cctx = try_lookup_cpu_ctx(that_cpu);
 	if (!cctx)
 		return false;
