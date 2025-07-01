@@ -23,3 +23,4 @@ int scx_atq_insert(scx_atq *atq_ptr, u64 taskc_ptr);
 int scx_atq_insert_vtime(scx_atq_t *atq, u64 taskc_ptr, u64 vtime);
 int scx_atq_nr_queued(scx_atq_t *atq);
 u64 scx_atq_pop(scx_atq_t *atq);
+u64 scx_atq_peek(scx_atq_t *atq);

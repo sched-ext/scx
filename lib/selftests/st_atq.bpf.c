@@ -67,7 +67,7 @@ int scx_selftest_atq_common(bool isfifo)
 	u64 vtime;
 
 	atq = isfifo ? fifo : prio;
-	
+
 	for (i = 0, ind = 0; i < NTASKS_IN_QUEUE && can_loop; i++ ) {
 		tasks[ind]->pid = i;
 		tasks[ind]->vtime = ind;
@@ -89,8 +89,8 @@ int scx_selftest_atq_common(bool isfifo)
 			}
 		}
 
-		/* 
-		 * A step prime to the size of the modulo ring 
+		/*
+		 * A step prime to the size of the modulo ring
 		 * guarantees we don't revisit indices.
 		 */
 		ind = (ind + step) % NTASKS_IN_QUEUE;
@@ -207,7 +207,70 @@ int scx_selftest_atq_nr_queued(u64 unused)
 #undef NTASKS_FOR_TEST
 }
 
-#define SCX_atq_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_atq_ ## suffix, (u64)NULL)
+#define SCX_ATQ_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_atq_ ## suffix, (u64)NULL)
+
+__weak
+int scx_selftest_atq_peek_nodestruct(u64 unused)
+{
+	const u64 elem = 5;
+	const int iters = 10;
+	u64 found;
+	int i;
+
+	found = scx_atq_nr_queued(fifo);
+	if (found) {
+		bpf_printk("ATQ was not empty");
+		return -EINVAL;
+	}
+
+	if (scx_atq_insert(fifo, elem)) {
+		bpf_printk("ATQ insert failed");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < iters && can_loop; i++) {
+		if (scx_atq_peek(fifo) == elem)
+			continue;
+
+		found = scx_atq_nr_queued(fifo);
+		if (found != 1) {
+			bpf_printk("found %d elems in ATQ", found);
+			return -EINVAL;
+		}
+
+		bpf_printk("ATQ peek failed");
+		return -EINVAL;
+	}
+
+	scx_atq_pop(fifo);
+
+	found = scx_atq_nr_queued(fifo);
+	if (found) {
+		bpf_printk("leaving ATQ nonempty");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+__weak
+int scx_selftest_atq_peek_empty(u64 unused)
+{
+	u64 found;
+
+	found = scx_atq_nr_queued(fifo);
+	if (found) {
+		bpf_printk("ATQ was not empty");
+		return -EINVAL;
+	}
+
+	if (scx_atq_peek(fifo) != (u64)NULL) {
+		bpf_printk("ATQ peek did not return NULL");
+		return -EINVAL;
+	}
+
+	return 0;
+}
 
 __weak
 int scx_selftest_atq(void)
@@ -222,12 +285,14 @@ int scx_selftest_atq(void)
 		}
 	}
 
-	SCX_atq_SELFTEST(create);
-	SCX_atq_SELFTEST(fifo);
-	SCX_atq_SELFTEST(fail_fifo_with_weight);
-	SCX_atq_SELFTEST(vtime);
-	SCX_atq_SELFTEST(fail_vtime_without_weight);
-	SCX_atq_SELFTEST(nr_queued);
+	SCX_ATQ_SELFTEST(create);
+	SCX_ATQ_SELFTEST(fifo);
+	SCX_ATQ_SELFTEST(fail_fifo_with_weight);
+	SCX_ATQ_SELFTEST(vtime);
+	SCX_ATQ_SELFTEST(fail_vtime_without_weight);
+	SCX_ATQ_SELFTEST(nr_queued);
+	SCX_ATQ_SELFTEST(peek_nodestruct);
+	SCX_ATQ_SELFTEST(peek_empty);
 
 	return 0;
 }
