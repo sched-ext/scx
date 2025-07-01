@@ -71,3 +71,91 @@ impl CpuUtilEvent {
         Ok((value * 100) / total)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu_stats::CpuStatSnapshot;
+
+    use super::*;
+    use std::sync::{Arc, RwLock};
+
+    fn create_snapshot(user: u64, system: u64, idle: u64) -> CpuStatSnapshot {
+        CpuStatSnapshot {
+            user,
+            nice: 0,
+            system,
+            idle,
+            iowait: 0,
+            irq: 0,
+            softirq: 0,
+            steal: 0,
+            guest: 0,
+            guest_nice: 0,
+        }
+    }
+
+    #[test]
+    fn test_cpu_util_event_total_full() {
+        let mut tracker = CpuStatTracker::default();
+
+        tracker.prev.insert(0, create_snapshot(15, 5, 50));
+        tracker.current.insert(0, create_snapshot(30, 10, 50));
+
+        let tracker = Arc::new(RwLock::new(tracker));
+        let event = CpuUtilEvent::new(0, CpuUtilMetric::Total, tracker);
+
+        assert_eq!(event.value().unwrap(), 100);
+    }
+
+    #[test]
+    fn test_cpu_util_event_total_partial() {
+        let mut tracker = CpuStatTracker::default();
+
+        tracker.prev.insert(0, create_snapshot(15, 5, 50));
+        tracker.current.insert(0, create_snapshot(30, 10, 70));
+
+        let tracker = Arc::new(RwLock::new(tracker));
+        let event = CpuUtilEvent::new(0, CpuUtilMetric::Total, tracker);
+
+        assert_eq!(event.value().unwrap(), 50);
+    }
+
+    #[test]
+    fn test_cpu_util_event_user() {
+        let mut tracker = CpuStatTracker::default();
+
+        tracker.prev.insert(0, create_snapshot(10, 5, 100));
+        tracker.current.insert(0, create_snapshot(90, 45, 140));
+
+        let tracker = Arc::new(RwLock::new(tracker));
+        let event = CpuUtilEvent::new(0, CpuUtilMetric::User, tracker);
+
+        assert_eq!(event.value().unwrap(), 50);
+    }
+
+    #[test]
+    fn test_cpu_util_event_system() {
+        let mut tracker = CpuStatTracker::default();
+
+        tracker.prev.insert(0, create_snapshot(10, 5, 100));
+        tracker.current.insert(0, create_snapshot(20, 25, 150));
+
+        let tracker = Arc::new(RwLock::new(tracker));
+        let event = CpuUtilEvent::new(0, CpuUtilMetric::System, tracker);
+
+        assert_eq!(event.value().unwrap(), 25);
+    }
+
+    #[test]
+    fn test_cpu_util_zero_total() {
+        let mut tracker = CpuStatTracker::default();
+
+        tracker.prev.insert(0, create_snapshot(100, 50, 850));
+        tracker.current.insert(0, create_snapshot(100, 50, 850));
+
+        let tracker = Arc::new(RwLock::new(tracker));
+        let event = CpuUtilEvent::new(0, CpuUtilMetric::Total, tracker);
+
+        assert_eq!(event.value().unwrap(), 0);
+    }
+}
