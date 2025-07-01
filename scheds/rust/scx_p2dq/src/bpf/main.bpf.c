@@ -870,7 +870,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
-
 	if (cpuc->nice_task)
 		enq_flags |= SCX_ENQ_PREEMPT;
 
@@ -887,6 +886,21 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		}
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		return;
+	}
+
+	// If the last CPU is running an interactive task then reenque to the
+	// CPUs local DSQ. This should reduce the number of migrations.
+	if (taskc->last_cpu_dsq_id != SCX_DSQ_INVALID &&
+	    taskc->interactive &&
+	    scx_bpf_dsq_nr_queued(taskc->last_cpu_dsq_id) == 0 &&
+	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON|taskc->last_cpu) == 0) {
+		ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
+		ret->vtime.dsq_id = taskc->last_cpu_dsq_id;
+		ret->vtime.enq_flags = enq_flags;
+		ret->vtime.slice_ns = taskc->slice_ns;
+		ret->vtime.vtime = p->scx.dsq_vtime;
+		stat_inc(P2DQ_STAT_ENQ_CPU);
 		return;
 	}
 
@@ -967,6 +981,8 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	taskc->llc_id = llcx->id;
 	taskc->node_id = llcx->node_id;
 	taskc->was_nice = p->scx.weight < 100;
+	taskc->last_cpu = task_cpu;
+	taskc->last_cpu_dsq_id = cpuc->affn_dsq;
 	cpuc->interactive = taskc->interactive;
 	cpuc->dsq_index = taskc->dsq_index;
 	cpuc->nice_task = p->scx.weight < 100;
@@ -1335,6 +1351,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	} else if (p->scx.weight > 100) {
 		taskc->dsq_index = nr_dsqs_per_llc - 1;
 	}
+	taskc->last_cpu_dsq_id = SCX_DSQ_INVALID;
 	taskc->last_dsq_index = taskc->dsq_index;
 	taskc->slice_ns = slice_ns;
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask &&

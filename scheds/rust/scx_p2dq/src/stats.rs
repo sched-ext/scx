@@ -23,6 +23,8 @@ pub struct Metrics {
     pub same_dsq: u64,
     #[stat(desc = "Number of times a task kept running")]
     pub keep: u64,
+    #[stat(desc = "Number of times a task was enqueued to CPU DSQ")]
+    pub enq_cpu: u64,
     #[stat(desc = "Number of times a task was enqueued to LLC DSQ")]
     pub enq_llc: u64,
     #[stat(desc = "Number of times a task was enqueued to interactive DSQ")]
@@ -53,12 +55,13 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}\n\tenq llc/intr/mig {}/{}/{}",
+            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}\n\tenq cpu/llc/intr/mig {}/{}/{}/{}",
             self.direct,
             self.idle,
             self.keep,
             self.same_dsq,
             self.dsq_change,
+            self.enq_cpu,
             self.enq_llc,
             self.enq_intr,
             self.enq_mig,
@@ -84,6 +87,7 @@ impl Metrics {
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,
+            enq_cpu: self.enq_cpu - rhs.enq_cpu,
             enq_llc: self.enq_llc - rhs.enq_llc,
             enq_intr: self.enq_intr - rhs.enq_intr,
             enq_mig: self.enq_mig - rhs.enq_mig,

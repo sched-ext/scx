@@ -10,6 +10,7 @@ struct p2dq_timer {
 struct cpu_ctx {
 	int				id;
 	u32				llc_id;
+	u64				dsq_id;
 	u64				affn_dsq;
 	u32				dsq_index;
 	u64				slice_ns;
@@ -61,10 +62,12 @@ struct task_p2dq {
 	u32			node_id;
 	u64			used;
 	u64			last_dsq_id;
+	u64			last_cpu_dsq_id;
 	u64 			last_run_started;
 	u64 			last_run_at;
 	u64			llc_runs; /* how many runs on the current LLC */
 	int			last_dsq_index;
+	s32			last_cpu;
 	bool			interactive;
 	bool			was_nice;
 
