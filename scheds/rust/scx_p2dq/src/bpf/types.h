@@ -17,6 +17,7 @@ struct cpu_ctx {
 	u32				perf;
 	bool				interactive;
 	bool				is_big;
+	bool				nice_task;
 	u64				ran_for;
 	u32				node_id;
 	u64				intr_dsq;
@@ -66,6 +67,7 @@ struct task_p2dq {
 	u64			llc_runs; /* how many runs on the current LLC */
 	int			last_dsq_index;
 	bool			interactive;
+	bool			was_nice;
 
 	/* The task is a workqueue worker thread */
 	bool			is_kworker;

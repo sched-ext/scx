@@ -104,6 +104,11 @@ static u64 max(u64 a, u64 b)
 	return a >= b ? a : b;
 }
 
+static u64 min(u64 a, u64 b)
+{
+	return a <= b ? a : b;
+}
+
 static __always_inline u64 dsq_time_slice(int dsq_index)
 {
 	if (dsq_index > nr_dsqs_per_llc || dsq_index < 0) {
@@ -123,14 +128,31 @@ static __always_inline u64 max_dsq_time_slice(void)
 	return dsq_time_slices[nr_dsqs_per_llc - 1];
 }
 
+static __always_inline u64 clamp_slice(u64 slice_ns)
+{
+
+	return min(max(MIN_SLICE_NSEC, slice_ns), max_dsq_time_slice());
+}
+
 static __always_inline u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
 {
-	return (p->scx.weight * slice_ns) / 100;
+	return clamp_slice(scale_by_task_weight(p, slice_ns));
 }
 
 static __always_inline u64 task_dsq_slice_ns(struct task_struct *p, int dsq_index)
 {
 	return task_slice_ns(p, dsq_time_slice(dsq_index));
+}
+
+static u64 llc_nr_queued(struct llc_ctx *llcx)
+{
+	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
+
+	nr_queued += scx_bpf_dsq_nr_queued(llcx->mig_dsq);
+	if (interactive_dsq)
+		nr_queued += scx_bpf_dsq_nr_queued(llcx->intr_dsq);
+
+	return nr_queued;
 }
 
 struct p2dq_timer p2dq_timers[MAX_TIMERS] = {
@@ -280,19 +302,23 @@ static __always_inline bool can_migrate(task_ctx *taskc)
 		taskc->llc_runs > min_llc_runs_pick2);
 }
 
-static void set_deadline_slice(task_ctx *taskc, struct llc_ctx *llcx)
+static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
+			       struct llc_ctx *llcx)
 {
-	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
+	u64 slice_ns, nr_idle;
+
+	u64 nr_queued = llc_nr_queued(llcx);
 
 	const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
-	u64 nr_idle = bpf_cpumask_weight(idle_cpumask);
+	nr_idle = bpf_cpumask_weight(idle_cpumask);
 	scx_bpf_put_cpumask(idle_cpumask);
 
-	if (nr_queued >= nr_idle) {
-		if (nr_idle == 0)
-			taskc->slice_ns = max(MIN_SLICE_USEC, max_dsq_time_slice() / nr_queued);
-		else
-			taskc->slice_ns = max(MIN_SLICE_USEC, (max_dsq_time_slice() * nr_idle) / nr_queued);
+	if (nr_idle == 0)
+		nr_idle = 1;
+
+	if (nr_queued > nr_idle) {
+		slice_ns = (max_dsq_time_slice() * nr_idle) / nr_queued;
+		taskc->slice_ns = clamp_slice(slice_ns);
 	}
 }
 
@@ -303,21 +329,25 @@ static void set_deadline_slice(task_ctx *taskc, struct llc_ctx *llcx)
 static __always_inline void update_vtime(struct task_struct *p,
 					 struct cpu_ctx *cpuc,
 					 task_ctx *taskc,
-					 u64 vtime_now)
+					 struct llc_ctx *llcx)
 {
 	/*
 	 * If in the same LLC we only need to clamp the vtime to ensure no task
 	 * accumulates too much vtime.
 	 */
 	if (taskc->llc_id == cpuc->llc_id) {
-		u64 max_slice = max_dsq_time_slice();
-		u64 vtime_min = vtime_now - max_slice;
+		if (p->scx.dsq_vtime >= llcx->vtime)
+			return;
 
-		p->scx.dsq_vtime = task_slice_ns(p, max(p->scx.dsq_vtime, vtime_min));
+		u64 scaled_min = scale_by_task_weight(p, max_dsq_time_slice());
+
+		if (p->scx.dsq_vtime < llcx->vtime - scaled_min)
+			p->scx.dsq_vtime = llcx->vtime - scaled_min;
+
 		return;
 	}
 
-	p->scx.dsq_vtime = vtime_now;
+	p->scx.dsq_vtime = llcx->vtime;
 
 	return;
 }
@@ -647,11 +677,14 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * Per-cpu kthreads are considered interactive and dispatched directly
 	 * into the local DSQ.
 	 */
-	if ((p->flags & PF_KTHREAD) &&
-	    p->nr_cpus_allowed == 1 &&
-	    kthreads_local) {
+	if (kthreads_local &&
+	    (p->flags & PF_KTHREAD) &&
+	    p->nr_cpus_allowed == 1) {
 		stat_inc(P2DQ_STAT_DIRECT);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, dsq_time_slices[0], enq_flags);
+		scx_bpf_dsq_insert(p,
+				   SCX_DSQ_LOCAL,
+				   clamp_slice(scale_by_task_weight(p, dsq_time_slices[0])),
+				   enq_flags);
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
@@ -681,15 +714,20 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		}
 
 		taskc->dsq_id = cpuc->affn_dsq;
-		update_vtime(p, cpuc, taskc, llcx->vtime);
+		update_vtime(p, cpuc, taskc, llcx);
 		if (deadline_scheduling)
-			set_deadline_slice(taskc, llcx);
+			set_deadline_slice(p, taskc, llcx);
+
+		if (cpuc->nice_task)
+			enq_flags |= SCX_ENQ_PREEMPT;
 
 		// Idle affinitized tasks can be direct dispatched.
-		if (is_idle) {
+		if (is_idle || cpuc->nice_task) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
-			stat_inc(P2DQ_STAT_IDLE);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			if (is_idle) {
+				stat_inc(P2DQ_STAT_IDLE);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			}
 			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
@@ -699,6 +737,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		else
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
 
+		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
+		      p->comm, p->scx.weight, taskc->slice_ns, p->scx.dsq_vtime, llcx->vtime);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -714,16 +754,22 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		update_vtime(p, cpuc, taskc, llcx->vtime);
-		if (is_idle) {
+		update_vtime(p, cpuc, taskc, llcx);
+		if (deadline_scheduling)
+			set_deadline_slice(p, taskc, llcx);
+
+		if (cpuc->nice_task)
+			enq_flags |= SCX_ENQ_PREEMPT;
+
+		if (is_idle || cpuc->nice_task) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
-			stat_inc(P2DQ_STAT_IDLE);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			if (is_idle) {
+				stat_inc(P2DQ_STAT_IDLE);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			}
 			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
-		if (deadline_scheduling)
-			set_deadline_slice(taskc, llcx);
 
 		if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
 			taskc->dsq_id = llcx->intr_dsq;
@@ -741,6 +787,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		else
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
 
+		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
+		      p->comm, p->scx.weight, taskc->slice_ns, p->scx.dsq_vtime, llcx->vtime);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -752,11 +800,19 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	update_vtime(p, cpuc, taskc, llcx->vtime);
-	if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+	if (cpuc->nice_task)
+		enq_flags |= SCX_ENQ_PREEMPT;
+
+	update_vtime(p, cpuc, taskc, llcx);
+	if (deadline_scheduling)
+		set_deadline_slice(p, taskc, llcx);
+
+	if (scx_bpf_test_and_clear_cpu_idle(cpu) || cpuc->nice_task) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
-		stat_inc(P2DQ_STAT_IDLE);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		if (!cpuc->nice_task) {
+			stat_inc(P2DQ_STAT_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		}
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -772,8 +828,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		stat_inc(P2DQ_STAT_ENQ_LLC);
 	}
 
-	if (deadline_scheduling)
-		set_deadline_slice(taskc, llcx);
+	trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
+	      p->comm, p->scx.weight, taskc->slice_ns, p->scx.dsq_vtime, llcx->vtime);
 
 	if (interactive_fifo && taskc->interactive) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
@@ -835,9 +891,11 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 
 	taskc->llc_id = llcx->id;
 	taskc->node_id = llcx->node_id;
+	taskc->was_nice = p->scx.weight < 100;
 	cpuc->interactive = taskc->interactive;
 	cpuc->dsq_index = taskc->dsq_index;
 	cpuc->dsq_id = taskc->dsq_id;
+	cpuc->nice_task = p->scx.weight < 100;
 	cpuc->slice_ns = taskc->slice_ns;
 	cpuc->ran_for = 0;
 	// racy, but don't care
@@ -865,6 +923,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 {
 	task_ctx *taskc;
 	struct llc_ctx *llcx;
+	struct cpu_ctx *cpuc;
 	u64 used, scaled_used, last_dsq_slice_ns;
 	u64 now = bpf_ktime_get_ns();
 
@@ -879,13 +938,22 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 
+	// This is an optimization to not have to lookup the cpu_ctx every
+	// time. When a nice task was run we need to update the cpu_ctx so that
+	// tasks are no longer enqueued to the local DSQ.
+	if (taskc->was_nice &&
+	    (cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p)))) {
+		cpuc->nice_task = false;
+		taskc->was_nice = false;
+	}
+
 	taskc->last_dsq_id = taskc->dsq_id;
 	taskc->last_dsq_index = taskc->dsq_index;
 	taskc->used = 0;
 
 	last_dsq_slice_ns = taskc->slice_ns;
 	used = now - taskc->last_run_at;
-	scaled_used = (used * 100) / p->scx.weight;
+	scaled_used = scale_by_task_weight_inverse(p, used);
 
 	p->scx.dsq_vtime += scaled_used;
 	__sync_fetch_and_add(&llcx->vtime, used);
@@ -906,7 +974,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		// On stopping determine if the task can move to a longer DSQ by
 		// comparing the used time to the scaled DSQ slice.
 		if (used >= ((9 * last_dsq_slice_ns) / 10)) {
-			if (taskc->dsq_index < nr_dsqs_per_llc - 1) {
+			if (taskc->dsq_index < nr_dsqs_per_llc - 1 &&
+			    p->scx.weight >= 100) {
 				taskc->dsq_index += 1;
 				stat_inc(P2DQ_STAT_DSQ_CHANGE);
 				trace("%s[%p]: DSQ inc %llu -> %u", p->comm, p,
@@ -927,6 +996,11 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		} else {
 			stat_inc(P2DQ_STAT_DSQ_SAME);
 		}
+
+		// nice tasks can only get the minimal amount of non interactive slice.
+		if (p->scx.weight < 100 && taskc->dsq_index > 1)
+			taskc->dsq_index = 1;
+
 		taskc->slice_ns = task_dsq_slice_ns(p, taskc->dsq_index);
 		taskc->last_run_started = 0;
 		taskc->interactive = is_interactive(taskc);
@@ -1170,9 +1244,16 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 
 	taskc->llc_id = cpuc->llc_id;
 	taskc->node_id = cpuc->node_id;
-	taskc->dsq_index = init_dsq_index;
-	taskc->last_dsq_index = init_dsq_index;
-	taskc->slice_ns = dsq_time_slice(init_dsq_index);
+	// Adjust starting index based on niceness
+	if (p->scx.weight == 100) {
+		taskc->dsq_index = init_dsq_index;
+	} else if (p->scx.weight < 100) {
+		taskc->dsq_index = 0;
+	} else if (p->scx.weight > 100) {
+		taskc->dsq_index = nr_dsqs_per_llc - 1;
+	}
+	taskc->last_dsq_index = taskc->dsq_index;
+	taskc->slice_ns = scale_by_task_weight(p, dsq_time_slice(init_dsq_index));
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 	taskc->interactive = is_interactive(taskc);
 	p->scx.dsq_vtime = llcx->vtime;
