@@ -335,26 +335,9 @@ impl<'a> Scheduler<'a> {
         // Enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if !opts.no_futex_boost {
-            compat::cond_tracepoint_enable(
-                "syscalls:sys_enter_futex",
-                &skel.progs.rtp_sys_enter_futex,
-            )?;
-            compat::cond_tracepoint_enable(
-                "syscalls:sys_exit_futex",
-                &skel.progs.rtp_sys_exit_futex,
-            )?;
-            compat::cond_tracepoint_enable(
-                "syscalls:sys_exit_futex_wait",
-                &skel.progs.rtp_sys_exit_futex_wait,
-            )?;
-            compat::cond_tracepoint_enable(
-                "syscalls:sys_exit_futex_waitv",
-                &skel.progs.rtp_sys_exit_futex_waitv,
-            )?;
-            compat::cond_tracepoint_enable(
-                "syscalls:sys_exit_futex_wake",
-                &skel.progs.rtp_sys_exit_futex_wake,
-            )?;
+            if Self::attach_futex_tracepoints(&mut skel)? == false {
+                info!("Fail to attach futex tracepoints.");
+            }
         }
 
         // Initialize CPU topology
@@ -391,6 +374,27 @@ impl<'a> Scheduler<'a> {
             stats_server,
             mseq_id: 0,
         })
+    }
+
+    fn attach_futex_tracepoints(skel: &mut OpenBpfSkel) -> Result<bool> {
+        let tracepoints = vec![
+            ("syscalls:sys_enter_futex", &skel.progs.rtp_sys_enter_futex),
+            ("syscalls:sys_exit_futex", &skel.progs.rtp_sys_exit_futex),
+            (
+                "syscalls:sys_exit_futex_wait",
+                &skel.progs.rtp_sys_exit_futex_wait,
+            ),
+            (
+                "syscalls:sys_exit_futex_waitv",
+                &skel.progs.rtp_sys_exit_futex_waitv,
+            ),
+            (
+                "syscalls:sys_exit_futex_wake",
+                &skel.progs.rtp_sys_exit_futex_wake,
+            ),
+        ];
+
+        compat::cond_tracepoints_enable(tracepoints)
     }
 
     fn init_cpus(skel: &mut OpenBpfSkel, order: &CpuOrder) {
