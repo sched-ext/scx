@@ -94,11 +94,17 @@ static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
  *   time slice, we assume futex_wake() is skipped.
  * - We do not distinguish futex user addresses to lower the tracing burden.
  *
- * We trace either trace entries or tracepoint entries. Ftrace is low-overhead,
+ * We trace either ftrace entries or tracepoint entries. Ftrace is low-overhead,
  * but it does not provide stability, as function entries can disappear if
  * functions are inlined according to specific kernel configurations. Hence,
  * the BPF offers both ftrace and tracepoint, allowing userspace to make a
  * decision based on availability.
+ *
+ * The overhead of tracepoint, fentry, and fexit on AMD Ryzen 9 PRO 6950H are
+ * as follows:
+ *   - tracepoint: 130ns
+ *   - fentry:      48ns
+ *   - fexit:       76ns
  */
 
 /*
