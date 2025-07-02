@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* 
- * Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
+ * Copyright (c) 2025 Emily Soto <sotoemily03@protonmail.com>
  */
 #include <scx/common.bpf.h>
 #include "intf.h"
@@ -16,8 +16,9 @@ char _license[] SEC("license") = "GPL";
 #define BIG_DSQ_ID 1
 #define LITTLE_DSQ_ID 2
 #define TURBO_DSQ_ID 3
-#define L3_DSQ_ID 4
-
+#define L3_DSQ_ID1 4 //Make these automatically in spark_init via counting the amount of L3 caches
+#define L3_DSQ_ID2 5
+#define FIRST_CPU 6 //always after the last DSQ
  /* Report additional debugging information */
 const volatile bool debug;
 
@@ -80,17 +81,17 @@ volatile s64 cpufreq_perf_lvl;
 /*
  * Enable GPU support for task detection and prioritization.
  */
-const volatile bool enable_gpu_support = false;
+const volatile bool enable_gpu_support;
 
 /*
  * Aggressive GPU task mode: only GPU tasks can use big/performance cores.
  */
-const volatile bool aggressive_gpu_tasks = false;
+const volatile bool aggressive_gpu_tasks;
 
 /*
  * Stay with kthread: tasks stay on CPUs where kthreads are running. TODO: Make this more fine-grained. We don't want to stick with all kthreads. C
  */
-const volatile bool stay_with_kthread = false;
+const volatile bool stay_with_kthread;
 
 /*
  * Scheduling statistics.
@@ -204,6 +205,10 @@ struct cpu_ctx {
 	u64 last_running;
 	u64 perf_lvl;
 	struct bpf_cpumask __kptr *l3_cpumask;
+	struct bpf_cpumask __kptr *big_l3_cpumask;
+	struct bpf_cpumask __kptr *little_l3_cpumask;
+	bool is_turbo;
+	bool is_big;
 	bool has_active_kthread;
 };
 
@@ -221,6 +226,7 @@ struct {
 static void detect_workload_type(const struct task_struct *p) {
 	struct workload_info info = {0};
 	u64 now = scx_bpf_now();
+	char *comm = p->comm;
 	
 	if (!p)
 		return;
@@ -229,7 +235,6 @@ static void detect_workload_type(const struct task_struct *p) {
 	info.workload_type = WORKLOAD_TYPE_UNKNOWN;
 	
 	/* Use the comm field from the task_struct instead of bpf_get_current_comm */
-	char *comm = p->comm;
 	
 	/* Inference workload detection */
 	if (bpf_strncmp(comm, sizeof(p->comm), "inference") == 0 ||
@@ -296,6 +301,23 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
 }
 
+/*
+ * Helper function to print CPU context details for debugging.
+ */
+static void print_cpu_ctx_details(s32 cpu, const char *callback_name)
+{
+	struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx) {
+		dbg_msg("%s: CPU %d - cpu_ctx not found", callback_name, cpu);
+		return;
+	}
+	
+	dbg_msg("%s: CPU %d - tot_runtime=%llu, prev_runtime=%llu, last_running=%llu, perf_lvl=%llu, is_turbo=%d, is_big=%d, has_active_kthread=%d", 
+		callback_name, cpu, cctx->tot_runtime, cctx->prev_runtime, 
+		cctx->last_running, cctx->perf_lvl, cctx->is_turbo, cctx->is_big, 
+		cctx->has_active_kthread);
+}
+
 
 /*
  * Per-task local storage.
@@ -308,6 +330,8 @@ struct task_ctx {
 	 */
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
+	struct bpf_cpumask __kptr *big_l3_cpumask;
+	struct bpf_cpumask __kptr *little_l3_cpumask;
 
 	/*
 	 * Task's average used time slice.
@@ -453,7 +477,7 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
  * Save current task's PID/TID to GPU maps when GPU operations are detected.
  * Both entire processes using the GPU and single threads using the GPU will be tracked.
  */
-int set_gpu_task() {
+static int set_gpu_task() {
 	struct task_struct *current;
 
 	if (!enable_gpu_support)
@@ -467,7 +491,7 @@ int set_gpu_task() {
 		return -ENOENT;
 	task_ctx->is_gpu_task = true;
 	task_ctx->workload_info.gpu_usage_count++;
-	task_ctx->workload_info.last_gpu_access = scx_bpf_now();
+	task_ctx->workload_info.last_gpu_access = bpf_ktime_get_ns();
 	
 	return 0;
 }
@@ -527,17 +551,19 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 }
 
 /*
- * Return the DSQ ID for dispatching tasks.
+ * Return the shared or per-CPU DSQ ID for dispatching tasks.
  */
 static u64 get_dsq_id(s32 cpu)
 {
 	switch (dsq_mode) {
 	case DSQ_MODE_CPU:
-		return (u64) cpu;
+		return (u64) cpu + FIRST_CPU;
 	case DSQ_MODE_SHARED:
-	default:
 		return SHARED_DSQ_ID;
 	}
+
+	scx_bpf_error("Invalid DSQ mode: CPU %d\n", cpu);
+	return -1;
 }
 
 /*
@@ -613,10 +639,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
  */
 static bool keep_running(const struct task_struct *p, s32 cpu)
 {
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	const struct cpumask  *idle_cpumask;
 	struct cpu_ctx *cctx;
-	bool ret;
 
 	/* Do not keep running if the task doesn't need to run */
 	if (!is_queued(p))
@@ -641,7 +664,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 			       s32 cpu, const struct cpumask *cpumask)
 {
 	struct bpf_cpumask *primary, *l3_domain;
-	struct bpf_cpumask *p_mask, *l3_mask;
+	struct bpf_cpumask *p_mask, *l3_mask, *big_l3_mask, *little_l3_mask;
+	
 	struct cpu_ctx *cctx;
 
 	/*
@@ -660,6 +684,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 
 	l3_domain = cctx->l3_cpumask;
 
+
 	p_mask = tctx->cpumask;
 	if (!p_mask) {
 		scx_bpf_error("cpumask not initialized");
@@ -671,6 +696,9 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 		scx_bpf_error("l3 cpumask not initialized");
 		return;
 	}
+
+	big_l3_mask = tctx->big_l3_cpumask;
+	little_l3_mask = tctx->little_l3_cpumask;
 
 	/*
 	 * Determine the task's scheduling domain.
@@ -685,6 +713,18 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (l3_domain)
 		bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
+
+	/*
+	 * Determine the big CPUs in the L3 cache domain.
+	 */
+	if (big_l3_mask && l3_domain && big_cpumask)
+		bpf_cpumask_and(big_l3_mask, cast_mask(l3_domain), cast_mask(big_cpumask));
+
+	/*
+	 * Determine the little CPUs in the L3 cache domain.
+	 */
+	if (little_l3_mask && l3_domain && little_cpumask)
+		bpf_cpumask_and(little_l3_mask, cast_mask(l3_domain), cast_mask(little_cpumask));
 }
 
 /*
@@ -786,7 +826,6 @@ static s32 pick_idle_cpu_gpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags
 {
 	const struct cpumask *big_mask;
 	const struct cpumask *turbo_mask;
-	const struct cpumask *big_l3_mask;
 	s32 cpu = -1; //If no idle CPU is found, go down the regular path for finding an idle CPU
 
 	big_mask = cast_mask(big_cpumask);
@@ -827,9 +866,8 @@ if(turbo_mask){
 	//Try to use big idle CPUs that are L3 cache siblings
 	if (big_mask) {
 		struct task_ctx *tctx = try_lookup_task_ctx(p);
-		if (tctx) {
-			bpf_cpumask_and(big_l3_mask, big_mask, cast_mask(tctx->l3_cpumask));
-			cpu = find_idle_cpu_in_mask(big_l3_mask, 0);
+		if (tctx && tctx->big_l3_cpumask) {
+			cpu = find_idle_cpu_in_mask(cast_mask(tctx->big_l3_cpumask), 0);
 			if(cpu >= 0){
 				*is_idle = true;
 				return cpu;
@@ -861,22 +899,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	is_gpu_task = tctx->is_gpu_task;
 
 	if(aggressive_gpu_tasks){
-		
 		if(is_gpu_task){
-			bpf_printk("Aggressive gpu task: %s", p->comm);
 			cpu = pick_idle_cpu_gpu(p, prev_cpu, wake_flags, is_idle);
 			if(cpu >= 0){
 				return cpu;
 			}
 		}
 		else{
-			bpf_printk("Not a gpu task: %s", p->comm);
 			little_mask = cast_mask(little_cpumask);
 			if (little_mask && bpf_cpumask_empty(little_mask)){
 				little_mask = NULL;
 			}
 
-			/*
+						/*
 	 * Try to re-use the same CPU if it's a little CPU.
 	 */
 	if (little_mask && bpf_cpumask_test_cpu(prev_cpu, little_mask) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -885,7 +920,14 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		goto out_put_cpumask;
 	}
 
-			//All little CPUs are L3 cache siblings
+		if (tctx && tctx->little_l3_cpumask) {
+			cpu = find_idle_cpu_in_mask(cast_mask(tctx->little_l3_cpumask), 0);
+			if(cpu >= 0){
+				*is_idle = true;
+				return cpu;
+			}
+
+			//Use any idle little CPU
 			if(little_mask){
 				cpu = find_idle_cpu_in_mask(little_mask, 0);
 				if(cpu >= 0){
@@ -893,6 +935,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 					goto out_put_cpumask;
 				}
 			}
+		}
 		}
 	}
 		
@@ -1034,6 +1077,9 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 {
 	bool is_idle = false;
 	s32 cpu;
+	
+	dbg_msg("bpfland_select_cpu: task=%s prev_cpu=%d wake_flags=%llu", p->comm, prev_cpu, wake_flags);
+	print_cpu_ctx_details(prev_cpu, "bpfland_select_cpu");
 
 	if (is_throttled())
 		return prev_cpu;
@@ -1212,6 +1258,9 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 slice, deadline, dsq_id;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 
+	dbg_msg("bpfland_enqueue: task=%s enq_flags=%llu", p->comm, enq_flags);
+	print_cpu_ctx_details(prev_cpu, "bpfland_enqueue");
+
 	/*
 	 * Dispatch regular tasks to the appropriate DSQ.
 	 */
@@ -1228,10 +1277,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (try_direct_dispatch(p, tctx, prev_cpu, slice, enq_flags))
 		return;
 
-if(stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1){
-	scx_bpf_dsq_insert_vtime(p, prev_cpu, slice, 0, enq_flags);
-	goto workload_statistics;
-}
+// if(stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1){ We should boost the priority of threads runnning after per-CPU kthreads, not the per-CPU kthreads themselves
+// 	scx_bpf_dsq_insert_vtime(p, prev_cpu + FIRST_CPU, slice, 0, enq_flags);
+// 	goto workload_statistics;
+// }
 
 	/*
 	 * Track workload type dispatches.
@@ -1239,12 +1288,16 @@ if(stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1){
 	if (enable_gpu_support) {
 		if (tctx->is_gpu_task) {
 			__sync_fetch_and_add(&nr_gpu_task_dispatches, 1);
-		}
 
-		if(aggressive_gpu_tasks) {
+					if(aggressive_gpu_tasks) {
 			scx_bpf_dsq_insert_vtime(p, TURBO_DSQ_ID, slice, deadline, enq_flags); //Can I make this fallback to big if turbos are taking too long?
+			goto workload_statistics;
 		}
-		goto workload_statistics;
+		}
+		else if(aggressive_gpu_tasks && p->nr_cpus_allowed > 1) { //Non-GPU tasks that aren't per-cpu threads in aggressive mode, insert into the little queue
+			scx_bpf_dsq_insert_vtime(p, LITTLE_DSQ_ID, slice, deadline, enq_flags);
+			goto workload_statistics;
+		}
 	}
 
 
@@ -1290,6 +1343,10 @@ workload_statistics:
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u64 dsq_id = get_dsq_id(cpu);
+	struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
+
+	dbg_msg("bpfland_dispatch: cpu=%d prev_task=%s", cpu, prev ? prev->comm : "NULL");
+	print_cpu_ctx_details(cpu, "bpfland_dispatch");
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -1297,12 +1354,44 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	if (is_throttled())
 		return;
 
-	/*
-	 * Consume regular tasks from the appropriate DSQ, transferring them to the
+		/*
+		 * If the CPU core type is turbo, first try to dispatch a task from the turbo DSQ.
+		 * If the CPU core type is not turbo but is big, then try to dispatch a task from the big DSQ.
+		 * If the CPU core type is not turbo or big, then try to dispatch a task from the little DSQ.
+		 * If all else fails, then try to dispatch a task from the per-CPU or shared DSQ.
+		 */
+	if(aggressive_gpu_tasks && cctx){
+		if(cctx->is_turbo){
+			if (scx_bpf_dsq_move_to_local(TURBO_DSQ_ID)) {
+				return;
+			}
+		}
+		if(cctx->is_big){
+			if (scx_bpf_dsq_move_to_local(BIG_DSQ_ID)) {
+				return;
+			}
+		}
+		else{
+				/*
+	 * Consume regular tasks from the per-CPU DSQ or shared DSQ depending on mode, transferring them to the
 	 * local CPU DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(dsq_id))
+	if (scx_bpf_dsq_move_to_local(dsq_id)) {
 		return;
+	}
+			if (scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID)) {
+				return;
+			}
+		}
+	}
+		
+	/*
+	 * Consume regular tasks from the per-CPU DSQ or shared DSQ depending on mode, transferring them to the
+	 * local CPU DSQ.
+	 */
+	if (scx_bpf_dsq_move_to_local(dsq_id)) {
+		return;
+	}
 
 	if (prev && keep_running(prev, cpu))
 		prev->scx.slice = slice_max;
@@ -1390,6 +1479,9 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	u64 now = scx_bpf_now();
 	s32 cpu = scx_bpf_task_cpu(p);
 
+	dbg_msg("bpfland_running: task=%s cpu=%d", p->comm, cpu);
+	print_cpu_ctx_details(cpu, "bpfland_running");
+
 	__sync_fetch_and_add(&nr_running, 1);
 
 	/* If stay_with_kthread is enabled, track cpu's (per-cpu)kthread activity */
@@ -1435,6 +1527,9 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+
+	dbg_msg("bpfland_stopping: task=%s cpu=%d runnable=%d", p->comm, cpu, runnable);
+	print_cpu_ctx_details(cpu, "bpfland_stopping");
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
@@ -1482,6 +1577,10 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	dbg_msg("bpfland_runnable: task=%s enq_flags=%llu", p->comm, enq_flags);
+	print_cpu_ctx_details(cpu, "bpfland_runnable");
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1492,6 +1591,9 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
 {
+	dbg_msg("bpfland_cpu_release: cpu=%d", cpu);
+	print_cpu_ctx_details(cpu, "bpfland_cpu_release");
+
 	/*
 	 * When a CPU is taken by a higher priority scheduler class,
 	 * re-enqueue all the tasks that are waiting in the local DSQ, so
@@ -1506,6 +1608,9 @@ void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 	s32 cpu = bpf_get_smp_processor_id();
 	struct task_ctx *tctx;
 
+	dbg_msg("bpfland_set_cpumask: task=%s cpu=%d", p->comm, cpu);
+	print_cpu_ctx_details(cpu, "bpfland_set_cpumask");
+
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
@@ -1516,6 +1621,10 @@ void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
 	struct task_ctx *tctx;
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	dbg_msg("bpfland_enable: task=%s", p->comm);
+	print_cpu_ctx_details(cpu, "bpfland_enable");
 
 	/* Initialize voluntary context switch timestamp */
 	tctx = try_lookup_task_ctx(p);
@@ -1534,6 +1643,9 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 	s32 cpu = bpf_get_smp_processor_id();
 	struct task_ctx *tctx;
 	struct bpf_cpumask *cpumask;
+
+	dbg_msg("bpfland_init_task: task=%s cpu=%d", p->comm, cpu);
+	print_cpu_ctx_details(cpu, "bpfland_init_task");
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -1572,6 +1684,26 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 	if (!cpumask)
 		return -ENOMEM;
 	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	/*
+	 * Create task's big L3 cache cpumask.
+	 */
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+	cpumask = bpf_kptr_xchg(&tctx->big_l3_cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	/*
+	 * Create task's little L3 cache cpumask.
+	 */
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+	cpumask = bpf_kptr_xchg(&tctx->little_l3_cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
@@ -1623,23 +1755,57 @@ int enable_sibling_cpu(struct domain_arg *input)
 {
 	struct cpu_ctx *cctx;
 	struct bpf_cpumask *mask, **pmask;
-	int err = 0;
+	bool big;
+	int err = 0, core_type;
 
 	cctx = try_lookup_cpu_ctx(input->cpu_id);
 	if (!cctx)
 		return -ENOENT;
-
+	core_type = input->core_type;
+		if(core_type == CORE_TYPE_BIG){
+			cctx->is_big = true;
+			big = true;
+		}
+		else if(core_type == CORE_TYPE_TURBO){
+			cctx->is_turbo = true;
+			cctx->is_big = true;
+			big = true;
+		}
 	/* Make sure the target CPU mask is initialized */
-	switch (input->lvl_id) {
-	case 3:
+
+	if( input->lvl_id == 3){
+		if(big){
+			err = init_cpumask(&cctx->big_l3_cpumask);
+			if (err)
+				return err;
+			bpf_rcu_read_lock();
+			mask = cctx->big_l3_cpumask;
+			if (mask)
+				bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
+			bpf_rcu_read_unlock();
+		}
+		else{
+			err = init_cpumask(&cctx->little_l3_cpumask);
+			if (err)
+				return err;
+			bpf_rcu_read_lock();
+			mask = cctx->little_l3_cpumask;
+			if (mask)
+				bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
+			bpf_rcu_read_unlock();
+		}
+
 		pmask = &cctx->l3_cpumask;
-		break;
-	default:
+	}
+	else {
+		scx_bpf_error("Invalid level ID: %d\n", input->lvl_id);
 		return -EINVAL;
 	}
+
 	err = init_cpumask(pmask);
 	if (err)
 		return err;
+
 
 	bpf_rcu_read_lock();
 	mask = *pmask;
@@ -1662,13 +1828,13 @@ int enable_cpu(struct enable_cpu_arg *input)
 	case 0: /* primary */
 		target_mask = &primary_cpumask;
 		break;
-	case 1: /* big */
+	case CORE_TYPE_BIG: /* big */
 		target_mask = &big_cpumask;
 		break;
-	case 2: /* little */
+	case CORE_TYPE_LITTLE: /* little */
 		target_mask = &little_cpumask;
 		break;
-	case 3: /* turbo */
+	case CORE_TYPE_TURBO: /* turbo */
 		target_mask = &turbo_cpumask;
 		break;
 	default:
@@ -1689,7 +1855,6 @@ int enable_cpu(struct enable_cpu_arg *input)
 	mask = *target_mask;
 	if (mask) {
 		s32 cpu = input->cpu_id;
-
 		if (cpu < 0)
 			bpf_cpumask_clear(mask);
 		else
@@ -1710,7 +1875,7 @@ static void init_cpuperf_target(void)
 	s32 cpu;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
-	bpf_for (cpu, 0, nr_cpu_ids) {
+	bpf_for (cpu, FIRST_CPU, FIRST_CPU + nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
 			continue;
 
@@ -1754,7 +1919,7 @@ static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	set_throttled(!throttled);
 
-	bpf_for(cpu, 0, nr_cpu_ids)
+	bpf_for(cpu, FIRST_CPU, FIRST_CPU + nr_cpu_ids)
 		scx_bpf_kick_cpu(cpu, flags);
 
 	/*
@@ -1775,6 +1940,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	u32 key = 0;
 	s32 cpu;
 
+	dbg_msg("bpfland_init: scheduler initialization started");
+
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
@@ -1787,11 +1954,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	 */
 	if(dsq_mode == DSQ_MODE_CPU) {
 		/* Create per-CPU DSQs */
-		bpf_for(cpu, L3_DSQ_ID + 1, L3_DSQ_ID + 1 + nr_cpu_ids) {
+		bpf_for(cpu, FIRST_CPU, FIRST_CPU + nr_cpu_ids) {
 			err = scx_bpf_create_dsq((u64) cpu, -1);
 			if (err) {
-				scx_bpf_error("failed to create per-CPU DSQ %llu for CPU %d: %d", 
-					     cpu, cpu, err);
+				scx_bpf_error("failed to create per-CPU DSQ %d for CPU %d: %d", 
+					     cpu, cpu-FIRST_CPU, err);
 				return err;
 			}
 		}
@@ -1822,9 +1989,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		return err;
 	}
 
-	err = scx_bpf_create_dsq(L3_DSQ_ID, -1);
+	err = scx_bpf_create_dsq(L3_DSQ_ID1, -1);
 	if (err) {
-		scx_bpf_error("failed to create L3 DSQ %d: %d", L3_DSQ_ID, err);
+		scx_bpf_error("failed to create L3 DSQ %d: %d", L3_DSQ_ID1, err);
+		return err;
+	}
+	
+	err = scx_bpf_create_dsq(L3_DSQ_ID2, -1);
+	if (err) {
+		scx_bpf_error("failed to create L3 DSQ %d: %d", L3_DSQ_ID2, err);
 		return err;
 	}
 
@@ -1873,6 +2046,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 
 void BPF_STRUCT_OPS(bpfland_exit, struct scx_exit_info *ei)
 {
+	dbg_msg("bpfland_exit: scheduler exiting - type=%d reason=%s", ei->kind, ei->reason);
 	UEI_RECORD(uei, ei);
 }
 
@@ -1889,5 +2063,6 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .init_task		= (void *)bpfland_init_task,
 	       .init			= (void *)bpfland_init,
 	       .exit			= (void *)bpfland_exit,
+	       .exit_dump_len = 10000000,
 	       .timeout_ms		= 5000,
 	       .name			= "spark");

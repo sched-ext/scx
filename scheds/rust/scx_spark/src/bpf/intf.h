@@ -27,11 +27,6 @@ enum consts {
 	DSQ_MODE_CPU = 1,
 	DSQ_MODE_SHARED = 2,
 
-	/* Maximum number of GPU task PIDs to track */
-	MAX_GPU_TASK_PIDS = 10000,
-
-	MAX_WORKLOAD_PIDS = 10000,
-
 	/* Maximum command name length for workload detection */
 	MAX_COMM_LEN = 16,
 
@@ -42,6 +37,10 @@ enum consts {
 	WORKLOAD_TYPE_PREPROCESSING = 4,
 	WORKLOAD_TYPE_DATA_LOADING = 5,
 	WORKLOAD_TYPE_MODEL_LOADING = 6,
+
+	CORE_TYPE_BIG = 1,
+	CORE_TYPE_LITTLE = 2,
+	CORE_TYPE_TURBO = 3,
 };
 
 #ifndef __VMLINUX_H__
@@ -71,6 +70,7 @@ struct domain_arg {
 	s32 lvl_id;
 	s32 cpu_id;
 	s32 sibling_cpu_id;
+	s32 core_type;
 };
 
 struct workload_info {

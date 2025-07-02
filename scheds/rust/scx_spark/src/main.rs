@@ -20,6 +20,12 @@ const MASK_TYPE_BIG: i32 = 1;
 const MASK_TYPE_LITTLE: i32 = 2;
 const MASK_TYPE_TURBO: i32 = 3;
 
+
+const CORE_TYPE_BIG: usize = 1;
+const CORE_TYPE_LITTLE: usize = 2;
+const CORE_TYPE_TURBO: usize = 3;
+
+
 mod stats;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
@@ -36,7 +42,6 @@ use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libbpf_rs::OpenProgramImpl;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::libbpf_sys::bpf_program__set_autoload;
 
@@ -59,6 +64,7 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
+
 
 const SCHEDULER_NAME: &str = "scx_spark";
 
@@ -733,12 +739,14 @@ impl<'a> Scheduler<'a> {
         lvl: usize,
         cpu: usize,
         sibling_cpu: usize,
+        core_type: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let prog = &mut skel.progs.enable_sibling_cpu;
         let mut args = domain_arg {
             lvl_id: lvl as c_int,
             cpu_id: cpu as c_int,
             sibling_cpu_id: sibling_cpu as c_int,
+            core_type: core_type as c_int,
         };
         let input = ProgramInput {
             context_in: Some(unsafe {
@@ -761,38 +769,100 @@ impl<'a> Scheduler<'a> {
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
         cache_lvl: usize,
-        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), Box<dyn std::error::Error>>,
+        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize, usize) -> Result<(), Box<dyn std::error::Error>>,
     ) -> Result<(), std::io::Error> {
-        // Determine the list of CPU IDs associated to each cache node.
-        let mut cache_id_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        // Determine the list of CPU IDs associated to each cache node, grouped by core type.
+        let mut cache_id_map: BTreeMap<usize, (Vec<usize>, Vec<usize>, Vec<usize>)> = BTreeMap::new(); // (big_cpus, little_cpus, turbo_cpus)
         for core in topo.all_cores.values() {
             for (cpu_id, cpu) in &core.cpus {
                 let cache_id = match cache_lvl {
                     3 => cpu.llc_id,
                     _ => panic!("invalid cache level {}", cache_lvl),
                 };
-                cache_id_map.entry(cache_id).or_default().push(*cpu_id);
+                let entry = cache_id_map.entry(cache_id).or_default();
+                match &cpu.core_type {
+                    CoreType::Big { .. } => entry.0.push(*cpu_id),
+                    CoreType::Little => entry.1.push(*cpu_id),
+                }
+                entry.2.push(*cpu_id);
             }
         }
 
         // Update the BPF cpumasks for the cache domains.
-        for (cache_id, cpus) in cache_id_map {
-            // Ignore the cache domain if it includes a single CPU.
-            if cpus.len() <= 1 {
-                continue;
+        for (cache_id, (big_cpus, little_cpus, all_cpus)) in cache_id_map {
+            // Set up full L3 cache siblings (all CPUs in this cache domain)
+            if all_cpus.len() > 1 {
+                info!(
+                    "L{} cache ID {}: all sibling CPUs: {:?}",
+                    cache_lvl, cache_id, all_cpus
+                );
+                for cpu in &all_cpus {
+                    for sibling_cpu in &all_cpus {
+                        if let Err(err) = enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu, 0) {
+                            warn!(
+                                "L{} cache ID {}: failed to set CPU {} sibling {}: {}",
+                                cache_lvl, cache_id, *cpu, *sibling_cpu, err
+                            );
+                        }
+                    }
+                }
             }
 
-            info!(
-                "L{} cache ID {}: sibling CPUs: {:?}",
-                cache_lvl, cache_id, cpus
-            );
-            for cpu in &cpus {
-                for sibling_cpu in &cpus {
-                    if let Err(err) = enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu) {
-                        warn!(
-                            "L{} cache ID {}: failed to set CPU {} sibling {}: {}",
-                            cache_lvl, cache_id, *cpu, *sibling_cpu, err
-                        );
+            // Set up big core siblings within this L3 cache
+            if big_cpus.len() > 1 {
+                info!(
+                    "L{} cache ID {}: big core sibling CPUs: {:?}",
+                    cache_lvl, cache_id, big_cpus
+                );
+                for cpu in &big_cpus {
+                    for sibling_cpu in &big_cpus {
+                        // Look up the sibling CPU information from topology
+                        let sibling_cpu_info = topo.all_cpus.get(sibling_cpu);
+                        
+                        if let Some(cpu_info) = sibling_cpu_info {
+                            // Check if this sibling CPU is a big core with turbo capability
+                            match &cpu_info.core_type {
+                                CoreType::Big { turbo: true } => {
+                                    if let Err(err) = enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu, CORE_TYPE_TURBO) {
+                                        warn!(
+                                            "L{} cache ID {}: failed to set turbo CPU {} sibling {}: {}",
+                                            cache_lvl, cache_id, *cpu, *sibling_cpu, err
+                                        );
+                                    }
+                                }
+                                CoreType::Big { turbo: false } => {
+                                    if let Err(err) = enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu, CORE_TYPE_BIG) {
+                                        warn!(
+                                            "L{} cache ID {}: failed to set big CPU {} sibling {}: {}",
+                                            cache_lvl, cache_id, *cpu, *sibling_cpu, err
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    // This shouldn't happen since we're iterating through big_cpus
+                                    warn!("Unexpected core type for CPU {} in big_cpus list", sibling_cpu);
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+            
+
+            // Set up little core siblings within this L3 cache
+            if little_cpus.len() > 1 {
+                info!(
+                    "L{} cache ID {}: little core sibling CPUs: {:?}",
+                    cache_lvl, cache_id, little_cpus
+                );
+                for cpu in &little_cpus {
+                    for sibling_cpu in &little_cpus {
+                        if let Err(err) = enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu, CORE_TYPE_LITTLE) {
+                            warn!(
+                                "L{} cache ID {}: failed to set little CPU {} sibling {}: {}",
+                                cache_lvl, cache_id, *cpu, *sibling_cpu, err
+                            );
+                        }
                     }
                 }
             }
@@ -805,8 +875,8 @@ impl<'a> Scheduler<'a> {
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
     ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
+        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu, core_type| {
+            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu, core_type)
         })
     }
 
