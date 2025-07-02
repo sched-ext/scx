@@ -381,6 +381,15 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        let nr_nodes = topo.nodes.len();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
+        let numa_disabled = opts.disable_numa || nr_nodes == 1;
+        if numa_disabled {
+            info!("Disabling NUMA optimizations");
+        }
+
         // Determine the primary scheduling domain.
         let power_profile = Self::power_profile();
         let domain =
@@ -402,7 +411,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
-        skel.maps.rodata_data.numa_disabled = opts.disable_numa;
+        skel.maps.rodata_data.numa_disabled = numa_disabled;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
@@ -429,8 +438,12 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.flash_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | if numa_disabled {
+                0
+            } else {
+                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            };
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.flash_ops_mut().flags
