@@ -1218,21 +1218,33 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	preempt_curr(prev_cpu);
 
 	/*
-	 * Keep reusing the same CPU in round-robin mode.
-	 */
-	if (rr_sched) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
-		return;
-	}
-
-	/*
 	 * Dispatch regular tasks to the shared DSQ.
 	 */
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	/*
+	 * Keep reusing the same CPU in round-robin mode.
+	 */
+	if (rr_sched) {
+		/*
+		 * In case of a re-enqueue due to a higher scheduling class
+		 * stealing the CPU, allow the task to move to a different
+		 * CPU.
+		 */
+		if (enq_flags & SCX_ENQ_REENQ) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, slice_max, enq_flags);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+			goto out_kick;
+		}
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+
+		return;
+	}
 
 	/*
 	 * No need to update the task's deadline if it was re-enqueued due
@@ -1275,6 +1287,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx->recent_used_cpu != prev_cpu)
 		task_update_domain(p, tctx, prev_cpu, p->cpus_ptr);
 
+out_kick:
 	/*
 	 * If there are idle CPUs in the system try to proactively wake up
 	 * one, so that it can immediately execute the task in case its
