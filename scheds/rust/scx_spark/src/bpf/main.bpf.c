@@ -155,22 +155,22 @@ UEI_DEFINE(uei);
  * Mask of CPUs that the scheduler can use until the system becomes saturated,
  * at which point tasks may overflow to other available CPUs.
  */
-private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
+private(spark) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
  * Mask of Big (performance) CPUs.
  */
-private(BPFLAND) struct bpf_cpumask __kptr *big_cpumask;
+private(spark) struct bpf_cpumask __kptr *big_cpumask;
 
 /*
  * Mask of Little (energy-efficient) CPUs.
  */
-private(BPFLAND) struct bpf_cpumask __kptr *little_cpumask;
+private(spark) struct bpf_cpumask __kptr *little_cpumask;
 
 /*
  * Mask of Turbo (performance) CPUs.
  */
-private(BPFLAND) struct bpf_cpumask __kptr *turbo_cpumask;
+private(spark) struct bpf_cpumask __kptr *turbo_cpumask;
 
 /*
  * DSQ dispatch mode.
@@ -1072,14 +1072,20 @@ static bool can_direct_dispatch(s32 cpu)
  * If a task is dispatched here, ops.enqueue() will be skipped: task will be
  * dispatched directly to the CPU returned by this callback.
  */
-s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
+s32 BPF_STRUCT_OPS(spark_select_cpu, struct task_struct *p,
 		s32 prev_cpu, u64 wake_flags)
 {
 	bool is_idle = false;
 	s32 cpu;
+	struct task_ctx *tctx;
 	
-	dbg_msg("bpfland_select_cpu: task=%s prev_cpu=%d wake_flags=%llu", p->comm, prev_cpu, wake_flags);
-	print_cpu_ctx_details(prev_cpu, "bpfland_select_cpu");
+	tctx = try_lookup_task_ctx(p);
+	if (tctx) {
+		dbg_msg("spark_select_cpu: task=%s prev_cpu=%d wake_flags=%llu deadline=%llu", p->comm, prev_cpu, wake_flags, tctx->deadline);
+	} else {
+		dbg_msg("spark_select_cpu: task=%s prev_cpu=%d wake_flags=%llu deadline=N/A", p->comm, prev_cpu, wake_flags);
+	}
+	print_cpu_ctx_details(prev_cpu, "spark_select_cpu");
 
 	if (is_throttled())
 		return prev_cpu;
@@ -1252,14 +1258,15 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
-void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(spark_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	struct cpu_ctx *cctx;
 	u64 slice, deadline, dsq_id;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 
-	dbg_msg("bpfland_enqueue: task=%s enq_flags=%llu", p->comm, enq_flags);
-	print_cpu_ctx_details(prev_cpu, "bpfland_enqueue");
+	dbg_msg("spark_enqueue: task=%s enq_flags=%llu", p->comm, enq_flags);
+	print_cpu_ctx_details(prev_cpu, "spark_enqueue");
 
 	/*
 	 * Dispatch regular tasks to the appropriate DSQ.
@@ -1271,16 +1278,22 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	deadline = task_deadline(p, tctx);
 	slice = CLAMP(slice_max / nr_tasks_waiting(prev_cpu), slice_min, slice_max);
 
+	dbg_msg("spark_enqueue: task=%s deadline=%llu slice=%llu", p->comm, deadline, slice);
+
 	/*
 	 * Try to dispatch the task directly, if possible.
 	 */
 	if (try_direct_dispatch(p, tctx, prev_cpu, slice, enq_flags))
 		return;
 
-// if(stay_with_kthread && is_kthread(p) && p->nr_cpus_allowed == 1){ We should boost the priority of threads runnning after per-CPU kthreads, not the per-CPU kthreads themselves
-// 	scx_bpf_dsq_insert_vtime(p, prev_cpu + FIRST_CPU, slice, 0, enq_flags);
-// 	goto workload_statistics;
-// }
+if(stay_with_kthread){ 
+	cctx = try_lookup_cpu_ctx(prev_cpu);
+	if (cctx && cctx->has_active_kthread) {
+		dbg_msg("spark_enqueue: Previous task is a per-CPU kthread, inserting into per-CPU DSQ", p->comm);
+		scx_bpf_dsq_insert_vtime(p, get_dsq_id(prev_cpu), slice, 0, enq_flags);
+		goto workload_statistics;
+	}
+}
 
 	/*
 	 * Track workload type dispatches.
@@ -1340,13 +1353,13 @@ workload_statistics:
 
 
 
-void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
+void BPF_STRUCT_OPS(spark_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u64 dsq_id = get_dsq_id(cpu);
 	struct cpu_ctx *cctx = try_lookup_cpu_ctx(cpu);
 
-	dbg_msg("bpfland_dispatch: cpu=%d prev_task=%s", cpu, prev ? prev->comm : "NULL");
-	print_cpu_ctx_details(cpu, "bpfland_dispatch");
+	dbg_msg("spark_dispatch: cpu=%d prev_task=%s", cpu, prev ? prev->comm : "NULL");
+	print_cpu_ctx_details(cpu, "spark_dispatch");
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
@@ -1473,14 +1486,14 @@ static void update_workload_stats(struct task_struct *p, struct task_ctx *tctx, 
 	}
 }
 
-void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
+void BPF_STRUCT_OPS(spark_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 	u64 now = scx_bpf_now();
 	s32 cpu = scx_bpf_task_cpu(p);
 
-	dbg_msg("bpfland_running: task=%s cpu=%d", p->comm, cpu);
-	print_cpu_ctx_details(cpu, "bpfland_running");
+	dbg_msg("spark_running: task=%s cpu=%d", p->comm, cpu);
+	print_cpu_ctx_details(cpu, "spark_running");
 
 	__sync_fetch_and_add(&nr_running, 1);
 
@@ -1496,6 +1509,8 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	if (!tctx)
 		return;
 	tctx->last_run_at = now;
+
+	dbg_msg("spark_running: task=%s deadline=%llu exec_runtime=%llu", p->comm, tctx->deadline, tctx->exec_runtime);
 
 	/*
 	 * Update workload statistics.
@@ -1521,15 +1536,15 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  * Update task statistics when the task is releasing the CPU (either
  * voluntarily or because it expires its assigned time slice).
  */
-void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
+void BPF_STRUCT_OPS(spark_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = scx_bpf_now(), slice, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-	dbg_msg("bpfland_stopping: task=%s cpu=%d runnable=%d", p->comm, cpu, runnable);
-	print_cpu_ctx_details(cpu, "bpfland_stopping");
+	dbg_msg("spark_stopping: task=%s cpu=%d runnable=%d", p->comm, cpu, runnable);
+	print_cpu_ctx_details(cpu, "spark_stopping");
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
@@ -1562,7 +1577,10 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's vruntime.
 	 */
+	u64 old_deadline = tctx->deadline;
 	tctx->deadline += scale_by_task_normalized_weight_inverse(p, slice);
+
+	dbg_msg("spark_stopping: task=%s slice=%llu old_deadline=%llu new_deadline=%llu", p->comm, slice, old_deadline, tctx->deadline);
 
 	/*
 	 * Update CPU runtime.
@@ -1574,25 +1592,27 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	cctx->tot_runtime += delta_runtime;
 }
 
-void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(spark_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 
-	dbg_msg("bpfland_runnable: task=%s enq_flags=%llu", p->comm, enq_flags);
-	print_cpu_ctx_details(cpu, "bpfland_runnable");
+	dbg_msg("spark_runnable: task=%s enq_flags=%llu", p->comm, enq_flags);
+	print_cpu_ctx_details(cpu, "spark_runnable");
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 
+	dbg_msg("spark_runnable: task=%s deadline=%llu", p->comm, tctx->deadline);
+
 	tctx->exec_runtime = 0;
 }
 
-void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
+void BPF_STRUCT_OPS(spark_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
 {
-	dbg_msg("bpfland_cpu_release: cpu=%d", cpu);
-	print_cpu_ctx_details(cpu, "bpfland_cpu_release");
+	dbg_msg("spark_cpu_release: cpu=%d", cpu);
+	print_cpu_ctx_details(cpu, "spark_cpu_release");
 
 	/*
 	 * When a CPU is taken by a higher priority scheduler class,
@@ -1602,14 +1622,14 @@ void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *a
 	scx_bpf_reenqueue_local();
 }
 
-void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
+void BPF_STRUCT_OPS(spark_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
 	s32 cpu = bpf_get_smp_processor_id();
 	struct task_ctx *tctx;
 
-	dbg_msg("bpfland_set_cpumask: task=%s cpu=%d", p->comm, cpu);
-	print_cpu_ctx_details(cpu, "bpfland_set_cpumask");
+	dbg_msg("spark_set_cpumask: task=%s cpu=%d", p->comm, cpu);
+	print_cpu_ctx_details(cpu, "spark_set_cpumask");
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -1618,13 +1638,13 @@ void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 	task_update_domain(p, tctx, cpu, cpumask);
 }
 
-void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
+void BPF_STRUCT_OPS(spark_enable, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 
-	dbg_msg("bpfland_enable: task=%s", p->comm);
-	print_cpu_ctx_details(cpu, "bpfland_enable");
+	dbg_msg("spark_enable: task=%s", p->comm);
+	print_cpu_ctx_details(cpu, "spark_enable");
 
 	/* Initialize voluntary context switch timestamp */
 	tctx = try_lookup_task_ctx(p);
@@ -1635,17 +1655,19 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	 * Initialize the task vruntime to the current global vruntime.
 	 */
 	tctx->deadline = vtime_now;
+
+	dbg_msg("spark_enable: task=%s initial_deadline=%llu vtime_now=%llu", p->comm, tctx->deadline, vtime_now);
 }
 
-s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS(spark_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	s32 cpu = bpf_get_smp_processor_id();
 	struct task_ctx *tctx;
 	struct bpf_cpumask *cpumask;
 
-	dbg_msg("bpfland_init_task: task=%s cpu=%d", p->comm, cpu);
-	print_cpu_ctx_details(cpu, "bpfland_init_task");
+	dbg_msg("spark_init_task: task=%s cpu=%d", p->comm, cpu);
+	print_cpu_ctx_details(cpu, "spark_init_task");
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -1933,14 +1955,14 @@ static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(spark_init)
 {
 	struct bpf_timer *timer;
 	int err;
 	u32 key = 0;
 	s32 cpu;
 
-	dbg_msg("bpfland_init: scheduler initialization started");
+	dbg_msg("spark_init: scheduler initialization started");
 
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
@@ -2044,25 +2066,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	return 0;
 }
 
-void BPF_STRUCT_OPS(bpfland_exit, struct scx_exit_info *ei)
+void BPF_STRUCT_OPS(spark_exit, struct scx_exit_info *ei)
 {
-	dbg_msg("bpfland_exit: scheduler exiting - type=%d reason=%s", ei->kind, ei->reason);
+	dbg_msg("spark_exit: scheduler exiting - type=%d reason=%s", ei->kind, ei->reason);
 	UEI_RECORD(uei, ei);
 }
 
-SCX_OPS_DEFINE(bpfland_ops,
-	       .select_cpu		= (void *)bpfland_select_cpu,
-	       .enqueue			= (void *)bpfland_enqueue,
-	       .dispatch		= (void *)bpfland_dispatch,
-	       .running			= (void *)bpfland_running,
-	       .stopping		= (void *)bpfland_stopping,
-	       .runnable		= (void *)bpfland_runnable,
-	       .cpu_release		= (void *)bpfland_cpu_release,
-	       .set_cpumask		= (void *)bpfland_set_cpumask,
-	       .enable			= (void *)bpfland_enable,
-	       .init_task		= (void *)bpfland_init_task,
-	       .init			= (void *)bpfland_init,
-	       .exit			= (void *)bpfland_exit,
+SCX_OPS_DEFINE(spark_ops,
+	       .select_cpu		= (void *)spark_select_cpu,
+	       .enqueue			= (void *)spark_enqueue,
+	       .dispatch		= (void *)spark_dispatch,
+	       .running			= (void *)spark_running,
+	       .stopping		= (void *)spark_stopping,
+	       .runnable		= (void *)spark_runnable,
+	       .cpu_release		= (void *)spark_cpu_release,
+	       .set_cpumask		= (void *)spark_set_cpumask,
+	       .enable			= (void *)spark_enable,
+	       .init_task		= (void *)spark_init_task,
+	       .init			= (void *)spark_init,
+	       .exit			= (void *)spark_exit,
 	       .exit_dump_len = 10000000,
 	       .timeout_ms		= 5000,
 	       .name			= "spark");

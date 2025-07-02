@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
+// Copyright (c) 2025 Emily Soto <sotoemily03@protonmail.com>
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
@@ -11,8 +11,8 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 // DSQ mode constants
-const DSQ_MODE_CPU: u32 = 1;
-const DSQ_MODE_SHARED: u32 = 2;
+const DSQ_MODE_CPU: u32 = 0;
+const DSQ_MODE_SHARED: u32 = 1;
 
 // CPU mask type constants
 const MASK_TYPE_PRIMARY: i32 = 0;
@@ -172,7 +172,7 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     format!("0x{}", hex_str)
 }
 
-/// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
+/// scx_spark: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
 ///
 /// This scheduler is derived from scx_rustland, but it is fully implemented in BPF. It has a minimal
 /// user-space part written in Rust to process command line options, collect metrics and log out
@@ -411,9 +411,9 @@ impl<'a> Scheduler<'a> {
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
-        let mut skel = scx_ops_open!(skel_builder, open_object, bpfland_ops)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, spark_ops)?;
 
-        skel.struct_ops.bpfland_ops_mut().exit_dump_len = opts.exit_dump_len;
+        skel.struct_ops.spark_ops_mut().exit_dump_len = opts.exit_dump_len;
 
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
@@ -458,13 +458,13 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.stay_with_kthread = opts.stay_with_kthread;
 
         // Set scheduler flags.
-        skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
+        skel.struct_ops.spark_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         info!(
             "scheduler flags: {:#x}",
-            skel.struct_ops.bpfland_ops_mut().flags
+            skel.struct_ops.spark_ops_mut().flags
         );
                    
         if !opts.enable_gpu_support {
@@ -496,7 +496,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Load the BPF program for validation.
-        let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
+        let mut skel = scx_ops_load!(skel, spark_ops, uei)?;
 
 
         // Initialize the primary scheduling domain and the preferred domain.
@@ -525,7 +525,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Attach the scheduler.
-        let struct_ops = Some(scx_ops_attach!(skel, bpfland_ops)?);
+        let struct_ops = Some(scx_ops_attach!(skel, spark_ops)?);
         
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
