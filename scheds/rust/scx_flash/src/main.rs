@@ -234,6 +234,9 @@ struct Opts {
     ///
     /// Enabling this option can reduce the amount of task migrations, but it can also make
     /// performance less consistent on systems with hybrid cores.
+    ///
+    /// This option has no effect if the primary scheduling domain includes all the CPUs
+    /// (e.g., `--primary-domain all`).
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
     sticky_cpu: bool,
 
