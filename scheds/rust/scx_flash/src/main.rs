@@ -215,7 +215,7 @@ struct Opts {
 
     /// Enable round-robin scheduling.
     ///
-    /// Each task is given a fixed time slice (defined by --slice-us-max) and run in a cyclic, fair
+    /// Each task is given a fixed time slice (defined by --slice-us) and run in a cyclic, fair
     /// order.
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
