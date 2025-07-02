@@ -720,9 +720,15 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Calculate when a task can be scheduled for how long.
+	 *
+	 * If the task is re-enqueued due to a higher-priority scheduling class
+	 * taking the CPU, we don't need to recalculate the task's deadline and
+	 * timeslice, as the task hasn't yet run.
 	 */
-	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
-	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+	if (!(enq_flags & SCX_ENQ_REENQ)) {
+		taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
+		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+	}
 	p->scx.slice = calc_time_slice(taskc);
 
 	/*

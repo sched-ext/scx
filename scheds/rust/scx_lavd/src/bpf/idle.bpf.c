@@ -364,6 +364,24 @@ bool test_cpu_stickable(struct pick_ctx *ctx, s32 cpu, bool is_task_big)
 	return false;
 }
 
+static
+bool is_sync_wakeup(struct pick_ctx *ctx)
+{
+	struct task_struct *waker;
+
+	if (!(ctx->wake_flags & SCX_WAKE_SYNC))
+		return false;
+
+	/*
+	 * If the waker is exiting now, it is not worth sticking to.
+	 */
+	waker = bpf_get_current_task_btf();
+	if (waker->flags & PF_EXITING)
+		return false;
+
+	return true;
+}
+
 static 
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
@@ -380,12 +398,11 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	ctx->i_m = 0;
 	ctx->i_nm = 0;
 	test_cpu_stickable(ctx, ctx->prev_cpu, ctx->is_task_big);
-	if (ctx->wake_flags & SCX_WAKE_SYNC) {
-		s32 sync_waker_cpu = bpf_get_smp_processor_id();
-		if (ctx->prev_cpu != ctx->sync_waker_cpu) {
-			ctx->sync_waker_cpu = sync_waker_cpu;
-			test_cpu_stickable(ctx, ctx->sync_waker_cpu,
-					   ctx->is_task_big);
+	if (is_sync_wakeup(ctx)) {
+		s32 waker_cpu = bpf_get_smp_processor_id();
+		if (waker_cpu != ctx->prev_cpu) {
+			ctx->sync_waker_cpu = waker_cpu;
+			test_cpu_stickable(ctx, ctx->sync_waker_cpu, ctx->is_task_big);
 		}
 	}
 
