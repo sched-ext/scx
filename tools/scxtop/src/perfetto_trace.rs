@@ -371,10 +371,10 @@ impl PerfettoTraceManager {
         // dsq nr_queued tracks
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_nr_queued_events.remove(dsq) {
-                for dsq_lat_event in events {
-                    let ts: u64 = timestamp_absolute_us(&dsq_lat_event) as u64 / 1_000;
+                for dsq_nr_queued_event in events {
+                    let ts: u64 = timestamp_absolute_us(&dsq_nr_queued_event) as u64 / 1_000;
                     self.trace.packet.push(TracePacket {
-                        data: Some(trace_packet::Data::TrackEvent(dsq_lat_event)),
+                        data: Some(trace_packet::Data::TrackEvent(dsq_nr_queued_event)),
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
                             trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
@@ -817,7 +817,7 @@ impl PerfettoTraceManager {
             .push({
                 TrackEvent {
                     type_: Some(track_event::Type::TYPE_COUNTER.into()),
-                    track_uuid: Some(*next_dsq_uuid),
+                    track_uuid: Some(*next_dsq_uuid + 1),
                     // Each track needs a separate unique UUID, so we'll add one to the dsq for
                     // the nr_queued events.
                     counter_value_field: Some(track_event::Counter_value_field::CounterValue(
