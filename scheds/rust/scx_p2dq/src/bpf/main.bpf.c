@@ -481,6 +481,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 				goto found_cpu;
 			}
 			// Nothing idle, stay sticky
+			stat_inc(P2DQ_STAT_WAKE_PREV);
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
@@ -489,6 +490,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		task_ctx *waker_taskc = scx_task_data(waker);
 		// Shouldn't happen, but makes code easier to follow
 		if (!waker_taskc) {
+			stat_inc(P2DQ_STAT_WAKE_PREV);
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
@@ -512,14 +514,18 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 				goto found_cpu;
 			}
 			// Nothing idle, stay sticky
+			stat_inc(P2DQ_STAT_WAKE_PREV);
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
 
 		// If wakeup LLC are allowed then migrate to the waker llc.
 		struct llc_ctx *waker_llcx = lookup_llc_ctx(waker_taskc->llc_id);
-		if (!waker_llcx)
+		if (!waker_llcx) {
+			stat_inc(P2DQ_STAT_WAKE_PREV);
+			cpu = prev_cpu;
 			goto found_cpu;
+		}
 
 		if (waker_llcx->cpumask &&
 		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(waker_llcx->cpumask),
@@ -537,8 +543,10 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			*is_idle = true;
 			goto found_cpu;
 		}
+
 		// Nothing idle, move to waker CPU
 		cpu = scx_bpf_task_cpu(waker);
+		stat_inc(P2DQ_STAT_WAKE_MIG);
 		goto found_cpu;
 	}
 
@@ -727,10 +735,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 		if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
 			taskc->dsq_id = llcx->intr_dsq;
+			stat_inc(P2DQ_STAT_ENQ_INTR);
 		} else if (can_migrate(taskc)) {
 			taskc->dsq_id = llcx->mig_dsq;
+			stat_inc(P2DQ_STAT_ENQ_MIG);
 		} else {
 			taskc->dsq_id = llcx->dsq;
+			stat_inc(P2DQ_STAT_ENQ_LLC);
 		}
 
 		if (interactive_fifo && taskc->interactive)
@@ -760,10 +771,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 	if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
 		taskc->dsq_id = llcx->intr_dsq;
+		stat_inc(P2DQ_STAT_ENQ_INTR);
 	} else if (can_migrate(taskc)) {
 		taskc->dsq_id = llcx->mig_dsq;
+		stat_inc(P2DQ_STAT_ENQ_MIG);
 	} else {
 		taskc->dsq_id = llcx->dsq;
+		stat_inc(P2DQ_STAT_ENQ_LLC);
 	}
 
 	if (deadline_scheduling)
