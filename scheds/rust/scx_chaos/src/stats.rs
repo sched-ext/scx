@@ -21,6 +21,10 @@ pub struct Metrics {
     pub trait_cpu_freq: u64,
     #[stat(desc = "Number of times performance degradation chaos trait was applied")]
     pub trait_degradation: u64,
+    #[stat(desc = "Number of futex wait syscalls delayed")]
+    pub trait_futex_delays: u64,
+    #[stat(desc = "Number of futex wait syscalls delayed until replaced")]
+    pub trait_futex_delays_contended: u64,
     #[stat(desc = "Number of times chaos was excluded due to task matching")]
     pub chaos_excluded: u64,
     #[stat(desc = "Number of times chaos was skipped (TRAIT_NONE selected)")]
@@ -33,13 +37,15 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}\n\tchaos excluded/skipped {}/{}\n\ttimer kicks: {}",
+            "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}\n\tchaos excluded/skipped {}/{}\n\ttimer kicks: {}\n\tfutex: contended/total: {}/{}",
             self.trait_random_delays,
             self.trait_cpu_freq,
             self.trait_degradation,
             self.chaos_excluded,
             self.chaos_skipped,
             self.timer_kicks,
+            self.trait_futex_delays_contended,
+            self.trait_futex_delays,
         )?;
         Ok(())
     }
@@ -49,6 +55,9 @@ impl Metrics {
             trait_random_delays: self.trait_random_delays - rhs.trait_random_delays,
             trait_cpu_freq: self.trait_cpu_freq - rhs.trait_cpu_freq,
             trait_degradation: self.trait_degradation - rhs.trait_degradation,
+            trait_futex_delays: self.trait_futex_delays - rhs.trait_futex_delays,
+            trait_futex_delays_contended: self.trait_futex_delays_contended
+                - rhs.trait_futex_delays_contended,
             chaos_excluded: self.chaos_excluded - rhs.chaos_excluded,
             chaos_skipped: self.chaos_skipped - rhs.chaos_skipped,
             timer_kicks: self.timer_kicks - rhs.timer_kicks,
