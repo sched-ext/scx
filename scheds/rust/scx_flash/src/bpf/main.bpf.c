@@ -119,6 +119,11 @@ const volatile bool sticky_cpu;
 const volatile bool local_pcpu;
 
 /*
+ * Always directly dispatch a task if an idle CPU is found.
+ */
+const volatile bool direct_dispatch;
+
+/*
  * Native tasks priorities.
  *
  * By default, the scheduler normalizes task priorities to avoid large gaps
@@ -365,6 +370,14 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return p->flags & PF_KTHREAD;
+}
+
+/*
+ * Return true if @p can only run on a single CPU, false otherwise.
+ */
+static bool is_pcpu_task(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
 }
 
 /*
@@ -1009,14 +1022,11 @@ out_put_cpumask:
 static inline bool can_direct_dispatch(s32 cpu)
 {
 	/*
-	 * If @local_pcpu is enabled allow direct dispatch only if there
-	 * are no other tasks queued to the CPU DSQ. This prevents
-	 * potential starvation of per-CPU tasks.
+	 * If @direct_dispatch is enabled always allow direct dispatch,
+	 * otherwise allow it only if there are no other tasks queued to
+	 * the DSQs.
 	 */
-	if (local_pcpu)
-		return !nr_tasks_waiting(cpu);
-
-	return true;
+	return direct_dispatch ?: !nr_tasks_waiting(cpu);
 }
 
 /*
@@ -1198,21 +1208,34 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	/*
+	 * If the CPU is not busy dispatch tasks in a round-robin fashion.
+	 */
+	if (direct_dispatch && !is_cpu_busy(cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		dispatched = true;
+
+		goto out_kick;
+	}
+
+	/*
 	 * If the task can only run on a single CPU and that CPU is idle,
 	 * perform a direct dispatch.
 	 */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
-		if (scx_bpf_test_and_clear_cpu_idle(cpu) && can_direct_dispatch(cpu)) {
+	if (is_pcpu_task(p)) {
+		if (can_direct_dispatch(cpu) && scx_bpf_test_and_clear_cpu_idle(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			dispatched = true;
+
+			goto out_kick;
 		}
 
 		/*
 		 * No need to check for other CPUs if the task can only run
 		 * on a single one.
 		 */
-		goto out_kick;
+		return false;
 	}
 
 	/*
@@ -1240,41 +1263,14 @@ out_kick:
 }
 
 /*
- * Return true if a CPU is busy (based on its utilization), false
- * otherwise.
+ * Return true if the @p can be enqueued to the @cpu DSQ, false otherwise.
  */
-static bool is_cpu_busy(s32 cpu)
+static bool can_enqueue_to_cpu(const struct task_struct *p, s32 cpu)
 {
-	const struct cpu_ctx *cctx;
-	/*
-	 * Determine whether a CPU is considered busy using the following logic:
-	 *  - if a fixed threshold is provided (@cpu_busy_thresh), use it
-	 *    directly;
-	 *  - otherwise, compute a dynamic threshold as:
-	 *        100% - global CPU user time %
-	 *
-	 * The dynamic threshold adapts to system load: when user time is
-	 * high, the threshold decreases, making the scheduler more
-	 * aggressive in migrating tasks to improve responsiveness. When
-	 * user time is low, the threshold increases, encouraging task
-	 * stickiness to improve cache locality while still preserving work
-	 * conservation, since the system isn't overloaded.
-	 *
-	 * Note that the CPU utilization percentage is represented using fixed
-	 * point, so we need to multiply the threshold percentage by 1000.
-	 */
-	u64 cpu_thresh = cpu_busy_thresh >= 0 ? cpu_busy_thresh * 1000 :
-						(SCX_CPUPERF_ONE - cpu_util);
+	if (local_pcpu && is_pcpu_task(p))
+		return true;
 
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return false;
-
-	/*
-	 * Normalize the utilization in range [0 .. SCX_CPUPERF_ONE] and
-	 * check if the current utilization exceeds the target threshold.
-	 */
-	return cctx->perf_lvl >= cpu_thresh;
+	return !is_cpu_busy(cpu);
 }
 
 /*
@@ -1361,7 +1357,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and use the per-node DSQ if the CPU is getting saturated, so
 	 * that tasks can attempt to migrate somewhere else.
 	 */
-	if (!scx_bpf_task_running(p) && !is_cpu_busy(prev_cpu)) {
+	if (!scx_bpf_task_running(p) && can_enqueue_to_cpu(p, prev_cpu)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);

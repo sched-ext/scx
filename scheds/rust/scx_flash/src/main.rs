@@ -249,6 +249,19 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
 
+    /// Always allow direct dispatch to idle CPUs.
+    ///
+    /// By default tasks are not directly dispatched to idle CPUs if there are other tasks waiting
+    /// in the scheduler's queues. This prevents potential starvation of the already queued tasks.
+    ///
+    /// Enabling this option allows tasks to be always dispatched directly to idle CPUs,
+    /// potentially bypassing the scheduler queues.
+    ///
+    /// This allows to improve system throughput, especially with server workloads, but it can
+    /// introduce unfairness and potentially trigger stall conditions.
+    #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
+    direct_dispatch: bool,
+
     /// Enable CPU stickiness.
     ///
     /// Enabling this option can reduce the amount of task migrations, but it can also make
@@ -441,6 +454,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.numa_disabled = numa_disabled;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
+        skel.maps.rodata_data.direct_dispatch = opts.direct_dispatch;
         skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.tickless_sched = opts.tickless;
