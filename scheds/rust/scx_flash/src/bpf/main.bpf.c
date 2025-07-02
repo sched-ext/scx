@@ -65,7 +65,7 @@ const volatile u64 run_lag = 200ULL * NSEC_PER_MSEC;
  * Maximum amount of voluntary context switches (this limit allows to prevent
  * spikes or abuse of the nvcsw dynamic).
  */
-const volatile u64 max_avg_nvcsw;
+const volatile u64 max_avg_nvcsw = 128ULL;
 
 /*
  * CPU utilization threshold to consider the CPU as busy.
@@ -321,9 +321,8 @@ struct task_ctx {
 	/*
 	 * Voluntary context switches metrics.
 	 */
-	u64 nvcsw;
-	u64 nvcsw_ts;
 	u64 avg_nvcsw;
+	u64 last_sleep_at;
 
 	/*
 	 * Task's recently used CPU: used to determine whether we need to
@@ -518,7 +517,7 @@ static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	 * budget, a task that is sleeping frequently will get a bigger
 	 * time budget.
 	 */
-	lag_scale = max_avg_nvcsw ? MAX(log2_u64(tctx->avg_nvcsw), 1) : 1;
+	lag_scale = max_avg_nvcsw ? log2_u64(MAX(tctx->avg_nvcsw, 2)) : 1;
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
@@ -1573,17 +1572,14 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 
 	/*
-	 * Refresh voluntary context switch metrics every @slice_max ns.
+	 * Refresh the average rate of voluntary context switches.
 	 */
-	tctx->nvcsw++;
+	delta_t = time_delta(now, tctx->last_sleep_at);
+	if (delta_t > 0) {
+	    u64 nvcsw = slice_max / delta_t;
 
-	delta_t = time_delta(now, tctx->nvcsw_ts);
-	if (delta_t > slice_max) {
-		u64 avg = tctx->nvcsw * slice_max / delta_t;
-
-		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg, 0, max_avg_nvcsw);
-		tctx->nvcsw = 0;
-		tctx->nvcsw_ts = now;
+	    tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, nvcsw, 0, max_avg_nvcsw);
+	    tctx->last_sleep_at = now;
 	}
 }
 
