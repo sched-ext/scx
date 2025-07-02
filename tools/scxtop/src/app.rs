@@ -2218,11 +2218,20 @@ impl<'a> App<'a> {
             AppState::Scheduler => {
                 let [left, right] =
                     Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
-                let [top, center, bottom] = Layout::vertical([Constraint::Fill(1); 3]).areas(left);
-                self.render_scheduler("dsq_lat_us", frame, top, true, true)?;
-                self.render_scheduler("dsq_slice_consumed", frame, center, true, false)?;
-                self.render_scheduler("dsq_vtime_delta", frame, bottom, true, false)?;
-                self.render_scheduler_stats(frame, right)
+                let [left_top, left_center, left_bottom] = Layout::vertical([
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                ])
+                .areas(left);
+                let [right_top, right_bottom] =
+                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+                        .areas(right);
+                self.render_scheduler("dsq_lat_us", frame, left_top, true, true)?;
+                self.render_scheduler("dsq_slice_consumed", frame, left_center, true, false)?;
+                self.render_scheduler("dsq_vtime_delta", frame, left_bottom, true, false)?;
+                self.render_scheduler("dsq_nr_queued", frame, right_bottom, true, false)?;
+                self.render_scheduler_stats(frame, right_top)
             }
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
@@ -2510,6 +2519,7 @@ impl<'a> App<'a> {
         let SchedSwitchAction {
             cpu,
             next_dsq_id,
+            next_dsq_nr_queued,
             next_dsq_lat_us,
             next_dsq_vtime,
             prev_dsq_id,
@@ -2536,14 +2546,6 @@ impl<'a> App<'a> {
         let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
 
         if next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
-            if self.state == AppState::MangoApp {
-                if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
-                    cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
-                }
-            } else {
-                cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
-            }
-
             let next_dsq_data = self
                 .dsq_data
                 .entry(next_dsq_id)
@@ -2551,10 +2553,14 @@ impl<'a> App<'a> {
 
             if self.state == AppState::MangoApp {
                 if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
+                    cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
                     next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+                    next_dsq_data.add_event_data("dsq_nr_queued", *next_dsq_nr_queued as u64);
                 }
             } else {
+                cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
                 next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+                next_dsq_data.add_event_data("dsq_nr_queued", *next_dsq_nr_queued as u64);
             }
 
             if *next_dsq_vtime > 0 {
