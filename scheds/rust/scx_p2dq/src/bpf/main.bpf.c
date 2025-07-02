@@ -370,22 +370,17 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 	// First try last CPU
 	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
 		*is_idle = true;
 		goto found_cpu;
 	}
 
 	wrapper = bpf_task_storage_get(&task_masks, p, 0, 0);
-	if (!wrapper) {
-		cpu = prev_cpu;
+	if (!wrapper)
 		goto found_cpu;
-	}
 
 	mask = wrapper->mask;
-	if (!mask) {
-		cpu = prev_cpu;
+	if (!mask)
 		goto found_cpu;
-	}
 
 	if (llcx->cpumask)
 		bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
@@ -442,7 +437,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 
 	if (interactive_sticky && taskc->interactive) {
-		cpu = prev_cpu;
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
 		goto found_cpu;
 	}
@@ -451,7 +445,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	if (bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !taskc->interactive) ?
 				 idle_smtmask : idle_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
 		*is_idle = true;
 		goto found_cpu;
 	}
@@ -491,7 +484,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		// Shouldn't happen, but makes code easier to follow
 		if (!waker_taskc) {
 			stat_inc(P2DQ_STAT_WAKE_PREV);
-			cpu = prev_cpu;
 			goto found_cpu;
 		}
 
