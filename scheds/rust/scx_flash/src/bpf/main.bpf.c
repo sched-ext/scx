@@ -1470,13 +1470,10 @@ static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
 		return;
 
 	/*
-	 * Refresh target performance level, if utilization is above 75%
-	 * bump up the performance level to the max.
+	 * Refresh target performance level.
 	 */
 	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
 	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
-	if (perf_lvl >= SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
-		perf_lvl = SCX_CPUPERF_ONE;
 
 	/*
 	 * Use a moving average to evalute the target performance level,
