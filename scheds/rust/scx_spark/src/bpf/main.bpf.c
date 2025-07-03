@@ -822,67 +822,115 @@ static s32 find_idle_cpu_in_mask(const struct cpumask *mask, u64 flags)
 	return scx_bpf_pick_idle_cpu(mask, flags);
 }
 
-static s32 pick_idle_cpu_gpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
-{
-	const struct cpumask *big_mask;
+static s32 pick_idle_turbo_cpu(s32 prev_cpu, u64 wake_flags, bool *is_idle, int *cpu){
 	const struct cpumask *turbo_mask;
-	s32 cpu = -1; //If no idle CPU is found, go down the regular path for finding an idle CPU
+	s32 cpu_id = -1; 
 
-	big_mask = cast_mask(big_cpumask);
 	turbo_mask = cast_mask(turbo_cpumask);
-	if (big_mask && bpf_cpumask_empty(big_mask)){
-		big_mask = NULL;
-		turbo_mask = NULL;
-		return cpu;
-	}
-
 	if(turbo_mask && bpf_cpumask_empty(turbo_mask)){
 		turbo_mask = NULL;
 	}
 
-
-/*Try looking for idle turbo CPUs, even if it's not a cache sibling. NOTE: This will probably happen dynamically based on cache sensitivity when workload detection improves.*/
 if(turbo_mask){
     //Check if the previous CPU is idle and in the turbo mask
 	if (bpf_cpumask_test_cpu(prev_cpu, turbo_mask) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		*is_idle = true;
-		return prev_cpu;
+		*cpu = prev_cpu;
+		return 1;
 	}
 //Select any turbo CPU (all turbo CPUs are L3 cache siblings)
-	cpu = find_idle_cpu_in_mask(turbo_mask, 0);
-	if(cpu >= 0){
+	cpu_id = find_idle_cpu_in_mask(turbo_mask, 0);
+	if(cpu_id >= 0){
 		*is_idle = true;
-		return cpu;
+		*cpu = cpu_id;
+		return 1;
 	}
 }
+return -1;
+}
+
+static s32 pick_idle_big_cpu(struct task_ctx *tctx, s32 prev_cpu, u64 wake_flags, bool *is_idle, int *cpu)
+{
+	const struct cpumask *big_mask;
+	const struct cpumask *turbo_mask;
+	s32 cpu_id = -1; 
+
+	big_mask = cast_mask(big_cpumask);
+	if (big_mask && bpf_cpumask_empty(big_mask)){
+		big_mask = NULL;
+	}
+
 	/*
 	 * Try to re-use the same CPU if it's a big CPU.
 	 */
 	if (big_mask && bpf_cpumask_test_cpu(prev_cpu, big_mask) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		*is_idle = true;
-		return prev_cpu;
+		*cpu = prev_cpu;
+		return 1;
 	}
 
 	//Try to use big idle CPUs that are L3 cache siblings
-	if (big_mask) {
-		struct task_ctx *tctx = try_lookup_task_ctx(p);
+	
 		if (tctx && tctx->big_l3_cpumask) {
-			cpu = find_idle_cpu_in_mask(cast_mask(tctx->big_l3_cpumask), 0);
-			if(cpu >= 0){
+			cpu_id = find_idle_cpu_in_mask(cast_mask(tctx->big_l3_cpumask), 0);
+			if(cpu_id >= 0){
 				*is_idle = true;
-				return cpu;
+				*cpu = cpu_id;
+				return 1;
 			}
 		}
+
 		//Otherwise, try using any big CPU
-		cpu = find_idle_cpu_in_mask(big_mask, 0);
-		if(cpu >= 0){
+		if (big_mask) {
+		cpu_id = find_idle_cpu_in_mask(big_mask, 0);
+		if(cpu_id >= 0){
 			*is_idle = true;
-			return cpu;
+			*cpu = cpu_id;
+			return 1;
 		}
 	}
-
-	return cpu;
+	return -1;
 }
+
+static s32 pick_idle_little_cpu(struct task_ctx *tctx, s32 prev_cpu, u64 wake_flags, bool *is_idle, int *cpu){
+	const struct cpumask *little_mask;
+	s32 cpu_id = -1;
+	little_mask = cast_mask(little_cpumask);
+			if (little_mask && bpf_cpumask_empty(little_mask)){
+				little_mask = NULL;
+			}
+
+						/*
+	 * Try to re-use the same CPU if it's a little CPU.
+	 */
+	if (little_mask && bpf_cpumask_test_cpu(prev_cpu, little_mask) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		*cpu = prev_cpu;
+		*is_idle = true;
+		return 1;
+	}
+
+		if (tctx && tctx->little_l3_cpumask) {
+			cpu_id = find_idle_cpu_in_mask(cast_mask(tctx->little_l3_cpumask), 0);
+			if(cpu_id >= 0){
+				*is_idle = true;
+				*cpu = cpu_id;
+				return 1;
+			}
+		}
+
+
+			//Use any idle little CPU
+			if(little_mask){
+				cpu_id = find_idle_cpu_in_mask(little_mask, 0);
+				if(cpu_id >= 0){
+					*is_idle = true;
+					*cpu = cpu_id;
+					return 1;
+				}
+			}
+	return -1;
+}
+
 
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
@@ -899,43 +947,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	is_gpu_task = tctx->is_gpu_task;
 
 	if(aggressive_gpu_tasks){
-		if(is_gpu_task){
-			cpu = pick_idle_cpu_gpu(p, prev_cpu, wake_flags, is_idle);
-			if(cpu >= 0){
-				return cpu;
-			}
+		if(is_gpu_task && (pick_idle_turbo_cpu(prev_cpu, wake_flags, is_idle, &cpu) >= 0 || pick_idle_big_cpu(tctx, prev_cpu, wake_flags, is_idle, &cpu) >= 0 || pick_idle_little_cpu(tctx, prev_cpu, wake_flags, is_idle, &cpu) >= 0)){
+			return cpu;
 		}
-		else{
-			little_mask = cast_mask(little_cpumask);
-			if (little_mask && bpf_cpumask_empty(little_mask)){
-				little_mask = NULL;
-			}
-
-						/*
-	 * Try to re-use the same CPU if it's a little CPU.
-	 */
-	if (little_mask && bpf_cpumask_test_cpu(prev_cpu, little_mask) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
-		*is_idle = true;
-		goto out_put_cpumask;
-	}
-
-		if (tctx && tctx->little_l3_cpumask) {
-			cpu = find_idle_cpu_in_mask(cast_mask(tctx->little_l3_cpumask), 0);
-			if(cpu >= 0){
-				*is_idle = true;
-				return cpu;
-			}
-
-			//Use any idle little CPU
-			if(little_mask){
-				cpu = find_idle_cpu_in_mask(little_mask, 0);
-				if(cpu >= 0){
-					*is_idle = true;
-					goto out_put_cpumask;
-				}
-			}
-		}
+		else if (pick_idle_little_cpu(tctx, prev_cpu, wake_flags, is_idle, &cpu) >= 0 || pick_idle_big_cpu(tctx, prev_cpu, wake_flags, is_idle, &cpu) >= 0 || pick_idle_turbo_cpu(prev_cpu, wake_flags, is_idle, &cpu) >= 0){
+			return cpu; 
 		}
 	}
 		
@@ -1308,10 +1324,16 @@ if(stay_with_kthread){
 		}
 		}
 		else if(aggressive_gpu_tasks && p->nr_cpus_allowed > 1) { //Non-GPU tasks that aren't per-cpu threads in aggressive mode, insert into the little queue
+
+		/*
+					// Balance non-GPU tasks between BIG_DSQ_ID and LITTLE_DSQ_ID to allow better load distribution ? Maybe try it
+			u64 dsq_choice = (deadline % 2) ? BIG_DSQ_ID : LITTLE_DSQ_ID;
+			*/
 			scx_bpf_dsq_insert_vtime(p, LITTLE_DSQ_ID, slice, deadline, enq_flags);
 			goto workload_statistics;
 		}
 	}
+
 
 
 	dsq_id = get_dsq_id(prev_cpu);
@@ -1371,31 +1393,21 @@ void BPF_STRUCT_OPS(spark_dispatch, s32 cpu, struct task_struct *prev)
 		 * If the CPU core type is turbo, first try to dispatch a task from the turbo DSQ.
 		 * If the CPU core type is not turbo but is big, then try to dispatch a task from the big DSQ.
 		 * If the CPU core type is not turbo or big, then try to dispatch a task from the little DSQ.
-		 * If all else fails, then try to dispatch a task from the per-CPU or shared DSQ.
+		 * All cores can fallback to other DSQs and finally to the per-CPU or shared DSQ.
 		 */
 	if(aggressive_gpu_tasks && cctx){
-		if(cctx->is_turbo){
-			if (scx_bpf_dsq_move_to_local(TURBO_DSQ_ID)) {
+			if (cctx->is_turbo && scx_bpf_dsq_move_to_local(TURBO_DSQ_ID) || scx_bpf_dsq_move_to_local(BIG_DSQ_ID) 
+			|| scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID) || scx_bpf_dsq_move_to_local(dsq_id)) {
 				return;
 			}
-		}
-		if(cctx->is_big){
-			if (scx_bpf_dsq_move_to_local(BIG_DSQ_ID)) {
+			else if (cctx->is_big && scx_bpf_dsq_move_to_local(BIG_DSQ_ID) || scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID) || scx_bpf_dsq_move_to_local(dsq_id)) {
 				return;
 			}
-		}
-		else{
-				/*
-	 * Consume regular tasks from the per-CPU DSQ or shared DSQ depending on mode, transferring them to the
-	 * local CPU DSQ.
-	 */
-	if (scx_bpf_dsq_move_to_local(dsq_id)) {
-		return;
-	}
-			if (scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID)) {
-				return;
+			else {
+				if (scx_bpf_dsq_move_to_local(dsq_id) || scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID)) {
+					return;
+				}
 			}
-		}
 	}
 		
 	/*
