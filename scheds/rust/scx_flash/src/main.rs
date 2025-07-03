@@ -381,7 +381,12 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        let nr_nodes = topo.nodes.len();
+        // Determine the amount of non-empty NUMA nodes in the system.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
         info!("NUMA nodes: {}", nr_nodes);
 
         // Automatically disable NUMA optimizations when running on non-NUMA systems.
