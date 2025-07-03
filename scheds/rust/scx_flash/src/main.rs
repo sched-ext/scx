@@ -159,6 +159,13 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "4096")]
     slice_us_lag: u64,
 
+    /// Dynamically adjust task's maximum sleep budget based on CPU utilization.
+    ///
+    /// Enabling this option allows to increase the throughput of highly message passing workloads,
+    /// but it can also reduce the overall system responsiveness.
+    #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
+    slice_lag_scaling: bool,
+
     /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
@@ -426,6 +433,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;
+        skel.maps.rodata_data.slice_lag_scaling = opts.slice_lag_scaling;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
