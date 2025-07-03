@@ -41,6 +41,7 @@ struct chaos_task_ctx {
 	enum chaos_trait_kind	pending_trait;
 	u64			enq_flags;
 	u64			p2dq_vtime;
+	u64			in_delay_dispatch;
 };
 
 enum chaos_stat_idx {
