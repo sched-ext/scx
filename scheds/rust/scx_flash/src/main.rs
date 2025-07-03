@@ -777,8 +777,8 @@ impl<'a> Scheduler<'a> {
         let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
 
         if total_diff > 0 {
-            let user_pct = 100.0 * (user_diff as f64) / (total_diff as f64);
-            Some((user_pct * 1000.0).round() as u64)
+            let user_ratio = user_diff as f64 / total_diff as f64;
+            Some((user_ratio * 1024.0).round() as u64)
         } else {
             None
         }

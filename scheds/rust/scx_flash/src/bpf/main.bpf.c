@@ -1196,7 +1196,7 @@ static bool is_cpu_busy(s32 cpu)
 	 * point, so we need to multiply the threshold percentage by 1000.
 	 */
 	u64 cpu_thresh = cpu_busy_thresh >= 0 ? cpu_busy_thresh * 1000 :
-						(100000 - cpu_util);
+						(SCX_CPUPERF_ONE - cpu_util);
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
@@ -1206,7 +1206,7 @@ static bool is_cpu_busy(s32 cpu)
 	 * Normalize the utilization in range [0 .. SCX_CPUPERF_ONE] and
 	 * check if the current utilization exceeds the target threshold.
 	 */
-	return cctx->perf_lvl >= SCX_CPUPERF_ONE * cpu_thresh / 100000;
+	return cctx->perf_lvl >= cpu_thresh;
 }
 
 /*
