@@ -432,8 +432,14 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
-        skel.maps.rodata_data.cpu_busy_thresh = opts.cpu_busy_thresh;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
+
+        // Normalize CPU busy threshold in the range [0 .. 1024].
+        skel.maps.rodata_data.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
+            opts.cpu_busy_thresh
+        } else {
+            opts.cpu_busy_thresh * 1024 / 100
+        };
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
@@ -777,8 +783,8 @@ impl<'a> Scheduler<'a> {
         let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
 
         if total_diff > 0 {
-            let user_pct = 100.0 * (user_diff as f64) / (total_diff as f64);
-            Some((user_pct * 1000.0).round() as u64)
+            let user_ratio = user_diff as f64 / total_diff as f64;
+            Some((user_ratio * 1024.0).round() as u64)
         } else {
             None
         }

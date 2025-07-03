@@ -1074,6 +1074,48 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 }
 
 /*
+ * Return true if a CPU is busy (based on its utilization), false
+ * otherwise.
+ */
+static bool is_cpu_busy(s32 cpu)
+{
+	const struct cpu_ctx *cctx;
+	/*
+	 * Determine whether a CPU is considered busy using the following logic:
+	 *  - if a fixed threshold is provided (@cpu_busy_thresh), use it
+	 *    directly;
+	 *  - otherwise, compute a dynamic threshold as:
+	 *        100% - global CPU user time %
+	 *
+	 * The dynamic threshold adapts to system load: when user time is
+	 * high, the threshold decreases, making the scheduler more
+	 * aggressive in migrating tasks to improve responsiveness. When
+	 * user time is low, the threshold increases, encouraging task
+	 * stickiness to improve cache locality while still preserving work
+	 * conservation, since the system isn't overloaded.
+	 */
+	u64 cpu_thresh = cpu_busy_thresh >= 0 ? cpu_busy_thresh :
+						(SCX_CPUPERF_ONE - cpu_util);
+
+	/*
+	 * If the target threshold is greater than 100% assume the CPU is
+	 * never busy,
+	 */
+	if (cpu_thresh > SCX_CPUPERF_ONE)
+		return false;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return false;
+
+	/*
+	 * Normalize the utilization in range [0 .. SCX_CPUPERF_ONE] and
+	 * check if the current utilization exceeds the target threshold.
+	 */
+	return cctx->perf_lvl >= cpu_thresh;
+}
+
+/*
  * Attempt to dispatch a task directly to its assigned CPU.
  *
  * Return true if the task is dispatched, false otherwise.
@@ -1196,7 +1238,7 @@ static bool is_cpu_busy(s32 cpu)
 	 * point, so we need to multiply the threshold percentage by 1000.
 	 */
 	u64 cpu_thresh = cpu_busy_thresh >= 0 ? cpu_busy_thresh * 1000 :
-						(100000 - cpu_util);
+						(SCX_CPUPERF_ONE - cpu_util);
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
@@ -1206,7 +1248,7 @@ static bool is_cpu_busy(s32 cpu)
 	 * Normalize the utilization in range [0 .. SCX_CPUPERF_ONE] and
 	 * check if the current utilization exceeds the target threshold.
 	 */
-	return cctx->perf_lvl >= SCX_CPUPERF_ONE * cpu_thresh / 100000;
+	return cctx->perf_lvl >= cpu_thresh;
 }
 
 /*
