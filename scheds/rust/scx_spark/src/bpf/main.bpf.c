@@ -1396,11 +1396,11 @@ void BPF_STRUCT_OPS(spark_dispatch, s32 cpu, struct task_struct *prev)
 		 * All cores can fallback to other DSQs and finally to the per-CPU or shared DSQ.
 		 */
 	if(aggressive_gpu_tasks && cctx){
-			if (cctx->is_turbo && scx_bpf_dsq_move_to_local(TURBO_DSQ_ID) || scx_bpf_dsq_move_to_local(BIG_DSQ_ID) 
-			|| scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID) || scx_bpf_dsq_move_to_local(dsq_id)) {
+			if (cctx->is_turbo && scx_bpf_dsq_move_to_local(TURBO_DSQ_ID) ||  scx_bpf_dsq_move_to_local(dsq_id) || scx_bpf_dsq_move_to_local(BIG_DSQ_ID) 
+			|| scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID)) {
 				return;
 			}
-			else if (cctx->is_big && scx_bpf_dsq_move_to_local(BIG_DSQ_ID) || scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID) || scx_bpf_dsq_move_to_local(dsq_id)) {
+			else if (cctx->is_big && scx_bpf_dsq_move_to_local(BIG_DSQ_ID) ||  scx_bpf_dsq_move_to_local(dsq_id) || scx_bpf_dsq_move_to_local(LITTLE_DSQ_ID)) {
 				return;
 			}
 			else {
