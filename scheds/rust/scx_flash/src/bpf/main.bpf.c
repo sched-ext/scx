@@ -55,6 +55,12 @@ const volatile u64 slice_min = 128ULL * NSEC_PER_USEC;
 const volatile u64 slice_lag = 4096ULL * NSEC_PER_USEC;
 
 /*
+ * Adjust the maximum sleep budget in function of the average CPU
+ * utilization.
+ */
+const volatile bool slice_lag_scaling;
+
+/*
  * Maximum runtime penalty that a task can accumulate while running (used
  * to determine the task's maximum exec_vruntime: accumulated vruntime
  * since last sleep).
@@ -552,6 +558,26 @@ static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	 * time budget.
 	 */
 	lag_scale = max_avg_nvcsw ? log2_u64(MAX(tctx->avg_nvcsw, 2)) : 1;
+
+	/*
+	 * Adjust the budget in function of the average user CPU
+	 * utilization: increase the allowed spread when CPUs are more
+	 * utilized and reduce it when they are more idle.
+	 *
+	 * This enables dynamic fairness: when user CPU utilization is low,
+	 * the impact of vruntime is reduced, favoring bursty workloads
+	 * that use short execution slots (i.e., message-passing tasks like
+	 * hackbench or similar).
+	 *
+	 * As utilization increases, sleeping tasks regain vruntime credit
+	 * more quickly, restoring fairness and maintaining system
+	 * responsiveness under load.
+         *
+         * This ensures that isolated bursty workloads are prioritized for
+         * performance, while mixed workloads remain responsive and balanced.
+	 */
+	if (slice_lag_scaling)
+		lag_scale = lag_scale * cpu_util / SCX_CPUPERF_ONE;
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
