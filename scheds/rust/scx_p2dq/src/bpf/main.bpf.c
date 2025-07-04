@@ -148,7 +148,8 @@ static u64 llc_nr_queued(struct llc_ctx *llcx)
 {
 	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
 
-	nr_queued += scx_bpf_dsq_nr_queued(llcx->mig_dsq);
+	if (nr_llcs > 1)
+		nr_queued += scx_bpf_dsq_nr_queued(llcx->mig_dsq);
 	if (interactive_dsq)
 		nr_queued += scx_bpf_dsq_nr_queued(llcx->intr_dsq);
 
@@ -291,12 +292,32 @@ static bool is_interactive(task_ctx *taskc)
 	return taskc->dsq_index == 0;
 }
 
-static __always_inline bool can_migrate(task_ctx *taskc)
+static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 {
-	if (!dispatch_lb_interactive && taskc->interactive)
+	if (nr_llcs <= 1 || (!dispatch_lb_interactive && taskc->interactive))
 		return false;
+
 	if (max_dsq_pick2 && taskc->dsq_index != nr_dsqs_per_llc - 1)
 		return false;
+
+	u64 mig_nr_queued = scx_bpf_dsq_nr_queued(llcx->mig_dsq);
+
+	// If the number of queued tasks is greater than half of the number of
+	// CPUs then only try to migrate non interactive tasks.
+	if (taskc->interactive &&
+	    mig_nr_queued > llcx->nr_cpus / (llcx->nr_cpus > 1 ? 2 : 1))
+		return false;
+
+	u64 llc_nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
+	if (mig_nr_queued >= llc_nr_queued || mig_nr_queued >= llcx->nr_cpus)
+		return false;
+
+	if (interactive_dsq) {
+		u64 intr_nr_queued = scx_bpf_dsq_nr_queued(llcx->intr_dsq);
+		if (mig_nr_queued > intr_nr_queued)
+			return false;
+	}
+
 	return (nr_llcs > 1 &&
 		taskc->all_cpus &&
 		taskc->llc_runs > min_llc_runs_pick2);
@@ -771,10 +792,11 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
+		bool migrate = can_migrate(taskc, llcx);
+		if (interactive_dsq && taskc->interactive && !migrate) {
 			taskc->dsq_id = llcx->intr_dsq;
 			stat_inc(P2DQ_STAT_ENQ_INTR);
-		} else if (can_migrate(taskc)) {
+		} else if (migrate) {
 			taskc->dsq_id = llcx->mig_dsq;
 			stat_inc(P2DQ_STAT_ENQ_MIG);
 		} else {
@@ -817,10 +839,11 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	if (interactive_dsq && taskc->interactive && !can_migrate(taskc)) {
+	bool migrate = can_migrate(taskc, llcx);
+	if (interactive_dsq && taskc->interactive && !migrate) {
 		taskc->dsq_id = llcx->intr_dsq;
 		stat_inc(P2DQ_STAT_ENQ_INTR);
-	} else if (can_migrate(taskc)) {
+	} else if (migrate) {
 		taskc->dsq_id = llcx->mig_dsq;
 		stat_inc(P2DQ_STAT_ENQ_MIG);
 	} else {
