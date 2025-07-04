@@ -894,7 +894,6 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	taskc->was_nice = p->scx.weight < 100;
 	cpuc->interactive = taskc->interactive;
 	cpuc->dsq_index = taskc->dsq_index;
-	cpuc->dsq_id = taskc->dsq_id;
 	cpuc->nice_task = p->scx.weight < 100;
 	cpuc->slice_ns = taskc->slice_ns;
 	cpuc->ran_for = 0;
@@ -1429,7 +1428,6 @@ static s32 init_cpu(int cpu)
 	cpuc->llc_id = cpu_llc_ids[cpu];
 	cpuc->node_id = cpu_node_ids[cpu];
 	cpuc->is_big = big_core_ids[cpu] == 1;
-	cpuc->dsq_id = 0;
 	cpuc->slice_ns = 1;
 
 	if (!(llcx = lookup_llc_ctx(cpuc->llc_id)) ||

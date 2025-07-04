@@ -12,7 +12,6 @@ struct cpu_ctx {
 	u32				llc_id;
 	u64				affn_dsq;
 	u32				dsq_index;
-	u64				dsq_id;
 	u64				slice_ns;
 	u32				perf;
 	bool				interactive;
