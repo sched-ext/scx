@@ -73,39 +73,20 @@ fn parse_config_content(file_content: &str) -> Result<Config> {
 }
 
 pub fn get_default_config() -> Config {
+    let supported_scheds = [
+        SupportedSched::Bpfland,
+        SupportedSched::Rusty,
+        SupportedSched::Lavd,
+        SupportedSched::Flash,
+        SupportedSched::P2DQ,
+        SupportedSched::Tickless,
+        SupportedSched::Rustland,
+    ];
+    let scheds_map = HashMap::from(supported_scheds.map(|x| init_default_config_entry(x)));
     Config {
         default_sched: None,
         default_mode: Some(SchedMode::Auto),
-        scheds: HashMap::from([
-            (
-                "scx_bpfland".to_string(),
-                get_default_sched_for_config(&SupportedSched::Bpfland),
-            ),
-            (
-                "scx_rusty".to_string(),
-                get_default_sched_for_config(&SupportedSched::Rusty),
-            ),
-            (
-                "scx_lavd".to_string(),
-                get_default_sched_for_config(&SupportedSched::Lavd),
-            ),
-            (
-                "scx_flash".to_string(),
-                get_default_sched_for_config(&SupportedSched::Flash),
-            ),
-            (
-                "scx_p2dq".to_string(),
-                get_default_sched_for_config(&SupportedSched::P2DQ),
-            ),
-            (
-                "scx_tickless".to_string(),
-                get_default_sched_for_config(&SupportedSched::Tickless),
-            ),
-            (
-                "scx_rustland".to_string(),
-                get_default_sched_for_config(&SupportedSched::Rustland),
-            ),
-        ]),
+        scheds: scheds_map,
     }
 }
 
@@ -239,6 +220,15 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         // scx_rustland doesn't support any of these modes
         SupportedSched::Rustland => vec![],
     }
+}
+
+/// Initializes entry for config sched map
+fn init_default_config_entry(scx_sched: SupportedSched) -> (String, Sched) {
+    let default_modes = get_default_sched_for_config(&scx_sched);
+    (
+        <SupportedSched as Into<&str>>::into(scx_sched).to_owned(),
+        default_modes,
+    )
 }
 
 #[cfg(test)]
