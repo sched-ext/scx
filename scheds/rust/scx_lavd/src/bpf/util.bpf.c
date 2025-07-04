@@ -84,41 +84,6 @@ struct {
 #define max(X, Y) (((X) < (Y)) ? (Y) : (X))
 #endif
 
-static u64 sigmoid_u64(u64 v, u64 max)
-{
-	/*
-	 * An integer approximation of the sigmoid function. It is convenient
-	 * to use the sigmoid function since it has a known upper and lower
-	 * bound, [0, max].
-	 *
-	 *      |
-	 *	|      +------ <= max
-	 *	|    /
-	 *	|  /
-	 *	|/
-	 *	+------------->
-	 */
-	return (v > max) ? max : v;
-}
-
-static u64 rsigmoid_u64(u64 v, u64 max)
-{
-	/*
-	 * A horizontally flipped version of sigmoid function. Again, it is
-	 * convenient since the upper and lower bound of the function is known,
-	 * [0, max].
-	 *
-	 *
-	 *      |
-	 *	|\ <= max
-	 *	| \
-	 *	|  \
-	 *	|   \
-	 *	+----+-------->
-	 */
-	return (v >= max) ? 0 : max - v;
-}
-
 static struct task_ctx *get_task_ctx(struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -238,7 +203,7 @@ static bool use_full_cpus(void)
 	return sys_stat.nr_active >= nr_cpus_onln;
 }
 
-static s64 pick_any_bit(u64 bitmap, u64 nuance)
+s64 __attribute__ ((noinline)) pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 i, pos;
 
