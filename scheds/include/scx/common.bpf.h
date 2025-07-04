@@ -727,6 +727,25 @@ static inline u32 log2_u64(u64 v)
 }
 
 /*
+ * sqrt_u64 - Calculate the square root of value @x using Newton's method.
+ */
+static inline u64 __sqrt_u64(u64 x)
+{
+	if (x == 0 || x == 1)
+		return x;
+
+	u64 r = ((1ULL << 32) > x) ? x : (1ULL << 32);
+
+	for (int i = 0; i < 8; ++i) {
+		u64 q = x / r;
+		if (r <= q)
+			break;
+		r = (r + q) >> 1;
+	}
+	return r;
+}
+
+/*
  * Return a value proportionally scaled to the task's weight.
  */
 static inline u64 scale_by_task_weight(const struct task_struct *p, u64 value)
