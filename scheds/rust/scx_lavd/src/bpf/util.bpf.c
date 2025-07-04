@@ -141,20 +141,6 @@ static struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
 
-#define __calc_avg(old, new, decay) ({						\
-	typeof(decay) thr = 1 << (decay);					\
-	typeof(old) ret;							\
-	if (((old) < thr) || ((new) < thr)) {					\
-		if (((old) == 1) && ((new) == 0))				\
-			ret = 0;						\
-		else								\
-			ret = ((old) - ((old) >> 1)) + ((new) >> 1);		\
-	} else {								\
-		ret = ((old) - ((old) >> (decay))) + ((new) >> (decay));	\
-	}									\
-	ret;									\
-})
-
 u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
