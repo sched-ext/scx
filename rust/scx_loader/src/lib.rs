@@ -36,6 +36,8 @@ pub enum SupportedSched {
     Rustland,
     #[serde(rename = "scx_wd40")]
     WD40,
+    #[serde(rename = "scx_chaos")]
+    Chaos,
 }
 
 impl FromStr for SupportedSched {
@@ -51,6 +53,7 @@ impl FromStr for SupportedSched {
             "scx_rustland" => Ok(SupportedSched::Rustland),
             "scx_rusty" => Ok(SupportedSched::Rusty),
             "scx_wd40" => Ok(SupportedSched::WD40),
+            "scx_chaos" => Ok(SupportedSched::Chaos),
             _ => Err(anyhow::anyhow!("{scx_name} is not supported")),
         }
     }
@@ -74,6 +77,7 @@ impl From<SupportedSched> for &str {
             SupportedSched::Rustland => "scx_rustland",
             SupportedSched::Rusty => "scx_rusty",
             SupportedSched::WD40 => "scx_wd40",
+            SupportedSched::Chaos => "scx_chaos",
         }
     }
 }
