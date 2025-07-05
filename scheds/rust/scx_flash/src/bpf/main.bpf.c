@@ -809,12 +809,12 @@ static s32 pick_idle_cpu_builtin(struct task_struct *p, s32 prev_cpu, u64 wake_f
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
+static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
+			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	const struct cpumask *primary, *p_mask, *l2_mask, *l3_mask;
-	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
 	bool is_prev_allowed;
@@ -822,10 +822,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
 		return -EINVAL;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return -ENOENT;
 
 	/*
 	 * Use the built-in idle CPU selection policy, if enabled.
@@ -1090,13 +1086,18 @@ static inline bool can_direct_dispatch(s32 cpu)
 s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 			s32 prev_cpu, u64 wake_flags)
 {
+	struct task_ctx *tctx;
 	bool is_idle = false;
 	s32 cpu;
 
 	if (is_throttled())
 		return prev_cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return -ENOENT;
+
+	cpu = pick_idle_cpu(p, tctx, prev_cpu, wake_flags, &is_idle);
 	if (is_idle && can_direct_dispatch(cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
@@ -1293,7 +1294,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	/*
 	 * Try to pick an idle CPU close to the one the task is using.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
+	cpu = pick_idle_cpu(p, tctx, prev_cpu, 0, &is_idle);
 	if (!is_idle)
 		return false;
 
