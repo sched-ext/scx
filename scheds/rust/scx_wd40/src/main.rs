@@ -578,7 +578,6 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
 
         Self::setup_arenas(&mut skel)?;
-        
 
         info!(
             "Mask length {}, number of possible CPUs {}",
