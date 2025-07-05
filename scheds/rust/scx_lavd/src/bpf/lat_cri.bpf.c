@@ -120,9 +120,13 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Determine latency criticality of a task in a context-aware manner by
 	 * considering which task wakes up this task. If its waker is more
-	 * latency-critcial, inherit waker's latency criticality.
+	 * latency-critcial, inherit waker's latency criticality partially.
 	 */
-	taskc->lat_cri = max(lat_cri, taskc->lat_cri_waker);
+	if (taskc->lat_cri_waker > lat_cri) {
+		lat_cri += (taskc->lat_cri_waker - lat_cri) >>
+			   LAVD_LC_INHERIT_SHIFT;
+	}
+	taskc->lat_cri = lat_cri;
 
 	/*
 	 * A task is more CPU-performance sensitive when it meets the following
