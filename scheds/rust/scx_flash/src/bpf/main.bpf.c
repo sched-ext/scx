@@ -495,16 +495,12 @@ static inline u64 nr_tasks_waiting(s32 cpu)
  */
 static inline u64 task_slice(s32 cpu)
 {
-	return MAX(slice_max / (nr_tasks_waiting(cpu) + 1), slice_min);
-}
+	u64 nr_wait = nr_tasks_waiting(cpu);
 
-/*
- * Return the maximum time slice that can be assigned to a task, or an
- * infinite time slice if tickless mode is enabled.
- */
-static inline u64 task_slice_max(void)
-{
-	return tickless_sched ? SCX_SLICE_INF : slice_max;
+	if (!nr_wait)
+		return tickless_sched ? SCX_SLICE_INF : slice_max;
+
+	return MAX(slice_max / nr_wait, slice_min);
 }
 
 /*
@@ -1099,7 +1095,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, tctx, prev_cpu, wake_flags, &is_idle);
 	if (rr_sched || (is_idle && can_direct_dispatch(cpu))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(cpu), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -1277,7 +1273,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (is_pcpu_task(p)) {
 		if (can_direct_dispatch(cpu) && scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(cpu), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			dispatched = true;
 
@@ -1299,7 +1295,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	if (can_direct_dispatch(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice_max(), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		dispatched = true;
 	}
@@ -1556,7 +1552,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice_max();
+		prev->scx.slice = task_slice(cpu);
 }
 
 /*
