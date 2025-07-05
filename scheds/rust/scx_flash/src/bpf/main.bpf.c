@@ -7,8 +7,6 @@
 
 #define MAX_VTIME	(~0ULL)
 
-#define DSQ_FLAG_NODE	(1LLU << 32)
-
 /*
  * Thresholds for applying hysteresis to CPU performance scaling:
  *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
@@ -463,19 +461,11 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 }
 
 /*
- * Return the DSQ associated to @cpu.
- */
-static inline u64 cpu_to_dsq(s32 cpu)
-{
-	return (u64)cpu;
-}
-
-/*
  * Return the DSQ associated to @node.
  */
 static inline u64 node_to_dsq(int node)
 {
-	return DSQ_FLAG_NODE | node;
+	return node;
 }
 
 /*
@@ -485,8 +475,7 @@ static inline u64 nr_tasks_waiting(s32 cpu)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
-	return scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
-	       scx_bpf_dsq_nr_queued(node_to_dsq(node));
+	return scx_bpf_dsq_nr_queued(node_to_dsq(node));
 }
 
 /*
@@ -880,7 +869,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 		if ((share_llc || current->pid == tctx->waker_pid) &&
 		    p_mask && bpf_cpumask_test_cpu(this_cpu, p_mask) &&
 		    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu) &&
-		    !scx_bpf_dsq_nr_queued(cpu_to_dsq(this_cpu)) &&
 		    !is_llc_busy(this_cpu)) {
 			cpu = this_cpu;
 			*is_idle = true;
@@ -1187,7 +1175,7 @@ static bool is_cpu_busy(s32 cpu)
 static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 				s32 prev_cpu, u64 enq_flags)
 {
-	bool is_idle = false, dispatched = false;
+	bool is_idle = false;
 	s32 cpu = prev_cpu;
 
 	/*
@@ -1199,11 +1187,11 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(prev_cpu), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		dispatched = true;
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
-		goto out_kick;
+		return true;
 	}
 
 	/*
@@ -1236,27 +1224,15 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	/*
-	 * If the CPU is not busy dispatch tasks in a round-robin fashion.
-	 */
-	if (direct_dispatch && !is_cpu_busy(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		dispatched = true;
-
-		goto out_kick;
-	}
-
-	/*
 	 * If the task can only run on a single CPU and that CPU is idle,
 	 * perform a direct dispatch.
 	 */
 	if (is_pcpu_task(p)) {
 		if (can_direct_dispatch(cpu) && scx_bpf_test_and_clear_cpu_idle(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(cpu), enq_flags);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			dispatched = true;
-
-			goto out_kick;
+			return true;
 		}
 
 		/*
@@ -1276,18 +1252,13 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	if (can_direct_dispatch(cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		dispatched = true;
+		if (is_idle)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+		return true;
 	}
 
-out_kick:
-	/*
-	 * Kick the CPU even if we didn't directly dispatch, so it can be
-	 * clear its idle state (transitioning from idle->awake->idle) or
-	 * consume another task from the CPU DSQ.
-	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	return dispatched;
+	return false;
 }
 
 /*
@@ -1380,16 +1351,13 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Try to keep awakened tasks on the same CPU using the per-CPU DSQ
-	 * and use the per-node DSQ if the CPU is getting saturated, so
-	 * that tasks can attempt to migrate somewhere else.
+	 * Try to keep tasks on the same CPU using the local DSQ and use
+	 * the per-node DSQ if the CPU is getting saturated, so that tasks
+	 * can attempt to migrate somewhere else.
 	 */
-	if (!scx_bpf_task_running(p) && can_enqueue_to_cpu(p, prev_cpu)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
-
+	if (can_enqueue_to_cpu(p, prev_cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(prev_cpu), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
 	scx_bpf_dsq_insert_vtime(p, node_to_dsq(node),
@@ -1491,12 +1459,6 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * Let the CPU go idle if the system is throttled.
 	 */
 	if (is_throttled())
-		return;
-
-	/*
-	 * Try to consume a task from the per-CPU DSQ.
-	 */
-	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
 		return;
 
 	/*
@@ -2053,7 +2015,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 {
 	struct bpf_timer *timer;
 	int err, node;
-	s32 cpu;
 	u32 key = 0;
 
 	/* Initialize amount of online and possible CPUs */
@@ -2062,15 +2023,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 
 	/* Initialize CPUs and NUMA properties */
 	init_cpuperf_target();
-
-	/* Create per-CPU DSQs */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
-		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
-			return err;
-		}
-	}
 
 	/* Create per-node DSQs */
 	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
