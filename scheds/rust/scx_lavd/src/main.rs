@@ -509,8 +509,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.preempt_shift = opts.preempt_shift;
         skel.maps.rodata_data.no_use_em = opts.no_use_em as u8;
 
-        skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
-            | *compat::SCX_OPS_ENQ_EXITING
+        skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;

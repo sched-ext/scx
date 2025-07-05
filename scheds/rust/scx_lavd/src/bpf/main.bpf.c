@@ -783,15 +783,29 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
 	 * is updated. The @current task is a waker and @p is a waiter, which
-	 * is being wakened up now.
+	 * is being wakened up now. This is true only when
+	 * SCX_OPS_ALLOW_QUEUED_WAKEUP is not set. The wake-up operations are
+	 * batch processed with SCX_OPS_ALLOW_QUEUED_WAKEUP, so @current task
+	 * is no longer a waker task.
 	 */
 	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		return;
 
 	/*
-	 * Filter out unrelated tasks.
+	 * Filter out unrelated tasks. We keep track of userspace tasks under
+	 * the same parent process to confine the waker-wakee relationship
+	 * within closely related tasks.
 	 */
+	if (enq_flags & (SCX_ENQ_PREEMPT | SCX_ENQ_REENQ | SCX_ENQ_LAST))
+		return;
+
+	if (is_kernel_task(p))
+		return;
+
 	waker = bpf_get_current_task_btf();
+	if ((p->real_parent != waker->real_parent) || is_kernel_task(waker))
+		return;
+
 	waker_taskc = get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
