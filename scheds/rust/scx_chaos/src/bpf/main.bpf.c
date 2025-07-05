@@ -444,17 +444,25 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 		}
 
+		if (taskc->in_delay_dispatch) {
+			bpf_task_release(p);
+			continue;
+		}
+		taskc->in_delay_dispatch = 1;
+
+
 		if (p->scx.dsq_vtime > now) {
 			bpf_task_release(p);
+			taskc->in_delay_dispatch = 0;
 			break; // this is the DSQ's key so we're done
 		}
 
 		// restore vtime to p2dq's timeline
 		p->scx.dsq_vtime = taskc->p2dq_vtime;
 
-		async_p2dq_enqueue_weak(&promise, p, taskc->enq_flags);
-		complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
+		scx_bpf_dsq_move_to_local(get_cpu_delay_dsq(cpu));
 		bpf_task_release(p);
+		taskc->in_delay_dispatch = 0;
 	}
 
 	return p2dq_dispatch_impl(cpu, prev);
