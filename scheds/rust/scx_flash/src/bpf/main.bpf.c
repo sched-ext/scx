@@ -1081,7 +1081,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 		return -ENOENT;
 
 	cpu = pick_idle_cpu(p, tctx, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && can_direct_dispatch(cpu)) {
+	if (rr_sched || (is_idle && can_direct_dispatch(cpu))) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
@@ -1352,21 +1352,20 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Keep reusing the same CPU in round-robin mode.
 	 */
 	if (rr_sched) {
-		/*
-		 * In case of a re-enqueue due to a higher scheduling class
-		 * stealing the CPU, allow the task to move to a different
-		 * CPU.
-		 */
-		if (enq_flags & SCX_ENQ_REENQ) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		if (!is_pcpu_task(p)) {
+			bool is_idle;
+			s32 cpu;
 
-			goto out_kick;
+			cpu = pick_idle_cpu(p, tctx, prev_cpu, 0, &is_idle);
+			if (is_idle) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+						   task_slice_max(), enq_flags);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				return;
+			}
 		}
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice_max(), enq_flags);
 		return;
 	}
 
