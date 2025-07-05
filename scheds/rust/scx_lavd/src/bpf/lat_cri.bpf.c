@@ -213,12 +213,15 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 
 static u64 calc_when_to_run(struct task_struct *p, struct task_ctx *taskc)
 {
-	u64 deadline_delta;
+	u64 dl_delta, clc;
 
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
-	 * task should be scheduled.
+	 * task should be scheduled. We start from -LAVD_DL_COMPETE_WINDOW
+	 * so that the current task can compete against the already enqueued
+	 * tasks within [-LAVD_DL_COMPETE_WINDOW, 0].
 	 */
-	deadline_delta = calc_virtual_deadline_delta(p, taskc);
-	return READ_ONCE(cur_logical_clk) + deadline_delta;
+	dl_delta = calc_virtual_deadline_delta(p, taskc);
+	clc = READ_ONCE(cur_logical_clk) - LAVD_DL_COMPETE_WINDOW;
+	return clc + dl_delta;
 }
