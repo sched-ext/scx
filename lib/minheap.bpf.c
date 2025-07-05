@@ -27,6 +27,9 @@ scx_minheap_swap_elems(struct scx_minheap_elem __arena *a __arg_arena,
 __weak
 u64 scx_minheap_alloc_internal(size_t capacity)
 {
+	if(!capacity)
+		return (u64)NULL;
+
 	size_t alloc_size = sizeof(scx_minheap_t);
 	scx_minheap_t *heap;
 
@@ -53,6 +56,9 @@ __weak
 int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;
+	if (heap->size < 2)
+		return 0;
+
 	int child, next;
 	int off, ind;
 
@@ -88,6 +94,9 @@ static inline
 int scx_minheap_balance_bottom_up(void __arena *heap_ptr __arg_arena)
 {
 	scx_minheap_t *heap = (scx_minheap_t *)heap_ptr;
+	if (heap->size < 2)
+		return 0;
+
 	int parent;
 	int ind;
 
