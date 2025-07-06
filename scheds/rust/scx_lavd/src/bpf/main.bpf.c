@@ -792,18 +792,18 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Filter out unrelated tasks. We keep track of userspace tasks under
-	 * the same parent process to confine the waker-wakee relationship
-	 * within closely related tasks.
+	 * Filter out unrelated tasks. We keep track of tasks under the same
+	 * parent process to confine the waker-wakee relationship within
+	 * closely related tasks.
 	 */
 	if (enq_flags & (SCX_ENQ_PREEMPT | SCX_ENQ_REENQ | SCX_ENQ_LAST))
 		return;
 
-	if (is_kernel_task(p))
+	waker = bpf_get_current_task_btf();
+	if ((p->real_parent != waker->real_parent))
 		return;
 
-	waker = bpf_get_current_task_btf();
-	if ((p->real_parent != waker->real_parent) || is_kernel_task(waker))
+	if (is_kernel_task(p) != is_kernel_task(waker))
 		return;
 
 	waker_taskc = get_task_ctx(waker);
