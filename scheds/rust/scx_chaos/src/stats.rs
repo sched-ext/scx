@@ -27,19 +27,38 @@ pub struct Metrics {
     pub chaos_skipped: u64,
     #[stat(desc = "Number of timer-based CPU kicks for delayed tasks")]
     pub timer_kicks: u64,
+    #[stat(desc = "Number of times dispatch failed to move task from the delay queue")]
+    pub chaos_dispatch_failures: u64,
+    #[stat(desc = "Number of times dispatch succeeded moving a task from the delay queue")]
+    pub chaos_successful_dipatches: u64,
+    #[stat(desc = "Number of times p2dq_enqueue moved task directly")]
+    pub chaos_dispatch_complete: u64,
+    #[stat(desc = "Number of times p2dq_enqueue recommended moving to fifo dsq")]
+    pub chaos_dispatch_fifo: u64,
+    #[stat(desc = "Number of times p2dq_enqueue recommended moving to vtime dsq")]
+    pub chaos_dispatch_vtime: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}\n\tchaos excluded/skipped {}/{}\n\ttimer kicks: {}",
+            "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}
+\tchaos excluded/skipped {}/{}
+\ttimer kicks: {}
+\tdispatch failures/successes: {}/{}
+\tp2dq_enqueue complete/fifo/vtime: {}/{}/{}",
             self.trait_random_delays,
             self.trait_cpu_freq,
             self.trait_degradation,
             self.chaos_excluded,
             self.chaos_skipped,
             self.timer_kicks,
+            self.chaos_dispatch_failures,
+            self.chaos_successful_dipatches,
+            self.chaos_dispatch_complete,
+            self.chaos_dispatch_fifo,
+            self.chaos_dispatch_vtime,
         )?;
         Ok(())
     }
@@ -52,6 +71,12 @@ impl Metrics {
             chaos_excluded: self.chaos_excluded - rhs.chaos_excluded,
             chaos_skipped: self.chaos_skipped - rhs.chaos_skipped,
             timer_kicks: self.timer_kicks - rhs.timer_kicks,
+            chaos_dispatch_failures: self.chaos_dispatch_failures - rhs.chaos_dispatch_failures,
+            chaos_successful_dipatches: self.chaos_successful_dipatches
+                - rhs.chaos_successful_dipatches,
+            chaos_dispatch_complete: self.chaos_dispatch_complete - rhs.chaos_dispatch_complete,
+            chaos_dispatch_fifo: self.chaos_dispatch_fifo - rhs.chaos_dispatch_fifo,
+            chaos_dispatch_vtime: self.chaos_dispatch_vtime - rhs.chaos_dispatch_vtime,
         }
     }
 }

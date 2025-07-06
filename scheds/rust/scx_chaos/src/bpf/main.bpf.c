@@ -402,12 +402,15 @@ static __always_inline void complete_p2dq_enqueue_move(struct enqueue_promise *p
 {
 	switch (pro->kind) {
 	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
+		chaos_stat_inc(CHAOS_STAT_DISPATCH_COMPLETE);
 		goto out;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
+		chaos_stat_inc(CHAOS_STAT_DISPATCH_FIFO);
 		__COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
 		__COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id, pro->fifo.enq_flags);
 		goto out;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
+		chaos_stat_inc(CHAOS_STAT_DISPATCH_VTIME);
 		__COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
 		__COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
 		__COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
@@ -432,8 +435,9 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 	struct chaos_task_ctx *taskc;
 	struct task_struct *p;
 	u64 now = bpf_ktime_get_ns();
+	u64 cpu_delay_queue = get_cpu_delay_dsq(-1);
 
-	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(-1), 0) {
+	bpf_for_each(scx_dsq, p, cpu_delay_queue, 0) {
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
@@ -460,7 +464,18 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 		// restore vtime to p2dq's timeline
 		p->scx.dsq_vtime = taskc->p2dq_vtime;
 
-		scx_bpf_dsq_move_to_local(get_cpu_delay_dsq(cpu));
+		async_p2dq_enqueue_weak(&promise, p, taskc->enq_flags);
+		complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
+
+		// In case p2dq_enqueue didn't properly move the task off the delay
+		// queue, we'll do that manually now.
+		if (p->scx.dsq->id == cpu_delay_queue) {
+			chaos_stat_inc(CHAOS_STAT_DISPATCH_MOVE_FAILURE);
+			scx_bpf_dsq_move_to_local(cpu_delay_queue);
+		} else {
+			chaos_stat_inc(CHAOS_STAT_DISPATCH_MOVE_SUCCESS);
+		}
+
 		bpf_task_release(p);
 		taskc->in_delay_dispatch = 0;
 	}

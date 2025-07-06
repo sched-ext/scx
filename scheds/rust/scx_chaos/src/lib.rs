@@ -197,6 +197,15 @@ impl Scheduler {
             chaos_excluded: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_EXCLUDED as usize],
             chaos_skipped: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_SKIPPED as usize],
             timer_kicks: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TIMER_KICKS as usize],
+            chaos_dispatch_failures: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_DISPATCH_MOVE_FAILURE as usize],
+            chaos_successful_dipatches: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_DISPATCH_MOVE_SUCCESS as usize],
+            chaos_dispatch_complete: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_DISPATCH_COMPLETE as usize],
+            chaos_dispatch_fifo: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_DISPATCH_FIFO as usize],
+            chaos_dispatch_vtime: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_DISPATCH_VTIME as usize],
         }
     }
 
