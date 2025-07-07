@@ -3139,7 +3139,6 @@ dependencies = [
  "signal-hook",
  "simplelog",
  "smartstring",
- "tempfile",
  "tokio",
  "tokio-util",
  "toml",

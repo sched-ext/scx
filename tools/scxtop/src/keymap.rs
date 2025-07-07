@@ -81,16 +81,6 @@ impl KeyMap {
         KeyMap { bindings }
     }
 
-    /// Returns if the KeyMap is empty.
-    pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty()
-    }
-
-    // Returns an Action for a Key.
-    pub fn get(&self, key: &Key) -> Option<&Action> {
-        self.bindings.get(key)
-    }
-
     /// Maps the Key to an Action.
     pub fn action(&self, key: &Key) -> Action {
         self.bindings.get(key).cloned().unwrap_or(Action::None)
