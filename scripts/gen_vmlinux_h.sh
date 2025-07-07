@@ -45,7 +45,7 @@ install_toolchains() {
     elif command -v dnf &> /dev/null; then
         sudo dnf install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
-            gcc-arm-linux-gnu gcc-mips64-linux-gnuabi64 \
+            gcc-arm-linux-gnu gcc-mips64-linux-gnu \
             gcc-powerpc64-linux-gnu gcc-riscv64-linux-gnu \
             gcc-s390x-linux-gnu
     elif command -v yum &> /dev/null; then
