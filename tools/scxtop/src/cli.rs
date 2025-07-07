@@ -62,7 +62,7 @@ pub struct TuiArgs {
     #[arg(long, default_value_t = -1)]
     pub process_id: i32,
     /// Custom perf events colon delimited (ex: "<event_name>:<event and umask ex: 0x023>:<event_type ex: 4>")
-    #[arg(long, num_args = 1.., value_parser)]
+    #[arg(long)]
     pub perf_events: Vec<String>,
     /// Default perf event colon delimited (ex: "<event_name>:<event and umask ex: 0x023>:<event_type ex: 4>")
     #[arg(long, default_value = "hw:cycles")]
