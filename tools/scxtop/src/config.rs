@@ -865,7 +865,9 @@ mod tests {
 
         let contents = fs::read_to_string(&config_path).expect("Failed to read file");
         let mut loaded_config: Config = toml::from_str(&contents).expect("Failed to deserialize");
-        loaded_config.resolve_keymap().expect("Failed to resolve keymap");
+        loaded_config
+            .resolve_keymap()
+            .expect("Failed to resolve keymap");
 
         let tui_args = TuiArgs::try_parse_from(vec![
             "scxtop",
