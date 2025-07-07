@@ -40,11 +40,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1745583952,
-        "narHash": "sha256-ybjWNaiScS4XCT4PYYXyXg5sWxQBWzIr7UkoLiB667U=",
+        "lastModified": 1751910901,
+        "narHash": "sha256-JUEAv/qiJTAn5icliTXNyrGDexdUE/M6EwW4+j/6/KU=",
         "owner": "JakeHillion",
         "repo": "nixpkgs",
-        "rev": "93043a431a3a709df655ae9d8f95af129d9b832f",
+        "rev": "9820667feae3e831a112a13a0a18c3bd8d03f696",
         "type": "github"
       },
       "original": {
@@ -80,11 +80,11 @@
     "veristat-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1736364478,
-        "narHash": "sha256-07awVCMrFFG69cGtucLYGT+mqcRZ9F9ZHvxARLLYpM0=",
+        "lastModified": 1751555249,
+        "narHash": "sha256-7NbKM9GA2N2CZGXZKllh00bqWGKb8+ftG/lGG/JNPng=",
         "owner": "libbpf",
         "repo": "veristat",
-        "rev": "3bf5cdf98b05faf53dca21492e69ffb4605c6d42",
+        "rev": "1b386f2cd5d798bc74dba1af5208f5273aba2b9d",
         "type": "github"
       },
       "original": {
