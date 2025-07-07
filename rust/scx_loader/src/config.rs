@@ -186,8 +186,8 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         // scx_rusty doesn't support any of these modes
         SupportedSched::Rusty => vec![],
         SupportedSched::Flash => match sched_mode {
-            SchedMode::Gaming => vec!["-m", "all", "-w", "-p"],
-            SchedMode::LowLatency => vec!["-m", "performance", "-w", "-p", "-C", "0"],
+            SchedMode::Gaming => vec!["-m", "all"],
+            SchedMode::LowLatency => vec!["-m", "performance", "-w", "-C", "0"],
             SchedMode::PowerSave => vec![
                 "-m",
                 "powersave",
@@ -200,7 +200,9 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
                 "-S",
                 "1000",
             ],
-            SchedMode::Server => vec!["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1"],
+            SchedMode::Server => vec![
+                "-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L",
+            ],
             SchedMode::Auto => vec![],
         },
         SupportedSched::P2DQ => match sched_mode {
@@ -263,10 +265,10 @@ server_mode = []
 
 [scheds.scx_flash]
 auto_mode = []
-gaming_mode = ["-m", "all", "-w", "-p"]
-lowlatency_mode = ["-m", "performance", "-w", "-p", "-C", "0"]
+gaming_mode = ["-m", "all"]
+lowlatency_mode = ["-m", "performance", "-w", "-C", "0"]
 powersave_mode = ["-m", "powersave", "-I", "10000", "-t", "10000", "-s", "10000", "-S", "1000"]
-server_mode = ["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1"]
+server_mode = ["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L"]
 
 [scheds.scx_p2dq]
 auto_mode = []

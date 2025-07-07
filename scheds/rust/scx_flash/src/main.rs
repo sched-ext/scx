@@ -123,20 +123,32 @@ defined as:
 
     deadline = vruntime + exec_vruntime
 
-`vruntime` represents the task's accumulated runtime, inversely scaled by its weight, while
-`exec_vruntime` accounts for the vruntime accumulated since the last sleep event.
+Here, `vruntime` represents the task's total accumulated runtime, inversely scaled by its weight,
+while `exec_vruntime` accounts for the scaled runtime accumulated since the last sleep event.
 
-Fairness is ensured through `vruntime`, whereas `exec_vruntime` helps prioritize latency-sensitive
-tasks. Tasks that are frequently blocked waiting for an event (typically latency-sensitive)
-accumulate a smaller `exec_vruntime` compared to tasks that continuously consume CPU without
-interruption.
+Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize latency-sensitive tasks
+that sleep frequently and use the CPU in short bursts.
 
-As a result, tasks with a smaller `exec_vruntime` will have a shorter deadline and will be
-dispatched earlier, ensuring better responsiveness for latency-sensitive tasks.
+To prevent sleeping tasks from gaining excessive priority, the maximum vruntime credit a task can
+accumulate while sleeping is capped by `slice_lag`, scaled by the task’s voluntary context switch
+rate (`max_avg_nvcsw`): tasks that sleep frequently can receive a larger credit, while tasks that
+perform fewer, longer sleeps are granted a smaller credit. This encourages responsive behavior
+without excessively boosting idle tasks.
 
-Moreover, tasks can accumulate a maximum `vruntime` credit while they're sleeping, based on how
-often they voluntarily release the CPU (`avg_nvcsw`). This allows prioritizing frequent sleepers
-over less-frequent ones.
+When dynamic fairness is enabled (`--slice-lag-scaling`), the maximum vruntime sleep credit is also
+scaled depending on the user-mode CPU utilization:
+
+ - At low utilization (mostly idle system), the impact of `vruntime` is reduced, and scheduling
+   decisions are driven primarily by `exec_vruntime`. This favors bursty, latency-sensitive
+   workloads (i.e., hackbench), improving their performance and latency.
+
+ - At high utilization, sleeping tasks regain their vruntime credit, increasing the influence of
+   `vruntime` in deadline calculation. This restores fairness and ensures system responsiveness
+   under load.
+
+This adaptive behavior allows the scheduler to prioritize intense message-passing workloads when
+the system is lightly loaded, while maintaining fairness and responsiveness when the system is
+saturated or overcommitted.
 "#
 )]
 struct Opts {
@@ -158,6 +170,13 @@ struct Opts {
     /// can also make performance more "spikey".
     #[clap(short = 'l', long, default_value = "4096")]
     slice_us_lag: u64,
+
+    /// Dynamically adjust task's maximum sleep budget based on CPU utilization.
+    ///
+    /// Enabling this option allows to increase the throughput of highly message passing workloads,
+    /// but it can also reduce the overall system responsiveness.
+    #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
+    slice_lag_scaling: bool,
 
     /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
     ///
@@ -220,6 +239,13 @@ struct Opts {
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
+    /// Disable in-kernel idle CPU selection policy.
+    ///
+    /// Set this option to disable the in-kernel built-in idle CPU selection policy and rely on the
+    /// custom CPU selection policy.
+    #[clap(short = 'b', long, action = clap::ArgAction::SetTrue)]
+    no_builtin_idle: bool,
+
     /// Enable per-CPU tasks prioritization.
     ///
     /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
@@ -229,6 +255,19 @@ struct Opts {
     /// This option is recommended for gaming or latency-sensitive workloads.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
+
+    /// Always allow direct dispatch to idle CPUs.
+    ///
+    /// By default tasks are not directly dispatched to idle CPUs if there are other tasks waiting
+    /// in the scheduler's queues. This prevents potential starvation of the already queued tasks.
+    ///
+    /// Enabling this option allows tasks to be always dispatched directly to idle CPUs,
+    /// potentially bypassing the scheduler queues.
+    ///
+    /// This allows to improve system throughput, especially with server workloads, but it can
+    /// introduce unfairness and potentially trigger stall conditions.
+    #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
+    direct_dispatch: bool,
 
     /// Enable CPU stickiness.
     ///
@@ -422,18 +461,27 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.numa_disabled = numa_disabled;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
+        skel.maps.rodata_data.direct_dispatch = opts.direct_dispatch;
         skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;
+        skel.maps.rodata_data.slice_lag_scaling = opts.slice_lag_scaling;
+        skel.maps.rodata_data.builtin_idle = !opts.no_builtin_idle;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
-        skel.maps.rodata_data.cpu_busy_thresh = opts.cpu_busy_thresh;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
+
+        // Normalize CPU busy threshold in the range [0 .. 1024].
+        skel.maps.rodata_data.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
+            opts.cpu_busy_thresh
+        } else {
+            opts.cpu_busy_thresh * 1024 / 100
+        };
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
@@ -777,8 +825,8 @@ impl<'a> Scheduler<'a> {
         let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
 
         if total_diff > 0 {
-            let user_pct = 100.0 * (user_diff as f64) / (total_diff as f64);
-            Some((user_pct * 1000.0).round() as u64)
+            let user_ratio = user_diff as f64 / total_diff as f64;
+            Some((user_ratio * 1024.0).round() as u64)
         } else {
             None
         }
