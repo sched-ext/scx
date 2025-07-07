@@ -9,7 +9,7 @@ set -euo pipefail
 #
 # Example
 #
-# ./scripts/gen_vmlinux_h.sh /path/to/linux ./sched/include/arch/
+# ./scripts/gen_vmlinux_h.sh /path/to/linux "$PWD/scheds/include/arch/"
 
 LINUX_REPO="$1" # where the linux repo is located
 pushd ${LINUX_REPO}
