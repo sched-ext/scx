@@ -310,9 +310,13 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 
 	u64 mig_nr_queued = scx_bpf_dsq_nr_queued(llcx->mig_dsq);
 
-	// If the number of queued tasks is greater than half of the number of
-	// CPUs then only try to migrate non interactive tasks.
-	if (taskc->interactive &&
+	// The first queued migration tasks should be the least interactive
+	if (mig_nr_queued == 0 && taskc->dsq_index != nr_dsqs_per_llc - 1)
+		return false;
+
+	// If the number of queued tasks is less than half of the number of
+	// CPUs then only try to migrate least interactive tasks.
+	if (taskc->dsq_index != nr_dsqs_per_llc - 1 &&
 	    mig_nr_queued > llcx->nr_cpus / (llcx->nr_cpus > 1 ? 2 : 1))
 		return false;
 
