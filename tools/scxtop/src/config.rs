@@ -288,19 +288,24 @@ impl Config {
         let contents = fs::read_to_string(config_path)?;
         let mut config: Config = toml::from_str(&contents)?;
 
-        if let Some(keymap_config) = &config.keymap {
+        config.resolve_keymap()?;
+
+        Ok(config)
+    }
+
+    fn resolve_keymap(&mut self) -> Result<()> {
+        if let Some(keymap_config) = &self.keymap {
             let mut keymap = KeyMap::default();
             for (key_str, action_str) in keymap_config {
                 let key = parse_key(key_str)?;
                 let action = parse_action(action_str)?;
                 keymap.insert(key, action);
             }
-            config.active_keymap = keymap;
+            self.active_keymap = keymap;
         } else {
-            config.active_keymap = KeyMap::default();
+            self.active_keymap = KeyMap::default();
         }
-
-        Ok(config)
+        Ok(())
     }
 
     /// Saves the current config.
@@ -802,6 +807,7 @@ mod tests {
             .map_or(false, |action| *action == Action::Enter));
     }
 
+    #[test]
     fn test_config_integration_test_complex() {
         let dir = tempdir().expect("Failed to create temporary directory");
         let config_path = get_mock_config_path(dir.path()).expect("Failed to get mock config path");
@@ -812,7 +818,7 @@ mod tests {
             .expect("Failed to create parent directory for config");
 
         // Create a dummy config file in the temporary directory
-        let saved_config = r#""
+        let saved_config = r#"
         perf_events = []
         theme = "MidnightGreen"
         tick_rate_ms = 500
@@ -843,9 +849,9 @@ mod tests {
         n = "AppStateNode"
         s = "AppStateScheduler"
         d = "AppStateDefault"
-        m = "SetState(MangoApp)"
+        m = "AppStateMangoApp"
         a = "RequestTrace"
-        K = "SetState(KprobeEvent)"
+        K = "AppStateKprobeEvent"
         L = "ToggleLocalization"
         Backspace = "Backspace"
         - = "DecTickRate"
@@ -858,7 +864,8 @@ mod tests {
         fs::write(&config_path, saved_config).expect("Failed to write dummy config file");
 
         let contents = fs::read_to_string(&config_path).expect("Failed to read file");
-        let loaded_config: Config = toml::from_str(&contents).expect("Failed to deserialize");
+        let mut loaded_config: Config = toml::from_str(&contents).expect("Failed to deserialize");
+        loaded_config.resolve_keymap().expect("Failed to resolve keymap");
 
         let tui_args = TuiArgs::try_parse_from(vec![
             "scxtop",
