@@ -28,6 +28,9 @@ ARCHS=(
     [riscv]="riscv64-linux-gnu-"
     [s390]="s390x-linux-gnu-"
 )
+if grep ^ID=fedora /etc/os-release &> /dev/null; then
+    ARCHS[arm]=arm-linux-gnu-
+fi
 
 # Detect and install cross-compile toolchains based on the package manager
 install_toolchains() {
