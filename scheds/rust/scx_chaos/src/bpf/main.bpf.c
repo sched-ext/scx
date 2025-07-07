@@ -396,7 +396,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init)
 	return p2dq_init_impl();
 }
 
-static __always_inline void complete_p2dq_enqueue_move(struct enqueue_promise *pro,
+static __always_inline __maybe_unused void complete_p2dq_enqueue_move(struct enqueue_promise *pro,
 						       struct bpf_iter_scx_dsq *it__iter,
 						       struct task_struct *p)
 {
@@ -418,7 +418,7 @@ out:
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 }
 
-__weak int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
+__weak __maybe_unused int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
 				   struct task_struct *p __arg_trusted,
 				   u64 enq_flags)
 {
@@ -428,7 +428,6 @@ __weak int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
 
 void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 {
-	struct enqueue_promise promise;
 	struct chaos_task_ctx *taskc;
 	struct task_struct *p;
 	u64 now = bpf_ktime_get_ns();
