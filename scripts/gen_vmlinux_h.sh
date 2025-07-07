@@ -85,8 +85,27 @@ generate_vmlinux_for_arch() {
     echo "" > ${LOG}
     echo "Writing compile logs to ${LOG}"
 
+    rm -f .config.orig vmlinux
+    if [ -e .config ]; then
+        cp .config .config.orig
+    else
+        make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error defconfig &>> ${LOG}
+        echo CONFIG_DEBUG_INFO_REDUCED=n >>.config
+        echo CONFIG_DEBUG_INFO_DWARF4=y >>.config
+        echo CONFIG_BPF_SYSCALL=y >>.config
+        echo CONFIG_DEBUG_INFO_BTF=y >>.config
+        echo CONFIG_BPF_JIT=y >>.config
+        echo CONFIG_SCHED_CLASS_EXT=y >>.config
+        echo CONFIG_CGROUP_SCHED=y >>.config
+        echo CONFIG_FTRACE=y >>.config
+    fi
     make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error olddefconfig &>> ${LOG}
     make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error -j$(nproc) vmlinux &>> ${LOG}
+    if [ -e .config.orig ]; then
+        mv .config.orig .config
+    else
+        rm .config
+    fi
 
     if [ -f ./vmlinux ]; then
         echo "Generating ${OUTPUT_FILE}..."
