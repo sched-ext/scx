@@ -210,7 +210,10 @@ impl Config {
 
     /// Duration of trace in ns.
     pub fn trace_duration_ns(&self) -> u64 {
-        self.trace_duration_ms.unwrap_or(1_250) * 1_000_000
+        self.trace_duration_ms
+            .or(self.trace_ticks.map(|t| (t * self.tick_rate_ms()) as u64))
+            .unwrap_or(1_250)
+            * 1_000_000
     }
 
     /// Number of worker threads
@@ -227,7 +230,12 @@ impl Config {
 
     /// Duration to warmup a trace before collecting in ns.
     pub fn trace_warmup_ns(&self) -> u64 {
-        self.trace_warmup_ms.unwrap_or(750) * 1_000_000
+        self.trace_warmup_ms
+            .or(self
+                .trace_tick_warmup
+                .map(|t| (t * self.tick_rate_ms()) as u64))
+            .unwrap_or(750)
+            * 1_000_000
     }
 
     /// Returns a config with nothing set.
