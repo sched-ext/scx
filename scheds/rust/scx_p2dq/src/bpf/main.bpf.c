@@ -352,6 +352,8 @@ static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
 	if (nr_queued > nr_idle) {
 		slice_ns = (max_dsq_time_slice() * nr_idle) / nr_queued;
 		taskc->slice_ns = clamp_slice(slice_ns);
+	} else {
+		taskc->slice_ns = max_dsq_time_slice();
 	}
 }
 
