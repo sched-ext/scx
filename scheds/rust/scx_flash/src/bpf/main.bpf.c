@@ -1347,31 +1347,28 @@ static void preempt_curr(s32 cpu)
 static void rr_enqueue(struct task_struct *p, struct task_ctx *tctx,
 		       s32 prev_cpu, u64 enq_flags)
 {
-	/*
-	 * Try to bounce the task on another CPU if it has been re-enqueued
-	 * due to a higher scheduling class stealing the CPU.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, task_slice(prev_cpu), enq_flags);
-		return;
-	}
+	bool is_idle;
+	s32 cpu;
 
 	/*
-	 * Attempt to migrate on another CPU (if possible), but always
-	 * prefer reusing the same CPU if it's idle..
+	 * Attempt to migrate on another CPU on wakeup or if the task has
+	 * been re-enqueued due to a higher priority class stealing the
+	 * CPU, otherwise always prefer running on the same CPU.
 	 */
-	if (!is_pcpu_task(p)) {
-		bool is_idle;
-		s32 cpu;
-
-		cpu = pick_idle_cpu(p, tctx, prev_cpu, 0, &is_idle);
-		if (is_idle) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), enq_flags);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return;
+	if (!scx_bpf_task_running(p) || (enq_flags & SCX_ENQ_REENQ)) {
+		if (is_pcpu_task(p)) {
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		} else {
+			cpu = pick_idle_cpu(p, tctx, prev_cpu, 0, &is_idle);
+			if (is_idle) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+						   task_slice(cpu), enq_flags);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				return;
+			}
 		}
 	}
-
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(prev_cpu), enq_flags);
 }
 
