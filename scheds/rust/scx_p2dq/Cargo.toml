@@ -6,9 +6,6 @@ edition = "2021"
 description = "scx_p2dq A simple pick two load balancing scheduler in BPF"
 license = "GPL-2.0-only"
 
-[package.metadata.scx]
-ci.kernel.blocklist = ["stable/6_12"]
-
 [dependencies]
 anyhow = "1.0.65"
 chrono = "0.4"
