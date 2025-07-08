@@ -12,11 +12,11 @@ struct cpu_ctx {
 	u32				llc_id;
 	u64				affn_dsq;
 	u32				dsq_index;
-	u64				dsq_id;
 	u64				slice_ns;
 	u32				perf;
 	bool				interactive;
 	bool				is_big;
+	bool				nice_task;
 	u64				ran_for;
 	u32				node_id;
 	u64				intr_dsq;
@@ -39,6 +39,7 @@ struct llc_ctx {
 	u64				load;
 	u64				affn_load;
 	u64				intr_load;
+	u64				dsq_load[MAX_DSQS_PER_LLC];
 	bool				all_big;
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
@@ -66,6 +67,7 @@ struct task_p2dq {
 	u64			llc_runs; /* how many runs on the current LLC */
 	int			last_dsq_index;
 	bool			interactive;
+	bool			was_nice;
 
 	/* The task is a workqueue worker thread */
 	bool			is_kworker;

@@ -323,6 +323,40 @@ static bool is_queued(const struct task_struct *p)
 }
 
 /*
+ * Return the cpumask of full-idle SMT CPUs associated to @node.
+ *
+ * If NUMA support is disabled, @node is ignored.
+ */
+static const struct cpumask *get_idle_smtmask_node(int node)
+{
+	return numa_disabled ? scx_bpf_get_idle_smtmask() :
+			       __COMPAT_scx_bpf_get_idle_smtmask_node(node);
+}
+
+/*
+ * Return the cpumask of idle CPUs associated to @node.
+ *
+ * If NUMA support is disabled, @node is ignored.
+ */
+static const struct cpumask *get_idle_cpumask_node(int node)
+{
+	return numa_disabled ? scx_bpf_get_idle_cpumask() :
+			       __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+}
+
+/*
+ * Return an idle CPU within the @cpus_allowed mask and @node.
+ *
+ * If NUMA support is disabled, @node is ignored.
+ */
+static s32 pick_idle_cpu_node(const struct cpumask *cpus_allowed, int node, u64 flags)
+{
+	return numa_disabled ?
+		scx_bpf_pick_idle_cpu(cpus_allowed, flags) :
+	       __COMPAT_scx_bpf_pick_idle_cpu_node(cpus_allowed, node, flags);
+}
+
+/*
  * Return true if @cpu is in a full-idle physical core,
  * false otherwise.
  */
@@ -332,7 +366,7 @@ static bool is_fully_idle(s32 cpu)
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 	bool is_idle;
 
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
+	idle_smtmask = get_idle_smtmask_node(node);
 	is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
 	scx_bpf_put_cpumask(idle_smtmask);
 
@@ -628,8 +662,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
 	 */
 	node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
-	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+	idle_smtmask = get_idle_smtmask_node(node);
+	idle_cpumask = get_idle_cpumask_node(node);
 
 	/*
 	 * In case of a sync wakeup, attempt to run the wakee on the
@@ -671,8 +705,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * shares the same L2 cache.
 		 */
 		if (l2_mask) {
-			cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(l2_mask, node,
-						SCX_PICK_IDLE_CORE | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+			cpu = pick_idle_cpu_node(l2_mask, node, SCX_PICK_IDLE_CORE | __COMPAT_SCX_PICK_IDLE_IN_NODE);
 			if (cpu >= 0) {
 				*is_idle = true;
 				goto out_put_cpumask;
@@ -684,8 +717,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * shares the same L3 cache.
 		 */
 		if (l3_mask) {
-			cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(l3_mask, node,
-						SCX_PICK_IDLE_CORE | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+			cpu = pick_idle_cpu_node(l3_mask, node, SCX_PICK_IDLE_CORE | __COMPAT_SCX_PICK_IDLE_IN_NODE);
 			if (cpu >= 0) {
 				*is_idle = true;
 				goto out_put_cpumask;
@@ -704,7 +736,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 			if (!node_rebalance(node))
 				flags |= __COMPAT_SCX_PICK_IDLE_IN_NODE;
 
-			cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p_mask, node, flags);
+			cpu = pick_idle_cpu_node(p_mask, node, flags);
 			if (cpu >= 0) {
 				*is_idle = true;
 				goto out_put_cpumask;
@@ -727,8 +759,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * L2 cache.
 	 */
 	if (l2_mask && !node_rebalance(node)) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(l2_mask, node,
-						__COMPAT_SCX_PICK_IDLE_IN_NODE);
+		cpu = pick_idle_cpu_node(l2_mask, node, __COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
@@ -740,8 +771,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * L3 cache.
 	 */
 	if (l3_mask && !node_rebalance(node)) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(l3_mask, node,
-						__COMPAT_SCX_PICK_IDLE_IN_NODE);
+		cpu = pick_idle_cpu_node(l3_mask, node, __COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
@@ -752,7 +782,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Search for any idle CPU in the scheduling domain.
 	 */
 	if (p_mask) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p_mask, node, 0);
+		cpu = pick_idle_cpu_node(p_mask, node, 0);
 		if (cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
@@ -762,7 +792,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	/*
 	 * Search for any idle CPU usable by the task.
 	 */
-	cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node, 0);
+	cpu = pick_idle_cpu_node(p->cpus_ptr, node, 0);
 	if (cpu >= 0) {
 		*is_idle = true;
 		goto out_put_cpumask;
@@ -867,8 +897,7 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	 */
 	mask = cast_mask(tctx->l2_cpumask);
 	if (mask) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask, node,
-					flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+		cpu = pick_idle_cpu_node(mask, node, flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return true;
@@ -876,8 +905,7 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	}
 	mask = cast_mask(tctx->l3_cpumask);
 	if (mask) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask, node,
-					flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+		cpu = pick_idle_cpu_node(mask, node, flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return true;
@@ -1053,7 +1081,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * current CPU is busy (always prioritizing full-idle SMT cores
 	 * first, if present).
 	 */
-	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+	idle_cpumask = get_idle_cpumask_node(node);
 	if (!bpf_cpumask_empty(idle_cpumask))
 		if (!kick_idle_cpu(p, tctx, prev_cpu, true))
 			kick_idle_cpu(p, tctx, prev_cpu, false);
@@ -1101,8 +1129,8 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	if (!smt)
 		return false;
 
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
-	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+	idle_smtmask = get_idle_smtmask_node(node);
+	idle_cpumask = get_idle_cpumask_node(node);
 
 	/*
 	 * If the task is running in a full-idle SMT core or if all the SMT
@@ -1313,39 +1341,24 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 {
 	s32 cpu = bpf_get_smp_processor_id();
 	struct task_ctx *tctx;
-	struct bpf_cpumask *cpumask;
+	int err;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
-	/*
-	 * Create task's primary cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L2 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L3 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+
+	err = calloc_cpumask(&tctx->cpumask);
+	if (err)
+		return err;
+
+	err = calloc_cpumask(&tctx->l2_cpumask);
+	if (err)
+		return err;
+
+	err = calloc_cpumask(&tctx->l3_cpumask);
+	if (err)
+		return err;
 
 	task_update_domain(p, tctx, cpu, p->cpus_ptr);
 

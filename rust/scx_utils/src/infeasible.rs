@@ -149,7 +149,8 @@
 //! task with weight 100 in domain 1, we would record their loads as follows:
 //!
 //!```rust
-//!     // Assume the same aggregator as above.
+//!     use scx_utils::LoadAggregator;
+//!     let mut aggregator = LoadAggregator::new(32, false);
 //!
 //!     // In this version, domain 0 has 2 tasks with weight 1.0 and duty cycle
 //!     // 1.0.

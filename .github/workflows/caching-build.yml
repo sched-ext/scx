@@ -11,7 +11,7 @@ jobs:
     secrets: inherit
 
   rust-tests:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     needs: build-kernels
     steps:
       - uses: actions/checkout@v4

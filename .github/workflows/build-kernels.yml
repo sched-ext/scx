@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-kernels:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 

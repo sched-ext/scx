@@ -90,8 +90,29 @@ u64 scx_atq_pop(scx_atq_t *atq)
 }
 
 __hidden
+u64 scx_atq_peek(scx_atq_t *atq)
+{
+	u64 elem;
+	int ret;
+
+	ret = arena_spin_lock(&atq->lock);
+	if (ret)
+		return (u64)NULL;
+
+	if (!scx_atq_nr_queued(atq)) {
+		arena_spin_unlock(&atq->lock);
+		return (u64)NULL;
+	}
+
+	elem = atq->heap->helems[0].elem;
+
+	arena_spin_unlock(&atq->lock);
+
+	return elem;
+}
+
+__hidden
 int scx_atq_nr_queued(scx_atq_t *atq)
 {
 	return atq->heap->size;
 }
-

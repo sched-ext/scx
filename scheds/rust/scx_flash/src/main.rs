@@ -14,6 +14,8 @@ mod stats;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fmt::Write;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -121,20 +123,32 @@ defined as:
 
     deadline = vruntime + exec_vruntime
 
-`vruntime` represents the task's accumulated runtime, inversely scaled by its weight, while
-`exec_vruntime` accounts for the vruntime accumulated since the last sleep event.
+Here, `vruntime` represents the task's total accumulated runtime, inversely scaled by its weight,
+while `exec_vruntime` accounts for the scaled runtime accumulated since the last sleep event.
 
-Fairness is ensured through `vruntime`, whereas `exec_vruntime` helps prioritize latency-sensitive
-tasks. Tasks that are frequently blocked waiting for an event (typically latency-sensitive)
-accumulate a smaller `exec_vruntime` compared to tasks that continuously consume CPU without
-interruption.
+Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize latency-sensitive tasks
+that sleep frequently and use the CPU in short bursts.
 
-As a result, tasks with a smaller `exec_vruntime` will have a shorter deadline and will be
-dispatched earlier, ensuring better responsiveness for latency-sensitive tasks.
+To prevent sleeping tasks from gaining excessive priority, the maximum vruntime credit a task can
+accumulate while sleeping is capped by `slice_lag`, scaled by the task’s voluntary context switch
+rate (`max_avg_nvcsw`): tasks that sleep frequently can receive a larger credit, while tasks that
+perform fewer, longer sleeps are granted a smaller credit. This encourages responsive behavior
+without excessively boosting idle tasks.
 
-Moreover, tasks can accumulate a maximum `vruntime` credit while they're sleeping, based on how
-often they voluntarily release the CPU (`avg_nvcsw`). This allows prioritizing frequent sleepers
-over less-frequent ones.
+When dynamic fairness is enabled (`--slice-lag-scaling`), the maximum vruntime sleep credit is also
+scaled depending on the user-mode CPU utilization:
+
+ - At low utilization (mostly idle system), the impact of `vruntime` is reduced, and scheduling
+   decisions are driven primarily by `exec_vruntime`. This favors bursty, latency-sensitive
+   workloads (i.e., hackbench), improving their performance and latency.
+
+ - At high utilization, sleeping tasks regain their vruntime credit, increasing the influence of
+   `vruntime` in deadline calculation. This restores fairness and ensures system responsiveness
+   under load.
+
+This adaptive behavior allows the scheduler to prioritize intense message-passing workloads when
+the system is lightly loaded, while maintaining fairness and responsiveness when the system is
+saturated or overcommitted.
 "#
 )]
 struct Opts {
@@ -143,25 +157,32 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
+    #[clap(short = 's', long, default_value = "4096")]
     slice_us: u64,
 
     /// Minimum scheduling slice duration in microseconds.
-    #[clap(short = 'S', long, default_value = "1000")]
+    #[clap(short = 'S', long, default_value = "128")]
     slice_us_min: u64,
 
     /// Maximum runtime budget that a task can accumulate while sleeping (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'l', long, default_value = "20000")]
+    #[clap(short = 'l', long, default_value = "4096")]
     slice_us_lag: u64,
+
+    /// Dynamically adjust task's maximum sleep budget based on CPU utilization.
+    ///
+    /// Enabling this option allows to increase the throughput of highly message passing workloads,
+    /// but it can also reduce the overall system responsiveness.
+    #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
+    slice_lag_scaling: bool,
 
     /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
-    #[clap(short = 'r', long, default_value = "200000")]
+    #[clap(short = 'r', long, default_value = "32768")]
     run_us_lag: u64,
 
     /// Maximum rate of voluntary context switches.
@@ -172,8 +193,21 @@ struct Opts {
     /// Decreasing this value makes the scheduler more robust and fair.
     ///
     /// (0 = disable voluntary context switch prioritization).
-    #[clap(short = 'c', long, default_value = "0")]
+    #[clap(short = 'c', long, default_value = "128")]
     max_avg_nvcsw: u64,
+
+    /// Utilization percentage to consider a CPU as busy (-1 = auto).
+    ///
+    /// A value close to 0 forces tasks to migrate quickier, increasing work conservation and
+    /// potentially system responsiveness.
+    ///
+    /// A value close to 100 makes tasks more sticky to their CPU, increasing cache-sensivite and
+    /// server-type workloads.
+    ///
+    /// In auto mode (-1) the scheduler autoomatically tries to determine the optimal value in
+    /// function of the current workload.
+    #[clap(short = 'C', long, allow_hyphen_values = true, default_value = "-1")]
+    cpu_busy_thresh: i64,
 
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
@@ -187,7 +221,7 @@ struct Opts {
     /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
     /// performance at the cost of higher power consumption. Alternatively, increasing the latency
     /// value may reduce performance, but also improve power efficiency.
-    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
+    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "32")]
     idle_resume_us: i64,
 
     /// Enable tickless mode.
@@ -198,36 +232,52 @@ struct Opts {
     #[clap(short = 'T', long, action = clap::ArgAction::SetTrue)]
     tickless: bool,
 
-    /// Use per-CPU runqueues only.
-    ///
-    /// Force using only per-CPU runqueues to reduce task migrations. This can improve certain
-    /// cache-sensitive workloads at the cost of making the system less responsive.
-    #[clap(short = 'C', long, action = clap::ArgAction::SetTrue)]
-    cpu_runqueue: bool,
-
-    /// Use per-node runqueues only.
-    ///
-    /// Force using only per-node runqueues to maximize work conservation. This can improve
-    /// system responsiveness under saturation conditions at the cost of reducing performance for
-    /// cache-sensitive workloads.
-    #[clap(short = 'N', long, action = clap::ArgAction::SetTrue)]
-    node_runqueue: bool,
-
     /// Enable round-robin scheduling.
     ///
-    /// Each task is given a fixed time slice (defined by --slice-us-max) and run in a cyclic, fair
+    /// Each task is given a fixed time slice (defined by --slice-us) and run in a cyclic, fair
     /// order.
     #[clap(short = 'R', long, action = clap::ArgAction::SetTrue)]
     rr_sched: bool,
 
+    /// Disable in-kernel idle CPU selection policy.
+    ///
+    /// Set this option to disable the in-kernel built-in idle CPU selection policy and rely on the
+    /// custom CPU selection policy.
+    #[clap(short = 'b', long, action = clap::ArgAction::SetTrue)]
+    no_builtin_idle: bool,
+
     /// Enable per-CPU tasks prioritization.
     ///
-    /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
-    /// can't be migrated when their only usable CPU is busy). Enabling this option can introduce
-    /// unfairness and potentially trigger stalls, but it can improve performance of server-type
-    /// workloads (such as large parallel builds).
+    /// Enabling this option allows to prioritize per-CPU tasks that usually tend to be
+    /// de-prioritized, since they can't be migrated when their only usable CPU is busy. This
+    /// improves fairness, but it can also reduce the overall system throughput.
+    ///
+    /// This option is recommended for gaming or latency-sensitive workloads.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
+
+    /// Always allow direct dispatch to idle CPUs.
+    ///
+    /// By default tasks are not directly dispatched to idle CPUs if there are other tasks waiting
+    /// in the scheduler's queues. This prevents potential starvation of the already queued tasks.
+    ///
+    /// Enabling this option allows tasks to be always dispatched directly to idle CPUs,
+    /// potentially bypassing the scheduler queues.
+    ///
+    /// This allows to improve system throughput, especially with server workloads, but it can
+    /// introduce unfairness and potentially trigger stall conditions.
+    #[clap(short = 'D', long, action = clap::ArgAction::SetTrue)]
+    direct_dispatch: bool,
+
+    /// Enable CPU stickiness.
+    ///
+    /// Enabling this option can reduce the amount of task migrations, but it can also make
+    /// performance less consistent on systems with hybrid cores.
+    ///
+    /// This option has no effect if the primary scheduling domain includes all the CPUs
+    /// (e.g., `--primary-domain all`).
+    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
+    sticky_cpu: bool,
 
     /// Native tasks priorities.
     ///
@@ -316,6 +366,13 @@ struct Opts {
     help_stats: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CpuTimes {
+    user: u64,
+    nice: u64,
+    total: u64,
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -366,6 +423,20 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Determine the amount of non-empty NUMA nodes in the system.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
+        let numa_disabled = opts.disable_numa || nr_nodes == 1;
+        if numa_disabled {
+            info!("Disabling NUMA optimizations");
+        }
+
         // Determine the primary scheduling domain.
         let power_profile = Self::power_profile();
         let domain =
@@ -387,12 +458,16 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
-        skel.maps.rodata_data.numa_disabled = opts.disable_numa;
+        skel.maps.rodata_data.numa_disabled = numa_disabled;
         skel.maps.rodata_data.rr_sched = opts.rr_sched;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
+        skel.maps.rodata_data.direct_dispatch = opts.direct_dispatch;
+        skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.tickless_sched = opts.tickless;
         skel.maps.rodata_data.native_priority = opts.native_priority;
+        skel.maps.rodata_data.slice_lag_scaling = opts.slice_lag_scaling;
+        skel.maps.rodata_data.builtin_idle = !opts.no_builtin_idle;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
@@ -401,18 +476,12 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
         skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
 
-        if !opts.cpu_runqueue && !opts.node_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = true;
-            skel.maps.rodata_data.node_dsq = true;
-        } else if opts.cpu_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = true;
-            skel.maps.rodata_data.node_dsq = false;
-        } else if opts.node_runqueue {
-            skel.maps.rodata_data.pcpu_dsq = false;
-            skel.maps.rodata_data.node_dsq = true;
+        // Normalize CPU busy threshold in the range [0 .. 1024].
+        skel.maps.rodata_data.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
+            opts.cpu_busy_thresh
         } else {
-            bail!("--cpu-runqueue and --node-runqueue are mutually exclusive");
-        }
+            opts.cpu_busy_thresh * 1024 / 100
+        };
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
@@ -425,8 +494,12 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.flash_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | if numa_disabled {
+                0
+            } else {
+                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            };
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.flash_ops_mut().flags
@@ -747,13 +820,68 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
+    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
+        let total_diff = curr.total.saturating_sub(prev.total);
+        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
+
+        if total_diff > 0 {
+            let user_ratio = user_diff as f64 / total_diff as f64;
+            Some((user_ratio * 1024.0).round() as u64)
+        } else {
+            None
+        }
+    }
+
+    fn read_cpu_times() -> Option<CpuTimes> {
+        let file = File::open("/proc/stat").ok()?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.starts_with("cpu ") {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 5 {
+                    return None;
+                }
+
+                let user: u64 = fields[1].parse().ok()?;
+                let nice: u64 = fields[2].parse().ok()?;
+
+                // Sum the first 8 fields as total time, including idle, system, etc.
+                let total: u64 = fields
+                    .iter()
+                    .skip(1)
+                    .take(8)
+                    .filter_map(|v| v.parse::<u64>().ok())
+                    .sum();
+
+                return Some(CpuTimes { user, nice, total });
+            }
+        }
+
+        None
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let (res_ch, req_ch) = self.stats_server.channels();
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if self.refresh_sched_domain() {
                 self.user_restart = true;
                 break;
             }
+
+            if self.opts.cpu_busy_thresh < 0 {
+                if let Some(curr_cputime) = Self::read_cpu_times() {
+                    if let Some(cpu_util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
+                    {
+                        self.skel.maps.bss_data.cpu_util = cpu_util;
+                    }
+                    prev_cputime = curr_cputime;
+                }
+            }
+
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}

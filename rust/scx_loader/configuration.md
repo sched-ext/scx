@@ -39,9 +39,9 @@ powersave_mode = ["--powersave"]
 
 [scheds.scx_flash]
 auto_mode = []
-gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
-powersave_mode = ["-m", "powersave"]
+gaming_mode = ["-m", "all", "-w", "-p"]
+lowlatency_mode = ["-m", "performance", "-w", "-p", "-C", "0"]
+powersave_mode = ["-m", "powersave", "-I", "10000", "-t", "10000", "-s", "10000", "-S", "1000"]
 
 [scheds.scx_p2dq]
 auto_mode = []

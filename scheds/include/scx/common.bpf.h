@@ -677,6 +677,26 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 })
 
 /*
+ * __calc_avg - Calculate exponential weighted moving average (EWMA) with
+ * @old and @new values. @decay represents how large the @old value remains.
+ * With a larger @decay value, the moving average changes slowly, exhibiting
+ * fewer fluctuations.
+ */
+#define __calc_avg(old, new, decay) ({						\
+	typeof(decay) thr = 1 << (decay);					\
+	typeof(old) ret;							\
+	if (((old) < thr) || ((new) < thr)) {					\
+		if (((old) == 1) && ((new) == 0))				\
+			ret = 0;						\
+		else								\
+			ret = ((old) - ((old) >> 1)) + ((new) >> 1);		\
+	} else {								\
+		ret = ((old) - ((old) >> (decay))) + ((new) >> (decay));	\
+	}									\
+	ret;									\
+})
+
+/*
  * log2_u32 - Compute the base 2 logarithm of a 32-bit exponential value.
  * @v: The value for which we're computing the base 2 logarithm.
  */
@@ -704,6 +724,25 @@ static inline u32 log2_u64(u64 v)
                 return log2_u32(hi) + 32 + 1;
         else
                 return log2_u32(v) + 1;
+}
+
+/*
+ * sqrt_u64 - Calculate the square root of value @x using Newton's method.
+ */
+static inline u64 __sqrt_u64(u64 x)
+{
+	if (x == 0 || x == 1)
+		return x;
+
+	u64 r = ((1ULL << 32) > x) ? x : (1ULL << 32);
+
+	for (int i = 0; i < 8; ++i) {
+		u64 q = x / r;
+		if (r <= q)
+			break;
+		r = (r + q) >> 1;
+	}
+	return r;
 }
 
 /*

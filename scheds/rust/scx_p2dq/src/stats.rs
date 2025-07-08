@@ -23,6 +23,12 @@ pub struct Metrics {
     pub same_dsq: u64,
     #[stat(desc = "Number of times a task kept running")]
     pub keep: u64,
+    #[stat(desc = "Number of times a task was enqueued to LLC DSQ")]
+    pub enq_llc: u64,
+    #[stat(desc = "Number of times a task was enqueued to interactive DSQ")]
+    pub enq_intr: u64,
+    #[stat(desc = "Number of times a task was enqueued to migration DSQ")]
+    pub enq_mig: u64,
     #[stat(desc = "Number of times a select_cpu pick 2 load balancing occured")]
     pub select_pick2: u64,
     #[stat(desc = "Number of times a dispatch pick 2 load balancing occured")]
@@ -47,12 +53,19 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle {}/{}\n\tdsq same/migrate/keep {}/{}/{}\n\twake_prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
+            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}\n\tenq llc/intr/mig {}/{}/{}",
             self.direct,
             self.idle,
+            self.keep,
             self.same_dsq,
             self.dsq_change,
-            self.keep,
+            self.enq_llc,
+            self.enq_intr,
+            self.enq_mig,
+        )?;
+        writeln!(
+            w,
+            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
             self.wake_prev,
             self.wake_llc,
             self.wake_mig,
@@ -71,6 +84,9 @@ impl Metrics {
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,
+            enq_llc: self.enq_llc - rhs.enq_llc,
+            enq_intr: self.enq_intr - rhs.enq_intr,
+            enq_mig: self.enq_mig - rhs.enq_mig,
             select_pick2: self.select_pick2 - rhs.select_pick2,
             dispatch_pick2: self.dispatch_pick2 - rhs.dispatch_pick2,
             llc_migrations: self.llc_migrations - rhs.llc_migrations,

@@ -210,10 +210,7 @@ impl Config {
 
     /// Duration of trace in ns.
     pub fn trace_duration_ns(&self) -> u64 {
-        self.trace_duration_ms
-            .or(self.trace_ticks.map(|t| (t * self.tick_rate_ms()) as u64))
-            .unwrap_or(1_250)
-            * 1_000_000
+        self.trace_duration_ms.unwrap_or(1_250) * 1_000_000
     }
 
     /// Number of worker threads
@@ -230,12 +227,7 @@ impl Config {
 
     /// Duration to warmup a trace before collecting in ns.
     pub fn trace_warmup_ns(&self) -> u64 {
-        self.trace_warmup_ms
-            .or(self
-                .trace_tick_warmup
-                .map(|t| (t * self.tick_rate_ms()) as u64))
-            .unwrap_or(750)
-            * 1_000_000
+        self.trace_warmup_ms.unwrap_or(750) * 1_000_000
     }
 
     /// Returns a config with nothing set.
@@ -286,24 +278,34 @@ impl Config {
     }
 
     /// Loads the config from XDG configuration.
-    pub fn load() -> Result<Config> {
+    pub fn load_or_default() -> Result<Config> {
         let config_path = get_config_path()?;
+
+        if !config_path.exists() {
+            return Ok(Config::default_config());
+        }
+
         let contents = fs::read_to_string(config_path)?;
         let mut config: Config = toml::from_str(&contents)?;
 
-        if let Some(keymap_config) = &config.keymap {
+        config.resolve_keymap()?;
+
+        Ok(config)
+    }
+
+    fn resolve_keymap(&mut self) -> Result<()> {
+        if let Some(keymap_config) = &self.keymap {
             let mut keymap = KeyMap::default();
             for (key_str, action_str) in keymap_config {
                 let key = parse_key(key_str)?;
                 let action = parse_action(action_str)?;
                 keymap.insert(key, action);
             }
-            config.active_keymap = keymap;
+            self.active_keymap = keymap;
         } else {
-            config.active_keymap = KeyMap::default();
+            self.active_keymap = KeyMap::default();
         }
-
-        Ok(config)
+        Ok(())
     }
 
     /// Saves the current config.

@@ -64,13 +64,7 @@ pub struct VecStats {
 }
 
 impl VecStats {
-    pub fn new(
-        vec: &Vec<u64>,
-        divisor: u64,
-        percentiles: Option<HashSet<StatAggregation>>,
-    ) -> Self {
-        assert!(divisor != 0, "divisor must be non-zero");
-
+    pub fn new(vec: &Vec<u64>, percentiles: Option<HashSet<StatAggregation>>) -> Self {
         let mut min: u64 = u64::MAX;
         let mut max: u64 = 0;
         let mut sum: u64 = 0;
@@ -83,14 +77,11 @@ impl VecStats {
             }
             sum += val;
         }
-        min /= divisor;
-        max /= divisor;
-        sum /= divisor;
         match percentiles {
             Some(ref hashset) => {
                 let mut pmap = BTreeMap::new();
                 if !hashset.is_empty() && !vec.is_empty() {
-                    let mut sorted: Vec<u64> = vec.iter().map(|v| v / divisor).collect();
+                    let mut sorted = vec.clone();
                     sorted.sort_unstable();
 
                     let n = sorted.len();

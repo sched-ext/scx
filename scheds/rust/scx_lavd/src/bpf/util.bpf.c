@@ -84,41 +84,6 @@ struct {
 #define max(X, Y) (((X) < (Y)) ? (Y) : (X))
 #endif
 
-static u64 sigmoid_u64(u64 v, u64 max)
-{
-	/*
-	 * An integer approximation of the sigmoid function. It is convenient
-	 * to use the sigmoid function since it has a known upper and lower
-	 * bound, [0, max].
-	 *
-	 *      |
-	 *	|      +------ <= max
-	 *	|    /
-	 *	|  /
-	 *	|/
-	 *	+------------->
-	 */
-	return (v > max) ? max : v;
-}
-
-static u64 rsigmoid_u64(u64 v, u64 max)
-{
-	/*
-	 * A horizontally flipped version of sigmoid function. Again, it is
-	 * convenient since the upper and lower bound of the function is known,
-	 * [0, max].
-	 *
-	 *
-	 *      |
-	 *	|\ <= max
-	 *	| \
-	 *	|  \
-	 *	|   \
-	 *	+----+-------->
-	 */
-	return (v >= max) ? 0 : max - v;
-}
-
 static struct task_ctx *get_task_ctx(struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -141,36 +106,22 @@ static struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
 
-#define __calc_avg(old, new, decay) ({						\
-	typeof(decay) thr = 1 << (decay);					\
-	typeof(old) ret;							\
-	if (((old) < thr) || ((new) < thr)) {					\
-		if (((old) == 1) && ((new) == 0))				\
-			ret = 0;						\
-		else								\
-			ret = ((old) - ((old) >> 1)) + ((new) >> 1);		\
-	} else {								\
-		ret = ((old) - ((old) >> (decay))) + ((new) >> (decay));	\
-	}									\
-	ret;									\
-})
-
 u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
-	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
+	 *  - EWMA = (0.875 * old) + (0.125 * new)
 	 */
-	return __calc_avg(old_val, new_val, 4);
+	return __calc_avg(old_val, new_val, 3);
 }
 
 u64 __attribute__ ((noinline)) calc_avg(u64 old_val, u64 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
-	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
+	 *  - EWMA = (0.875 * old) + (0.125 * new)
 	 */
-	return __calc_avg(old_val, new_val, 4);
+	return __calc_avg(old_val, new_val, 3);
 }
 
 u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
@@ -193,7 +144,7 @@ u64 __attribute__ ((noinline)) calc_avg_freq(u64 old_freq, u64 interval)
 	 * frequency with a new interval measured.
 	 */
 	new_freq = LAVD_TIME_ONE_SEC / interval;
-	ewma_freq = __calc_avg(old_freq, new_freq, 4);
+	ewma_freq = __calc_avg(old_freq, new_freq, 3);
 	return ewma_freq;
 }
 
@@ -252,7 +203,7 @@ static bool use_full_cpus(void)
 	return sys_stat.nr_active >= nr_cpus_onln;
 }
 
-static s64 pick_any_bit(u64 bitmap, u64 nuance)
+s64 __attribute__ ((noinline)) pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 i, pos;
 

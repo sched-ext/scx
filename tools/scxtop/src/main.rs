@@ -284,7 +284,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
     let config = Config::merge([
         Config::from(tui_args.clone()),
-        Config::load().unwrap_or(Config::default_config()),
+        Config::load_or_default().expect("Failed to load config or load default config"),
     ]);
     let keymap = config.active_keymap.clone();
 

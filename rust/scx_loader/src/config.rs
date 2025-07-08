@@ -73,43 +73,21 @@ fn parse_config_content(file_content: &str) -> Result<Config> {
 }
 
 pub fn get_default_config() -> Config {
+    let supported_scheds = [
+        SupportedSched::Bpfland,
+        SupportedSched::Rusty,
+        SupportedSched::Lavd,
+        SupportedSched::Flash,
+        SupportedSched::P2DQ,
+        SupportedSched::Tickless,
+        SupportedSched::Rustland,
+    ];
+    let scheds_map = HashMap::from(supported_scheds.map(|x| init_default_config_entry(x)));
     Config {
         default_sched: None,
         default_mode: Some(SchedMode::Auto),
-        scheds: HashMap::from([
-            (
-                "scx_bpfland".to_string(),
-                get_default_sched_for_config(&SupportedSched::Bpfland),
-            ),
-            (
-                "scx_rusty".to_string(),
-                get_default_sched_for_config(&SupportedSched::Rusty),
-            ),
-            (
-                "scx_lavd".to_string(),
-                get_default_sched_for_config(&SupportedSched::Lavd),
-            ),
-            (
-                "scx_flash".to_string(),
-                get_default_sched_for_config(&SupportedSched::Flash),
-            ),
-            (
-                "scx_p2dq".to_string(),
-                get_default_sched_for_config(&SupportedSched::P2DQ),
-            ),
-            (
-                "scx_tickless".to_string(),
-                get_default_sched_for_config(&SupportedSched::Tickless),
-            ),
-            (
-                "scx_rustland".to_string(),
-                get_default_sched_for_config(&SupportedSched::Rustland),
-            ),
-            (
-                "scx_spark".to_string(),
-                get_default_sched_for_config(&SupportedSched::Spark),
-            ),
-        ]),
+        scheds: scheds_map,
+        main
     }
 }
 
@@ -209,12 +187,23 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         // scx_rusty doesn't support any of these modes
         SupportedSched::Rusty => vec![],
         SupportedSched::Flash => match sched_mode {
-            SchedMode::Gaming => vec!["-m", "performance"],
-            SchedMode::LowLatency => {
-                vec!["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
-            }
-            SchedMode::PowerSave => vec!["-m", "powersave"],
-            SchedMode::Server => vec!["-p", "-c", "0"],
+            SchedMode::Gaming => vec!["-m", "all"],
+            SchedMode::LowLatency => vec!["-m", "performance", "-w", "-C", "0"],
+            SchedMode::PowerSave => vec![
+                "-m",
+                "powersave",
+                "-I",
+                "10000",
+                "-t",
+                "10000",
+                "-s",
+                "10000",
+                "-S",
+                "1000",
+            ],
+            SchedMode::Server => vec![
+                "-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L",
+            ],
             SchedMode::Auto => vec![],
         },
         SupportedSched::P2DQ => match sched_mode {
@@ -234,6 +223,15 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         // scx_rustland doesn't support any of these modes
         SupportedSched::Rustland => vec![],
     }
+}
+
+/// Initializes entry for config sched map
+fn init_default_config_entry(scx_sched: SupportedSched) -> (String, Sched) {
+    let default_modes = get_default_sched_for_config(&scx_sched);
+    (
+        <SupportedSched as Into<&str>>::into(scx_sched).to_owned(),
+        default_modes,
+    )
 }
 
 #[cfg(test)]
@@ -268,10 +266,10 @@ server_mode = []
 
 [scheds.scx_flash]
 auto_mode = []
-gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
-powersave_mode = ["-m", "powersave"]
-server_mode = ["-p", "-c", "0"]
+gaming_mode = ["-m", "all"]
+lowlatency_mode = ["-m", "performance", "-w", "-C", "0"]
+powersave_mode = ["-m", "powersave", "-I", "10000", "-t", "10000", "-s", "10000", "-S", "1000"]
+server_mode = ["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L"]
 
 [scheds.scx_p2dq]
 auto_mode = []

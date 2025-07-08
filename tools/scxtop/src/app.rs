@@ -11,6 +11,7 @@ use crate::bpf_stats::BpfStats;
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::format_hz;
+use crate::get_default_events;
 use crate::read_file_string;
 use crate::sanitize_nbsp;
 use crate::AppState;
@@ -162,24 +163,23 @@ impl<'a> App<'a> {
         let active_event =
             ProfilingEvent::Perf(PerfEvent::new(subsystem.clone(), event.clone(), 0));
         let mut active_prof_events = BTreeMap::new();
-        let mut default_perf_events = PerfEvent::default_events();
-        let config_perf_events = PerfEvent::from_config(&config)?;
-        default_perf_events.extend(config_perf_events);
-        let default_events_str: Vec<&str> = default_perf_events
-            .iter()
-            .map(|event| {
-                if !event.alias.is_empty() {
-                    event.alias.as_str()
-                } else {
-                    event.event.as_str()
-                }
-            })
-            .collect();
 
-        let default_events: Vec<ProfilingEvent> = default_perf_events
+        let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let mut default_events = get_default_events(cpu_stat_tracker.clone());
+
+        let config_perf_events = PerfEvent::from_config(&config)?;
+
+        default_events.extend(
+            config_perf_events
+                .iter()
+                .cloned()
+                .map(ProfilingEvent::Perf)
+                .collect::<Vec<_>>(),
+        );
+
+        let default_events_str: Vec<&str> = default_events
             .iter()
-            .cloned()
-            .map(ProfilingEvent::Perf)
+            .map(|event| event.event_name())
             .collect();
 
         for cpu in topo.all_cpus.values() {
@@ -192,12 +192,12 @@ impl<'a> App<'a> {
             cpu_data.insert(cpu.id, data);
         }
         for llc in topo.all_llcs.values() {
-            let mut data = LlcData::new(llc.id, llc.node_id, max_cpu_events);
+            let mut data = LlcData::new(llc.id, llc.node_id, llc.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
             llc_data.insert(llc.id, data);
         }
         for node in topo.nodes.values() {
-            let mut data = NodeData::new(node.id, max_cpu_events);
+            let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
             node_data.insert(node.id, data);
         }
@@ -241,7 +241,7 @@ impl<'a> App<'a> {
             hw_pressure,
             locale: SystemLocale::default()?,
             stats_client,
-            cpu_stat_tracker: Arc::new(RwLock::new(CpuStatTracker::default())),
+            cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,
@@ -337,15 +337,18 @@ impl<'a> App<'a> {
     fn reset_prof_events(&mut self) -> Result<()> {
         self.stop_prof_events();
         self.kprobe_links.clear();
-        let mut default_events = PerfEvent::default_events();
-        let config_events = PerfEvent::from_config(&self.config).unwrap();
-        default_events.extend(config_events);
 
-        self.available_events = default_events
-            .iter()
-            .cloned()
-            .map(ProfilingEvent::Perf)
-            .collect();
+        self.available_events = get_default_events(self.cpu_stat_tracker.clone());
+        let config_perf_events = PerfEvent::from_config(&self.config)?;
+
+        self.available_events.extend(
+            config_perf_events
+                .iter()
+                .cloned()
+                .map(ProfilingEvent::Perf)
+                .collect::<Vec<_>>(),
+        );
+
         self.active_hw_event_id = 0;
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
         self.active_event = prof_event.clone();
@@ -403,6 +406,11 @@ impl<'a> App<'a> {
                     let mut k = k.clone();
                     k.cpu = cpu_id;
                     ProfilingEvent::Kprobe(k)
+                }
+                ProfilingEvent::CpuUtil(c) => {
+                    let mut c = c.clone();
+                    c.cpu = cpu_id;
+                    ProfilingEvent::CpuUtil(c)
                 }
             };
             self.active_prof_events.insert(cpu_id, event);
@@ -508,8 +516,8 @@ impl<'a> App<'a> {
     fn reload_stats_client(&mut self) -> Result<()> {
         let stats_socket_path = self.config.stats_socket_path();
         let mut new_client = StatsClient::new();
-        new_client = new_client.connect()?;
         new_client = new_client.set_path(stats_socket_path);
+        new_client = new_client.connect()?;
         if let Some(client_ref) = &self.stats_client {
             let mut client = client_ref.blocking_lock();
             *client = new_client;
@@ -525,23 +533,23 @@ impl<'a> App<'a> {
             self.cpu_stat_tracker.write().unwrap().update()?;
         }
 
-        if self.state == AppState::Scheduler && !self.scheduler.is_empty() {
-            if let Some(stats_client_read) = self.stats_client.clone() {
+        if self.state == AppState::Scheduler {
+            if self.scheduler.is_empty() {
+                self.sched_stats_raw.clear();
+            } else if let Some(stats_client_read) = self.stats_client.clone() {
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
                     let mut client = stats_client_read.lock().await;
 
                     let result = client.request::<JsonValue>("stats", vec![]);
-                    match result {
-                        Ok(stats) => {
-                            tx.send(Action::SchedStats(
-                                serde_json::to_string_pretty(&stats).unwrap(),
-                            ))?;
-                        }
-                        Err(_) => {
-                            tx.send(Action::ReloadStatsClient)?;
-                        }
-                    }
+                    let action = match result {
+                        Ok(stats) => Action::SchedStats(
+                            serde_json::to_string_pretty(&stats)
+                                .expect("Unable to parse scheduler stats JSON."),
+                        ),
+                        Err(_) => Action::ReloadStatsClient,
+                    };
+                    tx.send(action)?;
                     Ok::<(), anyhow::Error>(())
                 });
             };
@@ -564,10 +572,7 @@ impl<'a> App<'a> {
         }
 
         for (cpu, event) in &mut self.active_prof_events {
-            let val = match event {
-                ProfilingEvent::Perf(p) => p.value(true)?,
-                ProfilingEvent::Kprobe(k) => k.value(true)?,
-            };
+            let val = event.value(true)?;
             let cpu_data = self
                 .cpu_data
                 .get_mut(cpu)
@@ -737,16 +742,21 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a llc.
     fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
-        let data = if self.llc_data.contains_key(&llc) {
-            let llc_data = self
-                .llc_data
-                .get(&llc)
-                .expect("LlcData should have been present");
-            llc_data.event_data_immut(self.active_event.event_name())
-        } else {
-            Vec::new()
+        let llc_data = self
+            .llc_data
+            .get(&llc)
+            .expect("LlcData should have been present");
+        let divisor = match self.active_event {
+            ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
+            _ => 1,
         };
-        let stats = VecStats::new(&data, 1, None);
+        let data = llc_data
+            .event_data_immut(self.active_event.event_name())
+            .iter()
+            .map(|x| x / divisor as u64)
+            .collect();
+
+        let stats = VecStats::new(&data, None);
 
         Sparkline::default()
             .data(&data)
@@ -785,16 +795,21 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a node.
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
-        let data = if self.node_data.contains_key(&node) {
-            let node_data = self
-                .node_data
-                .get(&node)
-                .expect("NodeData should have been present");
-            node_data.event_data_immut(self.active_event.event_name())
-        } else {
-            Vec::new()
+        let node_data = self
+            .node_data
+            .get(&node)
+            .expect("NodeData should have been present");
+        let divisor = match self.active_event {
+            ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
+            _ => 1,
         };
-        let stats = VecStats::new(&data, 1, None);
+        let data = node_data
+            .event_data_immut(self.active_event.event_name())
+            .iter()
+            .map(|x| x / divisor as u64)
+            .collect();
+
+        let stats = VecStats::new(&data, None);
 
         Sparkline::default()
             .data(&data)
@@ -864,9 +879,20 @@ impl<'a> App<'a> {
         let llc_iter = self
             .llc_data
             .values()
-            .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event_name()))
+            .flat_map(|llc_data| {
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
+                    _ => 1,
+                };
+                llc_data
+                    .event_data_immut(self.active_event.event_name())
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>()
+            })
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&llc_iter, 1, None);
+
+        let stats = VecStats::new(&llc_iter, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -984,9 +1010,20 @@ impl<'a> App<'a> {
         let node_iter = self
             .node_data
             .values()
-            .flat_map(|node_data| node_data.event_data_immut(self.active_event.event_name()))
+            .flat_map(|node_data| {
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
+                    _ => 1,
+                };
+                node_data
+                    .event_data_immut(self.active_event.event_name())
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>()
+            })
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&node_iter, 1, None);
+
+        let stats = VecStats::new(&node_iter, None);
 
         match self.view_state {
             ViewState::Sparkline => {
@@ -1111,7 +1148,7 @@ impl<'a> App<'a> {
             Vec::new()
         };
         // XXX: this should be max across all CPUs
-        let stats = VecStats::new(&data, 1, None);
+        let stats = VecStats::new(&data, None);
         Sparkline::default()
             .data(&data)
             .max(stats.max)
@@ -1213,7 +1250,7 @@ impl<'a> App<'a> {
             .map(|(dsq_id, dsq_data)| {
                 let values = dsq_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, 1, None);
+                let stats = VecStats::new(&values, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1247,9 +1284,17 @@ impl<'a> App<'a> {
             .iter()
             .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(event))
             .map(|(llc_id, llc_data)| {
-                let values = llc_data.event_data_immut(event);
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
+                    _ => 1,
+                };
+                let values = llc_data
+                    .event_data_immut(event)
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>();
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, 1, None);
+                let stats = VecStats::new(&values, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1261,9 +1306,17 @@ impl<'a> App<'a> {
             .iter()
             .filter(|(_node_id, node_data)| node_data.data.data.contains_key(event))
             .map(|(node_id, node_data)| {
-                let values = node_data.event_data_immut(event);
+                let divisor = match self.active_event {
+                    ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
+                    _ => 1,
+                };
+                let values = node_data
+                    .event_data_immut(event)
+                    .iter()
+                    .map(|&x| x / divisor as u64)
+                    .collect::<Vec<u64>>();
                 let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, 1, None);
+                let stats = VecStats::new(&values, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
@@ -1371,7 +1424,7 @@ impl<'a> App<'a> {
             .values()
             .flat_map(|dsq_data| dsq_data.event_data_immut(event))
             .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, 1, None);
+        let stats = VecStats::new(&dsq_global_iter, None);
 
         let bar_block = Block::default()
             .title_top(
@@ -1488,7 +1541,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, 1, None);
+                    let stats = VecStats::new(&node_iter, None);
 
                     let node_block = Block::bordered()
                         .title_top(
@@ -1609,7 +1662,7 @@ impl<'a> App<'a> {
                             cpu_data.event_data_immut(self.active_event.event_name())
                         })
                         .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, 1, None);
+                    let stats = VecStats::new(&node_iter, None);
 
                     let node_block = Block::bordered()
                         .title_top(
@@ -2165,11 +2218,20 @@ impl<'a> App<'a> {
             AppState::Scheduler => {
                 let [left, right] =
                     Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
-                let [top, center, bottom] = Layout::vertical([Constraint::Fill(1); 3]).areas(left);
-                self.render_scheduler("dsq_lat_us", frame, top, true, true)?;
-                self.render_scheduler("dsq_slice_consumed", frame, center, true, false)?;
-                self.render_scheduler("dsq_vtime_delta", frame, bottom, true, false)?;
-                self.render_scheduler_stats(frame, right)
+                let [left_top, left_center, left_bottom] = Layout::vertical([
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                ])
+                .areas(left);
+                let [right_top, right_bottom] =
+                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+                        .areas(right);
+                self.render_scheduler("dsq_lat_us", frame, left_top, true, true)?;
+                self.render_scheduler("dsq_slice_consumed", frame, left_center, true, false)?;
+                self.render_scheduler("dsq_vtime_delta", frame, left_bottom, true, false)?;
+                self.render_scheduler("dsq_nr_queued", frame, right_bottom, true, false)?;
+                self.render_scheduler_stats(frame, right_top)
             }
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
@@ -2457,6 +2519,7 @@ impl<'a> App<'a> {
         let SchedSwitchAction {
             cpu,
             next_dsq_id,
+            next_dsq_nr_queued,
             next_dsq_lat_us,
             next_dsq_vtime,
             prev_dsq_id,
@@ -2483,14 +2546,6 @@ impl<'a> App<'a> {
         let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
 
         if next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
-            if self.state == AppState::MangoApp {
-                if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
-                    cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
-                }
-            } else {
-                cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
-            }
-
             let next_dsq_data = self
                 .dsq_data
                 .entry(next_dsq_id)
@@ -2498,10 +2553,14 @@ impl<'a> App<'a> {
 
             if self.state == AppState::MangoApp {
                 if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
+                    cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
                     next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+                    next_dsq_data.add_event_data("dsq_nr_queued", *next_dsq_nr_queued as u64);
                 }
             } else {
+                cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
                 next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+                next_dsq_data.add_event_data("dsq_nr_queued", *next_dsq_nr_queued as u64);
             }
 
             if *next_dsq_vtime > 0 {
@@ -2704,7 +2763,10 @@ impl<'a> App<'a> {
                 self.stop_recording_trace(*ts)?;
             }
             Action::ReloadStatsClient => {
-                self.reload_stats_client()?;
+                tokio::task::block_in_place(|| {
+                    self.reload_stats_client()
+                        .expect("Failed to reload stats client");
+                });
             }
             Action::SaveConfig => {
                 self.on_save_config()?;

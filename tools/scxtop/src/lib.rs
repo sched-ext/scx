@@ -14,13 +14,11 @@ pub mod cpu_stats;
 pub mod edm;
 mod event_data;
 mod keymap;
-mod kprobe_event;
 mod llc_data;
 pub mod mangoapp;
 mod node_data;
-mod perf_event;
 mod perfetto_trace;
-pub mod protos;
+pub mod profiling_events;
 mod search;
 mod stats;
 mod theme;
@@ -36,14 +34,13 @@ pub use cpu_stats::CpuStatTracker;
 pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
-pub use kprobe_event::available_kprobe_events;
-pub use kprobe_event::KprobeEvent;
 pub use llc_data::LlcData;
 pub use node_data::NodeData;
-pub use perf_event::available_perf_events;
-pub use perf_event::PerfEvent;
 pub use perfetto_trace::PerfettoTraceManager;
-pub use protos::*;
+pub use profiling_events::{
+    available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
+    ProfilingEvent,
+};
 pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
@@ -130,28 +127,6 @@ impl FilteredEventState {
         self.count = 0;
         self.scroll = 0;
         self.selected = 0;
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum ProfilingEvent {
-    Perf(PerfEvent),
-    Kprobe(KprobeEvent),
-}
-
-impl ProfilingEvent {
-    pub fn event_name(&self) -> &str {
-        match self {
-            ProfilingEvent::Perf(p) => p.event_name(),
-            ProfilingEvent::Kprobe(k) => &k.event_name,
-        }
-    }
-
-    pub fn value(&mut self, reset: bool) -> anyhow::Result<u64> {
-        match self {
-            ProfilingEvent::Perf(p) => p.value(reset),
-            ProfilingEvent::Kprobe(k) => k.value(reset),
-        }
     }
 }
 
@@ -606,6 +581,8 @@ impl std::fmt::Display for Action {
         match self {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
+            Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
+            Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),

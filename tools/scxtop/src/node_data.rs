@@ -12,19 +12,21 @@ use std::collections::VecDeque;
 #[derive(Clone, Debug)]
 pub struct NodeData {
     pub node: usize,
+    pub num_cpus: usize,
     pub data: EventData,
     pub max_data_size: usize,
 }
 
 impl NodeData {
     /// Creates a new NodeData.
-    pub fn new(node: usize, max_data_size: usize) -> NodeData {
+    pub fn new(node: usize, num_cpus: usize, max_data_size: usize) -> NodeData {
         let mut data = EventData::new(max_data_size);
         for event in PerfEvent::default_events() {
             data.event_data(&event.event);
         }
         Self {
             node,
+            num_cpus,
             data,
             max_data_size,
         }

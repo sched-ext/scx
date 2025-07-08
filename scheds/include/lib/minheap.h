@@ -14,7 +14,7 @@ struct scx_minheap {
 typedef struct scx_minheap __arena scx_minheap_t;
 
 u64 scx_minheap_alloc_internal(size_t capacity);
-#define scx_minheap_alloc(capacity) (scx_minheap_t *)scx_minheap_alloc_internal(capacity);
+#define scx_minheap_alloc(capacity) (scx_minheap_t *)scx_minheap_alloc_internal(capacity)
 
 int scx_minheap_balance_top_down(void __arena *heap_ptr __arg_arena);
 int scx_minheap_insert(void __arena *heap_ptr __arg_arena, u64 elem, u64 weight);
