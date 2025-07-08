@@ -118,6 +118,12 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	lat_cri = log_wwf + log2_u64(runtime_ft * weight_ft);
 
 	/*
+	 * Amplify the task's latency criticality to better differentiate
+	 * between latency-critical vs. non-latency-critical tasks.
+	 */
+	lat_cri = lat_cri * lat_cri;
+
+	/*
 	 * Determine latency criticality of a task in a context-aware manner by
 	 * considering which task wakes up this task. If its waker is more
 	 * latency-critcial, inherit waker's latency criticality partially.
