@@ -6,8 +6,6 @@ import re
 import subprocess
 import sys
 
-priority=['scx_stats', 'scx_stats_derive', 'scx_utils', 'scx_userspace_arena',
-          'scx_rustland_core', 'scx_p2dq']
 publish_args={'scx_rlfifo': ['--no-verify'],
               'scx_rustland': ['--no-verify']}
 
@@ -23,17 +21,45 @@ def dbg(line):
 def underline(string):
     return f'\033[4m{string}\033[0m'
 
-def get_crate_names():
+def get_crate_info():
     metadata = subprocess.check_output(["cargo", "metadata", "--format-version", "1"])
     metadata = json.loads(metadata)
 
     default_members = set(metadata["workspace_default_members"])
+    crates = {}
 
     for pkg in metadata["packages"]:
         if pkg.get("publish") == []:
             continue
         if pkg["id"] in default_members:
-            yield pkg["name"]
+            deps = {dep["name"] for dep in pkg["dependencies"]
+                   if dep["source"] is None and dep["kind"] != "dev"}
+            crates[pkg["name"]] = deps
+
+    return crates
+
+def topological_sort(crates):
+    in_degree = {name: len(deps) for name, deps in crates.items()}
+
+    queue = [name for name, degree in in_degree.items() if degree == 0]
+    result = []
+
+    while queue:
+        queue.sort()
+        current = queue.pop(0)
+        result.append(current)
+
+        for name, deps in crates.items():
+            if current in deps:
+                in_degree[name] -= 1
+                if in_degree[name] == 0:
+                    queue.append(name)
+
+    if len(result) != len(crates):
+        remaining = [name for name in crates if name not in result]
+        err(f'Circular dependency detected among crates: {remaining}')
+
+    return result
 
 def publish(crate, extra_args, ignore_existing):
     try:
@@ -74,31 +100,21 @@ def main():
     global verbose
     verbose = args.verbose
 
-    crates = set(get_crate_names())
+    crates = get_crate_info()
 
-    excess_publish_args = publish_args.keys() - crates
+    excess_publish_args = publish_args.keys() - crates.keys()
     if excess_publish_args:
         err(f'publish_args contains non-existent crates {excess_publish_args}')
 
     if args.start and args.start not in crates:
         err(f'--start specified non-existent crate {args.start}')
 
-    targets = []
-
-    # add priority crates first
-    for pri in priority:
-        if pri not in crates:
-            err(f'cannot find priority crate {pri}')
-        crates.remove(pri)
-        targets.append(pri)
-
-    # sort remaining crates alphabetically
-    targets.extend(sorted(crates))
+    targets = topological_sort(crates)
 
     # Publish
     start_from = args.start
     for target in targets:
-        if start_from and target[0] != start_from:
+        if start_from and target != start_from:
             continue
         start_from = None
 
