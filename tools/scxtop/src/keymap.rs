@@ -328,12 +328,14 @@ pub fn parse_key(key_str: &str) -> Result<Key> {
     {
         Ok(Key::Code(keycode_wrapper.into()))
     } else {
-        match key_str {
-            "Page Up" | "PageUp" => Ok(Key::Code(KeyCode::PageUp)),
-            "Page Down" | "PageDown" => Ok(Key::Code(KeyCode::PageDown)),
-            "Up" => Ok(Key::Code(KeyCode::Up)),
-            "Down" => Ok(Key::Code(KeyCode::Down)),
-            "Enter" => Ok(Key::Code(KeyCode::Enter)),
+        match key_str.to_lowercase().as_str() {
+            "page up" | "pageup" => Ok(Key::Code(KeyCode::PageUp)),
+            "page down" | "pagedown" => Ok(Key::Code(KeyCode::PageDown)),
+            "up" => Ok(Key::Code(KeyCode::Up)),
+            "down" => Ok(Key::Code(KeyCode::Down)),
+            "enter" => Ok(Key::Code(KeyCode::Enter)),
+            "backspace" => Ok(Key::Code(KeyCode::Backspace)),
+            "esc" | "escape" => Ok(Key::Code(KeyCode::Esc)),
             _ => Err(anyhow!("Invalid key: {}", key_str)),
         }
     }
@@ -371,6 +373,8 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "PageDown" => Ok(Action::PageDown),
         "PageUp" => Ok(Action::PageUp),
         "Enter" => Ok(Action::Enter),
+        "Esc" => Ok(Action::Esc),
+        "Backspace" => Ok(Action::Backspace),
         _ => Err(anyhow!("Invalid action: {}", action_str)),
     }
 }

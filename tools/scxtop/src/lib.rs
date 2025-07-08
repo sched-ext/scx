@@ -581,6 +581,8 @@ impl std::fmt::Display for Action {
         match self {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
+            Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
+            Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),

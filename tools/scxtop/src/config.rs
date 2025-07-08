@@ -278,24 +278,34 @@ impl Config {
     }
 
     /// Loads the config from XDG configuration.
-    pub fn load() -> Result<Config> {
+    pub fn load_or_default() -> Result<Config> {
         let config_path = get_config_path()?;
+
+        if !config_path.exists() {
+            return Ok(Config::default_config());
+        }
+
         let contents = fs::read_to_string(config_path)?;
         let mut config: Config = toml::from_str(&contents)?;
 
-        if let Some(keymap_config) = &config.keymap {
+        config.resolve_keymap()?;
+
+        Ok(config)
+    }
+
+    fn resolve_keymap(&mut self) -> Result<()> {
+        if let Some(keymap_config) = &self.keymap {
             let mut keymap = KeyMap::default();
             for (key_str, action_str) in keymap_config {
                 let key = parse_key(key_str)?;
                 let action = parse_action(action_str)?;
                 keymap.insert(key, action);
             }
-            config.active_keymap = keymap;
+            self.active_keymap = keymap;
         } else {
-            config.active_keymap = KeyMap::default();
+            self.active_keymap = KeyMap::default();
         }
-
-        Ok(config)
+        Ok(())
     }
 
     /// Saves the current config.
