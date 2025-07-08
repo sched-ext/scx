@@ -145,18 +145,18 @@ u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
-	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
+	 *  - EWMA = (0.875 * old) + (0.125 * new)
 	 */
-	return __calc_avg(old_val, new_val, 4);
+	return __calc_avg(old_val, new_val, 3);
 }
 
 u64 __attribute__ ((noinline)) calc_avg(u64 old_val, u64 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
-	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
+	 *  - EWMA = (0.875 * old) + (0.125 * new)
 	 */
-	return __calc_avg(old_val, new_val, 4);
+	return __calc_avg(old_val, new_val, 3);
 }
 
 u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
@@ -179,7 +179,7 @@ u64 __attribute__ ((noinline)) calc_avg_freq(u64 old_freq, u64 interval)
 	 * frequency with a new interval measured.
 	 */
 	new_freq = LAVD_TIME_ONE_SEC / interval;
-	ewma_freq = __calc_avg(old_freq, new_freq, 4);
+	ewma_freq = __calc_avg(old_freq, new_freq, 3);
 	return ewma_freq;
 }
 
