@@ -78,6 +78,13 @@ struct task_p2dq {
 
 typedef struct task_p2dq __arena task_ctx;
 
+enum enqueue_promise_kind {
+	P2DQ_ENQUEUE_PROMISE_COMPLETE,
+	P2DQ_ENQUEUE_PROMISE_VTIME,
+	P2DQ_ENQUEUE_PROMISE_FIFO,
+	P2DQ_ENQUEUE_PROMISE_FAILED,
+};
+
 struct enqueue_promise_vtime {
 	u64	dsq_id;
 	u64	enq_flags;
@@ -91,8 +98,15 @@ struct enqueue_promise_fifo {
 	u64	slice_ns;
 };
 
+// This struct is zeroed at the beginning of `async_p2dq_enqueue` and only
+// relevant fields are set, so assume 0 as default when adding fields.
 struct enqueue_promise {
 	enum enqueue_promise_kind	kind;
+
+	s32				cpu;
+	bool				kick_idle;
+	bool				has_cleared_idle;
+
 	union {
 		struct enqueue_promise_vtime	vtime;
 		struct enqueue_promise_fifo	fifo;

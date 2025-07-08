@@ -396,29 +396,49 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init)
 	return p2dq_init_impl();
 }
 
-static __always_inline __maybe_unused void complete_p2dq_enqueue_move(struct enqueue_promise *pro,
+/* 
+ * Cleanup any outstanding work left over by the p2dq promise when we do not
+ * plan to complete it.
+ */
+static __always_inline void destroy_p2dq_enqueue_promise(struct enqueue_promise *pro)
+{
+	// If the idle bit of a CPU has already been cleared but we don't plan
+	// to execute a task on it we should kick the CPU. If the CPU goes to
+	// sleep again it will reset the kernel managed idle state.
+	if (pro->has_cleared_idle)
+		scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
+}
+
+static __always_inline void complete_p2dq_enqueue_move(struct enqueue_promise *pro,
 						       struct bpf_iter_scx_dsq *it__iter,
 						       struct task_struct *p)
 {
 	switch (pro->kind) {
 	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
-		goto out;
+		scx_bpf_error("chaos: delayed async_p2dq_enqueue returned COMPLETE"
+			      " after a task was placed in the delay dsq!");
+		break;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
 		__COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
 		__COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id, pro->fifo.enq_flags);
-		goto out;
+		break;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
 		__COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
 		__COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
 		__COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
-		goto out;
+		break;
+	case P2DQ_ENQUEUE_PROMISE_FAILED:
+		scx_bpf_error("chaos: delayed async_p2dq_enqueue failed");
+		break;
 	}
 
-out:
+	if (pro->kick_idle)
+		scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
+
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 }
 
-__weak __maybe_unused int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
+__weak int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
 				   struct task_struct *p __arg_trusted,
 				   u64 enq_flags)
 {
@@ -428,12 +448,12 @@ __weak __maybe_unused int async_p2dq_enqueue_weak(struct enqueue_promise *ret __
 
 void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct enqueue_promise promise;
 	struct chaos_task_ctx *taskc;
 	struct task_struct *p;
 	u64 now = bpf_ktime_get_ns();
-	u64 initial_dsq = get_cpu_delay_dsq(-1);
 
-	bpf_for_each(scx_dsq, p, initial_dsq, 0) {
+	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(-1), 0) {
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
@@ -452,7 +472,8 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 		// restore vtime to p2dq's timeline
 		p->scx.dsq_vtime = taskc->p2dq_vtime;
 
-		scx_bpf_dsq_move_to_local(initial_dsq);
+		async_p2dq_enqueue_weak(&promise, p, taskc->enq_flags);
+		complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
 		bpf_task_release(p);
 	}
 
@@ -475,10 +496,12 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	async_p2dq_enqueue(&promise, p, enq_flags);
 	if (promise.kind == P2DQ_ENQUEUE_PROMISE_COMPLETE)
 		return;
+	if (promise.kind == P2DQ_ENQUEUE_PROMISE_FAILED)
+		goto cleanup;
 
 	if (taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS &&
 	    enqueue_chaotic(p, enq_flags, taskc))
-		return;
+		goto cleanup;
 
 	// NOTE: this may not work for affinitized tasks because p2dq does
 	// direct dispatch in some situations.
@@ -498,6 +521,10 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	}
 
 	complete_p2dq_enqueue(&promise, p);
+	return;
+
+cleanup:
+	destroy_p2dq_enqueue_promise(&promise);
 }
 
 void BPF_STRUCT_OPS(chaos_runnable, struct task_struct *p, u64 enq_flags)
