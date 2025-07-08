@@ -39,6 +39,7 @@ struct llc_ctx {
 	u64				load;
 	u64				affn_load;
 	u64				intr_load;
+	u64				dsq_load[MAX_DSQS_PER_LLC];
 	bool				all_big;
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;

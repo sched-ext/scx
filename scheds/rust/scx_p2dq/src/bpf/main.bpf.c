@@ -302,37 +302,53 @@ static bool is_interactive(task_ctx *taskc)
 
 static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 {
+	int idx;
+	u64 load, prev_load, non_intr_sum = 0;
+
 	if (nr_llcs <= 1 || (!dispatch_lb_interactive && taskc->interactive))
 		return false;
 
 	if (max_dsq_pick2 && taskc->dsq_index != nr_dsqs_per_llc - 1)
 		return false;
 
+	if ((taskc->all_cpus && taskc->llc_runs < min_llc_runs_pick2) ||
+	     !taskc->all_cpus)
+		return false;
+
 	u64 mig_nr_queued = scx_bpf_dsq_nr_queued(llcx->mig_dsq);
-
-	// The first queued migration tasks should be the least interactive
-	if (mig_nr_queued == 0 && taskc->dsq_index != nr_dsqs_per_llc - 1)
-		return false;
-
-	// If the number of queued tasks is less than half of the number of
-	// CPUs then only try to migrate least interactive tasks.
-	if (taskc->dsq_index != nr_dsqs_per_llc - 1 &&
-	    mig_nr_queued > llcx->nr_cpus / (llcx->nr_cpus > 1 ? 2 : 1))
-		return false;
-
 	u64 llc_nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
-	if (mig_nr_queued >= llc_nr_queued || mig_nr_queued >= llcx->nr_cpus)
+	if (mig_nr_queued >= llc_nr_queued)
 		return false;
 
 	if (interactive_dsq) {
 		u64 intr_nr_queued = scx_bpf_dsq_nr_queued(llcx->intr_dsq);
-		if (mig_nr_queued > intr_nr_queued)
+		if (mig_nr_queued >= intr_nr_queued)
 			return false;
 	}
 
-	return (nr_llcs > 1 &&
-		taskc->all_cpus &&
-		taskc->llc_runs > min_llc_runs_pick2);
+	// The least interactive can always migrate
+	if (taskc->dsq_index == MAX_DSQS_PER_LLC - 1)
+		return true;
+
+	// For load balancing if the current DSQ index has more load the the
+	// more interactive tasks then it is eligible for migration.
+	bpf_for(idx, 1, nr_dsqs_per_llc - 1) {
+		non_intr_sum += llcx->dsq_load[idx];
+		if (idx != taskc->dsq_index)
+			continue;
+
+		prev_load = llcx->dsq_load[idx - 1];
+		load = llcx->dsq_load[idx];
+
+		if (load > prev_load)
+			return true;
+	}
+
+	// If there is more interactive load than non then allow migrations
+	if (taskc->dsq_index == 0 && llcx->dsq_load[0] > non_intr_sum)
+		return true;
+
+	return false;
 }
 
 static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
@@ -1035,6 +1051,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += scaled_used;
 	__sync_fetch_and_add(&llcx->vtime, used);
 	__sync_fetch_and_add(&llcx->load, used);
+	if (taskc->dsq_index >= 0 && taskc->dsq_index < MAX_DSQS_PER_LLC)
+		__sync_fetch_and_add(&llcx->dsq_load[taskc->dsq_index], used);
 
 	if (taskc->interactive)
 		__sync_fetch_and_add(&llcx->intr_load, used);
@@ -1143,6 +1161,15 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 	if (!left || !right)
 		return -EINVAL;
 
+	if (left->id == right->id) {
+		i = cur_llcx->load % nr_llcs;
+		i &= 0x3; // verifier
+		if (i >= 0 && i < nr_llcs)
+			right = lookup_llc_ctx(llc_ids[i]);
+		if (!right)
+			return -EINVAL;
+	}
+
 	if (right->load > left->load) {
 		first = right;
 		second = left;
@@ -1161,7 +1188,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
 	      cpu, first->id, first->load, second->id, second->load);
 
-	cur_load = cur_llcx->load + (cur_llcx->load * lb_slack_factor);
+	cur_load = cur_llcx->load + ((cur_llcx->load * lb_slack_factor) / 100);
 
 	if (first->load > cur_load &&
 	    consume_llc(first))
@@ -1657,6 +1684,7 @@ reset_load:
 		llcx->affn_load = 0;
 		llcx->last_period_ns = scx_bpf_now();
 		bpf_for(j, 0, nr_dsqs_per_llc) {
+			llcx->dsq_load[j] = 0;
 			if (llc_id == 0 && autoslice) {
 				if (j > 0 && dsq_time_slices[j] < dsq_time_slices[j-1]) {
 					dsq_time_slices[j] = dsq_time_slices[j-1] << dsq_shift;
