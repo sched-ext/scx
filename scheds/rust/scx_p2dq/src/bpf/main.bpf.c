@@ -780,6 +780,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		else
 			ret->has_cleared_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 
+		ret->cpu = cpu;
 		if (!(cpuc = lookup_cpu_ctx(cpu)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 			scx_bpf_error("invalid lookup");
@@ -800,7 +801,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
 			ret->fifo.slice_ns = taskc->slice_ns;
 			ret->fifo.enq_flags = enq_flags;
-
 			ret->kick_idle = ret->has_cleared_idle;
 			return;
 		}
@@ -836,6 +836,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
+		ret->cpu = cpu;
 		update_vtime(p, cpuc, taskc, llcx);
 		if (deadline_scheduling)
 			set_deadline_slice(p, taskc, llcx);
@@ -848,7 +849,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
 			ret->fifo.slice_ns = taskc->slice_ns;
 			ret->fifo.enq_flags = enq_flags;
-
 			ret->kick_idle = ret->has_cleared_idle;
 			return;
 		}
@@ -904,7 +904,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
 		ret->fifo.slice_ns = taskc->slice_ns;
 		ret->fifo.enq_flags = enq_flags;
-
 		ret->kick_idle = ret->has_cleared_idle;
 		return;
 	}
