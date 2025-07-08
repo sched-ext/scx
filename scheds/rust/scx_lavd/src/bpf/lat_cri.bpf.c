@@ -8,49 +8,9 @@
  * To be included to the main.bpf.c
  */
 
-static u32 calc_greedy_ratio(struct task_ctx *taskc)
-{
-	u32 ratio;
-
-	/*
-	 * The greedy ratio of a task represents how much time the task
-	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
-	 * the ratio of task's actual service time to average service time in a
-	 * system.
-	 */
-	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-	taskc->is_greedy = ratio > LAVD_SCALE;
-	return ratio;
-}
-
-static u32 calc_greedy_factor(u32 greedy_ratio)
-{
-	/*
-	 * For all under-utilized tasks, we treat them equally.
-	 */
-	if (greedy_ratio <= LAVD_SCALE)
-		return LAVD_SCALE;
-
-	/*
-	 * For over-utilized tasks, we give some mild penalty.
-	 */
-	return LAVD_SCALE + ((greedy_ratio - LAVD_SCALE) / LAVD_LC_GREEDY_PENALTY);
-}
-
-static inline u64 calc_runtime_factor(u64 runtime)
-{
-	return rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
-}
-
-static inline u64 calc_freq_factor(u64 freq)
-{
-	return sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
-}
-
 static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 {
 	u64 weight_boost = 1;
-	u64 weight_ft;
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
@@ -96,13 +56,83 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Respect nice priority.
 	 */
-	weight_ft = p->scx.weight * weight_boost;
-	return weight_ft;
+	return p->scx.weight * weight_boost + 1;
 }
 
-static void calc_perf_cri(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_wait_factor(struct task_ctx *taskc)
 {
-	u64 wait_freq_ft, wake_freq_ft, perf_cri = LAVD_SCALE;
+	u64 freq = min(taskc->wait_freq, LAVD_LC_FREQ_MAX);
+	return freq + 1;
+}
+
+static u64 calc_wake_factor(struct task_ctx *taskc)
+{
+	u64 freq = min(taskc->wake_freq, LAVD_LC_FREQ_MAX);
+	return freq + 1;
+}
+
+static inline u64 calc_runtime_factor(struct task_ctx *taskc)
+{
+	u64 ft = 1, delta;
+
+	if (LAVD_LC_RUNTIME_MAX > taskc->avg_runtime) {
+		delta = LAVD_LC_RUNTIME_MAX - taskc->avg_runtime;
+		return delta / LAVD_SLICE_MIN_NS_DFL;
+	}
+	return ft;
+}
+
+static u64 calc_sum_runtime_factor(struct task_struct *p, struct task_ctx *taskc)
+{
+	u64 sum = max(taskc->run_freq, 1) * max(taskc->avg_runtime, 1);
+	return (sum >> LAVD_SHIFT) * p->scx.weight;
+}
+
+static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
+{
+	u64 weight_ft, wait_ft, wake_ft, runtime_ft, sum_runtime_ft;
+	u64 log_wwf, lat_cri, perf_cri = LAVD_SCALE;
+
+	/*
+	 * A task is more latency-critical as its wait or wake frequencies
+	 * (i.e., wait_freq and wake_freq) are higher, and its runtime is
+	 * shorter.
+	 */
+	wait_ft = calc_wait_factor(taskc);
+	wake_ft = calc_wake_factor(taskc);
+	runtime_ft = calc_runtime_factor(taskc);
+
+	/*
+	 * Adjust task's weight based on the scheduling context, such as
+	 * if it is a kernel task, lock holder, etc.
+	 */
+	weight_ft = calc_weight_factor(p, taskc);
+
+	/*
+	 * Wake frequency and wait frequency represent how much a task is used
+	 * for a producer and a consumer, respectively. If both are high, the
+	 * task is in the middle of a task chain. The ratio tends to follow an
+	 * exponentially skewed distribution, so we linearize it using sqrt.
+	 */
+	log_wwf = log2_u64(wait_ft * wake_ft);
+	lat_cri = log_wwf + log2_u64(runtime_ft * weight_ft);
+
+	/*
+	 * Amplify the task's latency criticality to better differentiate
+	 * between latency-critical vs. non-latency-critical tasks.
+	 */
+	lat_cri = lat_cri * lat_cri;
+
+	/*
+	 * Determine latency criticality of a task in a context-aware manner by
+	 * considering which task wakes up this task. If its waker is more
+	 * latency-critcial, inherit waker's latency criticality partially.
+	 */
+	if (taskc->lat_cri_waker > lat_cri) {
+		lat_cri += (taskc->lat_cri_waker - lat_cri) >>
+			   LAVD_LC_INHERIT_SHIFT;
+	}
+	taskc->lat_cri = lat_cri;
 
 	/*
 	 * A task is more CPU-performance sensitive when it meets the following
@@ -119,58 +149,38 @@ static void calc_perf_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * Note that we use unadjusted weight to reflect the pure task priority.
 	 */
 	if (have_little_core) {
-		wait_freq_ft = calc_freq_factor(taskc->wait_freq);
-		wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-		perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
-		perf_cri += log2_u64(max(taskc->run_freq, 1) *
-				     max(taskc->avg_runtime, 1) * p->scx.weight);
+		sum_runtime_ft = calc_sum_runtime_factor(p, taskc);
+		perf_cri = log_wwf + log2_u64(sum_runtime_ft);
 	}
-
 	taskc->perf_cri = perf_cri;
 }
 
-static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
+static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {
-	u64 weight_ft, wait_freq_ft, wake_freq_ft, runtime_ft;
-	u64 lat_cri;
+	u32 ratio;
 
 	/*
-	 * Adjust task's weight based on the scheduling context, such as
-	 * if it is a kernel task, lock holder, etc.
+	 * The greedy ratio of a task represents how much time the task
+	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
+	 * the ratio of task's actual service time to average service time in a
+	 * system.
 	 */
-	weight_ft = calc_weight_factor(p, taskc);
+	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
+	taskc->is_greedy = ratio > LAVD_SCALE;
+	return ratio;
+}
+
+static u32 calc_greedy_factor(u32 greedy_ratio)
+{
+	u32 ft = LAVD_SCALE;
 
 	/*
-	 * A task is more latency-critical as its wait or wake frequencies
-	 * (i.e., wait_freq and wake_freq) are higher.
-	 *
-	 * Since those frequencies are unbounded and their upper limits are
-	 * unknown, we transform them using sigmoid-like functions. For wait
-	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
-	 * is monotonically increasing since higher frequencies mean more
-	 * latency-critical.
+	 * For all under-utilized tasks, we treat them equally.
+	 * For over-utilized tasks, we give some mild penalty.
 	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq) + 1;
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq) + 1;
-	runtime_ft = calc_runtime_factor(taskc->avg_runtime) + 1;
-
-	/*
-	 * Wake frequency and wait frequency represent how much a task is used
-	 * for a producer and a consumer, respectively. If both are high, the
-	 * task is in the middle of a task chain. The ratio tends to follow an
-	 * exponentially skewed distribution, so we linearize it using log2. We
-	 * add +1 to guarantee the latency criticality (log2-ed) is always
-	 * positive.
-	 */
-	lat_cri = log2_u64(wait_freq_ft * wake_freq_ft) +
-		  log2_u64(runtime_ft * weight_ft);
-
-	/*
-	 * Determine latency criticality of a task in a context-aware manner by
-	 * considering which task wakes up this task. If its waker is more
-	 * latency-critcial, inherit waker's latency criticality.
-	 */
-	taskc->lat_cri = max(lat_cri, taskc->lat_cri_waker);
+	if (greedy_ratio > LAVD_SCALE)
+		ft += (greedy_ratio - LAVD_SCALE) >> LAVD_LC_GREEDY_SHIFT;
+	return ft;
 }
 
 static u64 calc_adjusted_runtime(struct task_ctx *taskc)
@@ -198,22 +208,26 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 * Calculate the deadline based on runtime,
 	 * latency criticality, and greedy ratio.
 	 */
-	calc_perf_cri(p, taskc);
 	calc_lat_cri(p, taskc);
 	greedy_ratio = calc_greedy_ratio(taskc);
 	greedy_ft = calc_greedy_factor(greedy_ratio);
 	adjusted_runtime = calc_adjusted_runtime(taskc);
 
 	deadline = (adjusted_runtime * greedy_ft) / taskc->lat_cri;
-
-	return deadline;
+	return deadline >> LAVD_SHIFT;
 }
 
-static u64 calc_time_slice(struct task_ctx *taskc)
+static u64 calc_when_to_run(struct task_struct *p, struct task_ctx *taskc)
 {
-	if (!taskc)
-		return LAVD_SLICE_MAX_NS_DFL;
+	u64 dl_delta, clc;
 
-	taskc->slice_ns = sys_stat.slice;
-	return taskc->slice_ns;
+	/*
+	 * Before enqueueing a task to a run queue, we should decide when a
+	 * task should be scheduled. We start from -LAVD_DL_COMPETE_WINDOW
+	 * so that the current task can compete against the already enqueued
+	 * tasks within [-LAVD_DL_COMPETE_WINDOW, 0].
+	 */
+	dl_delta = calc_virtual_deadline_delta(p, taskc);
+	clc = READ_ONCE(cur_logical_clk) - LAVD_DL_COMPETE_WINDOW;
+	return clc + dl_delta;
 }

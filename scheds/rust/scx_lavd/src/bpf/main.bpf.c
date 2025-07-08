@@ -194,7 +194,7 @@ char _license[] SEC("license") = "GPL";
 /*
  * Logical current clock
  */
-static u64		cur_logical_clk;
+static u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
 
 /*
  * Current service time
@@ -281,6 +281,15 @@ static void advance_cur_logical_clk(struct task_struct *p)
 		 */
 		clc = ret_clc;
 	}
+}
+
+static u64 calc_time_slice(struct task_ctx *taskc)
+{
+	if (!taskc)
+		return LAVD_SLICE_MAX_NS_DFL;
+
+	taskc->slice_ns = sys_stat.slice;
+	return taskc->slice_ns;
 }
 
 static void update_stat_for_running(struct task_struct *p,
@@ -425,18 +434,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
 	taskc->lock_holder_xted = false;
-}
-
-static u64 calc_when_to_run(struct task_struct *p, struct task_ctx *taskc)
-{
-	u64 deadline_delta;
-
-	/*
-	 * Before enqueueing a task to a run queue, we should decide when a
-	 * task should be scheduled.
-	 */
-	deadline_delta = calc_virtual_deadline_delta(p, taskc);
-	return READ_ONCE(cur_logical_clk) + deadline_delta;
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -792,18 +789,18 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Filter out unrelated tasks. We keep track of userspace tasks under
-	 * the same parent process to confine the waker-wakee relationship
-	 * within closely related tasks.
+	 * Filter out unrelated tasks. We keep track of tasks under the same
+	 * parent process to confine the waker-wakee relationship within
+	 * closely related tasks.
 	 */
 	if (enq_flags & (SCX_ENQ_PREEMPT | SCX_ENQ_REENQ | SCX_ENQ_LAST))
 		return;
 
-	if (is_kernel_task(p))
+	waker = bpf_get_current_task_btf();
+	if ((p->real_parent != waker->real_parent))
 		return;
 
-	waker = bpf_get_current_task_btf();
-	if ((p->real_parent != waker->real_parent) || is_kernel_task(waker))
+	if (is_kernel_task(p) != is_kernel_task(waker))
 		return;
 
 	waker_taskc = get_task_ctx(waker);
