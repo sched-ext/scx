@@ -1887,18 +1887,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
-dependencies = [
- "bitflags 2.6.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2063,25 +2051,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd23dbe2eb8d8335d2bce0299e0a07d6a63c089243d626ca75b770a962ff49e6"
 dependencies = [
  "libloading",
-]
-
-[[package]]
-name = "objc2-core-foundation"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c10c2894a6fed806ade6027bcd50662746363a9589d3ec9d9bef30a4e4bc166"
-dependencies = [
- "bitflags 2.6.0",
-]
-
-[[package]]
-name = "objc2-io-kit"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71c1c64d6120e51cd86033f67176b1cb66780c2efe34dec55176f77befd93c0a"
-dependencies = [
- "libc",
- "objc2-core-foundation",
 ]
 
 [[package]]
@@ -2752,7 +2721,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -2769,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "scx_chaos"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "anyhow",
  "clap",
@@ -2790,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flash"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -2807,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2835,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2849,7 +2818,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "nix 0.30.1",
+ "nix 0.29.0",
  "nvml-wrapper",
  "once_cell",
  "scx_stats",
@@ -2858,13 +2827,13 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
- "sysinfo 0.35.2",
+ "sysinfo",
  "walkdir",
 ]
 
 [[package]]
 name = "scx_lib_selftests"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2874,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "scx_loader"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -2883,7 +2852,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "serde",
- "sysinfo 0.33.1",
+ "sysinfo",
  "tokio",
  "tokio-util",
  "toml",
@@ -2893,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2915,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "scx_p2dq"
-version = "1.0.18"
+version = "1.0.19"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2939,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -2953,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -2974,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.3.2"
+version = "2.3.3"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2988,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3011,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -3028,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3039,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "scx_tickless"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "affinity",
  "anyhow",
@@ -3057,7 +3026,7 @@ dependencies = [
 
 [[package]]
 name = "scx_userspace_arena"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "anyhow",
  "buddy_system_allocator",
@@ -3067,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -3099,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "scxctl"
-version = "1.0.13"
+version = "1.0.14"
 dependencies = [
  "clap",
  "colored 3.0.0",
@@ -3109,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "scxtop"
-version = "1.0.15"
+version = "1.0.16"
 dependencies = [
  "anyhow",
  "clap",
@@ -3467,21 +3436,7 @@ dependencies = [
  "memchr",
  "ntapi",
  "rayon",
- "windows 0.57.0",
-]
-
-[[package]]
-name = "sysinfo"
-version = "0.35.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3ffa3e4ff2b324a57f7aeb3c349656c7b127c3c189520251a648102a92496e"
-dependencies = [
- "libc",
- "memchr",
- "ntapi",
- "objc2-core-foundation",
- "objc2-io-kit",
- "windows 0.61.3",
+ "windows",
 ]
 
 [[package]]
@@ -3867,7 +3822,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmlinux_docify"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "walkdir",
@@ -4032,28 +3987,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows"
-version = "0.61.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893"
-dependencies = [
- "windows-collections",
- "windows-core 0.61.2",
- "windows-future",
- "windows-link",
- "windows-numerics",
-]
-
-[[package]]
-name = "windows-collections"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3beeceb5e5cfd9eb1d76b381630e82c4241ccd0d27f1a39ed41b2760b255c5e8"
-dependencies = [
- "windows-core 0.61.2",
-]
-
-[[package]]
 name = "windows-core"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4068,34 +4001,10 @@ version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
 dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
- "windows-result 0.1.2",
+ "windows-implement",
+ "windows-interface",
+ "windows-result",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.61.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3"
-dependencies = [
- "windows-implement 0.60.0",
- "windows-interface 0.59.1",
- "windows-link",
- "windows-result 0.3.4",
- "windows-strings",
-]
-
-[[package]]
-name = "windows-future"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc6a41e98427b19fe4b73c550f060b59fa592d7d686537eebf9385621bfbad8e"
-dependencies = [
- "windows-core 0.61.2",
- "windows-link",
- "windows-threading",
 ]
 
 [[package]]
@@ -4103,17 +4012,6 @@ name = "windows-implement"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.95",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.60.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a47fddd13af08290e67f4acabf4b459f647552718f683a7b415d290ac744a836"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4132,57 +4030,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-interface"
-version = "0.59.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd9211b69f8dcdfa817bfd14bf1c97c9188afa36f4750130fcdf3f400eca9fa8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.95",
-]
-
-[[package]]
-name = "windows-link"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e6ad25900d524eaabdbbb96d20b4311e1e7ae1699af4fb28c17ae66c80d798a"
-
-[[package]]
-name = "windows-numerics"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9150af68066c4c5c07ddc0ce30421554771e528bde427614c61038bc2c92c2b1"
-dependencies = [
- "windows-core 0.61.2",
- "windows-link",
-]
-
-[[package]]
 name = "windows-result"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
 dependencies = [
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-result"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
-dependencies = [
- "windows-link",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56e6c93f3a0c3b36176cb1327a4958a0353d5d166c2a35cb268ace15e91d3b57"
-dependencies = [
- "windows-link",
 ]
 
 [[package]]
@@ -4241,15 +4094,6 @@ dependencies = [
  "windows_x86_64_gnu 0.52.6",
  "windows_x86_64_gnullvm 0.52.6",
  "windows_x86_64_msvc 0.52.6",
-]
-
-[[package]]
-name = "windows-threading"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b66463ad2e0ea3bbf808b7f1d371311c80e115c0b71d60efc142cafbcfb057a6"
-dependencies = [
- "windows-link",
 ]
 
 [[package]]
