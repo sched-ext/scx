@@ -77,10 +77,4 @@ enum scheduler_mode {
 	MODE_PERFORMANCE,
 };
 
-enum enqueue_promise_kind {
-	P2DQ_ENQUEUE_PROMISE_COMPLETE,
-	P2DQ_ENQUEUE_PROMISE_VTIME,
-	P2DQ_ENQUEUE_PROMISE_FIFO,
-};
-
 #endif /* __P2DQ_INTF_H */

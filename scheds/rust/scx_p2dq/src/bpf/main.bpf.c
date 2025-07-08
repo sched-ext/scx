@@ -723,10 +723,13 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p,
  * is primarily used so that scx_chaos can decide to enqueue a task either
  * immediately in `enqueue` or later in `dispatch`. This returns a tagged union
  * with three states:
- * - P2DQ_ENQUEUE_PROMISE_COMPLETE: Either the task has been enqueued, or there
- *     is nothing to do (enqueue failed).
+ * - P2DQ_ENQUEUE_PROMISE_COMPLETE: The enqueue has been completed. Note that
+ *     this case _must_ be determinstic, or else scx_chaos will stall. That is,
+ *     if the same task and enq_flags arrive twice, it must have returned
+ *     _COMPLETE the first time to return it again.
  * - P2DQ_ENQUEUE_PROMISE_FIFO: The completer should enqueue this task on a fifo dsq.
  * - P2DQ_ENQUEUE_PROMISE_VTIME: The completer should enqueue this task on a vtime dsq.
+ * - P2DQ_ENQUEUE_PROMISE_FAILED: The enqueue failed.
  */
 static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 					       struct task_struct *p,
@@ -736,6 +739,10 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	struct llc_ctx *llcx;
 	task_ctx *taskc;
 	s32 cpu = scx_bpf_task_cpu(p);
+
+	// Default to 0 and set to failed.
+	__builtin_memset(ret, 0, sizeof(*ret));
+	ret->kind = P2DQ_ENQUEUE_PROMISE_FAILED;
 
 	/*
 	 * Per-cpu kthreads are considered interactive and dispatched directly
@@ -759,26 +766,23 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 	if(!(taskc = lookup_task_ctx(p))) {
 		scx_bpf_error("invalid lookup");
-		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
 
 	// Handle affinitized tasks separately
 	if (!taskc->all_cpus ||
 	    (p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed != nr_cpus)) {
-		bool is_idle = false;
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			cpu = pick_idle_affinitized_cpu(p,
 							taskc,
 							cpu,
-							&is_idle);
+							&ret->has_cleared_idle);
 		else
-			is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+			ret->has_cleared_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 
 		if (!(cpuc = lookup_cpu_ctx(cpu)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 			scx_bpf_error("invalid lookup");
-			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
 
@@ -791,45 +795,44 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			enq_flags |= SCX_ENQ_PREEMPT;
 
 		// Idle affinitized tasks can be direct dispatched.
-		if (is_idle || cpuc->nice_task) {
-			scx_bpf_dsq_insert(p,
-					   SCX_DSQ_LOCAL_ON|cpu,
-					   taskc->slice_ns, enq_flags);
-			if (is_idle) {
-				stat_inc(P2DQ_STAT_IDLE);
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			}
-			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		if (ret->has_cleared_idle || cpuc->nice_task) {
+			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+			ret->fifo.slice_ns = taskc->slice_ns;
+			ret->fifo.enq_flags = enq_flags;
+
+			ret->kick_idle = ret->has_cleared_idle;
 			return;
 		}
 
-		if (interactive_fifo && taskc->interactive)
-			scx_bpf_dsq_insert(p,
-					   taskc->dsq_id,
-					   taskc->slice_ns, enq_flags);
-		else
-			scx_bpf_dsq_insert_vtime(p,
-						 taskc->dsq_id, taskc->slice_ns,
-						 p->scx.dsq_vtime, enq_flags);
+		if (interactive_fifo && taskc->interactive) {
+			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+			ret->fifo.dsq_id = taskc->dsq_id;
+			ret->fifo.slice_ns = taskc->slice_ns;
+			ret->fifo.enq_flags = enq_flags;
+		} else {
+			ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
+			ret->vtime.dsq_id = taskc->dsq_id;
+			ret->vtime.slice_ns = taskc->slice_ns;
+			ret->vtime.enq_flags = enq_flags;
+			ret->vtime.vtime = p->scx.dsq_vtime;
+		}
 
 		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
 		      p->comm, p->scx.weight, taskc->slice_ns,
 		      p->scx.dsq_vtime, llcx->vtime);
 
-		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
 
 	// If an idle CPU hasn't been found in select_cpu find one now
 	if (select_idle_in_enqueue && !__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		bool is_idle = false;
 		cpu = pick_idle_cpu(p, taskc,
 				    cpu, 0,
-				    &is_idle);
+				    &ret->has_cleared_idle);
 		if (!(cpuc = lookup_cpu_ctx(cpu)) ||
 		     !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 			scx_bpf_error("invalid lookup");
-			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
 
@@ -840,15 +843,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (cpuc->nice_task)
 			enq_flags |= SCX_ENQ_PREEMPT;
 
-		if (is_idle || cpuc->nice_task) {
-			scx_bpf_dsq_insert(p,
-					   SCX_DSQ_LOCAL_ON|cpu,
-					   taskc->slice_ns, enq_flags);
-			if (is_idle) {
-				stat_inc(P2DQ_STAT_IDLE);
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			}
-			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		if (ret->has_cleared_idle || cpuc->nice_task) {
+			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+			ret->fifo.slice_ns = taskc->slice_ns;
+			ret->fifo.enq_flags = enq_flags;
+
+			ret->kick_idle = ret->has_cleared_idle;
 			return;
 		}
 
@@ -864,28 +865,29 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			stat_inc(P2DQ_STAT_ENQ_LLC);
 		}
 
-		if (interactive_fifo && taskc->interactive)
-			scx_bpf_dsq_insert(p,
-					   taskc->dsq_id,
-					   taskc->slice_ns, enq_flags);
-		else
-			scx_bpf_dsq_insert_vtime(p,
-						 taskc->dsq_id,
-						 taskc->slice_ns,
-						 p->scx.dsq_vtime, enq_flags);
+		if (interactive_fifo && taskc->interactive) {
+			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+			ret->fifo.dsq_id = taskc->dsq_id;
+			ret->fifo.slice_ns = taskc->slice_ns;
+			ret->fifo.enq_flags = enq_flags;
+		} else {
+			ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
+			ret->vtime.dsq_id = taskc->dsq_id;
+			ret->vtime.slice_ns = taskc->slice_ns;
+			ret->vtime.enq_flags = enq_flags;
+			ret->vtime.vtime = p->scx.dsq_vtime;
+		}
 
 		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
 		      p->comm, p->scx.weight, taskc->slice_ns,
 		      p->scx.dsq_vtime, llcx->vtime);
 
-		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
 
 	if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
 	    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		scx_bpf_error("invalid lookup");
-		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
 
@@ -896,15 +898,14 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if (deadline_scheduling)
 		set_deadline_slice(p, taskc, llcx);
 
-	if (scx_bpf_test_and_clear_cpu_idle(cpu) || cpuc->nice_task) {
-		scx_bpf_dsq_insert(p,
-				   SCX_DSQ_LOCAL_ON|cpu,
-				   taskc->slice_ns, enq_flags);
-		if (!cpuc->nice_task) {
-			stat_inc(P2DQ_STAT_IDLE);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		}
-		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+	ret->has_cleared_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+	if (ret->has_cleared_idle || cpuc->nice_task) {
+		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+		ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+		ret->fifo.slice_ns = taskc->slice_ns;
+		ret->fifo.enq_flags = enq_flags;
+
+		ret->kick_idle = ret->has_cleared_idle;
 		return;
 	}
 
@@ -929,13 +930,15 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		ret->fifo.dsq_id = taskc->dsq_id;
 		ret->fifo.enq_flags = enq_flags;
 		ret->fifo.slice_ns = taskc->slice_ns;
-	} else {
-		ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
-		ret->vtime.dsq_id = taskc->dsq_id;
-		ret->vtime.enq_flags = enq_flags;
-		ret->vtime.slice_ns = taskc->slice_ns;
-		ret->vtime.vtime = p->scx.dsq_vtime;
+
+		return;
 	}
+
+	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
+	ret->vtime.dsq_id = taskc->dsq_id;
+	ret->vtime.enq_flags = enq_flags;
+	ret->vtime.slice_ns = taskc->slice_ns;
+	ret->vtime.vtime = p->scx.dsq_vtime;
 }
 
 static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
@@ -943,17 +946,26 @@ static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
 {
 	switch (pro->kind) {
 	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
-		goto out;
+		break;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
 		scx_bpf_dsq_insert(p, pro->fifo.dsq_id, pro->fifo.slice_ns,
 				   pro->fifo.enq_flags);
-		goto out;
+		break;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
 		scx_bpf_dsq_insert_vtime(p, pro->vtime.dsq_id, pro->vtime.slice_ns,
 				         pro->vtime.vtime, pro->vtime.enq_flags);
-		goto out;
+		break;
+	case P2DQ_ENQUEUE_PROMISE_FAILED:
+		// should have already errored with a more specific error, but just for luck.
+		scx_bpf_error("p2dq enqueue failed");
+		break;
 	}
-out:
+
+	if (pro->kick_idle) {
+		stat_inc(P2DQ_STAT_IDLE);
+		scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
+	}
+
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 }
 
