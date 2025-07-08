@@ -147,8 +147,7 @@ fn annotate_vmlinux(
     }
 
     println!(
-        "Added {} function comments and {} struct/enum comments to vmlinux.h",
-        matches_found, struct_matches_found
+        "Added {matches_found} function comments and {struct_matches_found} struct/enum comments to vmlinux.h"
     );
     Ok(output)
 }
@@ -254,13 +253,13 @@ fn main() {
         Ok(annotated_content) => {
             // Write the annotated output
             if let Err(e) = fs::write(&args.output, annotated_content) {
-                eprintln!("Error writing annotated file: {}", e);
+                eprintln!("Error writing annotated file: {e}");
                 process::exit(1);
             }
             println!("Successfully wrote annotated vmlinux.h to {}", args.output);
         }
         Err(e) => {
-            eprintln!("Error processing vmlinux.h: {}", e);
+            eprintln!("Error processing vmlinux.h: {e}");
             process::exit(1);
         }
     }
