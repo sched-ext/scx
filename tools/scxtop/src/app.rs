@@ -63,6 +63,7 @@ use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
+use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -85,6 +86,7 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     proc_reader: ProcReader,
+    sys: Arc<StdMutex<System>>,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -246,6 +248,7 @@ impl<'a> App<'a> {
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             proc_reader: ProcReader::new(),
+            sys: Arc::new(StdMutex::new(System::new_all())),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -536,7 +539,7 @@ impl<'a> App<'a> {
             self.cpu_stat_tracker
                 .write()
                 .unwrap()
-                .update(&self.proc_reader)?;
+                .update(&self.proc_reader, self.sys.clone())?;
         }
 
         if self.state == AppState::Scheduler {
