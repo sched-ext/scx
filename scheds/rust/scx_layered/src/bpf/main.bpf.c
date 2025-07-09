@@ -58,6 +58,7 @@ volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
+const volatile bool enable_tickless = true;
 const volatile bool enable_match_debug = false;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
@@ -182,6 +183,32 @@ static u64 lo_fb_dsq_id(u32 llc_id)
 static __always_inline bool is_scheduler_task(struct task_struct *p)
 {
 	return (u32)p->tgid == layered_root_tgid;
+}
+
+static void preempt_tickless(struct cpu_ctx *cpuc)
+{
+	struct task_struct *curr;
+	struct layer *layer;
+
+	if (!enable_tickless)
+		return;
+
+	bpf_rcu_read_lock();
+	curr = scx_bpf_cpu_rq(cpuc->cpu)->curr;
+	if (curr->scx.slice == SCX_SLICE_INF) {
+		// If tickless task is running on a unowned layer then preempt it.
+		if (cpuc->layer_id >= nr_layers) {
+			curr->scx.slice = 1;
+			bpf_rcu_read_unlock();
+			return;
+		}
+		if (!(layer = lookup_layer(cpuc->layer_id))) {
+			bpf_rcu_read_unlock();
+			return;
+		}
+		curr->scx.slice = layer->slice_ns;
+	}
+	bpf_rcu_read_unlock();
 }
 
 struct {
@@ -1204,7 +1231,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
-		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
+		u64 slice_ns = layer->tickless ? SCX_SLICE_INF : layer->slice_ns;
+		scx_bpf_dsq_insert(p, taskc->dsq_id, slice_ns, 0);
 		return cpu;
 	}
 
@@ -1386,6 +1414,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
+
+	preempt_tickless(cpuc);
 
 	layer_id = taskc->layer_id;
 	if (!(layer = lookup_layer(layer_id)))
@@ -1602,10 +1632,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	lstats[LLC_LSTAT_CNT]++;
 
 	taskc->dsq_id = layer_dsq_id(layer_id, llc_id);
+	u64 slice_ns = layer->tickless ? SCX_SLICE_INF : layer->slice_ns;
 	if (layer->fifo)
-		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, slice_ns, enq_flags);
 	else
-		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, slice_ns, vtime, enq_flags);
 	lstat_inc(LSTAT_ENQ_DSQ, layer, cpuc);
 
 	/*
