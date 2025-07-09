@@ -1260,6 +1260,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fb_procfs"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8748972699ec5b99570e031841f449612e266d2106de7482ad76de003cfddba"
+dependencies = [
+ "below-common",
+ "lazy_static",
+ "libc",
+ "nix 0.29.0",
+ "openat",
+ "parking_lot",
+ "serde",
+ "slog",
+ "thiserror 2.0.10",
+ "threadpool",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2785,7 +2803,7 @@ dependencies = [
  "combinations",
  "crossbeam",
  "ctrlc",
- "fb_procfs",
+ "fb_procfs 0.7.1",
  "gpoint",
  "hex",
  "itertools 0.13.0",
@@ -2813,7 +2831,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fastrand",
- "fb_procfs",
+ "fb_procfs 0.7.1",
  "lazy_static",
  "libbpf-rs",
  "libc",
@@ -2869,7 +2887,7 @@ dependencies = [
  "cgroupfs",
  "clap",
  "ctrlc",
- "fb_procfs",
+ "fb_procfs 0.7.1",
  "itertools 0.13.0",
  "lazy_static",
  "libbpf-rs",
@@ -2891,7 +2909,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "fb_procfs",
+ "fb_procfs 0.7.1",
  "lazy_static",
  "libbpf-rs",
  "libc",
@@ -2964,7 +2982,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "fb_procfs",
+ "fb_procfs 0.7.1",
  "libbpf-rs",
  "libc",
  "log",
@@ -3086,6 +3104,7 @@ dependencies = [
  "config",
  "criterion",
  "crossterm 0.28.1",
+ "fb_procfs 0.9.0",
  "futures",
  "glob",
  "hashbrown 0.15.2",
