@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
+use fb_procfs::ProcReader;
 use rand::rngs::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -237,7 +238,7 @@ impl PerfettoTraceManager {
         });
     }
 
-    fn generate_key(&mut self, v1: u32, v2: u32) -> u64 {
+    fn generate_key(&self, v1: u32, v2: u32) -> u64 {
         let v1_u32 = v1 as u64;
         let v2_u32 = v2 as u64;
         (v1_u32 << 32) | v2_u32
@@ -246,39 +247,47 @@ impl PerfettoTraceManager {
     fn record_process_thread(&mut self, pid: u32, tid: u32, comm: String) {
         let key = self.generate_key(pid, tid);
 
-        if pid == tid {
-            let process = self
-                .processes
-                .entry(key)
-                .or_insert_with(|| ProcessDescriptor {
-                    pid: Some(pid as i32),
-                    ..ProcessDescriptor::default()
-                });
-            process.process_name.get_or_insert(comm);
-        } else {
+        if pid != tid {
             self.threads.entry(key).or_insert_with(|| ThreadDescriptor {
                 tid: Some(tid as i32),
                 pid: Some(pid as i32),
-                thread_name: Some(comm),
+                thread_name: Some(comm.clone()),
                 ..ThreadDescriptor::default()
             });
-            // Create a ProcessDescriptor with an empty comm if one doesn't
-            // exist - if we ever see the main thread we populate the process
-            // name field there (see above).
-            let pkey = self.generate_key(pid, pid);
-            self.processes
-                .entry(pkey)
-                .or_insert_with(|| ProcessDescriptor {
+        }
+
+        if !self.processes.contains_key(&key) {
+            let comm = self.get_comm(pid, tid, &comm);
+            let cmdline = self.get_cmdline(pid);
+            self.processes.insert(
+                key,
+                ProcessDescriptor {
                     pid: Some(pid as i32),
+                    cmdline: cmdline,
+                    process_name: comm,
                     ..ProcessDescriptor::default()
-                });
+                },
+            );
         }
     }
 
-    fn get_comm(pid: i32) -> Result<String> {
-        let path = format!("/proc/{}/comm", pid);
-        let content = fs::read_to_string(path)?;
-        Ok(content.trim_end().to_string())
+    fn get_comm(&self, pid: u32, tid: u32, comm: &String) -> Option<String> {
+        if pid == tid {
+            Some(comm.clone())
+        } else {
+            self.proc_reader
+                .read_pid_stat(pid)
+                .ok()
+                .and_then(|pid_stat| pid_stat.comm)
+        }
+    }
+
+    fn get_cmdline(&self, pid: u32) -> Vec<String> {
+        if let Ok(Some(cmdline)) = self.proc_reader.read_pid_cmdline(pid) {
+            cmdline
+        } else {
+            vec![]
+        }
     }
 
     /// Stops the trace and writes to configured output file.
@@ -320,13 +329,9 @@ impl PerfettoTraceManager {
                 .for_each(|(_, v)| v.retain(|e| e.timestamp.unwrap_or(0) < ns));
         };
 
-        for (_, mut process) in self.processes.drain() {
+        for (_, process) in self.processes.drain() {
             let uuid = self.rng.next_u64();
             self.process_uuids.insert(process.pid(), uuid);
-
-            if process.process_name().is_empty() {
-                process.process_name = Self::get_comm(process.pid()).ok();
-            }
 
             let desc = TrackDescriptor {
                 uuid: Some(uuid),
