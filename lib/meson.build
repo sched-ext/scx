@@ -1,5 +1,3 @@
-subdir('scxtest')
-
 libs = ['sdt_alloc', 'sdt_task']
 
 objs = []
@@ -23,17 +21,3 @@ scx_lib = custom_target(scx_lib_name,
   depends: objs,
 )
 
-test_sources = ['arena.bpf.c', 'bitmap.bpf.c', 'cpumask.bpf.c', 'sdt_alloc.bpf.c', 'sdt_task.bpf.c', 'topology.bpf.c']
-
-scx_lib_test_obj = static_library('scxlib_test',
-  test_sources,
-  include_directories: include_directories(['.', 'scxtest']),
-  c_args: scx_test_c_args,
-  dependencies: [kernel_dep, libbpf_dep, user_c_dep, scxtest_dep],
-)
-
-scx_lib_test_dep = declare_dependency(
-  link_with: scx_lib_test_obj,
-  include_directories: include_directories(['.']),
-
-)

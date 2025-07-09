@@ -13,7 +13,7 @@
  * that we want to get rid of that belongs here.
  */
 #define __builtin_preserve_field_info(x,y) 1
-#define __builtin_preserve_enum_value(x,y,z) 1
+#define __builtin_preserve_enum_value(x,y) 1
 
 #define bpf_addr_space_cast(var, dst_as, src_as)
 

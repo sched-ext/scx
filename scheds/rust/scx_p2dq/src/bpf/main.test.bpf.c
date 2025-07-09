@@ -6,9 +6,10 @@
 
 #include "main.bpf.c"
 
-static struct scx_percpu_test_map *cpu_ctxs_map = NULL;
-static struct scx_test_map llc_ctxs_map = { 0 };
-static struct scx_test_map task_masks_map = { 0 };
+// per thread globals because the Rust test driver has multiple threads
+static __thread struct scx_percpu_test_map *cpu_ctxs_map = NULL;
+static __thread struct scx_test_map llc_ctxs_map = { 0 };
+static __thread struct scx_test_map task_masks_map = { 0 };
 
 static void setup_task_wrapper(struct task_struct *p, struct cpumask *cpumask)
 {
@@ -32,7 +33,27 @@ static void setup_llc(u64 dsqid, u32 id, u32 nr_cpus, struct cpumask *mask)
 						 BPF_ANY) == 0);
 }
 
-static void test_pick_idle_cpu(void)
+/*
+ * Runs at the start of each test and operates on per-thread globals. No need
+ * for locking but check if already initialised.
+ */
+static void init_p2dq_test(void)
+{
+	if (cpu_ctxs_map)
+		return;
+
+	cpu_ctxs_map = scx_alloc_percpu_test_map(NR_CPUS);
+	INIT_SCX_PERCPU_TEST_MAP(cpu_ctxs_map, cpu_ctxs);
+
+	INIT_SCX_TEST_MAP(&llc_ctxs_map, llc_ctxs);
+	INIT_SCX_TEST_MAP_FROM_TASK_STORAGE(&task_masks_map, task_masks);
+
+	scx_test_map_register(&llc_ctxs_map, &llc_ctxs);
+	scx_test_map_register(&task_masks_map, &task_masks);
+	scx_register_percpu_test_map(cpu_ctxs_map, &cpu_ctxs);
+}
+
+SCX_TEST(test_pick_idle_cpu)
 {
 	struct task_struct p = { 0 };
 	task_ctx my_taskc = { 0 };
@@ -40,6 +61,8 @@ static void test_pick_idle_cpu(void)
 	u64 index = 0;
 	s32 idle_cpu;
 	bool is_idle = false;
+
+	init_p2dq_test();
 
 	my_taskc.llc_id = 1;
 	my_taskc.dsq_id = 1;
@@ -65,11 +88,13 @@ static void test_pick_idle_cpu(void)
 	scx_test_assert(is_idle);
 }
 
-static void test_lookup_cpu_ctx(void)
+SCX_TEST(test_lookup_cpu_ctx)
 {
 	struct cpu_ctx *my_cpuc = NULL;
 	struct cpu_ctx cpuc = { 0 };
 	u32 index = 0;
+
+	init_p2dq_test();
 
 	for (int i = 0; i < NR_CPUS; i++) {
 		cpuc.id = i;
@@ -97,29 +122,15 @@ static void test_lookup_cpu_ctx(void)
 	scx_test_assert(!memcmp(my_cpuc, &cpuc, sizeof(struct cpu_ctx)));
 }
 
-static void test_is_interactive(void)
+SCX_TEST(test_is_interactive)
 {
 	task_ctx my_taskc = {
 		.dsq_index = 0,
 	};
 
+	init_p2dq_test();
+
 	scx_test_assert(is_interactive(&my_taskc));
 	my_taskc.dsq_index = 1;
 	scx_test_assert(!is_interactive(&my_taskc));
-}
-
-int main(int argc, char **argv)
-{
-	cpu_ctxs_map = scx_alloc_percpu_test_map(NR_CPUS);
-	INIT_SCX_PERCPU_TEST_MAP(cpu_ctxs_map, cpu_ctxs);
-
-	INIT_SCX_TEST_MAP(&llc_ctxs_map, llc_ctxs);
-	INIT_SCX_TEST_MAP_FROM_TASK_STORAGE(&task_masks_map, task_masks);
-
-	scx_test_map_register(&llc_ctxs_map, &llc_ctxs);
-	scx_test_map_register(&task_masks_map, &task_masks);
-	scx_register_percpu_test_map(cpu_ctxs_map, &cpu_ctxs);
-	test_is_interactive();
-	test_lookup_cpu_ctx();
-	test_pick_idle_cpu();
 }

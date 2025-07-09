@@ -26,14 +26,14 @@ struct scx_percpu_map_entry {
 	struct scx_percpu_test_map *map;
 };
 
-static struct scx_map_entry *scx_map_entries = NULL;
-static int scx_map_entries_count = 0;
+static __thread struct scx_map_entry *scx_map_entries = NULL;
+static __thread int scx_map_entries_count = 0;
 
-static struct scx_percpu_map_entry *scx_percpu_map_entries = NULL;
-static int scx_percpu_map_entries_count = 0;
+static __thread struct scx_percpu_map_entry *scx_percpu_map_entries = NULL;
+static __thread int scx_percpu_map_entries_count = 0;
 
-static struct scx_map_type *scx_map_types = NULL;
-static int scx_map_types_count = 0;
+static __thread struct scx_map_type *scx_map_types = NULL;
+static __thread int scx_map_types_count = 0;
 
 static void scx_regsiter_map_type(void *map_ptr, int map_type)
 {
@@ -136,7 +136,10 @@ static int map_update_elem(struct scx_test_map *test_map, const void *key,
 		return -1;
 	}
 
-	if (test_map->nr >= test_map->max_entries) {
+	if (test_map->nr < 0) {
+		return -1;
+	}
+	if ((unsigned int)test_map->nr >= test_map->max_entries) {
 		return -1;
 	}
 

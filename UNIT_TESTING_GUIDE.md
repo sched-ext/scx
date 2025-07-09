@@ -8,18 +8,9 @@ the same patterns as their respective language's unit testing framework.
 
 ## How do I run the existing tests
 
-Currently we create separate binaries for the BPF tests, and this is handled by
-`meson`. In the future the various Rust based schedulers will also automatically
-do the correct thing when running `cargo test`.  For now simply run
-
-```bash
-# If you haven't compiled yet you run the following
-meson setup build
-meson compile -C build
-
-# To run the tests, you can use the following command
-meson test -v -C
-```
+Run `cargo test` and that will include unittests from the BPF side. This applies
+regardless of whether the test is for a C scheduler or a Rust scheduler as the
+driver code for the tests is written in Rust.
 
 ## The basic design
 
@@ -35,33 +26,20 @@ For example, if your main BPF file is `main.bpf.c`, you create a new file called
 
 #include "main.bpf.c"
 
-void test_my_function(void)
+SCX_TEST(test_my_function)
 {
     scx_test_assert(my_function(5) == 5);
-}
-
-int main(int argc, char **argv)
-{
-    test_my_function();
-    return 0;
 }
 ```
 
 A canonical example exists in `scheds/rust/scx_p2dq/src/bpf/main.test.bpf.c`.
 
-You must also include the following in your `meson.build` file to ensure that it
-is built properly and run when `meson test` is run
+You need to include the file in `rust/scx_bpf_unittests/build.rs` to ensure that
+it builds the tests and runs them with `cargo test`. Add your file alongside
+p2dq's main.test.bpf.c in the same style.
 
-```meson
-e = test_executable('scx_example_test',
-  ['path/to/main.test.bpf.c'],
-  dependencies: [scx_test_dep],
-  c_args: scx_test_c_args,
-  install: false,
-  build_by_default: false,
-)
-test('scx_example_test', e)
-```
+Eventually this is likely to be split between crates, but for now all schedulers
+run their unittests in the one crate.
 
 ## Stubbing out BPF and kernel functions
 
