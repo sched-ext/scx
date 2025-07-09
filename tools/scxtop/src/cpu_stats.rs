@@ -50,6 +50,8 @@ impl CpuStatTracker {
                 let snapshot = procfs_cpu_to_stat_snapshot(stat);
                 self.current.insert(cpu as usize, snapshot);
             }
+        } else {
+            bail!("Failed to parse cpu stats from /proc/stat");
         }
 
         Ok(())
