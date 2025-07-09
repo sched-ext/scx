@@ -1,8 +1,6 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
+use fb_procfs::ProcReader;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
 
 #[derive(Debug, Clone)]
 pub struct CpuStatSnapshot {
@@ -42,16 +40,15 @@ pub struct CpuStatTracker {
 }
 
 impl CpuStatTracker {
-    pub fn update(&mut self) -> Result<()> {
-        let lines = read_proc_stat_cpu_lines()?;
-
+    pub fn update(&mut self, proc_reader: &ProcReader) -> Result<()> {
         self.prev = std::mem::take(&mut self.current);
 
-        for line in lines {
-            if let Some((cpu, snapshot)) = parse_cpu_stat_line(&line) {
-                self.current.insert(cpu, snapshot);
-            } else {
-                bail!("Failed to parse line from /proc/stat: {:?}", line);
+        let proc_stat_data = proc_reader.read_stat()?;
+
+        if let Some(cpu_map) = proc_stat_data.cpus_map {
+            for (cpu, stat) in cpu_map {
+                let snapshot = procfs_cpu_to_stat_snapshot(stat);
+                self.current.insert(cpu as usize, snapshot);
             }
         }
 
@@ -59,47 +56,19 @@ impl CpuStatTracker {
     }
 }
 
-fn read_proc_stat_cpu_lines() -> Result<Vec<String>> {
-    let file = File::open("/proc/stat").expect("Failed to open /proc/stat");
-    let reader = BufReader::new(file);
-
-    let lines = reader
-        .lines()
-        .map_while(Result::ok)
-        .skip(1)
-        .filter(|l| l.starts_with("cpu"))
-        .map(|l| l.trim().to_string())
-        .collect();
-
-    Ok(lines)
-}
-
-fn parse_cpu_stat_line(line: &str) -> Option<(usize, CpuStatSnapshot)> {
-    let parts: Vec<u64> = line
-        .strip_prefix("cpu")?
-        .split_whitespace()
-        .filter_map(|s| s.parse::<u64>().ok())
-        .collect();
-
-    if parts.len() < 11 {
-        return None;
+fn procfs_cpu_to_stat_snapshot(stat: fb_procfs::CpuStat) -> CpuStatSnapshot {
+    CpuStatSnapshot {
+        user: stat.user_usec.expect("missing user"),
+        nice: stat.nice_usec.expect("missing nice"),
+        system: stat.system_usec.expect("missing system"),
+        idle: stat.idle_usec.expect("missing idle"),
+        iowait: stat.iowait_usec.expect("missing iowait"),
+        irq: stat.irq_usec.expect("missing irq"),
+        softirq: stat.softirq_usec.expect("missing softirq"),
+        steal: stat.stolen_usec.expect("missing steal"),
+        guest: stat.guest_usec.expect("missing guest"),
+        guest_nice: stat.guest_nice_usec.expect("missing guest_nice"),
     }
-
-    Some((
-        parts[0] as usize,
-        CpuStatSnapshot {
-            user: parts[1],
-            nice: parts[2],
-            system: parts[3],
-            idle: parts[4],
-            iowait: parts[5],
-            irq: parts[6],
-            softirq: parts[7],
-            steal: parts[8],
-            guest: parts[9],
-            guest_nice: parts[10],
-        },
-    ))
 }
 
 #[cfg(test)]
@@ -107,13 +76,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_cpu_stat_line_valid() {
-        let line = "cpu0 100 200 300 400 500 600 700 800 900 1000 1100";
-        let result = parse_cpu_stat_line(&line);
-        assert!(result.is_some());
+    fn test_convert_to_stat_snapshot_success() {
+        let input = fb_procfs::CpuStat {
+            user_usec: Some(100),
+            nice_usec: Some(200),
+            system_usec: Some(300),
+            idle_usec: Some(400),
+            iowait_usec: Some(500),
+            irq_usec: Some(600),
+            softirq_usec: Some(700),
+            stolen_usec: Some(800),
+            guest_usec: Some(900),
+            guest_nice_usec: Some(1000),
+        };
 
-        let (cpu, snapshot) = result.unwrap();
-        assert_eq!(cpu, 0);
+        let snapshot = procfs_cpu_to_stat_snapshot(input);
+
         assert_eq!(snapshot.user, 100);
         assert_eq!(snapshot.nice, 200);
         assert_eq!(snapshot.system, 300);
@@ -127,14 +105,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cpu_stat_line_invalid() {
-        let line = "cpu0 100 200";
-        let result = parse_cpu_stat_line(line);
-        assert!(result.is_none());
+    #[should_panic(expected = "missing user")]
+    fn test_convert_to_stat_snapshot_missing_user_panics() {
+        let input = fb_procfs::CpuStat {
+            user_usec: None, // <- this will trigger the panic
+            nice_usec: Some(200),
+            system_usec: Some(300),
+            idle_usec: Some(400),
+            iowait_usec: Some(500),
+            irq_usec: Some(600),
+            softirq_usec: Some(700),
+            stolen_usec: Some(800),
+            guest_usec: Some(900),
+            guest_nice_usec: Some(1000),
+        };
 
-        let line = "0 100 200 300 400 500 600 700 800 900 1000 1100";
-        let result = parse_cpu_stat_line(line);
-        assert!(result.is_none());
+        let _ = procfs_cpu_to_stat_snapshot(input);
     }
 
     #[test]
@@ -158,13 +144,26 @@ mod tests {
 
     #[test]
     fn test_read_proc_stat_cpu_lines_real_system() -> Result<()> {
-        let lines = read_proc_stat_cpu_lines()?;
+        let proc_reader = ProcReader::default();
+        let proc_fs_data = proc_reader.read_stat();
 
-        assert!(!lines.is_empty());
+        assert!(proc_fs_data.is_ok());
 
-        for line in &lines {
-            let parsed = parse_cpu_stat_line(line);
-            assert!(parsed.is_some(), "Failed to parse line: {:?}", line);
+        if let Ok(proc_fs_data) = proc_fs_data {
+            if let Some(cpu_map) = proc_fs_data.cpus_map {
+                for (_, stat) in cpu_map {
+                    assert!(stat.user_usec.is_some());
+                    assert!(stat.nice_usec.is_some());
+                    assert!(stat.system_usec.is_some());
+                    assert!(stat.idle_usec.is_some());
+                    assert!(stat.iowait_usec.is_some());
+                    assert!(stat.irq_usec.is_some());
+                    assert!(stat.softirq_usec.is_some());
+                    assert!(stat.stolen_usec.is_some());
+                    assert!(stat.guest_usec.is_some());
+                    assert!(stat.guest_nice_usec.is_some());
+                }
+            }
         }
 
         Ok(())
@@ -173,11 +172,12 @@ mod tests {
     #[test]
     fn test_integration_test() -> Result<()> {
         let mut tracker = CpuStatTracker::default();
-        tracker.update()?;
+        let proc_reader = ProcReader::default();
+        tracker.update(&proc_reader)?;
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        tracker.update()?;
+        tracker.update(&proc_reader)?;
 
         assert!(!tracker.prev.is_empty());
         assert!(!tracker.current.is_empty());
