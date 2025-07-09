@@ -5,7 +5,12 @@
 #include <scx/common.bpf.h>
 #include "scx_cosmos.h"
 
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+
 #define CLOCK_MONOTONIC		1
+
+#define SHARED_DSQ		0
 
 /*
  * Subset of CPUs to prioritize.
@@ -23,11 +28,48 @@ const volatile bool primary_all = true;
  */
 const volatile u64 slice_ns = 10000ULL;
 
+/*
+ * User CPU utilization threshold to determine when the system is busy.
+ */
+const volatile u64 busy_threshold;
+
+/*
+ * Current global CPU utilization percentage in the range [0 .. 1024].
+ */
+volatile u64 cpu_util;
+
 char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
 static u64 nr_cpu_ids;
+
+static u64 vtime_now;
+
+/*
+ * Per-task context.
+ */
+struct task_ctx {
+	u64 last_run_at;
+	u64 exec_runtime;
+	u64 vtime;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_ctx);
+} task_ctx_stor SEC(".maps");
+
+/*
+ * Return a local task context from a generic task.
+ */
+struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
+{
+	return bpf_task_storage_get(&task_ctx_stor,
+					(struct task_struct *)p, 0, 0);
+}
 
 /*
  * Timer used to defer idle CPU wakeups.
@@ -47,12 +89,30 @@ struct {
 } wakeup_timer SEC(".maps");
 
 /*
- * Pick an optimal idle CPU for task @p (as close as possible to @prev_cpu).
+ * Pick an optimal idle CPU for task @p (as close as possible to
+ * @prev_cpu).
+ *
+ * Return the CPU id or a negative value if an idle CPU can't be found.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool from_enqueue)
 {
 	const struct cpumask *mask = cast_mask(primary_cpumask);
 	s32 cpu;
+
+	/*
+	 * Fallback to the old API if the kernel doesn't support
+	 * scx_bpf_select_cpu_and().
+	 */
+	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+		bool is_idle = false;
+
+		if (from_enqueue)
+			return -EBUSY;
+
+		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+
+		return is_idle ? cpu : -EBUSY;
+	}
 
 	/*
 	 * If a primary domain is defined, try to pick an idle CPU from
@@ -125,6 +185,9 @@ int enable_primary_cpu(struct cpu_arg *input)
 
 /*
  * Kick idle CPUs with pending tasks.
+ *
+ * Instead of waking up CPU when tasks are enqueued, we defer the wakeup
+ * using this timer handler, in order to have a faster enqueue hot path.
  */
 static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
@@ -143,6 +206,9 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
+	/*
+	 * Re-arm the wakeup timer.
+	 */
 	err = bpf_timer_start(timer, slice_ns, 0);
 	if (err)
 		scx_bpf_error("Failed to re-arm duty cycle timer");
@@ -150,9 +216,83 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
+/*
+ * Calculate and return the virtual deadline for the given task.
+ *
+ * The goal is to limit how much virtual time budget a sleeping task can
+ * accumulate.
+ *
+ * This budget is:
+ *   - proportional to the task's weight (heavier tasks get more),
+ *   - inversely proportional to the amount of CPU time the task has
+ *     accumulated since it last slept (exec_runtime).
+ *
+ * As a result:
+ *   - tasks that sleep often are rewarded with a longer budget,
+ *   - CPU-bound tasks accumulate less budget.
+ *
+ * Then the vruntime is clamped to a minimum value using this budget,
+ * preventing it from falling too far behind to avoid starvation and
+ * preserving fairness over time.
+ */
+static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
+{
+	u64 vsleep_max = scale_by_task_weight(p, SCX_SLICE_DFL - tctx->exec_runtime);
+	u64 vtime_min = vtime_now - vsleep_max;
+
+	if (time_before(tctx->vtime, vtime_min))
+		tctx->vtime = vtime_min;
+
+	return tctx->vtime;
+}
+
+/*
+ * Return a time slice scaled by the task's weight.
+ */
+static u64 task_slice(const struct task_struct *p)
+{
+	return scale_by_task_weight(p, slice_ns);
+}
+
+/*
+ * Return true if the system is busy, false otherwise. This function
+ * determines when the scheduler needs to switch to deadline-mode (using a
+ * single shared DSQ) vs round-robin mode (using per-CPU DSQs).
+ */
+static bool is_system_busy(void)
+{
+	return cpu_util >= busy_threshold;
+}
+
+/*
+ * Return true if we should attempt a task migration to an idle CPU, false
+ * otherwise.
+ */
+static bool need_migrate(const struct task_struct *p, u64 enq_flags)
+{
+	/*
+	 * Per-CPU tasks are not allowed to migrate.
+	 */
+	if (is_pcpu_task(p))
+		return false;
+
+	/*
+	 * Attempt a migration on wakeup (if ops.select_cpu() was skipped)
+	 * or if the task was re-enqueued due to a higher scheduling class
+	 * stealing the CPU it was queued on.
+	 */
+	return (!__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p)) ||
+	       (enq_flags & SCX_ENQ_REENQ);
+}
+
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	struct task_ctx *tctx;
 	s32 cpu;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
 
 	/*
 	 * Try to find an idle CPU and dispatch the task directly to the
@@ -162,28 +302,31 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * task to ops.enqueue(). Dispatching directly from here, even if
 	 * we can't find an idle CPU, allows to save some locking overhead.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, false);
+	if (cpu >= 0 || !is_system_busy())
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 
-	return cpu < 0 ? prev_cpu : cpu;
+	return cpu >= 0 ? cpu : prev_cpu;
 }
 
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 
 	/*
-	 * Attempt a migration on wakeup or if the task was re-enqueued due
-	 * to a higher scheduling class stealing the CPU it was queued on.
+	 * Attempt to dispatch directly to an idle CPU if the task can
+	 * migrate.
 	 */
-	if (!scx_bpf_task_running(p) || (enq_flags & SCX_ENQ_REENQ)) {
-		if (!is_pcpu_task(p)) {
-			cpu = pick_idle_cpu(p, prev_cpu, 0);
-			if (cpu >= 0) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-						   slice_ns, enq_flags);
-				return;
-			}
+	if (need_migrate(p, enq_flags)) {
+		cpu = pick_idle_cpu(p, prev_cpu, 0, true);
+		if (cpu >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
+			return;
 		}
 	}
 
@@ -191,18 +334,29 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Keep using the same CPU while the task is running or if the
 	 * system is saturated.
 	 */
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+	if (!is_system_busy()) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		return;
+	}
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task_slice(p), task_dl(p, tctx), enq_flags);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
+	/*
+	 * Check if the there's any task waiting in the shared DSQ and
+	 * dispatch.
+	 */
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
+		return;
+
 	/*
 	 * If the previous task expired its time slice, but no other task
 	 * wants to run on this CPU, allow the previous task to run for
 	 * another time slot.
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		prev->scx.slice = slice_ns;
+		prev->scx.slice = task_slice(prev);
 }
 
 void BPF_STRUCT_OPS(cosmos_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
@@ -215,6 +369,80 @@ void BPF_STRUCT_OPS(cosmos_cpu_release, s32 cpu, struct scx_cpu_release_args *ar
 	scx_bpf_reenqueue_local();
 }
 
+void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
+{
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Reset exec runtime (accumulated execution time since last
+	 * sleep).
+	 */
+	tctx->exec_runtime = 0;
+}
+
+void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Save a timestamp when the task begins to run (used to evaluate
+	 * the used time slice).
+	 */
+	tctx->last_run_at = scx_bpf_now();
+
+	/*
+	 * Update current system's vruntime.
+	 */
+	if (time_before(vtime_now, tctx->vtime))
+		vtime_now = tctx->vtime;
+}
+
+void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
+{
+	struct task_ctx *tctx;
+	u64 slice;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Evaluate the used time slice.
+	 */
+	slice = MIN(scx_bpf_now() - tctx->last_run_at, SCX_SLICE_DFL);
+
+	/*
+	 * Update the vruntime and the total accumulated runtime since last
+	 * sleep.
+	 *
+	 * Cap the maximum accumulated time since last sleep to
+	 * SCX_SLICE_DFL, to prevent starving CPU-intensive tasks.
+	 */
+	tctx->vtime += scale_by_task_weight_inverse(p, slice);
+	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, SCX_SLICE_DFL);
+}
+
+s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
+{
+	struct task_ctx *tctx;
+
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
+		return -ENOMEM;
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
 	struct bpf_timer *timer;
@@ -222,6 +450,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	int err;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	err = scx_bpf_create_dsq(SHARED_DSQ, 0);
+	if (err) {
+		scx_bpf_error("failed to create shared DSQ: %d", err);
+		return err;
+	}
 
 	timer = bpf_map_lookup_elem(&wakeup_timer, &key);
 	if (!timer) {
@@ -250,11 +484,12 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .select_cpu		= (void *)cosmos_select_cpu,
 	       .enqueue			= (void *)cosmos_enqueue,
 	       .dispatch		= (void *)cosmos_dispatch,
+	       .runnable		= (void *)cosmos_runnable,
+	       .running			= (void *)cosmos_running,
+	       .stopping		= (void *)cosmos_stopping,
 	       .cpu_release		= (void *)cosmos_cpu_release,
+	       .init_task		= (void *)cosmos_init_task,
 	       .init			= (void *)cosmos_init,
 	       .exit			= (void *)cosmos_exit,
-               .flags			= SCX_OPS_ENQ_EXITING |
-					  SCX_OPS_ENQ_MIGRATION_DISABLED |
-					  SCX_OPS_ENQ_LAST |
-					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
+	       .timeout_ms		= 5000,
 	       .name			= "cosmos");
