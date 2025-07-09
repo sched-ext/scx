@@ -14,9 +14,9 @@ struct cpumask {
 	unsigned long bits[128];
 };
 
-static struct cpumask all_cpus = { 0 };
-static struct cpumask idle_smtmask = { 0 };
-static struct cpumask idle_cpumask = { 0 };
+static __thread struct cpumask all_cpus = { 0 };
+static __thread struct cpumask idle_smtmask = { 0 };
+static __thread struct cpumask idle_cpumask = { 0 };
 
 static void cpumask_set_cpu(int cpu, struct cpumask *mask)
 {
@@ -62,7 +62,7 @@ void scx_test_cpumask_set(int cpu, struct cpumask *cpumask)
 	cpumask_set_cpu(cpu, cpumask);
 }
 
-const struct cpumask *scx_bpf_get_idle_smtmask_node(int node)
+const struct cpumask *scx_bpf_get_idle_smtmask_node(int node __attribute__((unused)))
 {
 	return &idle_smtmask;
 }
@@ -91,7 +91,9 @@ bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask)
 	return cpumask_test_cpu(cpu, cpumask);
 }
 
-s32 scx_bpf_pick_idle_cpu_node(const struct cpumask *cpus_allowed, int node, u64 flags)
+s32 scx_bpf_pick_idle_cpu_node(const struct cpumask *cpus_allowed,
+			       int node __attribute__((unused)),
+			       u64 flags __attribute__((unused)))
 {
 	for (int i = 0; i < NR_CPUS; i++) {
 		if (cpumask_test_cpu(i, cpus_allowed) && cpumask_test_cpu(i, &idle_cpumask)) {
@@ -101,7 +103,7 @@ s32 scx_bpf_pick_idle_cpu_node(const struct cpumask *cpus_allowed, int node, u64
 	return -1;
 }
 
-s32 scx_bpf_pick_idle_cpu(const struct cpumask *cpus_allowed, u64 flags)
+s32 scx_bpf_pick_idle_cpu(const struct cpumask *cpus_allowed, u64 flags __attribute__((unused)))
 {
 	for (int i = 0; i < NR_CPUS; i++) {
 		if (cpumask_test_cpu(i, cpus_allowed) && cpumask_test_cpu(i, &idle_cpumask)) {
