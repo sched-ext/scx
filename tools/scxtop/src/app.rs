@@ -425,18 +425,13 @@ impl<'a> App<'a> {
     }
 
     fn record_cpu_freq(&mut self) -> Result<()> {
-        for cpu_id in self.topo.all_cpus.keys() {
-            let file = format!(
-                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-                *cpu_id
-            );
-            let path = Path::new(&file);
-            let freq = read_from_file(path).unwrap_or(0_usize);
+        let cpu_util_data = &self.cpu_stat_tracker.read().unwrap().current;
+        for (cpu_id, data) in cpu_util_data.iter() {
             let cpu_data = self
                 .cpu_data
                 .get_mut(cpu_id)
                 .expect("CpuData should have been present");
-            cpu_data.add_event_data("cpu_freq", freq as u64);
+            cpu_data.add_event_data("cpu_freq", data.freq * 1000);
         }
         Ok(())
     }
