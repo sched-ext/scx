@@ -21,7 +21,7 @@ impl CpuUtilMetric {
             CpuUtilMetric::Total => "cpu_total_util_percent",
             CpuUtilMetric::User => "cpu_user_util_percent",
             CpuUtilMetric::System => "cpu_system_util_percent",
-            CpuUtilMetric::Frequency => "cpu_frequency",
+            CpuUtilMetric::Frequency => "cpu_frequency_ghz",
         }
     }
 }
