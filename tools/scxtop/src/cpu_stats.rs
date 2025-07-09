@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use fb_procfs::ProcReader;
 use std::collections::BTreeMap;
 
