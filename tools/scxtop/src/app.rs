@@ -40,6 +40,7 @@ use crate::{
 };
 
 use anyhow::{bail, Result};
+use fb_procfs::ProcReader;
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
@@ -83,6 +84,7 @@ pub struct App<'a> {
     stats_client: Option<Arc<TokioMutex<StatsClient>>>,
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
+    proc_reader: ProcReader,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -243,6 +245,7 @@ impl<'a> App<'a> {
             stats_client,
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
+            proc_reader: ProcReader::new(),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -530,7 +533,10 @@ impl<'a> App<'a> {
         // always grab updated stats
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
         {
-            self.cpu_stat_tracker.write().unwrap().update()?;
+            self.cpu_stat_tracker
+                .write()
+                .unwrap()
+                .update(&self.proc_reader)?;
         }
 
         if self.state == AppState::Scheduler {
