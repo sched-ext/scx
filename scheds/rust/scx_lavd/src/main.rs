@@ -539,6 +539,10 @@ impl<'a> Scheduler<'a> {
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
+        let c_waker_cm: *const c_char = (&tc.waker_comm as *const [c_char; 17]) as *const c_char;
+        let c_waker_cm_str: &CStr = unsafe { CStr::from_ptr(c_waker_cm) };
+        let waker_comm: &str = c_waker_cm_str.to_str().unwrap();
+
         let c_tx_st: *const c_char = (&tx.stat as *const [c_char; 5]) as *const c_char;
         let c_tx_st_str: &CStr = unsafe { CStr::from_ptr(c_tx_st) };
         let tx_stat: &str = c_tx_st_str.to_str().unwrap();
@@ -548,11 +552,16 @@ impl<'a> Scheduler<'a> {
             pid: tx.pid,
             comm: tx_comm.into(),
             stat: tx_stat.into(),
-            cpu_id: tx.cpu_id,
+            cpu_id: tc.cpu_id,
+            prev_cpu_id: tc.prev_cpu_id,
+            suggested_cpu_id: tc.suggested_cpu_id,
+            waker_pid: tc.waker_pid,
+            waker_comm: waker_comm.into(),
             slice_ns: tc.slice_ns,
             lat_cri: tc.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,
+            resched_interval: tc.resched_interval,
             run_freq: tc.run_freq,
             avg_runtime: tc.avg_runtime,
             wait_freq: tc.wait_freq,
@@ -570,6 +579,9 @@ impl<'a> Scheduler<'a> {
     }
 
     fn prep_introspec(&mut self) {
+        if !self.skel.maps.bss_data.is_monitored {
+            self.skel.maps.bss_data.is_monitored = true;
+        }
         self.skel.maps.bss_data.intrspc.cmd = self.intrspc.cmd;
         self.skel.maps.bss_data.intrspc.arg = self.intrspc.arg;
     }
@@ -674,6 +686,12 @@ impl<'a> Scheduler<'a> {
         })
     }
 
+    fn stop_monitoring(&mut self) {
+        if self.skel.maps.bss_data.is_monitored {
+            self.skel.maps.bss_data.is_monitored = false;
+        }
+    }
+
     pub fn exited(&mut self) -> bool {
         uei_exited!(&self.skel, uei)
     }
@@ -745,8 +763,13 @@ impl<'a> Scheduler<'a> {
                     let res = self.stats_req_to_res(&req)?;
                     res_ch.send(res)?;
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(e) => Err(e)?,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.stop_monitoring();
+                }
+                Err(e) => {
+                    self.stop_monitoring();
+                    Err(e)?
+                }
             }
             self.cleanup_introspec();
         }
@@ -811,8 +834,10 @@ fn main() -> Result<()> {
 
     init_log(&opts);
 
-    opts.proc().unwrap();
-    info!("{:#?}", opts);
+    if opts.monitor.is_none() && opts.monitor_sched_samples.is_none() {
+        opts.proc().unwrap();
+        info!("{:#?}", opts);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
