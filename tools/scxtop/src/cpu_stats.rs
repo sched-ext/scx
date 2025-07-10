@@ -1,9 +1,11 @@
 use anyhow::{bail, Result};
 use fb_procfs::ProcReader;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use sysinfo::System;
 
 #[derive(Debug, Clone)]
-pub struct CpuStatSnapshot {
+pub struct CpuUtilData {
     pub user: u64,
     pub nice: u64,
     pub system: u64,
@@ -16,8 +18,8 @@ pub struct CpuStatSnapshot {
     pub guest_nice: u64,
 }
 
-impl CpuStatSnapshot {
-    pub fn total(&self) -> u64 {
+impl CpuUtilData {
+    pub fn total_util(&self) -> u64 {
         self.user
             + self.nice
             + self.system
@@ -28,9 +30,15 @@ impl CpuStatSnapshot {
             + self.steal
     }
 
-    pub fn active(&self) -> u64 {
+    pub fn active_util(&self) -> u64 {
         self.user + self.nice + self.system + self.irq + self.softirq + self.steal
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CpuStatSnapshot {
+    pub cpu_util_data: CpuUtilData,
+    pub freq: u64,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -40,15 +48,25 @@ pub struct CpuStatTracker {
 }
 
 impl CpuStatTracker {
-    pub fn update(&mut self, proc_reader: &ProcReader) -> Result<()> {
+    pub fn update(&mut self, proc_reader: &ProcReader, sys: Arc<Mutex<System>>) -> Result<()> {
         self.prev = std::mem::take(&mut self.current);
 
         let proc_stat_data = proc_reader.read_stat()?;
+        let mut system_lock = sys.lock().unwrap();
+        system_lock.refresh_cpu_frequency();
 
-        if let Some(cpu_map) = proc_stat_data.cpus_map {
-            for (cpu, stat) in cpu_map {
-                let snapshot = procfs_cpu_to_stat_snapshot(stat);
-                self.current.insert(cpu as usize, snapshot);
+        if let Some(mut cpu_map) = proc_stat_data.cpus_map {
+            for (i, cpu) in system_lock.cpus().iter().enumerate() {
+                let cpu_util_data = procfs_cpu_to_util_data(
+                    cpu_map
+                        .remove(&(i as u32))
+                        .expect("Cpu should exist in cpu map data"),
+                );
+                let snapshot = CpuStatSnapshot {
+                    cpu_util_data,
+                    freq: cpu.frequency(),
+                };
+                self.current.insert(i, snapshot);
             }
         } else {
             bail!("Failed to parse cpu stats from /proc/stat");
@@ -58,8 +76,8 @@ impl CpuStatTracker {
     }
 }
 
-fn procfs_cpu_to_stat_snapshot(stat: fb_procfs::CpuStat) -> CpuStatSnapshot {
-    CpuStatSnapshot {
+fn procfs_cpu_to_util_data(stat: fb_procfs::CpuStat) -> CpuUtilData {
+    CpuUtilData {
         user: stat.user_usec.expect("missing user"),
         nice: stat.nice_usec.expect("missing nice"),
         system: stat.system_usec.expect("missing system"),
@@ -92,7 +110,7 @@ mod tests {
             guest_nice_usec: Some(1000),
         };
 
-        let snapshot = procfs_cpu_to_stat_snapshot(input);
+        let snapshot = procfs_cpu_to_util_data(input);
 
         assert_eq!(snapshot.user, 100);
         assert_eq!(snapshot.nice, 200);
@@ -122,12 +140,12 @@ mod tests {
             guest_nice_usec: Some(1000),
         };
 
-        let _ = procfs_cpu_to_stat_snapshot(input);
+        let _ = procfs_cpu_to_util_data(input);
     }
 
     #[test]
     fn test_snapshot_totals() {
-        let snap = CpuStatSnapshot {
+        let snap = CpuUtilData {
             user: 1,
             nice: 2,
             system: 3,
@@ -140,8 +158,8 @@ mod tests {
             guest_nice: 0,
         };
 
-        assert_eq!(snap.total(), 36);
-        assert_eq!(snap.active(), 27);
+        assert_eq!(snap.total_util(), 36);
+        assert_eq!(snap.active_util(), 27);
     }
 
     #[test]
@@ -175,19 +193,20 @@ mod tests {
     fn test_integration_test() -> Result<()> {
         let mut tracker = CpuStatTracker::default();
         let proc_reader = ProcReader::default();
-        tracker.update(&proc_reader)?;
+        let sys = Arc::new(Mutex::new(System::new_all()));
+        tracker.update(&proc_reader, sys.clone())?;
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        tracker.update(&proc_reader)?;
+        tracker.update(&proc_reader, sys.clone())?;
 
         assert!(!tracker.prev.is_empty());
         assert!(!tracker.current.is_empty());
 
         for (cpu, prev) in &tracker.prev {
             let current = tracker.current.get(cpu).unwrap();
-            assert!(current.total() >= prev.total());
-            assert!(current.active() >= prev.active());
+            assert!(current.cpu_util_data.total_util() >= prev.cpu_util_data.total_util());
+            assert!(current.cpu_util_data.active_util() >= prev.cpu_util_data.active_util());
         }
 
         Ok(())

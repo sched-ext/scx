@@ -63,6 +63,7 @@ use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
+use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -85,6 +86,7 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     proc_reader: ProcReader,
+    sys: Arc<StdMutex<System>>,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -246,6 +248,7 @@ impl<'a> App<'a> {
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             proc_reader: ProcReader::new(),
+            sys: Arc::new(StdMutex::new(System::new_all())),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -422,18 +425,13 @@ impl<'a> App<'a> {
     }
 
     fn record_cpu_freq(&mut self) -> Result<()> {
-        for cpu_id in self.topo.all_cpus.keys() {
-            let file = format!(
-                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
-                *cpu_id
-            );
-            let path = Path::new(&file);
-            let freq = read_from_file(path).unwrap_or(0_usize);
+        let cpu_util_data = &self.cpu_stat_tracker.read().unwrap().current;
+        for (cpu_id, data) in cpu_util_data.iter() {
             let cpu_data = self
                 .cpu_data
                 .get_mut(cpu_id)
                 .expect("CpuData should have been present");
-            cpu_data.add_event_data("cpu_freq", freq as u64);
+            cpu_data.add_event_data("cpu_freq", data.freq * 1000);
         }
         Ok(())
     }
@@ -536,7 +534,7 @@ impl<'a> App<'a> {
             self.cpu_stat_tracker
                 .write()
                 .unwrap()
-                .update(&self.proc_reader)?;
+                .update(&self.proc_reader, self.sys.clone())?;
         }
 
         if self.state == AppState::Scheduler {
