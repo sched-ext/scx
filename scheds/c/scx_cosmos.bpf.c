@@ -13,6 +13,16 @@
 #define SHARED_DSQ		0
 
 /*
+ * Thresholds for applying hysteresis to CPU performance scaling:
+ *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
+ *  - CPUFREQ_HIGH_THRESH: above this level, raise performance to maximum
+ *
+ * Values between the two thresholds retain the current smoothed performance level.
+ */
+#define CPUFREQ_LOW_THRESH	(SCX_CPUPERF_ONE / 4)
+#define CPUFREQ_HIGH_THRESH	(SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
+
+/*
  * Subset of CPUs to prioritize.
  */
 private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
@@ -22,6 +32,11 @@ private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
  * the CPU).
  */
 const volatile bool primary_all = true;
+
+/*
+ * Enable cpufreq integration.
+ */
+const volatile u64 cpufreq_enabled = true;
 
 /*
  * Enable NUMA optimizatons.
@@ -74,6 +89,103 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
+}
+
+/*
+ * Per-CPU context.
+ */
+struct cpu_ctx {
+	u64 last_update;
+	u64 perf_lvl;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpu_ctx);
+	__uint(max_entries, 1);
+} cpu_ctx_stor SEC(".maps");
+
+/*
+ * Return a CPU context.
+ */
+struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
+{
+	const u32 idx = 0;
+	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
+/*
+ * Exponential weighted moving average (EWMA).
+ *
+ * Copied from scx_lavd. Returns the new average as:
+ *
+ *	new_avg := (old_avg * .75) + (new_val * .25);
+ */
+static u64 calc_avg(u64 old_val, u64 new_val)
+{
+	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+/*
+ * Update CPU load and scale target performance level accordingly.
+ */
+static void update_cpu_load(struct task_struct *p, u64 slice)
+{
+	u64 now = scx_bpf_now();
+	s32 cpu = scx_bpf_task_cpu(p);
+	u64 perf_lvl, delta_t;
+	struct cpu_ctx *cctx;
+
+	if (!cpufreq_enabled)
+		return;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
+	/*
+	 * Evaluate dynamic cpuperf scaling factor using the average CPU
+	 * utilization, normalized in the range [0 .. SCX_CPUPERF_ONE].
+	 */
+	delta_t = now - cctx->last_update;
+	if (!delta_t)
+		return;
+
+	/*
+	 * Refresh target performance level.
+	 */
+	perf_lvl = MIN(slice * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
+	cctx->perf_lvl = calc_avg(cctx->perf_lvl, perf_lvl);
+	cctx->last_update = now;
+}
+
+/*
+ * Apply target cpufreq performance level to @cpu.
+ */
+static void update_cpufreq(s32 cpu)
+{
+	struct cpu_ctx *cctx;
+	u64 perf_lvl;
+
+	if (!cpufreq_enabled)
+		return;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
+	/*
+	 * Apply target performance level to the cpufreq governor.
+	 */
+	if (cctx->perf_lvl >= CPUFREQ_HIGH_THRESH)
+		perf_lvl = SCX_CPUPERF_ONE;
+	else if (cctx->perf_lvl <= CPUFREQ_LOW_THRESH)
+		perf_lvl = SCX_CPUPERF_ONE / 2;
+	else
+		perf_lvl = cctx->perf_lvl;
+
+	scx_bpf_cpuperf_set(cpu, perf_lvl);
 }
 
 /*
@@ -300,12 +412,7 @@ static bool need_migrate(const struct task_struct *p, u64 enq_flags)
 
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	struct task_ctx *tctx;
 	s32 cpu;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return prev_cpu;
 
 	/*
 	 * Try to find an idle CPU and dispatch the task directly to the
@@ -327,10 +434,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
 	struct task_ctx *tctx;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
 	/*
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
@@ -348,10 +451,19 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * fallback to the shared DSQ.
 	 */
 	if (!is_system_busy()) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 		return;
 	}
-	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu), slice_ns, task_dl(p, tctx), enq_flags);
+
+	/*
+	 * Dispatch the task to the global DSQ, using a deadline-based
+	 * scheduling.
+	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
+				 task_slice(p), task_dl(p, tctx), enq_flags);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
@@ -416,6 +528,11 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	 */
 	if (time_before(vtime_now, tctx->vtime))
 		vtime_now = tctx->vtime;
+
+	/*
+	 * Refresh cpufreq performance level.
+	 */
+	update_cpufreq(scx_bpf_task_cpu(p));
 }
 
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
@@ -441,6 +558,11 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 */
 	tctx->vtime += scale_by_task_weight_inverse(p, slice);
 	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, SCX_SLICE_DFL);
+
+	/*
+	 * Update per-CPU statistics.
+	 */
+	update_cpu_load(p, slice);
 }
 
 s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,

@@ -55,6 +55,7 @@ const char help_fmt[] =
 "  -m CPU1,CPU2,... Specify a list of CPUs to prioritize\n"
 "  -c PERC          Specify utilization threshold %% to consider the system busy (default 75%%)\n"
 "  -p TIME_MS       Specify the polling period to evaluate CPU utilization (default 250ms, 0 = disabled)\n"
+"  -f               Disable cpufreq integration\n"
 "  -n               Enable NUMA optimizations\n"
 "  -v               Print libbpf debug messages\n"
 "  -h               Display this help and exit\n";
@@ -256,8 +257,9 @@ restart:
 	skel->rodata->slice_ns = SLICE_US * 1000ULL;
 	skel->rodata->busy_threshold = 75 * 1024 / 100;
 	skel->rodata->numa_enabled = false;
+	skel->rodata->cpufreq_enabled = true;
 
-	while ((opt = getopt(argc, argv, "vhnm:s:p:c:")) != -1) {
+	while ((opt = getopt(argc, argv, "vhnfm:s:p:c:")) != -1) {
 		switch (opt) {
 		case 'v':
 			verbose = true;
@@ -269,6 +271,9 @@ restart:
 				free(cpu_list);
 				return 1;
 			}
+			break;
+		case 'f':
+			skel->rodata->cpufreq_enabled = false;
 			break;
 		case 'n':
 			skel->rodata->numa_enabled = true;
