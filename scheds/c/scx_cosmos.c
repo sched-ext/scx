@@ -34,6 +34,13 @@ struct cpu_util {
  */
 #define SLICE_US	10ULL
 
+/*
+ * Default polling time to evaluate CPU utilization (in us)
+ */
+#define POLLING_US	(250 * 1000ULL)
+
+static u64 polling_us = POLLING_US;
+
 static int *cpu_list = NULL;
 static int nr_cpus = 0;
 
@@ -42,11 +49,12 @@ const char help_fmt[] =
 "\n"
 "See the top-level comment in .bpf.c for more details.\n"
 "\n"
-"Usage: %s [-v]\n"
+"Usage: %s [-s TIME_US] [-m CPU1,CPU2,...] [-c PERC] [-p TIME_US] [-n] [-v] [-h]\n"
 "\n"
-"  -s SLICE_US      Override slice duration in us (default: 10us)\n"
-"  -c NUM           Specify utilization threshold %% to consider the system busy (default 75%%)\n"
+"  -s TIME_US       Override slice duration in us (default: 10us)\n"
 "  -m CPU1,CPU2,... Specify a list of CPUs to prioritize\n"
+"  -c PERC          Specify utilization threshold %% to consider the system busy (default 75%%)\n"
+"  -p TIME_MS       Specify the polling period to evaluate CPU utilization (default 250ms, 0 = disabled)\n"
 "  -n               Enable NUMA optimizations\n"
 "  -v               Print libbpf debug messages\n"
 "  -h               Display this help and exit\n";
@@ -249,7 +257,7 @@ restart:
 	skel->rodata->busy_threshold = 75 * 1024 / 100;
 	skel->rodata->numa_enabled = false;
 
-	while ((opt = getopt(argc, argv, "vhnm:s:c:")) != -1) {
+	while ((opt = getopt(argc, argv, "vhnm:s:p:c:")) != -1) {
 		switch (opt) {
 		case 'v':
 			verbose = true;
@@ -270,6 +278,11 @@ restart:
 			break;
 		case 'c':
 			skel->rodata->busy_threshold = strtoull(optarg, NULL, 0) * 1024 / 100;
+			break;
+		case 'p':
+			polling_us = strtoull(optarg, NULL, 0) * 1000ULL;
+			if (polling_us == 0)
+				polling_us = -1ULL;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
@@ -323,7 +336,7 @@ restart:
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		u64 user_pct;
 
-		sleep(1);
+		usleep(polling_us);
 
 		if (!read_cpu_times(&curr)) {
 			fprintf(stderr, "Failed to read CPU utilization\n");
