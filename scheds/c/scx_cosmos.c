@@ -44,9 +44,10 @@ const char help_fmt[] =
 "\n"
 "Usage: %s [-v]\n"
 "\n"
-"  -m CPU1,CPU2,... Specify a list of CPUs to prioritize\n"
 "  -s SLICE_US      Override slice duration in us (default: 10us)\n"
 "  -c NUM           Specify utilization threshold %% to consider the system busy (default 75%%)\n"
+"  -m CPU1,CPU2,... Specify a list of CPUs to prioritize\n"
+"  -n               Enable NUMA optimizations\n"
 "  -v               Print libbpf debug messages\n"
 "  -h               Display this help and exit\n";
 
@@ -246,8 +247,9 @@ restart:
 
 	skel->rodata->slice_ns = SLICE_US * 1000ULL;
 	skel->rodata->busy_threshold = 75 * 1024 / 100;
+	skel->rodata->numa_enabled = false;
 
-	while ((opt = getopt(argc, argv, "vhm:s:c:")) != -1) {
+	while ((opt = getopt(argc, argv, "vhnm:s:c:")) != -1) {
 		switch (opt) {
 		case 'v':
 			verbose = true;
@@ -259,6 +261,9 @@ restart:
 				free(cpu_list);
 				return 1;
 			}
+			break;
+		case 'n':
+			skel->rodata->numa_enabled = true;
 			break;
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000ULL;
@@ -282,6 +287,9 @@ restart:
 					     SCX_OPS_ENQ_MIGRATION_DISABLED |
 					     SCX_OPS_ENQ_LAST |
 					     SCX_OPS_ALLOW_QUEUED_WAKEUP;
+	if (skel->rodata->numa_enabled)
+		skel->struct_ops.cosmos_ops->flags |= SCX_OPS_BUILTIN_IDLE_PER_NODE;
+
 	fprintf(stdout, "flags: %#llx\n", skel->struct_ops.cosmos_ops->flags);
 
 	SCX_OPS_LOAD(skel, cosmos_ops, scx_cosmos, uei);

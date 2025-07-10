@@ -24,6 +24,11 @@ private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
 const volatile bool primary_all = true;
 
 /*
+ * Enable NUMA optimizatons.
+ */
+const volatile bool numa_enabled;
+
+/*
  * Default time slice.
  */
 const volatile u64 slice_ns = 10000ULL;
@@ -87,6 +92,14 @@ struct {
 	__type(key, u32);
 	__type(value, struct wakeup_timer);
 } wakeup_timer SEC(".maps");
+
+/*
+ * Return the global system shared DSQ.
+ */
+static inline u64 shared_dsq(s32 cpu)
+{
+	return numa_enabled ? __COMPAT_scx_bpf_cpu_node(cpu) : SHARED_DSQ;
+}
 
 /*
  * Pick an optimal idle CPU for task @p (as close as possible to
@@ -331,14 +344,14 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Keep using the same CPU while the task is running or if the
-	 * system is saturated.
+	 * Keep using the same CPU if the system is not busy, otherwise
+	 * fallback to the shared DSQ.
 	 */
 	if (!is_system_busy()) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 		return;
 	}
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task_slice(p), task_dl(p, tctx), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu), slice_ns, task_dl(p, tctx), enq_flags);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
@@ -347,7 +360,7 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * Check if the there's any task waiting in the shared DSQ and
 	 * dispatch.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(shared_dsq(cpu)))
 		return;
 
 	/*
@@ -451,10 +464,26 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
-	err = scx_bpf_create_dsq(SHARED_DSQ, 0);
-	if (err) {
-		scx_bpf_error("failed to create shared DSQ: %d", err);
-		return err;
+	/*
+	 * Create separate per-node DSQs if NUMA optimization is enabled,
+	 * otherwise use a single global shared DSQ.
+	 */
+	if (numa_enabled) {
+		int node;
+
+		bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+			err = scx_bpf_create_dsq(node, node);
+			if (err) {
+				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
+				return err;
+			}
+		}
+	} else {
+		err = scx_bpf_create_dsq(SHARED_DSQ, -1);
+		if (err) {
+			scx_bpf_error("failed to create shared DSQ: %d", err);
+			return err;
+		}
 	}
 
 	timer = bpf_map_lookup_elem(&wakeup_timer, &key);
