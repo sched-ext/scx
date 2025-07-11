@@ -123,8 +123,6 @@ impl PerfEvent {
             PerfEvent::new("hw".to_string(), "cache-references".to_string(), 0),
             PerfEvent::new("hw".to_string(), "instructions".to_string(), 0),
             PerfEvent::new("hw".to_string(), "ref-cycles".to_string(), 0),
-            PerfEvent::new("hw".to_string(), "stalled-cycles-backend".to_string(), 0),
-            PerfEvent::new("hw".to_string(), "stalled-cycles-frontend".to_string(), 0),
             PerfEvent::new("hw".to_string(), "bus-cycles".to_string(), 0),
             PerfEvent::new("hw".to_string(), "L1-dcache-load-misses".to_string(), 0),
         ]
@@ -191,12 +189,6 @@ impl PerfEvent {
                     }
                     "ref-cycles" => {
                         attrs.config = perf::bindings::PERF_COUNT_HW_REF_CPU_CYCLES as u64;
-                    }
-                    "stalled-cycles-backend" => {
-                        attrs.config = perf::bindings::PERF_COUNT_HW_STALLED_CYCLES_BACKEND as u64;
-                    }
-                    "stalled-cycles-frontend" => {
-                        attrs.config = perf::bindings::PERF_COUNT_HW_STALLED_CYCLES_FRONTEND as u64;
                     }
                     "bus-cycles" | "bus_cycles" => {
                         attrs.config = perf::bindings::PERF_COUNT_HW_BUS_CYCLES as u64;

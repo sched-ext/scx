@@ -2728,14 +2728,10 @@ impl<'a> App<'a> {
                 }
             }
             Action::NextEvent => {
-                if self.next_event().is_err() {
-                    // XXX handle error
-                }
+                self.next_event()?;
             }
             Action::PrevEvent => {
-                if self.prev_event().is_err() {
-                    // XXX handle error
-                }
+                self.prev_event()?;
             }
             Action::NextViewState => self.next_view_state(),
             Action::PstateSample(a) => {
