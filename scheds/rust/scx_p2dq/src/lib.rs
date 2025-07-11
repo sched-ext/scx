@@ -200,40 +200,60 @@ macro_rules! init_open_skel {
                 }
             }
 
-            $skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
-            $skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
-            $skel.maps.rodata_data.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
-            $skel.maps.rodata_data.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
-            $skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
-            $skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
-            $skel.maps.rodata_data.nr_cpus = *$crate::NR_CPU_IDS as u32;
-            $skel.maps.rodata_data.nr_dsqs_per_llc = opts.dumb_queues as u32;
-            $skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
-            $skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
-            $skel.maps.rodata_data.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
-            $skel.maps.rodata_data.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;
-            $skel.maps.rodata_data.lb_slack_factor = opts.lb_slack_factor;
+            // topo config
+            $skel.maps.rodata_data.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
+            $skel.maps.rodata_data.topo_config.nr_llcs =
+                $crate::TOPO.all_llcs.clone().keys().len() as u32;
+            $skel.maps.rodata_data.topo_config.nr_nodes =
+                $crate::TOPO.nodes.clone().keys().len() as u32;
+            $skel.maps.rodata_data.topo_config.smt_enabled =
+                MaybeUninit::new($crate::TOPO.smt_enabled);
+            $skel.maps.rodata_data.topo_config.has_little_cores =
+                MaybeUninit::new($crate::TOPO.has_little_cores());
 
-            $skel.maps.rodata_data.autoslice = opts.autoslice;
-            $skel.maps.rodata_data.debug = verbose as u32;
-            $skel.maps.rodata_data.deadline_scheduling = opts.deadline;
-            $skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
-            $skel.maps.rodata_data.dispatch_lb_busy = opts.dispatch_lb_busy;
-            $skel.maps.rodata_data.dispatch_lb_interactive = opts.dispatch_lb_interactive;
-            $skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
-            $skel.maps.rodata_data.freq_control = opts.freq_control;
-            $skel.maps.rodata_data.has_little_cores = $crate::TOPO.has_little_cores();
-            $skel.maps.rodata_data.interactive_dsq = opts.interactive_dsq;
-            $skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
-            $skel.maps.rodata_data.interactive_fifo = opts.interactive_fifo;
-            $skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
-            $skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
-            $skel.maps.rodata_data.smt_enabled = $crate::TOPO.smt_enabled;
-            $skel.maps.rodata_data.select_idle_in_enqueue = opts.select_idle_in_enqueue;
-            $skel.maps.rodata_data.wakeup_lb_busy = opts.wakeup_lb_busy;
-            $skel.maps.rodata_data.wakeup_llc_migrations = opts.wakeup_llc_migrations;
-            $skel.maps.rodata_data.max_exec_ns =
+            // timeline config
+            $skel.maps.rodata_data.timeline_config.min_slice_us = opts.min_slice_us;
+            $skel.maps.rodata_data.timeline_config.max_exec_ns =
                 2 * $skel.maps.bss_data.dsq_time_slices[opts.dumb_queues - 1];
+            $skel.maps.rodata_data.timeline_config.autoslice = MaybeUninit::new(opts.autoslice);
+            $skel.maps.rodata_data.timeline_config.deadline = MaybeUninit::new(opts.deadline);
+
+            // load balance config
+            $skel.maps.rodata_data.lb_config.slack_factor = opts.lb_slack_factor;
+            $skel.maps.rodata_data.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
+            $skel.maps.rodata_data.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
+            $skel.maps.rodata_data.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
+            $skel.maps.rodata_data.lb_config.eager_load_balance =
+                MaybeUninit::new(!opts.eager_load_balance);
+            $skel.maps.rodata_data.lb_config.dispatch_pick2_disable =
+                MaybeUninit::new(opts.dispatch_pick2_disable);
+            $skel.maps.rodata_data.lb_config.dispatch_lb_busy = opts.dispatch_lb_busy;
+            $skel.maps.rodata_data.lb_config.dispatch_lb_interactive =
+                MaybeUninit::new(opts.dispatch_lb_interactive);
+            $skel.maps.rodata_data.lb_config.wakeup_lb_busy = opts.wakeup_lb_busy;
+            $skel.maps.rodata_data.lb_config.wakeup_llc_migrations =
+                MaybeUninit::new(opts.wakeup_llc_migrations);
+
+            // p2dq config
+            $skel.maps.rodata_data.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
+            $skel.maps.rodata_data.p2dq_config.dsq_shift = opts.dsq_shift as u64;
+            $skel.maps.rodata_data.p2dq_config.kthreads_local =
+                MaybeUninit::new(!opts.disable_kthreads_local);
+            $skel.maps.rodata_data.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
+            $skel.maps.rodata_data.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
+
+            $skel.maps.rodata_data.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
+            $skel.maps.rodata_data.p2dq_config.interactive_sticky =
+                MaybeUninit::new(opts.interactive_sticky);
+            $skel.maps.rodata_data.p2dq_config.interactive_fifo =
+                MaybeUninit::new(opts.interactive_fifo);
+            $skel.maps.rodata_data.p2dq_config.keep_running_enabled =
+                MaybeUninit::new(opts.keep_running);
+            $skel.maps.rodata_data.p2dq_config.select_idle_in_enqueue =
+                MaybeUninit::new(opts.select_idle_in_enqueue);
+
+            $skel.maps.rodata_data.debug = verbose as u32;
+            $skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
 
             Ok(())
         }
