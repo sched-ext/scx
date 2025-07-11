@@ -142,8 +142,16 @@ pub struct SchedSample {
         desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligible or 'G'reedy, PN: 'P'reempting or 'N'ot"
     )]
     pub stat: String,
-    #[stat(desc = "CPU id where this task is scheduled on")]
+    #[stat(desc = "CPU ID where this task is scheduled on")]
     pub cpu_id: u32,
+    #[stat(desc = "CPU ID where a task ran last time.")]
+    pub prev_cpu_id: u32,
+    #[stat(desc = "CPU ID suggested when a task is enqueued.")]
+    pub suggested_cpu_id: u32,
+    #[stat(desc = "Waker's process ID")]
+    pub waker_pid: i32,
+    #[stat(desc = "Waker's task name")]
+    pub waker_comm: String,
     #[stat(desc = "Assigned time slice")]
     pub slice_ns: u32,
     #[stat(desc = "Latency criticality of this task")]
@@ -152,6 +160,8 @@ pub struct SchedSample {
     pub avg_lat_cri: u32,
     #[stat(desc = "Static priority (20 == nice 0)")]
     pub static_prio: u16,
+    #[stat(desc = "Time interval from the last stopped time.")]
+    pub resched_interval: u64,
     #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
     #[stat(desc = "Average runtime per schedule")]
@@ -178,16 +188,21 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:10} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
             "STAT",
             "CPU",
+            "PRV_CPU",
+            "SUG_CPU",
+            "WKER_PID",
+            "WKER_COMM",
             "SLC_NS",
             "LAT_CRI",
             "AVG_LC",
             "ST_PRIO",
+            "RESCHD_NS",
             "RUN_FREQ",
             "RUN_TM_NS",
             "WAIT_FREQ",
@@ -209,16 +224,21 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |",
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:10} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |",
             self.mseq,
             self.pid,
             self.comm,
             self.stat,
             self.cpu_id,
+            self.prev_cpu_id,
+            self.suggested_cpu_id,
+            self.waker_pid,
+            self.waker_comm,
             self.slice_ns,
             self.lat_cri,
             self.avg_lat_cri,
             self.static_prio,
+            self.resched_interval,
             self.run_freq,
             self.avg_runtime,
             self.wait_freq,

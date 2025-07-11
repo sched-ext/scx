@@ -135,6 +135,17 @@ struct task_ctx {
 	u8	on_big;			/* executable on a big core */
 	u8	on_little;		/* executable on a little core */
 	u8	is_affinitized;		/* is this task pinned to a subset of all CPUs? */
+
+	/*
+	 * Additional information when the scheduler is monitored,
+	 * so it is updated only when is_monitored is true.
+	 */
+	u64	resched_interval;	/* reschedule interval in ns */
+	u32	cpu_id;			/* where a task ran */
+	u32	prev_cpu_id;		/* where a task ran last time */
+	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
+	pid_t	waker_pid;		/* last waker's PID */
+	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 };
 
 /*
@@ -145,7 +156,6 @@ struct task_ctx_x {
 	char	comm[TASK_COMM_LEN + 1];
 	char	stat[LAVD_STATUS_STR_LEN + 1];
 	u16	static_prio;	/* nice priority */
-	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
 	u32	thr_perf_cri;	/* performance criticality threshold */

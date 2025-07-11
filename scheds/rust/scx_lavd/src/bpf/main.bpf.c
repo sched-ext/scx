@@ -328,6 +328,16 @@ static void update_stat_for_running(struct task_struct *p,
 	}
 
 	/*
+	 * Collect additional information when the scheduler is monitored.
+	 */
+	if (is_monitored) {
+		taskc->resched_interval = time_delta(now,
+						     taskc->last_running_clk);
+		taskc->prev_cpu_id = taskc->cpu_id;
+	}
+	taskc->cpu_id = cpuc->cpu_id;
+
+	/*
 	 * Update task state when starts running.
 	 */
 	taskc->wakeup_ft = 0;
@@ -457,9 +467,12 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	/*
 	 * Find an idle cpu and reserve it since the task @p will run
-	 * on the idle cpu.
+	 * on the idle cpu. Even if there is no idle cpu, still respect
+	 * the chosen cpu.
 	 */
 	cpu_id = pick_idle_cpu(&ictx, &found_idle);
+	cpu_id = cpu_id >= 0 ? cpu_id : prev_cpu;
+
 	if (found_idle) {
 		/*
 		 * If there is an idle cpu and its associated DSQ is empty,
@@ -468,7 +481,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
-			return cpu_id;
+			goto out;
 		}
 		dsq_id = cpuc->cpdom_id;
 
@@ -476,14 +489,17 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 			p->scx.slice = calc_time_slice(taskc);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
-			return cpu_id;
+			goto out;
 		}
 	}
 
+out:
 	/*
-	 * Even if there is no idle cpu, still repect the chosen cpu.
+	 * Collect additional information when the scheduler is monitored.
 	 */
-	return cpu_id >= 0 ? cpu_id : prev_cpu;
+	if (is_monitored)
+		taskc->suggested_cpu_id = cpu_id;
+	return cpu_id;
 }
 
 static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
@@ -526,6 +542,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
 	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle);
+
+	/*
+	 * Collect additional information when the scheduler is monitored.
+	 */
+	if (is_monitored)
+		taskc->suggested_cpu_id = cpu;
 
 	/*
 	 * Enqueue the task to a DSQ. If it is safe to directly dispatch
@@ -825,6 +847,15 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * task's self latency criticality to limit the context into one hop.
 	 */
 	p_taskc->lat_cri_waker = waker_taskc->lat_cri;
+
+	/*
+	 * Collect additional information when the scheduler is monitored.
+	 */
+	if (is_monitored) {
+		p_taskc->waker_pid = waker->pid;
+		__builtin_memcpy_inline(p_taskc->waker_comm, waker->comm,
+					TASK_COMM_LEN);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
