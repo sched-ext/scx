@@ -237,6 +237,8 @@ macro_rules! init_open_skel {
             // p2dq config
             $skel.maps.rodata_data.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
             $skel.maps.rodata_data.p2dq_config.dsq_shift = opts.dsq_shift as u64;
+            $skel.maps.rodata_data.p2dq_config.interactive_dsq =
+                MaybeUninit::new(opts.interactive_dsq);
             $skel.maps.rodata_data.p2dq_config.kthreads_local =
                 MaybeUninit::new(!opts.disable_kthreads_local);
             $skel.maps.rodata_data.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;

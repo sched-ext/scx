@@ -950,6 +950,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		scx_bpf_error("invalid lookup");
 		return;
 	}
+	ret->cpu = cpuc->id;
 
 	if (cpuc->nice_task)
 		enq_flags |= SCX_ENQ_PREEMPT;
