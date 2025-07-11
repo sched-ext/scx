@@ -74,6 +74,13 @@ gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
 server_mode = []
+
+[scheds.scx_mitosis]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
 ```
 
 **`default_sched`:**
@@ -129,6 +136,8 @@ The example configuration above shows how to set custom flags for different sche
 * For `scx_rustland`:
     * No custom flags are defined, so the default flags for each mode will be used.
 * For `scx_wd40`:
+    * No custom flags are defined, so the default flags for each mode will be used.
+* For `scx_mitosis`:
     * No custom flags are defined, so the default flags for each mode will be used.
 
 ## Fallback Behavior

@@ -36,6 +36,8 @@ pub enum SupportedSched {
     Rustland,
     #[serde(rename = "scx_wd40")]
     WD40,
+    #[serde(rename = "scx_mitosis")]
+    Mitosis,
 }
 
 impl FromStr for SupportedSched {
@@ -46,6 +48,7 @@ impl FromStr for SupportedSched {
             "scx_bpfland" => Ok(SupportedSched::Bpfland),
             "scx_flash" => Ok(SupportedSched::Flash),
             "scx_lavd" => Ok(SupportedSched::Lavd),
+            "scx_mitosis" => Ok(SupportedSched::Mitosis),
             "scx_p2dq" => Ok(SupportedSched::P2DQ),
             "scx_tickless" => Ok(SupportedSched::Tickless),
             "scx_rustland" => Ok(SupportedSched::Rustland),
@@ -69,6 +72,7 @@ impl From<SupportedSched> for &str {
             SupportedSched::Bpfland => "scx_bpfland",
             SupportedSched::Flash => "scx_flash",
             SupportedSched::Lavd => "scx_lavd",
+            SupportedSched::Mitosis => "scx_mitosis",
             SupportedSched::P2DQ => "scx_p2dq",
             SupportedSched::Tickless => "scx_tickless",
             SupportedSched::Rustland => "scx_rustland",
