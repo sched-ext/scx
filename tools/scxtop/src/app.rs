@@ -154,21 +154,11 @@ impl<'a> App<'a> {
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
-        let default_perf_event = config.default_perf_event();
-        let default_perf_event_parts: Vec<&str> = default_perf_event.split(':').collect();
-        if default_perf_event_parts.len() < 2 {
-            bail!(
-                "Invalid default perf event: {}",
-                config.default_perf_event()
-            );
-        }
-        let subsystem = default_perf_event_parts[0].to_string();
-        let event = default_perf_event_parts[1].to_string();
-        let active_event =
-            ProfilingEvent::Perf(PerfEvent::new(subsystem.clone(), event.clone(), 0));
-        let mut active_prof_events = BTreeMap::new();
-
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let active_event =
+            ProfilingEvent::from_str(&config.default_profiling_event(), cpu_stat_tracker.clone())?;
+
+        let mut active_prof_events = BTreeMap::new();
         let mut default_events = get_default_events(cpu_stat_tracker.clone());
 
         let config_perf_events = PerfEvent::from_config(&config)?;
@@ -187,9 +177,8 @@ impl<'a> App<'a> {
             .collect();
 
         for cpu in topo.all_cpus.values() {
-            let mut event = PerfEvent::new(subsystem.clone(), event.clone(), cpu.id);
-            event.attach(process_id)?;
-            active_prof_events.insert(cpu.id, ProfilingEvent::Perf(event));
+            let event = active_event.start(cpu.id, process_id);
+            active_prof_events.insert(cpu.id, event);
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
             data.initialize_events(&default_events_str);
@@ -401,24 +390,7 @@ impl<'a> App<'a> {
         }
 
         for &cpu_id in self.topo.all_cpus.keys() {
-            let event = match prof_event {
-                ProfilingEvent::Perf(p) => {
-                    let mut p = p.clone();
-                    p.cpu = cpu_id;
-                    p.attach(self.process_id)?;
-                    ProfilingEvent::Perf(p)
-                }
-                ProfilingEvent::Kprobe(k) => {
-                    let mut k = k.clone();
-                    k.cpu = cpu_id;
-                    ProfilingEvent::Kprobe(k)
-                }
-                ProfilingEvent::CpuUtil(c) => {
-                    let mut c = c.clone();
-                    c.cpu = cpu_id;
-                    ProfilingEvent::CpuUtil(c)
-                }
-            };
+            let event = prof_event.start(cpu_id, self.process_id);
             self.active_prof_events.insert(cpu_id, event);
         }
         Ok(())
@@ -593,6 +565,7 @@ impl<'a> App<'a> {
                 .expect("NodeData should have been present");
             node_data.add_cpu_event_data(event.event_name(), val);
         }
+
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
         }

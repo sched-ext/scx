@@ -46,7 +46,7 @@ pub fn perf_event_config(subsystem: &str, event: &str) -> Result<u64> {
     read_file_u64(event_path)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PerfEvent {
     pub subsystem: String,
     pub event: String,
@@ -113,6 +113,17 @@ impl PerfEvent {
         Ok(events)
     }
 
+    /// Returns a perf event from a string.
+    pub fn from_str(event: &str) -> Result<Self> {
+        let event_parts: Vec<&str> = event.split(':').collect();
+        if event_parts.len() != 2 {
+            anyhow::bail!("Invalid perf event: {}", event);
+        }
+        let subsystem = event_parts[0].to_string();
+        let event = event_parts[1].to_string();
+        Ok(PerfEvent::new(subsystem, event, 0))
+    }
+
     /// Returns the set of default hardware events.
     pub fn default_hw_events() -> Vec<PerfEvent> {
         vec![
@@ -123,8 +134,8 @@ impl PerfEvent {
             PerfEvent::new("hw".to_string(), "cache-references".to_string(), 0),
             PerfEvent::new("hw".to_string(), "instructions".to_string(), 0),
             PerfEvent::new("hw".to_string(), "ref-cycles".to_string(), 0),
-            PerfEvent::new("hw".to_string(), "stalled-cycles-backend".to_string(), 0),
-            PerfEvent::new("hw".to_string(), "stalled-cycles-frontend".to_string(), 0),
+            // PerfEvent::new("hw".to_string(), "stalled-cycles-backend".to_string(), 0),
+            // PerfEvent::new("hw".to_string(), "stalled-cycles-frontend".to_string(), 0),
             PerfEvent::new("hw".to_string(), "bus-cycles".to_string(), 0),
             PerfEvent::new("hw".to_string(), "L1-dcache-load-misses".to_string(), 0),
         ]
@@ -324,4 +335,37 @@ pub fn available_perf_events() -> Result<BTreeMap<String, HashSet<String>>> {
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_event_parsing() {
+        let input = "cpu:cycles";
+        let parsed = ProfilingEvent::from_str(input).unwrap();
+        let expected =
+            ProfilingEvent::Perf(PerfEvent::new("cpu".to_string(), "cycles".to_string(), 0));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_invalid_event_empty_string() {
+        let result = ProfilingEvent::from_str("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_event_only_one_part() {
+        let result = ProfilingEvent::from_str("cpu");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_event_with_more_colons() {
+        let input = "intel:uncore:llc-misses";
+        let parsed = ProfilingEvent::from_str(input);
+        assert!(parsed.is_err());
+    }
 }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use sysinfo::System;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuUtilData {
     pub user: u64,
     pub nice: u64,
@@ -41,7 +41,7 @@ pub struct CpuStatSnapshot {
     pub freq: u64,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatTracker {
     pub prev: BTreeMap<usize, CpuStatSnapshot>,
     pub current: BTreeMap<usize, CpuStatSnapshot>,

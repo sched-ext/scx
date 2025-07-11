@@ -7,7 +7,7 @@ use crate::CpuStatTracker;
 use anyhow::{bail, Result};
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CpuUtilMetric {
     Total,
     User,
@@ -24,9 +24,18 @@ impl CpuUtilMetric {
             CpuUtilMetric::Frequency => "cpu_frequency_mhz",
         }
     }
+
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "cpu_total_util_percent" => Ok(CpuUtilMetric::Total),
+            "cpu_user_util_percent" => Ok(CpuUtilMetric::User),
+            "cpu_system_util_percent" => Ok(CpuUtilMetric::System),
+            _ => Err(anyhow::anyhow!("Invalid CPU util metric: {}", s)),
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CpuUtilEvent {
     pub cpu: usize,
     pub metric: CpuUtilMetric,
@@ -58,6 +67,9 @@ impl CpuUtilEvent {
 
     pub fn value(&self) -> Result<u64> {
         let tracker = self.tracker.read().unwrap();
+        if tracker.prev.is_empty() || tracker.current.is_empty() {
+            return Ok(0);
+        }
         let prev = tracker.prev.get(&self.cpu).unwrap();
         let current = tracker.current.get(&self.cpu).unwrap();
 
@@ -86,6 +98,7 @@ impl CpuUtilEvent {
 #[cfg(test)]
 mod tests {
     use crate::cpu_stats::CpuStatSnapshot;
+    use crate::ProfilingEvent;
     use crate::cpu_stats::CpuUtilData;
 
     use super::*;

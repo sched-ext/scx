@@ -5,7 +5,10 @@
 
 use anyhow::Result;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Returns the file content as a String.
 pub fn read_file_string(path: &str) -> Result<String> {
