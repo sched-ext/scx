@@ -14,10 +14,11 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::edm::ActionHandler;
+use crate::get_clock_value;
 use crate::{
-    Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction,
+    Action, CpuStatAction, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction,
+    GpuMemAction, IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use perfetto_protos::{
@@ -37,6 +38,7 @@ use perfetto_protos::{
         SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
         SchedWakingFtraceEvent,
     },
+    sys_stats::{sys_stats::CpuTimes, SysStats},
     thread_descriptor::ThreadDescriptor,
     trace::Trace,
     trace_packet::{trace_packet, TracePacket},
@@ -67,6 +69,7 @@ pub struct PerfettoTraceManager {
     processes: HashMap<u64, ProcessDescriptor>,
     threads: HashMap<u64, ThreadDescriptor>,
     process_uuids: HashMap<i32, u64>,
+    sys_stats: BTreeMap<u64, Vec<SysStats>>,
 }
 
 impl PerfettoTraceManager {
@@ -98,6 +101,7 @@ impl PerfettoTraceManager {
             processes: HashMap::new(),
             threads: HashMap::new(),
             process_uuids: HashMap::new(),
+            sys_stats: BTreeMap::new(),
         }
     }
 
@@ -167,45 +171,37 @@ impl PerfettoTraceManager {
         desc_map
     }
 
-    fn get_clock_value(&mut self, clock_id: libc::c_int) -> u64 {
-        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-        if unsafe { libc::clock_gettime(clock_id, &mut ts) } != 0 {
-            return 0;
-        }
-        (ts.tv_sec as u64 * 1_000_000_000) + ts.tv_nsec as u64
-    }
-
     fn snapshot_clocks(&mut self) {
         let clock_snapshot = ClockSnapshot {
             clocks: vec![
                 Clock {
                     clock_id: Some(BuiltinClock::BUILTIN_CLOCK_MONOTONIC as u32),
-                    timestamp: Some(self.get_clock_value(libc::CLOCK_MONOTONIC)),
+                    timestamp: Some(get_clock_value(libc::CLOCK_MONOTONIC)),
                     ..Clock::default()
                 },
                 Clock {
                     clock_id: Some(BuiltinClock::BUILTIN_CLOCK_BOOTTIME as u32),
-                    timestamp: Some(self.get_clock_value(libc::CLOCK_BOOTTIME)),
+                    timestamp: Some(get_clock_value(libc::CLOCK_BOOTTIME)),
                     ..Clock::default()
                 },
                 Clock {
                     clock_id: Some(BuiltinClock::BUILTIN_CLOCK_REALTIME as u32),
-                    timestamp: Some(self.get_clock_value(libc::CLOCK_REALTIME)),
+                    timestamp: Some(get_clock_value(libc::CLOCK_REALTIME)),
                     ..Clock::default()
                 },
                 Clock {
                     clock_id: Some(BuiltinClock::BUILTIN_CLOCK_REALTIME_COARSE as u32),
-                    timestamp: Some(self.get_clock_value(libc::CLOCK_REALTIME_COARSE)),
+                    timestamp: Some(get_clock_value(libc::CLOCK_REALTIME_COARSE)),
                     ..Clock::default()
                 },
                 Clock {
                     clock_id: Some(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_COARSE as u32),
-                    timestamp: Some(self.get_clock_value(libc::CLOCK_MONOTONIC_COARSE)),
+                    timestamp: Some(get_clock_value(libc::CLOCK_MONOTONIC_COARSE)),
                     ..Clock::default()
                 },
                 Clock {
                     clock_id: Some(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_RAW as u32),
-                    timestamp: Some(self.get_clock_value(libc::CLOCK_MONOTONIC_RAW)),
+                    timestamp: Some(get_clock_value(libc::CLOCK_MONOTONIC_RAW)),
                     ..Clock::default()
                 },
             ],
@@ -276,6 +272,7 @@ impl PerfettoTraceManager {
 
         let trace_cpus: Vec<u32> = self.ftrace_events.keys().cloned().collect();
         let trace_dsqs: Vec<u64> = self.dsq_nr_queued_events.keys().cloned().collect();
+        let stat_ts: Vec<u64> = self.sys_stats.keys().cloned().collect();
 
         fn timestamp_absolute_us(e: &TrackEvent) -> i64 {
             use perfetto_protos::track_event::track_event::Timestamp;
@@ -381,6 +378,19 @@ impl PerfettoTraceManager {
                                 self.dsq_nr_queued_trusted_packet_seq_uuid,
                             ),
                         ),
+                        ..TracePacket::default()
+                    });
+                }
+            }
+        }
+
+        // system stat events
+        for ts in &stat_ts {
+            if let Some(events) = self.sys_stats.remove(ts) {
+                for sys_stat_event in events {
+                    self.trace.packet.push(TracePacket {
+                        data: Some(trace_packet::Data::SysStats(sys_stat_event)),
+                        timestamp: Some(*ts),
                         ..TracePacket::default()
                     });
                 }
@@ -741,6 +751,57 @@ impl PerfettoTraceManager {
         });
     }
 
+    pub fn on_cpu_stat(&mut self, action: &CpuStatAction) {
+        let CpuStatAction {
+            ts,
+            cpu_data_prev,
+            cpu_data_current,
+        } = action;
+
+        let mut cpufreq_khz = Vec::with_capacity(cpu_data_prev.len());
+        let mut cpu_stat = Vec::with_capacity(cpu_data_prev.len());
+        for (cpu, data) in cpu_data_current.iter() {
+            cpufreq_khz.insert(
+                *cpu,
+                (data.freq * 1000)
+                    .try_into()
+                    .expect("Should have been able to convert u64 to u32"),
+            );
+
+            // Skip if we haven't collected prev data yet for this cpu
+            if !cpu_data_prev.contains_key(cpu) {
+                continue;
+            }
+
+            let current_data = &data.cpu_util_data;
+            let prev_data = &cpu_data_prev
+                .get(cpu)
+                .expect("Should have cpu data")
+                .cpu_util_data;
+
+            let cpu_time = CpuTimes {
+                cpu_id: Some(*cpu as u32),
+                user_ns: Some(current_data.user - prev_data.user),
+                user_nice_ns: Some(current_data.nice - prev_data.nice),
+                system_mode_ns: Some(current_data.system - prev_data.system),
+                idle_ns: Some(current_data.idle - prev_data.idle),
+                io_wait_ns: Some(current_data.iowait - prev_data.iowait),
+                irq_ns: Some(current_data.irq - prev_data.irq),
+                softirq_ns: Some(current_data.softirq - prev_data.softirq),
+                special_fields: SpecialFields::new(),
+            };
+            cpu_stat.insert(*cpu, cpu_time);
+        }
+
+        self.sys_stats.entry(*ts).or_default().push({
+            SysStats {
+                cpu_stat,
+                cpufreq_khz,
+                ..SysStats::default()
+            }
+        });
+    }
+
     /// Adds events for the sched_switch event.
     pub fn on_sched_switch(&mut self, action: &SchedSwitchAction) {
         let SchedSwitchAction {
@@ -870,6 +931,9 @@ impl ActionHandler for PerfettoTraceManager {
             }
             Action::Kprobe(a) => {
                 self.on_kprobe(a);
+            }
+            Action::CpuStat(a) => {
+                self.on_cpu_stat(a);
             }
             _ => {}
         }
