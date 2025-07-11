@@ -26,6 +26,7 @@ use scxtop::{bpf_skel::*, AppState};
 use anyhow::anyhow;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
+use futures::future::join_all;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::Link;
@@ -186,11 +187,10 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             links.push(skel.progs.on_sched_exec.attach()?);
             links.push(skel.progs.on_sched_exit.attach()?);
 
-            let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
+            let bpf_publisher = BpfEventActionPublisher::new(action_tx);
 
             let mut event_rbb = RingBufferBuilder::new();
             let mut edm = EventDispatchManager::new(None, None);
-            let warmup_done = Arc::new(AtomicBool::new(false));
             edm.register_bpf_handler(Box::new(bpf_publisher));
             let event_handler = move |data: &[u8]| {
                 let mut event = bpf_event::default();
@@ -203,59 +203,61 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let event_rb = event_rbb.build()?;
             let shutdown = Arc::new(AtomicBool::new(false));
             let stop_poll = shutdown.clone();
-            let stop_main = shutdown.clone();
+            let mut handles = Vec::new();
 
-            tokio::spawn(async move {
+            handles.push(tokio::spawn(async move {
                 loop {
                     let _ = event_rb.poll(Duration::from_millis(1));
                     if stop_poll.load(Ordering::Relaxed) {
+                        // Flush the ring buffer to ensure all events are processed
+                        let _ = event_rb.consume();
                         debug!("polling stopped");
                         break;
                     }
                 }
-            });
+            }));
 
-            let (complete_tx, mut complete_rx) = mpsc::channel(1);
             let trace_file_prefix = config.trace_file_prefix().to_string();
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
             let mut tracer = Tracer::new(skel);
             tracer.trace(&trace_args.kprobes)?;
 
-            info!("warming up for {}ms", trace_args.warmup_ms);
-            tokio::time::sleep(Duration::from_millis(trace_args.warmup_ms)).await;
-            debug!("starting trace");
-            let thread_warmup = warmup_done.clone();
             trace_manager.start()?;
-            thread_warmup.store(true, Ordering::Relaxed);
-            tokio::spawn(async move {
+            handles.push(tokio::spawn(async move {
                 let mut count = 0;
                 loop {
                     let action = action_rx.recv().await;
                     if let Some(a) = action {
-                        if thread_warmup.load(Ordering::Relaxed) {
-                            count += 1;
-                            trace_manager.on_action(&a).unwrap();
-                        }
-                    }
-                    if stop_main.load(Ordering::Relaxed) {
+                        count += 1;
+                        trace_manager
+                            .on_action(&a)
+                            .expect("Action should have been resolved");
+                    } else {
                         trace_manager.stop(trace_file, None).unwrap();
-                        info!("trace complete, collected {} events", count);
-                        let _ = complete_tx.send(1).await;
+                        info!("trace file compiled, collected {} events", count);
                         break;
                     }
                 }
-            });
+            }));
 
+            info!("starting trace for {}ms", trace_args.trace_ms);
             tokio::time::sleep(Duration::from_millis(trace_args.trace_ms)).await;
-            tracer.clear_links()?;
+
             // The order is important here:
             // 1) first drop the links to detach the attached BPF programs
             // 2) set the shutdown variable to stop background tokio threads
             // 3) wait for the completion of the trace file generation to complete
+            tracer.clear_links()?;
             drop(links);
             shutdown.store(true, Ordering::Relaxed);
-            let _ = complete_rx.recv().await;
+            info!("generating trace");
+            let results = join_all(handles).await;
+            for result in results {
+                if let Err(e) = result {
+                    eprintln!("Task panicked: {}", e);
+                }
+            }
 
             let stats = tracer.stats()?;
             info!("{:?}", stats);

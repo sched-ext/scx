@@ -103,9 +103,6 @@ pub struct TraceArgs {
     /// Trace duration.
     #[arg(short = 'd', long, default_value_t = 1000)]
     pub trace_ms: u64,
-    /// Trace warmup duration, make sure this is long enough or events may have poor data quality.
-    #[arg(short = 'w', long, default_value_t = 5000)]
-    pub warmup_ms: u64,
     /// Trace output file.
     #[arg(short = 'o', long)]
     pub output_file: Option<String>,
