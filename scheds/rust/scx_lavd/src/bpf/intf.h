@@ -104,10 +104,10 @@ struct task_ctx {
 	/*
 	 * Clocks when a task state transition happens for task statistics calculation
 	 */
-	u64	last_runnable_clk;	/* last time when a task wakes up others */
+	u64	last_runnable_clk;	/* last time when a task became runnable */
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	last_stopping_clk;	/* last time when scheduled out */
-	u64	last_quiescent_clk;	/* last time when a task waits for an event */
+	u64	last_quiescent_clk;	/* last time when a task became asleep */
 
 	/*
 	 * Task running statistics for latency criticality calculation
@@ -140,7 +140,7 @@ struct task_ctx {
 	 * Additional information when the scheduler is monitored,
 	 * so it is updated only when is_monitored is true.
 	 */
-	u64	resched_interval;	/* reschedule interval in ns */
+	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
 	u32	cpu_id;			/* where a task ran */
 	u32	prev_cpu_id;		/* where a task ran last time */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
@@ -158,6 +158,7 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
+	u64	rerunnable_interval;	/* rerunnable interval in ns: [last quiescent, last runnable] */
 	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */

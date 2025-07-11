@@ -561,6 +561,7 @@ impl<'a> Scheduler<'a> {
             lat_cri: tc.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,
+            rerunnable_interval: tx.rerunnable_interval,
             resched_interval: tc.resched_interval,
             run_freq: tc.run_freq,
             avg_runtime: tc.avg_runtime,
