@@ -1201,8 +1201,10 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
 	taskc->is_affinitized = bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids;
+	taskc->last_runnable_clk = now;
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */
+	taskc->last_quiescent_clk = now;
 	taskc->avg_runtime = slice_max_ns;
 	taskc->svc_time = sys_stat.avg_svc_time;
 
