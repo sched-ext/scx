@@ -31,7 +31,6 @@ use anyhow::anyhow;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use futures::future::join_all;
-use futures::future::join_all;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::Link;
@@ -192,7 +191,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             links.push(skel.progs.on_sched_exec.attach()?);
             links.push(skel.progs.on_sched_exit.attach()?);
 
-            let bpf_publisher = BpfEventActionPublisher::new(action_tx);
+            let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
             // Set up the event buffer
             let mut event_rbb = RingBufferBuilder::new();
