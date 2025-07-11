@@ -19,47 +19,54 @@ The configuration file has the following structure:
 default_sched = "scx_flash"
 default_mode = "Auto"
 
-[scheds.scx_bpfland]
-auto_mode = []
-gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
-powersave_mode = ["-m", "powersave"]
-
-[scheds.scx_rusty]
+[scheds.scx_rustland]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
+server_mode = []
 
 [scheds.scx_lavd]
 auto_mode = []
 gaming_mode = ["--performance"]
 lowlatency_mode = ["--performance"]
 powersave_mode = ["--powersave"]
+server_mode = []
 
 [scheds.scx_flash]
 auto_mode = []
 gaming_mode = ["-m", "all"]
 lowlatency_mode = ["-m", "performance", "-w", "-C", "0"]
 powersave_mode = ["-m", "powersave", "-I", "10000", "-t", "10000", "-s", "10000", "-S", "1000"]
+server_mode = ["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L"]
 
 [scheds.scx_p2dq]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = ["-y"]
 powersave_mode = []
+server_mode = ["--keep-running"]
 
-[scheds.scx_tickless]
-auto_mode = []
-gaming_mode = ["-f 5000 -s 5000"]
-lowlatency_mode = ["-f 5000 -s 1000"]
-powersave_mode = ["-f 50 -p"]
-
-[scheds.scx_rustland]
+[scheds.scx_rusty]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
+server_mode = []
+
+[scheds.scx_bpfland]
+auto_mode = []
+gaming_mode = ["-m", "performance"]
+lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
+powersave_mode = ["-m", "powersave"]
+server_mode = ["-p"]
+
+[scheds.scx_tickless]
+auto_mode = []
+gaming_mode = ["-f", "5000", "-s", "5000"]
+lowlatency_mode = ["-f", "5000", "-s", "1000"]
+powersave_mode = ["-f", "50", "-p"]
+server_mode = ["-f", "100"]
 ```
 
 **`default_sched`:**
