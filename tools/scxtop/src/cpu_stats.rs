@@ -1,10 +1,9 @@
 use anyhow::{bail, Result};
 use fb_procfs::ProcReader;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 use sysinfo::System;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuUtilData {
     pub user: u64,
     pub nice: u64,
@@ -35,28 +34,27 @@ impl CpuUtilData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatSnapshot {
     pub cpu_util_data: CpuUtilData,
-    pub freq: u64,
+    pub freq: u64, // in kHz
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatTracker {
     pub prev: BTreeMap<usize, CpuStatSnapshot>,
     pub current: BTreeMap<usize, CpuStatSnapshot>,
 }
 
 impl CpuStatTracker {
-    pub fn update(&mut self, proc_reader: &ProcReader, sys: Arc<Mutex<System>>) -> Result<()> {
+    pub fn update(&mut self, proc_reader: &ProcReader, sys: &mut System) -> Result<()> {
         self.prev = std::mem::take(&mut self.current);
 
         let proc_stat_data = proc_reader.read_stat()?;
-        let mut system_lock = sys.lock().unwrap();
-        system_lock.refresh_cpu_frequency();
+        sys.refresh_cpu_frequency();
 
         if let Some(mut cpu_map) = proc_stat_data.cpus_map {
-            for (i, cpu) in system_lock.cpus().iter().enumerate() {
+            for (i, cpu) in sys.cpus().iter().enumerate() {
                 let cpu_util_data = procfs_cpu_to_util_data(
                     cpu_map
                         .remove(&(i as u32))
@@ -94,6 +92,7 @@ fn procfs_cpu_to_util_data(stat: fb_procfs::CpuStat) -> CpuUtilData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_convert_to_stat_snapshot_success() {
@@ -194,11 +193,12 @@ mod tests {
         let mut tracker = CpuStatTracker::default();
         let proc_reader = ProcReader::default();
         let sys = Arc::new(Mutex::new(System::new_all()));
-        tracker.update(&proc_reader, sys.clone())?;
+        let mut sys_guard = sys.lock().unwrap();
+        tracker.update(&proc_reader, &mut sys_guard)?;
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        tracker.update(&proc_reader, sys.clone())?;
+        tracker.update(&proc_reader, &mut *sys_guard)?;
 
         assert!(!tracker.prev.is_empty());
         assert!(!tracker.current.is_empty());

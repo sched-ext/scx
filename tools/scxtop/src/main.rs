@@ -3,17 +3,21 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use fb_procfs::ProcReader;
 use scx_utils::compat;
 use scxtop::available_kprobe_events;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
+use scxtop::get_clock_value;
 use scxtop::mangoapp::poll_mangoapp;
 use scxtop::read_file_string;
 use scxtop::tracer::Tracer;
 use scxtop::Action;
 use scxtop::App;
+use scxtop::CpuStatAction;
+use scxtop::CpuStatTracker;
 use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
@@ -27,6 +31,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use futures::future::join_all;
+use futures::future::join_all;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::Link;
@@ -39,16 +44,16 @@ use ratatui::crossterm::event::{KeyCode::Char, KeyEvent};
 use simplelog::{
     ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger, TerminalMode, WriteLogger,
 };
-use std::sync::atomic::AtomicBool;
-use tokio::sync::mpsc;
-
 use std::ffi::CString;
 use std::fs::File;
 use std::mem::MaybeUninit;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use sysinfo::System;
+use tokio::sync::mpsc;
 
 fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
     match event {
@@ -169,6 +174,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
         .block_on(async {
             let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
+            // Set up the BPF skel and publisher
             let mut open_object = MaybeUninit::uninit();
             let mut builder = BpfSkelBuilder::default();
             if trace_args.verbose > 2 {
@@ -176,12 +182,11 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             }
 
             let skel = builder.open(&mut open_object)?;
-            // set sample rate to 1 here to populate the BPF tctxs
-            skel.maps.data_data.sample_rate = 1;
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
 
             let mut skel = skel.load()?;
+            skel.maps.data_data.enable_bpf_events = false;
             let mut links = attach_progs(&mut skel)?;
             links.push(skel.progs.on_sched_fork.attach()?);
             links.push(skel.progs.on_sched_exec.attach()?);
@@ -189,6 +194,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx);
 
+            // Set up the event buffer
             let mut event_rbb = RingBufferBuilder::new();
             let mut edm = EventDispatchManager::new(None, None);
             edm.register_bpf_handler(Box::new(bpf_publisher));
@@ -198,13 +204,19 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 let _ = edm.on_event(&event);
                 0
             };
-
             event_rbb.add(&skel.maps.events, event_handler)?;
             let event_rb = event_rbb.build()?;
+
+            // Set up the background threads
             let shutdown = Arc::new(AtomicBool::new(false));
             let stop_poll = shutdown.clone();
-            let mut handles = Vec::new();
+            let stop_stats = shutdown.clone();
 
+            let mut cpu_stat_tracker = CpuStatTracker::default();
+            let proc_reader = ProcReader::new();
+            let mut system = System::new_all();
+
+            let mut handles = Vec::new();
             handles.push(tokio::spawn(async move {
                 loop {
                     let _ = event_rb.poll(Duration::from_millis(1));
@@ -217,13 +229,37 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 }
             }));
 
+            handles.push(tokio::spawn(async move {
+                loop {
+                    if stop_stats.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let ts = get_clock_value(libc::CLOCK_BOOTTIME);
+                    cpu_stat_tracker
+                        .update(&proc_reader, &mut system)
+                        .expect("Failed to update cpu stats");
+                    let action = Action::CpuStat(CpuStatAction {
+                        ts,
+                        cpu_data_prev: cpu_stat_tracker.prev.clone(),
+                        cpu_data_current: cpu_stat_tracker.current.clone(),
+                    });
+                    action_tx
+                        .send(action)
+                        .expect("Failed to send CpuStat action");
+
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }));
+
             let trace_file_prefix = config.trace_file_prefix().to_string();
             let trace_file = trace_args.output_file.clone();
             let mut trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
+
+            info!("starting trace for {}ms", trace_args.trace_ms);
+            trace_manager.start()?;
             let mut tracer = Tracer::new(skel);
             tracer.trace(&trace_args.kprobes)?;
 
-            trace_manager.start()?;
             handles.push(tokio::spawn(async move {
                 let mut count = 0;
                 loop {
@@ -240,17 +276,14 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                     }
                 }
             }));
-
-            info!("starting trace for {}ms", trace_args.trace_ms);
             tokio::time::sleep(Duration::from_millis(trace_args.trace_ms)).await;
 
-            // The order is important here:
-            // 1) first drop the links to detach the attached BPF programs
-            // 2) set the shutdown variable to stop background tokio threads
+            // 1) set the shutdown variable to stop background tokio threads
+            // 2) next, drop the links to detach the attached BPF programs
             // 3) wait for the completion of the trace file generation to complete
+            shutdown.store(true, Ordering::Relaxed);
             tracer.clear_links()?;
             drop(links);
-            shutdown.store(true, Ordering::Relaxed);
             info!("generating trace");
             let results = join_all(handles).await;
             for result in results {

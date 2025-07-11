@@ -531,10 +531,11 @@ impl<'a> App<'a> {
         // always grab updated stats
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
         {
+            let mut system_guard = self.sys.lock().unwrap();
             self.cpu_stat_tracker
                 .write()
                 .unwrap()
-                .update(&self.proc_reader, self.sys.clone())?;
+                .update(&self.proc_reader, &mut system_guard)?;
         }
 
         if self.state == AppState::Scheduler {
