@@ -1326,6 +1326,37 @@ impl<'a> App<'a> {
             .collect()
     }
 
+    /// Draw a top banner saying "missing scheduler" when no scx scheduler
+    /// is loaded.
+    fn render_missing_scheduler_banner(&self, frame: &mut Frame) {
+        use ratatui::{
+            layout::{Constraint, Layout},
+            style::Color,
+            text::Span,
+            widgets::{Clear, Paragraph},
+        };
+
+        let [banner, _] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(frame.area());
+
+        frame.render_widget(Clear, banner);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        // Style the text to be red and bold.
+        let para = Paragraph::new(Span::styled(
+            "missing scheduler",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center)
+        .block(block);
+
+        frame.render_widget(para, banner);
+    }
+
     /// Renders scheduler stats.
     fn render_scheduler_stats(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         let paragraph = Paragraph::new(self.sched_stats_raw.clone());
@@ -1492,11 +1523,18 @@ impl<'a> App<'a> {
                 area,
                 render_title,
                 render_sample_rate,
-            ),
+            )?,
             ViewState::BarChart => {
-                self.render_scheduler_barchart(event, frame, area, render_sample_rate)
+                self.render_scheduler_barchart(event, frame, area, render_sample_rate)?
             }
         }
+
+        // Overlay the banner if no scheduler loaded.
+        if self.scheduler.is_empty() {
+            self.render_missing_scheduler_banner(frame);
+        }
+
+        Ok(())
     }
 
     /// Renders the event state.
