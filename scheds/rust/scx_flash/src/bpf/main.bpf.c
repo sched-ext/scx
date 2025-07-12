@@ -493,14 +493,22 @@ static inline u64 nr_tasks_waiting(s32 cpu)
  * Return the time slice that can be assigned to a task queued to @dsq_id
  * DSQ.
  */
-static inline u64 task_slice(s32 cpu)
+static inline u64 task_slice(const struct task_struct *p, s32 cpu)
 {
 	u64 nr_wait = nr_tasks_waiting(cpu);
 
-	if (!nr_wait)
-		return tickless_sched ? SCX_SLICE_INF : slice_max;
+	/*
+	 * Scale by task weight only when -n / native_priority is set.
+	 * Since we don't have preemption, if there's a big gap between
+	 * priorities certain tasks may get a really long time slice and
+	 * this can hurt interactivity.
+	 */
+	u64 smax = native_priority ? scale_by_task_weight(p, slice_max) : slice_max;
 
-	return MAX(slice_max / nr_wait, slice_min);
+	if (!nr_wait)
+		return tickless_sched ? SCX_SLICE_INF : smax;
+
+	return MAX(smax / nr_wait, slice_min);
 }
 
 /*
@@ -1095,7 +1103,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, tctx, prev_cpu, wake_flags, &is_idle);
 	if (rr_sched || (is_idle && can_direct_dispatch(cpu))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(cpu), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, cpu), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -1260,7 +1268,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * If the CPU is not busy dispatch tasks in a round-robin fashion.
 	 */
 	if (direct_dispatch && !is_cpu_busy(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p, cpu), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		dispatched = true;
 
@@ -1273,7 +1281,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (is_pcpu_task(p)) {
 		if (can_direct_dispatch(cpu) && scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(cpu), enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, cpu), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			dispatched = true;
 
@@ -1295,7 +1303,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	if (can_direct_dispatch(cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(cpu), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p, cpu), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		dispatched = true;
 	}
@@ -1337,7 +1345,7 @@ static void preempt_curr(s32 cpu)
 	bpf_rcu_read_lock();
 	curr = scx_bpf_cpu_rq(cpu)->curr;
 	if (curr->scx.slice == SCX_SLICE_INF)
-		curr->scx.slice = task_slice(cpu);
+		curr->scx.slice = task_slice(curr, cpu);
 	bpf_rcu_read_unlock();
 }
 
@@ -1363,13 +1371,13 @@ static void rr_enqueue(struct task_struct *p, struct task_ctx *tctx,
 			cpu = pick_idle_cpu(p, tctx, prev_cpu, 0, &is_idle);
 			if (is_idle) {
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-						   task_slice(cpu), enq_flags);
+						   task_slice(p, cpu), enq_flags);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 				return;
 			}
 		}
 	}
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(prev_cpu), enq_flags);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
 }
 
 /*
@@ -1425,14 +1433,14 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!scx_bpf_task_running(p) && can_enqueue_to_cpu(p, prev_cpu)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
+					 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
 		return;
 	}
 	scx_bpf_dsq_insert_vtime(p, node_to_dsq(node),
-				 task_slice(prev_cpu), p->scx.dsq_vtime, enq_flags);
+				 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
@@ -1549,7 +1557,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(cpu);
+		prev->scx.slice = task_slice(prev, cpu);
 }
 
 /*
