@@ -124,6 +124,7 @@ def main():
         for scheduler in [
             "scx_bpfland",
             "scx_chaos",
+            "scx_cosmos",
             "scx_lavd",
             "scx_p2dq",
             "scx_rlfifo",
