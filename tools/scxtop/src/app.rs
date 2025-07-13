@@ -155,7 +155,7 @@ impl<'a> App<'a> {
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
-        let active_event = ProfilingEvent::from_str(
+        let active_event = ProfilingEvent::from_str_args(
             &config.default_profiling_event(),
             Some(cpu_stat_tracker.clone()),
         )?;

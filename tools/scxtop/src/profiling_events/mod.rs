@@ -8,6 +8,7 @@ pub mod kprobe;
 pub mod perf;
 
 use anyhow::Result;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 pub use cpu_util::CpuUtilEvent;
@@ -62,7 +63,7 @@ impl ProfilingEvent {
         }
     }
 
-    pub fn from_str(s: &str, tracker: Option<Arc<RwLock<CpuStatTracker>>>) -> Result<Self> {
+    pub fn from_str_args(s: &str, tracker: Option<Arc<RwLock<CpuStatTracker>>>) -> Result<Self> {
         let (source, event) = s
             .split_once(':')
             .ok_or(anyhow::anyhow!("Invalid profiling event: {}", s))?;
@@ -72,7 +73,7 @@ impl ProfilingEvent {
                 CpuUtilMetric::from_str(event)?,
                 tracker.expect("CpuStatTracker not provided"),
             ))),
-            "perf" => Ok(ProfilingEvent::Perf(PerfEvent::from_str(event, 0)?)),
+            "perf" => Ok(ProfilingEvent::Perf(PerfEvent::from_str_args(event, 0)?)),
             "kprobe" => Ok(ProfilingEvent::Kprobe(KprobeEvent::new(
                 event.to_string(),
                 0,
@@ -108,7 +109,8 @@ mod tests {
     fn test_cpu_event_parsing() {
         let tracker = dummy_tracker();
         let result =
-            ProfilingEvent::from_str("cpu:cpu_total_util_percent", Some(tracker.clone())).unwrap();
+            ProfilingEvent::from_str_args("cpu:cpu_total_util_percent", Some(tracker.clone()))
+                .unwrap();
 
         let expected = ProfilingEvent::CpuUtil(CpuUtilEvent::new(0, CpuUtilMetric::Total, tracker));
 
@@ -117,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_perf_event_parsing() {
-        let result = ProfilingEvent::from_str("perf:hw:cycles", None).unwrap();
+        let result = ProfilingEvent::from_str_args("perf:hw:cycles", None).unwrap();
 
         let expected =
             ProfilingEvent::Perf(PerfEvent::new("hw".to_string(), "cycles".to_string(), 0));
@@ -127,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_kprobe_event_parsing() {
-        let result = ProfilingEvent::from_str("kprobe:vfs_read", None).unwrap();
+        let result = ProfilingEvent::from_str_args("kprobe:vfs_read", None).unwrap();
 
         let expected = ProfilingEvent::Kprobe(KprobeEvent::new("vfs_read".to_string(), 0));
 
@@ -137,33 +139,33 @@ mod tests {
     #[test]
     fn test_invalid_format_missing_colon() {
         let tracker = dummy_tracker();
-        let err = ProfilingEvent::from_str("invalid_format", None);
+        let err = ProfilingEvent::from_str_args("invalid_format", None);
         assert!(err.is_err());
 
-        let err = ProfilingEvent::from_str("invalid_format", Some(tracker));
+        let err = ProfilingEvent::from_str_args("invalid_format", Some(tracker));
         assert!(err.is_err());
     }
 
     #[test]
     fn test_invalid_source_type() {
         let tracker = dummy_tracker();
-        let err = ProfilingEvent::from_str("foo:bar", None);
+        let err = ProfilingEvent::from_str_args("foo:bar", None);
         assert!(err.is_err());
 
-        let err = ProfilingEvent::from_str("foo:bar", Some(tracker));
+        let err = ProfilingEvent::from_str_args("foo:bar", Some(tracker));
         assert!(err.is_err());
     }
 
     #[test]
     fn test_invalid_cpu_metric() {
         let tracker = dummy_tracker();
-        let result = ProfilingEvent::from_str("cpu:not_a_real_metric", Some(tracker));
+        let result = ProfilingEvent::from_str_args("cpu:not_a_real_metric", Some(tracker));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_perf_event() {
-        let result = ProfilingEvent::from_str("perf:", None);
+        let result = ProfilingEvent::from_str_args("perf:", None);
         assert!(result.is_err());
     }
 }

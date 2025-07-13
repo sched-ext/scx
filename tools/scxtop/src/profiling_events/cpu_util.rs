@@ -7,6 +7,7 @@ use crate::CpuStatTracker;
 use anyhow::{bail, Result};
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -17,6 +18,19 @@ pub enum CpuUtilMetric {
     Frequency,
 }
 
+impl FromStr for CpuUtilMetric {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "cpu_total_util_percent" => Ok(CpuUtilMetric::Total),
+            "cpu_user_util_percent" => Ok(CpuUtilMetric::User),
+            "cpu_system_util_percent" => Ok(CpuUtilMetric::System),
+            _ => Err(anyhow::anyhow!("Invalid CPU util metric: {}", s)),
+        }
+    }
+}
+
 impl CpuUtilMetric {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -24,15 +38,6 @@ impl CpuUtilMetric {
             CpuUtilMetric::User => "cpu_user_util_percent",
             CpuUtilMetric::System => "cpu_system_util_percent",
             CpuUtilMetric::Frequency => "cpu_frequency_mhz",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "cpu_total_util_percent" => Ok(CpuUtilMetric::Total),
-            "cpu_user_util_percent" => Ok(CpuUtilMetric::User),
-            "cpu_system_util_percent" => Ok(CpuUtilMetric::System),
-            _ => Err(anyhow::anyhow!("Invalid CPU util metric: {}", s)),
         }
     }
 }

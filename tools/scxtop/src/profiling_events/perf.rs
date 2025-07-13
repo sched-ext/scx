@@ -114,7 +114,7 @@ impl PerfEvent {
     }
 
     /// Returns a perf event from a string.
-    pub fn from_str(event: &str, cpu: usize) -> Result<Self> {
+    pub fn from_str_args(event: &str, cpu: usize) -> Result<Self> {
         let event_parts: Vec<&str> = event.split(':').collect();
         if event_parts.len() != 2 {
             anyhow::bail!("Invalid perf event: {}", event);
@@ -348,7 +348,7 @@ mod tests {
     fn test_valid_event_parsing() {
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
         let input = "perf:cpu:cycles";
-        let parsed = ProfilingEvent::from_str(input, Some(cpu_stat_tracker)).unwrap();
+        let parsed = ProfilingEvent::from_str_args(input, Some(cpu_stat_tracker)).unwrap();
         let expected =
             ProfilingEvent::Perf(PerfEvent::new("cpu".to_string(), "cycles".to_string(), 0));
         assert_eq!(parsed, expected);
@@ -356,19 +356,19 @@ mod tests {
 
     #[test]
     fn test_invalid_event_empty_string() {
-        let result = PerfEvent::from_str("", 0);
+        let result = PerfEvent::from_str_args("", 0);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_event_only_one_part() {
-        let result = PerfEvent::from_str("cpu", 0);
+        let result = PerfEvent::from_str_args("cpu", 0);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_event_with_more_colons() {
-        let parsed = PerfEvent::from_str("intel:uncore:llc-misses", 0);
+        let parsed = PerfEvent::from_str_args("intel:uncore:llc-misses", 0);
         assert!(parsed.is_err());
     }
 }
