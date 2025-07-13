@@ -52,6 +52,11 @@ enum p2dq_timers_defs {
 	MAX_TIMERS,
 };
 
+enum p2dq_lb_mode {
+	PICK2_LOAD,
+	PICK2_NR_QUEUED,
+};
+
 enum stat_idx {
 	P2DQ_STAT_DIRECT,
 	P2DQ_STAT_DSQ_SAME,

@@ -78,6 +78,7 @@ const volatile struct {
 	u64 min_llc_runs_pick2;
 	u64 backoff_ns;
 	u32 min_nr_queued_pick2;
+	int pick2_mode;
 	bool max_dsq_pick2;
 	bool eager_load_balance;
 
@@ -92,6 +93,7 @@ const volatile struct {
 	.min_llc_runs_pick2 = 5,
 	.backoff_ns = 5LLU * NSEC_PER_MSEC,
 	.min_nr_queued_pick2 = 10,
+	.pick2_mode = PICK2_LOAD,
 	.max_dsq_pick2 = false,
 	.eager_load_balance = true,
 
@@ -1249,6 +1251,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 			return -EINVAL;
 	}
 
+
 	if (right->load > left->load) {
 		first = right;
 		second = left;
@@ -1267,15 +1270,27 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
 	      cpu, first->id, first->load, second->id, second->load);
 
-	cur_load = cur_llcx->load + ((cur_llcx->load * lb_config.slack_factor) / 100);
+	if (lb_config.pick2_mode == PICK2_LOAD) {
+		cur_load = cur_llcx->load + ((cur_llcx->load * lb_config.slack_factor) / 100);
 
-	if (first->load > cur_load &&
-	    consume_llc(first))
-		return 0;
+		if (first->load > cur_load &&
+		    consume_llc(first))
+			return 0;
 
-	if (second->load > cur_load &&
-	    consume_llc(second))
-		return 0;
+		if (second->load > cur_load &&
+		    consume_llc(second))
+			return 0;
+	} else if (lb_config.pick2_mode == PICK2_NR_QUEUED) {
+		cur_load = llc_nr_queued(cur_llcx);
+
+		if (llc_nr_queued(first) >= cur_load &&
+		    consume_llc(first))
+			return 0;
+
+		if (llc_nr_queued(second) >= cur_load &&
+		    consume_llc(second))
+			return 0;
+	}
 
 	return 0;
 }
