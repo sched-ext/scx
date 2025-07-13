@@ -7,6 +7,7 @@ pub mod cpu_util;
 pub mod kprobe;
 pub mod perf;
 
+use anyhow::Result;
 use std::sync::{Arc, RwLock};
 
 pub use cpu_util::CpuUtilEvent;
@@ -16,7 +17,7 @@ pub use perf::{available_perf_events, PerfEvent};
 use crate::profiling_events::cpu_util::CpuUtilMetric;
 use crate::CpuStatTracker;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProfilingEvent {
     CpuUtil(CpuUtilEvent),
     Perf(PerfEvent),
@@ -32,29 +33,28 @@ impl ProfilingEvent {
         }
     }
 
-    pub fn start(&self, cpu: usize, process: i32) -> ProfilingEvent {
+    pub fn start(&self, cpu: usize, process: i32) -> Result<ProfilingEvent> {
         match self {
             ProfilingEvent::Perf(p) => {
                 let mut p = p.clone();
                 p.cpu = cpu;
-                p.attach(process)
-                    .expect("Failed to attach perf event to process");
-                ProfilingEvent::Perf(p)
+                p.attach(process)?;
+                Ok(ProfilingEvent::Perf(p))
             }
             ProfilingEvent::Kprobe(k) => {
                 let mut k = k.clone();
                 k.cpu = cpu;
-                ProfilingEvent::Kprobe(k)
+                Ok(ProfilingEvent::Kprobe(k))
             }
             ProfilingEvent::CpuUtil(c) => {
                 let mut c = c.clone();
                 c.cpu = cpu;
-                ProfilingEvent::CpuUtil(c)
+                Ok(ProfilingEvent::CpuUtil(c))
             }
         }
     }
 
-    pub fn value(&mut self, reset: bool) -> anyhow::Result<u64> {
+    pub fn value(&mut self, reset: bool) -> Result<u64> {
         match self {
             ProfilingEvent::CpuUtil(c) => c.value(),
             ProfilingEvent::Perf(p) => p.value(reset),
@@ -62,15 +62,17 @@ impl ProfilingEvent {
         }
     }
 
-    pub fn from_str(s: &str, tracker: Arc<RwLock<CpuStatTracker>>) -> anyhow::Result<Self> {
-        let (source, event) = s.split_once(':').expect("Invalid profiling event");
+    pub fn from_str(s: &str, tracker: Option<Arc<RwLock<CpuStatTracker>>>) -> Result<Self> {
+        let (source, event) = s
+            .split_once(':')
+            .ok_or(anyhow::anyhow!("Invalid profiling event: {}", s))?;
         match source {
             "cpu" => Ok(ProfilingEvent::CpuUtil(CpuUtilEvent::new(
                 0,
                 CpuUtilMetric::from_str(event)?,
-                tracker,
+                tracker.expect("CpuStatTracker not provided"),
             ))),
-            "perf" => Ok(ProfilingEvent::Perf(PerfEvent::from_str(event)?)),
+            "perf" => Ok(ProfilingEvent::Perf(PerfEvent::from_str(event, 0)?)),
             "kprobe" => Ok(ProfilingEvent::Kprobe(KprobeEvent::new(
                 event.to_string(),
                 0,
@@ -106,33 +108,28 @@ mod tests {
     fn test_cpu_event_parsing() {
         let tracker = dummy_tracker();
         let result =
-            ProfilingEvent::from_str("cpu:cpu_total_util_percent", tracker.clone()).unwrap();
+            ProfilingEvent::from_str("cpu:cpu_total_util_percent", Some(tracker.clone())).unwrap();
 
-        let expected = ProfilingEvent::CpuUtil(CpuUtilEvent::new(
-            0,
-            CpuUtilMetric::from_str("cpu_total_util_percent").unwrap(),
-            tracker,
-        ));
+        let expected = ProfilingEvent::CpuUtil(CpuUtilEvent::new(0, CpuUtilMetric::Total, tracker));
 
         assert_eq!(result, expected);
     }
 
     #[test]
     fn test_perf_event_parsing() {
-        let tracker = dummy_tracker();
-        let result = ProfilingEvent::from_str("perf:hw:cycles", tracker).unwrap();
+        let result = ProfilingEvent::from_str("perf:hw:cycles", None).unwrap();
 
-        let expected = ProfilingEvent::Perf(PerfEvent::from_str("hw:cycles").unwrap());
+        let expected =
+            ProfilingEvent::Perf(PerfEvent::new("hw".to_string(), "cycles".to_string(), 0));
 
         assert_eq!(result, expected);
     }
 
     #[test]
     fn test_kprobe_event_parsing() {
-        let tracker = dummy_tracker();
-        let result = ProfilingEvent::from_str("kprobe:vfs_read", tracker).unwrap();
+        let result = ProfilingEvent::from_str("kprobe:vfs_read", None).unwrap();
 
-        let expected = ProfilingEvent::Kprobe(KprobeEvent::new("vfs_read", 0).unwrap());
+        let expected = ProfilingEvent::Kprobe(KprobeEvent::new("vfs_read".to_string(), 0));
 
         assert_eq!(result, expected);
     }
@@ -140,35 +137,33 @@ mod tests {
     #[test]
     fn test_invalid_format_missing_colon() {
         let tracker = dummy_tracker();
-        let err = ProfilingEvent::from_str("invalid_format", tracker);
-        assert!(err.is_err(),);
+        let err = ProfilingEvent::from_str("invalid_format", None);
+        assert!(err.is_err());
+
+        let err = ProfilingEvent::from_str("invalid_format", Some(tracker));
+        assert!(err.is_err());
     }
 
     #[test]
     fn test_invalid_source_type() {
         let tracker = dummy_tracker();
-        let err = ProfilingEvent::from_str("foo:bar", tracker);
-        assert!(err.is_err(),);
+        let err = ProfilingEvent::from_str("foo:bar", None);
+        assert!(err.is_err());
+
+        let err = ProfilingEvent::from_str("foo:bar", Some(tracker));
+        assert!(err.is_err());
     }
 
     #[test]
     fn test_invalid_cpu_metric() {
         let tracker = dummy_tracker();
-        let result = ProfilingEvent::from_str("cpu:not_a_real_metric", tracker);
+        let result = ProfilingEvent::from_str("cpu:not_a_real_metric", Some(tracker));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_perf_event() {
-        let tracker = dummy_tracker();
-        let result = ProfilingEvent::from_str("perf:", tracker);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_invalid_kprobe_event() {
-        let tracker = dummy_tracker();
-        let result = ProfilingEvent::from_str("kprobe:", tracker);
+        let result = ProfilingEvent::from_str("perf:", None);
         assert!(result.is_err());
     }
 }

@@ -155,8 +155,10 @@ impl<'a> App<'a> {
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
-        let active_event =
-            ProfilingEvent::from_str(&config.default_profiling_event(), cpu_stat_tracker.clone())?;
+        let active_event = ProfilingEvent::from_str(
+            &config.default_profiling_event(),
+            Some(cpu_stat_tracker.clone()),
+        )?;
 
         let mut active_prof_events = BTreeMap::new();
         let mut default_events = get_default_events(cpu_stat_tracker.clone());
@@ -177,7 +179,7 @@ impl<'a> App<'a> {
             .collect();
 
         for cpu in topo.all_cpus.values() {
-            let event = active_event.start(cpu.id, process_id);
+            let event = active_event.start(cpu.id, process_id)?;
             active_prof_events.insert(cpu.id, event);
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
@@ -390,7 +392,7 @@ impl<'a> App<'a> {
         }
 
         for &cpu_id in self.topo.all_cpus.keys() {
-            let event = prof_event.start(cpu_id, self.process_id);
+            let event = prof_event.start(cpu_id, self.process_id)?;
             self.active_prof_events.insert(cpu_id, event);
         }
         Ok(())

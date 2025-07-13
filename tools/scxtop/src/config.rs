@@ -324,6 +324,10 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Action;
+    use clap::Parser;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn test_merge_configs() {
@@ -370,8 +374,8 @@ mod tests {
             "1000",
             "--worker-threads",
             "8",
-            "--default-perf-event",
-            "cpu:instructions",
+            "--default-profiling-event",
+            "perf:cpu:instructions",
         ])
         .unwrap();
 
@@ -396,7 +400,7 @@ mod tests {
         assert_eq!(config.worker_threads.unwrap(), 8);
         assert_eq!(
             config.default_profiling_event.unwrap(),
-            "cpu:instructions".to_string()
+            "perf:cpu:instructions".to_string()
         );
         assert!(config.keymap.is_none());
         assert!(config.active_keymap.is_empty());
@@ -421,7 +425,7 @@ mod tests {
         assert!(config.worker_threads.is_none());
         assert_eq!(
             config.default_profiling_event.unwrap(),
-            "hw:cycles".to_string()
+            "cpu:cpu_total_util_percent".to_string()
         );
     }
 
@@ -557,11 +561,14 @@ mod tests {
         assert_eq!(config.worker_threads(), 8);
 
         // Default Perf Event
-        assert_eq!(config.default_profiling_event(), "hw:cycles".to_string());
-        config.default_profiling_event = Some("cpu:instructions".to_string());
         assert_eq!(
             config.default_profiling_event(),
-            "cpu:instructions".to_string()
+            "cpu:cpu_total_util_percent".to_string()
+        );
+        config.default_profiling_event = Some("perf:cpu:instructions".to_string());
+        assert_eq!(
+            config.default_profiling_event(),
+            "perf:cpu:instructions".to_string()
         );
 
         // Trace Warmup NS
@@ -598,7 +605,10 @@ mod tests {
         assert_eq!(config.trace_file_prefix(), TRACE_FILE_PREFIX);
         assert_eq!(config.trace_duration_ns(), 1250 * 1_000_000);
         assert_eq!(config.worker_threads(), 4);
-        assert_eq!(config.default_profiling_event(), "hw:cycles".to_string());
+        assert_eq!(
+            config.default_profiling_event(),
+            "cpu:cpu_total_util_percent".to_string()
+        );
         assert_eq!(config.trace_warmup_ns(), 750 * 1_000_000);
     }
 
@@ -830,7 +840,7 @@ mod tests {
         tick_rate_ms = 500
         debug = false
         exclude_bpf = true
-        default_profiling_event = "mem:faults"
+        default_profiling_event = "perf:mem:faults"
 
         [keymap]
         S = "SaveConfig"
@@ -882,8 +892,8 @@ mod tests {
             "--perf-events",
             "cpu:cycles",
             "mem:faults",
-            "--default-perf-event",
-            "cpu:instructions",
+            "--default-profiling-event",
+            "perf:cpu:instructions",
         ])
         .unwrap();
 
@@ -900,7 +910,7 @@ mod tests {
         );
         assert_eq!(
             config.default_profiling_event(),
-            "cpu:instructions".to_string()
+            "perf:cpu:instructions".to_string()
         );
 
         assert!(config

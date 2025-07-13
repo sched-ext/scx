@@ -35,7 +35,7 @@ impl CpuUtilData {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatSnapshot {
     pub cpu_util_data: CpuUtilData,
     pub freq: u64,

@@ -5,6 +5,8 @@
 
 use crate::CpuStatTracker;
 use anyhow::{bail, Result};
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -95,10 +97,45 @@ impl CpuUtilEvent {
     }
 }
 
+impl PartialEq for CpuUtilEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.cpu == other.cpu
+            && self.metric == other.metric
+            && Arc::ptr_eq(&self.tracker, &other.tracker)
+    }
+}
+
+impl Eq for CpuUtilEvent {}
+
+impl PartialOrd for CpuUtilEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CpuUtilEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.cpu.cmp(&other.cpu) {
+            Ordering::Equal => match self.metric.cmp(&other.metric) {
+                Ordering::Equal => Arc::as_ptr(&self.tracker).cmp(&Arc::as_ptr(&other.tracker)),
+                other => other,
+            },
+            other => other,
+        }
+    }
+}
+
+impl Hash for CpuUtilEvent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.cpu.hash(state);
+        self.metric.hash(state);
+        std::ptr::hash(Arc::as_ptr(&self.tracker), state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::cpu_stats::CpuStatSnapshot;
-    use crate::ProfilingEvent;
     use crate::cpu_stats::CpuUtilData;
 
     use super::*;
