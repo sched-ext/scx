@@ -33,7 +33,7 @@ impl ProfilingEvent {
         }
     }
 
-    pub fn start(&self, cpu: usize, process: i32) -> Result<ProfilingEvent> {
+    pub fn initialize_for_cpu(&self, cpu: usize, process: i32) -> Result<ProfilingEvent> {
         match self {
             ProfilingEvent::Perf(p) => {
                 let mut p = p.clone();

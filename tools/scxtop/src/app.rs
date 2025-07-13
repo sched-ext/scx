@@ -179,7 +179,7 @@ impl<'a> App<'a> {
             .collect();
 
         for cpu in topo.all_cpus.values() {
-            let event = active_event.start(cpu.id, process_id)?;
+            let event = active_event.initialize_for_cpu(cpu.id, process_id)?;
             active_prof_events.insert(cpu.id, event);
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
@@ -392,7 +392,7 @@ impl<'a> App<'a> {
         }
 
         for &cpu_id in self.topo.all_cpus.keys() {
-            let event = prof_event.start(cpu_id, self.process_id)?;
+            let event = prof_event.initialize_for_cpu(cpu_id, self.process_id)?;
             self.active_prof_events.insert(cpu_id, event);
         }
         Ok(())
