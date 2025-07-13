@@ -37,7 +37,7 @@ impl CpuUtilData {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatSnapshot {
     pub cpu_util_data: CpuUtilData,
-    pub freq: u64, // in kHz
+    pub freq_khz: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -62,7 +62,7 @@ impl CpuStatTracker {
                 );
                 let snapshot = CpuStatSnapshot {
                     cpu_util_data,
-                    freq: cpu.frequency(),
+                    freq_khz: cpu.frequency(),
                 };
                 self.current.insert(i, snapshot);
             }

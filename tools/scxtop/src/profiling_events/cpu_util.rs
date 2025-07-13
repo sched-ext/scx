@@ -62,7 +62,7 @@ impl CpuUtilEvent {
         let current = tracker.current.get(&self.cpu).unwrap();
 
         if self.metric == CpuUtilMetric::Frequency {
-            return Ok(current.freq);
+            return Ok(current.freq_khz);
         }
 
         let total = current.cpu_util_data.total_util() - prev.cpu_util_data.total_util();

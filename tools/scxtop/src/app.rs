@@ -431,7 +431,7 @@ impl<'a> App<'a> {
                 .cpu_data
                 .get_mut(cpu_id)
                 .expect("CpuData should have been present");
-            cpu_data.add_event_data("cpu_freq", data.freq * 1000);
+            cpu_data.add_event_data("cpu_freq", data.freq_khz * 1000);
         }
         Ok(())
     }

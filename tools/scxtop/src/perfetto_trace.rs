@@ -763,7 +763,7 @@ impl PerfettoTraceManager {
         for (cpu, data) in cpu_data_current.iter() {
             cpufreq_khz.insert(
                 *cpu,
-                (data.freq * 1000)
+                (data.freq_khz * 1000)
                     .try_into()
                     .expect("Should have been able to convert u64 to u32"),
             );

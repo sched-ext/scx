@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
+use nix::time::{clock_gettime, ClockId};
 use std::fs;
 use std::io::Read;
 
@@ -27,11 +28,8 @@ pub fn format_hz(hz: u64) -> String {
 
 /// Returns the current clock_id time in nanoseconds.
 pub fn get_clock_value(clock_id: libc::c_int) -> u64 {
-    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-    if unsafe { libc::clock_gettime(clock_id, &mut ts) } != 0 {
-        return 0;
-    }
-    (ts.tv_sec as u64 * 1_000_000_000) + ts.tv_nsec as u64
+    let ts = clock_gettime(ClockId::from_raw(clock_id)).expect("Failed to get clock time");
+    (ts.tv_sec() as u64 * 1_000_000_000) + ts.tv_nsec() as u64
 }
 
 /// Replaces non-breaking spaces with regular spaces. [TEMPORARY]
