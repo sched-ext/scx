@@ -10,12 +10,13 @@ mod bpf_stats;
 pub mod cli;
 pub mod config;
 mod cpu_data;
-pub mod cpu_stats;
+mod cpu_stats;
 pub mod edm;
 mod event_data;
 mod keymap;
 mod llc_data;
 pub mod mangoapp;
+mod mem_stats;
 mod node_data;
 mod perfetto_trace;
 pub mod profiling_events;
@@ -35,6 +36,7 @@ pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
 pub use llc_data::LlcData;
+pub use mem_stats::MemStatSnapshot;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
 pub use profiling_events::{
@@ -292,10 +294,11 @@ pub struct KprobeAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CpuStatAction {
+pub struct SystemStatAction {
     pub ts: u64,
     pub cpu_data_prev: BTreeMap<usize, CpuStatSnapshot>,
     pub cpu_data_current: BTreeMap<usize, CpuStatSnapshot>,
+    pub mem_info: MemStatSnapshot,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -318,7 +321,7 @@ pub enum Action {
     ClearEvent,
     CpuhpEnter(CpuhpEnterAction),
     CpuhpExit(CpuhpExitAction),
-    CpuStat(CpuStatAction),
+    SystemStat(SystemStatAction),
     DecBpfSampleRate,
     DecTickRate,
     Down,
