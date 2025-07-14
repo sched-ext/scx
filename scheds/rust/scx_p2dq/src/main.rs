@@ -61,6 +61,7 @@ use scx_p2dq::bpf_skel::*;
 use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
 
+const SCHEDULER_NAME: &str = "scx_p2dq";
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
 ///
 /// The BPF part does simple vtime or round robin scheduling in each domain
@@ -340,6 +341,8 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
+        info!("Unregister {} scheduler", SCHEDULER_NAME);
+
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
         }
