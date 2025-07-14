@@ -843,6 +843,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
+		stat_inc(P2DQ_STAT_ENQ_CPU);
 		taskc->dsq_id = cpuc->affn_dsq;
 		update_vtime(p, cpuc, taskc, llcx);
 		if (timeline_config.deadline)
