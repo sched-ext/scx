@@ -907,6 +907,10 @@ impl Drop for Scheduler<'_> {
                 }
             }
         }
+
+        if let Some(struct_ops) = self.struct_ops.take() {
+            drop(struct_ops);
+        }
     }
 }
 
