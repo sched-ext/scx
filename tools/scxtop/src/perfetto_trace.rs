@@ -843,9 +843,7 @@ impl PerfettoTraceManager {
         }
 
         let mem_data = vec![
-            Self::meminfo_value(MeminfoCounters::MEMINFO_MEM_TOTAL, mem_info.total_kb),
             Self::meminfo_value(MeminfoCounters::MEMINFO_MEM_FREE, mem_info.free_kb),
-            Self::meminfo_value(MeminfoCounters::MEMINFO_SWAP_TOTAL, mem_info.swap_total_kb),
             Self::meminfo_value(MeminfoCounters::MEMINFO_SWAP_FREE, mem_info.swap_free_kb),
         ];
 
