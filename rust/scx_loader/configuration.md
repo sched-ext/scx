@@ -16,50 +16,57 @@ If no configuration file is found at any of these paths, `scx_loader` will use t
 The configuration file has the following structure:
 
 ```toml
-default_sched = "scx_bpfland"
+default_sched = "scx_flash"
 default_mode = "Auto"
-
-[scheds.scx_bpfland]
-auto_mode = []
-gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
-powersave_mode = ["-m", "powersave"]
-
-[scheds.scx_rusty]
-auto_mode = []
-gaming_mode = []
-lowlatency_mode = []
-powersave_mode = []
-
-[scheds.scx_lavd]
-auto_mode = []
-gaming_mode = ["--performance"]
-lowlatency_mode = ["--performance"]
-powersave_mode = ["--powersave"]
-
-[scheds.scx_flash]
-auto_mode = []
-gaming_mode = ["-m", "all", "-w", "-p"]
-lowlatency_mode = ["-m", "performance", "-w", "-p", "-C", "0"]
-powersave_mode = ["-m", "powersave", "-I", "10000", "-t", "10000", "-s", "10000", "-S", "1000"]
-
-[scheds.scx_p2dq]
-auto_mode = []
-gaming_mode = []
-lowlatency_mode = ["-y"]
-powersave_mode = []
-
-[scheds.scx_tickless]
-auto_mode = []
-gaming_mode = ["-f 5000 -s 5000"]
-lowlatency_mode = ["-f 5000 -s 1000"]
-powersave_mode = ["-f 50 -p"]
 
 [scheds.scx_rustland]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
+server_mode = []
+
+[scheds.scx_lavd]
+auto_mode = []
+gaming_mode = ["--performance"]
+lowlatency_mode = ["--performance"]
+powersave_mode = ["--powersave"]
+server_mode = []
+
+[scheds.scx_flash]
+auto_mode = []
+gaming_mode = ["-m", "all"]
+lowlatency_mode = ["-m", "performance", "-w", "-C", "0"]
+powersave_mode = ["-m", "powersave", "-I", "10000", "-t", "10000", "-s", "10000", "-S", "1000"]
+server_mode = ["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L"]
+
+[scheds.scx_p2dq]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = ["-y"]
+powersave_mode = []
+server_mode = ["--keep-running"]
+
+[scheds.scx_rusty]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
+
+[scheds.scx_bpfland]
+auto_mode = []
+gaming_mode = ["-m", "performance"]
+lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
+powersave_mode = ["-m", "powersave"]
+server_mode = ["-p"]
+
+[scheds.scx_tickless]
+auto_mode = []
+gaming_mode = ["-f", "5000", "-s", "5000"]
+lowlatency_mode = ["-f", "5000", "-s", "1000"]
+powersave_mode = ["-f", "50", "-p"]
+server_mode = ["-f", "100"]
 ```
 
 **`default_sched`:**
@@ -90,8 +97,9 @@ The example configuration above shows how to set custom flags for different sche
 
 * For `scx_bpfland`:
     * Gaming mode: `-m performance`
-    * Low Latency mode: `-s 5000 -S 500 -l 5000`
+    * Low Latency mode: `-s 5000 -S 500 -l 5000 -m performance`
     * Power Save mode: `-m powersave`
+    * Server mode: `-p`
 * For `scx_rusty`:
     * No custom flags are defined, so the default flags for each mode will be used.
 * For `scx_lavd`:
@@ -99,7 +107,15 @@ The example configuration above shows how to set custom flags for different sche
     * Low Latency mode: `--performance`
     * Power Save mode: `--powersave`
 * For `scx_flash`:
-    * No custom flags are defined, so the default flags for each mode will be used.
+    * Gaming mode: `-m all`
+    * Low Latency mode: `-m performance -w -C 0`
+    * Power Save mode: `-m powersave -I 10000 -t 10000 -s 10000 -S 1000`
+    * Server mode: `-m all -s 20000 -S 1000 -I -1 -D -L`
+* For `scx_tickless`:
+    * Gaming_mode = `-f 5000 -s 5000`
+    * Lowlatency mode = `-f 5000 -s 1000`
+    * Powersave_mode = `-f 50 -p`
+    * Server mode = `-f 100`
 * For `scx_p2dq`:
     * Low Latency mode: `-y`
     * Server mode: `--keep-running`
