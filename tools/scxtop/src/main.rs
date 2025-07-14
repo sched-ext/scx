@@ -283,7 +283,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             // 1) set the shutdown variable to stop background tokio threads
             // 2) next, drop the links to detach the attached BPF programs
             // 3) drop the action_tx to ensure action_rx closes
-            // 3) wait for the completion of the trace file generation to complete
+            // 4) wait for the completion of the trace file generation to complete
             shutdown.store(true, Ordering::Relaxed);
             tracer.clear_links()?;
             drop(links);
