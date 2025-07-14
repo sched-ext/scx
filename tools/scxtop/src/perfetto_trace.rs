@@ -170,22 +170,23 @@ impl PerfettoTraceManager {
         }
 
         for (name, &uuid) in &self.mem_uuids {
-            let mut desc = Vec::new();
-
-            desc.push(TrackDescriptor {
-                uuid: Some(uuid),
-                counter: Some(CounterDescriptor {
-                    unit: Some(UNIT_COUNT.into()),
-                    unit_name: Some(name.to_string()),
-                    is_incremental: Some(false),
-                    ..CounterDescriptor::default()
-                })
-                .into(),
-                static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(name.to_string())),
-                ..TrackDescriptor::default()
-            });
-
-            desc_map.insert(uuid, desc);
+            desc_map.insert(
+                uuid,
+                vec![TrackDescriptor {
+                    uuid: Some(uuid),
+                    counter: Some(CounterDescriptor {
+                        unit: Some(UNIT_COUNT.into()),
+                        unit_name: Some(name.to_string()),
+                        is_incremental: Some(false),
+                        ..CounterDescriptor::default()
+                    })
+                    .into(),
+                    static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(
+                        name.to_string(),
+                    )),
+                    ..TrackDescriptor::default()
+                }],
+            );
         }
 
         desc_map
