@@ -42,6 +42,7 @@ use bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use bpf_intf::stat_idx_P2DQ_STAT_DISPATCH_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
+use bpf_intf::stat_idx_P2DQ_STAT_ENQ_CPU;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_INTR;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_MIG;
@@ -152,8 +153,9 @@ impl<'a> Scheduler<'a> {
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
             keep: stats[stat_idx_P2DQ_STAT_KEEP as usize],
-            enq_llc: stats[stat_idx_P2DQ_STAT_ENQ_LLC as usize],
+            enq_cpu: stats[stat_idx_P2DQ_STAT_ENQ_CPU as usize],
             enq_intr: stats[stat_idx_P2DQ_STAT_ENQ_INTR as usize],
+            enq_llc: stats[stat_idx_P2DQ_STAT_ENQ_LLC as usize],
             enq_mig: stats[stat_idx_P2DQ_STAT_ENQ_MIG as usize],
             select_pick2: stats[stat_idx_P2DQ_STAT_SELECT_PICK2 as usize],
             dispatch_pick2: stats[stat_idx_P2DQ_STAT_DISPATCH_PICK2 as usize],
