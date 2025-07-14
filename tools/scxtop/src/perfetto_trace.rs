@@ -62,9 +62,7 @@ pub struct PerfettoTraceManager {
     // per cpu ftrace events
     ftrace_events: BTreeMap<u32, Vec<FtraceEvent>>,
     dsq_lat_events: BTreeMap<u64, Vec<TrackEvent>>,
-    dsq_lat_trusted_packet_seq_uuid: u32,
     dsq_nr_queued_events: BTreeMap<u64, Vec<TrackEvent>>,
-    dsq_nr_queued_trusted_packet_seq_uuid: u32,
     dsq_uuids: BTreeMap<u64, u64>,
     processes: HashMap<u64, ProcessDescriptor>,
     threads: HashMap<u64, ThreadDescriptor>,
@@ -81,23 +79,17 @@ impl PerfettoTraceManager {
                 .expect("Time went backwards")
                 .as_secs(),
         );
-        let mut rng = StdRng::seed_from_u64(trace_uuid);
-        let trace = Trace::default();
-        let dsq_lat_trusted_packet_seq_uuid = rng.next_u32();
-        let dsq_nr_queued_trusted_packet_seq_uuid = rng.next_u32();
 
         Self {
-            trace,
+            trace: Trace::default(),
             trace_id: 0,
             trusted_pid: std::process::id() as i32,
-            rng,
+            rng: StdRng::seed_from_u64(trace_uuid),
             output_file_prefix,
             ftrace_events: BTreeMap::new(),
             dsq_uuids: BTreeMap::new(),
             dsq_lat_events: BTreeMap::new(),
-            dsq_lat_trusted_packet_seq_uuid,
             dsq_nr_queued_events: BTreeMap::new(),
-            dsq_nr_queued_trusted_packet_seq_uuid,
             processes: HashMap::new(),
             threads: HashMap::new(),
             process_uuids: HashMap::new(),
@@ -347,6 +339,7 @@ impl PerfettoTraceManager {
         }
 
         // dsq latency tracks
+        let dsq_lat_trusted_packet_seq_uuid = self.rng.next_u32();
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_lat_events.remove(dsq) {
                 for dsq_lat_event in events {
@@ -356,7 +349,7 @@ impl PerfettoTraceManager {
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
                             trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
-                                self.dsq_lat_trusted_packet_seq_uuid,
+                                dsq_lat_trusted_packet_seq_uuid,
                             ),
                         ),
                         ..TracePacket::default()
@@ -366,6 +359,7 @@ impl PerfettoTraceManager {
         }
 
         // dsq nr_queued tracks
+        let dsq_nr_queued_trusted_packet_seq_uuid = self.rng.next_u32();
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_nr_queued_events.remove(dsq) {
                 for dsq_nr_queued_event in events {
@@ -375,7 +369,7 @@ impl PerfettoTraceManager {
                         timestamp: Some(ts),
                         optional_trusted_packet_sequence_id: Some(
                             trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
-                                self.dsq_nr_queued_trusted_packet_seq_uuid,
+                                dsq_nr_queued_trusted_packet_seq_uuid,
                             ),
                         ),
                         ..TracePacket::default()
