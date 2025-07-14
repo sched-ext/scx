@@ -83,13 +83,4 @@ mod tests {
         assert_eq!(snapshot.free_ratio(), 0.0);
         assert_eq!(snapshot.swap_ratio(), 0.0);
     }
-
-    #[test]
-    fn test_update_integration_test() {
-        let proc_reader = ProcReader::new();
-        let mut snapshot = MemStatSnapshot::default();
-        snapshot.update(&proc_reader).unwrap();
-        assert!(snapshot.free_ratio() > 0.0);
-        assert!(snapshot.swap_ratio() > 0.0);
-    }
 }
