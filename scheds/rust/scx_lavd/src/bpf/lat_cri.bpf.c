@@ -129,8 +129,15 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * latency-critcial, inherit waker's latency criticality partially.
 	 */
 	if (taskc->lat_cri_waker > lat_cri) {
-		lat_cri += (taskc->lat_cri_waker - lat_cri) >>
-			   LAVD_LC_INHERIT_SHIFT;
+		/*
+		 * The amount of the wakelet's latency criticality inherited
+		 * needs to be limited, so the wakee's latency criticality
+		 * portion should always be a dominant factor.
+		 */
+		u64 waker_inh = (taskc->lat_cri_waker - lat_cri) >>
+				LAVD_LC_INH_WAKER_SHIFT;
+		u64 wakee_max = lat_cri >> LAVD_LC_INH_WAKEE_SHIFT;
+		lat_cri += min(waker_inh, wakee_max);
 	}
 	taskc->lat_cri = lat_cri;
 
