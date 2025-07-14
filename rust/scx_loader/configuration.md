@@ -16,7 +16,7 @@ If no configuration file is found at any of these paths, `scx_loader` will use t
 The configuration file has the following structure:
 
 ```toml
-default_sched = "scx_bpfland"
+default_sched = "scx_flash"
 default_mode = "Auto"
 
 [scheds.scx_bpfland]
