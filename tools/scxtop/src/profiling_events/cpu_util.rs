@@ -62,7 +62,7 @@ impl CpuUtilEvent {
         let current = tracker.current.get(&self.cpu).unwrap();
 
         if self.metric == CpuUtilMetric::Frequency {
-            return Ok(current.freq);
+            return Ok(current.freq_khz);
         }
 
         let total = current.cpu_util_data.total_util() - prev.cpu_util_data.total_util();
@@ -91,7 +91,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, RwLock};
 
-    fn create_snapshot(user: u64, system: u64, idle: u64, freq: u64) -> CpuStatSnapshot {
+    fn create_snapshot(user: u64, system: u64, idle: u64, freq_khz: u64) -> CpuStatSnapshot {
         CpuStatSnapshot {
             cpu_util_data: CpuUtilData {
                 user,
@@ -105,7 +105,7 @@ mod tests {
                 guest: 0,
                 guest_nice: 0,
             },
-            freq,
+            freq_khz,
         }
     }
 

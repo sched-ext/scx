@@ -30,7 +30,7 @@ pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
 pub use bpf_skel::*;
 pub use cpu_data::CpuData;
-pub use cpu_stats::CpuStatTracker;
+pub use cpu_stats::{CpuStatSnapshot, CpuStatTracker};
 pub use event_data::EventData;
 pub use keymap::Key;
 pub use keymap::KeyMap;
@@ -48,6 +48,7 @@ pub use theme::AppTheme;
 pub use tui::Event;
 pub use tui::Tui;
 pub use util::format_hz;
+pub use util::get_clock_value;
 pub use util::read_file_string;
 pub use util::sanitize_nbsp;
 
@@ -56,6 +57,7 @@ pub use plain::Plain;
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
 use smartstring::alias::String as SsoString;
+use std::collections::BTreeMap;
 
 pub const APP: &str = "scxtop";
 pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
@@ -290,6 +292,13 @@ pub struct KprobeAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CpuStatAction {
+    pub ts: u64,
+    pub cpu_data_prev: BTreeMap<usize, CpuStatSnapshot>,
+    pub cpu_data_current: BTreeMap<usize, CpuStatSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MangoAppAction {
     pub pid: u32,
     pub vis_frametime: u64,
@@ -309,6 +318,7 @@ pub enum Action {
     ClearEvent,
     CpuhpEnter(CpuhpEnterAction),
     CpuhpExit(CpuhpExitAction),
+    CpuStat(CpuStatAction),
     DecBpfSampleRate,
     DecTickRate,
     Down,

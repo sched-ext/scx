@@ -451,7 +451,7 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	struct task_ctx *tctx;
 	struct bpf_event *event;
 
-	if (!p || !should_sample())
+	if (!enable_bpf_events || !p || !should_sample())
 		return 0;
 
 	u64 now = bpf_ktime_get_ns();
