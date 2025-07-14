@@ -80,11 +80,11 @@
     "veristat-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1751555249,
-        "narHash": "sha256-7NbKM9GA2N2CZGXZKllh00bqWGKb8+ftG/lGG/JNPng=",
+        "lastModified": 1736364478,
+        "narHash": "sha256-07awVCMrFFG69cGtucLYGT+mqcRZ9F9ZHvxARLLYpM0=",
         "owner": "libbpf",
         "repo": "veristat",
-        "rev": "1b386f2cd5d798bc74dba1af5208f5273aba2b9d",
+        "rev": "3bf5cdf98b05faf53dca21492e69ffb4605c6d42",
         "type": "github"
       },
       "original": {
