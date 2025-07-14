@@ -46,7 +46,7 @@ pub fn perf_event_config(subsystem: &str, event: &str) -> Result<u64> {
     read_file_u64(event_path)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PerfEvent {
     pub subsystem: String,
     pub event: String,
@@ -111,6 +111,17 @@ impl PerfEvent {
         }
 
         Ok(events)
+    }
+
+    /// Returns a perf event from a string.
+    pub fn from_str_args(event: &str, cpu: usize) -> Result<Self> {
+        let event_parts: Vec<&str> = event.split(':').collect();
+        if event_parts.len() != 2 {
+            anyhow::bail!("Invalid perf event: {}", event);
+        }
+        let subsystem = event_parts[0].to_string();
+        let event = event_parts[1].to_string();
+        Ok(PerfEvent::new(subsystem, event, cpu))
     }
 
     /// Returns the set of default hardware events.
@@ -324,4 +335,40 @@ pub fn available_perf_events() -> Result<BTreeMap<String, HashSet<String>>> {
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CpuStatTracker;
+    use crate::ProfilingEvent;
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn test_valid_event_parsing() {
+        let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let input = "perf:cpu:cycles";
+        let parsed = ProfilingEvent::from_str_args(input, Some(cpu_stat_tracker)).unwrap();
+        let expected =
+            ProfilingEvent::Perf(PerfEvent::new("cpu".to_string(), "cycles".to_string(), 0));
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_invalid_event_empty_string() {
+        let result = PerfEvent::from_str_args("", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_event_only_one_part() {
+        let result = PerfEvent::from_str_args("cpu", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_event_with_more_colons() {
+        let parsed = PerfEvent::from_str_args("intel:uncore:llc-misses", 0);
+        assert!(parsed.is_err());
+    }
 }

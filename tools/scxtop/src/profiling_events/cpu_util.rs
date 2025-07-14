@@ -5,14 +5,30 @@
 
 use crate::CpuStatTracker;
 use anyhow::{bail, Result};
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CpuUtilMetric {
     Total,
     User,
     System,
     Frequency,
+}
+
+impl FromStr for CpuUtilMetric {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "cpu_total_util_percent" => Ok(CpuUtilMetric::Total),
+            "cpu_user_util_percent" => Ok(CpuUtilMetric::User),
+            "cpu_system_util_percent" => Ok(CpuUtilMetric::System),
+            _ => Err(anyhow::anyhow!("Invalid CPU util metric: {}", s)),
+        }
+    }
 }
 
 impl CpuUtilMetric {
@@ -26,7 +42,7 @@ impl CpuUtilMetric {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CpuUtilEvent {
     pub cpu: usize,
     pub metric: CpuUtilMetric,
@@ -58,6 +74,9 @@ impl CpuUtilEvent {
 
     pub fn value(&self) -> Result<u64> {
         let tracker = self.tracker.read().unwrap();
+        if tracker.prev.is_empty() || tracker.current.is_empty() {
+            return Ok(0);
+        }
         let prev = tracker.prev.get(&self.cpu).unwrap();
         let current = tracker.current.get(&self.cpu).unwrap();
 
@@ -80,6 +99,42 @@ impl CpuUtilEvent {
         };
 
         Ok((value * 100) / total)
+    }
+}
+
+impl PartialEq for CpuUtilEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.cpu == other.cpu
+            && self.metric == other.metric
+            && Arc::ptr_eq(&self.tracker, &other.tracker)
+    }
+}
+
+impl Eq for CpuUtilEvent {}
+
+impl PartialOrd for CpuUtilEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CpuUtilEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.cpu.cmp(&other.cpu) {
+            Ordering::Equal => match self.metric.cmp(&other.metric) {
+                Ordering::Equal => Arc::as_ptr(&self.tracker).cmp(&Arc::as_ptr(&other.tracker)),
+                other => other,
+            },
+            other => other,
+        }
+    }
+}
+
+impl Hash for CpuUtilEvent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.cpu.hash(state);
+        self.metric.hash(state);
+        std::ptr::hash(Arc::as_ptr(&self.tracker), state);
     }
 }
 

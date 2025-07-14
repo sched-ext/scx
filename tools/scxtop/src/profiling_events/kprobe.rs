@@ -8,7 +8,7 @@ use scx_utils::compat::tracefs_mount;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct KprobeEvent {
     pub cpu: usize,
     pub event_name: String,

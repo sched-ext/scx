@@ -64,9 +64,10 @@ pub struct TuiArgs {
     /// Custom perf events colon delimited (ex: "<event_name>:<event and umask ex: 0x023>:<event_type ex: 4>")
     #[arg(long, num_args = 1.., value_parser)]
     pub perf_events: Vec<String>,
-    /// Default perf event colon delimited (ex: "<event_name>:<event and umask ex: 0x023>:<event_type ex: 4>")
-    #[arg(long, default_value = "hw:cycles")]
-    pub default_perf_event: String,
+    /// Default profiling event colon delimited (ex: "<source>:<event>")
+    /// where source is one of 'kprobe', 'perf', 'cpu'. Ex: "cpu:cpu_total_util_percent", "perf:hw:cycles"
+    #[arg(long, default_value = "cpu:cpu_total_util_percent")]
+    pub default_profiling_event: String,
 
     /// Automatically start a trace when a function takes too long to return.
     #[arg(
