@@ -97,8 +97,9 @@ The example configuration above shows how to set custom flags for different sche
 
 * For `scx_bpfland`:
     * Gaming mode: `-m performance`
-    * Low Latency mode: `-s 5000 -S 500 -l 5000`
+    * Low Latency mode: `-s 5000 -S 500 -l 5000 -m performance`
     * Power Save mode: `-m powersave`
+    * Server mode: `-p`
 * For `scx_rusty`:
     * No custom flags are defined, so the default flags for each mode will be used.
 * For `scx_lavd`:
@@ -106,7 +107,15 @@ The example configuration above shows how to set custom flags for different sche
     * Low Latency mode: `--performance`
     * Power Save mode: `--powersave`
 * For `scx_flash`:
-    * No custom flags are defined, so the default flags for each mode will be used.
+    * Gaming mode: `-m all`
+    * Low Latency mode: `-m performance -w -C 0`
+    * Power Save mode: `-m powersave -I 10000 -t 10000 -s 10000 -S 1000`
+    * Server mode: `-m all -s 20000 -S 1000 -I -1 -D -L`
+* For `scx_tickless`:
+    * Gaming_mode = `-f 5000 -s 5000`
+    * Lowlatency mode = `-f 5000 -s 1000`
+    * Powersave_mode = `-f 50 -p`
+    * Server mode = `-f 100`
 * For `scx_p2dq`:
     * Low Latency mode: `-y`
     * Server mode: `--keep-running`
