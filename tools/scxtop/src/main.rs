@@ -211,10 +211,6 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let stop_poll = shutdown.clone();
             let stop_stats = shutdown.clone();
 
-            let mut cpu_stat_tracker = CpuStatTracker::default();
-            let proc_reader = ProcReader::new();
-            let mut system = System::new_all();
-
             let mut handles = Vec::new();
             handles.push(tokio::spawn(async move {
                 loop {
@@ -228,27 +224,34 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 }
             }));
 
-            handles.push(tokio::spawn(async move {
-                loop {
-                    if stop_stats.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let ts = get_clock_value(libc::CLOCK_BOOTTIME);
-                    cpu_stat_tracker
-                        .update(&proc_reader, &mut system)
-                        .expect("Failed to update cpu stats");
-                    let action = Action::CpuStat(CpuStatAction {
-                        ts,
-                        cpu_data_prev: cpu_stat_tracker.prev.clone(),
-                        cpu_data_current: cpu_stat_tracker.current.clone(),
-                    });
-                    action_tx
-                        .send(action)
-                        .expect("Failed to send CpuStat action");
+            if trace_args.system_stats {
+                let mut cpu_stat_tracker = CpuStatTracker::default();
+                let proc_reader = ProcReader::new();
+                let mut system = System::new_all();
+                let action_tx_clone = action_tx.clone();
 
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }));
+                handles.push(tokio::spawn(async move {
+                    loop {
+                        if stop_stats.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let ts = get_clock_value(libc::CLOCK_BOOTTIME);
+                        cpu_stat_tracker
+                            .update(&proc_reader, &mut system)
+                            .expect("Failed to update cpu stats");
+                        let action = Action::CpuStat(CpuStatAction {
+                            ts,
+                            cpu_data_prev: cpu_stat_tracker.prev.clone(),
+                            cpu_data_current: cpu_stat_tracker.current.clone(),
+                        });
+                        action_tx_clone
+                            .send(action)
+                            .expect("Failed to send CpuStat action");
+
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }));
+            }
 
             let trace_file_prefix = config.trace_file_prefix().to_string();
             let trace_file = trace_args.output_file.clone();
@@ -279,10 +282,12 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
 
             // 1) set the shutdown variable to stop background tokio threads
             // 2) next, drop the links to detach the attached BPF programs
-            // 3) wait for the completion of the trace file generation to complete
+            // 3) drop the action_tx to ensure action_rx closes
+            // 4) wait for the completion of the trace file generation to complete
             shutdown.store(true, Ordering::Relaxed);
             tracer.clear_links()?;
             drop(links);
+            drop(action_tx);
             info!("generating trace");
             let results = join_all(handles).await;
             for result in results {

@@ -114,6 +114,9 @@ pub struct TraceArgs {
     /// Add a list of kprobe events to the trace.
     #[clap(short = 'k', long, num_args = 1.., value_parser)]
     pub kprobes: Vec<String>,
+    /// Collect system statistics (CPU, memory, etc).
+    #[clap(short = 's', long)]
+    pub system_stats: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
