@@ -42,7 +42,9 @@ jobs:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Install Veristat
-        run: nix-env -i $(nix build --no-link --print-out-paths ./.github/include#veristat)
+        run: |
+          VERISTAT_PATH=$(nix build --no-link --print-out-paths ./.github/include#veristat)
+          nix-env -i "$VERISTAT_PATH"
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
