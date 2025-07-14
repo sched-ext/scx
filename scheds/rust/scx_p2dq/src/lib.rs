@@ -11,6 +11,7 @@ use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
 
 use clap::Parser;
+use clap::ValueEnum;
 
 lazy_static::lazy_static! {
         pub static ref TOPO: Topology = Topology::new().unwrap();
@@ -24,6 +25,23 @@ fn get_default_llc_runs() -> u64 {
     let n_llcs = TOPO.all_llcs.len() as f64;
     let llc_runs = n_llcs.log2();
     llc_runs as u64
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum LbMode {
+    /// load of the LLC
+    Load,
+    /// number of tasks queued
+    NrQueued,
+}
+
+impl LbMode {
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            LbMode::Load => bpf_intf::p2dq_lb_mode_PICK2_LOAD as i32,
+            LbMode::NrQueued => bpf_intf::p2dq_lb_mode_PICK2_NR_QUEUED as i32,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -109,6 +127,10 @@ pub struct SchedulerOpts {
     /// Scheduling min slice duration in microseconds.
     #[clap(short = 's', long, default_value = "100")]
     pub min_slice_us: u64,
+
+    /// Load balance mode
+    #[arg(value_enum, long, default_value_t = LbMode::Load)]
+    pub lb_mode: LbMode,
 
     /// Slack factor for load balancing, load balancing is not performed if load is within slack
     /// factor percent.
@@ -223,6 +245,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
             $skel.maps.rodata_data.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
             $skel.maps.rodata_data.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
+            $skel.maps.rodata_data.lb_config.pick2_mode = opts.lb_mode.as_i32();
             $skel.maps.rodata_data.lb_config.eager_load_balance =
                 MaybeUninit::new(!opts.eager_load_balance);
             $skel.maps.rodata_data.lb_config.dispatch_pick2_disable =
