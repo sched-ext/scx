@@ -176,12 +176,12 @@ impl PerfettoTraceManager {
                 uuid: Some(uuid),
                 counter: Some(CounterDescriptor {
                     unit: Some(UNIT_COUNT.into()),
-                    unit_name: Some(format!("{name}")),
+                    unit_name: Some(name.to_string()),
                     is_incremental: Some(false),
                     ..CounterDescriptor::default()
                 })
                 .into(),
-                static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(format!("{name}"))),
+                static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(name.to_string())),
                 ..TrackDescriptor::default()
             });
 
@@ -420,7 +420,7 @@ impl PerfettoTraceManager {
         }
 
         // mem events
-        for (_, events) in &mut self.mem_events {
+        for events in self.mem_events.values_mut() {
             let mem_sequence_id = self.rng.next_u32();
             for mem_event in events.drain(..) {
                 let ts: u64 = timestamp_absolute_us(&mem_event) as u64 / 1_000;
@@ -862,10 +862,10 @@ impl PerfettoTraceManager {
             .push(TrackEvent {
                 type_: Some(track_event::Type::TYPE_COUNTER.into()),
                 track_uuid: Some(
-                    self.mem_uuids
+                    *self
+                        .mem_uuids
                         .get("mem_ratio")
-                        .expect("Should have mem_ratio")
-                        .clone(),
+                        .expect("Should have mem_ratio"),
                 ),
                 counter_value_field: Some(track_event::Counter_value_field::DoubleCounterValue(
                     mem_info.free_ratio() * 100.0,
@@ -882,10 +882,10 @@ impl PerfettoTraceManager {
             .push(TrackEvent {
                 type_: Some(track_event::Type::TYPE_COUNTER.into()),
                 track_uuid: Some(
-                    self.mem_uuids
+                    *self
+                        .mem_uuids
                         .get("swap_ratio")
-                        .expect("Should have swap_ratio")
-                        .clone(),
+                        .expect("Should have swap_ratio"),
                 ),
                 counter_value_field: Some(track_event::Counter_value_field::DoubleCounterValue(
                     mem_info.swap_ratio() * 100.0,
