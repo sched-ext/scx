@@ -58,6 +58,8 @@ enum p2dq_lb_mode {
 };
 
 enum stat_idx {
+	P2DQ_STAT_ATQ_ENQ,
+	P2DQ_STAT_ATQ_REENQ,
 	P2DQ_STAT_DIRECT,
 	P2DQ_STAT_DSQ_SAME,
 	P2DQ_STAT_DSQ_CHANGE,
