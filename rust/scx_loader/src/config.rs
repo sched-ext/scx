@@ -81,6 +81,7 @@ pub fn get_default_config() -> Config {
         SupportedSched::P2DQ,
         SupportedSched::Tickless,
         SupportedSched::Rustland,
+        SupportedSched::Cosmos,
     ];
     let scheds_map = HashMap::from(supported_scheds.map(|x| init_default_config_entry(x)));
     Config {
@@ -221,6 +222,8 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         },
         // scx_rustland doesn't support any of these modes
         SupportedSched::Rustland => vec![],
+        // scx_cosmos doesn't support any of these modes
+        SupportedSched::Cosmos => vec![],
     }
 }
 
@@ -285,6 +288,13 @@ powersave_mode = ["-f", "50", "-p"]
 server_mode = ["-f", "100"]
 
 [scheds.scx_rustland]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
+
+[scheds.scx_cosmos]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []

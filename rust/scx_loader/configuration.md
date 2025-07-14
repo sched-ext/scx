@@ -67,6 +67,13 @@ gaming_mode = ["-f", "5000", "-s", "5000"]
 lowlatency_mode = ["-f", "5000", "-s", "1000"]
 powersave_mode = ["-f", "50", "-p"]
 server_mode = ["-f", "100"]
+
+[scheds.scx_cosmos]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
 ```
 
 **`default_sched`:**
@@ -120,6 +127,8 @@ The example configuration above shows how to set custom flags for different sche
     * Low Latency mode: `-y`
     * Server mode: `--keep-running`
 * For `scx_rustland`:
+    * No custom flags are defined, so the default flags for each mode will be used.
+* For `scx_cosmos`:
     * No custom flags are defined, so the default flags for each mode will be used.
 
 ## Fallback Behavior
