@@ -86,7 +86,7 @@ fn main() {
                 };
 
                 // unclear where the empty name comes from, filter it out
-                if name != "" {
+                if symbol.is_definition() {
                     tests.push(name);
                 }
             }
