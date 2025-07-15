@@ -904,6 +904,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 */
 	cpuc->flags = taskc->flags;
 	cpuc->lat_cri = taskc->lat_cri;
+	cpuc->running_clk = now;
 	cpuc->est_stopping_clk = get_est_stopping_clk(taskc, now);
 
 	/*
@@ -978,6 +979,7 @@ unlock_out:
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
+	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
 	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
@@ -1004,6 +1006,7 @@ unlock_out:
 	barrier();
 
 	cpuc->lat_cri = 0;
+	cpuc->running_clk = 0;
 	cpuc->est_stopping_clk = SCX_SLICE_INF;
 }
 
@@ -1430,6 +1433,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->cpu_id = cpu;
 		cpuc->idle_start_clk = 0;
 		cpuc->lat_cri = 0;
+		cpuc->running_clk = 0;
 		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
