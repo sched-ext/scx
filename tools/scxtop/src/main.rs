@@ -16,13 +16,14 @@ use scxtop::read_file_string;
 use scxtop::tracer::Tracer;
 use scxtop::Action;
 use scxtop::App;
-use scxtop::CpuStatAction;
 use scxtop::CpuStatTracker;
 use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
+use scxtop::MemStatSnapshot;
 use scxtop::PerfettoTraceManager;
 use scxtop::Search;
+use scxtop::SystemStatAction;
 use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::{bpf_skel::*, AppState};
@@ -226,6 +227,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
 
             if trace_args.system_stats {
                 let mut cpu_stat_tracker = CpuStatTracker::default();
+                let mut mem_stats = MemStatSnapshot::default();
                 let proc_reader = ProcReader::new();
                 let mut system = System::new_all();
                 let action_tx_clone = action_tx.clone();
@@ -236,16 +238,23 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                             break;
                         }
                         let ts = get_clock_value(libc::CLOCK_BOOTTIME);
+
                         cpu_stat_tracker
                             .update(&proc_reader, &mut system)
                             .expect("Failed to update cpu stats");
-                        let action = Action::CpuStat(CpuStatAction {
+
+                        mem_stats
+                            .update(&proc_reader)
+                            .expect("Failed to update mem stats");
+
+                        let sys_stat_action = Action::SystemStat(SystemStatAction {
                             ts,
                             cpu_data_prev: cpu_stat_tracker.prev.clone(),
                             cpu_data_current: cpu_stat_tracker.current.clone(),
+                            mem_info: mem_stats.clone(),
                         });
                         action_tx_clone
-                            .send(action)
+                            .send(sys_stat_action)
                             .expect("Failed to send CpuStat action");
 
                         tokio::time::sleep(Duration::from_millis(100)).await;

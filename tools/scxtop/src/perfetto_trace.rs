@@ -16,9 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::edm::ActionHandler;
 use crate::get_clock_value;
 use crate::{
-    Action, CpuStatAction, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction,
-    GpuMemAction, IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
+    IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, SystemStatAction,
 };
 
 use perfetto_protos::{
@@ -38,14 +38,15 @@ use perfetto_protos::{
         SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
         SchedWakingFtraceEvent,
     },
-    sys_stats::{sys_stats::CpuTimes, SysStats},
+    sys_stats::{sys_stats::CpuTimes, sys_stats::MeminfoValue, SysStats},
+    sys_stats_counters::MeminfoCounters,
     thread_descriptor::ThreadDescriptor,
     trace::Trace,
     trace_packet::{trace_packet, TracePacket},
     track_descriptor::{track_descriptor::Static_or_dynamic_name, TrackDescriptor},
     track_event::{track_event, TrackEvent},
 };
-use protobuf::{Message, SpecialFields};
+use protobuf::{EnumOrUnknown, Message, SpecialFields};
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
 /// https://perfetto.dev/docs/concepts/buffers and
@@ -68,6 +69,8 @@ pub struct PerfettoTraceManager {
     threads: HashMap<u64, ThreadDescriptor>,
     process_uuids: HashMap<i32, u64>,
     sys_stats: BTreeMap<u64, Vec<SysStats>>,
+    mem_events: BTreeMap<String, Vec<TrackEvent>>,
+    mem_uuids: HashMap<String, u64>,
 }
 
 impl PerfettoTraceManager {
@@ -80,11 +83,16 @@ impl PerfettoTraceManager {
                 .as_secs(),
         );
 
+        let mut rng = StdRng::seed_from_u64(trace_uuid);
+        let mut mem_uuids = HashMap::new();
+        mem_uuids.insert("mem_ratio".to_string(), rng.next_u64());
+        mem_uuids.insert("swap_ratio".to_string(), rng.next_u64());
+
         Self {
             trace: Trace::default(),
             trace_id: 0,
             trusted_pid: std::process::id() as i32,
-            rng: StdRng::seed_from_u64(trace_uuid),
+            rng,
             output_file_prefix,
             ftrace_events: BTreeMap::new(),
             dsq_uuids: BTreeMap::new(),
@@ -94,6 +102,8 @@ impl PerfettoTraceManager {
             threads: HashMap::new(),
             process_uuids: HashMap::new(),
             sys_stats: BTreeMap::new(),
+            mem_events: BTreeMap::new(),
+            mem_uuids,
         }
     }
 
@@ -158,6 +168,26 @@ impl PerfettoTraceManager {
             });
 
             desc_map.insert(dsq_uuid, descs);
+        }
+
+        for (name, &uuid) in &self.mem_uuids {
+            desc_map.insert(
+                uuid,
+                vec![TrackDescriptor {
+                    uuid: Some(uuid),
+                    counter: Some(CounterDescriptor {
+                        unit: Some(UNIT_COUNT.into()),
+                        unit_name: Some(name.to_string()),
+                        is_incremental: Some(false),
+                        ..CounterDescriptor::default()
+                    })
+                    .into(),
+                    static_or_dynamic_name: Some(Static_or_dynamic_name::StaticName(
+                        name.to_string(),
+                    )),
+                    ..TrackDescriptor::default()
+                }],
+            );
         }
 
         desc_map
@@ -388,6 +418,24 @@ impl PerfettoTraceManager {
                         ..TracePacket::default()
                     });
                 }
+            }
+        }
+
+        // mem events
+        for events in self.mem_events.values_mut() {
+            let mem_sequence_id = self.rng.next_u32();
+            for mem_event in events.drain(..) {
+                let ts: u64 = timestamp_absolute_us(&mem_event) as u64 / 1_000;
+                self.trace.packet.push(TracePacket {
+                    data: Some(trace_packet::Data::TrackEvent(mem_event)),
+                    timestamp: Some(ts),
+                    optional_trusted_packet_sequence_id: Some(
+                        trace_packet::Optional_trusted_packet_sequence_id::TrustedPacketSequenceId(
+                            mem_sequence_id,
+                        ),
+                    ),
+                    ..TracePacket::default()
+                });
             }
         }
 
@@ -745,11 +793,20 @@ impl PerfettoTraceManager {
         });
     }
 
-    pub fn on_cpu_stat(&mut self, action: &CpuStatAction) {
-        let CpuStatAction {
+    fn meminfo_value(key: MeminfoCounters, value: u64) -> MeminfoValue {
+        MeminfoValue {
+            key: Some(EnumOrUnknown::new(key)),
+            value: Some(value),
+            special_fields: SpecialFields::default(),
+        }
+    }
+
+    pub fn on_sys_stat(&mut self, action: &SystemStatAction) {
+        let SystemStatAction {
             ts,
             cpu_data_prev,
             cpu_data_current,
+            mem_info,
         } = action;
 
         let mut cpufreq_khz = Vec::with_capacity(cpu_data_prev.len());
@@ -787,13 +844,59 @@ impl PerfettoTraceManager {
             cpu_stat.insert(*cpu, cpu_time);
         }
 
+        let mem_data = vec![
+            Self::meminfo_value(MeminfoCounters::MEMINFO_MEM_FREE, mem_info.free_kb),
+            Self::meminfo_value(MeminfoCounters::MEMINFO_SWAP_FREE, mem_info.swap_free_kb),
+        ];
+
         self.sys_stats.entry(*ts).or_default().push({
             SysStats {
                 cpu_stat,
                 cpufreq_khz,
+                meminfo: mem_data,
                 ..SysStats::default()
             }
         });
+
+        self.mem_events
+            .entry("mem_ratio".to_string())
+            .or_default()
+            .push(TrackEvent {
+                type_: Some(track_event::Type::TYPE_COUNTER.into()),
+                track_uuid: Some(
+                    *self
+                        .mem_uuids
+                        .get("mem_ratio")
+                        .expect("Should have mem_ratio"),
+                ),
+                counter_value_field: Some(track_event::Counter_value_field::DoubleCounterValue(
+                    mem_info.free_ratio() * 100.0,
+                )),
+                timestamp: Some(track_event::Timestamp::TimestampAbsoluteUs(
+                    (*ts) as i64 / 1000,
+                )),
+                ..TrackEvent::default()
+            });
+
+        self.mem_events
+            .entry("swap_ratio".to_string())
+            .or_default()
+            .push(TrackEvent {
+                type_: Some(track_event::Type::TYPE_COUNTER.into()),
+                track_uuid: Some(
+                    *self
+                        .mem_uuids
+                        .get("swap_ratio")
+                        .expect("Should have swap_ratio"),
+                ),
+                counter_value_field: Some(track_event::Counter_value_field::DoubleCounterValue(
+                    mem_info.swap_ratio() * 100.0,
+                )),
+                timestamp: Some(track_event::Timestamp::TimestampAbsoluteUs(
+                    (*ts) as i64 / 1000,
+                )),
+                ..TrackEvent::default()
+            });
     }
 
     /// Adds events for the sched_switch event.
@@ -926,8 +1029,8 @@ impl ActionHandler for PerfettoTraceManager {
             Action::Kprobe(a) => {
                 self.on_kprobe(a);
             }
-            Action::CpuStat(a) => {
-                self.on_cpu_stat(a);
+            Action::SystemStat(a) => {
+                self.on_sys_stat(a);
             }
             _ => {}
         }
