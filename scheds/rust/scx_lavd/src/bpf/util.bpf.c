@@ -163,6 +163,21 @@ static bool is_pinned(const struct task_struct *p)
 	return p->nr_cpus_allowed == 1;
 }
 
+static inline bool test_task_flag(struct task_ctx *taskc, u64 flag)
+{
+	return taskc->flags & flag;
+}
+
+static inline void set_task_flag(struct task_ctx *taskc, u64 flag)
+{
+	taskc->flags |= flag;
+}
+
+static inline void reset_task_flag(struct task_ctx *taskc, u64 flag)
+{
+	taskc->flags &= ~flag;
+}
+
 static bool is_lat_cri(struct task_ctx *taskc)
 {
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
@@ -180,7 +195,7 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_lock_holder(struct task_ctx *taskc)
 {
-	return taskc->futex_boost;
+	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 }
 
 static bool have_scheduled(struct task_ctx *taskc)

@@ -127,7 +127,12 @@ struct task_ctx {
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
 	u32	slice_ns;		/* time slice */
-	s8	futex_boost;		/* futex acquired or not */
+
+	/*
+	 * Task status
+	 */
+	u64	flags;			/* LAVD_FLAG_* */
+
 	u8	is_greedy;		/* task's overscheduling ratio compared to its nice priority */
 	u8	need_lock_boost;	/* need to boost lock for deadline calculation */
 	u8	lock_holder_xted;	/* slice is already extended for a lock holder task */
