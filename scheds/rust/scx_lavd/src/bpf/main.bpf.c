@@ -256,13 +256,79 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	}
 }
 
-static u64 calc_time_slice(struct task_ctx *taskc)
+static u64 calc_time_slice(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
-	if (!taskc)
+	/*
+	 * Calculate the time slice of @taskc to run on @cpuc.
+	 */
+	if (!taskc || !cpuc)
 		return LAVD_SLICE_MAX_NS_DFL;
 
-	taskc->slice_ns = sys_stat.slice;
-	return taskc->slice_ns;
+	/*
+	 * If the task's avg_runtime is greater than the regular time slice
+	 * (i.e., taskc->avg_runtime > sys_stat.slice), that means the task
+	 * could be scheduled out due to a shorter time slice than required.
+	 * In this case, let's consider boosting task's time slice.
+	 *
+	 * However, if there are pinned tasks waiting to run on this CPU,
+	 * we do not boost the task's time slice to avoid delaying the pinned
+	 * task that cannot be run on another CPU.
+	 */
+	if (!no_slice_boost && !cpuc->nr_pinned_tasks &&
+	    (taskc->avg_runtime >= sys_stat.slice)) {
+		/*
+		 * When the system is not heavily loaded, so it can serve all
+		 * tasks within the targeted latency (slice_max_ns <=
+		 * sys_stat.slice), we fully boost task's time slice.
+		 *
+		 * Let's set the task's time slice to its avg_runtime
+		 * (+ some bonus) to reduce unnecessary involuntary context
+		 * switching.
+		 *
+		 * Even in this case, we want to limit the maximum time slice
+		 * to LAVD_SLICE_BOOST_MAX (not infinite) because we want to
+		 * revisit if the task is placed on the best CPU at least
+		 * every LAVD_SLICE_BOOST_MAX interval.
+		 */
+		if (can_boost_slice()) {
+			/*
+			 * Add a bit of bonus so that a task, which takes a
+			 * bit longer than average, can still finish the job.
+			 */
+			u64 s = taskc->avg_runtime + LAVD_SLICE_BOOST_BONUS;
+			taskc->slice = clamp(s, slice_min_ns,
+					     LAVD_SLICE_BOOST_MAX);
+			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
+			return taskc->slice;
+		}
+
+		/*
+		 * When the system is under high load, we will boost the time
+		 * slice of only latency-critical tasks, which are likely in
+		 * the middle of a task chain. Also, increase the time slice
+		 * proportionally to the latency criticality up to 2x the
+		 * regular time slice.
+		 */
+		if (taskc->lat_cri > sys_stat.avg_lat_cri) {
+			u64 b = (sys_stat.slice * taskc->lat_cri) /
+				(sys_stat.avg_lat_cri + 1);
+			u64 s = sys_stat.slice + b;
+			taskc->slice = clamp(s, slice_min_ns,
+					     min(taskc->avg_runtime,
+						 sys_stat.slice * 2));
+
+			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
+			return taskc->slice;
+		}
+	}
+
+	/*
+	 * If slice boost is either not possible, not necessary, or not
+	 * eligible, assign the regular time slice.
+	 */
+	taskc->slice = sys_stat.slice;
+	reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
+	return taskc->slice;
 }
 
 static void update_stat_for_running(struct task_struct *p,
@@ -603,25 +669,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * to make system-wide forward progress.
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    is_lock_holder_running(cpuc)) {
-		taskc_prev = get_task_ctx(prev);
-		if (!taskc_prev) {
-			scx_bpf_error("Failed to look up task context");
-			return;
-		}
-
-		/*
-		 * Refill the time slice.
-		 */
-		prev->scx.slice = calc_time_slice(taskc_prev);
-
-		/*
-		 * Reset prev task's lock and futex boost count
-		 * for a lock holder to be boosted only once.
-		 */
-		reset_lock_futex_boost(taskc_prev, cpuc);
-		return;
-	}
+	    is_lock_holder_running(cpuc))
+		goto consume_prev;
 
 	/*
 	 * If all CPUs are using, directly consume without checking CPU masks.
@@ -780,8 +829,8 @@ consume_out:
 	 * If nothing to run, continue running the previous task.
 	 */
 	if (prev && prev->scx.flags & SCX_TASK_QUEUED) {
+consume_prev:
 		taskc_prev = taskc_prev ?: get_task_ctx(prev);
-
 		if (taskc_prev) {
 			/*
 			 * Let's update stats first before calculating time slice.
@@ -791,7 +840,21 @@ consume_out:
 			/*
 			 * Refill the time slice.
 			 */
-			prev->scx.slice = calc_time_slice(taskc_prev);
+			prev->scx.slice = calc_time_slice(taskc_prev, cpuc);
+
+			/*
+			 * Reset prev task's lock and futex boost count
+			 * for a lock holder to be boosted only once.
+			 */
+			if (is_lock_holder_running(cpuc))
+				reset_lock_futex_boost(taskc_prev, cpuc);
+
+			/*
+			 * Task flags can be updated when calculating the time
+			 * slice (LAVD_FLAG_SLICE_BOOST), so let's update the
+			 * CPU's copy of the flag as well.
+			 */
+			cpuc->flags = taskc_prev->flags;
 		}
 	}
 }
@@ -906,7 +969,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * Calculate the task's time slice here,
 	 * as it depends on the system load.
 	 */
-	p->scx.slice = calc_time_slice(taskc);
+	p->scx.slice = calc_time_slice(taskc, cpuc);
 
 	/*
 	 * Update the current logical clock.
@@ -1265,7 +1328,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */
 	taskc->last_quiescent_clk = now;
-	taskc->avg_runtime = slice_max_ns;
+	taskc->avg_runtime = sys_stat.slice;
 	taskc->svc_time = sys_stat.avg_svc_time;
 
 	set_on_core_type(taskc, p->cpus_ptr);

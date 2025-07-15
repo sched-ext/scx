@@ -208,15 +208,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 }
 
-static u64 clamp_time_slice_ns(u64 slice)
-{
-	if (slice < slice_min_ns)
-		slice = slice_min_ns;
-	else if (slice > slice_max_ns)
-		slice = slice_max_ns;
-	return slice;
-}
-
 static void calc_sys_stat(struct sys_stat_ctx *c)
 {
 	static int cnt = 0;
@@ -351,7 +342,7 @@ static void calc_sys_time_slice(void)
 	 */
 	nr_queued = sys_stat.nr_queued_task + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_queued;
-	slice = clamp_time_slice_ns(slice);
+	slice = clamp(slice, slice_min_ns, slice_max_ns);
 	sys_stat.slice = calc_avg(sys_stat.slice, slice);
 }
 
@@ -425,7 +416,7 @@ static s32 init_sys_stat(u64 now)
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
-	sys_stat.slice = LAVD_SLICE_MAX_NS_DFL;
+	sys_stat.slice = slice_max_ns;
 	bpf_for(dsq_id, 0, nr_cpdoms) {
 		if (dsq_id >= LAVD_CPDOM_MAX_NR)
 			break;

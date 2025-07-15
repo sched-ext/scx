@@ -569,7 +569,7 @@ impl<'a> Scheduler<'a> {
             suggested_cpu_id: tc.suggested_cpu_id,
             waker_pid: tc.waker_pid,
             waker_comm: waker_comm.into(),
-            slice_ns: tc.slice_ns,
+            slice: tc.slice,
             lat_cri: tc.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,

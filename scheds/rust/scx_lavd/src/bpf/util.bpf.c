@@ -86,6 +86,10 @@ struct {
 #define max(X, Y) (((X) < (Y)) ? (Y) : (X))
 #endif
 
+#ifndef clamp
+#define clamp(val, lo, hi) min(max(val, lo), hi)
+#endif
+
 static struct task_ctx *get_task_ctx(struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -201,7 +205,12 @@ static bool have_scheduled(struct task_ctx *taskc)
 	 * If task's time slice hasn't been updated, that means the task has
 	 * been scheduled by this scheduler.
 	 */
-	return taskc->slice_ns != 0;
+	return taskc->slice != 0;
+}
+
+static bool can_boost_slice(void)
+{
+	return slice_max_ns <= sys_stat.slice;
 }
 
 static u16 get_nice_prio(struct task_struct *p)
