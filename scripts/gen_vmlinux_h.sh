@@ -77,7 +77,8 @@ generate_vmlinux_for_arch() {
     ARCH=$1
     CROSS_COMPILE=${ARCHS[$ARCH]}
     TARGET_DIR=${INCLUDE_TARGET}/${ARCH}
-    OUTPUT_FILE="${TARGET_DIR}/vmlinux-${LINUX_VER}-g${SHORT_SHA}.h"
+    OUTPUT_BASENAME="vmlinux-${LINUX_VER}-g${SHORT_SHA}.h"
+    OUTPUT_FILE="${TARGET_DIR}/${OUTPUT_BASENAME}"
     mkdir -p ${TARGET_DIR}
 
     LOG="/tmp/${ARCH}.log"
@@ -90,6 +91,7 @@ generate_vmlinux_for_arch() {
     if [ -f ./vmlinux ]; then
         echo "Generating ${OUTPUT_FILE}..."
         bpftool btf dump file ./vmlinux format c > "${OUTPUT_FILE}"
+        ln -fsT "${OUTPUT_BASENAME}" "${TARGET_DIR}/vmlinux.h"
         echo "${OUTPUT_FILE} generated successfully."
     else
         echo "Failed to generate vmlinux for ${ARCH}. Please check the compilation process."
