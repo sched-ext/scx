@@ -251,9 +251,9 @@ impl PerfettoTraceManager {
 
     fn record_process_thread(&mut self, pid: u32, tid: u32, comm: String) {
         if pid != tid {
-            let parent_key = self.generate_key(pid, tid);
+            let thread_key = self.generate_key(pid, tid);
             self.threads
-                .entry(parent_key)
+                .entry(thread_key)
                 .or_insert_with(|| ThreadDescriptor {
                     tid: Some(tid as i32),
                     pid: Some(pid as i32),
