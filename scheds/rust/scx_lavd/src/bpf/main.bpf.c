@@ -443,7 +443,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * for a lock holder to be boosted only once.
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
-	taskc->lock_holder_xted = false;
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -618,7 +617,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * for a lock holder to be boosted only once.
 		 */
 		reset_lock_futex_boost(taskc_prev, cpuc);
-		taskc_prev->lock_holder_xted = true;
 		return;
 	}
 

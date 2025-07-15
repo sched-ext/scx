@@ -73,13 +73,12 @@ enum consts_internal {
 enum consts_flags {
 	LAVD_FLAG_FUTEX_BOOST		= (0x1 << 0), /* futex acquired or not */
 	LAVD_FLAG_NEED_LOCK_BOOST	= (0x1 << 1), /* need to boost lock for deadline calculation */
-	LAVD_FLAG_LOCK_HOLDER_XTED	= (0x1 << 2), /* slice is already extended for a lock holder task */
-	LAVD_FLAG_IS_GREEDY		= (0x1 << 3), /* task's overscheduling ratio compared to its nice priority */
-	LAVD_FLAG_IS_AFFINITIZED	= (0x1 << 4), /* is this task pinned to a subset of all CPUs? */
-	LAVD_FLAG_IS_WAKEUP		= (0x1 << 5), /* is this a wake up? */
-	LAVD_FLAG_IS_SYNC_WAKEUP	= (0x1 << 6), /* is this a sync wake up? */
-	LAVD_FLAG_ON_BIG		= (0x1 << 7), /* can a task run on a big core? */
-	LAVD_FLAG_ON_LITTLE		= (0x1 << 8), /* can a task run on a little core? */
+	LAVD_FLAG_IS_GREEDY		= (0x1 << 2), /* task's overscheduling ratio compared to its nice priority */
+	LAVD_FLAG_IS_AFFINITIZED	= (0x1 << 3), /* is this task pinned to a subset of all CPUs? */
+	LAVD_FLAG_IS_WAKEUP		= (0x1 << 4), /* is this a wake up? */
+	LAVD_FLAG_IS_SYNC_WAKEUP	= (0x1 << 5), /* is this a sync wake up? */
+	LAVD_FLAG_ON_BIG		= (0x1 << 6), /* can a task run on a big core? */
+	LAVD_FLAG_ON_LITTLE		= (0x1 << 7), /* can a task run on a little core? */
 };
 
 /*
