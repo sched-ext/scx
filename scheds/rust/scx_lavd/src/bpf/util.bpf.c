@@ -33,6 +33,7 @@ volatile bool		no_core_compaction;
 volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
+const volatile bool	no_slice_boost;
 const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
