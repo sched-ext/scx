@@ -247,8 +247,15 @@ static void set_on_core_type(struct task_ctx *taskc,
 			break;
 	}
 
-	WRITE_ONCE(taskc->on_big, on_big);
-	WRITE_ONCE(taskc->on_little, on_little);
+	if (on_big)
+		set_task_flag(taskc, LAVD_FLAG_ON_BIG);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_ON_BIG);
+
+	if (on_little)
+		set_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
 }
 
 static bool prob_x_out_of_y(u32 x, u32 y)
