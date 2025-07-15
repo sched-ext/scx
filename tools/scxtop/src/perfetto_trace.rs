@@ -251,33 +251,39 @@ impl PerfettoTraceManager {
     }
 
     fn record_process_thread(&mut self, pid: u32, tid: u32, comm: String) {
-        let key = self.generate_key(pid, tid);
-
         if pid != tid {
-            self.threads.entry(key).or_insert_with(|| ThreadDescriptor {
-                tid: Some(tid as i32),
-                pid: Some(pid as i32),
-                thread_name: Some(comm.clone()),
-                ..ThreadDescriptor::default()
-            });
+            let parent_key = self.generate_key(pid, tid);
+            self.threads
+                .entry(parent_key)
+                .or_insert_with(|| ThreadDescriptor {
+                    tid: Some(tid as i32),
+                    pid: Some(pid as i32),
+                    thread_name: Some(comm.clone()),
+                    ..ThreadDescriptor::default()
+                });
         }
 
         // Let's check if this is the first time we've seen this process.
-        if !self.process_descriptors.contains_key(&key) {
-            let comm = self.get_comm(pid, tid, &comm);
+        let parent_key = self.generate_key(pid, pid);
+        if !self.process_descriptors.contains_key(&parent_key) {
+            let process_name = if pid == tid {
+                Some(comm)
+            } else {
+                self.get_comm(pid)
+            };
             let cmdline = self.get_cmdline(pid);
             self.process_descriptors.insert(
-                key,
+                parent_key,
                 ProcessDescriptor {
                     pid: Some(pid as i32),
                     cmdline: cmdline.clone(),
-                    process_name: comm,
+                    process_name,
                     ..ProcessDescriptor::default()
                 },
             );
 
             self.processes.insert(
-                key,
+                parent_key,
                 Process {
                     pid: Some(pid as i32),
                     cmdline,
@@ -287,15 +293,11 @@ impl PerfettoTraceManager {
         }
     }
 
-    fn get_comm(&self, pid: u32, tid: u32, comm: &String) -> Option<String> {
-        if pid == tid {
-            Some(comm.clone())
-        } else {
-            self.proc_reader
-                .read_pid_stat(pid)
-                .ok()
-                .and_then(|pid_stat| pid_stat.comm)
-        }
+    fn get_comm(&self, pid: u32) -> Option<String> {
+        self.proc_reader
+            .read_pid_stat(pid)
+            .ok()
+            .and_then(|pid_stat| pid_stat.comm)
     }
 
     fn get_cmdline(&self, pid: u32) -> Vec<String> {
