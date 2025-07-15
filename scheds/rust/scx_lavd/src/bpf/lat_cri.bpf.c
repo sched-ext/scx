@@ -35,7 +35,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
-	if (taskc->is_affinitized)
+	if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*

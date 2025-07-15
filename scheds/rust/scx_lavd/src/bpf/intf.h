@@ -136,7 +136,6 @@ struct task_ctx {
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	u8	on_big;			/* executable on a big core */
 	u8	on_little;		/* executable on a little core */
-	u8	is_affinitized;		/* is this task pinned to a subset of all CPUs? */
 
 	/*
 	 * Additional information when the scheduler is monitored,

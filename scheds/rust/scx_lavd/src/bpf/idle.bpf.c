@@ -72,7 +72,7 @@ struct pick_ctx {
 static __always_inline
 bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
 {
-	if (!ctx->taskc->is_affinitized)
+	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		ctx->i_mask = idle_cpumask;
 	else {
 		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->tmp_i_mask;
@@ -102,7 +102,7 @@ bool init_ao_masks(struct pick_ctx *ctx)
 	if (!ctx->cpuc_cur)
 		return false;
 
-	if (!ctx->taskc->is_affinitized) {
+	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED)) {
 		ctx->a_mask = ctx->active;
 		ctx->o_mask = ctx->ovrflw;
 		ctx->a_empty = ctx->o_empty = false;
@@ -299,7 +299,7 @@ bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 	struct bpf_cpumask *a_mask;
 	struct bpf_cpumask *o_mask;
 
-	if (!ctx->taskc->is_affinitized)
+	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
 
 	if (!bpf_cpumask_test_cpu(cpu, ctx->p->cpus_ptr))
@@ -320,7 +320,7 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 	struct cpdom_ctx *cpdc;
 	struct bpf_cpumask *cpd_mask, *a_mask, *o_mask;
 
-	if (!ctx->taskc->is_affinitized)
+	if (!test_task_flag(ctx->taskc, LAVD_FLAG_IS_AFFINITIZED))
 		return true;
 
 	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);

@@ -669,7 +669,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * active or overflow set, extend the overflow set and go.
 		 */
 		taskc_prev = get_task_ctx(prev);
-		if (taskc_prev && taskc_prev->is_affinitized &&
+		if (taskc_prev &&
+		    test_task_flag(taskc_prev, LAVD_FLAG_IS_AFFINITIZED) &&
 		    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
@@ -729,9 +730,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * try another task.
 		 */
 		taskc = get_task_ctx(p);
-		if(taskc && (!taskc->is_affinitized ||
-		   bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+		if(taskc &&
+		   (!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		    bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
 			bpf_task_release(p);
 			continue;
 		}
@@ -1106,7 +1108,10 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	taskc->is_affinitized = bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids;
+	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	set_on_core_type(taskc, cpumask);
 }
 
@@ -1198,7 +1203,10 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
-	taskc->is_affinitized = bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids;
+	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	taskc->last_runnable_clk = now;
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */
