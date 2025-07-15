@@ -904,7 +904,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 */
 	cpuc->flags = taskc->flags;
 	cpuc->lat_cri = taskc->lat_cri;
-	cpuc->stopping_tm_est_ns = get_est_stopping_time(taskc, now);
+	cpuc->est_stopping_clk = get_est_stopping_clk(taskc, now);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -978,7 +978,7 @@ unlock_out:
 	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	cpuc->est_stopping_clk = SCX_SLICE_INF;
 	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
 
@@ -1004,7 +1004,7 @@ unlock_out:
 	barrier();
 
 	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	cpuc->est_stopping_clk = SCX_SLICE_INF;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -1430,7 +1430,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->cpu_id = cpu;
 		cpuc->idle_start_clk = 0;
 		cpuc->lat_cri = 0;
-		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
 		cpuc->cpu_release_clk = now;

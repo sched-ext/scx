@@ -7,12 +7,12 @@
  * Preemption related ones
  */
 struct preemption_info {
-	u64		stopping_tm_est_ns;
+	u64		est_stopping_clk;
 	u64		lat_cri;
 	struct cpu_ctx	*cpuc;
 };
 
-static u64 get_est_stopping_time(struct task_ctx *taskc, u64 now)
+static u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
 {
 	return now + taskc->avg_runtime;
 }
@@ -24,7 +24,7 @@ static bool can_a_preempt_b(struct preemption_info *prm_a,
 	 * Check one's latency criticality and deadline.
 	 */
 	if ((prm_a->lat_cri > prm_b->lat_cri) &&
-	    (prm_a->stopping_tm_est_ns < prm_b->stopping_tm_est_ns))
+	    (prm_a->est_stopping_clk < prm_b->est_stopping_clk))
 		return true;
 	return false;
 }
@@ -50,7 +50,7 @@ static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	/*
 	 * Set a CPU information
 	 */
-	prm_cpu2->stopping_tm_est_ns = cpuc2->stopping_tm_est_ns;
+	prm_cpu2->est_stopping_clk = cpuc2->est_stopping_clk;
 	prm_cpu2->lat_cri = cpuc2->lat_cri;
 	prm_cpu2->cpuc = cpuc2;
 
@@ -103,7 +103,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	/*
 	 * Get task's preemption information for comparison.
 	 */
-	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc, now);
+	prm_task.est_stopping_clk = get_est_stopping_clk(taskc, now);
 	prm_task.lat_cri = taskc->lat_cri;
 	prm_task.cpuc = cpuc = get_cpu_ctx();
 	if (!cpuc) {
@@ -205,10 +205,10 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 		 * coordinate this on purpose because such a race is rare, but
 		 * controlling it would impose high synchronization overhead.
 		 *
-		 * Instead, we set the victim's stopping_tm_est_ns to zero
+		 * Instead, we set the victim's est_stopping_clk to zero
 		 * atomically to avoid the same victim CPU can be chosen
 		 * repeatedly. In addition, once updating the
-		 * stopping_tm_est_ns to zero succeeds, that means this CPU
+		 * est_stopping_clk to zero succeeds, that means this CPU
 		 * wins in preempting the victim CPU. Hence, let's set the
 		 * victim task's time slice to one (not zero).
 		 *
@@ -217,10 +217,10 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 		 * fixes the zero time slice to the default time slice
 		 * (SCX_SLICE_DFL, 20 msec).
 		 */
-		u64 old = victim_cpuc->stopping_tm_est_ns;
+		u64 old = victim_cpuc->est_stopping_clk;
 		if (old) {
 			bool ret = __sync_bool_compare_and_swap(
-				&victim_cpuc->stopping_tm_est_ns, old, 0);
+				&victim_cpuc->est_stopping_clk, old, 0);
 			if (ret)
 				WRITE_ONCE(victim_p->scx.slice, 1);
 		}
@@ -287,7 +287,7 @@ static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 		 */
 		cpuc->flags = 0;
 		cpuc->lat_cri = SCX_SLICE_INF;
-		cpuc->stopping_tm_est_ns = 0;
+		cpuc->est_stopping_clk = 0;
 	} else {
 		/*
 		 * When the CPU is idle,
@@ -295,7 +295,7 @@ static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 		 */
 		cpuc->flags = 0;
 		cpuc->lat_cri = 0;
-		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+		cpuc->est_stopping_clk = SCX_SLICE_INF;
 	}
 }
 
