@@ -3021,6 +3021,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_events",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
