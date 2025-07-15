@@ -102,7 +102,6 @@ impl PerfettoTraceManager {
             dsq_uuids: BTreeMap::new(),
             dsq_lat_events: BTreeMap::new(),
             dsq_nr_queued_events: BTreeMap::new(),
-            dsq_nr_queued_trusted_packet_seq_uuid,
             process_descriptors: HashMap::new(),
             processes: HashMap::new(),
             threads: HashMap::new(),
