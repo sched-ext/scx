@@ -16,7 +16,7 @@ pushd ${LINUX_REPO}
 INCLUDE_TARGET=$2 # target directory, e.g., /path/to/scx/sched/include/arch/
 HASH=$(git rev-parse HEAD)
 SHORT_SHA=${HASH:0:12} # full SHA of the commit truncated to 12 chars
-LINUX_VER=$(git describe --tags --abbrev=0)
+LINUX_VER=$(git describe --tags --abbrev=0 --match="v*")
 
 # List of architectures and their corresponding cross-compilers
 declare -A ARCHS
