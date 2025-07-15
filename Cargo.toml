@@ -28,10 +28,14 @@ resolver = "2"
 [profile.release]
 lto = "thin"
 
+[profile.release-tiny]
+inherits = "release"
+lto = "thin"
+strip = true
+incremental = true
+
 [profile.release-fast]
 inherits = "release"
 target-cpu = "native"
 lto = false
 incremental = true
-opt-level = 0
-debuginfo = 0
