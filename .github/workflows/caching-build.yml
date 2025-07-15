@@ -1,9 +1,11 @@
 name: build-and-test
 
 on:
-  push:
   pull_request:
   merge_group:
+  push:
+    branches-ignore:
+      - gh-readonly-queue/main/**
 
 jobs:
   build-kernels:
