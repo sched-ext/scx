@@ -18,10 +18,10 @@
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "fbad404f04d758c52bae79ca20d0e7fe5fef91d3",
-    "lastModified": 1752206896,
-    "narHash": "sha256-DLttEX39dSI6M1Yqnb7Ja3NxWgGz9WVXRpk8tM6mc3M=",
-    "kernelVersion": "6.12.37"
+    "commitHash": "259f4977409c87a980fa2227b7c76a2fe3fb8c2f",
+    "lastModified": 1752552575,
+    "narHash": "sha256-LYoyQWRBez4GnlDhVC1CYJpE02iyL39062tbHA+5HXU=",
+    "kernelVersion": "6.12.38"
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
