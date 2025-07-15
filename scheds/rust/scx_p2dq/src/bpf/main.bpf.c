@@ -948,6 +948,32 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
+	// If the last CPU is idle just reenque to the CPUs local DSQ. This
+	// should reduce the number of migrations.
+	if (scx_bpf_dsq_nr_queued(taskc->last_cpu_dsq_id) == 0 &&
+	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON|taskc->last_cpu) == 0) {
+		if (!(llcx = lookup_llc_ctx(taskc->llc_id))) {
+			scx_bpf_error("invalid lookup");
+			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+			return;
+		}
+		if (llcx->id != taskc->llc_id)
+			p->scx.dsq_vtime = llcx->vtime;
+		else
+			p->scx.dsq_vtime = max(p->scx.dsq_vtime,
+					       llcx->vtime - max_dsq_time_slice());
+		scx_bpf_dsq_insert_vtime(p,
+					 taskc->last_cpu_dsq_id,
+					 taskc->slice_ns,
+					 p->scx.dsq_vtime, enq_flags);
+		if (scx_bpf_test_and_clear_cpu_idle(taskc->last_cpu)) {
+			stat_inc(P2DQ_STAT_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		}
+		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		return;
+	}
+
 	if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
 	    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		scx_bpf_error("invalid lookup");
@@ -1064,6 +1090,8 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	taskc->llc_id = llcx->id;
 	taskc->node_id = llcx->node_id;
 	taskc->was_nice = p->scx.weight < 100;
+	taskc->last_cpu = task_cpu;
+	taskc->last_cpu_dsq_id = cpuc->dsq_id;
 	cpuc->interactive = taskc->interactive;
 	cpuc->dsq_index = taskc->dsq_index;
 	cpuc->nice_task = p->scx.weight < 100;
