@@ -133,8 +133,6 @@ struct task_ctx {
 	 */
 	u64	flags;			/* LAVD_FLAG_* */
 
-	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
-
 	/*
 	 * Additional information when the scheduler is monitored,
 	 * so it is updated only when is_monitored is true.

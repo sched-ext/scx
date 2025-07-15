@@ -16,7 +16,11 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * Prioritize a wake-up task since this is a clear sign of immediate
 	 * consumer. If it is a synchronous wakeup, double the prioritization.
 	 */
-	weight_boost += taskc->wakeup_ft * LAVD_LC_WEIGHT_BOOST;
+	if (test_task_flag(taskc, LAVD_FLAG_IS_WAKEUP))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	if (test_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve

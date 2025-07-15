@@ -341,7 +341,8 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Update task state when starts running.
 	 */
-	taskc->wakeup_ft = 0;
+	reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
+	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	taskc->last_running_clk = now;
 
 	/*
@@ -462,7 +463,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!taskc)
 		return prev_cpu;
-	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
+
+	if (wake_flags & SCX_WAKE_SYNC)
+		set_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 
 	/*
 	 * Find an idle cpu and reserve it since the task @p will run
@@ -529,7 +534,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * timeslice, as the task hasn't yet run.
 	 */
 	if (!(enq_flags & SCX_ENQ_REENQ)) {
-		taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
+		if (enq_flags & SCX_ENQ_WAKEUP)
+			set_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
+		else
+			reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
+
 		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 	}
 	p->scx.slice = calc_time_slice(taskc);
