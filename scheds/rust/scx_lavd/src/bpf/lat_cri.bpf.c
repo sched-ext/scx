@@ -48,8 +48,8 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
-	if (taskc->need_lock_boost) {
-		taskc->need_lock_boost = false;
+	if (test_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST)) {
+		reset_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 	}
 

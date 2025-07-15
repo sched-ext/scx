@@ -58,7 +58,7 @@ static void dec_futex_boost(void)
 static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
 	if (is_lock_holder(taskc))
-		taskc->need_lock_boost = true;
+		set_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
 
 	reset_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 	cpuc->lock_holder = false;
