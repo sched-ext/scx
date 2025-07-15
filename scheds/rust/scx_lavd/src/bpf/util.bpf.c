@@ -166,7 +166,7 @@ static bool is_pinned(const struct task_struct *p)
 
 static inline bool test_task_flag(struct task_ctx *taskc, u64 flag)
 {
-	return taskc->flags & flag;
+	return (taskc->flags & flag) == flag;
 }
 
 static inline void set_task_flag(struct task_ctx *taskc, u64 flag)

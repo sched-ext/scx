@@ -95,8 +95,7 @@ static bool is_perf_cri(struct task_ctx *taskc)
 	if (!have_little_core)
 		return true;
 
-	if (test_task_flag(taskc, LAVD_FLAG_ON_BIG) &&
-	    test_task_flag(taskc, LAVD_FLAG_ON_LITTLE))
+	if (test_task_flag(taskc, LAVD_FLAG_ON_BIG | LAVD_FLAG_ON_LITTLE))
 		return taskc->perf_cri >= sys_stat.thr_perf_cri;
 
 	return test_task_flag(taskc, LAVD_FLAG_ON_BIG);
