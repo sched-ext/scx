@@ -239,7 +239,7 @@ static void try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
 	 */
-	if (!is_eligible(taskc))
+	if (test_task_flag(taskc, LAVD_FLAG_IS_GREEDY))
 		return;
 
 	/*

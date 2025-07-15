@@ -16,7 +16,11 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * Prioritize a wake-up task since this is a clear sign of immediate
 	 * consumer. If it is a synchronous wakeup, double the prioritization.
 	 */
-	weight_boost += taskc->wakeup_ft * LAVD_LC_WEIGHT_BOOST;
+	if (test_task_flag(taskc, LAVD_FLAG_IS_WAKEUP))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	if (test_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve
@@ -35,7 +39,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
-	if (taskc->is_affinitized)
+	if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -48,8 +52,8 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
-	if (taskc->need_lock_boost) {
-		taskc->need_lock_boost = false;
+	if (test_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST)) {
+		reset_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 	}
 
@@ -173,7 +177,10 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	 * system.
 	 */
 	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-	taskc->is_greedy = ratio > LAVD_SCALE;
+	if (ratio > LAVD_SCALE)
+		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
 	return ratio;
 }
 

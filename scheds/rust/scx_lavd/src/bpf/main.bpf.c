@@ -297,6 +297,7 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct cpu_ctx *cpuc, u64 now)
 {
 	u64 wait_period, interval;
+	struct cpu_ctx *prev_cpuc;
 
 	/*
 	 * If the sched_ext core directly dispatched a task, calculating the
@@ -333,14 +334,15 @@ static void update_stat_for_running(struct task_struct *p,
 	if (is_monitored) {
 		taskc->resched_interval = time_delta(now,
 						     taskc->last_running_clk);
-		taskc->prev_cpu_id = taskc->cpu_id;
 	}
+	taskc->prev_cpu_id = taskc->cpu_id;
 	taskc->cpu_id = cpuc->cpu_id;
 
 	/*
 	 * Update task state when starts running.
 	 */
-	taskc->wakeup_ft = 0;
+	reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
+	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	taskc->last_running_clk = now;
 
 	/*
@@ -379,10 +381,9 @@ static void update_stat_for_running(struct task_struct *p,
 	if (is_perf_cri(taskc))
 		cpuc->nr_perf_cri++;
 
-	if (taskc->dsq_id != cpuc->cpdom_id) {
-		taskc->dsq_id = cpuc->cpdom_id;
+	prev_cpuc = get_cpu_ctx_id(taskc->prev_cpu_id);
+	if (prev_cpuc && prev_cpuc->cpdom_id != cpuc->cpdom_id)
 		cpuc->nr_x_migration++;
-	}
 
 	/*
 	 * It is clear there is no need to consider the suspended duration
@@ -443,7 +444,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * for a lock holder to be boosted only once.
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
-	taskc->lock_holder_xted = false;
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -463,7 +463,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!taskc)
 		return prev_cpu;
-	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
+
+	if (wake_flags & SCX_WAKE_SYNC)
+		set_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 
 	/*
 	 * Find an idle cpu and reserve it since the task @p will run
@@ -530,7 +534,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * timeslice, as the task hasn't yet run.
 	 */
 	if (!(enq_flags & SCX_ENQ_REENQ)) {
-		taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
+		if (enq_flags & SCX_ENQ_WAKEUP)
+			set_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
+		else
+			reset_task_flag(taskc, LAVD_FLAG_IS_WAKEUP);
+
 		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 	}
 	p->scx.slice = calc_time_slice(taskc);
@@ -618,7 +626,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * for a lock holder to be boosted only once.
 		 */
 		reset_lock_futex_boost(taskc_prev, cpuc);
-		taskc_prev->lock_holder_xted = true;
 		return;
 	}
 
@@ -671,7 +678,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * active or overflow set, extend the overflow set and go.
 		 */
 		taskc_prev = get_task_ctx(prev);
-		if (taskc_prev && taskc_prev->is_affinitized &&
+		if (taskc_prev &&
+		    test_task_flag(taskc_prev, LAVD_FLAG_IS_AFFINITIZED) &&
 		    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 		    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
@@ -731,9 +739,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * try another task.
 		 */
 		taskc = get_task_ctx(p);
-		if(taskc && (!taskc->is_affinitized ||
-		   bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+		if(taskc &&
+		   (!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		    bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
 			bpf_task_release(p);
 			continue;
 		}
@@ -1108,7 +1117,10 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	taskc->is_affinitized = bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids;
+	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	set_on_core_type(taskc, cpumask);
 }
 
@@ -1200,7 +1212,10 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
-	taskc->is_affinitized = bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids;
+	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	taskc->last_runnable_clk = now;
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */

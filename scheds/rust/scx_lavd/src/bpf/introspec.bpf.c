@@ -52,7 +52,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.stat[0] = is_lat_cri(taskc) ? 'L' : 'R';
 	m->taskc_x.stat[1] = is_perf_cri(taskc) ? 'H' : 'I';
 	m->taskc_x.stat[2] = cpuc->big_core ? 'B' : 'T';
-	m->taskc_x.stat[3] = is_greedy(taskc) ? 'G' : 'E';
+	m->taskc_x.stat[3] = test_task_flag(taskc, LAVD_FLAG_IS_GREEDY)? 'G' : 'E';
 	m->taskc_x.stat[4] = '\0';
 
 	__builtin_memcpy_inline(&m->taskc, taskc, sizeof(m->taskc));

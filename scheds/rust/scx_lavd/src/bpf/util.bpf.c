@@ -163,24 +163,29 @@ static bool is_pinned(const struct task_struct *p)
 	return p->nr_cpus_allowed == 1;
 }
 
+static inline bool test_task_flag(struct task_ctx *taskc, u64 flag)
+{
+	return taskc->flags & flag;
+}
+
+static inline void set_task_flag(struct task_ctx *taskc, u64 flag)
+{
+	taskc->flags |= flag;
+}
+
+static inline void reset_task_flag(struct task_ctx *taskc, u64 flag)
+{
+	taskc->flags &= ~flag;
+}
+
 static bool is_lat_cri(struct task_ctx *taskc)
 {
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
 }
 
-static bool is_greedy(struct task_ctx *taskc)
-{
-	return taskc->is_greedy;
-}
-
-static bool is_eligible(struct task_ctx *taskc)
-{
-	return !is_greedy(taskc);
-}
-
 static bool is_lock_holder(struct task_ctx *taskc)
 {
-	return taskc->futex_boost;
+	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 }
 
 static bool have_scheduled(struct task_ctx *taskc)
@@ -242,8 +247,15 @@ static void set_on_core_type(struct task_ctx *taskc,
 			break;
 	}
 
-	WRITE_ONCE(taskc->on_big, on_big);
-	WRITE_ONCE(taskc->on_little, on_little);
+	if (on_big)
+		set_task_flag(taskc, LAVD_FLAG_ON_BIG);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_ON_BIG);
+
+	if (on_little)
+		set_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
 }
 
 static bool prob_x_out_of_y(u32 x, u32 y)

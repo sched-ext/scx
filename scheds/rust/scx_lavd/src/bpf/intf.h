@@ -118,7 +118,7 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
-	u64	dsq_id;			/* DSQ id where a task run for statistics */
+	u32	prev_cpu_id;		/* where a task ran last time */
 
 	/*
 	 * Task deadline and time slice
@@ -127,22 +127,18 @@ struct task_ctx {
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
 	u32	slice_ns;		/* time slice */
-	s8	futex_boost;		/* futex acquired or not */
-	u8	is_greedy;		/* task's overscheduling ratio compared to its nice priority */
-	u8	need_lock_boost;	/* need to boost lock for deadline calculation */
-	u8	lock_holder_xted;	/* slice is already extended for a lock holder task */
-	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
-	u8	on_big;			/* executable on a big core */
-	u8	on_little;		/* executable on a little core */
-	u8	is_affinitized;		/* is this task pinned to a subset of all CPUs? */
+
+	/*
+	 * Task status
+	 */
+	u64	flags;			/* LAVD_FLAG_* */
 
 	/*
 	 * Additional information when the scheduler is monitored,
 	 * so it is updated only when is_monitored is true.
 	 */
 	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
-	u32	cpu_id;			/* where a task ran */
-	u32	prev_cpu_id;		/* where a task ran last time */
+	u32	cpu_id;			/* where a task is running now */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */

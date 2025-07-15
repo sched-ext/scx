@@ -17,7 +17,7 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 			cpuc = get_cpu_ctx();
 
 		if (cpuc) {
-			taskc->futex_boost = true;
+			set_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 			cpuc->lock_holder = true;
 		}
 	}
@@ -31,12 +31,12 @@ static void __dec_futex_boost(struct cpu_ctx *cpuc)
 	struct task_struct *p = bpf_get_current_task_btf();
 	struct task_ctx *taskc = get_task_ctx(p);
 
-	if (taskc && taskc->futex_boost) {
+	if (taskc && test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST)) {
 		if (!cpuc)
 			cpuc = get_cpu_ctx();
 
 		if (cpuc) {
-			taskc->futex_boost = false;
+			reset_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 			cpuc->lock_holder = false;
 		}
 	}
@@ -58,9 +58,9 @@ static void dec_futex_boost(void)
 static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
 	if (is_lock_holder(taskc))
-		taskc->need_lock_boost = true;
+		set_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
 
-	taskc->futex_boost = false;
+	reset_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 	cpuc->lock_holder = false;
 }
 

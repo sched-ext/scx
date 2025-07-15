@@ -95,9 +95,11 @@ static bool is_perf_cri(struct task_ctx *taskc)
 	if (!have_little_core)
 		return true;
 
-	if (READ_ONCE(taskc->on_big) && READ_ONCE(taskc->on_little))
+	if (test_task_flag(taskc, LAVD_FLAG_ON_BIG) &&
+	    test_task_flag(taskc, LAVD_FLAG_ON_LITTLE))
 		return taskc->perf_cri >= sys_stat.thr_perf_cri;
-	return READ_ONCE(taskc->on_big);
+
+	return test_task_flag(taskc, LAVD_FLAG_ON_BIG);
 }
 
 static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
