@@ -57,7 +57,7 @@ static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	/*
 	 * Never preeempt a CPU running a lock holder.
 	 */
-	if (prm_cpu2->cpuc->lock_holder)
+	if (is_lock_holder_running(prm_cpu2->cpuc))
 		return false;
 
 	/*
@@ -285,6 +285,7 @@ static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 		 * When the CPU is taken by high priority scheduler,
 		 * set things impossible to preempt.
 		 */
+		cpuc->flags = 0;
 		cpuc->lat_cri = SCX_SLICE_INF;
 		cpuc->stopping_tm_est_ns = 0;
 	} else {
@@ -292,6 +293,7 @@ static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 		 * When the CPU is idle,
 		 * set things easy to preempt.
 		 */
+		cpuc->flags = 0;
 		cpuc->lat_cri = 0;
 		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 	}

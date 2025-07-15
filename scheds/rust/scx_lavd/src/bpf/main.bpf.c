@@ -609,7 +609,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If a task is holding a new lock, continue to execute it
 	 * to make system-wide forward progress.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && cpuc->lock_holder) {
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	    is_lock_holder_running(cpuc)) {
 		taskc_prev = get_task_ctx(prev);
 		if (!taskc_prev) {
 			scx_bpf_error("Failed to look up task context");
@@ -901,6 +902,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Update running task's information for preemption
 	 */
+	cpuc->flags = taskc->flags;
 	cpuc->lat_cri = taskc->lat_cri;
 	cpuc->stopping_tm_est_ns = get_est_stopping_time(taskc, now);
 
@@ -973,6 +975,7 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 unlock_out:
 	bpf_rcu_read_unlock();
 
+	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
 	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
@@ -994,6 +997,7 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 unlock_out:
 	bpf_rcu_read_unlock();
 
+	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;

@@ -145,10 +145,10 @@ struct cpu_ctx {
 	 * Information of a current running task for preemption
 	 */
 	volatile u64	stopping_tm_est_ns; /* estimated stopping time */
+	volatile u64	flags;		/* cached copy of task's flags */
 	volatile s32	futex_op;	/* futex op in futex V1 */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
-	volatile u8	lock_holder;	/* is a lock holder running */
 
 	/*
 	 * Information for CPU frequency scaling

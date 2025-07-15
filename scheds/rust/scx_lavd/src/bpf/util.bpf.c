@@ -189,6 +189,11 @@ static bool is_lock_holder(struct task_ctx *taskc)
 	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 }
 
+static bool is_lock_holder_running(struct cpu_ctx *cpuc)
+{
+	return cpuc->flags & LAVD_FLAG_FUTEX_BOOST;
+}
+
 static bool have_scheduled(struct task_ctx *taskc)
 {
 	/*
