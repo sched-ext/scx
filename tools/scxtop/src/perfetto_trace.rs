@@ -18,7 +18,7 @@ use crate::get_clock_value;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, SystemStatAction,
+    SchedWakingAction, SoftIRQAction, SystemStatAction, WaitAction,
 };
 
 use perfetto_protos::{
@@ -35,8 +35,8 @@ use perfetto_protos::{
     process_descriptor::ProcessDescriptor,
     sched::{
         SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
-        SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
-        SchedWakingFtraceEvent,
+        SchedProcessForkFtraceEvent, SchedProcessWaitFtraceEvent, SchedSwitchFtraceEvent,
+        SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
     },
     sys_stats::{sys_stats::CpuTimes, sys_stats::MeminfoValue, SysStats},
     sys_stats_counters::MeminfoCounters,
@@ -549,6 +549,32 @@ impl PerfettoTraceManager {
                         pid: Some((*pid).try_into().unwrap()),
                         old_pid: Some((*old_pid).try_into().unwrap()),
                         ..SchedProcessExecFtraceEvent::default()
+                    },
+                )),
+                ..FtraceEvent::default()
+            }
+        });
+    }
+
+    pub fn on_wait(&mut self, action: &WaitAction) {
+        let WaitAction {
+            ts,
+            cpu,
+            comm,
+            pid,
+            prio,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            FtraceEvent {
+                timestamp: Some(*ts),
+                pid: Some(*pid),
+                event: Some(ftrace_event::Event::SchedProcessWait(
+                    SchedProcessWaitFtraceEvent {
+                        comm: Some(comm.as_str().to_string()),
+                        pid: Some((*pid).try_into().unwrap()),
+                        prio: Some(*prio),
+                        special_fields: SpecialFields::new(),
                     },
                 )),
                 ..FtraceEvent::default()

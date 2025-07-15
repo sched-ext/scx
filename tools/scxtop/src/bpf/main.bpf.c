@@ -921,6 +921,37 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	return 0;
 }
 
+SEC("?tp_btf/sched_process_wait")
+int BPF_PROG(on_sched_wait, struct pid *pid)
+{
+	struct bpf_event *event;
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = WAIT;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	p = (struct task_struct *)bpf_get_current_task();
+	if (p) {
+		record_real_comm(event->event.wait.comm, p);
+		event->event.wait.pid = BPF_CORE_READ(p, pid);
+		event->event.wait.prio = (int)p->prio;
+	} else {
+		__builtin_memset(event->event.wait.comm, 0, MAX_COMM);
+		event->event.wait.pid = 0;
+		event->event.wait.prio = 0;
+	}
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("?tp_btf/gpu_mem_total")
 int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 {

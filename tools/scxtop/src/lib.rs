@@ -169,6 +169,15 @@ pub struct ExecAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WaitAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub comm: SsoString,
+    pub pid: u32,
+    pub prio: i32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedSwitchAction {
     pub ts: u64,
     pub cpu: u32,
@@ -370,6 +379,7 @@ pub enum Action {
     ToggleHwPressure,
     ToggleUncoreFreq,
     Up,
+    Wait(WaitAction),
     None,
 }
 
@@ -583,6 +593,18 @@ impl TryFrom<&bpf_event> for Action {
             bpf_intf::event_type_TRACE_STOPPED => {
                 let action = Action::TraceStopped(TraceStoppedAction { ts: event.ts });
                 Ok(action)
+            }
+            bpf_intf::event_type_WAIT => {
+                let wait = unsafe { &event.event.wait };
+                let comm = String::from_utf8_lossy(&wait.comm);
+
+                Ok(Action::Wait(WaitAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    comm: comm.into(),
+                    pid: wait.pid,
+                    prio: wait.prio,
+                }))
             }
             _ => Err(()),
         }

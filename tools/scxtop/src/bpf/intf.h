@@ -36,11 +36,12 @@ enum event_type {
 	EXEC,
 	EXIT,
 	FORK,
+	WAIT,
 	GPU_MEM,
 	HW_PRESSURE,
 	IPI,
 	PSTATE_SAMPLE,
-    SCHED_MIGRATE,
+    	SCHED_MIGRATE,
 	SCHED_REG,
 	SCHED_SWITCH,
 	SCHED_UNREG,
@@ -119,6 +120,12 @@ struct exec_event {
 	u32             pid;
 };
 
+struct wait_event {
+	u8              comm[MAX_COMM];
+	u32             pid;
+	int             prio;
+};
+
 struct ipi_event {
 	u32		pid;
 	u32		target_cpu;
@@ -172,6 +179,7 @@ struct bpf_event {
 		struct  exit_event exit;
 		struct  fork_event fork;
 		struct  exec_event exec;
+		struct  wait_event wait;
 		struct  hw_pressure_event hwp;
 		struct  gpu_mem_event gm;
 		struct  cpuhp_enter_event chp;
