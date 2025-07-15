@@ -118,7 +118,7 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
-	u64	dsq_id;			/* DSQ id where a task run for statistics */
+	u32	prev_cpu_id;		/* where a task ran last time */
 
 	/*
 	 * Task deadline and time slice
@@ -141,8 +141,7 @@ struct task_ctx {
 	 * so it is updated only when is_monitored is true.
 	 */
 	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
-	u32	cpu_id;			/* where a task ran */
-	u32	prev_cpu_id;		/* where a task ran last time */
+	u32	cpu_id;			/* where a task is running now */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */

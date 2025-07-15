@@ -297,6 +297,7 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct cpu_ctx *cpuc, u64 now)
 {
 	u64 wait_period, interval;
+	struct cpu_ctx *prev_cpuc;
 
 	/*
 	 * If the sched_ext core directly dispatched a task, calculating the
@@ -333,8 +334,8 @@ static void update_stat_for_running(struct task_struct *p,
 	if (is_monitored) {
 		taskc->resched_interval = time_delta(now,
 						     taskc->last_running_clk);
-		taskc->prev_cpu_id = taskc->cpu_id;
 	}
+	taskc->prev_cpu_id = taskc->cpu_id;
 	taskc->cpu_id = cpuc->cpu_id;
 
 	/*
@@ -379,10 +380,9 @@ static void update_stat_for_running(struct task_struct *p,
 	if (is_perf_cri(taskc))
 		cpuc->nr_perf_cri++;
 
-	if (taskc->dsq_id != cpuc->cpdom_id) {
-		taskc->dsq_id = cpuc->cpdom_id;
+	prev_cpuc = get_cpu_ctx_id(taskc->prev_cpu_id);
+	if (prev_cpuc && prev_cpuc->cpdom_id != cpuc->cpdom_id)
 		cpuc->nr_x_migration++;
-	}
 
 	/*
 	 * It is clear there is no need to consider the suspended duration
