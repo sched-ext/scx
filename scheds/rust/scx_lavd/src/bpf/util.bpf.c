@@ -183,16 +183,6 @@ static bool is_lat_cri(struct task_ctx *taskc)
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
 }
 
-static bool is_greedy(struct task_ctx *taskc)
-{
-	return taskc->is_greedy;
-}
-
-static bool is_eligible(struct task_ctx *taskc)
-{
-	return !is_greedy(taskc);
-}
-
 static bool is_lock_holder(struct task_ctx *taskc)
 {
 	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);

@@ -173,7 +173,10 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	 * system.
 	 */
 	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-	taskc->is_greedy = ratio > LAVD_SCALE;
+	if (ratio > LAVD_SCALE)
+		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
 	return ratio;
 }
 

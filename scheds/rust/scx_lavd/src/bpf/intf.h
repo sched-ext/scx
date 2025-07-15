@@ -133,7 +133,6 @@ struct task_ctx {
 	 */
 	u64	flags;			/* LAVD_FLAG_* */
 
-	u8	is_greedy;		/* task's overscheduling ratio compared to its nice priority */
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	u8	on_big;			/* executable on a big core */
 	u8	on_little;		/* executable on a little core */
