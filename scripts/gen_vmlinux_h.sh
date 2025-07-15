@@ -27,6 +27,7 @@ ARCHS=(
     [powerpc]="powerpc64le-linux-gnu-"
     [riscv]="riscv64-linux-gnu-"
     [s390]="s390x-linux-gnu-"
+    [x86]="x86_64-linux-gnu-"
 )
 if grep ^ID=fedora /etc/os-release &> /dev/null; then
     ARCHS[arm]=arm-linux-gnu-
@@ -41,25 +42,25 @@ install_toolchains() {
             gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu \
             gcc-arm-linux-gnueabi gcc-mips64-linux-gnuabi64 \
             gcc-powerpc64le-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu
+            gcc-s390x-linux-gnu gcc-x86-64-linux-gnu
     elif command -v dnf &> /dev/null; then
         sudo dnf install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
             gcc-arm-linux-gnu gcc-mips64-linux-gnu \
             gcc-powerpc64-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu
+            gcc-s390x-linux-gnu gcc-x86_64-linux-gnu
     elif command -v yum &> /dev/null; then
         sudo yum install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
             gcc-arm-linux-gnu gcc-mips64-linux-gnuabi64 \
             gcc-powerpc64-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu
+            gcc-s390x-linux-gnu gcc-x86_64-linux-gnu
     elif command -v pacman &> /dev/null; then
         sudo pacman -Sy --noconfirm \
             aarch64-linux-gnu-gcc x86_64-linux-gnu-gcc \
             arm-linux-gnueabi-gcc mips64-linux-gnu-gcc \
             powerpc64le-linux-gnu-gcc riscv64-linux-gnu-gcc \
-            s390x-linux-gnu-gcc
+            s390x-linux-gnu-gcc gcc
     elif command -v zypper &> /dev/null; then
         sudo zypper install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
