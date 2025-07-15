@@ -137,6 +137,11 @@ pub struct SchedulerOpts {
     #[clap(long, default_value="false", action = clap::ArgAction::Set)]
     pub max_dsq_pick2: bool,
 
+    /// Task slice tracking, slices are automatically scaled based on utilization rather than the
+    /// predetermined slice index.
+    #[clap(long, default_value="false", action = clap::ArgAction::Set)]
+    pub task_slice: bool,
+
     /// Scheduling min slice duration in microseconds.
     #[clap(short = 's', long, default_value = "100")]
     pub min_slice_us: u64,
@@ -271,6 +276,7 @@ macro_rules! init_open_skel {
             // p2dq config
             rodata.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
             rodata.p2dq_config.dsq_shift = opts.dsq_shift as u64;
+            rodata.p2dq_config.task_slice = MaybeUninit::new(opts.task_slice);
             rodata.p2dq_config.kthreads_local = MaybeUninit::new(!opts.disable_kthreads_local);
             rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
