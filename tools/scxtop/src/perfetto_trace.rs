@@ -83,6 +83,7 @@ impl PerfettoTraceManager {
                 .as_secs(),
         );
 
+        let mut rng = StdRng::seed_from_u64(trace_uuid);
         let mut mem_uuids = HashMap::new();
         mem_uuids.insert("mem_ratio".to_string(), rng.next_u64());
         mem_uuids.insert("swap_ratio".to_string(), rng.next_u64());
@@ -91,7 +92,7 @@ impl PerfettoTraceManager {
             trace: Trace::default(),
             trace_id: 0,
             trusted_pid: std::process::id() as i32,
-            rng: StdRng::seed_from_u64(trace_uuid),
+            rng,
             output_file_prefix,
             ftrace_events: BTreeMap::new(),
             dsq_uuids: BTreeMap::new(),
