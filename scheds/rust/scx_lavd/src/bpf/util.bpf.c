@@ -26,12 +26,13 @@ struct sys_stat	sys_stat;
 /*
  * Options
  */
-volatile bool		no_preemption;
-volatile bool		no_wake_sync;
-volatile bool		no_core_compaction;
-volatile bool		no_freq_scaling;
 volatile bool		is_powersave_mode;
 volatile bool		reinit_cpumask_for_performance;
+volatile bool		no_preemption;
+volatile bool		no_core_compaction;
+volatile bool		no_freq_scaling;
+
+const volatile bool	no_wake_sync;
 const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
