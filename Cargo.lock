@@ -489,9 +489,9 @@ dependencies = [
 
 [[package]]
 name = "cargo_metadata"
-version = "0.15.4"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eee4243f1f26fc7a42710e7439c149e2b10b05472f88090acce52632f231a73a"
+checksum = "2d886547e41f740c616ae73108f6eb70afe6d940c7bc697cb30f13daec073037"
 dependencies = [
  "camino",
  "cargo-platform",
@@ -503,16 +503,16 @@ dependencies = [
 
 [[package]]
 name = "cargo_metadata"
-version = "0.18.1"
+version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d886547e41f740c616ae73108f6eb70afe6d940c7bc697cb30f13daec073037"
+checksum = "dd5eb614ed4c27c5d706420e4320fbe3216ab31fa1c33cd8246ac36dae4479ba"
 dependencies = [
  "camino",
  "cargo-platform",
  "semver",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.10",
 ]
 
 [[package]]
@@ -1335,24 +1335,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fb_procfs"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8748972699ec5b99570e031841f449612e266d2106de7482ad76de003cfddba"
-dependencies = [
- "below-common",
- "lazy_static",
- "libc",
- "nix 0.29.0",
- "openat",
- "parking_lot",
- "serde",
- "slog",
- "thiserror 2.0.10",
- "threadpool",
-]
-
-[[package]]
 name = "filetime"
 version = "0.2.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1803,27 +1785,28 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libbpf-cargo"
-version = "0.25.0-beta.1"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d78971d366f266fd02f310b68e8cbf08ebaa35d7dd458ba98360448d8bb25467"
+checksum = "626c6fbcb5088716de86d0ccbdccedc17b13e59f41a605a3274029335e71fcbb"
 dependencies = [
  "anyhow",
- "cargo_metadata 0.15.4",
+ "cargo_metadata 0.19.2",
  "clap",
  "libbpf-rs",
+ "libbpf-sys",
  "memmap2",
- "regex",
- "semver",
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "libbpf-rs"
-version = "0.25.0-beta.1"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad0b2c8f481a850c965da7642f3a844c6d32d7f8709b5afb74c5f6bff1e37582"
+checksum = "e23d252d93e246c8787198369f06806c99c5077b5295be29505295f4e5426dc4"
 dependencies = [
  "bitflags 2.6.0",
  "libbpf-sys",
@@ -1833,12 +1816,12 @@ dependencies = [
 
 [[package]]
 name = "libbpf-sys"
-version = "1.4.6+v1.4.7"
+version = "1.5.1+v1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f30caf02dfece12c94e2835cab8daf7b52e5c62c1675f334f1dac24be5bd5f82"
+checksum = "912fae30b08bcbdb861d4b85bd09c05352c0ac9d7b93765ced5ca23709e7e590"
 dependencies = [
  "cc",
- "nix 0.29.0",
+ "nix 0.30.1",
  "pkg-config",
 ]
 
@@ -2057,6 +2040,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.6.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2072,6 +2067,16 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8a3895c6391c39d7fe7ebc444a87eb2991b2a0bc718fdabd071eec617fc68e4"
 dependencies = [
+ "winapi",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.46.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
+dependencies = [
+ "overload",
  "winapi",
 ]
 
@@ -2302,6 +2307,12 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "overload"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 
 [[package]]
 name = "owning_ref"
@@ -3021,6 +3032,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_events",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3044,6 +3056,23 @@ dependencies = [
  "scx_stats",
  "scx_stats_derive",
  "scx_userspace_arena",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
+[[package]]
+name = "scx_cosmos"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "libbpf-rs",
+ "log",
+ "scx_stats",
+ "scx_stats_derive",
  "scx_utils",
  "serde",
  "simplelog",
@@ -3103,7 +3132,7 @@ dependencies = [
  "combinations",
  "crossbeam",
  "ctrlc",
- "fb_procfs 0.7.1",
+ "fb_procfs",
  "gpoint",
  "hex",
  "itertools 0.13.0",
@@ -3131,7 +3160,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fastrand",
- "fb_procfs 0.7.1",
+ "fb_procfs",
  "lazy_static",
  "libbpf-rs",
  "libc",
@@ -3187,7 +3216,7 @@ dependencies = [
  "cgroupfs",
  "clap",
  "ctrlc",
- "fb_procfs 0.7.1",
+ "fb_procfs",
  "itertools 0.13.0",
  "lazy_static",
  "libbpf-rs",
@@ -3209,7 +3238,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "fb_procfs 0.7.1",
+ "fb_procfs",
  "lazy_static",
  "libbpf-rs",
  "libc",
@@ -3282,7 +3311,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "fb_procfs 0.7.1",
+ "fb_procfs",
  "libbpf-rs",
  "libc",
  "log",
@@ -3378,10 +3407,35 @@ dependencies = [
  "sscanf",
  "tar",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
  "vergen",
  "version-compare",
  "walkdir",
  "zbus",
+]
+
+[[package]]
+name = "scx_wd40"
+version = "1.0.14"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "fb_procfs",
+ "libbpf-rs",
+ "log",
+ "nix 0.29.0",
+ "ordered-float",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+ "sorted-vec",
+ "static_assertions",
 ]
 
 [[package]]
@@ -3404,7 +3458,6 @@ dependencies = [
  "config",
  "criterion",
  "crossterm 0.28.1",
- "fb_procfs 0.9.0",
  "futures",
  "glob",
  "hashbrown 0.15.2",
@@ -3416,6 +3469,7 @@ dependencies = [
  "num-format",
  "perfetto_protos",
  "plain",
+ "procfs",
  "protobuf",
  "rand 0.8.5",
  "ratatui",
@@ -3524,6 +3578,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
 ]
 
 [[package]]
@@ -4057,6 +4120,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e672c95779cf947c5311f83787af4fa8fffd12fb27e4993211a84bdfd9610f9c"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8189decb5ac0fa7bc8b96b7cb9b2701d60d48805aca84a238004d665fcc4008"
+dependencies = [
+ "chrono",
+ "nu-ansi-term",
+ "sharded-slab",
+ "smallvec",
+ "thread_local",
+ "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -4155,6 +4245,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vergen"
