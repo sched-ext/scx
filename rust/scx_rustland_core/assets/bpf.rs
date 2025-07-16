@@ -241,7 +241,7 @@ impl<'cb> BpfScheduler<'cb> {
 
         // Check host topology to determine if we need to enable SMT capabilities.
         let topo = Topology::new().unwrap();
-        skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
+        skel.maps.rodata_data.as_mut().unwrap().smt_enabled = topo.smt_enabled;
 
         // Enable scheduler flags.
         skel.struct_ops.rustland_mut().flags = *compat::SCX_OPS_ENQ_LAST
@@ -251,10 +251,10 @@ impl<'cb> BpfScheduler<'cb> {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
-        skel.maps.rodata_data.usersched_pid = std::process::id();
-        skel.maps.rodata_data.khugepaged_pid = Self::khugepaged_pid();
-        skel.maps.rodata_data.builtin_idle = builtin_idle;
-        skel.maps.rodata_data.debug = debug;
+        skel.maps.rodata_data.as_mut().unwrap().usersched_pid = std::process::id();
+        skel.maps.rodata_data.as_mut().unwrap().khugepaged_pid = Self::khugepaged_pid();
+        skel.maps.rodata_data.as_mut().unwrap().builtin_idle = builtin_idle;
+        skel.maps.rodata_data.as_mut().unwrap().debug = debug;
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
@@ -424,68 +424,68 @@ impl<'cb> BpfScheduler<'cb> {
     // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
     // busy loop, causing unnecessary high CPU consumption.
     pub fn notify_complete(&mut self, nr_pending: u64) {
-        self.skel.maps.bss_data.nr_scheduled = nr_pending;
+        self.skel.maps.bss_data.as_mut().unwrap().nr_scheduled = nr_pending;
         std::thread::yield_now();
     }
 
     // Counter of the online CPUs.
     #[allow(dead_code)]
     pub fn nr_online_cpus_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_online_cpus
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_online_cpus
     }
 
     // Counter of currently running tasks.
     #[allow(dead_code)]
     pub fn nr_running_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_running
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_running
     }
 
     // Counter of queued tasks.
     #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_queued
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_queued
     }
 
     // Counter of scheduled tasks.
     #[allow(dead_code)]
     pub fn nr_scheduled_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_scheduled
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_scheduled
     }
 
     // Counter of user dispatch events.
     #[allow(dead_code)]
     pub fn nr_user_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_user_dispatches
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_user_dispatches
     }
 
     // Counter of user kernel events.
     #[allow(dead_code)]
     pub fn nr_kernel_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_kernel_dispatches
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_kernel_dispatches
     }
 
     // Counter of cancel dispatch events.
     #[allow(dead_code)]
     pub fn nr_cancel_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_cancel_dispatches
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_cancel_dispatches
     }
 
     // Counter of dispatches bounced to the shared DSQ.
     #[allow(dead_code)]
     pub fn nr_bounce_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_bounce_dispatches
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_bounce_dispatches
     }
 
     // Counter of failed dispatch events.
     #[allow(dead_code)]
     pub fn nr_failed_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_failed_dispatches
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_failed_dispatches
     }
 
     // Counter of scheduler congestion events.
     #[allow(dead_code)]
     pub fn nr_sched_congested_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.nr_sched_congested
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_sched_congested
     }
 
     // Set scheduling class for the scheduler itself to SCHED_EXT
@@ -537,14 +537,14 @@ impl<'cb> BpfScheduler<'cb> {
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         match self.queued.consume_raw() {
             0 => {
-                self.skel.maps.bss_data.nr_queued = 0;
+                self.skel.maps.bss_data.as_mut().unwrap().nr_queued = 0;
                 Ok(None)
             }
             LIBBPF_STOP => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
-                self.skel.maps.bss_data.nr_queued =
-                    self.skel.maps.bss_data.nr_queued.saturating_sub(1);
+                self.skel.maps.bss_data.as_mut().unwrap().nr_queued =
+                    self.skel.maps.bss_data.as_ref().unwrap().nr_queued.saturating_sub(1);
 
                 Ok(Some(task))
             }

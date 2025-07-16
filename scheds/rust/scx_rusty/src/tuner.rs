@@ -161,7 +161,7 @@ impl Tuner {
             }
         }
 
-        let ti = &mut skel.maps.bss_data.tune_input;
+        let ti = &mut skel.maps.bss_data.as_mut().unwrap().tune_input;
         let write_to_bpf = |target: &mut [u64; 8], mask: &Cpumask| {
             let raw_slice = mask.as_raw_slice();
             let (left, _) = target.split_at_mut(raw_slice.len());

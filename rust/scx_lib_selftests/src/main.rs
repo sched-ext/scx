@@ -71,12 +71,12 @@ fn main() {
     builder.obj_builder.debug(true);
     init_libbpf_logging(Some(PrintLevel::Debug));
 
-    let skel = builder
+    let mut skel = builder
         .open(&mut open_object)
         .context("Failed to open BPF program")
         .unwrap();
 
-    skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+    skel.maps.rodata_data.as_mut().unwrap().nr_cpu_ids = *NR_CPU_IDS as u32;
 
     let mut skel = skel.load().context("Failed to load BPF program").unwrap();
 

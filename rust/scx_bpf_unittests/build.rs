@@ -24,7 +24,7 @@ fn main() {
         root_dir.join("scheds/include/"),
         root_dir.join("scheds/include/arch/x86/"),
         root_dir.join("scheds/include/bpf-compat/"),
-        env::var("DEP_LIBBPF_INCLUDE").unwrap().into(),
+        env::var("DEP_BPF_INCLUDE").unwrap().into(),
     ];
 
     // Build the C tests

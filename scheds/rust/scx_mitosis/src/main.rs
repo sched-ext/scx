@@ -106,11 +106,11 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
+        skel.maps.rodata_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
 
-        skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
+        skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
-            skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
         let skel = scx_ops_load!(skel, mitosis, uei)?;
@@ -347,7 +347,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // create cells we don't have yet, drop cells that are no longer in use.
-        let cells = &self.skel.maps.bss_data.cells;
+        let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
         for i in 0..MAX_CELLS {
             let cell_idx = i as u32;
             let bpf_cell = cells[i];

@@ -186,7 +186,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
 
             let mut skel = skel.load()?;
-            skel.maps.data_data.enable_bpf_events = false;
+            skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
             let mut links = attach_progs(&mut skel)?;
             links.push(skel.progs.on_sched_fork.attach()?);
             links.push(skel.progs.on_sched_exec.attach()?);
@@ -353,8 +353,8 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             let mut edm = EventDispatchManager::new(None, None);
             edm.register_bpf_handler(Box::new(bpf_publisher));
 
-            let skel = builder.open(&mut open_object)?;
-            skel.maps.rodata_data.long_tail_tracing_min_latency_ns =
+            let mut skel = builder.open(&mut open_object)?;
+            skel.maps.rodata_data.as_mut().unwrap().long_tail_tracing_min_latency_ns =
                 tui_args.experimental_long_tail_tracing_min_latency_ns;
 
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
@@ -364,8 +364,8 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             skel.progs.scxtop_init.test_run(ProgramInput::default())?;
 
             if tui_args.experimental_long_tail_tracing {
-                skel.maps.data_data.trace_duration_ns = config.trace_duration_ns();
-                skel.maps.data_data.trace_warmup_ns = config.trace_warmup_ns();
+                skel.maps.data_data.as_mut().unwrap().trace_duration_ns = config.trace_duration_ns();
+                skel.maps.data_data.as_mut().unwrap().trace_warmup_ns = config.trace_warmup_ns();
 
                 let binary = tui_args
                     .experimental_long_tail_tracing_binary
@@ -383,7 +383,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                         0,
                         UprobeOpts {
                             retprobe: true,
-                            func_name: symbol.clone(),
+                            func_name: Some(symbol.clone()),
                             ..Default::default()
                         },
                     )?,
@@ -393,7 +393,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                         0,
                         UprobeOpts {
                             retprobe: false,
-                            func_name: symbol.clone(),
+                            func_name: Some(symbol.clone()),
                             ..Default::default()
                         },
                     )?,

@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.65"
-libbpf-rs = "=0.25.0-beta.1"
+libbpf-rs = "=0.25.0"
 simplelog = "0.12"
 scx_utils = { path = "../scx_utils", version = "1.0.17" }
 

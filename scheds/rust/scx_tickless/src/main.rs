@@ -146,13 +146,13 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.tickless_ops_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.smt_enabled = smt_enabled;
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+        skel.maps.rodata_data.as_mut().unwrap().smt_enabled = smt_enabled;
+        skel.maps.rodata_data.as_mut().unwrap().nr_cpu_ids = *NR_CPU_IDS as u32;
 
         // Override default BPF scheduling parameters.
-        skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
-        skel.maps.rodata_data.tick_freq = opts.frequency;
-        skel.maps.rodata_data.prefer_same_cpu = opts.prefer_same_cpu;
+        skel.maps.rodata_data.as_mut().unwrap().slice_ns = opts.slice_us * 1000;
+        skel.maps.rodata_data.as_mut().unwrap().tick_freq = opts.frequency;
+        skel.maps.rodata_data.as_mut().unwrap().prefer_same_cpu = opts.prefer_same_cpu;
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, tickless_ops, uei)?;
@@ -228,12 +228,13 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&self) -> Metrics {
+        let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
-            nr_ticks: self.skel.maps.bss_data.nr_ticks,
-            nr_preemptions: self.skel.maps.bss_data.nr_preemptions,
-            nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
-            nr_primary_dispatches: self.skel.maps.bss_data.nr_primary_dispatches,
-            nr_timer_dispatches: self.skel.maps.bss_data.nr_timer_dispatches,
+            nr_ticks: bss_data.nr_ticks,
+            nr_preemptions: bss_data.nr_preemptions,
+            nr_direct_dispatches: bss_data.nr_direct_dispatches,
+            nr_primary_dispatches: bss_data.nr_primary_dispatches,
+            nr_timer_dispatches: bss_data.nr_timer_dispatches,
         }
     }
 

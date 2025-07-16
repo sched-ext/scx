@@ -51,7 +51,7 @@ pub enum ScxConsts {
 macro_rules! uei_read {
     ($skel: expr, $uei:ident) => {{
         scx_utils::paste! {
-            let bpf_uei = $skel.maps.data_data.$uei;
+            let bpf_uei = $skel.maps.data_data.as_ref().unwrap().$uei;
             let bpf_dump = scx_utils::UEI_DUMP_PTR_MUTEX.lock().unwrap().ptr;
             let exit_code_ptr = match scx_utils::compat::struct_has_field("scx_exit_info", "exit_code") {
                 Ok(true) => &bpf_uei.exit_code as *const _,
@@ -80,7 +80,7 @@ macro_rules! uei_set_size {
                 0 => scx_utils::ScxConsts::ExitDumpDflLen as u32,
                 v => v,
             };
-            $skel.maps.rodata_data.[<$uei _dump_len>] = len;
+            $skel.maps.rodata_data.as_mut().unwrap().[<$uei _dump_len>] = len;
             $skel.maps.[<data_ $uei _dump>].set_value_size(len).unwrap();
 
             let mut ptr = scx_utils::UEI_DUMP_PTR_MUTEX.lock().unwrap();
@@ -101,7 +101,7 @@ macro_rules! uei_set_size {
 #[macro_export]
 macro_rules! uei_exited {
     ($skel: expr, $uei:ident) => {{
-        let bpf_uei = $skel.maps.data_data.uei;
+        let bpf_uei = $skel.maps.data_data.as_ref().unwrap().uei;
         (unsafe { std::ptr::read_volatile(&bpf_uei.kind as *const _) } != 0)
     }};
 }

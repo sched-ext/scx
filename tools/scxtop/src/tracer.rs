@@ -49,13 +49,13 @@ impl<'a> Tracer<'a> {
 
     /// Starts the collection of a trace, does not stop the trace.
     pub fn trace(&mut self, kprobes: &Vec<String>) -> Result<()> {
-        self.skel.maps.data_data.sample_rate = 1;
-        self.skel.maps.data_data.enable_bpf_events = true;
+        self.skel.maps.data_data.as_mut().unwrap().sample_rate = 1;
+        self.skel.maps.data_data.as_mut().unwrap().enable_bpf_events = true;
         self.attach_trace_progs(kprobes)?;
         debug!(
             "attached {} trace progs, sample_rate: {}",
             self.trace_links.len(),
-            self.skel.maps.data_data.sample_rate
+            self.skel.maps.data_data.as_ref().unwrap().sample_rate
         );
         Ok(())
     }

@@ -177,6 +177,7 @@ pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
 macro_rules! init_open_skel {
     ($skel: expr, $opts: expr, $verbose: expr) => {
         'block: {
+            let skel = $skel;
             let opts: &$crate::SchedulerOpts = $opts;
             let verbose: u8 = $verbose;
 
@@ -203,14 +204,14 @@ macro_rules! init_open_skel {
                 }
                 for (i, slice) in opts.dsq_time_slices.iter().enumerate() {
                     ::log::info!("DSQ[{}] slice_ns {}", i, slice * 1000);
-                    $skel.maps.bss_data.dsq_time_slices[i] = slice * 1000;
+                    skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice * 1000;
                 }
             } else {
                 for i in 0..=opts.dumb_queues - 1 {
                     let slice_ns =
                         $crate::dsq_slice_ns(i as u64, opts.min_slice_us, opts.dsq_shift);
                     ::log::info!("DSQ[{}] slice_ns {}", i, slice_ns);
-                    $skel.maps.bss_data.dsq_time_slices[i] = slice_ns;
+                    skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice_ns;
                 }
             }
             if opts.autoslice {
@@ -223,62 +224,51 @@ macro_rules! init_open_skel {
             }
 
             // topo config
-            $skel.maps.rodata_data.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
-            $skel.maps.rodata_data.topo_config.nr_llcs =
-                $crate::TOPO.all_llcs.clone().keys().len() as u32;
-            $skel.maps.rodata_data.topo_config.nr_nodes =
-                $crate::TOPO.nodes.clone().keys().len() as u32;
-            $skel.maps.rodata_data.topo_config.smt_enabled =
-                MaybeUninit::new($crate::TOPO.smt_enabled);
-            $skel.maps.rodata_data.topo_config.has_little_cores =
-                MaybeUninit::new($crate::TOPO.has_little_cores());
+            let rodata = skel.maps.rodata_data.as_mut().unwrap();
+            rodata.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
+            rodata.topo_config.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
+            rodata.topo_config.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;
+            rodata.topo_config.smt_enabled = MaybeUninit::new($crate::TOPO.smt_enabled);
+            rodata.topo_config.has_little_cores = MaybeUninit::new($crate::TOPO.has_little_cores());
 
             // timeline config
-            $skel.maps.rodata_data.timeline_config.min_slice_us = opts.min_slice_us;
-            $skel.maps.rodata_data.timeline_config.max_exec_ns =
-                2 * $skel.maps.bss_data.dsq_time_slices[opts.dumb_queues - 1];
-            $skel.maps.rodata_data.timeline_config.autoslice = MaybeUninit::new(opts.autoslice);
-            $skel.maps.rodata_data.timeline_config.deadline = MaybeUninit::new(opts.deadline);
+            rodata.timeline_config.min_slice_us = opts.min_slice_us;
+            rodata.timeline_config.max_exec_ns =
+                2 * skel.maps.bss_data.as_ref().unwrap().dsq_time_slices[opts.dumb_queues - 1];
+            rodata.timeline_config.autoslice = MaybeUninit::new(opts.autoslice);
+            rodata.timeline_config.deadline = MaybeUninit::new(opts.deadline);
 
             // load balance config
-            $skel.maps.rodata_data.lb_config.slack_factor = opts.lb_slack_factor;
-            $skel.maps.rodata_data.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
-            $skel.maps.rodata_data.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
-            $skel.maps.rodata_data.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
-            $skel.maps.rodata_data.lb_config.pick2_mode = opts.lb_mode.as_i32();
-            $skel.maps.rodata_data.lb_config.eager_load_balance =
-                MaybeUninit::new(!opts.eager_load_balance);
-            $skel.maps.rodata_data.lb_config.dispatch_pick2_disable =
-                MaybeUninit::new(opts.dispatch_pick2_disable);
-            $skel.maps.rodata_data.lb_config.dispatch_lb_busy = opts.dispatch_lb_busy;
-            $skel.maps.rodata_data.lb_config.dispatch_lb_interactive =
+            rodata.lb_config.slack_factor = opts.lb_slack_factor;
+            rodata.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
+            rodata.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
+            rodata.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
+            rodata.lb_config.pick2_mode = opts.lb_mode.as_i32();
+            rodata.lb_config.eager_load_balance = MaybeUninit::new(!opts.eager_load_balance);
+            rodata.lb_config.dispatch_pick2_disable = MaybeUninit::new(opts.dispatch_pick2_disable);
+            rodata.lb_config.dispatch_lb_busy = opts.dispatch_lb_busy;
+            rodata.lb_config.dispatch_lb_interactive =
                 MaybeUninit::new(opts.dispatch_lb_interactive);
-            $skel.maps.rodata_data.lb_config.wakeup_lb_busy = opts.wakeup_lb_busy;
-            $skel.maps.rodata_data.lb_config.wakeup_llc_migrations =
-                MaybeUninit::new(opts.wakeup_llc_migrations);
+            rodata.lb_config.wakeup_lb_busy = opts.wakeup_lb_busy;
+            rodata.lb_config.wakeup_llc_migrations = MaybeUninit::new(opts.wakeup_llc_migrations);
 
             // p2dq config
-            $skel.maps.rodata_data.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
-            $skel.maps.rodata_data.p2dq_config.dsq_shift = opts.dsq_shift as u64;
-            $skel.maps.rodata_data.p2dq_config.interactive_dsq =
-                MaybeUninit::new(opts.interactive_dsq);
-            $skel.maps.rodata_data.p2dq_config.kthreads_local =
-                MaybeUninit::new(!opts.disable_kthreads_local);
-            $skel.maps.rodata_data.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
-            $skel.maps.rodata_data.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
+            rodata.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
+            rodata.p2dq_config.dsq_shift = opts.dsq_shift as u64;
+            rodata.p2dq_config.interactive_dsq = MaybeUninit::new(opts.interactive_dsq);
+            rodata.p2dq_config.kthreads_local = MaybeUninit::new(!opts.disable_kthreads_local);
+            rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
+            rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
 
-            $skel.maps.rodata_data.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
-            $skel.maps.rodata_data.p2dq_config.interactive_sticky =
-                MaybeUninit::new(opts.interactive_sticky);
-            $skel.maps.rodata_data.p2dq_config.interactive_fifo =
-                MaybeUninit::new(opts.interactive_fifo);
-            $skel.maps.rodata_data.p2dq_config.keep_running_enabled =
-                MaybeUninit::new(opts.keep_running);
-            $skel.maps.rodata_data.p2dq_config.select_idle_in_enqueue =
+            rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
+            rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
+            rodata.p2dq_config.interactive_fifo = MaybeUninit::new(opts.interactive_fifo);
+            rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
+            rodata.p2dq_config.select_idle_in_enqueue =
                 MaybeUninit::new(opts.select_idle_in_enqueue);
 
-            $skel.maps.rodata_data.debug = verbose as u32;
-            $skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+            rodata.debug = verbose as u32;
+            rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
 
             Ok(())
         }
@@ -289,17 +279,17 @@ macro_rules! init_open_skel {
 macro_rules! init_skel {
     ($skel: expr) => {
         for cpu in $crate::TOPO.all_cpus.values() {
-            $skel.maps.bss_data.big_core_ids[cpu.id] =
+            $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
                     1
                 } else {
                     0
                 };
-            $skel.maps.bss_data.cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
-            $skel.maps.bss_data.cpu_node_ids[cpu.id] = cpu.node_id as u64;
+            $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
+            $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
         }
         for llc in $crate::TOPO.all_llcs.values() {
-            $skel.maps.bss_data.llc_ids[llc.id] = llc.id as u64;
+            $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
         }
     };
 }

@@ -456,28 +456,29 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.flash_ops_mut().exit_dump_len = opts.exit_dump_len;
 
         // Override default BPF scheduling parameters.
-        skel.maps.rodata_data.debug = opts.debug;
-        skel.maps.rodata_data.smt_enabled = smt_enabled;
-        skel.maps.rodata_data.numa_disabled = numa_disabled;
-        skel.maps.rodata_data.rr_sched = opts.rr_sched;
-        skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
-        skel.maps.rodata_data.direct_dispatch = opts.direct_dispatch;
-        skel.maps.rodata_data.sticky_cpu = opts.sticky_cpu;
-        skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
-        skel.maps.rodata_data.tickless_sched = opts.tickless;
-        skel.maps.rodata_data.native_priority = opts.native_priority;
-        skel.maps.rodata_data.slice_lag_scaling = opts.slice_lag_scaling;
-        skel.maps.rodata_data.builtin_idle = !opts.no_builtin_idle;
-        skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
-        skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
-        skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
-        skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
-        skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
-        skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
-        skel.maps.rodata_data.primary_all = domain.weight() == *NR_CPU_IDS;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        rodata.debug = opts.debug;
+        rodata.smt_enabled = smt_enabled;
+        rodata.numa_disabled = numa_disabled;
+        rodata.rr_sched = opts.rr_sched;
+        rodata.local_pcpu = opts.local_pcpu;
+        rodata.direct_dispatch = opts.direct_dispatch;
+        rodata.sticky_cpu = opts.sticky_cpu;
+        rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.tickless_sched = opts.tickless;
+        rodata.native_priority = opts.native_priority;
+        rodata.slice_lag_scaling = opts.slice_lag_scaling;
+        rodata.builtin_idle = !opts.no_builtin_idle;
+        rodata.slice_max = opts.slice_us * 1000;
+        rodata.slice_min = opts.slice_us_min * 1000;
+        rodata.slice_lag = opts.slice_us_lag * 1000;
+        rodata.run_lag = opts.run_us_lag * 1000;
+        rodata.throttle_ns = opts.throttle_us * 1000;
+        rodata.max_avg_nvcsw = opts.max_avg_nvcsw;
+        rodata.primary_all = domain.weight() == *NR_CPU_IDS;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
-        skel.maps.rodata_data.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
+        rodata.cpu_busy_thresh = if opts.cpu_busy_thresh < 0 {
             opts.cpu_busy_thresh
         } else {
             opts.cpu_busy_thresh * 1024 / 100
@@ -485,10 +486,10 @@ impl<'a> Scheduler<'a> {
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
-        skel.maps.rodata_data.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
+        rodata.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
 
         // Set scheduler compatibility flags.
-        skel.maps.rodata_data.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
+        rodata.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
 
         // Set scheduler flags.
         skel.struct_ops.flash_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
@@ -646,7 +647,7 @@ impl<'a> Scheduler<'a> {
                 _ => perf_lvl.to_string(),
             }
         );
-        skel.maps.bss_data.cpufreq_perf_lvl = perf_lvl;
+        skel.maps.bss_data.as_mut().unwrap().cpufreq_perf_lvl = perf_lvl;
 
         Ok(())
     }
@@ -807,12 +808,13 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&self) -> Metrics {
+        let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
-            nr_running: self.skel.maps.bss_data.nr_running,
-            nr_cpus: self.skel.maps.bss_data.nr_online_cpus,
-            nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
-            nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
-            nr_shared_dispatches: self.skel.maps.bss_data.nr_shared_dispatches,
+            nr_running: bss_data.nr_running,
+            nr_cpus: bss_data.nr_online_cpus,
+            nr_kthread_dispatches: bss_data.nr_kthread_dispatches,
+            nr_direct_dispatches: bss_data.nr_direct_dispatches,
+            nr_shared_dispatches: bss_data.nr_shared_dispatches,
         }
     }
 
@@ -876,7 +878,7 @@ impl<'a> Scheduler<'a> {
                 if let Some(curr_cputime) = Self::read_cpu_times() {
                     if let Some(cpu_util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
                     {
-                        self.skel.maps.bss_data.cpu_util = cpu_util;
+                        self.skel.maps.bss_data.as_mut().unwrap().cpu_util = cpu_util;
                     }
                     prev_cputime = curr_cputime;
                 }
