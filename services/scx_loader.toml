@@ -1,0 +1,2 @@
+# This field specifies the scheduler that will be started automatically when scx_loader starts (e.g., on boot).
+default_sched = "scx_flash"
