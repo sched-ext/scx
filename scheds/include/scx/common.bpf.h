@@ -27,6 +27,7 @@
 #include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
 
+#define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
 #define PF_WQ_WORKER			0x00000020	/* I'm a workqueue worker */
 #define PF_KCOMPACTD			0x00010000      /* I am kcompactd */

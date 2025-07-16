@@ -36,6 +36,11 @@ private(COSMOS) struct bpf_cpumask __kptr *primary_cpumask;
 const volatile bool primary_all = true;
 
 /*
+ * Enable flat iteration to find idle CPUs (fast but inaccurate).
+ */
+const volatile bool flat_idle_scan = true;
+
+/*
  * Enable cpufreq integration.
  */
 const volatile bool cpufreq_enabled = true;
@@ -235,6 +240,70 @@ static inline u64 shared_dsq(s32 cpu)
 }
 
 /*
+ * Return true if @p can only run on a single CPU, false otherwise.
+ */
+static inline bool is_pcpu_task(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
+}
+
+/*
+ * Return true if the system is busy, false otherwise.
+ *
+ * This function determines when the scheduler needs to switch to
+ * deadline-mode (using a shared DSQ) vs round-robin mode (using per-CPU
+ * local DSQs).
+ */
+static inline bool is_system_busy(void)
+{
+	return cpu_util >= busy_threshold;
+}
+
+/*
+ * Return true if the CPU is running the idle thread, false otherwise.
+ */
+static inline bool is_cpu_idle(s32 cpu)
+{
+	return scx_bpf_cpu_rq(cpu)->curr->flags & PF_IDLE;
+}
+
+/*
+ * Find an idle CPU iterating over the available CPUs, instead of relying
+ * on the idle cpumasks.
+ *
+ * This method might be inaccurate, but it's less expensive than operating
+ * on cpumasks with simple topologies, especially under light or moderate
+ * load.
+ */
+static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
+{
+	static u32 last_cpu;
+	s32 start, i;
+
+	if (is_cpu_idle(prev_cpu))
+		return prev_cpu;
+
+	if (is_pcpu_task(p))
+		return -EBUSY;
+
+	start = last_cpu;
+	bpf_for(i, 0, nr_cpu_ids) {
+		s32 cpu = (start + i) % nr_cpu_ids;
+
+		if (cpu == prev_cpu)
+			continue;
+
+		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+		    is_cpu_idle(cpu)) {
+			last_cpu = cpu + 1;
+			return cpu;
+		}
+	}
+
+	return -EBUSY;
+}
+
+/*
  * Pick an optimal idle CPU for task @p (as close as possible to
  * @prev_cpu).
  *
@@ -244,6 +313,13 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 {
 	const struct cpumask *mask = cast_mask(primary_cpumask);
 	s32 cpu;
+
+	/*
+	 * Use the lightweight idle CPU scanning if flat idle scan is
+	 * enabled and all the CPUs are included in the primary domain.
+	 */
+	if (flat_idle_scan && primary_all)
+		return pick_idle_cpu_flat(p, prev_cpu);
 
 	/*
 	 * Clear the wake sync bit if synchronous wakeups are disabled.
@@ -285,11 +361,41 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 }
 
 /*
- * Return true if @p can only run on a single CPU, false otherwise.
+ * Return a time slice scaled by the task's weight.
  */
-static inline bool is_pcpu_task(const struct task_struct *p)
+static u64 task_slice(const struct task_struct *p)
 {
-	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
+	return scale_by_task_weight(p, slice_ns);
+}
+
+/*
+ * Calculate and return the virtual deadline for the given task.
+ *
+ * The goal is to limit how much virtual time budget a sleeping task can
+ * accumulate.
+ *
+ * This budget is:
+ *   - proportional to the task's weight (heavier tasks get more),
+ *   - inversely proportional to the amount of CPU time the task has
+ *     accumulated since it last slept (exec_runtime).
+ *
+ * As a result:
+ *   - tasks that sleep often are rewarded with a longer budget,
+ *   - CPU-bound tasks accumulate less budget.
+ *
+ * Then the vruntime is clamped to a minimum value using this budget,
+ * preventing it from falling too far behind to avoid starvation and
+ * preserving fairness over time.
+ */
+static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
+{
+	u64 vsleep_max = scale_by_task_weight(p, slice_lag - tctx->exec_runtime);
+	u64 vtime_min = vtime_now - vsleep_max;
+
+	if (time_before(tctx->vtime, vtime_min))
+		tctx->vtime = vtime_min;
+
+	return tctx->vtime;
 }
 
 /*
@@ -356,7 +462,7 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 * wake-up the CPUs from there to reduce overhead in the hot path.
          */
 	bpf_for(cpu, 0, nr_cpu_ids)
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu))
+		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) && is_cpu_idle(cpu))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	/*
@@ -367,56 +473,6 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 		scx_bpf_error("Failed to re-arm wakeup timer");
 
 	return 0;
-}
-
-/*
- * Calculate and return the virtual deadline for the given task.
- *
- * The goal is to limit how much virtual time budget a sleeping task can
- * accumulate.
- *
- * This budget is:
- *   - proportional to the task's weight (heavier tasks get more),
- *   - inversely proportional to the amount of CPU time the task has
- *     accumulated since it last slept (exec_runtime).
- *
- * As a result:
- *   - tasks that sleep often are rewarded with a longer budget,
- *   - CPU-bound tasks accumulate less budget.
- *
- * Then the vruntime is clamped to a minimum value using this budget,
- * preventing it from falling too far behind to avoid starvation and
- * preserving fairness over time.
- */
-static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
-{
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag - tctx->exec_runtime);
-	u64 vtime_min = vtime_now - vsleep_max;
-
-	if (time_before(tctx->vtime, vtime_min))
-		tctx->vtime = vtime_min;
-
-	return tctx->vtime;
-}
-
-/*
- * Return a time slice scaled by the task's weight.
- */
-static u64 task_slice(const struct task_struct *p)
-{
-	return scale_by_task_weight(p, slice_ns);
-}
-
-/*
- * Return true if the system is busy, false otherwise.
- *
- * This function determines when the scheduler needs to switch to
- * deadline-mode (using a shared DSQ) vs round-robin mode (using per-CPU
- * local DSQs).
- */
-static inline bool is_system_busy(void)
-{
-	return cpu_util >= busy_threshold;
 }
 
 /*
