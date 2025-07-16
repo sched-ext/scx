@@ -554,41 +554,43 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.maps.bss_data.slice_ns = scx_enums.SCX_SLICE_DFL;
+        skel.maps.bss_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
 
-        skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
-        skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        rodata.nr_nodes = domains.nr_nodes() as u32;
+        rodata.nr_doms = domains.nr_doms() as u32;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
 
         if opts.partial {
             skel.struct_ops.wd40_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
         skel.struct_ops.wd40_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.load_half_life = (opts.load_half_life * 1000000000.0) as u32;
-        skel.maps.rodata_data.kthreads_local = opts.kthreads_local;
-        skel.maps.rodata_data.fifo_sched = opts.fifo_sched;
-        skel.maps.rodata_data.greedy_threshold = opts.greedy_threshold;
-        skel.maps.rodata_data.greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
-        skel.maps.rodata_data.direct_greedy_numa = opts.direct_greedy_numa;
-        skel.maps.rodata_data.mempolicy_affinity = opts.mempolicy_affinity;
-        skel.maps.rodata_data.debug = opts.verbose as u32;
-        skel.maps.rodata_data.wd40_perf_mode = opts.perf;
+        rodata.load_half_life = (opts.load_half_life * 1000000000.0) as u32;
+        rodata.kthreads_local = opts.kthreads_local;
+        rodata.fifo_sched = opts.fifo_sched;
+        rodata.greedy_threshold = opts.greedy_threshold;
+        rodata.greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
+        rodata.direct_greedy_numa = opts.direct_greedy_numa;
+        rodata.mempolicy_affinity = opts.mempolicy_affinity;
+        rodata.debug = opts.verbose as u32;
+        rodata.wd40_perf_mode = opts.perf;
 
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
 
         Self::setup_arenas(&mut skel)?;
-        
 
+        let bss_data = skel.maps.bss_data.as_mut().unwrap();
         info!(
             "Mask length {}, number of possible CPUs {}",
-            skel.maps.bss_data.mask_size, skel.maps.rodata_data.nr_cpu_ids
+            bss_data.mask_size,
+            skel.maps.rodata_data.as_mut().unwrap().nr_cpu_ids
         );
         // Read the mask length chosen by BPF. We count elements in the u64 array, like the BPF
         // program does.
         //
         // This invocation is safe because there is no concurrency in the program during initialization.
-        unsafe { MASK_LEN = skel.maps.bss_data.mask_size as usize };
+        unsafe { MASK_LEN = bss_data.mask_size as usize };
 
         let types::topo_level(index) = types::topo_level::TOPO_LLC;
 
@@ -600,16 +602,16 @@ impl<'a> Scheduler<'a> {
                 numa_mask = numa_mask.or(&dom_mask);
             }
 
-            update_bpf_mask(skel.maps.bss_data.node_data[numa], &numa_mask)?;
+            update_bpf_mask(bss_data.node_data[numa], &numa_mask)?;
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
                 // XXX Remove this by using the topo node's cpumask.
-                let ptr = skel.maps.bss_data.topo_nodes[index as usize][dom.id()];
+                let ptr = bss_data.topo_nodes[index as usize][dom.id()];
                 let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
                 update_bpf_mask(domc.cpumask, &dom.mask())?;
 
-                skel.maps.bss_data.dom_numa_id_map[dom.id()] =
+                bss_data.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
                 info!(" DOM[{:02}] mask= {}", dom.id(), dom.mask());
@@ -623,7 +625,7 @@ impl<'a> Scheduler<'a> {
         for (id, dom) in domains.doms().iter() {
             let mut ctx = dom.ctx.lock().unwrap();
 
-            let ptr = skel.maps.bss_data.topo_nodes[index as usize][*id];
+            let ptr = skel.maps.bss_data.as_mut().unwrap().topo_nodes[index as usize][*id];
             let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
             *ctx = Some(domc);
         }

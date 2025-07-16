@@ -168,14 +168,9 @@ impl Tuner {
             }
         }
 
-        update_bpf_mask(
-            skel.maps.bss_data.direct_greedy_cpumask,
-            &self.direct_greedy_mask,
-        )?;
-        update_bpf_mask(
-            skel.maps.bss_data.kick_greedy_cpumask,
-            &self.kick_greedy_mask,
-        )?;
+        let bss_data = skel.maps.bss_data.as_mut().unwrap();
+        update_bpf_mask(bss_data.direct_greedy_cpumask, &self.direct_greedy_mask)?;
+        update_bpf_mask(bss_data.kick_greedy_cpumask, &self.kick_greedy_mask)?;
 
         if self.fully_utilized {
             self.slice_ns = self.overutil_slice_ns;
@@ -183,7 +178,7 @@ impl Tuner {
             self.slice_ns = self.underutil_slice_ns;
         }
 
-        skel.maps.bss_data.slice_ns = self.slice_ns;
+        bss_data.slice_ns = self.slice_ns;
 
         // For domain in domains
         // Get the dom_ctx and the internal mask

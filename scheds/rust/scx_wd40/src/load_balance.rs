@@ -556,7 +556,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     fn calculate_load_avgs(&mut self) -> Result<LoadLedger> {
         const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
         let now_mono = now_monotonic();
-        let load_half_life = self.skel.maps.rodata_data.load_half_life;
+        let load_half_life = self.skel.maps.rodata_data.as_ref().unwrap().load_half_life;
 
         let mut aggregator =
             LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
@@ -627,7 +627,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
 
         let types::topo_level(index) = types::topo_level::TOPO_LLC;
-        let ptr = self.skel.maps.bss_data.topo_nodes[index as usize][dom.id];
+        let ptr = self.skel.maps.bss_data.as_ref().unwrap().topo_nodes[index as usize][dom.id];
         let dom_ctx = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
         let active_tasks = &mut dom_ctx.active_tasks;
 
@@ -640,7 +640,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         // Read task_ctx and load.
-        let load_half_life = self.skel.maps.rodata_data.load_half_life;
+        let load_half_life = self.skel.maps.rodata_data.as_ref().unwrap().load_half_life;
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
