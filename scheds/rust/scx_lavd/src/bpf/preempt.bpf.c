@@ -68,6 +68,7 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
+				       s32 preferred_cpu,
 				       struct task_ctx *taskc, u64 now)
 {
 	/*
@@ -79,6 +80,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
+	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
 	int i, v = 0;
@@ -92,6 +94,15 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	prm_task.cpuc = NULL;
 
 	/*
+	 * If there is a preferred CPU on which a task wants to run,
+	 * check that CPU first.
+	 */
+	if (preferred_cpu >= 0 && (cpuc = get_cpu_ctx_id(preferred_cpu))) {
+		if (can_x_kick_cpu2(&prm_task, &prm_cpus[v], cpuc))
+			v++;
+	}
+
+	/*
 	 * Randomly find _two_ CPUs that run lower-priority tasks than @p. To
 	 * traverse CPUs in a random order, we start from a random CPU ID in a
 	 * random direction (left or right). The random-order traversal helps
@@ -102,16 +113,14 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * be too expensive to perform every task queue. We need to revisit
 	 * this if the traversal cost becomes problematic.
 	 */
-	barrier();
 	nr_cpus = bpf_cpumask_weight(cpumask);
 	bpf_for(i, 0, nr_cpus) {
-		struct cpu_ctx *cpuc;
 
 		/*
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
-		if (cpu >= nr_cpu_ids)
+		if (cpu >= nr_cpu_ids || cpu == preferred_cpu)
 			continue;
 
 		/*
@@ -208,7 +217,9 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 }
 
 static void try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc, u64 dsq_id)
+					 struct task_ctx *taskc,
+					 s32 preferred_cpu,
+					 u64 dsq_id)
 {
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
@@ -247,7 +258,7 @@ static void try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
 	now = scx_bpf_now();
-	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc, now);
+	victim_cpuc = find_victim_cpu(cast_mask(cpumask), preferred_cpu, taskc, now);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.

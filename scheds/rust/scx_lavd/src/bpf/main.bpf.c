@@ -574,7 +574,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
 	if (!no_preemption)
-		try_find_and_kick_victim_cpu(p, taskc, dsq_id);
+		try_find_and_kick_victim_cpu(p, taskc, cpu, dsq_id);
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
