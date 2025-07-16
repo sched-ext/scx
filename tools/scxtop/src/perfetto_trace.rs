@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
+use fb_procfs::ProcReader;
 use rand::rngs::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -33,6 +34,7 @@ use perfetto_protos::{
     ipi::IpiRaiseFtraceEvent,
     irq::{SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent},
     process_descriptor::ProcessDescriptor,
+    process_tree::{process_tree::Process, ProcessTree},
     sched::{
         SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
         SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
@@ -65,12 +67,14 @@ pub struct PerfettoTraceManager {
     dsq_lat_events: BTreeMap<u64, Vec<TrackEvent>>,
     dsq_nr_queued_events: BTreeMap<u64, Vec<TrackEvent>>,
     dsq_uuids: BTreeMap<u64, u64>,
-    processes: HashMap<u64, ProcessDescriptor>,
+    process_descriptors: HashMap<u64, ProcessDescriptor>,
+    processes: HashMap<u64, Process>,
     threads: HashMap<u64, ThreadDescriptor>,
     process_uuids: HashMap<i32, u64>,
     sys_stats: BTreeMap<u64, Vec<SysStats>>,
     mem_events: BTreeMap<String, Vec<TrackEvent>>,
     mem_uuids: HashMap<String, u64>,
+    proc_reader: ProcReader,
 }
 
 impl PerfettoTraceManager {
@@ -98,12 +102,14 @@ impl PerfettoTraceManager {
             dsq_uuids: BTreeMap::new(),
             dsq_lat_events: BTreeMap::new(),
             dsq_nr_queued_events: BTreeMap::new(),
+            process_descriptors: HashMap::new(),
             processes: HashMap::new(),
             threads: HashMap::new(),
             process_uuids: HashMap::new(),
             sys_stats: BTreeMap::new(),
             mem_events: BTreeMap::new(),
             mem_uuids,
+            proc_reader: ProcReader::new(),
         }
     }
 
@@ -237,48 +243,68 @@ impl PerfettoTraceManager {
         });
     }
 
-    fn generate_key(&mut self, v1: u32, v2: u32) -> u64 {
+    fn generate_key(&self, v1: u32, v2: u32) -> u64 {
         let v1_u32 = v1 as u64;
         let v2_u32 = v2 as u64;
         (v1_u32 << 32) | v2_u32
     }
 
     fn record_process_thread(&mut self, pid: u32, tid: u32, comm: String) {
-        let key = self.generate_key(pid, tid);
+        if pid != tid {
+            let thread_key = self.generate_key(pid, tid);
+            self.threads
+                .entry(thread_key)
+                .or_insert_with(|| ThreadDescriptor {
+                    tid: Some(tid as i32),
+                    pid: Some(pid as i32),
+                    thread_name: Some(comm.clone()),
+                    ..ThreadDescriptor::default()
+                });
+        }
 
-        if pid == tid {
-            let process = self
-                .processes
-                .entry(key)
-                .or_insert_with(|| ProcessDescriptor {
+        // Let's check if this is the first time we've seen this process.
+        let parent_key = self.generate_key(pid, pid);
+        if !self.process_descriptors.contains_key(&parent_key) {
+            let process_name = if pid == tid {
+                Some(comm)
+            } else {
+                self.get_comm(pid)
+            };
+            let cmdline = self.get_cmdline(pid);
+            self.process_descriptors.insert(
+                parent_key,
+                ProcessDescriptor {
                     pid: Some(pid as i32),
+                    cmdline: cmdline.clone(),
+                    process_name,
                     ..ProcessDescriptor::default()
-                });
-            process.process_name.get_or_insert(comm);
-        } else {
-            self.threads.entry(key).or_insert_with(|| ThreadDescriptor {
-                tid: Some(tid as i32),
-                pid: Some(pid as i32),
-                thread_name: Some(comm),
-                ..ThreadDescriptor::default()
-            });
-            // Create a ProcessDescriptor with an empty comm if one doesn't
-            // exist - if we ever see the main thread we populate the process
-            // name field there (see above).
-            let pkey = self.generate_key(pid, pid);
-            self.processes
-                .entry(pkey)
-                .or_insert_with(|| ProcessDescriptor {
+                },
+            );
+
+            self.processes.insert(
+                parent_key,
+                Process {
                     pid: Some(pid as i32),
-                    ..ProcessDescriptor::default()
-                });
+                    cmdline,
+                    ..Process::default()
+                },
+            );
         }
     }
 
-    fn get_comm(pid: i32) -> Result<String> {
-        let path = format!("/proc/{}/comm", pid);
-        let content = fs::read_to_string(path)?;
-        Ok(content.trim_end().to_string())
+    fn get_comm(&self, pid: u32) -> Option<String> {
+        self.proc_reader
+            .read_pid_stat(pid)
+            .ok()
+            .and_then(|pid_stat| pid_stat.comm)
+    }
+
+    fn get_cmdline(&self, pid: u32) -> Vec<String> {
+        if let Ok(Some(cmdline)) = self.proc_reader.read_pid_cmdline(pid) {
+            cmdline
+        } else {
+            vec![]
+        }
     }
 
     /// Stops the trace and writes to configured output file.
@@ -320,13 +346,9 @@ impl PerfettoTraceManager {
                 .for_each(|(_, v)| v.retain(|e| e.timestamp.unwrap_or(0) < ns));
         };
 
-        for (_, mut process) in self.processes.drain() {
+        for (_, process) in self.process_descriptors.drain() {
             let uuid = self.rng.next_u64();
             self.process_uuids.insert(process.pid(), uuid);
-
-            if process.process_name().is_empty() {
-                process.process_name = Self::get_comm(process.pid()).ok();
-            }
 
             let desc = TrackDescriptor {
                 uuid: Some(uuid),
@@ -336,6 +358,19 @@ impl PerfettoTraceManager {
 
             let packet = TracePacket {
                 data: Some(trace_packet::Data::TrackDescriptor(desc)),
+                ..TracePacket::default()
+            };
+            self.trace.packet.push(packet);
+        }
+
+        for (_, process) in self.processes.drain() {
+            let tree = ProcessTree {
+                processes: vec![process],
+                ..ProcessTree::default()
+            };
+
+            let packet = TracePacket {
+                data: Some(trace_packet::Data::ProcessTree(tree)),
                 ..TracePacket::default()
             };
             self.trace.packet.push(packet);
