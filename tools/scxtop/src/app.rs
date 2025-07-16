@@ -36,7 +36,7 @@ use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, KprobeAction, MangoAppAction, PstateSampleAction,
     SchedCpuPerfSetAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction, WaitAction,
 };
 
 use anyhow::{bail, Result};
@@ -2331,6 +2331,7 @@ impl<'a> App<'a> {
             self.skel.progs.on_sched_fork.attach()?,
             self.skel.progs.on_sched_exec.attach()?,
             self.skel.progs.on_sched_exit.attach()?,
+            self.skel.progs.on_sched_wait.attach()?,
         ];
 
         Ok(())
@@ -2479,6 +2480,12 @@ impl<'a> App<'a> {
     fn on_fork(&mut self, action: &ForkAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_fork(action);
+        }
+    }
+
+    fn on_wait(&mut self, action: &WaitAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_wait(action);
         }
     }
 
@@ -2775,6 +2782,9 @@ impl<'a> App<'a> {
             }
             Action::Fork(a) => {
                 self.on_fork(a);
+            }
+            Action::Wait(a) => {
+                self.on_wait(a);
             }
             Action::IPI(a) => {
                 self.on_ipi(a);
