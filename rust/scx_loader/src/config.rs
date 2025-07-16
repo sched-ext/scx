@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Copyright (c) 2024 Vladislav Nepogodin <vnepogodin@cachyos.org>
+// Copyright (c) 2024-2025 Vladislav Nepogodin <vnepogodin@cachyos.org>
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
@@ -50,8 +50,12 @@ pub fn parse_config_file(filepath: &str) -> Result<Config> {
 pub fn get_config_path() -> Result<String> {
     // Search in system directories
     let check_paths = [
+        // locations for user config
         "/etc/scx_loader/config.toml".to_owned(),
         "/etc/scx_loader.toml".to_owned(),
+        // locations for distributions to ship default configuration
+        "/usr/share/scx_loader/config.toml".to_owned(),
+        "/usr/share/scx_loader.toml".to_owned(),
     ];
     for check_path in check_paths {
         if !Path::new(&check_path).exists() {
