@@ -17,36 +17,32 @@ static u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
 	return now + taskc->avg_runtime;
 }
 
-static bool can_a_preempt_b(struct preemption_info *prm_a,
-			    struct preemption_info *prm_b)
+static bool can_x_kick_y(struct preemption_info *prm_x,
+			    struct preemption_info *prm_y)
 {
+	/*
+	 * A caller should ensure that Y is not a lock holder.
+	 */
+
 	/*
 	 * Check one's latency criticality and deadline.
 	 */
-	if ((prm_a->lat_cri > prm_b->lat_cri) &&
-	    (prm_a->est_stopping_clk < prm_b->est_stopping_clk))
+	if ((prm_x->lat_cri > prm_y->lat_cri) &&
+	    (prm_x->est_stopping_clk < prm_y->est_stopping_clk))
 		return true;
 	return false;
 }
 
-static bool can_task1_kick_task2(struct preemption_info *prm_task1,
-				 struct preemption_info *prm_task2)
+static bool can_x_kick_cpu2(struct preemption_info *prm_x,
+			    struct preemption_info *prm_cpu2,
+			    struct cpu_ctx *cpuc2)
 {
 	/*
-	 * A caller should ensure that task2 is not a lock holder.
+	 * Never preeempt a CPU running a lock holder.
 	 */
+	if (is_lock_holder_running(cpuc2))
+		return false;
 
-	/*
-	 * If that CPU runs a lower priority task, that's a victim
-	 * candidate.
-	 */
-	return can_a_preempt_b(prm_task1, prm_task2);
-}
-
-static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
-			       struct preemption_info *prm_cpu2,
-			       struct cpu_ctx *cpuc2)
-{
 	/*
 	 * Set a CPU information
 	 */
@@ -55,16 +51,10 @@ static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	prm_cpu2->cpuc = cpuc2;
 
 	/*
-	 * Never preeempt a CPU running a lock holder.
-	 */
-	if (is_lock_holder_running(prm_cpu2->cpuc))
-		return false;
-
-	/*
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	return can_a_preempt_b(prm_cpu1, prm_cpu2);
+	return can_x_kick_y(prm_x, prm_cpu2);
 }
 
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
@@ -75,11 +65,6 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 	 * victimize another CPU as the current task is urgent enough.
 	 */
 	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
-}
-
-static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
-{
-	return cpuc->is_online;
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
@@ -94,10 +79,9 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
-	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
-	int i, v = 0, cur_cpu;
+	int i, v = 0;
 	int ret;
 
 	/*
@@ -105,12 +89,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	prm_task.est_stopping_clk = get_est_stopping_clk(taskc, now);
 	prm_task.lat_cri = taskc->lat_cri;
-	prm_task.cpuc = cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("Failed to lookup the current cpu_ctx");
-		goto null_out;
-	}
-	cur_cpu = cpuc->cpu_id;
+	prm_task.cpuc = NULL;
 
 	/*
 	 * Randomly find _two_ CPUs that run lower-priority tasks than @p. To
@@ -126,12 +105,13 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	barrier();
 	nr_cpus = bpf_cpumask_weight(cpumask);
 	bpf_for(i, 0, nr_cpus) {
+		struct cpu_ctx *cpuc;
+
 		/*
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
-
-		if (cpu >= nr_cpu_ids || cur_cpu == cpu)
+		if (cpu >= nr_cpu_ids)
 			continue;
 
 		/*
@@ -143,7 +123,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 			goto null_out;
 		}
 
-		if (!can_cpu_be_kicked(now, cpuc))
+		if (!cpuc->is_online)
 			continue;
 
 		/*
@@ -153,7 +133,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 * Note that a task running on cpu 2 (prm_cpus[v]) cannot
 		 * be a lock holder.
 		 */
-		ret = can_cpu1_kick_cpu2(&prm_task, &prm_cpus[v], cpuc);
+		ret = can_x_kick_cpu2(&prm_task, &prm_cpus[v], cpuc);
 		if (ret == true && ++v >= 2)
 			break;
 	}
@@ -163,7 +143,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	switch(v) {
 	case 2:	/* two candidates */
-		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ?
+		victim_cpu = can_x_kick_y(&prm_cpus[0], &prm_cpus[1]) ?
 				&prm_cpus[0] : &prm_cpus[1];
 		goto bingo_out;
 	case 1:	/* one candidate */
