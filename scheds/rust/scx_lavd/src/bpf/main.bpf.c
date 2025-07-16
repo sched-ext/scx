@@ -503,6 +503,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	bool found_idle = false;
 	struct task_ctx *taskc = get_task_ctx(p);
+	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
 	struct cpu_ctx *cpuc;
 	u64 dsq_id;
 	s32 cpu_id;
@@ -510,10 +511,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		.p = p,
 		.taskc = taskc,
 		.prev_cpu = prev_cpu,
+		.cpuc_cur = cpuc_cur,
 		.wake_flags = wake_flags,
 	};
 
-	if (!taskc)
+	if (!taskc || !cpuc_cur)
 		return prev_cpu;
 
 	if (wake_flags & SCX_WAKE_SYNC)
@@ -570,13 +572,14 @@ static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
 	u64 dsq_id;
-	bool is_idle = false;
+	bool is_idle = false, shrinked = false;
 
 	taskc = get_task_ctx(p);
-	if (!taskc)
+	cpuc_cur = get_cpu_ctx();
+	if (!taskc || !cpuc_cur)
 		return;
 
 	/*
@@ -602,19 +605,13 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * the closest available domain from the previous domain.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
-	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle);
+	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle, cpuc_cur);
 
 	/*
 	 * Increase the number of pinned tasks waiting for execution.
 	 */
 	if (cpu >= 0 && is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu)))
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
-
-	/*
-	 * Collect additional information when the scheduler is monitored.
-	 */
-	if (is_monitored)
-		taskc->suggested_cpu_id = cpu;
 
 	/*
 	 * Enqueue the task to a DSQ. If it is safe to directly dispatch
@@ -630,6 +627,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * Collect additional information when the scheduler is monitored.
+	 */
+	if (is_monitored)
+		taskc->suggested_cpu_id = cpu;
+
+	/*
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
 	 * kick the new CPU and go.
 	 */
@@ -643,7 +646,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
-	if (!no_preemption)
+	if (!shrinked && !no_preemption)
 		try_find_and_kick_victim_cpu(p, taskc, cpu, dsq_id);
 }
 
@@ -1013,6 +1016,15 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 
 	now = scx_bpf_now();
 	account_task_runtime(p, taskc, cpuc, now);
+
+	/*
+	 * If this task is slice-boosted and there is a pinned task that
+	 * must run on this, shrink its time slice to the regular one.
+	 */
+	if (cpuc->nr_pinned_tasks &&
+	    test_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST)) {
+		shrink_boosted_slice_at_tick(p, cpuc, now);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)

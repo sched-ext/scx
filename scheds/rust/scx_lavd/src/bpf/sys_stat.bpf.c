@@ -92,6 +92,17 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
+		 * When pinned tasks are waiting to run on this CPU
+		 * or a system is overloaded (so the slice cannot be boosted
+		 * or there are pending tasks to run)), shrink the time slice
+		 * of slice-boosted tasks.
+		 */
+		if (cpuc->nr_pinned_tasks || !can_boost_slice() ||
+		    have_pending_tasks(cpuc)) {
+			shrink_boosted_slice_remote(cpuc, c->now);
+		}
+
+		/*
 		 * Accumulate cpus' loads.
 		 */
 		c->tot_svc_time += cpuc->tot_svc_time;
