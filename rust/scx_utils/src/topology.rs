@@ -83,7 +83,9 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "gpu-topology")]
 use crate::gpu::{create_gpus, Gpu, GpuIndex};
@@ -104,6 +106,9 @@ lazy_static::lazy_static! {
     /// disabled CPUs that may not be onlined, whose IDs are lower than the
     /// IDs of other CPUs that may be onlined.
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
+
+    /// Whether AMD preferred core ranking is enabled on this system
+    pub static ref HAS_PREF_RANK: bool = has_pref_rank();
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -112,7 +117,7 @@ pub enum CoreType {
     Little,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug)]
 pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,
@@ -138,6 +143,110 @@ pub struct Cpu {
     pub node_id: usize,
     pub package_id: usize,
     pub cluster_id: isize,
+    rank: AtomicU32,
+}
+
+impl Clone for Cpu {
+    fn clone(&self) -> Self {
+        Cpu {
+            id: self.id,
+            min_freq: self.min_freq,
+            max_freq: self.max_freq,
+            base_freq: self.base_freq,
+            cpu_capacity: self.cpu_capacity,
+            smt_level: self.smt_level,
+            pm_qos_resume_latency_us: self.pm_qos_resume_latency_us,
+            trans_lat_ns: self.trans_lat_ns,
+            l2_id: self.l2_id,
+            l3_id: self.l3_id,
+            cache_size: self.cache_size,
+            core_type: self.core_type.clone(),
+            core_id: self.core_id,
+            llc_id: self.llc_id,
+            node_id: self.node_id,
+            package_id: self.package_id,
+            cluster_id: self.cluster_id,
+            rank: AtomicU32::new(self.rank.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl PartialEq for Cpu {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.min_freq == other.min_freq
+            && self.max_freq == other.max_freq
+            && self.base_freq == other.base_freq
+            && self.trans_lat_ns == other.trans_lat_ns
+            && self.l2_id == other.l2_id
+            && self.l3_id == other.l3_id
+            && self.core_type == other.core_type
+            && self.core_id == other.core_id
+            && self.llc_id == other.llc_id
+            && self.node_id == other.node_id
+            && self.package_id == other.package_id
+            && self.cluster_id == other.cluster_id
+            && self.rank() == other.rank()
+    }
+}
+
+impl Eq for Cpu {}
+
+impl PartialOrd for Cpu {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Cpu {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id
+            .cmp(&other.id)
+            .then_with(|| self.min_freq.cmp(&other.min_freq))
+            .then_with(|| self.max_freq.cmp(&other.max_freq))
+            .then_with(|| self.base_freq.cmp(&other.base_freq))
+            .then_with(|| self.trans_lat_ns.cmp(&other.trans_lat_ns))
+            .then_with(|| self.l2_id.cmp(&other.l2_id))
+            .then_with(|| self.l3_id.cmp(&other.l3_id))
+            .then_with(|| self.core_type.cmp(&other.core_type))
+            .then_with(|| self.core_id.cmp(&other.core_id))
+            .then_with(|| self.llc_id.cmp(&other.llc_id))
+            .then_with(|| self.node_id.cmp(&other.node_id))
+            .then_with(|| self.package_id.cmp(&other.package_id))
+            .then_with(|| self.cluster_id.cmp(&other.cluster_id))
+            .then_with(|| self.rank().cmp(&other.rank()))
+    }
+}
+
+impl std::hash::Hash for Cpu {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.min_freq.hash(state);
+        self.max_freq.hash(state);
+        self.base_freq.hash(state);
+        self.trans_lat_ns.hash(state);
+        self.l2_id.hash(state);
+        self.l3_id.hash(state);
+        self.core_type.hash(state);
+        self.core_id.hash(state);
+        self.llc_id.hash(state);
+        self.node_id.hash(state);
+        self.package_id.hash(state);
+        self.cluster_id.hash(state);
+        self.rank().hash(state);
+    }
+}
+
+impl Cpu {
+    /// Get the current rank value
+    pub fn rank(&self) -> usize {
+        self.rank.load(Ordering::Relaxed) as usize
+    }
+
+    /// Set the rank value
+    pub fn set_rank(&self, rank: usize) {
+        self.rank.store(rank as u32, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -202,6 +311,36 @@ pub struct Topology {
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+
+    /// Cached list of ranked CPUs
+    ranked_cpus: Mutex<Arc<RankedCpuCache>>,
+}
+
+const RANKED_CPU_CACHE_DURATION: Duration = Duration::from_secs(10);
+
+/// Cached list of ranked CPUs
+#[derive(Debug, Clone)]
+pub struct RankedCpuCache {
+    /// List of CPU IDs sorted by their ranking (highest to lowest)
+    pub cpu_ids: Vec<usize>,
+    /// When this cache was last updated
+    pub last_updated: Instant,
+    /// Generation number that increments each time the order changes
+    pub generation: u64,
+}
+
+impl RankedCpuCache {
+    pub fn new() -> Self {
+        Self {
+            cpu_ids: Vec::new(),
+            last_updated: Instant::now() - RANKED_CPU_CACHE_DURATION,
+            generation: 0,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.last_updated.elapsed() < RANKED_CPU_CACHE_DURATION
+    }
 }
 
 impl Topology {
@@ -264,6 +403,7 @@ impl Topology {
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
+            ranked_cpus: Mutex::new(Arc::new(RankedCpuCache::new())),
         })
     }
 
@@ -332,11 +472,73 @@ impl Topology {
         }
         sibling_cpu
     }
+
+    /// Returns true if cpu_a has a higher rank than cpu_b.
+    /// If ranking is not enabled or either CPU is invalid, returns false.
+    pub fn is_higher_ranked(&self, cpu_a: usize, cpu_b: usize) -> bool {
+        if !*HAS_PREF_RANK {
+            return false;
+        }
+
+        let cpu_a_rank = self.all_cpus.get(&cpu_a).map(|cpu| cpu.rank());
+        let cpu_b_rank = self.all_cpus.get(&cpu_b).map(|cpu| cpu.rank());
+
+        match (cpu_a_rank, cpu_b_rank) {
+            (Some(rank_a), Some(rank_b)) => rank_a > rank_b,
+            _ => false,
+        }
+    }
+
+    /// Returns the cached ranked CPU list.
+    /// The list is cached internally and refreshed every 10 seconds.
+    /// If preferred core ranking is not enabled, returns an empty cache.
+    pub fn get_ranked_cpus(&self) -> Arc<RankedCpuCache> {
+        if !*HAS_PREF_RANK {
+            return Arc::new(RankedCpuCache {
+                cpu_ids: Vec::new(),
+                last_updated: Instant::now(),
+                generation: 0,
+            });
+        }
+
+        let mut cache = self.ranked_cpus.lock().unwrap();
+        if !cache.is_valid() {
+            let mut cpu_ranks: Vec<(usize, usize)> = Vec::new();
+
+            for &cpu_id in self.all_cpus.keys() {
+                let cpu_path = Path::new("/sys/devices/system/cpu")
+                    .join(format!("cpu{}", cpu_id))
+                    .join("cpufreq");
+
+                if let Ok(rank) = read_file_byte(&cpu_path.join("amd_pstate_prefcore_ranking")) {
+                    // Update the rank directly in the CPU object
+                    if let Some(cpu) = self.all_cpus.get(&cpu_id) {
+                        cpu.set_rank(rank);
+                    }
+                    cpu_ranks.push((cpu_id, rank));
+                }
+            }
+
+            cpu_ranks.sort_by(|a, b| {
+                let a_val = a.1;
+                let b_val = b.1;
+                b_val.cmp(&a_val).then_with(|| a.0.cmp(&b.0))
+            });
+
+            let inner = Arc::make_mut(&mut *cache);
+            inner.cpu_ids.clear();
+            inner.cpu_ids.extend(cpu_ranks.iter().map(|(id, _)| *id));
+            inner.last_updated = Instant::now();
+            inner.generation += 1;
+        }
+
+        Arc::clone(&cache)
+    }
 }
 
 /******************************************************
  * Helper structs/functions for creating the Topology *
- ******************************************************/
+******************************************************/
 /// TopoCtx is a helper struct used to build a topology.
 struct TopoCtx {
     /// Mapping of NUMA node core ids
@@ -551,6 +753,7 @@ fn create_insert_cpu(
             node_id: node.id,
             package_id,
             cluster_id,
+            rank: AtomicU32::new(0),
         }),
     );
 
@@ -830,4 +1033,14 @@ fn create_numa_nodes(
         nodes.insert(node.id, node);
     }
     Ok(nodes)
+}
+
+fn has_pref_rank() -> bool {
+    if !Path::new("/sys/devices/system/cpu/amd_pstate/prefcore").exists() {
+        return false;
+    }
+    match std::fs::read_to_string("/sys/devices/system/cpu/amd_pstate/prefcore") {
+        Ok(contents) => contents.trim() == "enabled",
+        Err(_) => false,
+    }
 }
