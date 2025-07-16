@@ -125,6 +125,7 @@ def main():
             "scx_bpfland",
             "scx_chaos",
             "scx_cosmos",
+            "scx_flash",
             "scx_lavd",
             "scx_p2dq",
             "scx_rlfifo",
