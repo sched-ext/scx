@@ -222,7 +222,7 @@ impl<'a> App<'a> {
             client
         });
         let stats_client = Some(Arc::new(TokioMutex::new(stats_client)));
-        let sample_rate = skel.maps.data_data.sample_rate;
+        let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
@@ -1142,7 +1142,7 @@ impl<'a> App<'a> {
                     .title_top(if render_sample_rate {
                         Line::from(format!(
                             "sample rate {}",
-                            self.skel.maps.data_data.sample_rate
+                            self.skel.maps.data_data.as_ref().unwrap().sample_rate
                         ))
                         .style(self.theme().text_important_color())
                         .right_aligned()
@@ -1397,7 +1397,7 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let sample_rate = self.skel.maps.data_data.sample_rate;
+        let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
 
         let dsq_global_iter = self
             .dsq_data
@@ -1816,7 +1816,7 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::DecBpfSampleRate),
-                    self.skel.maps.data_data.sample_rate
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
                 ),
                 Style::default(),
             )),
@@ -1826,7 +1826,7 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::IncBpfSampleRate),
-                    self.skel.maps.data_data.sample_rate
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
                 ),
                 Style::default(),
             )),
@@ -2338,7 +2338,7 @@ impl<'a> App<'a> {
 
     /// Records the trace to perfetto output.
     fn stop_recording_trace(&mut self, ts: u64) -> Result<()> {
-        self.skel.maps.data_data.sample_rate = self.prev_bpf_sample_rate;
+        self.skel.maps.data_data.as_mut().unwrap().sample_rate = self.prev_bpf_sample_rate;
         self.state = self.prev_state.clone();
         self.trace_manager.stop(None, Some(ts))?;
         self.trace_links.clear();
@@ -2352,8 +2352,9 @@ impl<'a> App<'a> {
             return Ok(());
         };
 
-        self.skel.maps.data_data.trace_duration_ns = self.config.trace_duration_ns();
-        self.skel.maps.data_data.trace_warmup_ns = self.config.trace_warmup_ns();
+        self.skel.maps.data_data.as_mut().unwrap().trace_duration_ns =
+            self.config.trace_duration_ns();
+        self.skel.maps.data_data.as_mut().unwrap().trace_warmup_ns = self.config.trace_warmup_ns();
 
         if self.trace_links.is_empty() {
             self.attach_trace_progs()?;
@@ -2643,7 +2644,7 @@ impl<'a> App<'a> {
     /// Handles kprobe events.
     pub fn on_kprobe(&mut self, action: &KprobeAction) {
         let cpu = action.cpu as usize;
-        let sample_rate = self.skel.maps.data_data.sample_rate as u64;
+        let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate as u64;
 
         if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu) {
             if kprobe.instruction_pointer == Some(action.instruction_pointer) {
@@ -2679,7 +2680,7 @@ impl<'a> App<'a> {
 
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
-        self.skel.maps.data_data.sample_rate = sample_rate;
+        self.skel.maps.data_data.as_mut().unwrap().sample_rate = sample_rate;
     }
 
     /// Handles the action and updates application states.
@@ -2809,7 +2810,7 @@ impl<'a> App<'a> {
             Action::ToggleLocalization => self.localize = !self.localize,
             Action::ToggleHwPressure => self.hw_pressure = !self.hw_pressure,
             Action::IncBpfSampleRate => {
-                let sample_rate = self.skel.maps.data_data.sample_rate;
+                let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
                 if sample_rate == 0 {
                     self.update_bpf_sample_rate(8_u32);
                 } else {
@@ -2817,7 +2818,7 @@ impl<'a> App<'a> {
                 }
             }
             Action::DecBpfSampleRate => {
-                let sample_rate = self.skel.maps.data_data.sample_rate;
+                let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
                 if sample_rate > 0 {
                     // prevent overly aggressive bpf sampling, but allow disabling sampling
                     let new_rate = sample_rate >> 2;

@@ -813,8 +813,8 @@ struct BpfStats {
 
 impl BpfStats {
     fn read(skel: &BpfSkel, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Self {
-        let nr_layers = skel.maps.rodata_data.nr_layers as usize;
-        let nr_llcs = skel.maps.rodata_data.nr_llcs as usize;
+        let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
+        let nr_llcs = skel.maps.rodata_data.as_ref().unwrap().nr_llcs as usize;
         let mut gstats = vec![0u64; NR_GSTATS];
         let mut lstats = vec![vec![0u64; NR_LSTATS]; nr_layers];
         let mut llc_lstats = vec![vec![vec![0u64; NR_LLC_LSTATS]; nr_llcs]; nr_layers];
@@ -952,10 +952,10 @@ impl Stats {
         proc_reader: &fb_procfs::ProcReader,
         gpu_task_affinitizer: &GpuTaskAffinitizer,
     ) -> Result<Self> {
-        let nr_layers = skel.maps.rodata_data.nr_layers as usize;
+        let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
-        let nr_nodes = skel.maps.rodata_data.nr_nodes as usize;
+        let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
 
         Ok(Self {
             at: Instant::now(),
@@ -998,6 +998,8 @@ impl Stats {
         let nr_layer_tasks: Vec<usize> = skel
             .maps
             .bss_data
+            .as_ref()
+            .unwrap()
             .layers
             .iter()
             .take(self.nr_layers)
@@ -1006,6 +1008,8 @@ impl Stats {
         let layer_slice_us: Vec<u64> = skel
             .maps
             .bss_data
+            .as_ref()
+            .unwrap()
             .layers
             .iter()
             .take(self.nr_layers)
@@ -1518,14 +1522,14 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init_layers(skel: &mut OpenBpfSkel, specs: &[LayerSpec], topo: &Topology) -> Result<()> {
-        skel.maps.rodata_data.nr_layers = specs.len() as u32;
+        skel.maps.rodata_data.as_mut().unwrap().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
         let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
         let mut layer_weights: Vec<usize> = vec![];
 
         for (spec_i, spec) in specs.iter().enumerate() {
-            let layer = &mut skel.maps.bss_data.layers[spec_i];
+            let layer = &mut skel.maps.bss_data.as_mut().unwrap().layers[spec_i];
 
             for (or_i, or) in spec.matches.iter().enumerate() {
                 for (and_i, and) in or.iter().enumerate() {
@@ -1739,7 +1743,11 @@ impl<'a> Scheduler<'a> {
 
         layer_iteration_order.sort_by(|i, j| layer_weights[*i].cmp(&layer_weights[*j]));
         for (idx, layer_idx) in layer_iteration_order.iter().enumerate() {
-            skel.maps.rodata_data.layer_iteration_order[idx] = *layer_idx as u32;
+            skel.maps
+                .rodata_data
+                .as_mut()
+                .unwrap()
+                .layer_iteration_order[idx] = *layer_idx as u32;
         }
 
         if perf_set && !compat::ksym_exists("scx_bpf_cpuperf_set")? {
@@ -1750,29 +1758,31 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
-        skel.maps.rodata_data.nr_nodes = topo.nodes.len() as u32;
-        skel.maps.rodata_data.nr_llcs = 0;
+        skel.maps.rodata_data.as_mut().unwrap().nr_nodes = topo.nodes.len() as u32;
+        skel.maps.rodata_data.as_mut().unwrap().nr_llcs = 0;
 
         for (&node_id, node) in &topo.nodes {
             debug!("configuring node {}, LLCs {:?}", node_id, node.llcs.len());
-            skel.maps.rodata_data.nr_llcs += node.llcs.len() as u32;
+            skel.maps.rodata_data.as_mut().unwrap().nr_llcs += node.llcs.len() as u32;
             let raw_numa_slice = node.span.as_raw_slice();
-            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[node_id];
+            let node_cpumask_slice =
+                &mut skel.maps.rodata_data.as_mut().unwrap().numa_cpumasks[node_id];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
             debug!(
                 "node {} mask: {:?}",
-                node_id, skel.maps.rodata_data.numa_cpumasks[node_id]
+                node_id,
+                skel.maps.rodata_data.as_ref().unwrap().numa_cpumasks[node_id]
             );
 
             for llc in node.llcs.values() {
                 debug!("configuring llc {:?} for node {:?}", llc.id, node_id);
-                skel.maps.rodata_data.llc_numa_id_map[llc.id] = node_id as u32;
+                skel.maps.rodata_data.as_mut().unwrap().llc_numa_id_map[llc.id] = node_id as u32;
             }
         }
 
         for cpu in topo.all_cpus.values() {
-            skel.maps.rodata_data.cpu_llc_id_map[cpu.id] = cpu.llc_id as u32;
+            skel.maps.rodata_data.as_mut().unwrap().cpu_llc_id_map[cpu.id] = cpu.llc_id as u32;
         }
     }
 
@@ -2165,17 +2175,19 @@ impl<'a> Scheduler<'a> {
         let ext_sched_class_addr = get_kallsyms_addr("ext_sched_class");
         let idle_sched_class_addr = get_kallsyms_addr("idle_sched_class");
 
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+
         if ext_sched_class_addr.is_ok() && idle_sched_class_addr.is_ok() {
-            skel.maps.rodata_data.ext_sched_class_addr = ext_sched_class_addr.unwrap();
-            skel.maps.rodata_data.idle_sched_class_addr = idle_sched_class_addr.unwrap();
+            rodata.ext_sched_class_addr = ext_sched_class_addr.unwrap();
+            rodata.idle_sched_class_addr = idle_sched_class_addr.unwrap();
         } else {
             warn!(
                 "Unable to get sched_class addresses from /proc/kallsyms, disabling skip_preempt."
             );
         }
 
-        skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
-        skel.maps.rodata_data.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
+        rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
+        rodata.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
@@ -2187,65 +2199,65 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        skel.maps.rodata_data.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
-        skel.maps.rodata_data.percpu_kthread_preempt_all =
+        rodata.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
+        rodata.percpu_kthread_preempt_all =
             !opts.disable_percpu_kthread_preempt && opts.percpu_kthread_preempt_all;
-        skel.maps.rodata_data.debug = opts.verbose as u32;
-        skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
-        skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
+        rodata.debug = opts.verbose as u32;
+        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
         } else {
             opts.slice_us * 1000 * 20
         };
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
-        skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
-        skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
-        skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
-        skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
-        skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
-        skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
-        skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
-        skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
-        skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
-        skel.maps.rodata_data.enable_match_debug = opts.enable_match_debug;
-        skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
+        rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
+        rodata.smt_enabled = topo.smt_enabled;
+        rodata.has_little_cores = topo.has_little_cores();
+        rodata.xnuma_preemption = opts.xnuma_preemption;
+        rodata.antistall_sec = opts.antistall_sec;
+        rodata.monitor_disable = opts.monitor_disable;
+        rodata.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
+        rodata.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
+        rodata.enable_antistall = !opts.disable_antistall;
+        rodata.enable_match_debug = opts.enable_match_debug;
+        rodata.enable_gpu_support = opts.enable_gpu_support;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
-            skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
+            rodata.__sibling_cpu[cpu] = *sib;
         }
         for cpu in topo.all_cpus.keys() {
-            skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps.rodata_data.nr_op_layers = layer_specs
+        rodata.nr_op_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
                 LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_on_layers = layer_specs
+        rodata.nr_on_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
                 LayerKind::Open { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_gp_layers = layer_specs
+        rodata.nr_gp_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
                 LayerKind::Grouped { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_gn_layers = layer_specs
+        rodata.nr_gn_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
                 LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_excl_layers = layer_specs
+        rodata.nr_excl_layers = layer_specs
             .iter()
             .filter(|spec| spec.kind.common().exclusive)
             .count() as u32;
@@ -2260,22 +2272,20 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        skel.maps.rodata_data.min_open_layer_disallow_open_after_ns = match min_open {
+        rodata.min_open_layer_disallow_open_after_ns = match min_open {
             u64::MAX => *DFL_DISALLOW_OPEN_AFTER_US,
             v => v,
         };
-        skel.maps
-            .rodata_data
-            .min_open_layer_disallow_preempt_after_ns = match min_preempt {
+        rodata.min_open_layer_disallow_preempt_after_ns = match min_preempt {
             u64::MAX => *DFL_DISALLOW_PREEMPT_AFTER_US,
             v => v,
         };
 
         // Consider all layers empty at the beginning.
         for i in 0..layer_specs.len() {
-            skel.maps.bss_data.empty_layer_ids[i] = i as u32;
+            skel.maps.bss_data.as_mut().unwrap().empty_layer_ids[i] = i as u32;
         }
-        skel.maps.bss_data.nr_empty_layer_ids = nr_layers as u32;
+        skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids = nr_layers as u32;
 
         Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
@@ -2825,7 +2835,10 @@ impl<'a> Scheduler<'a> {
             }
 
             if freed {
-                Self::update_bpf_layer_cpumask(layer, &mut self.skel.maps.bss_data.layers[idx]);
+                Self::update_bpf_layer_cpumask(
+                    layer,
+                    &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                );
                 updated = true;
             }
         }
@@ -2860,7 +2873,10 @@ impl<'a> Scheduler<'a> {
             }
 
             if alloced {
-                Self::update_bpf_layer_cpumask(layer, &mut self.skel.maps.bss_data.layers[idx]);
+                Self::update_bpf_layer_cpumask(
+                    layer,
+                    &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                );
                 updated = true;
             }
         }
@@ -2872,7 +2888,7 @@ impl<'a> Scheduler<'a> {
                     continue;
                 }
 
-                let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
+                let bpf_layer = &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx];
                 let available_cpus = self.cpu_pool.available_cpus().and(&layer.allowed_cpus);
                 let nr_available_cpus = available_cpus.weight();
 
@@ -2883,7 +2899,8 @@ impl<'a> Scheduler<'a> {
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
 
-            self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
+            self.skel.maps.bss_data.as_mut().unwrap().fallback_cpu =
+                self.cpu_pool.fallback_cpu as u32;
 
             for (lidx, layer) in self.layers.iter().enumerate() {
                 self.nr_layer_cpus_ranges[lidx] = (
@@ -2908,10 +2925,11 @@ impl<'a> Scheduler<'a> {
                 .map(|(idx, _layer)| idx as u32)
                 .collect();
             for i in 0..self.layers.len() {
-                self.skel.maps.bss_data.empty_layer_ids[i] =
+                self.skel.maps.bss_data.as_mut().unwrap().empty_layer_ids[i] =
                     empty_layer_ids.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
             }
-            self.skel.maps.bss_data.nr_empty_layer_ids = empty_layer_ids.len() as u32;
+            self.skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids =
+                empty_layer_ids.len() as u32;
         }
 
         let _ = self.update_netdev_cpumasks();
@@ -2989,7 +3007,12 @@ impl<'a> Scheduler<'a> {
             }
 
             if enable_layer_refresh && now >= next_layer_refresh_at {
-                self.skel.maps.bss_data.layer_refresh_seq_avgruntime += 1;
+                self.skel
+                    .maps
+                    .bss_data
+                    .as_mut()
+                    .unwrap()
+                    .layer_refresh_seq_avgruntime += 1;
                 while next_layer_refresh_at < now {
                     next_layer_refresh_at += self.layer_refresh_intv;
                 }

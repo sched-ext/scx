@@ -422,9 +422,9 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU capacity.
         for cpu in order.cpuids.iter() {
-            skel.maps.rodata_data.cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
-            skel.maps.rodata_data.cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
-            skel.maps.rodata_data.cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
+            skel.maps.rodata_data.as_mut().unwrap().cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
+            skel.maps.rodata_data.as_mut().unwrap().cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
+            skel.maps.rodata_data.as_mut().unwrap().cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
         }
 
         // Initialize performance vs. CPU order table.
@@ -433,7 +433,7 @@ impl<'a> Scheduler<'a> {
             panic!("Generated performance vs. CPU order stats are too complex ({nr_pco_states}) to handle");
         }
 
-        skel.maps.rodata_data.nr_pco_states = nr_pco_states;
+        skel.maps.rodata_data.as_mut().unwrap().nr_pco_states = nr_pco_states;
         for (i, (_, pco)) in order.perf_cpu_order.iter().enumerate() {
             Self::init_pco_tuple(skel, i, &pco);
             info!("{:#}", pco);
@@ -450,31 +450,33 @@ impl<'a> Scheduler<'a> {
         let cpus_ovflw = pco.cpus_ovflw.borrow();
         let pco_nr_primary = cpus_perf.len();
 
-        skel.maps.rodata_data.pco_bounds[i] = pco.perf_cap as u32;
-        skel.maps.rodata_data.pco_nr_primary[i] = pco_nr_primary as u16;
+        skel.maps.rodata_data.as_mut().unwrap().pco_bounds[i] = pco.perf_cap as u32;
+        skel.maps.rodata_data.as_mut().unwrap().pco_nr_primary[i] = pco_nr_primary as u16;
 
         for (j, &cpu_adx) in cpus_perf.iter().enumerate() {
-            skel.maps.rodata_data.pco_table[i][j] = cpu_adx as u16;
+            skel.maps.rodata_data.as_mut().unwrap().pco_table[i][j] = cpu_adx as u16;
         }
 
         for (j, &cpu_adx) in cpus_ovflw.iter().enumerate() {
             let k = j + pco_nr_primary;
-            skel.maps.rodata_data.pco_table[i][k] = cpu_adx as u16;
+            skel.maps.rodata_data.as_mut().unwrap().pco_table[i][k] = cpu_adx as u16;
         }
     }
 
     fn init_cpdoms(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         // Initialize compute domain contexts
         for (k, v) in order.cpdom_map.iter() {
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id.get() as u64;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].node_id = k.node_adx as u8;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_valid = 1;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].alt_id =
+                v.cpdom_alt_id.get() as u64;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].node_id = k.node_adx as u8;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].is_valid = 1;
             for cpu_id in v.cpu_ids.iter() {
                 let i = cpu_id / 64;
                 let j = cpu_id % 64;
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].__cpumask[i] |= 0x01 << j;
+                skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].__cpumask[i] |=
+                    0x01 << j;
             }
 
             if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST as usize {
@@ -486,28 +488,32 @@ impl<'a> Scheduler<'a> {
                 if nr_neighbors > LAVD_CPDOM_MAX_NR as u8 {
                     panic!("The processor topology is too complex to handle in BPF.");
                 }
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = nr_neighbors;
+                skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
+                    nr_neighbors;
                 for n in neighbors.borrow().iter() {
-                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] |= 0x1 << n;
+                    skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].neighbor_bits[k] |=
+                        0x1 << n;
                 }
             }
         }
     }
 
     fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
-        skel.maps.bss_data.no_preemption = opts.no_preemption;
-        skel.maps.bss_data.no_wake_sync = opts.no_wake_sync;
-        skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
-        skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
-        skel.maps.bss_data.is_powersave_mode = opts.powersave;
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u64;
-        skel.maps.rodata_data.is_smt_active = order.smt_enabled;
-        skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
-        skel.maps.rodata_data.verbose = opts.verbose;
-        skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
-        skel.maps.rodata_data.slice_min_ns = opts.slice_min_us * 1000;
-        skel.maps.rodata_data.preempt_shift = opts.preempt_shift;
-        skel.maps.rodata_data.no_use_em = opts.no_use_em as u8;
+        let bss_data = skel.maps.bss_data.as_mut().unwrap();
+        bss_data.no_preemption = opts.no_preemption;
+        bss_data.no_wake_sync = opts.no_wake_sync;
+        bss_data.no_core_compaction = opts.no_core_compaction;
+        bss_data.no_freq_scaling = opts.no_freq_scaling;
+        bss_data.is_powersave_mode = opts.powersave;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u64;
+        rodata.is_smt_active = order.smt_enabled;
+        rodata.is_autopilot_on = opts.autopilot;
+        rodata.verbose = opts.verbose;
+        rodata.slice_max_ns = opts.slice_max_us * 1000;
+        rodata.slice_min_ns = opts.slice_min_us * 1000;
+        rodata.preempt_shift = opts.preempt_shift;
+        rodata.no_use_em = opts.no_use_em as u8;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
@@ -580,15 +586,15 @@ impl<'a> Scheduler<'a> {
     }
 
     fn prep_introspec(&mut self) {
-        if !self.skel.maps.bss_data.is_monitored {
-            self.skel.maps.bss_data.is_monitored = true;
+        if !self.skel.maps.bss_data.as_ref().unwrap().is_monitored {
+            self.skel.maps.bss_data.as_mut().unwrap().is_monitored = true;
         }
-        self.skel.maps.bss_data.intrspc.cmd = self.intrspc.cmd;
-        self.skel.maps.bss_data.intrspc.arg = self.intrspc.arg;
+        self.skel.maps.bss_data.as_mut().unwrap().intrspc.cmd = self.intrspc.cmd;
+        self.skel.maps.bss_data.as_mut().unwrap().intrspc.arg = self.intrspc.arg;
     }
 
     fn cleanup_introspec(&mut self) {
-        self.skel.maps.bss_data.intrspc.cmd = LAVD_CMD_NOP;
+        self.skel.maps.bss_data.as_mut().unwrap().intrspc.cmd = LAVD_CMD_NOP;
     }
 
     fn get_pc(x: u64, y: u64) -> f64 {
@@ -617,7 +623,7 @@ impl<'a> Scheduler<'a> {
                 }
                 self.mseq_id += 1;
 
-                let bss_data = &self.skel.maps.bss_data;
+                let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
                 let st = bss_data.sys_stat;
 
                 let mseq = self.mseq_id;
@@ -688,8 +694,8 @@ impl<'a> Scheduler<'a> {
     }
 
     fn stop_monitoring(&mut self) {
-        if self.skel.maps.bss_data.is_monitored {
-            self.skel.maps.bss_data.is_monitored = false;
+        if self.skel.maps.bss_data.as_ref().unwrap().is_monitored {
+            self.skel.maps.bss_data.as_mut().unwrap().is_monitored = false;
         }
     }
 

@@ -271,14 +271,15 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cosmos_ops_mut().exit_dump_len = opts.exit_dump_len;
 
         // Override default BPF scheduling parameters.
-        skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
-        skel.maps.rodata_data.slice_lag = opts.slice_lag_us * 1000;
-        skel.maps.rodata_data.cpufreq_enabled = !opts.disable_cpufreq;
-        skel.maps.rodata_data.numa_enabled = opts.enable_numa;
-        skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.slice_lag = opts.slice_lag_us * 1000;
+        rodata.cpufreq_enabled = !opts.disable_cpufreq;
+        rodata.numa_enabled = opts.enable_numa;
+        rodata.no_wake_sync = opts.no_wake_sync;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
-        skel.maps.rodata_data.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
+        rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
 
         // Define the primary scheduling domain.
         let primary_cpus = if let Some(ref domain) = opts.primary_domain {
@@ -291,9 +292,9 @@ impl<'a> Scheduler<'a> {
         };
         if primary_cpus.len() < *NR_CPU_IDS {
             info!("Primary CPUs: {:?}", primary_cpus);
-            skel.maps.rodata_data.primary_all = false;
+            rodata.primary_all = false;
         } else {
-            skel.maps.rodata_data.primary_all = true;
+            rodata.primary_all = true;
         }
 
         // Set scheduler flags.
@@ -359,8 +360,8 @@ impl<'a> Scheduler<'a> {
 
     fn get_metrics(&self) -> Metrics {
         Metrics {
-            cpu_thresh: self.skel.maps.rodata_data.busy_threshold,
-            cpu_util: self.skel.maps.bss_data.cpu_util,
+            cpu_thresh: self.skel.maps.rodata_data.as_ref().unwrap().busy_threshold,
+            cpu_util: self.skel.maps.bss_data.as_ref().unwrap().cpu_util,
         }
     }
 
@@ -428,7 +429,7 @@ impl<'a> Scheduler<'a> {
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
                 if let Some(curr_cputime) = Self::read_cpu_times() {
                     Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                        .map(|util| self.skel.maps.bss_data.cpu_util = util);
+                        .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
                     prev_cputime = curr_cputime;
                 }
                 last_update = Instant::now();

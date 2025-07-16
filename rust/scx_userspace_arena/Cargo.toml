@@ -15,7 +15,7 @@ scx_utils = { path = "../scx_utils", version = "1.0.17" }
 
 anyhow = "1.0.65"
 buddy_system_allocator = { version = "0.11.0", default-features = false }
-libbpf-rs = "=0.25.0-beta.1"
+libbpf-rs = "=0.25.0"
 
 [build-dependencies]
 scx_utils = { path = "../scx_utils", version = "1.0.17" }

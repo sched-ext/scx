@@ -381,23 +381,24 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.maps.bss_data.slice_ns = scx_enums.SCX_SLICE_DFL;
+        skel.maps.bss_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
 
-        skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
-        skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
-        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        rodata.nr_nodes = domains.nr_nodes() as u32;
+        rodata.nr_doms = domains.nr_doms() as u32;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
 
         // Any CPU with dom > MAX_DOMS is considered offline by default. There
         // are a few places in the BPF code where we skip over offlined CPUs
         // (e.g. when initializing or refreshing tune params), and elsewhere the
         // scheduler will error if we try to schedule from them.
         for cpu in 0..*NR_CPU_IDS {
-            skel.maps.rodata_data.cpu_dom_id_map[cpu] = u32::MAX;
+            rodata.cpu_dom_id_map[cpu] = u32::MAX;
         }
 
         for (id, dom) in domains.doms().iter() {
             for cpu in dom.mask().iter() {
-                skel.maps.rodata_data.cpu_dom_id_map[cpu] = *id as u32;
+                rodata.cpu_dom_id_map[cpu] = *id as u32;
             }
         }
 
@@ -410,17 +411,17 @@ impl<'a> Scheduler<'a> {
             }
 
             let raw_numa_slice = numa_mask.as_raw_slice();
-            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[numa];
+            let node_cpumask_slice = &mut rodata.numa_cpumasks[numa];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
                 let raw_dom_slice = dom.mask_slice();
-                let dom_cpumask_slice = &mut skel.maps.rodata_data.dom_cpumasks[dom.id()];
+                let dom_cpumask_slice = &mut rodata.dom_cpumasks[dom.id()];
                 let (left, _) = dom_cpumask_slice.split_at_mut(raw_dom_slice.len());
                 left.clone_from_slice(raw_dom_slice);
-                skel.maps.rodata_data.dom_numa_id_map[dom.id()] =
+                rodata.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
                 info!(" DOM[{:02}] mask= {}", dom.id(), dom.mask());
@@ -432,15 +433,15 @@ impl<'a> Scheduler<'a> {
         }
         skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.load_half_life = (opts.load_half_life * 1000000000.0) as u32;
-        skel.maps.rodata_data.kthreads_local = opts.kthreads_local;
-        skel.maps.rodata_data.fifo_sched = opts.fifo_sched;
-        skel.maps.rodata_data.greedy_threshold = opts.greedy_threshold;
-        skel.maps.rodata_data.greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
-        skel.maps.rodata_data.direct_greedy_numa = opts.direct_greedy_numa;
-        skel.maps.rodata_data.mempolicy_affinity = opts.mempolicy_affinity;
-        skel.maps.rodata_data.debug = opts.verbose as u32;
-        skel.maps.rodata_data.rusty_perf_mode = opts.perf;
+        rodata.load_half_life = (opts.load_half_life * 1000000000.0) as u32;
+        rodata.kthreads_local = opts.kthreads_local;
+        rodata.fifo_sched = opts.fifo_sched;
+        rodata.greedy_threshold = opts.greedy_threshold;
+        rodata.greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
+        rodata.direct_greedy_numa = opts.direct_greedy_numa;
+        rodata.mempolicy_affinity = opts.mempolicy_affinity;
+        rodata.debug = opts.verbose as u32;
+        rodata.rusty_perf_mode = opts.perf;
 
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
@@ -450,7 +451,7 @@ impl<'a> Scheduler<'a> {
         for (id, dom) in domains.doms().iter() {
             let mut ctx = dom.ctx.lock().unwrap();
 
-            *ctx = Some(skel.maps.bss_data.dom_ctxs[*id]);
+            *ctx = Some(skel.maps.bss_data.as_ref().unwrap().dom_ctxs[*id]);
         }
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");

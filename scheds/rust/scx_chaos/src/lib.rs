@@ -415,36 +415,34 @@ impl Builder<'_> {
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos)?;
         scx_p2dq::init_open_skel!(&mut open_skel, self.p2dq_opts, self.verbose)?;
 
+        let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
+
         // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
         // this codepath
-        open_skel
-            .maps
-            .rodata_data
-            .p2dq_config
-            .select_idle_in_enqueue = MaybeUninit::new(false);
+        rodata.p2dq_config.select_idle_in_enqueue = MaybeUninit::new(false);
 
         match self.requires_ppid {
             None => {
-                open_skel.maps.rodata_data.ppid_targeting_ppid = -1;
+                rodata.ppid_targeting_ppid = -1;
             }
             Some(RequiresPpid::ExcludeParent(p)) => {
-                open_skel.maps.rodata_data.ppid_targeting_inclusive = false;
-                open_skel.maps.rodata_data.ppid_targeting_ppid = p.as_raw();
+                rodata.ppid_targeting_inclusive = false;
+                rodata.ppid_targeting_ppid = p.as_raw();
             }
             Some(RequiresPpid::IncludeParent(p)) => {
-                open_skel.maps.rodata_data.ppid_targeting_inclusive = true;
-                open_skel.maps.rodata_data.ppid_targeting_ppid = p.as_raw();
+                rodata.ppid_targeting_inclusive = true;
+                rodata.ppid_targeting_ppid = p.as_raw();
             }
         };
 
         if let Some(kprobe_random_delays) = &self.kprobe_random_delays {
-            open_skel.maps.rodata_data.kprobe_delays_freq_frac32 =
+            rodata.kprobe_delays_freq_frac32 =
                 (kprobe_random_delays.freq * 2_f64.powf(32_f64)) as u32;
         }
 
         // Set up the frequency array. The first element means nothing, so should be what's
         // required to add up to 100%. The rest should be cumulative frequencies.
-        let freq_array = &mut open_skel.maps.rodata_data.trait_delay_freq_frac32;
+        let freq_array = &mut rodata.trait_delay_freq_frac32;
         freq_array.fill(0);
         for tr in &self.traits {
             let kind = tr.kind();
@@ -471,7 +469,7 @@ impl Builder<'_> {
 
         debug!(
             "frequencies calculated as: {:?}",
-            open_skel.maps.rodata_data.trait_delay_freq_frac32
+            rodata.trait_delay_freq_frac32
         );
 
         for tr in &self.traits {
@@ -481,26 +479,25 @@ impl Builder<'_> {
                     min_us,
                     max_us,
                 } => {
-                    open_skel.maps.rodata_data.random_delays_min_ns = min_us * 1000;
-                    open_skel.maps.rodata_data.random_delays_max_ns = max_us * 1000;
+                    rodata.random_delays_min_ns = min_us * 1000;
+                    rodata.random_delays_max_ns = max_us * 1000;
                 }
                 Trait::CpuFreq {
                     frequency: _,
                     min_freq,
                     max_freq,
                 } => {
-                    open_skel.maps.rodata_data.cpu_freq_min = *min_freq;
-                    open_skel.maps.rodata_data.cpu_freq_max = *max_freq;
+                    rodata.cpu_freq_min = *min_freq;
+                    rodata.cpu_freq_max = *max_freq;
                     // Don't let p2dq control frequency
-                    open_skel.maps.rodata_data.p2dq_config.freq_control = MaybeUninit::new(false);
+                    rodata.p2dq_config.freq_control = MaybeUninit::new(false);
                 }
                 Trait::PerfDegradation {
                     frequency,
                     degradation_frac7,
                 } => {
-                    open_skel.maps.rodata_data.degradation_freq_frac32 =
-                        (frequency * 2_f64.powf(32_f64)) as u32;
-                    open_skel.maps.rodata_data.degradation_frac7 = *degradation_frac7;
+                    rodata.degradation_freq_frac32 = (frequency * 2_f64.powf(32_f64)) as u32;
+                    rodata.degradation_frac7 = *degradation_frac7;
                 }
             }
         }

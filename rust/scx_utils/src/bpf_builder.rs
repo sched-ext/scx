@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
+use tracing::Level;
+use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
 
 #[derive(Debug)]
 /// # Build helpers for sched_ext schedulers with Rust userspace component
@@ -346,17 +348,14 @@ impl BpfBuilder {
             let name = Path::new(filename).file_name().unwrap().to_str().unwrap();
             let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
 
-            let output = SkeletonBuilder::new()
-                .debug(true)
-                .source(filename)
-                .obj(&obj)
-                .clang(&self.clang.clang)
-                .clang_args(&self.cflags)
-                .build()?;
-
-            for line in String::from_utf8_lossy(output.stderr()).lines() {
-                println!("cargo:warning={}", line);
-            }
+            with_clang_warnings(|| {
+                SkeletonBuilder::new()
+                    .source(filename)
+                    .obj(&obj)
+                    .clang(&self.clang.clang)
+                    .clang_args(&self.cflags)
+                    .build()
+            })?;
 
             linker.add_file(&obj)?;
         }
@@ -393,16 +392,14 @@ impl BpfBuilder {
         let obj = self.out_dir.join(format!("{}.bpf.o", name));
         let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
 
-        let output = SkeletonBuilder::new()
-            .source(input)
-            .obj(&obj)
-            .clang(&self.clang.clang)
-            .clang_args(&self.cflags)
-            .build_and_generate(&skel_path)?;
-
-        for line in String::from_utf8_lossy(output.stderr()).lines() {
-            println!("cargo:warning={}", line);
-        }
+        with_clang_warnings(|| {
+            SkeletonBuilder::new()
+                .source(input)
+                .obj(&obj)
+                .clang(&self.clang.clang)
+                .clang_args(&self.cflags)
+                .build_and_generate(&skel_path)
+        })?;
 
         self.add_src_deps(deps, input)?;
 
@@ -458,6 +455,26 @@ impl BpfBuilder {
         self.gen_cargo_reruns(Some(&deps))?;
         Ok(())
     }
+}
+
+// Helper function to set up tracing and output compiler warnings
+fn with_clang_warnings<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce() -> Result<R>,
+{
+    let fmt =
+        tracing_subscriber::fmt::layer().event_format(libbpf_cargo::util::CargoWarningFormatter);
+    let filter = filter::Targets::new()
+        .with_target("compiler-stdout", Level::INFO)
+        .with_target("compiler-stderr", Level::INFO);
+
+    let subscriber = tracing_subscriber::registry().with(fmt.with_filter(filter));
+
+    // Execute the closure with a tracing guard
+    Ok({
+        let _guard = tracing::subscriber::set_default(subscriber);
+        f()
+    }?)
 }
 
 #[cfg(test)]
