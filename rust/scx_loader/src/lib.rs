@@ -34,6 +34,8 @@ pub enum SupportedSched {
     Tickless,
     #[serde(rename = "scx_rustland")]
     Rustland,
+    #[serde(rename = "scx_cosmos")]
+    Cosmos,
 }
 
 impl FromStr for SupportedSched {
@@ -42,6 +44,7 @@ impl FromStr for SupportedSched {
     fn from_str(scx_name: &str) -> anyhow::Result<SupportedSched> {
         match scx_name {
             "scx_bpfland" => Ok(SupportedSched::Bpfland),
+            "scx_cosmos" => Ok(SupportedSched::Cosmos),
             "scx_flash" => Ok(SupportedSched::Flash),
             "scx_lavd" => Ok(SupportedSched::Lavd),
             "scx_p2dq" => Ok(SupportedSched::P2DQ),
@@ -64,6 +67,7 @@ impl From<SupportedSched> for &str {
     fn from(scx_name: SupportedSched) -> Self {
         match scx_name {
             SupportedSched::Bpfland => "scx_bpfland",
+            SupportedSched::Cosmos => "scx_cosmos",
             SupportedSched::Flash => "scx_flash",
             SupportedSched::Lavd => "scx_lavd",
             SupportedSched::P2DQ => "scx_p2dq",

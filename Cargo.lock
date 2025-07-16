@@ -2816,6 +2816,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_cosmos"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "libbpf-rs",
+ "log",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
+[[package]]
 name = "scx_flash"
 version = "1.0.12"
 dependencies = [
