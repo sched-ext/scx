@@ -34,6 +34,7 @@ use perfetto_protos::{
     ipi::IpiRaiseFtraceEvent,
     irq::{SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent},
     process_descriptor::ProcessDescriptor,
+    process_tree::{process_tree::Process, ProcessTree},
     sched::{
         SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
         SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
@@ -66,12 +67,14 @@ pub struct PerfettoTraceManager {
     dsq_lat_events: BTreeMap<u64, Vec<TrackEvent>>,
     dsq_nr_queued_events: BTreeMap<u64, Vec<TrackEvent>>,
     dsq_uuids: BTreeMap<u64, u64>,
-    processes: HashMap<u64, ProcessDescriptor>,
+    process_descriptors: HashMap<u64, ProcessDescriptor>,
+    processes: HashMap<u64, Process>,
     threads: HashMap<u64, ThreadDescriptor>,
     process_uuids: HashMap<i32, u64>,
     sys_stats: BTreeMap<u64, Vec<SysStats>>,
     mem_events: BTreeMap<String, Vec<TrackEvent>>,
     mem_uuids: HashMap<String, u64>,
+    proc_reader: ProcReader,
 }
 
 impl PerfettoTraceManager {
@@ -99,12 +102,15 @@ impl PerfettoTraceManager {
             dsq_uuids: BTreeMap::new(),
             dsq_lat_events: BTreeMap::new(),
             dsq_nr_queued_events: BTreeMap::new(),
+            dsq_nr_queued_trusted_packet_seq_uuid,
+            process_descriptors: HashMap::new(),
             processes: HashMap::new(),
             threads: HashMap::new(),
             process_uuids: HashMap::new(),
             sys_stats: BTreeMap::new(),
             mem_events: BTreeMap::new(),
             mem_uuids,
+            proc_reader: ProcReader::new(),
         }
     }
 
@@ -256,16 +262,26 @@ impl PerfettoTraceManager {
             });
         }
 
-        if !self.processes.contains_key(&key) {
+        // Let's check if this is the first time we've seen this process.
+        if !self.process_descriptors.contains_key(&key) {
             let comm = self.get_comm(pid, tid, &comm);
             let cmdline = self.get_cmdline(pid);
-            self.processes.insert(
+            self.process_descriptors.insert(
                 key,
                 ProcessDescriptor {
                     pid: Some(pid as i32),
-                    cmdline: cmdline,
+                    cmdline: cmdline.clone(),
                     process_name: comm,
                     ..ProcessDescriptor::default()
+                },
+            );
+
+            self.processes.insert(
+                key,
+                Process {
+                    pid: Some(pid as i32),
+                    cmdline,
+                    ..Process::default()
                 },
             );
         }
@@ -329,7 +345,7 @@ impl PerfettoTraceManager {
                 .for_each(|(_, v)| v.retain(|e| e.timestamp.unwrap_or(0) < ns));
         };
 
-        for (_, process) in self.processes.drain() {
+        for (_, process) in self.process_descriptors.drain() {
             let uuid = self.rng.next_u64();
             self.process_uuids.insert(process.pid(), uuid);
 
@@ -341,6 +357,19 @@ impl PerfettoTraceManager {
 
             let packet = TracePacket {
                 data: Some(trace_packet::Data::TrackDescriptor(desc)),
+                ..TracePacket::default()
+            };
+            self.trace.packet.push(packet);
+        }
+
+        for (_, process) in self.processes.drain() {
+            let tree = ProcessTree {
+                processes: vec![process],
+                ..ProcessTree::default()
+            };
+
+            let packet = TracePacket {
+                data: Some(trace_packet::Data::ProcessTree(tree)),
                 ..TracePacket::default()
             };
             self.trace.packet.push(packet);
