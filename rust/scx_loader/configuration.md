@@ -8,8 +8,8 @@ The `scx_loader` can be configured using a TOML file. This file allows you to cu
 
 1. `/etc/scx_loader/config.toml`
 2. `/etc/scx_loader.toml`
-3. `/usr/share/scx_loader/config.toml`
-4. `/usr/share/scx_loader.toml`
+3. `$VENDORDIR/scx_loader/config.toml` (`$VENDORDIR` is `/usr/share` by default, though your distribution may customize this)
+4. `$VENDORDIR/scx_loader.toml` (`$VENDORDIR` is `/usr/share` by default, though your distribution may customize this)
 
 If no configuration file is found at any of these paths, `scx_loader` will use the built-in default configuration.
 

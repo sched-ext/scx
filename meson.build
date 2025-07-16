@@ -360,6 +360,8 @@ if enable_rust
     cargo_env.set('CARGO_HOME', get_option('cargo_home'))
   endif
 
+  cargo_env.set('MESON_VENDORDIR', get_option('vendordir'))
+
   run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 
   rust_scheds = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
