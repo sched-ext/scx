@@ -9,7 +9,7 @@
  */
 
 __weak
-u64 scx_atq_create_internal(bool fifo)
+u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
 	scx_atq_t *atq;
 
@@ -17,7 +17,7 @@ u64 scx_atq_create_internal(bool fifo)
 	if (!atq)
 		return (u64)NULL;
 
-	atq->heap = scx_minheap_alloc(SCX_ATQ_MAX_CAPACITY);
+	atq->heap = scx_minheap_alloc(capacity);
 	if (!atq->heap)
 		return (u64)NULL;
 
