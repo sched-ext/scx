@@ -12,7 +12,23 @@ jobs:
     uses: ./.github/workflows/build-kernels.yml
     secrets: inherit
 
-  rust-tests:
+  lint:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Format
+        run: nix run ./.github/include#ci -- format
+
+      - name: Clippy
+        run: nix run ./.github/include#ci -- clippy
+
+  build-and-test:
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     needs: build-kernels
     steps:
@@ -28,14 +44,8 @@ jobs:
           echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_sched_ext/for-next')" >> $GITHUB_ENV
           echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_sched_ext/for-next'.headers)" >> $GITHUB_ENV
 
-      - name: Format
-        run: nix run ./.github/include#ci -- format
-
       - name: Build
         run: nix run ./.github/include#ci -- build
-
-      - name: Clippy
-        run: nix run ./.github/include#ci -- clippy
 
       - name: Test
         run: nix run ./.github/include#ci -- test
@@ -47,7 +57,8 @@ jobs:
 
   required-checks:
     needs: [
-      rust-tests,
+      lint,
+      build-and-test,
       integration-test,
     ]
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
