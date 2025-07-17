@@ -24,6 +24,8 @@ option('veristat_diff_dir', type: 'string', value: '',
        description: 'veristat diff dir')
 option('kernel_headers', type: 'string', value: '',
        description: 'kernel headers to build the schedulers')
+option('vendordir', type: 'string', value: '/usr/share',
+       description: 'Default location for package-managed config files')
 option(
   'systemd',
   type: 'feature',
