@@ -273,6 +273,52 @@ int scx_selftest_atq_peek_empty(u64 unused)
 }
 
 __weak
+int scx_selftest_atq_sized(u64 unused)
+{
+	scx_atq_t *sized_fifo, *sized_vtime;
+	int ret;
+
+	sized_fifo = (scx_atq_t *)scx_atq_create_size(true, 1);
+	if (!sized_fifo) {
+		bpf_printk("ATQ failed to create sized fifo ATQ");
+		return -ENOMEM;
+	}
+
+	sized_vtime = (scx_atq_t *)scx_atq_create_size(false, 1);
+	if (!sized_vtime) {
+		bpf_printk("ATQ failed to create sized vtime ATQ");
+		return -ENOMEM;
+	}
+
+	ret = scx_atq_insert(sized_fifo, 1234);
+	if (ret) {
+		bpf_printk("ATQ failed to insert into sized fifo ATQ");
+		return -EINVAL;
+	}
+
+	ret = scx_atq_insert(sized_fifo, 5678);
+	if (!ret) {
+		bpf_printk("ATQ too many inserts into sized fifo ATQ");
+		return -EINVAL;
+	}
+
+	ret = scx_atq_insert_vtime(sized_vtime, 1234, 7890);
+	if (ret) {
+		bpf_printk("ATQ failed to insert into sized vtime ATQ");
+		return -EINVAL;
+	}
+
+	ret = scx_atq_insert_vtime(sized_vtime, 1111, 2222);
+	if (!ret) {
+		bpf_printk("ATQ too many inserts into sized vtime ATQ");
+		return -EINVAL;
+	}
+
+
+	return 0;
+}
+
+__weak
 int scx_selftest_atq(void)
 {
 	int i;
@@ -293,6 +339,7 @@ int scx_selftest_atq(void)
 	SCX_ATQ_SELFTEST(nr_queued);
 	SCX_ATQ_SELFTEST(peek_nodestruct);
 	SCX_ATQ_SELFTEST(peek_empty);
+	SCX_ATQ_SELFTEST(sized);
 
 	return 0;
 }
