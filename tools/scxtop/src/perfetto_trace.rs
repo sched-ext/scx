@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use fb_procfs::ProcReader;
+use procfs::process::Process as ProcProcess;
 use rand::rngs::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -74,7 +74,6 @@ pub struct PerfettoTraceManager {
     sys_stats: BTreeMap<u64, Vec<SysStats>>,
     mem_events: BTreeMap<String, Vec<TrackEvent>>,
     mem_uuids: HashMap<String, u64>,
-    proc_reader: ProcReader,
 }
 
 impl PerfettoTraceManager {
@@ -109,7 +108,6 @@ impl PerfettoTraceManager {
             sys_stats: BTreeMap::new(),
             mem_events: BTreeMap::new(),
             mem_uuids,
-            proc_reader: ProcReader::new(),
         }
     }
 
@@ -293,18 +291,18 @@ impl PerfettoTraceManager {
     }
 
     fn get_comm(&self, pid: u32) -> Option<String> {
-        self.proc_reader
-            .read_pid_stat(pid)
-            .ok()
-            .and_then(|pid_stat| pid_stat.comm)
+        let pid = pid.try_into().expect("u32 was not able to fit into i32");
+        let process = ProcProcess::new(pid).ok()?;
+        let stat = process.stat().ok()?;
+        Some(stat.comm)
     }
 
     fn get_cmdline(&self, pid: u32) -> Vec<String> {
-        if let Ok(Some(cmdline)) = self.proc_reader.read_pid_cmdline(pid) {
-            cmdline
-        } else {
-            vec![]
-        }
+        let pid = pid.try_into().expect("u32 was not able to fit into i32");
+        ProcProcess::new(pid)
+            .ok()
+            .and_then(|p| p.cmdline().ok())
+            .unwrap_or_default()
     }
 
     /// Stops the trace and writes to configured output file.

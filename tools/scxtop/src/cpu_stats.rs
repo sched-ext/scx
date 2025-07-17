@@ -1,5 +1,5 @@
-use anyhow::{bail, Result};
-use fb_procfs::ProcReader;
+use anyhow::Result;
+use procfs::{CpuTime, CurrentSI, KernelStats};
 use std::collections::BTreeMap;
 use sysinfo::System;
 
@@ -47,45 +47,40 @@ pub struct CpuStatTracker {
 }
 
 impl CpuStatTracker {
-    pub fn update(&mut self, proc_reader: &ProcReader, sys: &mut System) -> Result<()> {
+    pub fn update(&mut self, sys: &mut System) -> Result<()> {
         self.prev = std::mem::take(&mut self.current);
 
-        let proc_stat_data = proc_reader.read_stat()?;
+        let kernel_stats = KernelStats::current()?;
+        let cpu_stat_data = kernel_stats.cpu_time;
         sys.refresh_cpu_frequency();
 
-        if let Some(mut cpu_map) = proc_stat_data.cpus_map {
-            for (i, cpu) in sys.cpus().iter().enumerate() {
-                let cpu_util_data = procfs_cpu_to_util_data(
-                    cpu_map
-                        .remove(&(i as u32))
-                        .expect("Cpu should exist in cpu map data"),
-                );
+        for (i, cpu) in sys.cpus().iter().enumerate() {
+            if let Some(cpu_time) = cpu_stat_data.get(i) {
+                let cpu_util_data = procfs_cpu_to_util_data(cpu_time);
                 let snapshot = CpuStatSnapshot {
                     cpu_util_data,
                     freq_khz: cpu.frequency(),
                 };
                 self.current.insert(i, snapshot);
             }
-        } else {
-            bail!("Failed to parse cpu stats from /proc/stat");
         }
 
         Ok(())
     }
 }
 
-fn procfs_cpu_to_util_data(stat: fb_procfs::CpuStat) -> CpuUtilData {
+fn procfs_cpu_to_util_data(stat: &CpuTime) -> CpuUtilData {
     CpuUtilData {
-        user: stat.user_usec.expect("missing user"),
-        nice: stat.nice_usec.expect("missing nice"),
-        system: stat.system_usec.expect("missing system"),
-        idle: stat.idle_usec.expect("missing idle"),
-        iowait: stat.iowait_usec.expect("missing iowait"),
-        irq: stat.irq_usec.expect("missing irq"),
-        softirq: stat.softirq_usec.expect("missing softirq"),
-        steal: stat.stolen_usec.expect("missing steal"),
-        guest: stat.guest_usec.expect("missing guest"),
-        guest_nice: stat.guest_nice_usec.expect("missing guest_nice"),
+        user: stat.user,
+        nice: stat.nice,
+        system: stat.system,
+        idle: stat.idle,
+        iowait: stat.iowait.expect("missing iowait"),
+        irq: stat.irq.expect("missing irq"),
+        softirq: stat.softirq.expect("missing softirq"),
+        steal: stat.steal.expect("missing steal"),
+        guest: stat.guest.expect("missing guest"),
+        guest_nice: stat.guest_nice.expect("missing guest_nice"),
     }
 }
 
@@ -96,20 +91,22 @@ mod tests {
 
     #[test]
     fn test_convert_to_stat_snapshot_success() {
-        let input = fb_procfs::CpuStat {
-            user_usec: Some(100),
-            nice_usec: Some(200),
-            system_usec: Some(300),
-            idle_usec: Some(400),
-            iowait_usec: Some(500),
-            irq_usec: Some(600),
-            softirq_usec: Some(700),
-            stolen_usec: Some(800),
-            guest_usec: Some(900),
-            guest_nice_usec: Some(1000),
-        };
+        let kernel_stats = KernelStats::current().unwrap();
+        let mut cpu_time = kernel_stats.total;
 
-        let snapshot = procfs_cpu_to_util_data(input);
+        // We'll just take over the cpu_time in order to test it
+        cpu_time.user = 100;
+        cpu_time.nice = 200;
+        cpu_time.system = 300;
+        cpu_time.idle = 400;
+        cpu_time.iowait = Some(500);
+        cpu_time.irq = Some(600);
+        cpu_time.softirq = Some(700);
+        cpu_time.steal = Some(800);
+        cpu_time.guest = Some(900);
+        cpu_time.guest_nice = Some(1000);
+
+        let snapshot = procfs_cpu_to_util_data(&cpu_time);
 
         assert_eq!(snapshot.user, 100);
         assert_eq!(snapshot.nice, 200);
@@ -124,22 +121,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "missing user")]
-    fn test_convert_to_stat_snapshot_missing_user_panics() {
-        let input = fb_procfs::CpuStat {
-            user_usec: None, // <- this will trigger the panic
-            nice_usec: Some(200),
-            system_usec: Some(300),
-            idle_usec: Some(400),
-            iowait_usec: Some(500),
-            irq_usec: Some(600),
-            softirq_usec: Some(700),
-            stolen_usec: Some(800),
-            guest_usec: Some(900),
-            guest_nice_usec: Some(1000),
-        };
+    #[should_panic(expected = "missing iowait")]
+    fn test_convert_to_stat_snapshot_missing_iowait_panics() {
+        let kernel_stats = KernelStats::current().unwrap();
+        let mut cpu_time = kernel_stats.total;
 
-        let _ = procfs_cpu_to_util_data(input);
+        // We'll just take over the cpu_time in order to test it
+        cpu_time.user = 100;
+        cpu_time.nice = 200;
+        cpu_time.system = 300;
+        cpu_time.idle = 400;
+        cpu_time.iowait = None; // <- this should cause a panic
+        cpu_time.irq = Some(600);
+        cpu_time.softirq = Some(700);
+        cpu_time.steal = Some(800);
+        cpu_time.guest = Some(900);
+        cpu_time.guest_nice = Some(1000);
+
+        let _ = procfs_cpu_to_util_data(&cpu_time);
     }
 
     #[test]
@@ -162,43 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn test_read_proc_stat_cpu_lines_real_system() -> Result<()> {
-        let proc_reader = ProcReader::default();
-        let proc_fs_data = proc_reader.read_stat();
-
-        assert!(proc_fs_data.is_ok());
-
-        if let Ok(proc_fs_data) = proc_fs_data {
-            if let Some(cpu_map) = proc_fs_data.cpus_map {
-                for (_, stat) in cpu_map {
-                    assert!(stat.user_usec.is_some());
-                    assert!(stat.nice_usec.is_some());
-                    assert!(stat.system_usec.is_some());
-                    assert!(stat.idle_usec.is_some());
-                    assert!(stat.iowait_usec.is_some());
-                    assert!(stat.irq_usec.is_some());
-                    assert!(stat.softirq_usec.is_some());
-                    assert!(stat.stolen_usec.is_some());
-                    assert!(stat.guest_usec.is_some());
-                    assert!(stat.guest_nice_usec.is_some());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn test_integration_test() -> Result<()> {
         let mut tracker = CpuStatTracker::default();
-        let proc_reader = ProcReader::default();
         let sys = Arc::new(Mutex::new(System::new_all()));
         let mut sys_guard = sys.lock().unwrap();
-        tracker.update(&proc_reader, &mut sys_guard)?;
+        tracker.update(&mut sys_guard)?;
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        tracker.update(&proc_reader, &mut sys_guard)?;
+        tracker.update(&mut sys_guard)?;
 
         assert!(!tracker.prev.is_empty());
         assert!(!tracker.current.is_empty());

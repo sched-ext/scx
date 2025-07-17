@@ -3,7 +3,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use fb_procfs::ProcReader;
 use scx_utils::compat;
 use scxtop::available_kprobe_events;
 use scxtop::bpf_skel::types::bpf_event;
@@ -229,7 +228,6 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             if trace_args.system_stats {
                 let mut cpu_stat_tracker = CpuStatTracker::default();
                 let mut mem_stats = MemStatSnapshot::default();
-                let proc_reader = ProcReader::new();
                 let mut system = System::new_all();
                 let action_tx_clone = action_tx.clone();
 
@@ -241,12 +239,10 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                         let ts = get_clock_value(libc::CLOCK_BOOTTIME);
 
                         cpu_stat_tracker
-                            .update(&proc_reader, &mut system)
+                            .update(&mut system)
                             .expect("Failed to update cpu stats");
 
-                        mem_stats
-                            .update(&proc_reader)
-                            .expect("Failed to update mem stats");
+                        mem_stats.update().expect("Failed to update mem stats");
 
                         let sys_stat_action = Action::SystemStat(SystemStatAction {
                             ts,
