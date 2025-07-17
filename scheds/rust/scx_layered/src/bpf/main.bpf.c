@@ -25,6 +25,8 @@ char _license[] SEC("license") = "GPL";
 
 extern unsigned CONFIG_HZ __kconfig;
 
+static u32 do_refresh_layer_cpumasks = 0;
+
 const volatile u32 debug;
 const volatile u64 slice_ns;
 const volatile u64 max_exec_ns;
@@ -48,6 +50,7 @@ const volatile u32 nr_on_layers;	/* open && !preempt */
 const volatile u32 nr_gp_layers;	/* grouped && preempt */
 const volatile u32 nr_gn_layers;	/* grouped && !preempt */
 const volatile u32 nr_excl_layers;
+const volatile bool kfuncs_supported_in_syscall = true;
 const volatile u64 min_open_layer_disallow_open_after_ns;
 const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
@@ -449,7 +452,7 @@ static void layer_cpuset_bpfmask(int layer_id)
 /*
  * Returns if any cpus were added to the layer.
  */
-int refresh_cpumasks(u32 layer_id)
+__weak s32 refresh_cpumasks(u32 layer_id)
 {
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -531,12 +534,30 @@ int refresh_cpumasks(u32 layer_id)
 	return 0;
 }
 
+static __always_inline void maybe_refresh_layer_cpumasks()
+{
+	if (kfuncs_supported_in_syscall || !__sync_lock_test_and_set(&do_refresh_layer_cpumasks, 0))
+		return;
+
+	u32 id;
+
+	bpf_for(id, 0, nr_layers)
+		refresh_cpumasks(id);
+}
+
 /*
  * Refreshes all layer cpumasks, this is called via BPF_PROG_RUN from userspace.
  */
 SEC("syscall")
 int BPF_PROG(refresh_layer_cpumasks)
 {
+	if (!kfuncs_supported_in_syscall) {
+		// BACKPORT NOTE: We can't call `bpf_cpumask_{set,clear}_cpu` from a
+		// BPF_PROG. Set a flag and take care of it later.
+		__sync_fetch_and_or(&do_refresh_layer_cpumasks, 1);
+		return 0;
+	}
+
 	u32 id;
 
 	bpf_for(id, 0, nr_layers)
@@ -1185,6 +1206,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	struct layer *layer;
 	s32 cpu;
 
+	maybe_refresh_layer_cpumasks();
+
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
@@ -1383,6 +1406,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	bool yielding, try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
+
+	maybe_refresh_layer_cpumasks();
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
@@ -2011,6 +2036,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	bool tried_preempting = false, tried_lo_fb = false;
 	u32 nr_ogp_layers = nr_op_layers + nr_gp_layers;
 	u32 nr_ogn_layers = nr_on_layers + nr_gn_layers;
+
+	maybe_refresh_layer_cpumasks();
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return;

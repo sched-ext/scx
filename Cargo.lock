@@ -2794,6 +2794,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scx_bpf_compat"
+version = "1.0.14"
+dependencies = [
+ "anyhow",
+ "libbpf-rs",
+ "log",
+ "once_cell",
+ "scx_utils",
+]
+
+[[package]]
 name = "scx_bpf_unittests"
 version = "0.1.0"
 dependencies = [
@@ -2922,6 +2933,7 @@ dependencies = [
  "nix 0.29.0",
  "nvml-wrapper",
  "once_cell",
+ "scx_bpf_compat",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
