@@ -106,6 +106,7 @@ struct task_ctx {
 	 */
 	u64	last_runnable_clk;	/* last time when a task became runnable */
 	u64	last_running_clk;	/* last time when scheduled in */
+	u64	last_measured_clk;	/* last time when running time was measured */
 	u64	last_stopping_clk;	/* last time when scheduled out */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
 
