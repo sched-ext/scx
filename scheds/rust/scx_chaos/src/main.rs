@@ -2,6 +2,7 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
+use anyhow::bail;
 use scx_chaos::run;
 use scx_chaos::Args;
 
@@ -29,6 +30,10 @@ fn main() -> anyhow::Result<()> {
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     )?;
+
+    if args.p2dq.atq_enabled {
+        bail!("ATQs not supported");
+    }
 
     run(args)
 }
