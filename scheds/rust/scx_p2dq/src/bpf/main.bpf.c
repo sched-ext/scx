@@ -216,26 +216,39 @@ static u64 llc_nr_queued(struct llc_ctx *llcx)
 		else
 			nr_queued += scx_bpf_dsq_nr_queued(llcx->mig_dsq);
 	}
-	if (p2dq_config.interactive_dsq)
-		nr_queued += scx_bpf_dsq_nr_queued(llcx->intr_dsq);
+	if (p2dq_config.interactive_dsq) {
+		if (p2dq_config.atq_enabled)
+			nr_queued += scx_atq_nr_queued(llcx->intr_atq);
+		else
+			nr_queued += scx_bpf_dsq_nr_queued(llcx->intr_dsq);
+	}
 
 	return nr_queued;
 }
 
 static int llc_create_atqs(struct llc_ctx *llcx)
 {
-	if (topo_config.nr_llcs < 2 || !p2dq_config.atq_enabled)
+	if (!p2dq_config.atq_enabled)
 		return 0;
 
-	llcx->mig_atq = (scx_atq_t *)scx_atq_create_size(false,
-							 topo_config.nr_cpus);
-	if (!llcx->mig_atq) {
-		scx_bpf_error("ATQ failed to create ATQ for LLC %u",
-			      llcx->id);
-		return -ENOMEM;
+	if (topo_config.nr_llcs > 1) {
+		llcx->mig_atq = (scx_atq_t *)scx_atq_create_size(false,
+								 topo_config.nr_cpus);
+		if (!llcx->mig_atq) {
+			scx_bpf_error("ATQ failed to create ATQ for LLC %u",
+				      llcx->id);
+			return -ENOMEM;
+		}
+		trace("ATQ mig_atq %llu created for LLC %llu",
+		      (u64)llcx->mig_atq, llcx->id);
 	}
-	trace("ATQ %llu created for LLC %llu",
-	      (u64)llcx->mig_atq, llcx->id);
+	if (p2dq_config.interactive_dsq) {
+		size_t intr_dsq_sz = topo_config.nr_cpus;
+		llcx->intr_atq = (scx_atq_t *)scx_atq_create_size(false,
+								  intr_dsq_sz);
+		trace("ATQ intr_atq %llu created for LLC %llu",
+		      (u64)llcx->intr_atq, llcx->id);
+	}
 
 	return 0;
 }
@@ -401,7 +414,12 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 		return false;
 
 	if (p2dq_config.interactive_dsq) {
-		u64 intr_nr_queued = scx_bpf_dsq_nr_queued(llcx->intr_dsq);
+		u64 intr_nr_queued;
+
+		if (p2dq_config.atq_enabled)
+			intr_nr_queued = scx_atq_nr_queued(llcx->intr_atq);
+		else
+			intr_nr_queued = scx_bpf_dsq_nr_queued(llcx->intr_dsq);
 		if (mig_nr_queued >= intr_nr_queued)
 			return false;
 	}
@@ -1010,6 +1028,16 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	bool migrate = can_migrate(taskc, llcx);
 	if (p2dq_config.interactive_dsq && taskc->interactive && !migrate) {
 		taskc->dsq_id = llcx->intr_dsq;
+		if (p2dq_config.atq_enabled) {
+			taskc->enq_flags = enq_flags;
+			ret->kind = P2DQ_ENQUEUE_PROMISE_ATQ_VTIME;
+			ret->vtime.dsq_id = llcx->dsq;
+			ret->vtime.atq = llcx->intr_atq;
+			ret->vtime.slice_ns = taskc->slice_ns;
+			ret->vtime.vtime = p->scx.dsq_vtime;
+
+			return;
+		}
 		stat_inc(P2DQ_STAT_ENQ_INTR);
 	} else if (migrate) {
 		taskc->dsq_id = llcx->mig_dsq;
@@ -1412,7 +1440,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 pid, peeked_pid, dsq_id = 0;
-	bool min_atq = false;
+	scx_atq_t *min_atq = NULL;
 
 	if (!(cpuc = lookup_cpu_ctx(cpu))) {
 		scx_bpf_error("can't happen");
@@ -1425,7 +1453,11 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	}
 
 	bool has_affn_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0;
-	bool has_intr_queued = scx_bpf_dsq_nr_queued(cpuc->intr_dsq) > 0;
+	bool has_intr_queued;
+	if (p2dq_config.atq_enabled)
+		has_intr_queued = scx_atq_nr_queued(cpuc->intr_atq) > 0;
+	else
+		has_intr_queued = scx_bpf_dsq_nr_queued(cpuc->intr_dsq) > 0;
 
 	u64 min_vtime = 0;
 
@@ -1442,12 +1474,26 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 
 	// Next search interactive
 	if (p2dq_config.interactive_dsq && has_intr_queued) {
-		bpf_for_each(scx_dsq, p, cpuc->intr_dsq, 0) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->intr_dsq;
+		if (p2dq_config.atq_enabled) {
+			pid = scx_atq_peek(cpuc->intr_atq);
+			if ((p = bpf_task_from_pid((s32)pid))) {
+				if (p->scx.dsq_vtime < min_vtime ||
+				    min_vtime == 0) {
+					min_vtime = p->scx.dsq_vtime;
+					min_atq = cpuc->intr_atq;
+					peeked_pid = p->pid;
+				}
+				bpf_task_release(p);
 			}
-			break;
+		} else {
+			bpf_for_each(scx_dsq, p, cpuc->intr_dsq, 0) {
+				if (p->scx.dsq_vtime < min_vtime ||
+				    min_vtime == 0) {
+					min_vtime = p->scx.dsq_vtime;
+					dsq_id = cpuc->intr_dsq;
+				}
+				break;
+			}
 		}
 	}
 
@@ -1467,15 +1513,10 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		if (p2dq_config.atq_enabled) {
 			pid = scx_atq_peek(cpuc->mig_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
-				if (!(taskc = lookup_task_ctx(p))) {
-					bpf_task_release(p);
-					scx_bpf_error("failed to get task ctx");
-					return;
-				}
 				if (p->scx.dsq_vtime < min_vtime ||
 				    min_vtime == 0) {
 					min_vtime = p->scx.dsq_vtime;
-					min_atq = true;
+					min_atq = cpuc->mig_atq;
 					/*
 					 * Normally doing these peeks would be
 					 * racy with scx_bpf_dsq_move_to_local.
@@ -1506,13 +1547,13 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	}
 
 	if (dsq_id != 0)
-		trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu atq %d",
+		trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu atq %llu",
 		      cpu, min_vtime, dsq_id, min_atq);
 
 	// First try the DSQ with the lowest vtime for fairness.
 	if (min_atq) {
-		trace("ATQ dispatching with min vtime %llu", min_vtime);
-		pid = scx_atq_pop(cpuc->mig_atq);
+		trace("ATQ dispatching %llu with min vtime %llu", min_atq, min_vtime);
+		pid = scx_atq_pop(min_atq);
 		if ((p = bpf_task_from_pid((s32)pid))) {
 			/*
 			 * Need to ensure the peeked_pid is the pid popped off
@@ -1538,12 +1579,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 				 * might have a higher vtime so reenqueue it
 				 * back to the ATQ.
 				 */
-				if (!(taskc = lookup_task_ctx(p))) {
-					bpf_task_release(p);
-					scx_bpf_error("failed to get task ctx");
-					return;
-				}
-				scx_atq_insert_vtime(cpuc->mig_atq,
+				scx_atq_insert_vtime(min_atq,
 						     (u64)p->pid,
 						     p->scx.dsq_vtime);
 				bpf_task_release(p);
@@ -1559,9 +1595,36 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
-	if (p2dq_config.interactive_dsq && dsq_id != cpuc->intr_dsq &&
-	    scx_bpf_dsq_move_to_local(cpuc->intr_dsq))
-		return;
+	if (p2dq_config.interactive_dsq) {
+		if (p2dq_config.atq_enabled) {
+			pid = scx_atq_pop(cpuc->intr_atq);
+			if ((p = bpf_task_from_pid((s32)pid))) {
+				if (p->pid == peeked_pid) {
+					if (!(taskc = lookup_task_ctx(p))) {
+						bpf_task_release(p);
+						scx_bpf_error("failed to get task ctx");
+						return;
+					}
+					scx_bpf_dsq_insert(p,
+							   SCX_DSQ_LOCAL,
+							   taskc->slice_ns,
+							   taskc->enq_flags);
+					bpf_task_release(p);
+					return;
+				} else {
+					scx_atq_insert_vtime(cpuc->intr_atq,
+							     (u64)p->pid,
+							     p->scx.dsq_vtime);
+					bpf_task_release(p);
+					stat_inc(P2DQ_STAT_ATQ_REENQ);
+				}
+			}
+		} else {
+			if (dsq_id != cpuc->intr_dsq &&
+			    scx_bpf_dsq_move_to_local(cpuc->intr_dsq))
+			return;
+		}
+	}
 
 	if (dsq_id != cpuc->llc_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
@@ -1847,6 +1910,7 @@ static s32 init_cpu(int cpu)
 	llcx->id = cpu_llc_ids[cpu];
 	llcx->node_id = cpu_node_ids[cpu];
 	nodec->id = cpu_node_ids[cpu];
+	cpuc->intr_atq = llcx->intr_atq;
 	cpuc->mig_atq = llcx->mig_atq;
 
 	if (cpuc->is_big) {
