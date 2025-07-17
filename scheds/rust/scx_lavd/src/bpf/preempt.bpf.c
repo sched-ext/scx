@@ -14,7 +14,7 @@ struct preemption_info {
 
 static u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
 {
-	return now + taskc->avg_runtime;
+	return now + min(taskc->avg_runtime, taskc->slice_ns);
 }
 
 static bool can_x_kick_y(struct preemption_info *prm_x,
