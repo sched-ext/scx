@@ -13,6 +13,7 @@ use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;

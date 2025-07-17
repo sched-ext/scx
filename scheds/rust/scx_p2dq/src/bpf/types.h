@@ -1,5 +1,7 @@
 #pragma once
 
+#include <lib/atq.h>
+
 struct p2dq_timer {
 	// if set to 0 the timer will only be scheduled once
 	u64 interval_ns;
@@ -23,6 +25,8 @@ struct cpu_ctx {
 	u64				mig_dsq;
 	u64				llc_dsq;
 	u64				max_load_dsq;
+
+	scx_atq_t			*mig_atq;
 };
 
 struct llc_ctx {
@@ -41,10 +45,13 @@ struct llc_ctx {
 	u64				intr_load;
 	u64				dsq_load[MAX_DSQS_PER_LLC];
 	bool				all_big;
+
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 	struct bpf_cpumask __kptr	*little_cpumask;
 	struct bpf_cpumask __kptr	*node_cpumask;
+
+	scx_atq_t			*mig_atq;
 };
 
 struct node_ctx {
@@ -65,6 +72,7 @@ struct task_p2dq {
 	u64 			last_run_started;
 	u64 			last_run_at;
 	u64			llc_runs; /* how many runs on the current LLC */
+	u64			enq_flags;
 	int			last_dsq_index;
 	bool			interactive;
 	bool			was_nice;
@@ -82,6 +90,8 @@ enum enqueue_promise_kind {
 	P2DQ_ENQUEUE_PROMISE_COMPLETE,
 	P2DQ_ENQUEUE_PROMISE_VTIME,
 	P2DQ_ENQUEUE_PROMISE_FIFO,
+	P2DQ_ENQUEUE_PROMISE_ATQ_VTIME,
+	P2DQ_ENQUEUE_PROMISE_ATQ_FIFO,
 	P2DQ_ENQUEUE_PROMISE_FAILED,
 };
 
@@ -90,12 +100,16 @@ struct enqueue_promise_vtime {
 	u64	enq_flags;
 	u64	slice_ns;
 	u64	vtime;
+
+	scx_atq_t	*atq;
 };
 
 struct enqueue_promise_fifo {
 	u64	dsq_id;
 	u64	enq_flags;
 	u64	slice_ns;
+
+	scx_atq_t	*atq;
 };
 
 // This struct is zeroed at the beginning of `async_p2dq_enqueue` and only

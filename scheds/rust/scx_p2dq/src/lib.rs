@@ -100,6 +100,10 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub keep_running: bool,
 
+    /// Use a arena based queues (ATQ) for task queueing.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub atq_enabled: bool,
+
     /// Use a separate DSQ for interactive tasks
     #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub interactive_dsq: bool,
@@ -153,7 +157,7 @@ pub struct SchedulerOpts {
 
     /// Minimum number of queued tasks to use pick2 balancing, 0 to always enabled.
     #[clap(short = 'm', long, default_value = "0")]
-    pub min_nr_queued_pick2: u32,
+    pub min_nr_queued_pick2: u64,
 
     /// Number of dumb DSQs.
     #[clap(short = 'q', long, default_value = "3")]
@@ -260,6 +264,9 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
 
+            rodata.p2dq_config.atq_enabled = MaybeUninit::new(
+                opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
+            );
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.interactive_fifo = MaybeUninit::new(opts.interactive_fifo);

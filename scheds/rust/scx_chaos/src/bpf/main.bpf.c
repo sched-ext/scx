@@ -427,6 +427,10 @@ static __always_inline void complete_p2dq_enqueue_move(struct enqueue_promise *p
 		__COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
 		__COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
 		break;
+	case P2DQ_ENQUEUE_PROMISE_ATQ_FIFO:
+	case P2DQ_ENQUEUE_PROMISE_ATQ_VTIME:
+		scx_bpf_error("chaos: ATQs not supported");
+		break;
 	case P2DQ_ENQUEUE_PROMISE_FAILED:
 		scx_bpf_error("chaos: delayed async_p2dq_enqueue failed");
 		break;

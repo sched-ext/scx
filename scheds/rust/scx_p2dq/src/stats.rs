@@ -17,6 +17,10 @@ use serde::Serialize;
 pub struct Metrics {
     #[stat(desc = "Scheduler mode")]
     pub sched_mode: u32,
+    #[stat(desc = "Number of times a task was enqueued to a ATQ")]
+    pub atq_enq: u64,
+    #[stat(desc = "Number of times a task was re-enqueued to a ATQ")]
+    pub atq_reenq: u64,
     #[stat(desc = "Number of times tasks have switched DSQs")]
     pub dsq_change: u64,
     #[stat(desc = "Number of times tasks have stayed on the same DSQ")]
@@ -55,12 +59,14 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}\n\tenq cpu/llc/intr/mig {}/{}/{}/{}",
+            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}\n\tatq enq/reenq {}/{}\n\tenq cpu/llc/intr/mig {}/{}/{}/{}",
             self.direct,
             self.idle,
             self.keep,
             self.same_dsq,
             self.dsq_change,
+            self.atq_enq,
+            self.atq_reenq,
             self.enq_cpu,
             self.enq_llc,
             self.enq_intr,
@@ -82,6 +88,8 @@ impl Metrics {
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
+            atq_enq: self.atq_enq - rhs.atq_enq,
+            atq_reenq: self.atq_reenq - rhs.atq_reenq,
             direct: self.direct - rhs.direct,
             idle: self.idle - rhs.idle,
             dsq_change: self.dsq_change - rhs.dsq_change,

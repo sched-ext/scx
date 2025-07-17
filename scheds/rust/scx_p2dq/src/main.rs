@@ -38,6 +38,8 @@ use scx_utils::{Core, Llc};
 use std::ffi::c_ulong;
 
 use bpf_intf::stat_idx_P2DQ_NR_STATS;
+use bpf_intf::stat_idx_P2DQ_STAT_ATQ_ENQ;
+use bpf_intf::stat_idx_P2DQ_STAT_ATQ_REENQ;
 use bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use bpf_intf::stat_idx_P2DQ_STAT_DISPATCH_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
@@ -147,6 +149,8 @@ impl<'a> Scheduler<'a> {
             stats[stat as usize] = sum;
         }
         Metrics {
+            atq_enq: stats[stat_idx_P2DQ_STAT_ATQ_ENQ as usize],
+            atq_reenq: stats[stat_idx_P2DQ_STAT_ATQ_REENQ as usize],
             direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
             idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
             sched_mode: self.skel.maps.bss_data.as_ref().unwrap().sched_mode,
