@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn test_convert_to_stat_snapshot_success() {
         let kernel_stats = KernelStats::current().unwrap();
-        let cpu_time = kernel_stats.cpu_time;
+        let mut cpu_time = kernel_stats.total;
 
         // We'll just take over the cpu_time in order to test it
         cpu_time.user = 100;
@@ -106,7 +106,7 @@ mod tests {
         cpu_time.guest = Some(900);
         cpu_time.guest_nice = Some(1000);
 
-        let snapshot = procfs_cpu_to_util_data(cpu_time);
+        let snapshot = procfs_cpu_to_util_data(&cpu_time);
 
         assert_eq!(snapshot.user, 100);
         assert_eq!(snapshot.nice, 200);
@@ -121,10 +121,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "missing user")]
-    fn test_convert_to_stat_snapshot_missing_user_panics() {
+    #[should_panic(expected = "missing iowait")]
+    fn test_convert_to_stat_snapshot_missing_iowait_panics() {
         let kernel_stats = KernelStats::current().unwrap();
-        let cpu_time = kernel_stats.cpu_time;
+        let mut cpu_time = kernel_stats.total;
 
         // We'll just take over the cpu_time in order to test it
         cpu_time.user = 100;
@@ -138,7 +138,7 @@ mod tests {
         cpu_time.guest = Some(900);
         cpu_time.guest_nice = Some(1000);
 
-        let _ = procfs_cpu_to_util_data(input);
+        let _ = procfs_cpu_to_util_data(&cpu_time);
     }
 
     #[test]
