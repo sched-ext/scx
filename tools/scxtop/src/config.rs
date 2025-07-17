@@ -620,9 +620,9 @@ mod tests {
         assert!(config.tick_rate_ms.is_some());
         assert_eq!(config.tick_rate_ms.unwrap(), 250);
         assert!(config.debug.is_some());
-        assert_eq!(config.debug.unwrap(), false);
+        assert!(!config.debug.unwrap());
         assert!(config.exclude_bpf.is_some());
-        assert_eq!(config.exclude_bpf.unwrap(), false);
+        assert!(!config.exclude_bpf.unwrap());
 
         // Other fields should still be None or empty vec/KeyMap
         assert!(config.keymap.is_none());
@@ -816,11 +816,11 @@ mod tests {
         assert!(loaded_config
             .active_keymap
             .get(&parse_key("i").unwrap())
-            .map_or(false, |action| *action == Action::Quit));
+            .is_some_and(|action| *action == Action::Quit));
         assert!(loaded_config
             .active_keymap
             .get(&parse_key("2").unwrap())
-            .map_or(false, |action| *action == Action::Enter));
+            .is_some_and(|action| *action == Action::Enter));
     }
 
     #[test]
@@ -916,10 +916,10 @@ mod tests {
         assert!(config
             .active_keymap
             .get(&parse_key("i").unwrap())
-            .map_or(false, |action| *action == Action::Quit));
+            .is_some_and(|action| *action == Action::Quit));
         assert!(config
             .active_keymap
             .get(&parse_key("o").unwrap())
-            .map_or(false, |action| *action == Action::NextViewState));
+            .is_some_and(|action| *action == Action::NextViewState));
     }
 }

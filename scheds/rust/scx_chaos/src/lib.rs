@@ -381,7 +381,7 @@ impl Builder<'_> {
                 skel.progs
                     .generic
                     .attach_kprobe(false, k)
-                    .context(format!("Failed to attach kprobe {:?}", k))?,
+                    .context(format!("Failed to attach kprobe {k:?}"))?,
             );
         }
         Ok(links)
@@ -859,7 +859,7 @@ pub fn run(args: Args) -> Result<()> {
     });
 
     if let Some(pid) = args.pid {
-        info!("Monitoring process with PID: {}", pid);
+        info!("Monitoring process with PID: {pid}");
 
         let is_process_running = |pid: libc::pid_t| -> bool {
             unsafe {

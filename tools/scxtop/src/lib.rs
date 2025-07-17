@@ -645,7 +645,7 @@ impl std::fmt::Display for Action {
             Action::PageDown => write!(f, "PageDown"),
             Action::PageUp => write!(f, "PageUp"),
             Action::Enter => write!(f, "Enter"),
-            _ => write!(f, "{:?}", self),
+            _ => write!(f, "{self:?}"),
         }
     }
 }

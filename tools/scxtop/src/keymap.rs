@@ -22,8 +22,8 @@ pub enum Key {
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Key::Char(c) => write!(f, "{}", c),
-            Key::Code(c) => write!(f, "{}", c),
+            Key::Char(c) => write!(f, "{c}"),
+            Key::Code(c) => write!(f, "{c}"),
         }
     }
 }
@@ -125,7 +125,7 @@ impl KeyMap {
     pub fn to_hashmap(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for (key, action) in &self.bindings {
-            map.insert(format!("{}", key), format!("{}", action));
+            map.insert(format!("{key}"), format!("{action}"));
         }
         map
     }
@@ -333,8 +333,7 @@ impl From<KeyCodeWrapper> for KeyCode {
 pub fn parse_key(key_str: &str) -> Result<Key> {
     if key_str.len() == 1 {
         Ok(Key::Char(key_str.chars().next().unwrap()))
-    } else if let Ok(keycode_wrapper) =
-        toml::from_str::<KeyCodeWrapper>(&format!("\"{}\"", key_str))
+    } else if let Ok(keycode_wrapper) = toml::from_str::<KeyCodeWrapper>(&format!("\"{key_str}\""))
     {
         Ok(Key::Code(keycode_wrapper.into()))
     } else {

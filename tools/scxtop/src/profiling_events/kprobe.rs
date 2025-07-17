@@ -45,7 +45,7 @@ fn resolve_kfunc_address(name: &str) -> Option<u64> {
         .expect("Failed to open /proc/kallsyms. Make sure CONFIG_KALLSYMS is enabled.");
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(std::io::Result::ok) {
-        if line.ends_with(&format!(" {}", name)) {
+        if line.ends_with(&format!(" {name}")) {
             if let Some(addr_str) = line.split_whitespace().next() {
                 if let Ok(addr) = u64::from_str_radix(addr_str, 16) {
                     return Some(addr);

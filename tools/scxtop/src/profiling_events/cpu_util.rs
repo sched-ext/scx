@@ -238,7 +238,7 @@ mod tests {
 
         let tracker = Arc::new(RwLock::new(tracker));
         let event = CpuUtilEvent::new(0, CpuUtilMetric::Frequency, tracker);
-        println!("{:?}", event);
+        println!("{event:?}");
         println!("{:?}", event.value());
 
         assert_eq!(event.value().unwrap(), 75);

@@ -10,6 +10,11 @@
     nixpkgs.url = "github:JakeHillion/nixpkgs/virtme-ng";
     flake-utils.url = "github:numtide/flake-utils";
 
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     nix-develop-gha.url = "github:nicknovitski/nix-develop";
     nix-develop-gha.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -19,12 +24,20 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, nix-develop-gha, veristat-src, ... }:
+  outputs = { self, nixpkgs, flake-utils, fenix, nix-develop-gha, veristat-src, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" ]
       (system:
         let
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
+
+          rust-toolchain = fenix.packages.${system}.stable.withComponents [
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+          ];
 
           makeBpfClang = llvmPackages: kernel: pkgs.stdenv.mkDerivation {
             pname = "bpf-clang";
@@ -66,7 +79,6 @@
               buildInputs = with pkgs; [
                 bash
                 binutils
-                cargo
                 clang
                 coreutils
                 elfutils
@@ -78,13 +90,14 @@
                 libseccomp
                 pkg-config
                 protobuf
-                rustc
-                rustfmt
                 zlib
                 zstd
 
                 llvmPackages.libclang
                 llvmPackages.libllvm
+
+                # fenix managed rust toolchain
+                rust-toolchain
               ];
             } // build-env-vars);
 
@@ -124,7 +137,9 @@
               pyproject = false;
               dontUnpack = true;
 
-              propagatedBuildInputs = with pkgs; [ cargo ];
+              propagatedBuildInputs = [
+                rust-toolchain # requires cargo, use the toolchain to match version exactly
+              ];
 
               installPhase = "install -Dm755 ${./list-integration-tests.py} $out/bin/list-integration-tests";
             };
@@ -140,10 +155,7 @@
                 bash
                 binutils
                 black
-                cargo
-                cargo-nextest
                 clang
-                clippy
                 coreutils
                 gcc
                 git
@@ -157,13 +169,15 @@
                 llvmPackages.libllvm
                 pkg-config
                 protobuf
-                rustc
-                rustfmt
                 virtme-ng
 
                 elfutils.dev
                 zlib.dev
                 zstd.dev
+
+                # fenix managed rust toolchain + nixpkgs cargo-nextest
+                cargo-nextest
+                rust-toolchain
               ];
 
               makeWrapperArgs = lib.lists.flatten ([

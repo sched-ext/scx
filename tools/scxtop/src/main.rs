@@ -283,7 +283,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                             .expect("Action should have been resolved");
                     } else {
                         trace_manager.stop(trace_file, None).unwrap();
-                        info!("trace file compiled, collected {} events", count);
+                        info!("trace file compiled, collected {count} events");
                         break;
                     }
                 }
@@ -302,12 +302,12 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let results = join_all(handles).await;
             for result in results {
                 if let Err(e) = result {
-                    eprintln!("Task panicked: {}", e);
+                    eprintln!("Task panicked: {e}");
                 }
             }
 
             let stats = tracer.stats()?;
-            info!("{:?}", stats);
+            info!("{stats:?}");
 
             Ok(())
         })
@@ -499,7 +499,7 @@ fn main() -> Result<()> {
         }
         Commands::GenerateCompletions { shell, output } => {
             generate_completions(Cli::command(), *shell, output.clone())
-                .unwrap_or_else(|_| panic!("Failed to generate completions for {}", shell));
+                .unwrap_or_else(|_| panic!("Failed to generate completions for {shell}"));
         }
     }
     Ok(())
