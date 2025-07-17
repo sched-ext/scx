@@ -98,6 +98,15 @@ struct Opts {
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     disable_cpufreq: bool,
 
+    /// Enable flat idle CPU scanning.
+    ///
+    /// This option can help reducing some overhead when trying to allocate idle CPUs and it can be
+    /// quite effective with simple CPU topologies.
+    ///
+    /// This option is automatically disabled if --primary-domain is used.
+    #[arg(short = 'i', action = clap::ArgAction::SetTrue)]
+    flat_idle_scan: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -275,6 +284,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
+        rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.numa_enabled = opts.enable_numa;
         rodata.no_wake_sync = opts.no_wake_sync;
 
