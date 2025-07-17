@@ -133,14 +133,11 @@ jobs:
           compression-level: 9
 
   all-success:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     needs: integration-test
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     if: always()
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
-      - name: Check all jobs succeeded
-        run: |
-          if [[ "${{ needs.integration-test.result }}" != "success" ]]; then
-            echo "Integration tests failed or were cancelled"
-            exit 1
-          fi
-          echo "All integration tests passed successfully"
+      - run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-build-kernels
+      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'

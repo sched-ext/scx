@@ -45,6 +45,19 @@ jobs:
     needs: build-kernels
     secrets: inherit
 
+  required-checks:
+    needs: [
+      rust-tests,
+      integration-test,
+    ]
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    if: always()
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+    steps:
+      - run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-build-kernels
+      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
+
   pages:
     runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/main'

@@ -96,7 +96,6 @@
               buildInputs = with pkgs; gha-common-pkgs ++ [
                 gawk
                 jq
-                jq
               ];
             };
 
