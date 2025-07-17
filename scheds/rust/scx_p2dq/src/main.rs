@@ -115,10 +115,9 @@ impl<'a> Scheduler<'a> {
         let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
         scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
 
-        match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
-            0 => info!("Kernel does not support queued wakeup optimization."),
-            v => open_skel.struct_ops.p2dq_mut().flags |= v,
-        };
+        if opts.queued_wakeup {
+            open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+        }
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
 

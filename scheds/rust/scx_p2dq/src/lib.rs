@@ -120,6 +120,10 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub select_idle_in_enqueue: bool,
 
+    /// Allow queued wakeup.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub queued_wakeup: bool,
+
     /// Set idle QoS resume latency based in microseconds.
     #[clap(long)]
     pub idle_resume_us: Option<u32>,
