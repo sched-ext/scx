@@ -166,9 +166,9 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	taskc->perf_cri = perf_cri;
 }
 
-static u32 calc_greedy_ratio(struct task_ctx *taskc)
+static u64 calc_greedy_penalty(struct task_ctx *taskc)
 {
-	u32 ratio;
+	u64 ratio, penalty;
 
 	/*
 	 * The greedy ratio of a task represents how much time the task
@@ -177,24 +177,20 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	 * system.
 	 */
 	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-	if (ratio > LAVD_SCALE)
-		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
-	return ratio;
-}
-
-static u32 calc_greedy_factor(u32 greedy_ratio)
-{
-	u32 ft = LAVD_SCALE;
 
 	/*
 	 * For all under-utilized tasks, we treat them equally.
 	 * For over-utilized tasks, we give some mild penalty.
 	 */
-	if (greedy_ratio > LAVD_SCALE)
-		ft += (greedy_ratio - LAVD_SCALE) >> LAVD_LC_GREEDY_SHIFT;
-	return ft;
+	if (ratio > LAVD_SCALE) {
+		penalty = LAVD_SCALE + ((ratio - LAVD_SCALE) >> LAVD_LC_GREEDY_SHIFT);
+		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
+	} else {
+		penalty = LAVD_SCALE;
+		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
+	}
+
+	return penalty;
 }
 
 static u64 calc_adjusted_runtime(struct task_ctx *taskc)
@@ -216,18 +212,17 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 				       struct task_ctx *taskc)
 {
 	u64 deadline, adjusted_runtime;
-	u32 greedy_ratio, greedy_ft;
+	u32 greedy_penalty;
 
 	/*
 	 * Calculate the deadline based on runtime,
 	 * latency criticality, and greedy ratio.
 	 */
 	calc_lat_cri(p, taskc);
-	greedy_ratio = calc_greedy_ratio(taskc);
-	greedy_ft = calc_greedy_factor(greedy_ratio);
+	greedy_penalty = calc_greedy_penalty(taskc);
 	adjusted_runtime = calc_adjusted_runtime(taskc);
 
-	deadline = (adjusted_runtime * greedy_ft) / taskc->lat_cri;
+	deadline = (adjusted_runtime * greedy_penalty) / taskc->lat_cri;
 	return deadline >> LAVD_SHIFT;
 }
 
