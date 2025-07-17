@@ -626,7 +626,7 @@ impl<'a> App<'a> {
                     "".to_string()
                 },
                 if self.hw_pressure && hw_pressure > 0 {
-                    format!("{}", hw_pressure)
+                    format!("{hw_pressure}")
                 } else {
                     "".to_string()
                 }
@@ -634,7 +634,7 @@ impl<'a> App<'a> {
             .text_value(if self.localize {
                 sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
-                format!("{}", value)
+                format!("{value}")
             })
     }
 
@@ -697,7 +697,7 @@ impl<'a> App<'a> {
                                 "{}{}",
                                 perf,
                                 if self.pstate {
-                                    format!("/{}", pstate)
+                                    format!("/{pstate}")
                                 } else {
                                     "".to_string()
                                 }
@@ -709,7 +709,7 @@ impl<'a> App<'a> {
                             "".to_string()
                         },
                         if self.hw_pressure && hw_pressure > 0 {
-                            format!(" hw_pressure({})", hw_pressure)
+                            format!(" hw_pressure({hw_pressure})")
                         } else {
                             "".to_string()
                         }
@@ -1150,7 +1150,7 @@ impl<'a> App<'a> {
                         Line::from("".to_string())
                     })
                     .title_top(if render_title {
-                        Line::from(format!("{} ", event))
+                        Line::from(format!("{event} "))
                             .style(self.theme().title_style())
                             .left_aligned()
                     } else {
@@ -1213,12 +1213,12 @@ impl<'a> App<'a> {
                     sanitize_nbsp(min.to_formatted_string(&self.locale))
                 )
             } else {
-                format!("{:#X} avg {} max {} min {}", dsq, avg, max, min,)
+                format!("{dsq:#X} avg {avg} max {max} min {min}",)
             }))
             .text_value(if self.localize {
                 sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
-                format!("{}", value)
+                format!("{value}")
             })
     }
 
@@ -1249,12 +1249,12 @@ impl<'a> App<'a> {
                     sanitize_nbsp(min.to_formatted_string(&self.locale))
                 )
             } else {
-                format!("{} avg {} max {} min {}", id, avg, max, min,)
+                format!("{id} avg {avg} max {max} min {min}",)
             }))
             .text_value(if self.localize {
                 sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
-                format!("{}", value)
+                format!("{value}")
             })
     }
 
@@ -1427,7 +1427,7 @@ impl<'a> App<'a> {
                 .centered(),
             )
             .title_top(if render_sample_rate {
-                Line::from(format!("sample rate {}", sample_rate))
+                Line::from(format!("sample rate {sample_rate}"))
                     .style(self.theme().text_important_color())
                     .right_aligned()
             } else {

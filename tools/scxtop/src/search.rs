@@ -315,7 +315,7 @@ mod tests {
         let search = Search::new(events);
         let results = search.fuzzy_search("alarm");
 
-        let expected_matches = vec![
+        let expected_matches = [
             "alarmtimer:alarmtimer_suspend",
             "alarmtimer:alarmtimer_fired",
             "alarmtimer:alarmtimer_cancel",
@@ -324,8 +324,7 @@ mod tests {
         for expected in expected_matches.iter() {
             assert!(
                 results.contains(&expected.to_string()),
-                "Missing expected match: {}",
-                expected
+                "Missing expected match: {expected}"
             );
         }
 
@@ -374,7 +373,7 @@ mod tests {
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
 
         let results = search.fuzzy_search("alarm");
-        let expected_matches = vec![
+        let expected_matches = [
             "alarmtimer:alarmtimer_suspend",
             "alarmtimer:alarmtimer_fired",
             "alarmtimer:alarmtimer_cancel",
@@ -383,8 +382,7 @@ mod tests {
         for expected in expected_matches.iter() {
             assert!(
                 results.contains(&expected.to_string()),
-                "Missing expected match: {}",
-                expected
+                "Missing expected match: {expected}"
             );
         }
 

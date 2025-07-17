@@ -36,7 +36,7 @@ pub fn read_file_u64<P: AsRef<Path>>(path: P) -> Result<u64> {
     let trimmed_contents = contents.trim();
 
     u64::from_str(trimmed_contents)
-        .with_context(|| format!("Failed to parse u64 from '{}'", contents))
+        .with_context(|| format!("Failed to parse u64 from '{contents}'"))
 }
 
 /// Returns the config value for the perf event.

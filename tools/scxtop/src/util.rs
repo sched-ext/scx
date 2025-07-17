@@ -19,7 +19,7 @@ pub fn read_file_string(path: &str) -> Result<String> {
 /// Formats a value in hz to human readable.
 pub fn format_hz(hz: u64) -> String {
     match hz {
-        0..=999 => format!("{}Hz", hz),
+        0..=999 => format!("{hz}Hz"),
         1_000..=999_999 => format!("{:.0}MHz", hz as f64 / 1_000.0),
         1_000_000..=999_999_999 => format!("{:.3}GHz", hz as f64 / 1_000_000.0),
         _ => format!("{:.3}THz", hz as f64 / 1_000_000_000.0),

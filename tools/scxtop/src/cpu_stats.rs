@@ -198,7 +198,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        tracker.update(&proc_reader, &mut *sys_guard)?;
+        tracker.update(&proc_reader, &mut sys_guard)?;
 
         assert!(!tracker.prev.is_empty());
         assert!(!tracker.current.is_empty());
