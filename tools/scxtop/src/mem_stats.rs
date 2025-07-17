@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use fb_procfs::ProcReader;
+use procfs::{Current, Meminfo};
 
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MemStatSnapshot {
@@ -19,22 +19,18 @@ pub struct MemStatSnapshot {
 }
 
 impl MemStatSnapshot {
-    pub fn update(&mut self, proc_reader: &ProcReader) -> Result<()> {
-        let meminfo = proc_reader.read_meminfo()?;
-        self.total_kb = meminfo.total.expect("total memory should be present");
-        self.free_kb = meminfo.free.expect("free memory should be present");
+    pub fn update(&mut self) -> Result<()> {
+        let meminfo = Meminfo::current()?;
+        self.total_kb = meminfo.mem_total;
+        self.free_kb = meminfo.mem_free;
         self.available_kb = meminfo
-            .available
+            .mem_available
             .expect("available memory should be present");
-        self.active_kb = meminfo.active.expect("active memory should be present");
-        self.inactive_kb = meminfo.inactive.expect("inactive memory should be present");
+        self.active_kb = meminfo.active;
+        self.inactive_kb = meminfo.inactive;
         self.shmem_kb = meminfo.shmem.expect("shmem memory should be present");
-        self.swap_total_kb = meminfo
-            .swap_total
-            .expect("swap total memory should be present");
-        self.swap_free_kb = meminfo
-            .swap_free
-            .expect("swap free memory should be present");
+        self.swap_total_kb = meminfo.swap_total;
+        self.swap_free_kb = meminfo.swap_free;
         Ok(())
     }
 
