@@ -7,9 +7,9 @@ use libbpf_rs::{set_print, PrintLevel};
 
 fn print_to_log(level: PrintLevel, msg: String) {
     match level {
-        PrintLevel::Debug => log::debug!("{}", msg),
-        PrintLevel::Info => log::info!("{}", msg),
-        PrintLevel::Warn => log::warn!("{}", msg),
+        PrintLevel::Debug => log::debug!("{msg}"),
+        PrintLevel::Info => log::info!("{msg}"),
+        PrintLevel::Warn => log::warn!("{msg}"),
     }
 }
 

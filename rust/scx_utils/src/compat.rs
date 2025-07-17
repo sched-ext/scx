@@ -237,7 +237,7 @@ pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result
         }
         return Ok(true);
     } else {
-        warn!("symbol {} is missing, kprobe not loaded", sym);
+        warn!("symbol {sym} is missing, kprobe not loaded");
     }
 
     Ok(false)
@@ -247,7 +247,7 @@ pub fn cond_kprobes_enable<T>(kprobes: Vec<(&str, &OpenProgramImpl<T>)>) -> Resu
     // Check if all the symbols exist.
     for (sym, _) in kprobes.iter() {
         if in_kallsyms(sym)? == false {
-            warn!("symbol {} is missing, kprobe not loaded", sym);
+            warn!("symbol {sym} is missing, kprobe not loaded");
             return Ok(false);
         }
     }
@@ -269,10 +269,7 @@ pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>
         }
         return Ok(true);
     } else {
-        warn!(
-            "tradepoint {} is missing, tracepoint not loaded",
-            tracepoint
-        );
+        warn!("tradepoint {tracepoint} is missing, tracepoint not loaded");
     }
 
     Ok(false)
@@ -282,7 +279,7 @@ pub fn cond_tracepoints_enable<T>(tracepoints: Vec<(&str, &OpenProgramImpl<T>)>)
     // Check if all the tracepoints exist.
     for (tp, _) in tracepoints.iter() {
         if tracepoint_exists(tp)? == false {
-            warn!("tradepoint {} is missing, tracepoint not loaded", tp);
+            warn!("tradepoint {tp} is missing, tracepoint not loaded");
             return Ok(false);
         }
     }

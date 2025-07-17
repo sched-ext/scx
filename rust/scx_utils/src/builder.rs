@@ -21,7 +21,7 @@ impl Builder {
 
     fn gen_bpf_h(&self) {
         let out_dir = env::var("OUT_DIR").unwrap();
-        let file = File::create(PathBuf::from(&out_dir).join(format!("{}.tar", BPF_H))).unwrap();
+        let file = File::create(PathBuf::from(&out_dir).join(format!("{BPF_H}.tar"))).unwrap();
         let mut ar = tar::Builder::new(file);
 
         ar.follow_symlinks(false);

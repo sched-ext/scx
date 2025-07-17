@@ -57,7 +57,7 @@ impl std::fmt::Display for StatsKind {
             Self::U64 => write!(f, "u64"),
             Self::Float => write!(f, "float"),
             Self::String => write!(f, "string"),
-            Self::Struct(name) => write!(f, "{}", name),
+            Self::Struct(name) => write!(f, "{name}"),
         }
     }
 }
@@ -181,9 +181,9 @@ impl StatsData {
 impl std::fmt::Display for StatsData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Datum(kind) => write!(f, "{}", kind),
-            Self::Array(kind) => write!(f, "[{}]", kind),
-            Self::Dict { key, datum } => write!(f, "{{{}:{}}}", key, datum),
+            Self::Datum(kind) => write!(f, "{kind}"),
+            Self::Array(kind) => write!(f, "[{kind}]"),
+            Self::Dict { key, datum } => write!(f, "{{{key}:{datum}}}"),
         }
     }
 }
@@ -256,7 +256,7 @@ impl StatsFieldAttrs {
                         }
                         v => Err(Error::new(
                             attr.span(),
-                            format!("Not a field attribute: {:?}", v),
+                            format!("Not a field attribute: {v:?}"),
                         ))?,
                     }
                 }

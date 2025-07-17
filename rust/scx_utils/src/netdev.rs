@@ -40,8 +40,8 @@ impl NetDev {
 
     pub fn apply_cpumasks(&self) -> Result<()> {
         for (irq, cpumask) in self.irqs.iter() {
-            let irq_path = format!("/proc/irq/{}/smp_affinity", irq);
-            fs::write(irq_path, format!("{:#x}", cpumask))?
+            let irq_path = format!("/proc/irq/{irq}/smp_affinity");
+            fs::write(irq_path, format!("{cpumask:#x}"))?
         }
         Ok(())
     }
@@ -53,19 +53,19 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
     for entry in fs::read_dir("/sys/class/net")? {
         let entry = entry?;
         let iface = entry.file_name().to_string_lossy().into_owned();
-        let iface_path_raw = format!("/sys/class/net/{}/device/enable", iface);
+        let iface_path_raw = format!("/sys/class/net/{iface}/device/enable");
         let iface_path = Path::new(&iface_path_raw);
         let is_enabled = read_from_file(iface_path).unwrap_or(0_usize);
         if is_enabled < 1 {
             continue;
         }
-        let raw_path = format!("/sys/class/net/{}/device/msi_irqs", iface);
+        let raw_path = format!("/sys/class/net/{iface}/device/msi_irqs");
         let msi_irqs_path = Path::new(&raw_path);
         if !msi_irqs_path.exists() {
             continue;
         }
 
-        let node_path_raw = format!("/sys/class/net/{}/device/numa_node", iface);
+        let node_path_raw = format!("/sys/class/net/{iface}/device/numa_node");
         let node_path = Path::new(&node_path_raw);
         let node = read_from_file(node_path).unwrap_or(0_usize);
         let mut irqs = BTreeMap::new();
@@ -75,12 +75,12 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
             let entry = entry.unwrap();
             let irq = entry.file_name().to_string_lossy().into_owned();
             if let Ok(irq) = irq.parse::<usize>() {
-                let irq_path_raw = format!("/proc/irq/{}", irq);
+                let irq_path_raw = format!("/proc/irq/{irq}");
                 let irq_path = Path::new(&irq_path_raw);
                 if !irq_path.exists() {
                     continue;
                 }
-                let affinity_raw_path = format!("/proc/irq/{}/smp_affinity", irq);
+                let affinity_raw_path = format!("/proc/irq/{irq}/smp_affinity");
                 let smp_affinity_path = Path::new(&affinity_raw_path);
                 let smp_affinity = fs::read_to_string(smp_affinity_path)?
                     .replace(",", "")
@@ -89,7 +89,7 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
                 irqs.insert(irq, cpumask);
 
                 // affinity hints
-                let affinity_hint_raw_path = format!("/proc/irq/{}/affinity_hint", irq);
+                let affinity_hint_raw_path = format!("/proc/irq/{irq}/affinity_hint");
                 let affinity_hint_path = Path::new(&affinity_hint_raw_path);
                 let affinity_hint = fs::read_to_string(affinity_hint_path)?
                     .replace(",", "")

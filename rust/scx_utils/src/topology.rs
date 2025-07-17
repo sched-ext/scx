@@ -526,7 +526,7 @@ fn create_insert_cpu(
         llc_id: *llc_id,
         node_id: node.id,
         kernel_id: core_kernel_id,
-        cluster_id: cluster_id,
+        cluster_id,
     }));
     let core_mut = Arc::get_mut(core).unwrap();
 
@@ -572,7 +572,7 @@ fn read_cpu_ids() -> Result<Vec<usize>> {
     let cpu_paths = glob(&path)?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let cpu_str = cpu_path.to_str().unwrap().trim();
-        if *ROOT_PREFIX == "" {
+        if ROOT_PREFIX.is_empty() {
             match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
                 Ok(val) => cpu_ids.push(val),
                 Err(_) => {
@@ -750,7 +750,7 @@ fn create_numa_nodes(
     let numa_paths = glob(&path)?;
     for numa_path in numa_paths.filter_map(Result::ok) {
         let numa_str = numa_path.to_str().unwrap().trim();
-        let node_id = if *ROOT_PREFIX == "" {
+        let node_id = if ROOT_PREFIX.is_empty() {
             match sscanf!(numa_str, "/sys/devices/system/node/node{usize}") {
                 Ok(val) => val,
                 Err(_) => {
@@ -801,7 +801,7 @@ fn create_numa_nodes(
         let mut cpu_ids = vec![];
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
-            let cpu_id = if *ROOT_PREFIX == "" {
+            let cpu_id = if ROOT_PREFIX.is_empty() {
                 match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
                     Ok((_, val)) => val,
                     Err(_) => {

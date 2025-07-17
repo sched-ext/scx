@@ -313,15 +313,15 @@ where
         let mut first = true;
         self.visit_meta(from, &mut |m| {
             if !first {
-                writeln!(w, "")?;
+                writeln!(w)?;
             }
             first = false;
 
             write!(w, "[{:nw$}]", m.name, nw = nwidth)?;
             if let Some(desc) = &m.attrs.desc {
-                write!(w, " {}", desc)?;
+                write!(w, " {desc}")?;
             }
-            writeln!(w, "")?;
+            writeln!(w)?;
 
             for (fname, f) in m.fields.iter() {
                 write!(
@@ -333,9 +333,9 @@ where
                     dw = dwidth
                 )?;
                 if let Some(desc) = &f.attrs.desc {
-                    write!(w, " : {}", desc)?;
+                    write!(w, " : {desc}")?;
                 }
-                writeln!(w, "")?;
+                writeln!(w)?;
             }
             Ok(())
         })
@@ -560,16 +560,16 @@ where
                     let (req_pair, res_pair) = ChannelPair::<Req, Res>::bidi();
                     match add_req.send(res_pair) {
                         Ok(()) => debug!("sent new channel to proxy"),
-                        Err(e) => warn!("StatsServer::proxy() failed ({})", e),
+                        Err(e) => warn!("StatsServer::proxy() failed ({e})"),
                     }
 
                     spawn(move || {
                         if let Err(e) = Self::serve(stream, data, req_pair, exit) {
-                            warn!("stat communication errored ({})", e);
+                            warn!("stat communication errored ({e})");
                         }
                     });
                 }
-                Err(e) => warn!("failed to accept stat connection ({})", e),
+                Err(e) => warn!("failed to accept stat connection ({e})"),
             }
         }
     }
@@ -641,18 +641,18 @@ where
         let path = &self.path.as_ref().unwrap();
 
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {:?}", dir))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
         }
 
         let res = std::fs::remove_file(path);
         if let std::io::Result::Err(e) = &res {
             if e.kind() != std::io::ErrorKind::NotFound {
-                res.with_context(|| format!("deleting {:?}", path))?;
+                res.with_context(|| format!("deleting {path:?}"))?;
             }
         }
 
         let listener =
-            UnixListener::bind(path).with_context(|| format!("creating UNIX socket {:?}", path))?;
+            UnixListener::bind(path).with_context(|| format!("creating UNIX socket {path:?}"))?;
 
         let inner = StatsServerInner::new(
             listener,
