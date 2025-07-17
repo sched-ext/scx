@@ -921,7 +921,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	return 0;
 }
 
-SEC("?tp_btf/sched_process_wait")
+SEC("tp_btf/sched_process_wait")
 int BPF_PROG(on_sched_wait, struct pid *pid)
 {
 	struct bpf_event *event;
@@ -938,9 +938,9 @@ int BPF_PROG(on_sched_wait, struct pid *pid)
 	event->ts = bpf_ktime_get_ns();
 	p = (struct task_struct *)bpf_get_current_task();
 	if (p) {
-		record_real_comm(event->event.wait.comm, p);
+		bpf_core_read_str(&event->event.wait.comm, sizeof(event->event.wait.comm), &p->comm);
 		event->event.wait.pid = BPF_CORE_READ(p, pid);
-		event->event.wait.prio = (int)p->prio;
+		event->event.wait.prio = BPF_CORE_READ(p, prio);
 	} else {
 		__builtin_memset(event->event.wait.comm, 0, MAX_COMM);
 		event->event.wait.pid = 0;
