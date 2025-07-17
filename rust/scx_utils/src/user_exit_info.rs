@@ -199,23 +199,23 @@ impl UserExitInfo {
             eprintln!(
                 "================================================================================\n"
             );
-            eprintln!("{}", dump);
+            eprintln!("{dump}");
             eprintln!(
                 "================================================================================\n"
             );
         }
 
         let why = match (&self.reason, &self.msg) {
-            (Some(reason), None) => format!("EXIT: {}", reason),
-            (Some(reason), Some(msg)) => format!("EXIT: {} ({})", reason, msg),
+            (Some(reason), None) => format!("EXIT: {reason}"),
+            (Some(reason), Some(msg)) => format!("EXIT: {reason} ({msg})"),
             _ => "<UNKNOWN>".into(),
         };
 
         if self.kind <= ScxExitKind::UnregKern as i32 {
-            eprintln!("{}", why);
+            eprintln!("{why}");
             Ok(())
         } else {
-            bail!("{}", why)
+            bail!("{why}")
         }
     }
 

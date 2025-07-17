@@ -95,7 +95,7 @@ pub fn stat_doc(
                         Ok(())
                     })
                     .unwrap_or_else(|err| {
-                        panic!("Failed to parse the stat attribute: {}", err);
+                        panic!("Failed to parse the stat attribute: {err}");
                     });
                 }
                 new_attrs.push(attr);

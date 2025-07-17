@@ -41,7 +41,7 @@ impl ClangInfo {
         let mut clang_args = vec!["--version".to_string()];
 
         if let Ok(target) = env::var("TARGET") {
-            clang_args.push(format!("--target={}", target));
+            clang_args.push(format!("--target={target}"));
         }
 
         let clang = env::var("BPF_CLANG").unwrap_or("clang".into());
@@ -167,7 +167,7 @@ impl ClangInfo {
             .collect();
         cflags.push(format!("-D__TARGET_ARCH_{}", &kernel_target));
         cflags.push("-mcpu=v3".into());
-        cflags.push(format!("-m{}-endian", endian));
+        cflags.push(format!("-m{endian}-endian"));
         cflags.append(
             &mut sys_incls
                 .into_iter()

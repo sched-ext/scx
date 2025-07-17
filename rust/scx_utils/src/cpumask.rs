@@ -110,8 +110,8 @@ impl Cpumask {
             }
             tmp_str
         };
-        let byte_vec = hex::decode(&hex_str)
-            .with_context(|| format!("Failed to parse cpumask: {}", cpumask))?;
+        let byte_vec =
+            hex::decode(&hex_str).with_context(|| format!("Failed to parse cpumask: {cpumask}"))?;
 
         let mut mask = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
         for (index, &val) in byte_vec.iter().rev().enumerate() {
@@ -323,8 +323,8 @@ impl Cpumask {
         // The rest in descending order.
         for submask in masks.iter().rev() {
             match case {
-                'x' => write!(f, ",{:08x}", submask)?,
-                'X' => write!(f, ",{:08X}", submask)?,
+                'x' => write!(f, ",{submask:08x}")?,
+                'X' => write!(f, ",{submask:08X}")?,
                 _ => unreachable!(),
             }
         }

@@ -120,7 +120,7 @@ impl PerfDomain {
         let util = clamp(util, 0.0, 100.0);
         let (perf_max, _) = self.perf_table.last_key_value().unwrap();
         let perf_max = *perf_max as f32;
-        let req_perf = (perf_max as f32 * (util / 100.0)) as usize;
+        let req_perf = (perf_max * (util / 100.0)) as usize;
         for (perf, ps) in self.perf_table.iter() {
             if *perf >= req_perf {
                 return Some(ps);
@@ -172,7 +172,7 @@ impl PartialEq for PerfState {
 impl fmt::Display for EnergyModel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for (_, pd) in self.perf_doms.iter() {
-            writeln!(f, "{:#}", pd)?;
+            writeln!(f, "{pd:#}")?;
         }
         Ok(())
     }
@@ -183,7 +183,7 @@ impl fmt::Display for PerfDomain {
         writeln!(f, "# perf domain: {:#}, cpus: {:#}", self.id, self.span)?;
         writeln!(f, "cost, frequency, inefficient, performance, power")?;
         for (_, ps) in self.perf_table.iter() {
-            writeln!(f, "{:#}", ps)?;
+            writeln!(f, "{ps:#}")?;
         }
         Ok(())
     }
@@ -238,7 +238,7 @@ fn get_pd_paths() -> Result<Vec<(usize, String)>> {
 }
 
 fn get_em_root() -> Result<String> {
-    if *ROOT_PREFIX == "" {
+    if ROOT_PREFIX.is_empty() {
         let root = compat::debugfs_mount().unwrap().join("energy_model");
         Ok(root.display().to_string())
     } else {

@@ -389,8 +389,8 @@ impl BpfBuilder {
             None => return Ok(()),
         };
 
-        let obj = self.out_dir.join(format!("{}.bpf.o", name));
-        let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
+        let obj = self.out_dir.join(format!("{name}.bpf.o"));
+        let skel_path = self.out_dir.join(format!("{name}_skel.rs"));
 
         with_clang_warnings(|| {
             SkeletonBuilder::new()
@@ -414,7 +414,7 @@ impl BpfBuilder {
             .to_str()
             .ok_or(anyhow!("Parent dir of {:?} isn't a UTF-8 string", c_path))?;
 
-        for path in glob(&format!("{}/*.[hc]", dir))?.filter_map(Result::ok) {
+        for path in glob(&format!("{dir}/*.[hc]"))?.filter_map(Result::ok) {
             deps.insert(
                 path.to_str()
                     .ok_or(anyhow!("Path {:?} is not a valid string", path))?
@@ -433,12 +433,12 @@ impl BpfBuilder {
         println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
         if let Some(deps) = dependencies {
             for dep in deps.iter() {
-                println!("cargo:rerun-if-changed={}", dep);
+                println!("cargo:rerun-if-changed={dep}");
             }
         };
 
         for source in self.sources.iter() {
-            println!("cargo:rerun-if-changed={}", source);
+            println!("cargo:rerun-if-changed={source}");
         }
 
         Ok(())
@@ -490,7 +490,7 @@ mod tests {
         unsafe { std::env::set_var("OUT_DIR", td.path()) };
 
         let res = super::BpfBuilder::new();
-        assert!(res.is_ok(), "Failed to create BpfBuilder ({:?})", res);
+        assert!(res.is_ok(), "Failed to create BpfBuilder ({res:?})");
     }
 
     #[test]

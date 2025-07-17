@@ -30,13 +30,10 @@ pub fn update_cpu_idle_resume_latency(cpu_num: usize, value_us: i32) -> Result<(
         return Err(anyhow!("Latency value must be non-negative"));
     }
 
-    let path = format!(
-        "/sys/devices/system/cpu/cpu{}/power/pm_qos_resume_latency_us",
-        cpu_num
-    );
+    let path = format!("/sys/devices/system/cpu/cpu{cpu_num}/power/pm_qos_resume_latency_us");
 
     let mut file = File::create(Path::new(&path))?;
-    write!(file, "{}", value_us)?;
+    write!(file, "{value_us}")?;
     Ok(())
 }
 
