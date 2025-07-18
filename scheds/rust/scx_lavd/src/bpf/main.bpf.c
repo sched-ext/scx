@@ -300,25 +300,6 @@ static void update_stat_for_running(struct task_struct *p,
 	struct cpu_ctx *prev_cpuc;
 
 	/*
-	 * If the sched_ext core directly dispatched a task, calculating the
-	 * task's deadline and time slice was also skipped. In this case, we
-	 * set the deadline and time slice here.
-	 *
-	 * Note that this is necessary when the kernel does not support
-	 * SCX_OPS_ENQ_MIGRATION_DISABLED or SCX_OPS_ENQ_MIGRATION_DISABLED
-	 * is not turned on.
-	 */
-	if (p->scx.slice == SCX_SLICE_DFL) {
-		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
-		p->scx.slice = calc_time_slice(taskc);
-	}
-
-	/*
-	 * Update the current logical clock.
-	 */
-	advance_cur_logical_clk(p);
-
-	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
@@ -361,7 +342,7 @@ static void update_stat_for_running(struct task_struct *p,
 	cpuc->nr_sched++;
 
 	/*
-	 * Update per-CPU performanc criticality information
+	 * Update per-CPU performance criticality information
 	 * for every-scheduled tasks.
 	 */
 	if (have_little_core) {
@@ -371,6 +352,14 @@ static void update_stat_for_running(struct task_struct *p,
 			cpuc->min_perf_cri = taskc->perf_cri;
 		cpuc->sum_perf_cri += taskc->perf_cri;
 	}
+
+	/*
+	 * Update running task's information for preemption
+	 */
+	cpuc->flags = taskc->flags;
+	cpuc->lat_cri = taskc->lat_cri;
+	cpuc->running_clk = now;
+	cpuc->est_stopping_clk = get_est_stopping_clk(taskc, now);
 
 	/*
 	 * Update statistics information.
@@ -491,7 +480,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-			p->scx.slice = calc_time_slice(taskc);
+			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			goto out;
 		}
@@ -541,7 +530,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 	}
-	p->scx.slice = calc_time_slice(taskc);
+	p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
@@ -585,7 +574,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
 	if (!no_preemption)
-		try_find_and_kick_victim_cpu(p, taskc, dsq_id);
+		try_find_and_kick_victim_cpu(p, taskc, cpu, dsq_id);
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
@@ -609,7 +598,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If a task is holding a new lock, continue to execute it
 	 * to make system-wide forward progress.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && cpuc->lock_holder) {
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	    is_lock_holder_running(cpuc)) {
 		taskc_prev = get_task_ctx(prev);
 		if (!taskc_prev) {
 			scx_bpf_error("Failed to look up task context");
@@ -873,9 +863,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	struct task_ctx *taskc;
 	u64 now = scx_bpf_now();
 
-	/*
-	 * Update task statistics
-	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc) {
@@ -883,12 +870,33 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		return;
 	}
 
-	update_stat_for_running(p, taskc, cpuc, now);
+	/*
+	 * If the sched_ext core directly dispatched a task, calculating the
+	 * task's deadline and time slice was also skipped. In this case, we
+	 * set the deadline to the current logical lock.
+	 *
+	 * Note that this is necessary when the kernel does not support
+	 * SCX_OPS_ENQ_MIGRATION_DISABLED or SCX_OPS_ENQ_MIGRATION_DISABLED
+	 * is not turned on.
+	 */
+	if (p->scx.slice == SCX_SLICE_DFL)
+		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
 
 	/*
-	 * Calculate the task's time slice.
+	 * Calculate the task's time slice here,
+	 * as it depends on the system load.
 	 */
 	p->scx.slice = calc_time_slice(taskc);
+
+	/*
+	 * Update the current logical clock.
+	 */
+	advance_cur_logical_clk(p);
+
+	/*
+	 * Update task statistics
+	 */
+	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
 	 * Calculate the task's CPU performance target and update if the new
@@ -897,12 +905,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * gradually according to EWMA of past performance targets.
 	 */
 	update_cpuperf_target(cpuc);
-
-	/*
-	 * Update running task's information for preemption
-	 */
-	cpuc->lat_cri = taskc->lat_cri;
-	cpuc->stopping_tm_est_ns = get_est_stopping_time(taskc, now);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -973,9 +975,11 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 unlock_out:
 	bpf_rcu_read_unlock();
 
+	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	cpuc->running_clk = 0;
+	cpuc->est_stopping_clk = SCX_SLICE_INF;
 	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
 
@@ -994,13 +998,15 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 unlock_out:
 	bpf_rcu_read_unlock();
 
+	cpuc->flags = 0;
 	cpuc->idle_start_clk = 0;
 	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;
 	barrier();
 
 	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	cpuc->running_clk = 0;
+	cpuc->est_stopping_clk = SCX_SLICE_INF;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -1426,7 +1432,8 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->cpu_id = cpu;
 		cpuc->idle_start_clk = 0;
 		cpuc->lat_cri = 0;
-		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+		cpuc->running_clk = 0;
+		cpuc->est_stopping_clk = SCX_SLICE_INF;
 		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
 		cpuc->cpu_release_clk = now;

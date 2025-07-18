@@ -501,7 +501,6 @@ impl<'a> Scheduler<'a> {
     fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.no_preemption = opts.no_preemption;
-        bss_data.no_wake_sync = opts.no_wake_sync;
         bss_data.no_core_compaction = opts.no_core_compaction;
         bss_data.no_freq_scaling = opts.no_freq_scaling;
         bss_data.is_powersave_mode = opts.powersave;
@@ -514,6 +513,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_min_ns = opts.slice_min_us * 1000;
         rodata.preempt_shift = opts.preempt_shift;
         rodata.no_use_em = opts.no_use_em as u8;
+        rodata.no_wake_sync = opts.no_wake_sync;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST

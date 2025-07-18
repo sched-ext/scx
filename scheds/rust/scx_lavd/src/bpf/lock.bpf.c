@@ -18,7 +18,7 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 
 		if (cpuc) {
 			set_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
-			cpuc->lock_holder = true;
+			cpuc->flags = taskc->flags;
 		}
 	}
 	/*
@@ -37,7 +37,7 @@ static void __dec_futex_boost(struct cpu_ctx *cpuc)
 
 		if (cpuc) {
 			reset_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
-			cpuc->lock_holder = false;
+			cpuc->flags = taskc->flags;
 		}
 	}
 	/*
@@ -61,7 +61,7 @@ static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 		set_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
 
 	reset_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
-	cpuc->lock_holder = false;
+	cpuc->flags = taskc->flags;
 }
 
 /**

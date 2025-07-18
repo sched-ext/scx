@@ -7,64 +7,54 @@
  * Preemption related ones
  */
 struct preemption_info {
-	u64		stopping_tm_est_ns;
+	u64		est_stopping_clk;
 	u64		lat_cri;
 	struct cpu_ctx	*cpuc;
 };
 
-static u64 get_est_stopping_time(struct task_ctx *taskc, u64 now)
+static u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
 {
-	return now + taskc->avg_runtime;
+	return now + min(taskc->avg_runtime, taskc->slice_ns);
 }
 
-static bool can_a_preempt_b(struct preemption_info *prm_a,
-			    struct preemption_info *prm_b)
+static bool can_x_kick_y(struct preemption_info *prm_x,
+			    struct preemption_info *prm_y)
 {
+	/*
+	 * A caller should ensure that Y is not a lock holder.
+	 */
+
 	/*
 	 * Check one's latency criticality and deadline.
 	 */
-	if ((prm_a->lat_cri > prm_b->lat_cri) &&
-	    (prm_a->stopping_tm_est_ns < prm_b->stopping_tm_est_ns))
+	if ((prm_x->lat_cri > prm_y->lat_cri) &&
+	    (prm_x->est_stopping_clk < prm_y->est_stopping_clk))
 		return true;
 	return false;
 }
 
-static bool can_task1_kick_task2(struct preemption_info *prm_task1,
-				 struct preemption_info *prm_task2)
+static bool can_x_kick_cpu2(struct preemption_info *prm_x,
+			    struct preemption_info *prm_cpu2,
+			    struct cpu_ctx *cpuc2)
 {
 	/*
-	 * A caller should ensure that task2 is not a lock holder.
+	 * Never preeempt a CPU running a lock holder.
 	 */
+	if (is_lock_holder_running(cpuc2))
+		return false;
 
-	/*
-	 * If that CPU runs a lower priority task, that's a victim
-	 * candidate.
-	 */
-	return can_a_preempt_b(prm_task1, prm_task2);
-}
-
-static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
-			       struct preemption_info *prm_cpu2,
-			       struct cpu_ctx *cpuc2)
-{
 	/*
 	 * Set a CPU information
 	 */
-	prm_cpu2->stopping_tm_est_ns = cpuc2->stopping_tm_est_ns;
+	prm_cpu2->est_stopping_clk = cpuc2->est_stopping_clk;
 	prm_cpu2->lat_cri = cpuc2->lat_cri;
 	prm_cpu2->cpuc = cpuc2;
 
 	/*
-	 * Never preeempt a CPU running a lock holder.
-	 */
-	if (prm_cpu2->cpuc->lock_holder)
-		return false;
-
-	/*
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	return can_a_preempt_b(prm_cpu1, prm_cpu2);
+	return can_x_kick_y(prm_x, prm_cpu2);
 }
 
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
@@ -77,12 +67,8 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
 
-static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
-{
-	return cpuc->is_online;
-}
-
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
+				       s32 preferred_cpu,
 				       struct task_ctx *taskc, u64 now)
 {
 	/*
@@ -97,20 +83,24 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
-	int i, v = 0, cur_cpu;
+	int i, v = 0;
 	int ret;
 
 	/*
 	 * Get task's preemption information for comparison.
 	 */
-	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc, now);
+	prm_task.est_stopping_clk = get_est_stopping_clk(taskc, now);
 	prm_task.lat_cri = taskc->lat_cri;
-	prm_task.cpuc = cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("Failed to lookup the current cpu_ctx");
-		goto null_out;
+	prm_task.cpuc = NULL;
+
+	/*
+	 * If there is a preferred CPU on which a task wants to run,
+	 * check that CPU first.
+	 */
+	if (preferred_cpu >= 0 && (cpuc = get_cpu_ctx_id(preferred_cpu))) {
+		if (can_x_kick_cpu2(&prm_task, &prm_cpus[v], cpuc))
+			v++;
 	}
-	cur_cpu = cpuc->cpu_id;
 
 	/*
 	 * Randomly find _two_ CPUs that run lower-priority tasks than @p. To
@@ -123,15 +113,14 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * be too expensive to perform every task queue. We need to revisit
 	 * this if the traversal cost becomes problematic.
 	 */
-	barrier();
 	nr_cpus = bpf_cpumask_weight(cpumask);
 	bpf_for(i, 0, nr_cpus) {
+
 		/*
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
-
-		if (cpu >= nr_cpu_ids || cur_cpu == cpu)
+		if (cpu >= nr_cpu_ids || cpu == preferred_cpu)
 			continue;
 
 		/*
@@ -143,7 +132,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 			goto null_out;
 		}
 
-		if (!can_cpu_be_kicked(now, cpuc))
+		if (!cpuc->is_online)
 			continue;
 
 		/*
@@ -153,7 +142,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 * Note that a task running on cpu 2 (prm_cpus[v]) cannot
 		 * be a lock holder.
 		 */
-		ret = can_cpu1_kick_cpu2(&prm_task, &prm_cpus[v], cpuc);
+		ret = can_x_kick_cpu2(&prm_task, &prm_cpus[v], cpuc);
 		if (ret == true && ++v >= 2)
 			break;
 	}
@@ -163,7 +152,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	switch(v) {
 	case 2:	/* two candidates */
-		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ?
+		victim_cpu = can_x_kick_y(&prm_cpus[0], &prm_cpus[1]) ?
 				&prm_cpus[0] : &prm_cpus[1];
 		goto bingo_out;
 	case 1:	/* one candidate */
@@ -205,10 +194,10 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 		 * coordinate this on purpose because such a race is rare, but
 		 * controlling it would impose high synchronization overhead.
 		 *
-		 * Instead, we set the victim's stopping_tm_est_ns to zero
+		 * Instead, we set the victim's est_stopping_clk to zero
 		 * atomically to avoid the same victim CPU can be chosen
 		 * repeatedly. In addition, once updating the
-		 * stopping_tm_est_ns to zero succeeds, that means this CPU
+		 * est_stopping_clk to zero succeeds, that means this CPU
 		 * wins in preempting the victim CPU. Hence, let's set the
 		 * victim task's time slice to one (not zero).
 		 *
@@ -217,10 +206,10 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 		 * fixes the zero time slice to the default time slice
 		 * (SCX_SLICE_DFL, 20 msec).
 		 */
-		u64 old = victim_cpuc->stopping_tm_est_ns;
+		u64 old = victim_cpuc->est_stopping_clk;
 		if (old) {
 			bool ret = __sync_bool_compare_and_swap(
-				&victim_cpuc->stopping_tm_est_ns, old, 0);
+				&victim_cpuc->est_stopping_clk, old, 0);
 			if (ret)
 				WRITE_ONCE(victim_p->scx.slice, 1);
 		}
@@ -228,7 +217,9 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 }
 
 static void try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc, u64 dsq_id)
+					 struct task_ctx *taskc,
+					 s32 preferred_cpu,
+					 u64 dsq_id)
 {
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
@@ -267,7 +258,7 @@ static void try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
 	now = scx_bpf_now();
-	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc, now);
+	victim_cpuc = find_victim_cpu(cast_mask(cpumask), preferred_cpu, taskc, now);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
@@ -285,15 +276,17 @@ static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 		 * When the CPU is taken by high priority scheduler,
 		 * set things impossible to preempt.
 		 */
+		cpuc->flags = 0;
 		cpuc->lat_cri = SCX_SLICE_INF;
-		cpuc->stopping_tm_est_ns = 0;
+		cpuc->est_stopping_clk = 0;
 	} else {
 		/*
 		 * When the CPU is idle,
 		 * set things easy to preempt.
 		 */
+		cpuc->flags = 0;
 		cpuc->lat_cri = 0;
-		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+		cpuc->est_stopping_clk = SCX_SLICE_INF;
 	}
 }
 

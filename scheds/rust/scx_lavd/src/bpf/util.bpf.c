@@ -26,12 +26,13 @@ struct sys_stat	sys_stat;
 /*
  * Options
  */
-volatile bool		no_preemption;
-volatile bool		no_wake_sync;
-volatile bool		no_core_compaction;
-volatile bool		no_freq_scaling;
 volatile bool		is_powersave_mode;
 volatile bool		reinit_cpumask_for_performance;
+volatile bool		no_preemption;
+volatile bool		no_core_compaction;
+volatile bool		no_freq_scaling;
+
+const volatile bool	no_wake_sync;
 const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
@@ -165,7 +166,7 @@ static bool is_pinned(const struct task_struct *p)
 
 static inline bool test_task_flag(struct task_ctx *taskc, u64 flag)
 {
-	return taskc->flags & flag;
+	return (taskc->flags & flag) == flag;
 }
 
 static inline void set_task_flag(struct task_ctx *taskc, u64 flag)
@@ -186,6 +187,11 @@ static bool is_lat_cri(struct task_ctx *taskc)
 static bool is_lock_holder(struct task_ctx *taskc)
 {
 	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
+}
+
+static bool is_lock_holder_running(struct cpu_ctx *cpuc)
+{
+	return cpuc->flags & LAVD_FLAG_FUTEX_BOOST;
 }
 
 static bool have_scheduled(struct task_ctx *taskc)
