@@ -1,47 +1,68 @@
 #!/usr/bin/env bash
 GUEST_TIMEOUT=25
-BUILD_DIR=$1
-SCHED=$2
+EXTRACT_BPF_OBJECTS=$1
+SCHED_NAME=$2
 KERNEL=$3
-VNG_RW_ARG=$4
 
 if [ "${KERNEL}" == "vmlinuz" ]; then
   unset KERNEL
 fi
-
-VNG_RW=''
-if [ "${VNG_RW_ARG}" == "VNG_RW=true" ]; then
-  VNG_RW=' --rw '
-fi
-
-cd $BUILD_DIR || exit 1
 
 if [ -n "${KERNEL}" ] && [ ! -x `which vng` ]; then
   echo "vng not found, please install virtme-ng to enable testing"
   exit 1
 fi
 
-if [ -n "${SCHED}" ]; then
-  BPF_PATH=$(find ${BUILD_DIR} -type f -name bpf.bpf.o | grep ${SCHED})
-  echo "Running veristat on ${BPF_PATH}"
-  if [ -n "${KERNEL}" ]; then
-    timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng --user root -m 10G --cpu 8 -v --user root -r ${KERNEL} -- \
-        sudo $(which veristat) ${BPF_PATH} 2>&1 | tee veristat.ci.log
-    exit $?
-  else
-    sudo veristat ${BPF_PATH} 2>&1 | tee veristat.ci.log
-    exit $?
-  fi
+if [ -z "${EXTRACT_BPF_OBJECTS}" ] || [ -z "${SCHED_NAME}" ]; then
+  echo "Usage: $0 <extract_bpf_objects_script> <scheduler_name> [kernel]"
+  exit 1
 fi
 
-for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
-  if [ -n "${KERNEL}" ]; then
-    timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng --user root -m 10G --cpu 8 $VNG_RW -v --user root -r ${KERNEL} -- \
-        sudo $(which veristat) ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"
-  else
-    echo "$BPF_PATH"
-    sudo veristat ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"
+if [ ! -f "${EXTRACT_BPF_OBJECTS}" ]; then
+  echo "extract_bpf_objects script ${EXTRACT_BPF_OBJECTS} not found"
+  exit 1
+fi
+
+# Find the scheduler binary like test_sched does
+SCHED_BINARY=$(find -type f -executable -name ${SCHED_NAME})
+if [ ! -n "${SCHED_BINARY}" ]; then
+  echo "Scheduler binary ${SCHED_NAME} not found"
+  exit 1
+fi
+
+echo "Found scheduler binary: ${SCHED_BINARY}"
+
+# Use extract_bpf_objects.sh to extract BPF objects from the scheduler binary
+EXTRACT_DIR=$(mktemp -d)
+
+echo "Extracting BPF objects from ${SCHED_BINARY} using extract_bpf_objects.sh"
+if ! "${EXTRACT_BPF_OBJECTS}" "${SCHED_BINARY}" "${EXTRACT_DIR}"; then
+  echo "Failed to extract BPF objects from ${SCHED_BINARY}"
+  rm -rf ${EXTRACT_DIR}
+  exit 1
+fi
+
+# Run veristat on each extracted BPF object
+RESULT=0
+for BPF_PATH in ${EXTRACT_DIR}/*.o; do
+  if [ -f "${BPF_PATH}" ]; then
+    echo "Running veristat on ${BPF_PATH}"
+    if [ -n "${KERNEL}" ]; then
+      timeout --preserve-status ${GUEST_TIMEOUT} \
+        vng --user root -m 10G --cpu 8 -v --user root -r ${KERNEL} -- \
+          $(which veristat) ${BPF_PATH} 2>&1 | tee veristat.ci.log
+      RESULT=$?
+    else
+      sudo veristat ${BPF_PATH} 2>&1 | tee veristat.ci.log
+      RESULT=$?
+    fi
+    # Exit on first failure
+    if [ ${RESULT} -ne 0 ]; then
+      break
+    fi
   fi
 done
+
+# Clean up temporary directory
+rm -rf ${EXTRACT_DIR}
+exit ${RESULT}

@@ -16,4 +16,5 @@ name="${name##*/}"
 "$bpftool" gen object "$stem".l3o "$stem".l2o
 cmp "$stem".l2o "$stem".l3o
 "$bpftool" gen skeleton "$stem".l3o name "$name" > "$skel"
+sed -i 's|static const char data\[\] __attribute__((__aligned__(8)))|static const char data[] __attribute__((__aligned__(8), section(".bpf.objs")))|g' "$skel"
 "$bpftool" gen subskeleton "$stem".l3o name "$name" > "$subskel"

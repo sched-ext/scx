@@ -16,6 +16,8 @@ run_veristat = find_program(join_paths(meson.current_source_dir(),
                                        'meson-scripts/veristat'))
 run_veristat_diff = find_program(join_paths(meson.current_source_dir(),
                                        'meson-scripts/veristat_diff'))
+extract_bpf_objects = find_program(join_paths(meson.current_source_dir(),
+                                       'scripts/extract_bpf_objects.sh'))
 
 enable_stress = get_option('enable_stress')
 
@@ -407,14 +409,16 @@ run_target('veristat', command: [run_veristat, meson.current_build_dir(),
 if get_option('vng_rw_mount') == true
   foreach s : rust_scheds
     run_target('test_sched_'+s, command: [test_sched, kernel, s, 'VNG_RW=true'])
-    run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
-                                   get_option('veristat_scheduler'), get_option('kernel'), s, 'VNG_RW=true'])
+    run_target('veristat_'+s, command: [run_veristat, extract_bpf_objects,
+                                   s,
+                                   get_option('kernel')])
   endforeach
 else
   foreach s : rust_scheds
     run_target('test_sched_'+s, command: [test_sched, kernel, s])
-    run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
-                                   get_option('veristat_scheduler'), get_option('kernel'), s])
+    run_target('veristat_'+s, command: [run_veristat, extract_bpf_objects,
+                                   s,
+                                   get_option('kernel')])
   endforeach
 endif
 

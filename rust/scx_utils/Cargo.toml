@@ -15,7 +15,7 @@ glob = "0.3.2"
 hex = "0.4.3"
 lazy_static = "1.5.0"
 libbpf-sys = "=1.5.1"
-libbpf-cargo = "=0.25.0"
+libbpf-cargo = { git = "https://github.com/JakeHillion/libbpf-rs.git", rev = "e6c87a85e7bf2ab75e4e06c9266a58ac8f73238f" }
 libbpf-rs = "=0.25.0"
 log = "0.4.17"
 nvml-wrapper = { version = "0.11.0", optional = true }
@@ -43,7 +43,7 @@ anyhow = "1.0.65"
 bindgen = ">=0.69"
 glob = "0.3.2"
 lazy_static = "1.5.0"
-libbpf-cargo = "=0.25.0"
+libbpf-cargo = { git = "https://github.com/JakeHillion/libbpf-rs.git", rev = "e6c87a85e7bf2ab75e4e06c9266a58ac8f73238f" }
 sscanf = "0.4"
 tar = "0.4"
 vergen = { version = "8.0.0", features = ["cargo", "git", "gitcl"] }
