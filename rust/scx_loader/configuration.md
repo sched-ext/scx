@@ -121,10 +121,10 @@ The example configuration above shows how to set custom flags for different sche
     * Power Save mode: `-m powersave -I 10000 -t 10000 -s 10000 -S 1000`
     * Server mode: `-m all -s 20000 -S 1000 -I -1 -D -L`
 * For `scx_tickless`:
-    * Gaming_mode = `-f 5000 -s 5000`
-    * Lowlatency mode = `-f 5000 -s 1000`
-    * Powersave_mode = `-f 50 -p`
-    * Server mode = `-f 100`
+    * Gaming mode: `-f 5000 -s 5000`
+    * Low Latency mode: `-f 5000 -s 1000`
+    * Power Save mode: `-f 50 -p`
+    * Server mode: `-f 100`
 * For `scx_p2dq`:
     * Low Latency mode: `-y`
     * Server mode: `--keep-running`
