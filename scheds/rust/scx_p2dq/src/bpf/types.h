@@ -26,6 +26,7 @@ struct cpu_ctx {
 	u64				llc_dsq;
 	u64				max_load_dsq;
 
+	scx_atq_t			*intr_atq;
 	scx_atq_t			*mig_atq;
 };
 
@@ -51,6 +52,7 @@ struct llc_ctx {
 	struct bpf_cpumask __kptr	*little_cpumask;
 	struct bpf_cpumask __kptr	*node_cpumask;
 
+	scx_atq_t			*intr_atq;
 	scx_atq_t			*mig_atq;
 };
 
