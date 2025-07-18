@@ -40,6 +40,8 @@ pub enum SupportedSched {
     Chaos,
     #[serde(rename = "scx_mitosis")]
     Mitosis,
+    #[serde(rename = "scx_wd40")]
+    WD40,
 }
 
 impl FromStr for SupportedSched {
@@ -57,6 +59,7 @@ impl FromStr for SupportedSched {
             "scx_tickless" => Ok(SupportedSched::Tickless),
             "scx_rustland" => Ok(SupportedSched::Rustland),
             "scx_rusty" => Ok(SupportedSched::Rusty),
+            "scx_wd40" => Ok(SupportedSched::WD40),
             _ => Err(anyhow::anyhow!("{scx_name} is not supported")),
         }
     }
@@ -82,6 +85,7 @@ impl From<SupportedSched> for &str {
             SupportedSched::Tickless => "scx_tickless",
             SupportedSched::Rustland => "scx_rustland",
             SupportedSched::Rusty => "scx_rusty",
+            SupportedSched::WD40 => "scx_wd40",
         }
     }
 }
