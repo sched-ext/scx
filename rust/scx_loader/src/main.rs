@@ -90,6 +90,7 @@ impl ScxLoader {
     async fn supported_schedulers(&self) -> Vec<&str> {
         vec![
             "scx_bpfland",
+            "scx_chaos",
             "scx_cosmos",
             "scx_flash",
             "scx_lavd",
