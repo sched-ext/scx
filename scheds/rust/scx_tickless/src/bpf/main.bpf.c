@@ -29,9 +29,13 @@ UEI_DEFINE(uei);
 
 const volatile u32 nr_cpu_ids;
 const volatile bool smt_enabled;
-const volatile bool prefer_same_cpu;
 const volatile u64 slice_ns;
 const volatile u64 tick_freq;
+
+/*
+ * CPUs sorted by their capacity in descendent order.
+ */
+const volatile u64 preferred_cpus[MAX_CPUS];
 
 /*
  * Scheduling statistics.
@@ -41,7 +45,6 @@ volatile u64 nr_direct_dispatches, nr_timer_dispatches, nr_primary_dispatches;
 
 struct cpu_ctx {
 	struct bpf_timer timer;
-	u64 started_at;
 };
 
 struct {
@@ -237,8 +240,21 @@ s32 BPF_STRUCT_OPS(tickless_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 
 void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 	u64 deadline;
+
+	 /*
+	  * Directly dispatch the task if it can only run on a primary CPU.
+	  * These tasks are not eligible to run on tickless CPUs, so we
+	  * want to place them immediately on their only usable CPU.
+	  */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+		if (is_primary_cpu(cpu)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+			return;
+		}
+	}
 
 	/*
 	 * Insert the task to the shared queue.
@@ -253,12 +269,11 @@ void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
 
 /*
  * Try to consume a task from the shared queue and dispatch on a target
- * @cpu. If @same_cpu is true, try to consume a task that was previously
- * running on @cpu.
+ * @cpu.
  *
  * Return true if a task was dispatched, false otherwise.
  */
-static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
+static bool dispatch_cpu(s32 cpu, bool from_dispatch)
 {
 	struct task_struct *p;
 	bool dispatched = false;
@@ -273,11 +288,6 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
-
-		if (same_cpu && cpu != scx_bpf_task_cpu(p)) {
-			bpf_task_release(p);
-			continue;
-		}
 
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			bpf_task_release(p);
@@ -314,24 +324,25 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
  */
 static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 {
-	const struct cpumask *idle_mask;
+	const struct cpumask *mask;
 	s32 i, cpu;
 	bool is_done = false;
 
 	if (!scx_bpf_dsq_nr_queued(SHARED_DSQ))
 		return true;
 
-	idle_mask = do_idle_smt ? scx_bpf_get_idle_smtmask() : scx_bpf_get_idle_cpumask();
+	if (!smt_enabled & do_idle_smt)
+		return false;
 
-	bpf_for(i, 0, bpf_cpumask_weight(idle_mask)) {
+	mask = do_idle_smt ? scx_bpf_get_idle_smtmask() : NULL;
+
+	bpf_for(i, 0, MIN(nr_cpu_ids, MAX_CPUS)) {
 		/*
-		 * Lock the first idle CPU available and attempt to dispatch a
-		 * task.
+		 * Try to lock the first idle CPU available and attempt to
+		 * dispatch a task.
 		 */
-		cpu = bpf_cpumask_first(idle_mask);
-		if (cpu >= nr_cpu_ids)
-			break;
-		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
+		cpu = preferred_cpus[i];
+		if ((mask && !bpf_cpumask_test_cpu(cpu, mask)) || !scx_bpf_test_and_clear_cpu_idle(cpu))
 			continue;
 
 		/*
@@ -348,11 +359,10 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 			continue;
 
 		/*
-		 * Try to dispatch a task that was using this CPU first, if
-		 * @prefer_same_cpu is enabled.
+		 * Consume a task from the shared DSQ and dispatch it to
+		 * the target CPU.
 		 */
-		if (!prefer_same_cpu || !dispatch_cpu(cpu, true, from_dispatch))
-			dispatch_cpu(cpu, false, from_dispatch);
+		dispatch_cpu(cpu, from_dispatch);
 
 		/*
 		 * Stop dispatching if all the pending tasks have been
@@ -364,41 +374,50 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 		}
 	}
 
-	scx_bpf_put_cpumask(idle_mask);
+	if (mask)
+		scx_bpf_put_cpumask(mask);
 
 	return is_done;
 }
 
 static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
-	struct cpu_ctx *cctx;
-	u64 now = scx_bpf_now();
 	s32 cpu;
 
 	/*
 	 * Dispatch tasks on the available CPUs.
 	 */
-	if (!smt_enabled || !dispatch_all_cpus(true, false))
+	if (!dispatch_all_cpus(true, false))
 		dispatch_all_cpus(false, false);
 
 	/*
 	 * Check if we need to preempt the running tasks.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (!cctx)
+		struct task_struct *p;
+
+		/*
+		 * Ignore CPU if idle task is running.
+		 */
+		p = scx_bpf_cpu_rq(cpu)->curr;
+		if (p->flags & PF_IDLE)
 			continue;
 
-		if (!cctx->started_at ||
-		    time_before(now, cctx->started_at + slice_ns))
-			continue;
-
+		/*
+		 * Ignore CPUs without any task waiting.
+		 */
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) &&
 		    !scx_bpf_dsq_nr_queued(SHARED_DSQ))
 			continue;
 
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-		__sync_fetch_and_add(&nr_preemptions, 1);
+		/*
+		 * Set a finite time slice to the running task, so that it
+		 * can be preempted.
+		 */
+		if (p->scx.slice == SCX_SLICE_INF) {
+			p->scx.slice = slice_ns;
+			__sync_fetch_and_add(&nr_preemptions, 1);
+		}
 	}
 
 	bpf_timer_start(timer, tick_interval_ns(), 0);
@@ -436,7 +455,7 @@ void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
 		 * Try to bounce all the queued tasks to the available
 		 * tickless CPUs first.
 		 */
-		if (!smt_enabled || !dispatch_all_cpus(true, true))
+		if (!dispatch_all_cpus(true, true))
 			dispatch_all_cpus(false, true);
 	}
 
@@ -482,14 +501,7 @@ void BPF_STRUCT_OPS(tickless_runnable, struct task_struct *p, u64 enq_flags)
  */
 void BPF_STRUCT_OPS(tickless_running, struct task_struct *p)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
-	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return;
-	cctx->started_at = scx_bpf_now() ? : 1;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -518,15 +530,8 @@ void BPF_STRUCT_OPS(tickless_tick, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(tickless_stopping, struct task_struct *p, bool runnable)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
-	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	u64 slice;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return;
-	cctx->started_at = 0;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)

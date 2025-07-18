@@ -31,6 +31,7 @@ use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -53,7 +54,9 @@ struct Opts {
 
     /// Define the set of CPUs, represented as a bitmask in hex (e.g., 0xff), dedicated to process
     /// scheduling events.
-    #[clap(short = 'm', long, default_value = "0x1")]
+    ///
+    /// 0x0 = autodetect the slowest CPU to process scheduling events.
+    #[clap(short = 'm', long, default_value = "0")]
     primary_domain: String,
 
     /// Maximum scheduling slice duration in microseconds (applied only when multiple tasks are
@@ -68,13 +71,6 @@ struct Opts {
     /// more scheduling overhead and load on the primary CPUs.
     #[clap(short = 'f', long, default_value = "0")]
     frequency: u64,
-
-    /// Try to keep tasks running on the same CPU
-    ///
-    /// This can help to improve cache locality at the cost of introducing some extra overhead in
-    /// the scheduler (and increase the load on the primary CPUs).
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
-    prefer_same_cpu: bool,
 
     /// Disable SMT topology awareness.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
@@ -135,24 +131,46 @@ impl<'a> Scheduler<'a> {
             warn!("nohz_full is not enabled in the kernel");
         }
 
+        // Generate the list of available CPUs sorted by capacity in descendind order.
+        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+
         // Process the domain of primary CPUs.
-        let domain = Cpumask::from_str(&opts.primary_domain)?;
+        let mut domain = Cpumask::from_str(&opts.primary_domain)?;
+        if domain.is_empty() {
+            if let Some(cpu) = cpus.last() {
+                domain = Cpumask::from_str(&format!("{:x}", 1 << cpu.id).to_string())?;
+            }
+        }
         info!("primary CPU domain = 0x{:x}", domain);
 
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
         let mut skel = scx_ops_open!(skel_builder, open_object, tickless_ops)?;
-
         skel.struct_ops.tickless_ops_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.as_mut().unwrap().smt_enabled = smt_enabled;
-        skel.maps.rodata_data.as_mut().unwrap().nr_cpu_ids = *NR_CPU_IDS as u32;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
+
+        rodata.smt_enabled = smt_enabled;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
 
         // Override default BPF scheduling parameters.
-        skel.maps.rodata_data.as_mut().unwrap().slice_ns = opts.slice_us * 1000;
-        skel.maps.rodata_data.as_mut().unwrap().tick_freq = opts.frequency;
-        skel.maps.rodata_data.as_mut().unwrap().prefer_same_cpu = opts.prefer_same_cpu;
+        rodata.slice_ns = opts.slice_us * 1000;
+        rodata.tick_freq = opts.frequency;
+
+        for (i, cpu) in cpus.iter().enumerate() {
+            rodata.preferred_cpus[i] = cpu.id as u64;
+        }
+
+        // Set scheduler flags.
+        skel.struct_ops.tickless_ops_mut().flags = *compat::SCX_OPS_ENQ_LAST
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+        info!(
+            "scheduler flags: {:#x}",
+            skel.struct_ops.tickless_ops_mut().flags
+        );
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, tickless_ops, uei)?;
