@@ -318,7 +318,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Use the lightweight idle CPU scanning if flat idle scan is
 	 * enabled and all the CPUs are included in the primary domain.
 	 */
-	if (flat_idle_scan && primary_all)
+	if (flat_idle_scan && primary_all && !is_system_busy())
 		return pick_idle_cpu_flat(p, prev_cpu);
 
 	/*
