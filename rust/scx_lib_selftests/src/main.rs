@@ -12,8 +12,12 @@ use anyhow::Context;
 use anyhow::Result;
 
 use std::ffi::c_ulong;
+use std::sync::Arc;
 
 use scx_utils::init_libbpf_logging;
+use scx_utils::Core;
+use scx_utils::Llc;
+use scx_utils::Topology;
 use scx_utils::NR_CPU_IDS;
 
 use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
@@ -56,6 +60,98 @@ fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
+fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
+    let mut args = types::arena_alloc_mask_args {
+        bitmap: 0 as c_ulong,
+    };
+
+    let input = ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut args as *mut _ as *mut u8,
+                std::mem::size_of_val(&args),
+            )
+        }),
+        ..Default::default()
+    };
+
+    let output = skel.progs.arena_alloc_mask.test_run(input)?;
+    if output.return_value != 0 {
+        bail!(
+            "Could not initialize arenas, setup_topology_node returned {}",
+            output.return_value as i32
+        );
+    }
+
+    let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap) };
+
+    let (valid_mask, _) = ptr.split_at_mut(mask.len());
+    valid_mask.clone_from_slice(mask);
+
+    let mut args = types::arena_topology_node_init_args {
+        bitmap: args.bitmap as c_ulong,
+        data_size: 0 as c_ulong,
+        id: 0 as c_ulong,
+    };
+
+    let input = ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut args as *mut _ as *mut u8,
+                std::mem::size_of_val(&args),
+            )
+        }),
+        ..Default::default()
+    };
+
+    let output = skel.progs.arena_topology_node_init.test_run(input)?;
+    if output.return_value != 0 {
+        bail!(
+            "p2dq_topology_node_init returned {}",
+            output.return_value as i32
+        );
+    }
+
+    Ok(())
+}
+
+fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
+    let topo = Topology::new().expect("Failed to build host topology");
+
+    setup_topology_node(skel, topo.span.as_raw_slice())?;
+
+    for (_, node) in topo.nodes {
+        setup_topology_node(skel, node.span.as_raw_slice())?;
+    }
+
+    for (_, llc) in topo.all_llcs {
+        setup_topology_node(
+            skel,
+            Arc::<Llc>::into_inner(llc)
+                .expect("missing llc")
+                .span
+                .as_raw_slice(),
+        )?;
+    }
+
+    for (_, core) in topo.all_cores {
+        setup_topology_node(
+            skel,
+            Arc::<Core>::into_inner(core)
+                .expect("missing core")
+                .span
+                .as_raw_slice(),
+        )?;
+    }
+    for (_, cpu) in topo.all_cpus {
+        let mut mask = [0; 9];
+        mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+        setup_topology_node(skel, &mask)?;
+    }
+
+    Ok(())
+}
+
 fn main() {
     TermLogger::init(
         simplelog::LevelFilter::Info,
@@ -81,6 +177,7 @@ fn main() {
     let mut skel = skel.load().context("Failed to load BPF program").unwrap();
 
     setup_arenas(&mut skel).unwrap();
+    setup_topology(&mut skel).unwrap();
 
     let input = ProgramInput {
         ..Default::default()
