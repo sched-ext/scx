@@ -27,10 +27,15 @@ static __always_inline
 int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 {
 	struct cpu_ctx *cpuc;
+	struct cpdom_ctx *cpdomc;
 	struct msg_task_ctx *m;
 
 	cpuc = get_cpu_ctx_id(cpu_id);
 	if (!cpuc)
+		return -EINVAL;
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+	if (!cpdomc)
 		return -EINVAL;
 
 	m = bpf_ringbuf_reserve(&introspec_msg, sizeof(*m), 0);
@@ -48,6 +53,9 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.thr_perf_cri = sys_stat.thr_perf_cri;
 	m->taskc_x.nr_active = sys_stat.nr_active;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
+	/* Refactor this when per-cpu DSQs are added */
+	m->taskc_x.dsq_id = cpdomc->id;
+	m->taskc_x.dsq_consume_lat = cpdomc->dsq_consume_lat;
 
 	m->taskc_x.stat[0] = is_lat_cri(taskc) ? 'L' : 'R';
 	m->taskc_x.stat[1] = is_perf_cri(taskc) ? 'H' : 'I';

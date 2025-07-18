@@ -184,13 +184,17 @@ pub struct SchedSample {
     pub cpu_sutil: u64,
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
+    #[stat(desc = "DSQ ID where this task was dispatched from")]
+    pub dsq_id: u64,
+    #[stat(desc = "Consume latency of this DSQ (shows how contended the DSQ is)")]
+    pub dsq_consume_lat: u64,
 }
 
 impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:6} | {:10} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
@@ -216,6 +220,8 @@ impl SchedSample {
             "CPU_UTIL",
             "CPU_SUTIL",
             "NR_ACT",
+            "DSQ_ID",
+            "DSQ_LAT_NS",
         )?;
         Ok(())
     }
@@ -227,7 +233,7 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} |",
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:12} | {:12} |",
             self.mseq,
             self.pid,
             self.comm,
@@ -253,6 +259,8 @@ impl SchedSample {
             self.cpu_util,
             self.cpu_sutil,
             self.nr_active,
+            self.dsq_id,
+            self.dsq_consume_lat,
         )?;
         Ok(())
     }

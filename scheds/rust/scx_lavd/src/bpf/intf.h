@@ -159,6 +159,8 @@ struct task_ctx_x {
 	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */
+	u64	dsq_id;		/* CPU's associated DSQ */
+	u64	dsq_consume_lat; /* DSQ's consume latency */
 };
 
 
