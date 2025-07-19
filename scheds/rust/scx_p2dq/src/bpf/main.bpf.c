@@ -1307,8 +1307,10 @@ static __always_inline bool consume_llc(struct llc_ctx *llcx)
 	if (!llcx)
 		return false;
 
-	if (p2dq_config.atq_enabled &&
-	    scx_atq_nr_queued(llcx->mig_atq) > 0) {
+	if (p2dq_config.atq_enabled) {
+		if (scx_atq_nr_queued(llcx->mig_atq) == 0)
+			return false;
+
 		pid = scx_atq_pop(llcx->mig_atq);
 		p = bpf_task_from_pid((s32)pid);
 		if (!p) {
@@ -1407,26 +1409,29 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
 	      cpu, first->id, first->load, second->id, second->load);
 
-	if (lb_config.pick2_mode == PICK2_LOAD) {
+	switch (lb_config.pick2_mode) {
+	case PICK2_LOAD:
 		cur_load = cur_llcx->load + ((cur_llcx->load * lb_config.slack_factor) / 100);
 
 		if (first->load > cur_load &&
 		    consume_llc(first))
-			return 0;
+			break;
 
-		if (second->load > cur_load &&
+		if (topo_config.nr_llcs > 2 &&
+		    second->load > cur_load &&
 		    consume_llc(second))
-			return 0;
-	} else if (lb_config.pick2_mode == PICK2_NR_QUEUED) {
+			break;
+	case PICK2_NR_QUEUED:
 		cur_load = llc_nr_queued(cur_llcx);
 
 		if (llc_nr_queued(first) >= cur_load &&
 		    consume_llc(first))
-			return 0;
+			break;
 
-		if (llc_nr_queued(second) >= cur_load &&
+		if (topo_config.nr_llcs > 2 &&
+		    llc_nr_queued(second) >= cur_load &&
 		    consume_llc(second))
-			return 0;
+			break;
 	}
 
 	return 0;
@@ -1596,7 +1601,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		return;
 
 	if (p2dq_config.interactive_dsq) {
-		if (p2dq_config.atq_enabled) {
+		if (p2dq_config.atq_enabled && min_atq != cpuc->intr_atq) {
 			pid = scx_atq_pop(cpuc->intr_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
 				if (p->pid == peeked_pid) {
@@ -1629,6 +1634,29 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	if (dsq_id != cpuc->llc_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
 		return;
+
+	if (topo_config.nr_llcs > 1) {
+		if (p2dq_config.atq_enabled) {
+			pid = scx_atq_pop(cpuc->mig_atq);
+			if ((p = bpf_task_from_pid((s32)pid))) {
+				if (!(taskc = lookup_task_ctx(p))) {
+					bpf_task_release(p);
+					scx_bpf_error("failed to get task ctx");
+					return;
+				}
+				scx_bpf_dsq_insert(p,
+						   SCX_DSQ_LOCAL,
+						   taskc->slice_ns,
+						   taskc->enq_flags);
+				bpf_task_release(p);
+				return;
+			}
+		} else {
+			if (dsq_id != cpuc->mig_dsq &&
+			    scx_bpf_dsq_move_to_local(cpuc->mig_dsq))
+				return;
+		}
+	}
 
 	if (!(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		scx_bpf_error("invalid llc id %u", cpuc->llc_id);
