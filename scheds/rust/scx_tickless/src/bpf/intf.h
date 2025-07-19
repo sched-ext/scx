@@ -8,6 +8,9 @@
 #ifndef __INTF_H
 #define __INTF_H
 
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+
 #ifndef __VMLINUX_H__
 typedef unsigned char u8;
 typedef unsigned short u16;
