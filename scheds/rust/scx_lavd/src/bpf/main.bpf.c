@@ -504,6 +504,7 @@ static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
+	struct cpu_ctx *cpuc;
 	s32 task_cpu, cpu = -ENOENT;
 	u64 dsq_id;
 	bool is_idle = false;
@@ -536,6 +537,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
 	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle);
+
+	/*
+	 * Increase the number of pinned tasks waiting for execution.
+	 */
+	if (cpu >= 0 && is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu)))
+		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 
 	/*
 	 * Collect additional information when the scheduler is monitored.
@@ -876,6 +883,12 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		scx_bpf_error("Failed to lookup context for task %d", p->pid);
 		return;
 	}
+
+	/*
+	 * Increase the number of pinned tasks waiting for execution.
+	 */
+	if (is_pinned(p))
+		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
 
 	/*
 	 * If the sched_ext core directly dispatched a task, calculating the

@@ -149,6 +149,7 @@ struct cpu_ctx {
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	flags;		/* cached copy of task's flags */
 	volatile s32	futex_op;	/* futex op in futex V1 */
+	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
 
