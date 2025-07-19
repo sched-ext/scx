@@ -16,7 +16,7 @@ volatile topo_ptr topo_all;
  */
 u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 
-__weak
+__hidden
 int topo_contains(topo_ptr topo, u32 cpu)
 {
 	return scx_bitmap_test_cpu(cpu, topo->mask);
