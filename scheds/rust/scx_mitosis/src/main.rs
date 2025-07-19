@@ -5,9 +5,12 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod stats;
 
 use std::cmp::max;
 use std::collections::HashMap;
+use std::fmt;
+use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -18,11 +21,14 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::trace;
+use log::warn;
+use scx_stats::prelude::*;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -34,6 +40,9 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
+
+use stats::CellMetrics;
+use stats::Metrics;
 
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
@@ -67,6 +76,11 @@ struct Opts {
     /// Interval to report monitoring information
     #[clap(long, default_value = "1")]
     monitor_interval_s: u64,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
 }
 
 // The subset of cstats we care about.
@@ -93,6 +107,46 @@ struct Scheduler<'a> {
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
+    metrics: Metrics,
+    stats_server: StatsServer<(), Metrics>,
+}
+
+struct DistributionStats {
+    total_decisions: u64,
+    share_of_decisions_pct: f64,
+    local_q_pct: f64,
+    default_q_pct: f64,
+    hi_q_pct: f64,
+    lo_q_pct: f64,
+    affn_viol_pct: f64,
+
+    // for formatting
+    global_queue_decisions: u64,
+}
+
+impl Display for DistributionStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This makes the output easier to read by improving column alignment. First, it guarantees that within a
+        // given logging interval, the global and cell queueing decision counts print at the same width.
+        // Second, it reduces variance in column width between logging intervals. 5 is simply a heuristic.
+        const MIN_DECISIONS_WIDTH: usize = 5;
+        let descisions_width = max(
+            MIN_DECISIONS_WIDTH,
+            (self.global_queue_decisions as f64).log10().ceil() as usize,
+        );
+        write!(
+            f,
+            "{:width$} {:5.1}% | L:{:4.1}% D:{:4.1}% hi:{:4.1}% lo:{:4.1}% | V:{:4.1}%",
+            self.total_decisions,
+            self.share_of_decisions_pct,
+            self.local_q_pct,
+            self.default_q_pct,
+            self.hi_q_pct,
+            self.lo_q_pct,
+            self.affn_viol_pct,
+            width = descisions_width,
+        )
+    }
 }
 
 impl<'a> Scheduler<'a> {
@@ -115,34 +169,50 @@ impl<'a> Scheduler<'a> {
 
         let skel = scx_ops_load!(skel, mitosis, uei)?;
 
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
         Ok(Self {
             skel,
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
+            metrics: Metrics::default(),
+            stats_server,
         })
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
-        info!("Mitosis Scheduler Attached");
+
+        info!("Layered Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
+
+        let (res_ch, req_ch) = self.stats_server.channels();
+
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
-            std::thread::sleep(self.monitor_interval);
             self.refresh_bpf_cells()?;
-            self.debug()?;
+            self.collect_metrics()?;
+
+            match req_ch.recv_timeout(self.monitor_interval) {
+                Ok(()) => res_ch.send(self.get_metrics())?,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
         }
         drop(struct_ops);
         uei_report!(&self.skel, uei)
     }
 
-    fn calculate_distribution_and_log(
+    fn get_metrics(&self) -> Metrics {
+        self.metrics.clone()
+    }
+
+    fn calculate_distribution_stats(
         &self,
         queue_counts: &[u64; QUEUE_STATS_IDX.len()],
         global_queue_decisions: u64,
         scope_queue_decisions: u64,
         scope_affn_viols: u64,
-        prefix: &str,
-    ) -> Result<()> {
+    ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
         let share_of_global =
@@ -166,15 +236,6 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_affn_viols as f64) / (scope_queue_decisions as f64)
         };
 
-        // This makes the output easier to read by improving column alignment. First, it guarantees that within a
-        // given logging interval, the global and cell queueing decision counts print at the same width.
-        // Second, it reduces variance in column width between logging intervals. 5 is simply a heuristic.
-        const MIN_DECISIONS_WIDTH: usize = 5;
-        let decisions_format_width: usize = max(
-            MIN_DECISIONS_WIDTH,
-            (global_queue_decisions as f64).log10().ceil() as usize,
-        );
-
         const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -184,24 +245,21 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        trace!(
-            "{} {:width$} {:5.1}% | L:{:4.1}% D:{:4.1}% hi:{:4.1}% lo:{:4.1}% | V:{:4.1}%",
-            prefix,
-            scope_queue_decisions,
-            share_of_global,
-            queue_pct[0],
-            queue_pct[1],
-            queue_pct[2],
-            queue_pct[3],
-            affinity_violations_percent,
-            width = decisions_format_width
-        );
-        Ok(())
+        return Ok(DistributionStats {
+            total_decisions: scope_queue_decisions,
+            share_of_decisions_pct: share_of_global,
+            local_q_pct: queue_pct[0],
+            default_q_pct: queue_pct[1],
+            hi_q_pct: queue_pct[2],
+            lo_q_pct: queue_pct[3],
+            affn_viol_pct: affinity_violations_percent,
+            global_queue_decisions,
+        });
     }
 
     // Queue stats for the whole node
-    fn log_global_queue_stats(
-        &self,
+    fn update_and_log_global_queue_stats(
+        &mut self,
         global_queue_decisions: u64,
         cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS],
     ) -> Result<()> {
@@ -222,20 +280,23 @@ impl<'a> Scheduler<'a> {
             .sum::<u64>();
 
         // Special case where the number of scope decisions == number global decisions
-        self.calculate_distribution_and_log(
+        let stats = self.calculate_distribution_stats(
             &queue_counts,
             global_queue_decisions,
             global_queue_decisions,
             scope_affn_viols,
-            &prefix,
         )?;
+
+        self.metrics.update(&stats);
+
+        trace!("{} {}", prefix, stats);
 
         Ok(())
     }
 
     // Print out the per-cell stats
-    fn log_cell_queue_stats(
-        &self,
+    fn update_and_log_cell_queue_stats(
+        &mut self,
         global_queue_decisions: u64,
         cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS],
     ) -> Result<()> {
@@ -264,18 +325,32 @@ impl<'a> Scheduler<'a> {
             let scope_affn_viols: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
 
-            self.calculate_distribution_and_log(
+            let stats = self.calculate_distribution_stats(
                 &queue_counts,
                 global_queue_decisions,
                 cell_queue_decisions,
                 scope_affn_viols,
-                &prefix,
             )?;
+
+            self.metrics
+                .cells
+                .entry(cell as u32)
+                .and_modify(|cell_metrics| cell_metrics.update(&stats))
+                .or_insert_with(|| {
+                    let mut cell_metrics = CellMetrics::default();
+                    cell_metrics.update(&stats);
+                    cell_metrics
+                });
+
+            trace!("{} {}", prefix, stats);
         }
         Ok(())
     }
 
-    fn log_all_queue_stats(&self, cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS]) -> Result<()> {
+    fn log_all_queue_stats(
+        &mut self,
+        cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS],
+    ) -> Result<()> {
         // Get total decisions
         let global_queue_decisions: u64 = cell_stats_delta
             .iter()
@@ -287,9 +362,9 @@ impl<'a> Scheduler<'a> {
             bail!("Error: No queueing decisions made globally");
         }
 
-        self.log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
 
-        self.log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)?;
 
         Ok(())
     }
@@ -319,8 +394,8 @@ impl<'a> Scheduler<'a> {
         Ok(cell_stats_delta)
     }
 
-    /// Output various debugging data like per cell stats, per-cpu stats, etc.
-    fn debug(&mut self) -> Result<()> {
+    /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
+    fn collect_metrics(&mut self) -> Result<()> {
         let cell_stats_delta = self.calculate_cell_stat_delta()?;
 
         self.log_all_queue_stats(&cell_stats_delta)?;
@@ -328,6 +403,16 @@ impl<'a> Scheduler<'a> {
         for (cell_id, cell) in &self.cells {
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
         }
+
+        for (cell_id, cell) in self.cells.iter() {
+            // Assume we have a CellMetrics entry if we have a known cell
+            self.metrics
+                .cells
+                .entry(*cell_id)
+                .and_modify(|cell_metrics| cell_metrics.num_cpus = cell.cpus.weight() as u32);
+        }
+        self.metrics.num_cells = self.cells.len() as u32;
+
         Ok(())
     }
 
@@ -346,7 +431,9 @@ impl<'a> Scheduler<'a> {
                 });
         }
 
-        // create cells we don't have yet, drop cells that are no longer in use.
+        // Create cells we don't have yet, drop cells that are no longer in use.
+        // If we continue to drop cell metrics once a cell is removed, we'll need to make sure we
+        // flush metrics for a cell before we remove it completely.
         let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
         for i in 0..MAX_CELLS {
             let cell_idx = i as u32;
@@ -358,8 +445,10 @@ impl<'a> Scheduler<'a> {
                         .expect("missing cell in cpu map")
                         .clone(),
                 });
+                self.metrics.cells.insert(cell_idx, CellMetrics::default());
             } else {
                 self.cells.remove(&cell_idx);
+                self.metrics.cells.remove(&cell_idx);
             }
         }
 
@@ -413,6 +502,27 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
+
+    if let Some(intv) = opts.monitor {
+        let shutdown_clone = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            match stats::monitor(Duration::from_secs_f64(intv), shutdown_clone) {
+                Ok(_) => {
+                    debug!("stats monitor thread finished successfully")
+                }
+                Err(error_object) => {
+                    warn!(
+                        "stats monitor thread finished because of an error {}",
+                        error_object
+                    )
+                }
+            }
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {
