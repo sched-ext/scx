@@ -8,6 +8,10 @@ license = "GPL-2.0-only"
 
 publish = false
 
+[package.metadata.scx]
+ci.kernel.default = "bpf/bpf-next"
+ci.kernel.allowlist = ["bpf/bpf-next"]
+
 [dependencies]
 anyhow = "1.0.65"
 chrono = "0.4"
