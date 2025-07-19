@@ -149,12 +149,22 @@ static void plan_x_cpdom_migration(void)
 	sys_stat.nr_stealee = nr_stealee;
 }
 
-static bool consume_dsq(u64 dsq_id)
+static bool consume_dsq(struct cpdom_ctx *cpdomc)
 {
+	bool ret;
+	u64 before = 0;
+
+	if (is_monitored)
+		before = bpf_ktime_get_ns();
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	return scx_bpf_dsq_move_to_local(dsq_id);
+	ret = scx_bpf_dsq_move_to_local(cpdomc->id);
+
+	if (is_monitored)
+		cpdomc->dsq_consume_lat = time_delta(bpf_ktime_get_ns(), before);
+
+	return ret;
 }
 
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
@@ -217,7 +227,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * because the chance is low and there is no harm
 			 * in slight over-stealing.
 			 */
-			if (consume_dsq(dsq_id)) {
+			if (consume_dsq(cpdomc_pick)) {
 				WRITE_ONCE(cpdomc_pick->is_stealee, false);
 				WRITE_ONCE(cpdomc->is_stealer, false);
 				return true;
@@ -275,7 +285,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			if (consume_dsq(dsq_id))
+			if (consume_dsq(cpdomc_pick))
 				return true;
 		}
 	}
@@ -304,7 +314,7 @@ static bool consume_task(u64 dsq_id)
 	/*
 	 * Try to consume a task from CPU's associated DSQ.
 	 */
-	if (consume_dsq(dsq_id))
+	if (consume_dsq(cpdomc))
 		return true;
 
 	/*

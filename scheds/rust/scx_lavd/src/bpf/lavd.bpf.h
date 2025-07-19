@@ -101,6 +101,7 @@ struct cpdom_ctx {
 	u32	cur_util_sum;			    /* the sum of CPU utilization in the current interval */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
+	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
 	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */

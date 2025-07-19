@@ -579,6 +579,8 @@ impl<'a> Scheduler<'a> {
             cpu_util: tx.cpu_util,
             cpu_sutil: tx.cpu_sutil,
             nr_active: tx.nr_active,
+            dsq_id: tx.dsq_id,
+            dsq_consume_lat: tx.dsq_consume_lat,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
             Err(e) => panic!("failed to send on intrspc_tx ({})", e),
