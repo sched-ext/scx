@@ -28,6 +28,7 @@ impl CpuUtilData {
             + self.softirq
             + self.steal
     }
+
     pub fn active_util(&self) -> u64 {
         self.user + self.nice + self.system + self.irq + self.softirq + self.steal
     }
@@ -178,7 +179,7 @@ mod tests {
             assert!(current.cpu_util_data.total_util() >= prev.cpu_util_data.total_util());
             assert!(current.cpu_util_data.active_util() >= prev.cpu_util_data.active_util());
         }
-        
+
         Ok(())
     }
 }
