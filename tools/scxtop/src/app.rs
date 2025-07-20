@@ -47,12 +47,12 @@ use num_format::{SystemLocale, ToFormattedString};
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
-    style::{Modifier, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Gauge, Paragraph, RenderDirection,
-        Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, Paragraph,
+        RenderDirection, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
     },
     Frame,
 };
@@ -1449,6 +1449,33 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Draw the "Missing Scheduler" message.
+    fn missing_scheduler_msg(&self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(Clear, area);
+
+        let top_pad = area.height.saturating_sub(1) / 2;
+
+        let mut lines: Vec<Line> = Vec::with_capacity(top_pad as usize + 1);
+        for _ in 0..top_pad {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(Span::styled(
+            "Missing Scheduler",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .style(Style::default().fg(Color::Red));
+
+        let para = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .block(block);
+
+        frame.render_widget(para, area);
+    }
+
     /// Renders the scheduler application state.
     fn render_scheduler(
         &mut self,
@@ -1458,6 +1485,12 @@ impl<'a> App<'a> {
         render_title: bool,
         render_sample_rate: bool,
     ) -> Result<()> {
+        // If no scheduler is attached, display a message and return early.
+        if self.scheduler.is_empty() {
+            self.missing_scheduler_msg(frame, area);
+            return Ok(());
+        }
+
         match self.view_state {
             ViewState::Sparkline => self.render_scheduler_sparklines(
                 event,
@@ -1465,11 +1498,13 @@ impl<'a> App<'a> {
                 area,
                 render_title,
                 render_sample_rate,
-            ),
+            )?,
             ViewState::BarChart => {
-                self.render_scheduler_barchart(event, frame, area, render_sample_rate)
+                self.render_scheduler_barchart(event, frame, area, render_sample_rate)?
             }
         }
+
+        Ok(())
     }
 
     /// Renders the event state.
