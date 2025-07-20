@@ -45,18 +45,15 @@ use libbpf_rs::ProgramInput;
 use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
-use ratatui::text::Text;
-use ratatui::widgets::Cell;
-use ratatui::widgets::Row;
-use ratatui::widgets::Table;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, Paragraph,
-        RenderDirection, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
+        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
+        Table,
     },
     Frame,
 };
