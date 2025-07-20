@@ -41,6 +41,7 @@ enum event_type {
 	HW_PRESSURE,
 	IPI,
 	PSTATE_SAMPLE,
+	SCHED_HANG,
     	SCHED_MIGRATE,
 	SCHED_REG,
 	SCHED_SWITCH,
@@ -126,6 +127,11 @@ struct wait_event {
 	int             prio;
 };
 
+struct hang_event {
+	u8              comm[MAX_COMM];
+	u32             pid;
+};
+
 struct ipi_event {
 	u32		pid;
 	u32		target_cpu;
@@ -192,6 +198,7 @@ struct bpf_event {
 		struct	wakeup_event wakeup;
 		struct	wakeup_event waking;
 		struct  migrate_event migrate;
+		struct  hang_event hang;
 		struct  trace_started_event trace;
 		struct  kprobe_event kprobe;
 	} event;

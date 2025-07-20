@@ -631,6 +631,28 @@ int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
     return 0;
 }
 
+SEC("tp_btf/sched_process_hang")
+int BPF_PROG(on_sched_hang, struct task_struct *p)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+    event->type = SCHED_HANG;
+    event->ts = bpf_ktime_get_ns();
+    event->cpu = bpf_get_smp_processor_id();
+    record_real_comm(event->event.hang.comm, p);
+    event->event.hang.pid = p->pid;
+
+    bpf_ringbuf_submit(event, 0);
+
+    return 0;
+}
+
 SEC("tp_btf/softirq_entry")
 int BPF_PROG(on_softirq_entry, unsigned int nr)
 {

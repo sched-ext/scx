@@ -191,6 +191,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             links.push(skel.progs.on_sched_exec.attach()?);
             links.push(skel.progs.on_sched_exit.attach()?);
             links.push(skel.progs.on_sched_wait.attach()?);
+            links.push(skel.progs.on_sched_hang.attach()?);
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
