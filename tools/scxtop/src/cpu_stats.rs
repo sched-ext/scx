@@ -16,7 +16,6 @@ pub struct CpuUtilData {
     pub guest: u64,
     pub guest_nice: u64,
 }
-
 impl CpuUtilData {
     pub fn total_util(&self) -> u64 {
         self.user
@@ -28,18 +27,15 @@ impl CpuUtilData {
             + self.softirq
             + self.steal
     }
-
     pub fn active_util(&self) -> u64 {
         self.user + self.nice + self.system + self.irq + self.softirq + self.steal
     }
 }
-
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatSnapshot {
     pub cpu_util_data: CpuUtilData,
     pub freq_khz: u64,
 }
-
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatTracker {
     pub prev: BTreeMap<usize, CpuStatSnapshot>,
@@ -155,7 +151,6 @@ mod tests {
             guest: 0,
             guest_nice: 0,
         };
-
         assert_eq!(snap.total_util(), 36);
         assert_eq!(snap.active_util(), 27);
     }
@@ -173,13 +168,11 @@ mod tests {
 
         assert!(!tracker.prev.is_empty());
         assert!(!tracker.current.is_empty());
-
         for (cpu, prev) in &tracker.prev {
             let current = tracker.current.get(cpu).unwrap();
             assert!(current.cpu_util_data.total_util() >= prev.cpu_util_data.total_util());
             assert!(current.cpu_util_data.active_util() >= prev.cpu_util_data.active_util());
         }
-
         Ok(())
     }
 }

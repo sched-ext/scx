@@ -110,7 +110,9 @@ struct exit_event {
 
 struct fork_event {
 	u32		parent_pid;
+	u32		parent_tgid;
 	u32		child_pid;
+	u32		child_tgid;
 	u8		parent_comm[MAX_COMM];
 	u8		child_comm[MAX_COMM];
 };

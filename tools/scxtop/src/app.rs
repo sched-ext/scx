@@ -10,10 +10,8 @@ use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::config::get_config_path;
 use crate::config::Config;
-use crate::format_hz;
 use crate::get_default_events;
-use crate::read_file_string;
-use crate::sanitize_nbsp;
+use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
@@ -25,6 +23,7 @@ use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
+use crate::ProcData;
 use crate::ProfilingEvent;
 use crate::Search;
 use crate::VecStats;
@@ -44,7 +43,12 @@ use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
 use num_format::{SystemLocale, ToFormattedString};
+use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
+use ratatui::text::Text;
+use ratatui::widgets::Cell;
+use ratatui::widgets::Row;
+use ratatui::widgets::Table;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -66,7 +70,8 @@ use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -105,6 +110,7 @@ pub struct App<'a> {
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
     dsq_data: BTreeMap<u64, EventData>,
+    proc_data: BTreeMap<i32, ProcData>,
 
     // Event related
     active_event: ProfilingEvent,
@@ -152,6 +158,7 @@ impl<'a> App<'a> {
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
+        let mut proc_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
         let active_event = ProfilingEvent::from_str_args(
             &config.default_profiling_event(),
@@ -193,6 +200,12 @@ impl<'a> App<'a> {
             let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
             node_data.insert(node.id, data);
+        }
+
+        for process in all_processes()?.flatten() {
+            if let Ok(data) = ProcData::new(&process, max_cpu_events) {
+                proc_data.insert(process.pid, data);
+            }
         }
 
         let initial_perf_events_list: Vec<String> = available_perf_events()?
@@ -255,6 +268,7 @@ impl<'a> App<'a> {
             llc_data,
             node_data,
             dsq_data: BTreeMap::new(),
+            proc_data,
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -850,7 +864,6 @@ impl<'a> App<'a> {
             self.resize_events(area_events);
         }
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_llcs = self.topo.all_llcs.len();
 
         let llc_iter = self
@@ -967,10 +980,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
-
-        Ok(())
+        self.render_process_table(frame, left)
     }
 
     /// Renders the node application state.
@@ -981,7 +991,6 @@ impl<'a> App<'a> {
             self.resize_events(area_events);
         }
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_nodes = self.topo.nodes.len();
 
         let node_iter = self
@@ -1104,9 +1113,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
-        Ok(())
+        self.render_process_table(frame, left)
     }
 
     /// Creates a sparkline for a dsq.
@@ -1774,12 +1781,9 @@ impl<'a> App<'a> {
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
-        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
 
         self.render_event(frame, right)?;
-        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
-        Ok(())
+        self.render_process_table(frame, left)
     }
 
     /// Renders the help TUI.
@@ -2219,6 +2223,79 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Render the process view.
+    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let header = [
+            "TGID",
+            "Name",
+            "Command Line",
+            "Last DSQ",
+            "CPU",
+            "LLC",
+            "NUMA",
+            "Threads",
+        ]
+        .into_iter()
+        .map(Cell::from)
+        .collect::<Row>()
+        .height(1)
+        .bold()
+        .underlined();
+
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title_top(
+                Line::from(format!("Processes (total: {})", self.proc_data.len()))
+                    .style(self.theme().title_style())
+                    .centered(),
+            );
+
+        let mut sorted_view: Vec<(&i32, &ProcData)> = self.proc_data.iter().collect();
+        sorted_view.sort_unstable_by_key(|(_, proc_data)| Reverse(proc_data.threads.len()));
+
+        let rows = sorted_view.into_iter().map(|(i, data)| {
+            [
+                Cell::from(Text::from(i.to_string())),
+                Cell::from(Text::from(data.process_name.clone())),
+                Cell::from(Text::from(data.cmdline.join(" "))),
+                Cell::from(Text::from(
+                    data.dsq.map_or(String::new(), |v| format!("0x{:X}", v)),
+                )),
+                Cell::from(Text::from(data.cpu.to_string())),
+                Cell::from(Text::from(
+                    data.llc.map_or(String::new(), |v| v.to_string()),
+                )),
+                Cell::from(Text::from(
+                    data.node.map_or(String::new(), |v| v.to_string()),
+                )),
+                Cell::from(Text::from(data.threads.len().to_string())),
+            ]
+            .into_iter()
+            .collect::<Row>()
+            .height(1)
+        });
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(8),
+                Constraint::Length(15),
+                Constraint::Fill(1),
+                Constraint::Length(18),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(4),
+                Constraint::Length(7),
+            ],
+        )
+        .header(header)
+        .block(block);
+
+        frame.render_widget(table, area);
+
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
@@ -2498,18 +2575,68 @@ impl<'a> App<'a> {
     }
 
     fn on_exec(&mut self, action: &ExecAction) {
+        let ExecAction { old_pid, pid, .. } = action;
+
+        // In case pid != old_pid
+        let old_pid: i32 = u32_to_i32(*old_pid);
+        self.proc_data.remove(&old_pid);
+
+        let pid = u32_to_i32(*pid);
+        if let Ok(new_proc_data) = ProcData::from_tgid(pid, self.max_cpu_events) {
+            self.proc_data.insert(pid, new_proc_data);
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exec(action);
         }
     }
 
     fn on_exit(&mut self, action: &ExitAction) {
+        let ExitAction { pid, tgid, .. } = action;
+
+        let pid: i32 = u32_to_i32(*pid);
+        let tgid: i32 = u32_to_i32(*tgid);
+
+        if pid == tgid {
+            self.proc_data.remove(&pid);
+        } else if let Entry::Occupied(entry) = self.proc_data.entry(tgid) {
+            entry.into_mut().remove_thread(pid);
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exit(action);
         }
     }
 
     fn on_fork(&mut self, action: &ForkAction) {
+        let ForkAction {
+            parent_tgid,
+            child_pid,
+            child_tgid,
+            ..
+        } = action;
+
+        let parent_tgid: i32 = u32_to_i32(*parent_tgid);
+        let child_tgid: i32 = u32_to_i32(*child_tgid);
+        let child_pid: i32 = u32_to_i32(*child_pid);
+
+        if parent_tgid == child_tgid {
+            // Fork created a new thread for an existing process
+            match self.proc_data.entry(parent_tgid) {
+                Entry::Vacant(entry) => {
+                    if let Ok(proc_data) = ProcData::from_tgid(parent_tgid, self.max_cpu_events) {
+                        entry.insert(proc_data);
+                    }
+                }
+                Entry::Occupied(entry) => entry.into_mut().add_thread(child_pid),
+            }
+        } else {
+            // Fork created a fully new process
+            if let Ok(new_proc_data) = ProcData::from_tgid(child_pid, self.max_cpu_events) {
+                self.proc_data.insert(child_pid, new_proc_data);
+            }
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_fork(action);
         }
@@ -2542,8 +2669,10 @@ impl<'a> App<'a> {
             next_dsq_nr_queued,
             next_dsq_lat_us,
             next_dsq_vtime,
+            next_tgid,
             prev_dsq_id,
             prev_used_slice_ns,
+            prev_tgid,
             ..
         } = action;
 
@@ -2553,6 +2682,42 @@ impl<'a> App<'a> {
             }
             return;
         }
+
+        let topo_cpu = self
+            .topo
+            .all_cpus
+            .get(&(*cpu as usize))
+            .expect("Cpu should exist in topology");
+        let llc = topo_cpu.llc_id;
+        let node = topo_cpu.node_id;
+
+        let mut insert_or_update = |tgid: i32, dsq: u64| {
+            match self.proc_data.entry(tgid) {
+                Entry::Vacant(entry) => {
+                    if let Ok(mut proc_data) = ProcData::from_tgid(tgid, self.max_cpu_events) {
+                        proc_data.cpu = u32_to_i32(*cpu);
+                        proc_data.llc = Some(llc as u32);
+                        proc_data.node = Some(node as u32);
+                        proc_data.dsq = Some(dsq);
+                        entry.insert(proc_data);
+                    }
+                }
+                Entry::Occupied(mut entry) => {
+                    let proc_data = entry.get_mut();
+                    proc_data.cpu = u32_to_i32(*cpu);
+                    proc_data.llc = Some(llc as u32);
+                    proc_data.node = Some(node as u32);
+                    proc_data.dsq = Some(dsq);
+                }
+            };
+        };
+
+        let next_tgid = u32_to_i32(*next_tgid);
+        let prev_tgid = u32_to_i32(*prev_tgid);
+
+        insert_or_update(next_tgid, *next_dsq_id);
+        insert_or_update(prev_tgid, *prev_dsq_id);
+
         if self.scheduler.is_empty() {
             return;
         }

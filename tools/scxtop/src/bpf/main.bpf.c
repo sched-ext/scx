@@ -856,7 +856,7 @@ int BPF_PROG(on_sched_exit, struct task_struct *task)
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	if (!(event = try_reserve_event()))
@@ -880,7 +880,7 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	if (!(event = try_reserve_event()))
@@ -890,7 +890,9 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.fork.parent_pid = BPF_CORE_READ(parent, pid);
+	event->event.fork.parent_tgid = BPF_CORE_READ(parent, tgid);
 	event->event.fork.child_pid = BPF_CORE_READ(child, pid);
+	event->event.fork.child_tgid = BPF_CORE_READ(child, tgid);
 	record_real_comm(event->event.fork.parent_comm, parent);
 	record_real_comm(event->event.fork.child_comm, child);
 
@@ -904,7 +906,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	if (!(event = try_reserve_event()))

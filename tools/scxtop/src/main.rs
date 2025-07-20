@@ -9,10 +9,10 @@ use scxtop::bpf_skel::types::bpf_event;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
-use scxtop::get_clock_value;
 use scxtop::mangoapp::poll_mangoapp;
-use scxtop::read_file_string;
 use scxtop::tracer::Tracer;
+use scxtop::util::get_clock_value;
+use scxtop::util::read_file_string;
 use scxtop::Action;
 use scxtop::App;
 use scxtop::CpuStatTracker;
@@ -92,6 +92,9 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
         skel.progs.on_sched_wakeup_new.attach()?,
         skel.progs.on_sched_waking.attach()?,
         skel.progs.on_sched_migrate_task.attach()?,
+        skel.progs.on_sched_fork.attach()?,
+        skel.progs.on_sched_exec.attach()?,
+        skel.progs.on_sched_exit.attach()?,
     ];
 
     // 6.13 compatibility
@@ -186,10 +189,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
 
             let mut skel = skel.load()?;
             skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
-            let mut links = attach_progs(&mut skel)?;
-            links.push(skel.progs.on_sched_fork.attach()?);
-            links.push(skel.progs.on_sched_exec.attach()?);
-            links.push(skel.progs.on_sched_exit.attach()?);
+            let links = attach_progs(&mut skel)?;
             links.push(skel.progs.on_sched_wait.attach()?);
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
