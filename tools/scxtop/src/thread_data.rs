@@ -38,6 +38,6 @@ impl ThreadData {
             max_data_size,
         };
 
-        Ok(threaqd_data)
+        Ok(thread_data)
     }
 }
