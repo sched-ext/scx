@@ -2255,7 +2255,7 @@ impl<'a> App<'a> {
                 Cell::from(Text::from(data.process_name.clone())),
                 Cell::from(Text::from(data.cmdline.join(" "))),
                 Cell::from(Text::from(
-                    data.dsq.map_or(String::new(), |v| format!("0x{:X}", v)),
+                    data.dsq.map_or(String::new(), |v| format!("0x{v:X}")),
                 )),
                 Cell::from(Text::from(data.cpu.to_string())),
                 Cell::from(Text::from(
