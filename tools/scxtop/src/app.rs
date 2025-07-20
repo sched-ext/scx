@@ -52,8 +52,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
-        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
-        Table,
+        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
     },
     Frame,
 };

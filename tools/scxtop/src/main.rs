@@ -188,7 +188,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
 
             let mut skel = skel.load()?;
             skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
-            let links = attach_progs(&mut skel)?;
+            let mut links = attach_progs(&mut skel)?;
             links.push(skel.progs.on_sched_wait.attach()?);
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());

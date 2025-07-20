@@ -33,14 +33,12 @@ impl ProcData {
         let cpu = proc_stats
             .processor
             .expect("proc_stats should have processor");
-        let cmdline = process.cmdline().unwrap_or(vec![]);
+        let cmdline = process.cmdline().unwrap_or_default();
 
         let mut threads = BTreeMap::new();
-        for thread in process.tasks()? {
-            if let Ok(thread) = thread {
-                let thread_data = ThreadData::new(thread, max_data_size)?;
-                threads.insert(thread_data.pid, thread_data);
-            }
+        for thread in process.tasks()?.flatten() {
+            let thread_data = ThreadData::new(thread, max_data_size)?;
+            threads.insert(thread_data.pid, thread_data);
         }
 
         let proc_data = Self {
