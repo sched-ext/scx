@@ -64,10 +64,12 @@ use std::collections::BTreeMap;
 pub const APP: &str = "scxtop";
 pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
-pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
-
-This software may be used and distributed according to the terms of the 
-GNU General Public License version 2.";
+pub const LICENSE: &str = concat!(
+    "Copyright (c) Meta Platforms, Inc. and affiliates.\n",
+    "\n",
+    "This software may be used and distributed according to the terms of the \n",
+    "GNU General Public License version 2."
+);
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
