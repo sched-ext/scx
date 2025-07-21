@@ -136,6 +136,9 @@ const volatile struct {
 	.select_idle_in_enqueue = true,
 };
 
+extern int sched_core_priority __ksym;
+extern bool sched_itmt_capable __ksym;
+
 const volatile u32 debug = 2;
 const u32 zero_u32 = 0;
 extern const volatile u32 nr_cpu_ids;
@@ -1889,6 +1892,7 @@ static s32 init_cpu(int cpu)
 	struct node_ctx *nodec;
 	struct llc_ctx *llcx;
 	struct cpu_ctx *cpuc;
+	int *prio;
 
 	if (!(cpuc = lookup_cpu_ctx(cpu)))
 		return -ENOENT;
@@ -1905,6 +1909,7 @@ static s32 init_cpu(int cpu)
 		return -ENOENT;
 	}
 
+
 	// copy for each cpu, doesn't matter if it gets overwritten.
 	llcx->nr_cpus += 1;
 	llcx->id = cpu_llc_ids[cpu];
@@ -1912,6 +1917,14 @@ static s32 init_cpu(int cpu)
 	nodec->id = cpu_node_ids[cpu];
 	cpuc->intr_atq = llcx->intr_atq;
 	cpuc->mig_atq = llcx->mig_atq;
+
+	if ((bool)&sched_itmt_capable &&
+	    (prio = (int *)bpf_per_cpu_ptr(&sched_core_priority, cpu))) {
+		cpuc->prio = *prio;
+		trace("CFG CPU[%d] prio->%d", cpu, *prio);
+	} else {
+		cpuc->prio = 0;
+	}
 
 	if (cpuc->is_big) {
 		trace("CPU[%d] is big", cpu);

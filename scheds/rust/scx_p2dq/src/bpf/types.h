@@ -16,6 +16,7 @@ struct cpu_ctx {
 	u32				dsq_index;
 	u64				slice_ns;
 	u32				perf;
+	int				prio;
 	bool				interactive;
 	bool				is_big;
 	bool				nice_task;
