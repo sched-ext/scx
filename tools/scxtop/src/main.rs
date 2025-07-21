@@ -38,7 +38,6 @@ use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
 use log::debug;
 use log::info;
-use log::warn;
 use ratatui::crossterm::event::{KeyCode::Char, KeyEvent};
 use simplelog::{
     ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger, TerminalMode, WriteLogger,
@@ -140,16 +139,6 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     if let Ok(link) = skel.progs.on_pstate_sample.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel.progs.on_sched_wait.attach() {
-        links.push(link);
-    } else {
-        warn!("tradepoint on_sched_wait is missing, tracepoint not loaded");
-    }
-    if let Ok(link) = skel.progs.on_sched_hang.attach() {
-        links.push(link);
-    } else {
-        warn!("tradepoint on_sched_hang is missing, tracepoint not loaded");
-    }
 
     Ok(links)
 }
@@ -196,6 +185,14 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let skel = builder.open(&mut open_object)?;
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
+            compat::cond_kprobe_enable(
+                "__tracepoint_sched_process_wait",
+                &skel.progs.on_sched_wait,
+            )?;
+            compat::cond_kprobe_enable(
+                "__tracepoint_sched_process_hang",
+                &skel.progs.on_sched_hang,
+            )?;
 
             let mut skel = skel.load()?;
             skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
@@ -365,6 +362,8 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
+            compat::cond_kprobe_enable("__tracepoint_sched_process_wait", &skel.progs.on_sched_wait)?;
+            compat::cond_kprobe_enable("__tracepoint_sched_process_hang", &skel.progs.on_sched_hang)?;
             let mut skel = skel.load()?;
             let mut links = attach_progs(&mut skel)?;
             skel.progs.scxtop_init.test_run(ProgramInput::default())?;
