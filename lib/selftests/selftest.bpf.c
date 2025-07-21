@@ -17,6 +17,12 @@ int arena_selftest(void)
 		return ret;
 	}
 
+	ret = scx_selftest_btree();
+	if (ret) {
+		bpf_printk("scx_selftest_btree failed with %d", ret);
+		return ret;
+	}
+
 	ret = scx_selftest_minheap();
 	if (ret) {
 		bpf_printk("scx_selftest_minheap failed with %d", ret);
