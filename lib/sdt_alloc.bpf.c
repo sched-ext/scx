@@ -528,7 +528,7 @@ static void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 	data->tid.idx = idx;
 }
 
-__weak
+__hidden
 u64 scx_alloc_internal(struct scx_allocator *alloc)
 {
 	struct scx_alloc_stack __arena *stack = prealloc_stack;
