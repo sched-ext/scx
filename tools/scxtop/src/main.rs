@@ -38,6 +38,7 @@ use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
 use log::debug;
 use log::info;
+use log::warn;
 use ratatui::crossterm::event::{KeyCode::Char, KeyEvent};
 use simplelog::{
     ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger, TerminalMode, WriteLogger,
@@ -139,6 +140,16 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     if let Ok(link) = skel.progs.on_pstate_sample.attach() {
         links.push(link);
     }
+    if let Ok(link) = skel.progs.on_sched_wait.attach() {
+        links.push(link);
+    } else {
+        warn!("tradepoint on_sched_wait is missing, tracepoint not loaded");
+    }
+    if let Ok(link) = skel.progs.on_sched_hang.attach() {
+        links.push(link);
+    } else {
+        warn!("tradepoint on_sched_hang is missing, tracepoint not loaded");
+    }
 
     Ok(links)
 }
@@ -188,9 +199,7 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
 
             let mut skel = skel.load()?;
             skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
-            let mut links = attach_progs(&mut skel)?;
-            links.push(skel.progs.on_sched_wait.attach()?);
-            links.push(skel.progs.on_sched_hang.attach()?);
+            let links = attach_progs(&mut skel)?;
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
