@@ -51,8 +51,8 @@ const volatile u32 degradation_freq_frac32 = 1;
 const volatile u64 degradation_frac7 = 0;
 
 const volatile u32 kprobe_delays_freq_frac32 = 1;
-const volatile u64 kprobe_delays_min_ns = 1; /* for veristat */
-const volatile u64 kprobe_delays_max_ns = 2; /* for veristat */
+const volatile u64 kprobe_delays_min_ns = 1;
+const volatile u64 kprobe_delays_max_ns = 2;
 
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))

@@ -35,7 +35,6 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            // Probably should break this up into multiple lines
             "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}\n\tchaos excluded/skipped {}/{}\n\tkprobe_random_delays {}\n\ttimer kicks: {}",
             self.trait_random_delays,
             self.trait_cpu_freq,
