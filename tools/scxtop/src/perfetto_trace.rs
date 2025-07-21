@@ -15,7 +15,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::edm::ActionHandler;
-use crate::get_clock_value;
+use crate::util::get_clock_value;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
@@ -545,6 +545,7 @@ impl PerfettoTraceManager {
             child_pid,
             parent_comm,
             child_comm,
+            ..
         } = action;
 
         self.ftrace_events.entry(*cpu).or_default().push({

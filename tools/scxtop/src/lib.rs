@@ -19,13 +19,15 @@ pub mod mangoapp;
 mod mem_stats;
 mod node_data;
 mod perfetto_trace;
+mod proc_data;
 pub mod profiling_events;
 mod search;
 mod stats;
 mod theme;
+mod thread_data;
 pub mod tracer;
 mod tui;
-mod util;
+pub mod util;
 
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
@@ -39,6 +41,7 @@ pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
+pub use proc_data::ProcData;
 pub use profiling_events::{
     available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
     ProfilingEvent,
@@ -47,12 +50,9 @@ pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
 pub use theme::AppTheme;
+pub use thread_data::ThreadData;
 pub use tui::Event;
 pub use tui::Tui;
-pub use util::format_hz;
-pub use util::get_clock_value;
-pub use util::read_file_string;
-pub use util::sanitize_nbsp;
 
 pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
@@ -157,7 +157,9 @@ pub struct ForkAction {
     pub ts: u64,
     pub cpu: u32,
     pub parent_pid: u32,
+    pub parent_tgid: u32,
     pub child_pid: u32,
+    pub child_tgid: u32,
     pub parent_comm: SsoString,
     pub child_comm: SsoString,
 }
@@ -532,7 +534,9 @@ impl TryFrom<&bpf_event> for Action {
                     ts: event.ts,
                     cpu: event.cpu,
                     parent_pid: fork.parent_pid,
+                    parent_tgid: fork.parent_tgid,
                     child_pid: fork.child_pid,
+                    child_tgid: fork.child_tgid,
                     parent_comm: parent_comm.into(),
                     child_comm: child_comm.into(),
                 }))
