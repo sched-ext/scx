@@ -67,7 +67,6 @@ use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
-use std::cmp::Reverse;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
@@ -518,6 +517,21 @@ impl<'a> App<'a> {
                 .write()
                 .unwrap()
                 .update(&mut system_guard)?;
+        }
+
+        let system_active_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let mut to_remove = vec![];
+
+        for (&i, proc_data) in self.proc_data.iter_mut() {
+            match proc_data.update_cpu_usage() {
+                Ok(_) => proc_data.set_cpu_util(system_active_util),
+                Err(_) => to_remove.push(i),
+            }
+        }
+
+        // If we weren't able to update the stats, it is because the process is no longer alive
+        for key in to_remove {
+            self.proc_data.remove(&key);
         }
 
         if self.state == AppState::Scheduler {
@@ -2231,6 +2245,7 @@ impl<'a> App<'a> {
             "LLC",
             "NUMA",
             "Threads",
+            "CPU%",
         ]
         .into_iter()
         .map(Cell::from)
@@ -2248,7 +2263,12 @@ impl<'a> App<'a> {
             );
 
         let mut sorted_view: Vec<(&i32, &ProcData)> = self.proc_data.iter().collect();
-        sorted_view.sort_unstable_by_key(|(_, proc_data)| Reverse(proc_data.threads.len()));
+        sorted_view.sort_unstable_by(|a, b| {
+            b.1.cpu_util_perc
+                .partial_cmp(&a.1.cpu_util_perc)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.threads.len().cmp(&a.1.threads.len()))
+        });
 
         let rows = sorted_view.into_iter().map(|(i, data)| {
             [
@@ -2266,6 +2286,7 @@ impl<'a> App<'a> {
                     data.node.map_or(String::new(), |v| v.to_string()),
                 )),
                 Cell::from(Text::from(data.threads.len().to_string())),
+                Cell::from(Text::from(format!("{:?}", data.cpu_util_perc))),
             ]
             .into_iter()
             .collect::<Row>()
@@ -2283,6 +2304,7 @@ impl<'a> App<'a> {
                 Constraint::Length(3),
                 Constraint::Length(4),
                 Constraint::Length(7),
+                Constraint::Length(4),
             ],
         )
         .header(header)
