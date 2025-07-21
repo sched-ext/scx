@@ -51,6 +51,8 @@ const volatile u32 degradation_freq_frac32 = 1;
 const volatile u64 degradation_frac7 = 0;
 
 const volatile u32 kprobe_delays_freq_frac32 = 1;
+const volatile u64 kprobe_delays_min_ns = 1;
+const volatile u64 kprobe_delays_max_ns = 2;
 
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -251,17 +253,16 @@ out:
 }
 
 __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_flags,
-				struct chaos_task_ctx *taskc __arg_nonnull)
+				struct chaos_task_ctx *taskc __arg_nonnull, u64 min_ns, u64 max_ns)
 {
 	u64 rand64 = ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
 
-	u64 vtime = bpf_ktime_get_ns() + random_delays_min_ns;
-	if (random_delays_min_ns != random_delays_max_ns) {
-		vtime += rand64 % (random_delays_max_ns - random_delays_min_ns);
+	u64 vtime = bpf_ktime_get_ns() + min_ns;
+	if (min_ns != max_ns) {
+		vtime += rand64 % (max_ns - min_ns);
 	}
 
 	scx_bpf_dsq_insert_vtime(p, get_cpu_delay_dsq(-1), 0, vtime, enq_flags);
-	chaos_stat_inc(CHAOS_STAT_TRAIT_RANDOM_DELAYS);
 
 	return true;
 }
@@ -272,10 +273,22 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 	bool out;
 
 	switch (taskc->next_trait) {
-	case CHAOS_TRAIT_RANDOM_DELAYS:
-		out = enqueue_random_delay(p, enq_flags, taskc);
+	case CHAOS_TRAIT_KPROBE_RANDOM_DELAYS:
+		out = enqueue_random_delay(p,
+					   enq_flags,
+					   taskc,
+					   kprobe_delays_min_ns,
+					   kprobe_delays_max_ns);
+		chaos_stat_inc(CHAOS_STAT_KPROBE_RANDOM_DELAYS);
 		break;
-
+	case CHAOS_TRAIT_RANDOM_DELAYS:
+		out = enqueue_random_delay(p,
+					   enq_flags,
+					   taskc,
+					   random_delays_min_ns,
+					   random_delays_max_ns);
+		chaos_stat_inc(CHAOS_STAT_TRAIT_RANDOM_DELAYS);
+		break;
 	case CHAOS_TRAIT_NONE:
 		chaos_stat_inc(CHAOS_STAT_CHAOS_SKIPPED);
 		out = false;
@@ -503,7 +516,8 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	if (promise.kind == P2DQ_ENQUEUE_PROMISE_FAILED)
 		goto cleanup;
 
-	if (taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS &&
+	if ((taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS ||
+		taskc->next_trait == CHAOS_TRAIT_KPROBE_RANDOM_DELAYS) &&
 	    enqueue_chaotic(p, enq_flags, taskc))
 		goto cleanup;
 
@@ -592,7 +606,7 @@ void BPF_STRUCT_OPS(chaos_tick, struct task_struct *p)
 	if (!(taskc = lookup_create_chaos_task_ctx(p)))
 		return;
 
-	if (taskc->pending_trait == CHAOS_TRAIT_RANDOM_DELAYS)
+	if (taskc->pending_trait == CHAOS_TRAIT_KPROBE_RANDOM_DELAYS)
 		p->scx.slice = 0;
 }
 
@@ -643,7 +657,7 @@ int generic(struct pt_regs *ctx)
 
 	u32 roll = bpf_get_prandom_u32();
 	if (roll <= kprobe_delays_freq_frac32) {
-		taskc->pending_trait = CHAOS_TRAIT_RANDOM_DELAYS;
+		taskc->pending_trait = CHAOS_TRAIT_KPROBE_RANDOM_DELAYS;
 		dbg("GENERIC: setting pending_trait to RANDOM_DELAYS - task[%d]", p->pid);
 	}
 
