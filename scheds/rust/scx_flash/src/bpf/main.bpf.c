@@ -9,6 +9,16 @@
 
 #define DSQ_FLAG_NODE	(1LLU << 32)
 
+extern unsigned CONFIG_HZ __kconfig;
+
+/*
+ * Return the time interval between two ticks in ns.
+ */
+static inline u64 tick_interval_ns(void)
+{
+	return NSEC_PER_SEC / CONFIG_HZ;
+}
+
 /*
  * Thresholds for applying hysteresis to CPU performance scaling:
  *  - CPUFREQ_LOW_THRESH: below this level, reduce performance to minimum
@@ -239,6 +249,20 @@ struct {
 	__type(key, u32);
 	__type(value, struct throttle_timer);
 } throttle_timer SEC(".maps");
+
+/*
+ * Timer used to preempt CPUs in tickless mode.
+ */
+struct tickless_timer {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct tickless_timer);
+} tickless_timer SEC(".maps");
 
 /*
  * Per-node context.
@@ -485,7 +509,8 @@ static inline u64 nr_tasks_waiting(s32 cpu)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
-	return scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
+	return scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) +
+	       scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
 	       scx_bpf_dsq_nr_queued(node_to_dsq(node));
 }
 
@@ -1173,6 +1198,14 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 static bool is_cpu_busy(s32 cpu)
 {
 	const struct cpu_ctx *cctx;
+
+	/*
+	 * If no other tasks are contending for this CPU, consider the CPU
+	 * as non-busy.
+	 */
+	if (!nr_tasks_waiting(cpu))
+		return false;
+
 	/*
 	 * Determine whether a CPU is considered busy using the following logic:
 	 *  - if a fixed threshold is provided (@cpu_busy_thresh), use it
@@ -1331,25 +1364,6 @@ static bool can_enqueue_to_cpu(const struct task_struct *p, s32 cpu)
 }
 
 /*
- * If tickless mode is enabled, check whether the task running on @cpu
- * needs to be preempted and, in that case, assign a regular time slice to
- * it.
- */
-static void preempt_curr(s32 cpu)
-{
-	struct task_struct *curr;
-
-	if (!tickless_sched)
-		return;
-
-	bpf_rcu_read_lock();
-	curr = scx_bpf_cpu_rq(cpu)->curr;
-	if (curr->scx.slice == SCX_SLICE_INF)
-		curr->scx.slice = task_slice(curr, cpu);
-	bpf_rcu_read_unlock();
-}
-
-/*
  * Enqueue a task when running in round-robin mode.
  */
 static void rr_enqueue(struct task_struct *p, struct task_ctx *tctx,
@@ -1390,12 +1404,6 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
-
-	/*
-	 * Task is going to be enqueued, so check whether its previously
-	 * used CPU needs to be preempted.
-	 */
-	preempt_curr(prev_cpu);
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -1965,6 +1973,50 @@ static void init_cpuperf_target(void)
 }
 
 /*
+ * Tickless timer used to preempt CPUs.
+ */
+static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
+{
+	s32 cpu;
+	int err;
+
+	/*
+	 * Check if we need to preempt the running tasks.
+	 */
+	bpf_rcu_read_lock();
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct task_struct *p;
+
+		/*
+		 * Ignore CPU if idle task is running.
+		 */
+		p = scx_bpf_cpu_rq(cpu)->curr;
+		if (p->flags & PF_IDLE)
+			continue;
+
+		/*
+		 * Ignore CPUs without any task waiting.
+		 */
+		if (!nr_tasks_waiting(cpu))
+			continue;
+
+		/*
+		 * Set a finite time slice to the running task, so that it
+		 * can be preempted.
+		 */
+		if (p->scx.slice == SCX_SLICE_INF)
+			p->scx.slice = slice_min;
+	}
+	bpf_rcu_read_unlock();
+
+	err = bpf_timer_start(timer, tick_interval_ns(), 0);
+	if (err)
+		scx_bpf_error("Failed to re-arm tickless timer");
+
+	return 0;
+}
+
+/*
  * Throttle timer used to inject idle time across all the CPUs.
  */
 static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -2132,6 +2184,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	if (err)
 		return err;
 
+	timer = bpf_map_lookup_elem(&tickless_timer, &key);
+	if (!timer) {
+		scx_bpf_error("Failed to lookup tickless timer");
+		return -ESRCH;
+	}
+
+	/*
+	 * Fire the tickless timer if tickless mode is enabled.
+	 */
+	if (tickless_sched) {
+		bpf_timer_init(timer, &tickless_timer, CLOCK_MONOTONIC);
+		bpf_timer_set_callback(timer, tickless_timerfn);
+		err = bpf_timer_start(timer, tick_interval_ns(), 0);
+		if (err) {
+			scx_bpf_error("Failed to arm tickless timer");
+			return err;
+		}
+	}
+
 	timer = bpf_map_lookup_elem(&throttle_timer, &key);
 	if (!timer) {
 		scx_bpf_error("Failed to lookup throttle timer");
@@ -2142,7 +2213,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 	 * Fire the throttle timer if CPU throttling is enabled.
 	 */
 	if (throttle_ns) {
-		bpf_timer_init(timer, &throttle_timer, CLOCK_BOOTTIME);
+		bpf_timer_init(timer, &throttle_timer, CLOCK_MONOTONIC);
 		bpf_timer_set_callback(timer, throttle_timerfn);
 		err = bpf_timer_start(timer, slice_max, 0);
 		if (err) {
@@ -2161,7 +2232,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 		return -ESRCH;
 	}
 
-	bpf_timer_init(timer, &numa_timer, CLOCK_BOOTTIME);
+	bpf_timer_init(timer, &numa_timer, CLOCK_MONOTONIC);
 	bpf_timer_set_callback(timer, numa_timerfn);
 	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
 	if (err) {
