@@ -631,7 +631,7 @@ int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
     return 0;
 }
 
-SEC("tp_btf/sched_process_hang")
+SEC("?tp_btf/sched_process_hang")
 int BPF_PROG(on_sched_hang, struct task_struct *p)
 {
 	struct bpf_event *event;
@@ -945,7 +945,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	return 0;
 }
 
-SEC("tp_btf/sched_process_wait")
+SEC("?tp_btf/sched_process_wait")
 int BPF_PROG(on_sched_wait, struct pid *pid)
 {
 	struct bpf_event *event;
