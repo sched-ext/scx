@@ -275,18 +275,18 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 	switch (taskc->next_trait) {
 	case CHAOS_TRAIT_KPROBE_RANDOM_DELAYS:
 		out = enqueue_random_delay(p,
-								   enq_flags,
-								   taskc,
-								   kprobe_delays_min_ns,
-								   kprobe_delays_max_ns);
+					   enq_flags,
+					   taskc,
+					   kprobe_delays_min_ns,
+					   kprobe_delays_max_ns);
 		chaos_stat_inc(CHAOS_STAT_KPROBE_RANDOM_DELAYS);
 		break;
 	case CHAOS_TRAIT_RANDOM_DELAYS:
 		out = enqueue_random_delay(p,
-								   enq_flags,
-								   taskc,
-								   random_delays_min_ns,
-								   random_delays_max_ns);
+					   enq_flags,
+					   taskc,
+					   random_delays_min_ns,
+					   random_delays_max_ns);
 		chaos_stat_inc(CHAOS_STAT_TRAIT_RANDOM_DELAYS);
 		break;
 	case CHAOS_TRAIT_NONE:
