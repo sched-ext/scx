@@ -51,10 +51,7 @@ pub struct EnergyModel {
 
 impl EnergyModel {
     pub fn has_energy_model() -> bool {
-        match get_pd_paths() {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        get_pd_paths().is_ok()
     }
 
     /// Build a complete EnergyModel
@@ -78,7 +75,7 @@ impl EnergyModel {
     pub fn get_pd_by_cpu_id(&self, cpu_id: usize) -> Option<&PerfDomain> {
         for (_, pd) in self.perf_doms.iter() {
             if pd.span.test_cpu(cpu_id) {
-                return Some(&pd);
+                return Some(pd);
             }
         }
         None
