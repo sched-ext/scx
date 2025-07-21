@@ -185,12 +185,12 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let skel = builder.open(&mut open_object)?;
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
+            compat::cond_tracepoint_enable("sched:sched_process_wait", &skel.progs.on_sched_wait)?;
+            compat::cond_tracepoint_enable("sched:sched_process_hang", &skel.progs.on_sched_hang)?;
 
             let mut skel = skel.load()?;
             skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
-            let mut links = attach_progs(&mut skel)?;
-            links.push(skel.progs.on_sched_wait.attach()?);
-            links.push(skel.progs.on_sched_hang.attach()?);
+            let links = attach_progs(&mut skel)?;
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
@@ -356,6 +356,8 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
+            compat::cond_tracepoint_enable("sched:sched_process_wait", &skel.progs.on_sched_wait)?;
+            compat::cond_tracepoint_enable("sched:sched_process_hang", &skel.progs.on_sched_hang)?;
             let mut skel = skel.load()?;
             let mut links = attach_progs(&mut skel)?;
             skel.progs.scxtop_init.test_run(ProgramInput::default())?;
