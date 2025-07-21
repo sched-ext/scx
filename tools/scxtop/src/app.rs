@@ -2236,11 +2236,13 @@ impl<'a> App<'a> {
         .map(Cell::from)
         .collect::<Row>()
         .height(1)
+        .style(self.theme().text_color())
         .bold()
         .underlined();
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
+            .border_style(self.theme().border_style())
             .title_top(
                 Line::from(format!("Processes (total: {})", self.proc_data.len()))
                     .style(self.theme().title_style())
@@ -2270,6 +2272,7 @@ impl<'a> App<'a> {
             .into_iter()
             .collect::<Row>()
             .height(1)
+            .style(self.theme().text_color())
         });
 
         let table = Table::new(
