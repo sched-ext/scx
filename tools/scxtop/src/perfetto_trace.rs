@@ -18,8 +18,8 @@ use crate::edm::ActionHandler;
 use crate::util::get_clock_value;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    IPIAction, KprobeAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, SystemStatAction, WaitAction,
+    IPIAction, KprobeAction, SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction, SystemStatAction, WaitAction,
 };
 
 use perfetto_protos::{
@@ -37,8 +37,8 @@ use perfetto_protos::{
     process_tree::{process_tree::Process, ProcessTree},
     sched::{
         SchedMigrateTaskFtraceEvent, SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent,
-        SchedProcessForkFtraceEvent, SchedProcessWaitFtraceEvent, SchedSwitchFtraceEvent,
-        SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
+        SchedProcessForkFtraceEvent, SchedProcessHangFtraceEvent, SchedProcessWaitFtraceEvent,
+        SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
     },
     sys_stats::{sys_stats::CpuTimes, sys_stats::MeminfoValue, SysStats},
     sys_stats_counters::MeminfoCounters,
@@ -699,6 +699,26 @@ impl PerfettoTraceManager {
                         prio: Some(*prio),
                         dest_cpu: Some((*dest_cpu).try_into().unwrap()),
                         ..SchedMigrateTaskFtraceEvent::default()
+                    },
+                )),
+                ..FtraceEvent::default()
+            }
+        });
+    }
+
+    /// Adds events for on sched_hang.
+    pub fn on_sched_hang(&mut self, action: &SchedHangAction) {
+        let SchedHangAction { ts, cpu, comm, pid } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            FtraceEvent {
+                timestamp: Some(*ts),
+                pid: Some(*pid),
+                event: Some(ftrace_event::Event::SchedProcessHang(
+                    SchedProcessHangFtraceEvent {
+                        comm: Some(comm.as_str().to_string()),
+                        pid: Some((*pid).try_into().unwrap()),
+                        special_fields: SpecialFields::new(),
                     },
                 )),
                 ..FtraceEvent::default()

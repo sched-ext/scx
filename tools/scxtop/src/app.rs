@@ -34,8 +34,9 @@ use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, KprobeAction, MangoAppAction, PstateSampleAction,
-    SchedCpuPerfSetAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction, WaitAction,
+    SchedCpuPerfSetAction, SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    WaitAction,
 };
 
 use anyhow::{bail, Result};
@@ -2785,6 +2786,12 @@ impl<'a> App<'a> {
         }
     }
 
+    fn on_sched_hang(&mut self, action: &SchedHangAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_sched_hang(action);
+        }
+    }
+
     // Groups built-in dsq's (GLOBAL, LOCAL, and LOCAL-ON)
     fn classify_dsq(dsq_id: u64) -> u64 {
         if dsq_id & scx_enums.SCX_DSQ_FLAG_BUILTIN == 0 {
@@ -2963,6 +2970,9 @@ impl<'a> App<'a> {
             }
             Action::SchedMigrateTask(a) => {
                 self.on_sched_migrate(a);
+            }
+            Action::SchedHang(a) => {
+                self.on_sched_hang(a);
             }
             Action::SoftIRQ(a) => {
                 self.on_softirq(a);

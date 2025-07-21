@@ -230,6 +230,14 @@ pub struct SchedMigrateTaskAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedHangAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub comm: SsoString,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SoftIRQAction {
     pub cpu: u32,
     pub pid: u32,
@@ -366,6 +374,7 @@ pub enum Action {
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedHang(SchedHangAction),
     SchedMigrateTask(SchedMigrateTaskAction),
     SchedReg,
     SchedStats(String),
@@ -503,6 +512,19 @@ impl TryFrom<&bpf_event> for Action {
                     pid: migrate.pid,
                     prio: migrate.prio,
                     comm: comm.into(),
+                }))
+            }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_SCHED_HANG => {
+                let hang = unsafe { &event.event.hang };
+
+                let comm = String::from_utf8_lossy(&hang.comm);
+
+                Ok(Action::SchedHang(SchedHangAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    comm: comm.into(),
+                    pid: hang.pid,
                 }))
             }
             bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
