@@ -120,13 +120,14 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 
 /*
  * task_ctx is the per-task information kept by scx_mitosis
-*/
+ */
 struct task_ctx {
 	/* cpumask is the set of valid cpus this task can schedule on */
 	/* (tasks cpumask anded with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
+	u64 basis_vtime;
 	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;
 	/* For the sake of scheduling, a task is exclusively owned by either a cell
@@ -200,7 +201,7 @@ static inline struct cell *lookup_cell(int idx)
 /*
  * Cells are allocated concurrently in some cases (e.g. cgroup_init).
  * allocate_cell and free_cell enable these allocations to be done safely
-*/
+ */
 static inline int allocate_cell()
 {
 	int cell_idx;
@@ -239,8 +240,10 @@ static inline int free_cell(int cell_idx)
  */
 struct cell_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
-	/* To avoid allocation on the reconfiguration path, have a second cpumask we
-	   can just do an xchg on. */
+	/*
+	 * To avoid allocation on the reconfiguration path, have a second cpumask we
+	 * can just do an xchg on.
+	 */
 	struct bpf_cpumask __kptr *tmp_cpumask;
 };
 
@@ -417,7 +420,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 /*
  * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
-*/
+ */
 static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 				   struct cgroup *cg)
 {
@@ -641,13 +644,15 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
 
+	tctx->basis_vtime = basis_vtime;
+
 	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
 		scx_bpf_error("vtime is too far in the future for %d", p->pid);
 		goto out;
 	}
 	/*
-     * Limit the amount of budget that an idling task can accumulate
-     * to one slice.
+	 * Limit the amount of budget that an idling task can accumulate
+	 * to one slice.
 	 */
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
@@ -696,17 +701,17 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-     * The move_to_local can fail if we raced with some other cpu in the cell
-     * and now the cell is empty. We have to ensure to try the cpu_dsq or else
-     * we might never wakeup.
-     */
+	 * The move_to_local can fail if we raced with some other cpu in the cell
+	 * and now the cell is empty. We have to ensure to try the cpu_dsq or else
+	 * we might never wakeup.
+	 */
 	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq))
 		scx_bpf_dsq_move_to_local(dsq);
 }
 
 /*
  * On tick, we apply CPU assignment
-*/
+ */
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
 	if (bpf_get_smp_processor_id())
@@ -716,7 +721,7 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	if (local_configuration_seq == READ_ONCE(applied_configuration_seq))
 		return;
 
-	// Get the root cell (cell 0) and its cpumask
+	/* Get the root cell (cell 0) and its cpumask */
 	struct cell_cpumask_wrapper *root_cell_cpumaskw;
 	int zero = 0;
 	if (!(root_cell_cpumaskw =
@@ -743,9 +748,11 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	}
 	bpf_cpumask_copy(root_bpf_cpumask, (const struct cpumask *)all_cpumask);
 
-	// Iterate through the rest of the cells and (if in_use), clear their cpus
-	// from the root cell and assign them to the correct core
-	// TODO: Handle freed cells by giving their cores back to the root cell
+	/*
+	 * Iterate through the rest of the cells and (if in_use), clear their cpus
+	 * from the root cell and assign them to the correct core
+	 * TODO: Handle freed cells by giving their cores back to the root cell
+	 */
 	int cell_idx;
 	bpf_for(cell_idx, 1, MAX_CELLS)
 	{
@@ -858,11 +865,13 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
  * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
  * and with different lengths. Some bpf_core_type_matches finagling can make
  * this all work.
-*/
+ */
 #define MAX_CPUMASK_ENTRIES (4)
 
-/* We don't know how big struct cpumask is at compile time, so just allocate a
-   large space and check that it is big enough at runtime */
+/*
+ * We don't know how big struct cpumask is at compile time, so just allocate a
+ * large space and check that it is big enough at runtime
+ */
 #define CPUMASK_LONG_ENTRIES (128)
 #define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
 
@@ -920,7 +929,7 @@ struct cpuset___cpumask_arr {
  * If we see a cgroup with a cpuset, that will define a new cell and we can
  * allocate it right here. Note, full core assignment must be synchronized so
  * that happens in tick()
-*/
+ */
 static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 					  struct cgroup *cgrp)
 {
@@ -1071,7 +1080,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 	}
 
 	bpf_cgroup_release(parent_cg);
-	// Otherwise initialize to parent's cell
+	/* Otherwise initialize to parent's cell */
 	cgc->cell = parent_cgc->cell;
 	return 0;
 }
@@ -1157,13 +1166,103 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	return 0;
 }
 
+__hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
+{
+	u32 u, v = 0;
+
+	bpf_for(u, 0, 32)
+	{
+		s32 cpu = 32 * word + u;
+		if (cpu < nr_possible_cpus &&
+		    bpf_cpumask_test_cpu(cpu, cpumask))
+			v |= 1 << u;
+	}
+	scx_bpf_dump("%08x", v);
+}
+
+static void dump_cpumask(const struct cpumask *cpumask)
+{
+	u32 word, nr_words = (nr_possible_cpus + 31) / 32;
+
+	bpf_for(word, 0, nr_words)
+	{
+		if (word)
+			scx_bpf_dump(",");
+		dump_cpumask_word(nr_words - word - 1, cpumask);
+	}
+}
+
+static void dump_cell_cpumask(int id)
+{
+	const struct cpumask *cell_cpumask;
+
+	if (!(cell_cpumask = lookup_cell_cpumask(id)))
+		return;
+
+	dump_cpumask(cell_cpumask);
+}
+
+void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
+{
+	u64 dsq_id;
+	int i;
+	struct cell *cell;
+	struct cpu_ctx *cpu_ctx;
+
+	scx_bpf_dump_header();
+
+	bpf_for(i, 0, MAX_CELLS)
+	{
+		if (!(cell = lookup_cell(i)))
+			return;
+
+		if (!cell->in_use)
+			continue;
+
+		scx_bpf_dump("CELL[%d] CPUS=", i);
+		dump_cell_cpumask(i);
+		scx_bpf_dump("\n");
+		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
+			     READ_ONCE(cell->vtime_now),
+			     scx_bpf_dsq_nr_queued(i));
+	}
+
+	bpf_for(i, 0, nr_possible_cpus)
+	{
+		if (!(cpu_ctx = lookup_cpu_ctx(i)))
+			return;
+
+		dsq_id = cpu_dsq(i);
+		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
+			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
+			     scx_bpf_dsq_nr_queued(dsq_id));
+	}
+}
+
+void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx,
+		    struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+
+	scx_bpf_dump(
+		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u dsq=%x all_cell_cpus_allowed=%d\n",
+		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell,
+		tctx->dsq, tctx->all_cell_cpus_allowed);
+	scx_bpf_dump("Task[%d] CPUS=", p->pid);
+	dump_cpumask(p->cpus_ptr);
+	scx_bpf_dump("\n");
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 {
 	struct bpf_cpumask *cpumask;
 	u32 i;
 	s32 ret;
 
-	// setup all_cpumask
+	/* setup all_cpumask */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
@@ -1252,6 +1351,8 @@ struct sched_ext_ops mitosis = {
 	.cgroup_init = (void *)mitosis_cgroup_init,
 	.cgroup_exit = (void *)mitosis_cgroup_exit,
 	.cgroup_move = (void *)mitosis_cgroup_move,
+	.dump = (void *)mitosis_dump,
+	.dump_task = (void *)mitosis_dump_task,
 	.init = (void *)mitosis_init,
 	.exit = (void *)mitosis_exit,
 	.name = "mitosis",
