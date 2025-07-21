@@ -122,7 +122,7 @@ static u32 task_pick_domain(task_ptr taskc, struct task_struct *p,
 				first_dom = dom;
 
 			if (taskc->preferred_dom_mask == 0)
-			       continue;
+				continue;
 
 			if (((1LLU << dom) & taskc->preferred_dom_mask)
 			    && preferred_dom == NO_DOM_FOUND)
