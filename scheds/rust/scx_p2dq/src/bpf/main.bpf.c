@@ -300,6 +300,43 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
+static struct cpu_ctx *lookup_cpu_ctx_may_fail(int cpu)
+{
+	struct cpu_ctx *cpuc;
+
+	if (cpu < 0) {
+		cpuc = bpf_map_lookup_elem(&cpu_ctxs, &zero_u32);
+	} else {
+		cpuc = bpf_map_lookup_percpu_elem(&cpu_ctxs,
+						  &zero_u32, cpu);
+	}
+
+	return cpuc;
+}
+
+SEC("kprobe/sched_set_itmt_core_prio")
+int BPF_KPROBE(set_itmt_core_prio)
+{
+	struct cpu_ctx *cpuc;
+	int cpu, *prio;
+
+	if (!(bool)&sched_itmt_capable)
+		return 0;
+
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!(cpuc = lookup_cpu_ctx_may_fail(cpu)))
+			return -EINVAL;
+
+		prio = (int *)bpf_per_cpu_ptr(&sched_core_priority, cpu);
+		if (!prio)
+			return -EINVAL;
+		cpuc->prio = *prio;
+		trace("CFG CPU[%d] prio->%d", cpu, *prio);
+	}
+
+	return 0;
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -1908,7 +1945,6 @@ static s32 init_cpu(int cpu)
 		scx_bpf_error("failed to get ctxs for cpu %u", cpu);
 		return -ENOENT;
 	}
-
 
 	// copy for each cpu, doesn't matter if it gets overwritten.
 	llcx->nr_cpus += 1;

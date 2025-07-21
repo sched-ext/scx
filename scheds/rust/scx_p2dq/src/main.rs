@@ -93,6 +93,7 @@ struct CliOpts {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
+    _links: Vec<libbpf_rs::Link>,
     verbose: u8,
 
     stats_server: StatsServer<(), Metrics>,
@@ -121,6 +122,8 @@ impl<'a> Scheduler<'a> {
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
 
+        let _links = vec![skel.progs.set_itmt_core_prio.attach()?];
+
         scx_p2dq::init_skel!(&mut skel);
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -128,6 +131,7 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             struct_ops: None,
+            _links,
             verbose,
             stats_server,
         })
