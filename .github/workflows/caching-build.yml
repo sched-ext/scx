@@ -55,6 +55,7 @@ jobs:
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
+      - uses: actions/checkout@v4
       - run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-build-kernels
       - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
 
