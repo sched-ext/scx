@@ -2241,6 +2241,8 @@ impl<'a> App<'a> {
             "Name",
             "Command Line",
             "Last DSQ",
+            "Slice ns",
+            "Max Lat us",
             "CPU",
             "LLC",
             "NUMA",
@@ -2273,6 +2275,11 @@ impl<'a> App<'a> {
         });
 
         let rows = sorted_view.into_iter().map(|(i, data)| {
+            let slice_data = data.event_data_immut("slice_consumed");
+            let slice_stats = VecStats::new(&slice_data, None);
+
+            let lat_data = data.event_data_immut("lat_us");
+            let lat_stats = VecStats::new(&lat_data, None);
             [
                 Cell::from(Text::from(i.to_string())),
                 Cell::from(Text::from(data.process_name.clone())),
@@ -2280,6 +2287,8 @@ impl<'a> App<'a> {
                 Cell::from(Text::from(
                     data.dsq.map_or(String::new(), |v| format!("0x{v:X}")),
                 )),
+                Cell::from(Text::from(slice_stats.avg.to_string())),
+                Cell::from(Text::from(lat_stats.max.to_string())),
                 Cell::from(Text::from(data.cpu.to_string())),
                 Cell::from(Text::from(
                     data.llc.map_or(String::new(), |v| v.to_string()),
@@ -2303,6 +2312,8 @@ impl<'a> App<'a> {
                 Constraint::Length(15),
                 Constraint::Fill(1),
                 Constraint::Length(18),
+                Constraint::Length(8),
+                Constraint::Length(10),
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Length(4),
@@ -2739,6 +2750,14 @@ impl<'a> App<'a> {
 
         insert_or_update(next_tgid, *next_dsq_id);
         insert_or_update(prev_tgid, *prev_dsq_id);
+
+        if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
+            proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
+        }
+
+        if let Some(proc_data) = self.proc_data.get_mut(&next_tgid) {
+            proc_data.add_event_data("lat_us", *next_dsq_lat_us);
+        }
 
         if self.scheduler.is_empty() {
             return;
