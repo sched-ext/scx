@@ -33,6 +33,7 @@ volatile bool		no_core_compaction;
 volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
+const volatile bool	no_slice_boost;
 const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
@@ -83,6 +84,10 @@ struct {
 
 #ifndef max
 #define max(X, Y) (((X) < (Y)) ? (Y) : (X))
+#endif
+
+#ifndef clamp
+#define clamp(val, lo, hi) min(max(val, lo), hi)
 #endif
 
 static struct task_ctx *get_task_ctx(struct task_struct *p)
@@ -179,6 +184,21 @@ static inline void reset_task_flag(struct task_ctx *taskc, u64 flag)
 	taskc->flags &= ~flag;
 }
 
+static inline bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+{
+	return (cpuc->flags & flag) == flag;
+}
+
+static inline void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+{
+	cpuc->flags |= flag;
+}
+
+static inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+{
+	cpuc->flags &= ~flag;
+}
+
 static bool is_lat_cri(struct task_ctx *taskc)
 {
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
@@ -191,7 +211,7 @@ static bool is_lock_holder(struct task_ctx *taskc)
 
 static bool is_lock_holder_running(struct cpu_ctx *cpuc)
 {
-	return cpuc->flags & LAVD_FLAG_FUTEX_BOOST;
+	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
 }
 
 static bool have_scheduled(struct task_ctx *taskc)
@@ -200,7 +220,18 @@ static bool have_scheduled(struct task_ctx *taskc)
 	 * If task's time slice hasn't been updated, that means the task has
 	 * been scheduled by this scheduler.
 	 */
-	return taskc->slice_ns != 0;
+	return taskc->slice != 0;
+}
+
+static bool can_boost_slice(void)
+{
+	return slice_max_ns <= sys_stat.slice;
+}
+
+static bool have_pending_tasks(struct cpu_ctx *cpuc)
+{
+	return scx_bpf_dsq_nr_queued(cpuc->cpdom_id) ||
+	       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
 }
 
 static u16 get_nice_prio(struct task_struct *p)

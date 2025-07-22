@@ -90,6 +90,32 @@ volatile u64		performance_mode_ns;
 volatile u64		balanced_mode_ns;
 volatile u64		powersave_mode_ns;
 
+static void reset_suspended_duration(struct cpu_ctx *cpuc)
+{
+	if (cpuc->online_clk > cpuc->offline_clk)
+		cpuc->offline_clk = cpuc->online_clk;
+}
+
+static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
+{
+	/*
+	 * When a system is suspended, a task is also suspended in a running
+	 * stat on the CPU. Hence, we subtract the suspended duration when it
+	 * resumes.
+	 */
+	u64 duration = 0;
+
+	if (cpuc->online_clk > cpuc->offline_clk) {
+		duration = time_delta(cpuc->online_clk, cpuc->offline_clk);
+		/*
+		 * Once calculated, reset the duration to zero.
+		 */
+		cpuc->offline_clk = cpuc->online_clk;
+	}
+
+	return duration;
+}
+
 static bool is_perf_cri(struct task_ctx *taskc)
 {
 	if (!have_little_core)

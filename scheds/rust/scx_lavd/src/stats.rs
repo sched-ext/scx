@@ -153,7 +153,7 @@ pub struct SchedSample {
     #[stat(desc = "Waker's task name")]
     pub waker_comm: String,
     #[stat(desc = "Assigned time slice")]
-    pub slice_ns: u32,
+    pub slice: u64,
     #[stat(desc = "Latency criticality of this task")]
     pub lat_cri: u32,
     #[stat(desc = "Average latency criticality in a system")]
@@ -243,7 +243,7 @@ impl SchedSample {
             self.suggested_cpu_id,
             self.waker_pid,
             self.waker_comm,
-            self.slice_ns,
+            self.slice,
             self.lat_cri,
             self.avg_lat_cri,
             self.static_prio,
