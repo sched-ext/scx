@@ -1800,6 +1800,13 @@ impl<'a> App<'a> {
     fn render_help(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
         let theme = self.theme();
+        let mut pause = self
+            .config
+            .active_keymap
+            .action_keys_string(Action::SetState(AppState::Pause));
+        if pause == " " {
+            pause = "Space".to_string();
+        }
         let text = vec![
             Line::from(Span::styled(
                 LICENSE,
@@ -1972,6 +1979,10 @@ impl<'a> App<'a> {
                     "{}: quit",
                     self.config.active_keymap.action_keys_string(Action::Quit),
                 ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!("{}: press to pause/unpause", pause),
                 Style::default(),
             )),
             Line::from(Span::styled(
