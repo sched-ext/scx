@@ -19,6 +19,9 @@ pub struct ProcData {
     pub llc: Option<u32>,
     pub node: Option<u32>,
     pub dsq: Option<u64>,
+    pub prev_cpu_time: u64,
+    pub current_cpu_time: u64,
+    pub cpu_util_perc: f64,
     pub state: ProcState,
     pub cmdline: Vec<String>,
     pub threads: BTreeMap<i32, ThreadData>,
@@ -41,6 +44,8 @@ impl ProcData {
             threads.insert(thread_data.pid, thread_data);
         }
 
+        let current_cpu_time = proc_stats.stime + proc_stats.utime;
+
         let proc_data = Self {
             tgid: process.pid,
             process_name: std::mem::take(&mut proc_stats.comm),
@@ -49,6 +54,9 @@ impl ProcData {
             node: None,
             dsq: None,
             state: proc_stats.state()?,
+            prev_cpu_time: 0,
+            current_cpu_time,
+            cpu_util_perc: 0.0,
             cmdline,
             threads,
             data: EventData::new(max_data_size),
@@ -79,5 +87,24 @@ impl ProcData {
 
     pub fn remove_thread(&mut self, pid: i32) -> Option<ThreadData> {
         self.threads.remove(&pid)
+    }
+
+    pub fn update_cpu_usage(&mut self) -> Result<()> {
+        let process = Process::new(self.tgid)?;
+        let stats = process.stat()?;
+
+        self.prev_cpu_time = std::mem::take(&mut self.current_cpu_time);
+        self.current_cpu_time = stats.stime + stats.utime;
+
+        Ok(())
+    }
+
+    pub fn set_cpu_util(&mut self, system_util: u64) {
+        self.cpu_util_perc = if system_util == 0 {
+            0.0
+        } else {
+            let delta = self.current_cpu_time.saturating_sub(self.prev_cpu_time);
+            (delta as f64 / system_util as f64) * 100.0
+        };
     }
 }
