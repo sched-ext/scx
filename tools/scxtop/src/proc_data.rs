@@ -107,4 +107,14 @@ impl ProcData {
             (delta as f64 / system_util as f64) * 100.0
         };
     }
+
+    /// Returns the data for an event and updates if no entry is present.
+    pub fn event_data_immut(&self, event: &str) -> Vec<u64> {
+        self.data.event_data_immut(event)
+    }
+
+    /// Adds data for an event.
+    pub fn add_event_data(&mut self, event: &str, val: u64) {
+        self.data.add_event_data(event, val)
+    }
 }
