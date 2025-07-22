@@ -3,12 +3,18 @@ name: install-deps
 runs:
   using: 'composite'
   steps:
+    # The Azure apt repos are pretty terrible and keep timing out. Use this
+    # GitHub action to select a fast one.
+    - name: Configure fast APT mirror
+      uses: vegardit/fast-apt-mirror.sh@1.4.1
+      with:
+        exclude-current: true # the azure repo is so unstable we should never use it
+
     ### OTHER REPOS ####
     # turn off interactive, refresh pkgs
     - run: |
-        echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
         sudo rm /var/lib/man-db/auto-update
-        sudo apt-get update -y
+        sudo apt-get update
         sudo apt-get install -y tasksel
         sudo tasksel remove ubuntu-desktop
       shell: bash
@@ -17,7 +23,7 @@ runs:
 
     # Download dependencies packaged by Ubuntu
     - run: |
-        sudo apt install -f -y bison busybox-static cmake coreutils \
+        sudo apt-get install -f -y bison busybox-static cmake coreutils \
         cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod \
         libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev \
         linux-headers-generic linux-tools-common linux-tools-generic make \
