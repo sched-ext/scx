@@ -82,7 +82,6 @@ use log::warn;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
