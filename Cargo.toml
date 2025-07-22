@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "rust/scx_bpf_unittests",
+    "rust/scx_events",
     "rust/scx_lib_selftests",
     "rust/scx_loader",
     "rust/scx_rustland_core",

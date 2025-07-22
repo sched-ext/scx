@@ -28,6 +28,7 @@ use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
+use scx_events::{EventReactor, EventReactorData};
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
@@ -261,11 +262,17 @@ struct Scheduler<'a> {
     topo: Topology,
     power_profile: PowerProfile,
     stats_server: StatsServer<(), Metrics>,
+    event_reactor: EventReactor,
     user_restart: bool,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &'a Opts,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<Self> {
         set_rlimit_infinity();
 
         // Validate command line arguments.
@@ -387,6 +394,9 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, bpfland_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        let event_broker_data = EventReactorData::new(32);
+        let mut event_reactor = EventReactor::new(shutdown.clone(), event_broker_data)?;
+
         Ok(Self {
             skel,
             struct_ops,
@@ -394,7 +404,9 @@ impl<'a> Scheduler<'a> {
             topo,
             power_profile,
             stats_server,
+            event_reactor,
             user_restart: false,
+            shutdown,
         })
     }
 
@@ -664,9 +676,9 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
-        while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+        while !self.shutdown.load(Ordering::Relaxed) && !self.exited() {
             if self.refresh_sched_domain() {
                 self.user_restart = true;
                 break;
@@ -762,8 +774,8 @@ fn main() -> Result<()> {
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object)?;
-        if !sched.run(shutdown.clone())?.should_restart() {
+        let mut sched = Scheduler::init(&opts, &mut open_object, shutdown.clone())?;
+        if !sched.run()?.should_restart() {
             if sched.user_restart {
                 continue;
             }
