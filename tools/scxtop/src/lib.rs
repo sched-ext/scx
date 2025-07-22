@@ -76,22 +76,24 @@ pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 pub enum AppState {
     /// Application is in the default state.
     Default,
-    /// Application is in the PerfEvent list state.
-    PerfEvent,
-    /// Application is in the KprobeEvent list state.
-    KprobeEvent,
     /// Application is in the help state.
     Help,
+    /// Application is in the KprobeEvent list state.
+    KprobeEvent,
     /// Application is in the Llc state.
     Llc,
+    /// Application is in the mangoapp state.
+    MangoApp,
     /// Application is in the NUMA node state.
     Node,
+    /// Application is in the paused state.
+    Pause,
+    /// Application is in the PerfEvent list state.
+    PerfEvent,
     /// Application is in the scheduler state.
     Scheduler,
     /// Application is in the tracing  state.
     Tracing,
-    /// Application is in the mangoapp state.
-    MangoApp,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -643,6 +645,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
+            Action::SetState(AppState::Pause) => write!(f, "AppStatePause"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
