@@ -15,7 +15,7 @@ ci.use_clippy = true
 scx_utils = { path = "../scx_utils", version = "1.0.17" }
 
 anyhow = "1.0.65"
-libbpf-rs = "=0.25.0"
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs.git", rev = "79bf5154af40517271be81ef7fdf6e30eebac41f" }
 log = "0.4.17"
 once_cell = "1.20.2"
 
