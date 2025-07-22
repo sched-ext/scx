@@ -463,7 +463,9 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                                 if app.should_quit.load(Ordering::Relaxed) {
                                     break;
                                 }
-                                tui.draw(|f| app.render(f).expect("Failed to render application"))?;
+                                if app.state() != AppState::Pause {
+                                    tui.draw(|f| app.render(f).expect("Failed to render application"))?;
+                                }
                             }
                             Event::Key(_) => {
                                 let action = get_action(&app, &keymap, ev);
