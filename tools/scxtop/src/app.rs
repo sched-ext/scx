@@ -74,8 +74,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
-const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
-
 /// App is the struct for scxtop application state.
 pub struct App<'a> {
     config: Config,
@@ -2351,7 +2349,7 @@ impl<'a> App<'a> {
                         .areas(right);
                 self.render_scheduler("dsq_lat_us", frame, left_top, true, true)?;
                 self.render_scheduler("dsq_slice_consumed", frame, left_center, true, false)?;
-                self.render_scheduler("dsq_vtime_delta", frame, left_bottom, true, false)?;
+                self.render_scheduler("dsq_vtime", frame, left_bottom, true, false)?;
                 self.render_scheduler("dsq_nr_queued", frame, right_bottom, true, false)?;
                 self.render_scheduler_stats(frame, right_top)
             }
@@ -2709,13 +2707,6 @@ impl<'a> App<'a> {
             ..
         } = action;
 
-        if self.state == AppState::Tracing {
-            if action.ts > self.trace_start {
-                self.trace_manager.on_sched_switch(action);
-            }
-            return;
-        }
-
         let topo_cpu = self
             .topo
             .all_cpus
@@ -2759,6 +2750,13 @@ impl<'a> App<'a> {
             proc_data.add_event_data("lat_us", *next_dsq_lat_us);
         }
 
+        if self.state == AppState::Tracing {
+            if action.ts > self.trace_start {
+                self.trace_manager.on_sched_switch(action);
+            }
+            return;
+        }
+
         if self.scheduler.is_empty() {
             return;
         }
@@ -2790,22 +2788,7 @@ impl<'a> App<'a> {
             }
 
             if *next_dsq_vtime > 0 {
-                // vtime is special because we want the delta
-                let last = next_dsq_data
-                    .event_data_immut("dsq_vtime_delta")
-                    .last()
-                    .copied()
-                    .unwrap_or(0_u64);
-                if next_dsq_vtime.saturating_sub(last) < DSQ_VTIME_CUTOFF {
-                    next_dsq_data.add_event_data(
-                        "dsq_vtime_delta",
-                        if last > 0 {
-                            next_dsq_vtime.saturating_sub(last)
-                        } else {
-                            0
-                        },
-                    );
-                }
+                next_dsq_data.add_event_data("dsq_vtime", *next_dsq_vtime);
             }
         }
 
