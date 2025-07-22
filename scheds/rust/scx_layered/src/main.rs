@@ -41,6 +41,7 @@ use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
+use scx_bpf_compat;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -2144,10 +2145,16 @@ impl<'a> Scheduler<'a> {
             layer_specs.to_vec()
         };
 
+        // Check kernel features
+        init_libbpf_logging(None);
+        let kfuncs_in_syscall = scx_bpf_compat::kfuncs_supported_in_syscall()?;
+        if !kfuncs_in_syscall {
+            warn!("Using slow path: kfuncs not supported in syscall programs (a8e03b6bbb2c ∉ ker)");
+        }
+
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 1);
-        init_libbpf_logging(None);
         info!(
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
@@ -2221,6 +2228,7 @@ impl<'a> Scheduler<'a> {
         rodata.enable_antistall = !opts.disable_antistall;
         rodata.enable_match_debug = opts.enable_match_debug;
         rodata.enable_gpu_support = opts.enable_gpu_support;
+        rodata.kfuncs_supported_in_syscall = kfuncs_in_syscall;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
             rodata.__sibling_cpu[cpu] = *sib;
