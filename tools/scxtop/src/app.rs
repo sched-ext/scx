@@ -300,6 +300,7 @@ impl<'a> App<'a> {
         if self.state != AppState::Help
             && self.state != AppState::PerfEvent
             && self.state != AppState::KprobeEvent
+            && self.state != AppState::Pause
         {
             self.prev_state = self.state.clone();
         }
