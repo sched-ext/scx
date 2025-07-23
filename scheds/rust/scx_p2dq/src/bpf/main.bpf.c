@@ -140,8 +140,8 @@ const volatile struct {
 	.select_idle_in_enqueue = true,
 };
 
-extern int sched_core_priority __ksym;
-extern bool sched_itmt_capable __ksym;
+extern int sched_core_priority __ksym __weak;
+extern bool sched_itmt_capable __ksym __weak;
 
 const volatile u32 debug = 2;
 const u32 zero_u32 = 0;
