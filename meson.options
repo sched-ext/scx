@@ -39,12 +39,6 @@ option(
   description: 'openrc init.d service file'
 )
 option(
-  'libalpm',
-  type: 'feature',
-  value: 'auto',
-  description: 'install pacman hooks'
-)
-option(
   'build_outside_src',
   type: 'boolean',
   value: false,
