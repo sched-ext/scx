@@ -6,6 +6,12 @@
 #include "intf.h"
 
 /*
+ * Maximum amount of CPUs supported by the scheduler when flat or preferred
+ * idle CPU scan is enabled.
+ */
+#define MAX_CPUS	1024
+
+/*
  * Shared DSQ used to schedule tasks in deadline mode when the system is
  * saturated.
  *
@@ -38,7 +44,22 @@ const volatile bool primary_all = true;
 /*
  * Enable flat iteration to find idle CPUs (fast but inaccurate).
  */
-const volatile bool flat_idle_scan = true;
+const volatile bool flat_idle_scan = false;
+
+/*
+ * CPUs in the system have SMT is enabled.
+ */
+const volatile bool smt_enabled = true;
+
+/*
+ * Enable preferred cores prioritization.
+ */
+const volatile bool preferred_idle_scan = false;
+
+/*
+ * CPUs sorted by their capacity in descendent order.
+ */
+const volatile u64 preferred_cpus[MAX_CPUS];
 
 /*
  * Enable cpufreq integration.
@@ -260,6 +281,20 @@ static inline bool is_system_busy(void)
 }
 
 /*
+ * Return the cpumask of fully idle SMT cores within the NUMA node that
+ * contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_smtmask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_smtmask();
+
+	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
  * Return true if the CPU is running the idle thread, false otherwise.
  */
 static inline bool is_cpu_idle(s32 cpu)
@@ -268,39 +303,110 @@ static inline bool is_cpu_idle(s32 cpu)
 }
 
 /*
- * Find an idle CPU iterating over the available CPUs, instead of relying
- * on the idle cpumasks.
- *
- * This method might be inaccurate, but it's less expensive than operating
- * on cpumasks with simple topologies, especially under light or moderate
- * load.
+ * Try to pick the best idle CPU based on the @preferred_cpus ranking.
+ * Return a full-idle SMT core if @do_idle_smt is true, or any idle CPU if
+ * @do_idle_smt is false.
  */
-static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
+static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
+				  const struct cpumask *primary, const struct cpumask *smt)
 {
 	static u32 last_cpu;
-	s32 start, i;
+	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS);
+	int i, start;
 
-	if (is_cpu_idle(prev_cpu))
+	if (is_prev_allowed &&
+	    (!primary || bpf_cpumask_test_cpu(prev_cpu, primary)) &&
+	    (!smt || bpf_cpumask_test_cpu(prev_cpu, smt)) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 		return prev_cpu;
 
-	if (is_pcpu_task(p))
-		return -EBUSY;
-
 	start = last_cpu;
-	bpf_for(i, 0, nr_cpu_ids) {
-		s32 cpu = (start + i) % nr_cpu_ids;
+	bpf_for(i, 0, max_cpus) {
+		/*
+		 * If @preferred_idle_scan is true, always scan the CPUs in
+		 * the preferred order, otherwise rotate the CPUs to
+		 * distribute the load more evenly.
+		 */
+		s32 cpu = preferred_idle_scan ?
+				preferred_cpus[i] : (start + i) % max_cpus;
 
-		if (cpu == prev_cpu)
+		if ((cpu == prev_cpu) || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
-		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-		    is_cpu_idle(cpu)) {
-			last_cpu = cpu + 1;
+		if ((!primary || bpf_cpumask_test_cpu(cpu, primary)) &&
+		    (!smt || bpf_cpumask_test_cpu(cpu, smt)) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu)) {
+			if (!preferred_idle_scan)
+				last_cpu = cpu + 1;
 			return cpu;
 		}
 	}
 
 	return -EBUSY;
+}
+
+/*
+ * Return the optimal idle CPU for task @p or -EBUSY if no idle CPU is
+ * found.
+ */
+static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
+{
+	const struct cpumask *smt, *primary;
+	bool is_prev_allowed = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
+	s32 cpu;
+
+	primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
+	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
+
+	/*
+	 * If the task can't migrate, there's no point looking for other
+	 * CPUs.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
+			goto out;
+		}
+	}
+
+	if (!primary_all) {
+		if (smt_enabled) {
+			/*
+			 * Try to pick a full-idle core in the primary
+			 * domain.
+			 */
+			cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, smt);
+			if (cpu >= 0)
+				goto out;
+		}
+
+		/*
+		 * Try to pick any idle CPU in the primary domain.
+		 */
+		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, NULL);
+		if (cpu >= 0)
+			goto out;
+	}
+
+	if (smt_enabled) {
+		/*
+		 * Try to pick any full-idle core in the system.
+		 */
+		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, smt);
+		if (cpu >= 0)
+			goto out;
+	}
+
+	/*
+	 * Try to pick any idle CPU in the system.
+	 */
+	cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, NULL);
+
+out:
+	if (smt)
+		scx_bpf_put_cpumask(smt);
+
+	return cpu;
 }
 
 /*
@@ -315,10 +421,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	s32 cpu;
 
 	/*
-	 * Use the lightweight idle CPU scanning if flat idle scan is
-	 * enabled and all the CPUs are included in the primary domain.
+	 * Use lightweight idle CPU scanning when flat or preferred idle
+	 * scan is enabled, unless the system is busy, in which case the
+	 * cpumask-based scanning is more efficient.
 	 */
-	if (flat_idle_scan && primary_all && !is_system_busy())
+	if ((flat_idle_scan || preferred_idle_scan) && !is_system_busy())
 		return pick_idle_cpu_flat(p, prev_cpu);
 
 	/*
