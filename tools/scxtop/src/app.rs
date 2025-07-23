@@ -33,10 +33,9 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, KprobeAction, MangoAppAction, PstateSampleAction,
-    SchedCpuPerfSetAction, SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
-    WaitAction,
+    HwPressureAction, IPIAction, KprobeAction, MangoAppAction, SchedCpuPerfSetAction,
+    SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction, WaitAction,
 };
 
 use anyhow::{bail, Result};
@@ -98,7 +97,6 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
-    pstate: bool,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
@@ -257,7 +255,6 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            pstate: true,
             cpu_data,
             llc_data,
             node_data,
@@ -622,7 +619,7 @@ impl<'a> App<'a> {
         Bar::default()
             .value(value)
             .label(Line::from(format!(
-                "{}{}{}{}",
+                "{}{}{}",
                 cpu,
                 if self.collect_cpu_freq {
                     format!(
@@ -634,18 +631,6 @@ impl<'a> App<'a> {
                                 .copied()
                                 .unwrap_or(0)
                         )
-                    )
-                } else {
-                    "".to_string()
-                },
-                if self.pstate {
-                    format!(
-                        " {}",
-                        cpu_data
-                            .event_data_immut("pstate")
-                            .last()
-                            .copied()
-                            .unwrap_or(0)
                     )
                 } else {
                     "".to_string()
@@ -665,30 +650,16 @@ impl<'a> App<'a> {
 
     /// Creates a sparkline for a cpu.
     fn cpu_sparkline(&self, cpu: usize, max: u64, borders: Borders, small: bool) -> Sparkline {
-        let mut perf: u64 = 0;
         let mut cpu_freq: u64 = 0;
         let mut hw_pressure: u64 = 0;
-        let mut pstate: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self
                 .cpu_data
                 .get(&cpu)
                 .expect("CpuData should have been present");
-            perf = cpu_data
-                .event_data_immut("perf")
-                .last()
-                .copied()
-                .unwrap_or(0);
             if self.collect_cpu_freq {
                 cpu_freq = cpu_data
                     .event_data_immut("cpu_freq")
-                    .last()
-                    .copied()
-                    .unwrap_or(0);
-            }
-            if self.pstate {
-                pstate = cpu_data
-                    .event_data_immut("pstate")
                     .last()
                     .copied()
                     .unwrap_or(0);
@@ -713,21 +684,8 @@ impl<'a> App<'a> {
             .block(
                 Block::new()
                     .title(format!(
-                        "{} perf({}){}{}",
+                        "{}{}{}",
                         cpu,
-                        if perf == 0 {
-                            "".to_string()
-                        } else {
-                            format!(
-                                "{}{}",
-                                perf,
-                                if self.pstate {
-                                    format!("/{pstate}")
-                                } else {
-                                    "".to_string()
-                                }
-                            )
-                        },
                         if self.collect_cpu_freq {
                             format!(" {}", format_hz(cpu_freq))
                         } else {
@@ -2612,15 +2570,6 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("perf", perf as u64);
     }
 
-    fn on_pstate_sample(&mut self, action: &PstateSampleAction) {
-        let PstateSampleAction { cpu, busy } = action;
-        let cpu_data = self
-            .cpu_data
-            .get_mut(&(*cpu as usize))
-            .expect("CpuData should have been present");
-        cpu_data.add_event_data("pstate", *busy as u64);
-    }
-
     fn on_exec(&mut self, action: &ExecAction) {
         let ExecAction { old_pid, pid, .. } = action;
 
@@ -2965,9 +2914,6 @@ impl<'a> App<'a> {
                 }
             }
             Action::NextViewState => self.next_view_state(),
-            Action::PstateSample(a) => {
-                self.on_pstate_sample(a);
-            }
             Action::SchedReg => {
                 self.on_scheduler_load()?;
             }

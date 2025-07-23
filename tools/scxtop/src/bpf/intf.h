@@ -40,7 +40,6 @@ enum event_type {
 	GPU_MEM,
 	HW_PRESSURE,
 	IPI,
-	PSTATE_SAMPLE,
 	SCHED_HANG,
     	SCHED_MIGRATE,
 	SCHED_REG,
@@ -170,10 +169,6 @@ struct trace_started_event {
 	bool		stop_scheduled;
 };
 
-struct pstate_sample_event {
-	u32             busy;
-};
-
 struct kprobe_event {
 	u32             pid;
 	u64             instruction_pointer;
@@ -193,7 +188,6 @@ struct bpf_event {
 		struct  cpuhp_enter_event chp;
 		struct  cpuhp_exit_event cxp;
 		struct	ipi_event ipi;
-		struct  pstate_sample_event pstate;
 		struct	sched_switch_event sched_switch;
 		struct	set_perf_event perf;
 		struct	softirq_event softirq;
