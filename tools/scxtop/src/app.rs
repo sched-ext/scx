@@ -295,6 +295,10 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
+        if self.state == AppState::Tracing {
+            return;
+        }
+
         if self.state != AppState::Help
             && self.state != AppState::PerfEvent
             && self.state != AppState::KprobeEvent
