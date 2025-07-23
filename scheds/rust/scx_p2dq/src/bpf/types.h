@@ -16,7 +16,6 @@ struct cpu_ctx {
 	u32				dsq_index;
 	u64				slice_ns;
 	u32				perf;
-	int				prio;
 	bool				interactive;
 	bool				is_big;
 	bool				nice_task;
@@ -55,6 +54,8 @@ struct llc_ctx {
 
 	scx_atq_t			*intr_atq;
 	scx_atq_t			*mig_atq;
+	scx_minheap_t			*idle_cpu_heap;
+	arena_spinlock_t		idle_lock;
 };
 
 struct node_ctx {

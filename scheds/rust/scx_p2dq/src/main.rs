@@ -93,7 +93,6 @@ struct CliOpts {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    _links: Vec<libbpf_rs::Link>,
     verbose: u8,
 
     stats_server: StatsServer<(), Metrics>,
@@ -119,10 +118,9 @@ impl<'a> Scheduler<'a> {
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
+        open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
-
-        let _links = vec![skel.progs.set_itmt_core_prio.attach()?];
 
         scx_p2dq::init_skel!(&mut skel);
 
@@ -131,7 +129,6 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             struct_ops: None,
-            _links,
             verbose,
             stats_server,
         })
