@@ -429,6 +429,7 @@ impl Builder<'_> {
         if self.p2dq_opts.queued_wakeup {
             open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
+        open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
 
         match self.requires_ppid {
             None => {
