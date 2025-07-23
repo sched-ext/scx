@@ -244,18 +244,6 @@ void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	u64 deadline;
 
-	 /*
-	  * Directly dispatch the task if it can only run on a primary CPU.
-	  * These tasks are not eligible to run on tickless CPUs, so we
-	  * want to place them immediately on their only usable CPU.
-	  */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
-		if (is_primary_cpu(cpu)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-			return;
-		}
-	}
-
 	/*
 	 * Insert the task to the shared queue.
 	 */
@@ -265,6 +253,14 @@ void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
 
 	deadline = task_deadline(p, tctx);
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, deadline, enq_flags);
+}
+
+/*
+ * Return true if @p can only run on a single CPU, false otherwise.
+ */
+static inline bool is_pcpu_task(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
 }
 
 /*
@@ -292,6 +288,30 @@ static bool dispatch_cpu(s32 cpu, bool from_dispatch)
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			bpf_task_release(p);
 			continue;
+		}
+
+		/*
+		 * If there's an eligible task in the SHARED_DSQ that can
+		 * run on this CPU, clear the CPU's idle state and dispatch
+		 * the task. Otherwise, immediately give up and move to the
+		 * next CPU, since the goal is to avoid contention as much
+		 * as possible, so that tasks can keep using their infinite
+		 * time slice.
+		 *
+		 * However, if the first eligible task in the SHARED_DSQ is
+		 * a per-CPU task, dispatch it regardless of the CPU's idle
+		 * state, since contention is unavoidable in this case (the
+		 * task can only run on this CPU). Then the currently
+		 * running task will be made preemptible by the BPF timer,
+		 * changing its time slice from SCX_SLICE_INF to a finite
+		 * slice_ns.
+		 *
+		 * In this way we can still minimize CPU contention without
+		 * introducing starvation for per-CPU tasks.
+		 */
+		if (!scx_bpf_test_and_clear_cpu_idle(cpu) && !is_pcpu_task(p)) {
+			bpf_task_release(p);
+			break;
 		}
 
 		if (!__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL_ON | cpu, 0)) {
@@ -342,7 +362,7 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 		 * dispatch a task.
 		 */
 		cpu = preferred_cpus[i];
-		if ((mask && !bpf_cpumask_test_cpu(cpu, mask)) || !scx_bpf_test_and_clear_cpu_idle(cpu))
+		if ((mask && !bpf_cpumask_test_cpu(cpu, mask)))
 			continue;
 
 		/*
