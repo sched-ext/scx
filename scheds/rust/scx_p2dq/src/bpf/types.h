@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lib/atq.h>
+#include <lib/minheap.h>
 
 struct p2dq_timer {
 	// if set to 0 the timer will only be scheduled once

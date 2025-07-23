@@ -13,6 +13,7 @@
 #include "../../../../include/scx/bpf_arena_common.bpf.h"
 #include "../../../../include/lib/atq.h"
 #include "../../../../include/lib/cpumask.h"
+#include "../../../../include/lib/minheap.h"
 #include "../../../../include/lib/percpu.h"
 #include "../../../../include/lib/sdt_task.h"
 #include "../../../../include/lib/topology.h"
@@ -21,6 +22,7 @@
 #include <scx/bpf_arena_common.bpf.h>
 #include <lib/atq.h>
 #include <lib/cpumask.h>
+#include <lib/minheap.h>
 #include <lib/percpu.h>
 #include <lib/sdt_task.h>
 #include <lib/topology.h>
