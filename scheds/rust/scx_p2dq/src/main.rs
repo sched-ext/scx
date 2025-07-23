@@ -118,6 +118,7 @@ impl<'a> Scheduler<'a> {
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
+        open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
 

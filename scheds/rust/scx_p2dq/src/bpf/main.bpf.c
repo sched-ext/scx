@@ -13,6 +13,7 @@
 #include "../../../../include/scx/bpf_arena_common.bpf.h"
 #include "../../../../include/lib/atq.h"
 #include "../../../../include/lib/cpumask.h"
+#include "../../../../include/lib/minheap.h"
 #include "../../../../include/lib/percpu.h"
 #include "../../../../include/lib/sdt_task.h"
 #include "../../../../include/lib/topology.h"
@@ -21,6 +22,7 @@
 #include <scx/bpf_arena_common.bpf.h>
 #include <lib/atq.h>
 #include <lib/cpumask.h>
+#include <lib/minheap.h>
 #include <lib/percpu.h>
 #include <lib/sdt_task.h>
 #include <lib/topology.h>
@@ -114,6 +116,7 @@ const volatile struct {
 	u32 interactive_ratio;
 
 	bool atq_enabled;
+	bool cpu_priority;
 	bool freq_control;
 	bool interactive_dsq;
 	bool interactive_fifo;
@@ -128,6 +131,7 @@ const volatile struct {
 	.interactive_ratio = 10,
 
 	.atq_enabled = false,
+	.cpu_priority = false,
 	.freq_control = false,
 	.interactive_fifo = true,
 	.interactive_sticky = false,
@@ -135,6 +139,9 @@ const volatile struct {
 	.kthreads_local = true,
 	.select_idle_in_enqueue = true,
 };
+
+extern int sched_core_priority __ksym __weak;
+extern bool sched_itmt_capable __ksym __weak;
 
 const volatile u32 debug = 2;
 const u32 zero_u32 = 0;
@@ -194,6 +201,21 @@ static __always_inline u64 clamp_slice(u64 slice_ns)
 static __always_inline s32 __pick_idle_cpu(struct bpf_cpumask *mask, int flags)
 {
 	return scx_bpf_pick_idle_cpu(cast_mask(mask), flags);
+}
+
+static __always_inline s32 pref_idle_cpu(struct llc_ctx *llcx)
+{
+	struct scx_minheap_elem helem;
+	int ret;
+
+	if ((ret = arena_spin_lock((void __arena *)&llcx->idle_lock)))
+		return ret;
+	ret = scx_minheap_pop(llcx->idle_cpu_heap, &helem);
+	arena_spin_unlock((void __arena *)&llcx->idle_lock);
+	if (ret)
+		return -EINVAL;
+
+	return (s32)helem.elem;
 }
 
 static __always_inline u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
@@ -295,6 +317,22 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cpuc;
+}
+
+static inline int cpu_priority(s32 cpu)
+{
+	bool itmt_enabled;
+	int *prio;
+
+	itmt_enabled = (bool)&sched_itmt_capable;
+	if (!itmt_enabled)
+		return 1;
+
+	prio = bpf_per_cpu_ptr(&sched_core_priority, cpu);
+	if (!prio)
+		return 1;
+
+	return *prio;
 }
 
 struct {
@@ -610,7 +648,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	struct llc_ctx *llcx;
-	s32 cpu = prev_cpu;
+	s32 pref_cpu, cpu = prev_cpu;
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
@@ -767,6 +805,17 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	     ) >= 0) {
 		*is_idle = true;
 		goto found_cpu;
+	}
+
+	if (p2dq_config.cpu_priority) {
+		pref_cpu = pref_idle_cpu(llcx);
+		if (llcx->cpumask && pref_cpu >= 0 &&
+		    scx_bpf_test_and_clear_cpu_idle(pref_cpu)) {
+			*is_idle = true;
+			cpu = pref_cpu;
+			trace("PREF idle %s->%d", p->comm, pref_cpu);
+			goto found_cpu;
+		}
 	}
 
 	// Try a idle CPU in the llc
@@ -1654,6 +1703,44 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 		p->nr_cpus_allowed == topo_config.nr_cpus;
 }
 
+void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
+{
+	struct llc_ctx *llcx;
+	u64 idle_score;
+	int ret, priority;
+
+	if (!idle ||
+	    !p2dq_config.cpu_priority ||
+	    cpu >= topo_config.nr_cpus ||
+	    cpu < 0)
+		return;
+
+	if (!(llcx = lookup_llc_ctx(cpu_llc_ids[cpu]))) {
+		scx_bpf_error("failed to lookup ctx");
+		return;
+	}
+
+	/*
+	 * The idle_score factors relative CPU performance. It could also
+	 * consider the last time the CPU went idle in the future.
+	 */
+
+	priority = cpu_priority(cpu);
+	if (priority < 0)
+		priority = 1;
+
+	// Since we use a minheap convert the highest prio to lowest score.
+	idle_score = (1<<10) - (u64)priority;
+
+	if ((ret = arena_spin_lock((void __arena *)&llcx->idle_lock)))
+		return;
+
+	scx_minheap_insert(llcx->idle_cpu_heap, (u64)cpu, idle_score);
+	arena_spin_unlock((void __arena *)&llcx->idle_lock);
+
+	return;
+}
+
 static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 					       struct scx_init_task_args *args)
 {
@@ -2198,6 +2285,14 @@ static __always_inline s32 p2dq_init_impl()
 		cpuc->intr_dsq = llcx->intr_dsq;
 	}
 
+	if (p2dq_config.cpu_priority) {
+		bpf_for(i, 0, topo_config.nr_llcs) {
+			if (!(llcx = lookup_llc_ctx(i)))
+				return -EINVAL;
+			llcx->idle_cpu_heap = scx_minheap_alloc(llcx->nr_cpus);
+		}
+	}
+
 	min_slice_ns = 1000 * timeline_config.min_slice_us;
 
 	if (start_timers() < 0)
@@ -2252,6 +2347,7 @@ SCX_OPS_DEFINE(p2dq,
 	       .running			= (void *)p2dq_running,
 	       .stopping		= (void *)p2dq_stopping,
 	       .set_cpumask		= (void *)p2dq_set_cpumask,
+	       .update_idle		= (void *)p2dq_update_idle,
 	       .init_task		= (void *)p2dq_init_task,
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .init			= (void *)p2dq_init,
