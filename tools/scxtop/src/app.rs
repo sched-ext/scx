@@ -1982,7 +1982,7 @@ impl<'a> App<'a> {
                 Style::default(),
             )),
             Line::from(Span::styled(
-                format!("{}: press to pause/unpause", pause),
+                format!("{pause}: press to pause/unpause"),
                 Style::default(),
             )),
             Line::from(Span::styled(
