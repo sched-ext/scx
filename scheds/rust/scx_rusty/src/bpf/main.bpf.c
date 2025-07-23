@@ -198,6 +198,7 @@ struct {
 	__uint(map_flags, 0);
 } node_data SEC(".maps");
 
+
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
 };
@@ -302,6 +303,7 @@ static void task_load_adj(struct task_ctx *taskc,
 {
 	taskc->runnable = runnable;
 	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
+	ravg_accumulate(&taskc->l3_rd, taskc->l3_traffic, now, load_half_life);
 }
 
 static struct bucket_ctx *lookup_dom_bucket(dom_ptr dom_ctx,
@@ -343,7 +345,7 @@ static u64 scale_inverse_fair(u64 value, u64 weight)
 	return value * 100 / weight;
 }
 
-static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
+static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable, s64 l3_adj)
 {
 	struct bucket_ctx *bucket;
 	struct lock_wrapper *lockw;
@@ -363,19 +365,22 @@ static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 
 	bpf_spin_lock(&lockw->lock);
 	bucket->dcycle += adj;
+	bucket->l3 += l3_adj;
 	ravg_accumulate(&bucket->rd, bucket->dcycle, now, load_half_life);
+	ravg_accumulate(&bucket->l3_rd, bucket->l3, now, load_half_life);
 	bpf_spin_unlock(&lockw->lock);
 
-	if (adj < 0 && (s64)bucket->dcycle < 0)
-		scx_bpf_error("cpu%d dom%u bucket%u load underflow (dcycle=%lld adj=%lld)",
+	if ((adj < 0 && (s64)bucket->dcycle < 0) || ((s64) bucket->l3 - l3_adj < 0))
+		scx_bpf_error("cpu%d dom%u bucket%u load underflow (dcycle=%lld l3=%lld adj=%lld l3_adj=%lld)",
 			      bpf_get_smp_processor_id(), dom_id, bucket_idx,
-			      bucket->dcycle, adj);
+			      bucket->dcycle, bucket->l3, adj, l3_adj);
 
 	if (debug >=2 &&
 	    (!domc->dbg_dcycle_printed_at || now - domc->dbg_dcycle_printed_at >= 1000000000)) {
-		bpf_printk("DCYCLE ADJ dom=%u bucket=%u adj=%lld dcycle=%u avg_dcycle=%llu",
+		bpf_printk("ADJ dom=%u bucket=%u adj=%lld dcycle=%u avg_dcycle=%llu avg_l3=%llu",
 			   dom_id, bucket_idx, adj, bucket->dcycle,
-			   ravg_read(&bucket->rd, now, load_half_life) >> RAVG_FRAC_BITS);
+			   ravg_read(&bucket->rd, now, load_half_life) >> RAVG_FRAC_BITS,
+			   ravg_read(&bucket->l3_rd, now, load_half_life) >> RAVG_FRAC_BITS);
 		domc->dbg_dcycle_printed_at = now;
 	}
 }
@@ -387,8 +392,9 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	struct bucket_ctx *from_bucket, *to_bucket;
 	u32 idx = 0, weight = taskc->weight;
 	struct lock_wrapper *from_lockw, *to_lockw;
-	struct ravg_data task_dcyc_rd;
+	struct ravg_data task_dcyc_rd, task_l3_rd;
 	u64 from_dcycle[2], to_dcycle[2], task_dcycle;
+	u64 from_l3[2], to_l3[2], task_l3;
 
 	from_lockw = lookup_dom_bkt_lock(from_domc->id, weight);
 	to_lockw = lookup_dom_bkt_lock(to_domc->id, weight);
@@ -409,42 +415,63 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
 	task_dcyc_rd = taskc->dcyc_rd;
-	if (debug >= 2)
+	task_l3_rd = taskc->l3_rd;
+	if (debug >= 2) {
 		task_dcycle = ravg_read(&task_dcyc_rd, now, load_half_life);
+		task_l3 = ravg_read(&task_dcyc_rd, now, load_half_life);
+	}
 
 	/* transfer out of @from_domc */
 	bpf_spin_lock(&from_lockw->lock);
-	if (taskc->runnable)
+	if (taskc->runnable) {
 		from_bucket->dcycle--;
+		from_bucket->l3 -= taskc->l3_traffic;
+	}
 
-	if (debug >= 2)
+	if (debug >= 2) {
 		from_dcycle[0] = ravg_read(&from_bucket->rd, now, load_half_life);
+		from_l3[0] = ravg_read(&from_bucket->rd, now, load_half_life);
+	}
 
 	ravg_transfer(&from_bucket->rd, from_bucket->dcycle,
 		      &task_dcyc_rd, taskc->runnable, load_half_life, false);
+	ravg_transfer(&from_bucket->l3_rd, from_bucket->l3,
+		      &task_l3_rd, taskc->l3_traffic, load_half_life, false);
 
-	if (debug >= 2)
+
+	if (debug >= 2) {
 		from_dcycle[1] = ravg_read(&from_bucket->rd, now, load_half_life);
+		from_l3[1] = ravg_read(&from_bucket->rd, now, load_half_life);
+	}
 
 	bpf_spin_unlock(&from_lockw->lock);
 
 	/* transfer into @to_domc */
 	bpf_spin_lock(&to_lockw->lock);
-	if (taskc->runnable)
+	if (taskc->runnable) {
 		to_bucket->dcycle++;
+		to_bucket->l3 += taskc->l3_traffic;
+	}
 
-	if (debug >= 2)
+	if (debug >= 2) {
 		to_dcycle[0] = ravg_read(&to_bucket->rd, now, load_half_life);
+		to_l3[0] = ravg_read(&to_bucket->rd, now, load_half_life);
+	}
 
 	ravg_transfer(&to_bucket->rd, to_bucket->dcycle,
 		      &task_dcyc_rd, taskc->runnable, load_half_life, true);
+	ravg_transfer(&to_bucket->l3_rd, to_bucket->l3,
+		      &task_l3_rd, taskc->l3_traffic, load_half_life, true);
 
-	if (debug >= 2)
+
+	if (debug >= 2) {
 		to_dcycle[1] = ravg_read(&to_bucket->rd, now, load_half_life);
+		to_l3[1] = ravg_read(&to_bucket->rd, now, load_half_life);
+	}
 
 	bpf_spin_unlock(&to_lockw->lock);
 
-	if (debug >= 2)
+	if (debug >= 2) {
 		bpf_printk("XFER DCYCLE dom%u->%u task=%lu from=%lu->%lu to=%lu->%lu",
 			   from_domc->id, to_domc->id,
 			   task_dcycle >> RAVG_FRAC_BITS,
@@ -452,6 +479,14 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 			   from_dcycle[1] >> RAVG_FRAC_BITS,
 			   to_dcycle[0] >> RAVG_FRAC_BITS,
 			   to_dcycle[1] >> RAVG_FRAC_BITS);
+		bpf_printk("XFER L3 dom%u->%u task=%lu from=%lu->%lu to=%lu->%lu",
+			   from_domc->id, to_domc->id,
+			   task_l3 >> RAVG_FRAC_BITS,
+			   from_l3[0] >> RAVG_FRAC_BITS,
+			   from_l3[1] >> RAVG_FRAC_BITS,
+			   to_l3[0] >> RAVG_FRAC_BITS,
+			   to_l3[1] >> RAVG_FRAC_BITS);
+	}
 }
 
 static u64 dom_min_vruntime(dom_ptr domc)
@@ -570,6 +605,70 @@ static void refresh_tune_params(void)
 				bpf_cpumask_clear_cpu(cpu, kick_greedy_cpumask);
 		}
 	}
+}
+
+void *bpf_cast_to_kern_ctx(void *) __ksym;
+
+/*
+ * Performance counter callback.
+ */
+SEC("perf_event")
+int read_sample(struct bpf_perf_event_data_kern __kptr *arg)
+{
+	struct bpf_perf_event_data_kern *ctx, a;
+	union perf_mem_data_src data_src;
+	struct perf_sample_data data;
+	struct task_ctx *taskc;
+	struct task_struct *p;
+	int ret;
+
+	ctx = bpf_cast_to_kern_ctx(arg);
+
+	if ((ret = bpf_probe_read_kernel(&a, sizeof(a), ctx))) {
+		scx_bpf_error("[0] %s: bpf_probe_read_kernel failed", __func__);
+		return -EACCES;
+	}
+
+	if ((ret = bpf_probe_read_kernel(&data, sizeof(data), a.data))) {
+		scx_bpf_error("%s: bpf_probe_read_kernel failed", __func__);
+		return -EACCES;
+	}
+
+	data_src = ctx->data->data_src;
+	if (!ctx->data->sample_flags || data_src.mem_op == 1)
+		return 0;
+
+
+	p = bpf_get_current_task_btf();
+	if (!p) {
+		bpf_printk("could not retrieve current task");
+		return 0;
+	}
+			
+	/* Benign failure for tasks not in scx, e.g., idle. */
+	taskc = try_lookup_task_ctx(p);
+	if (!taskc)
+		return 0;
+
+
+	/* Require level 3 because it is really spammy. */
+	if (debug >= 3) {
+		bpf_printk("(1/2) %s\t(0x%lx,0x%lx,0x%lx) ",
+				data_src.mem_op == 2 ? "STORE" : (data_src.mem_op == 4 ? "LOAD" : "UNKNOWN") ,
+				data_src.mem_lvl_num,
+				data_src.mem_snoop,
+				data_src.mem_remote
+				);
+		bpf_printk("(2/2) [%llx, %llx] 0x%lx",
+				ctx->data->phys_addr,
+				ctx->data->addr,
+				data_src.mem_dtlb
+				);
+	}
+
+	taskc->l3_next += 1;
+
+	return 0;
 }
 
 static u64 min(u64 a, u64 b)
@@ -1431,7 +1530,7 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(wakee_ctx, now, true);
-	dom_dcycle_adj(wakee_ctx->domc, wakee_ctx->weight, now, true);
+	dom_dcycle_adj(wakee_ctx->domc, wakee_ctx->weight, now, true, wakee_ctx->l3_traffic);
 
 	if (fifo_sched)
 		return;
@@ -1554,7 +1653,11 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 
 	task_load_adj(taskc, now, false);
-	dom_dcycle_adj(domc, taskc->weight, now, false);
+	dom_dcycle_adj(domc, taskc->weight, now, false, -taskc->l3_traffic);
+
+	/* Update our current L3 traffic prediction. */
+	taskc->l3_traffic = taskc->l3_next;
+	taskc->l3_next = 0;
 
 	if (fifo_sched)
 		return;
