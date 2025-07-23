@@ -60,6 +60,7 @@ use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
 
+const SCHEDULER_NAME: &str = "scx_lavd";
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
 /// The rust part is minimal. It processes command line options and logs out
@@ -797,6 +798,8 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
+        info!("Unregister {} scheduler", SCHEDULER_NAME);
+
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
         }
