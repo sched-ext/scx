@@ -110,3 +110,10 @@ void *scx_task_data(struct task_struct *p __attribute__((unused)))
 	// No arena support in scxtest yet, we can drop this when it's available.
 	return NULL;
 }
+
+__weak
+int scx_minheap_pop(void *heap_ptr __attribute__((unused)),
+		    struct scx_minheap_elemen *helem __attribute__((unused)))
+{
+	return 0;
+}
