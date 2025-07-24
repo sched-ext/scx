@@ -552,7 +552,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
 			goto out;
 		}
-		dsq_id = cpuc->cpdom_id;
+		dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
@@ -691,7 +691,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
-	dsq_id = cpuc->cpdom_id;
+	dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 	/*
 	 * If a task is holding a new lock, continue to execute it
@@ -1431,7 +1431,7 @@ static s32 init_cpdoms(u64 now)
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
 		 */
-		err = scx_bpf_create_dsq(cpdomc->id, cpdomc->node_id);
+		err = scx_bpf_create_dsq(cpdom_to_dsq(cpdomc->id), cpdomc->node_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpdom %llu on NUMA node %d",
 				      cpdomc->id, cpdomc->node_id);

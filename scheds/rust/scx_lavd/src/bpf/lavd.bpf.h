@@ -19,6 +19,12 @@
 #define p2s(percent)			(((percent) << LAVD_SHIFT) / 100)
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
+#define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
+#define cpu_to_dsq(cpu_id)		((cpu_id) | LAVD_DSQ_TYPE_CPU << LAVD_DSQ_TYPE_SHFT)
+#define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
+#define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
+#define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
+
 /*
  * common constants
  */
@@ -91,8 +97,8 @@ enum consts_flags {
  * - system > numa node > llc domain > compute domain per core type (P or E)
  */
 struct cpdom_ctx {
-	u64	id;				    /* id of this compute domain (== dsq_id) */
-	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
+	u64	id;				    /* id of this compute domain */
+	u64	alt_id;				    /* id of the closest compute domain of alternative type */
 	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_valid;			    /* is this a valid compute domain? */
@@ -171,8 +177,8 @@ struct cpu_ctx {
 	u16		capacity;	/* CPU capacity based on 1024 */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
-	u8		cpdom_id;	/* compute domain id (== dsq_id) */
-	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
+	u8		cpdom_id;	/* compute domain id */
+	u8		cpdom_alt_id;	/* compute domain id of anternative type */
 	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
 
 	/*

@@ -858,5 +858,5 @@ s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
 	};
 
 	*cpu = pick_idle_cpu(&ictx, is_idle);
-	return ictx.cpdom_id;
+	return cpdom_to_dsq(ictx.cpdom_id);
 }
