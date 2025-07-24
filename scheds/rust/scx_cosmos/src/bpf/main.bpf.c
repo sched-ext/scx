@@ -77,6 +77,11 @@ const volatile bool numa_enabled;
 const volatile bool mm_affinity;
 
 /*
+ * Enable deferred wakeup.
+ */
+const volatile bool deferred_wakeups = true;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -656,6 +661,20 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	return cpu >= 0 ? cpu : prev_cpu;
 }
 
+/*
+ * Wake-up @cpu if it's idle.
+ */
+static inline void wakeup_cpu(s32 cpu)
+{
+	/*
+	 * If deferred wakeups are enabled all the wakeup events are
+	 * performed asynchronously by wakeup_timerfn().
+	 */
+	if (deferred_wakeups)
+		return;
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -669,6 +688,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		cpu = pick_idle_cpu(p, prev_cpu, 0, true);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
+			wakeup_cpu(cpu);
 			return;
 		}
 	}
@@ -679,6 +699,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_system_busy()) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		wakeup_cpu(prev_cpu);
 		return;
 	}
 
@@ -691,6 +712,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
 				 task_slice(p), task_dl(p, tctx), enq_flags);
+	wakeup_cpu(prev_cpu);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
@@ -835,19 +857,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		}
 	}
 
-	timer = bpf_map_lookup_elem(&wakeup_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup wakeup timer");
-		return -ESRCH;
-	}
+	if (deferred_wakeups) {
+		timer = bpf_map_lookup_elem(&wakeup_timer, &key);
+		if (!timer) {
+			scx_bpf_error("Failed to lookup wakeup timer");
+			return -ESRCH;
+		}
 
-	bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
-	bpf_timer_set_callback(timer, wakeup_timerfn);
+		bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
+		bpf_timer_set_callback(timer, wakeup_timerfn);
 
-	err = bpf_timer_start(timer, slice_ns, 0);
-	if (err) {
-		scx_bpf_error("Failed to arm wakeup timer");
-		return err;
+		err = bpf_timer_start(timer, slice_ns, 0);
+		if (err) {
+			scx_bpf_error("Failed to arm wakeup timer");
+			return err;
+		}
 	}
 
 	return 0;
