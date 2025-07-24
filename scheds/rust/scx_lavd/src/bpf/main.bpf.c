@@ -345,7 +345,8 @@ static void update_stat_for_running(struct task_struct *p,
 	if (have_scheduled(taskc)) {
 		wait_period = time_delta(now, taskc->last_quiescent_clk);
 		interval = taskc->avg_runtime + wait_period;
-		taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
+		if (interval > 0)
+			taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 	}
 
 	/*
@@ -924,9 +925,12 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Update wake frequency.
 	 */
 	now = scx_bpf_now();
-	interval = time_delta(now, waker_taskc->last_runnable_clk);
-	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
-	waker_taskc->last_runnable_clk = now;
+	interval = time_delta(now, READ_ONCE(waker_taskc->last_runnable_clk));
+	if (interval >= LAVD_LC_WAKE_INTERVAL_MIN) {
+		WRITE_ONCE(waker_taskc->wake_freq,
+			   calc_avg_freq(waker_taskc->wake_freq, interval));
+		WRITE_ONCE(waker_taskc->last_runnable_clk, now);
+	}
 
 	/*
 	 * Propagate waker's latency criticality to wakee. Note that we pass
@@ -1079,8 +1083,10 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	now = scx_bpf_now();
 	interval = time_delta(now, taskc->last_quiescent_clk);
-	taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
-	taskc->last_quiescent_clk = now;
+	if (interval > 0) {
+		taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
+		taskc->last_quiescent_clk = now;
+	}
 }
 
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
