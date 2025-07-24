@@ -2418,6 +2418,7 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 		}
 
 		if (matched) {
+			trace("MATCH %s-%d -> %s", p->comm, p->pid, layer->name);
 			if (enable_match_debug && (pid = p->pid))
 				bpf_map_update_elem(&layer_match_dbg, &pid, &layer_id, BPF_ANY);
 
