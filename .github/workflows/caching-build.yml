@@ -39,10 +39,6 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - name: Load kernel
-        run: |
-          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_sched_ext/for-next')" >> $GITHUB_ENV
-          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_sched_ext/for-next'.headers)" >> $GITHUB_ENV
 
       - name: Build
         run: nix run ./.github/include#ci -- build
