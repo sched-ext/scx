@@ -138,11 +138,13 @@ impl FilteredEventState {
     }
 }
 
+type ColumnFn = Box<dyn Fn(i32, &ProcData) -> String>;
+
 struct Column {
     header: &'static str,
     constraint: ratatui::prelude::Constraint,
     visible: bool,
-    value_fn: Box<dyn Fn(i32, &ProcData) -> String>,
+    value_fn: ColumnFn,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

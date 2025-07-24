@@ -2307,7 +2307,7 @@ impl<'a> App<'a> {
 
         let constraints = visible_columns
             .iter()
-            .map(|col| col.constraint.clone())
+            .map(|col| col.constraint)
             .collect::<Vec<_>>();
 
         let block = Block::bordered()
