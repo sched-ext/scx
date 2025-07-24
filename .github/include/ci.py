@@ -24,6 +24,23 @@ def run_command(
     return subprocess.run(cmd, check=check, env=merged_env, cwd=cwd)
 
 
+def get_kernel_path(kernel_name: str) -> str:
+    """Get the kernel path from Nix store for the given kernel name."""
+    result = subprocess.run(
+        [
+            "nix",
+            "build",
+            "--no-link",
+            "--print-out-paths",
+            f"./.github/include#kernel_{kernel_name}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() + "/bzImage"
+
+
 def get_clippy_packages() -> List[str]:
     """Get list of packages that should be linted with clippy."""
     result = subprocess.run(
@@ -106,11 +123,7 @@ def run_tests():
     cpu_count = min(os.cpu_count(), 16)
 
     # Find kernel image
-    kernel_path = os.environ.get("KERNEL_STORE_PATH")
-    if kernel_path is None:
-        kernel_path = "linux/arch/x86/boot/bzImage"
-    else:
-        kernel_path += "/bzImage"
+    kernel_path = get_kernel_path("sched_ext/for-next")
     if not os.path.exists(kernel_path):
         print(f"Error: Kernel image not found at {kernel_path}")
         print("Make sure to run the build-kernel job first")
