@@ -72,6 +72,11 @@ const volatile bool cpufreq_enabled = true;
 const volatile bool numa_enabled;
 
 /*
+ * Enable address space affinity.
+ */
+const volatile bool mm_affinity;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -603,9 +608,38 @@ static bool need_migrate(const struct task_struct *p, u64 enq_flags)
 	       (enq_flags & SCX_ENQ_REENQ);
 }
 
+/*
+ * Return true if a task is waking up another task that share the same
+ * address space, false otherwise.
+ */
+static inline bool
+is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
+{
+	return mm_affinity &&
+		!(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
+}
+
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+	bool is_busy = is_system_busy();
 	s32 cpu;
+
+	/*
+	 * When the waker and wakee share the same address space and were previously
+	 * running on the same CPU, there's a high chance of finding hot cache data
+	 * on that CPU. In such cases, prefer keeping the wakee on the same CPU.
+	 *
+	 * This optimization is applied only when the system is not saturated,
+	 * to avoid introducing too much unfairness.
+	 */
+	if (is_wake_affine(current, p) && !is_busy) {
+		cpu = bpf_get_smp_processor_id();
+		if (cpu == prev_cpu) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			return cpu;
+		}
+	}
 
 	/*
 	 * Try to find an idle CPU and dispatch the task directly to the
@@ -616,7 +650,7 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	 * we can't find an idle CPU, allows to save some locking overhead.
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, false);
-	if (cpu >= 0 || !is_system_busy())
+	if (cpu >= 0 || !is_busy)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 
 	return cpu >= 0 ? cpu : prev_cpu;
