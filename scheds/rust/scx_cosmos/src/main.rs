@@ -128,6 +128,15 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Enable address space affinity.
+    ///
+    /// This option allows to keep tasks that share the same address space (e.g., threads of the
+    /// same process) on the same CPU across wakeups.
+    ///
+    /// This can improve locality and performance in certain cache-sensitive workloads.
+    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
+    mm_affinity: bool,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -307,6 +316,7 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = opts.enable_numa;
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.mm_affinity = opts.mm_affinity;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
