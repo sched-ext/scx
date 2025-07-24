@@ -138,6 +138,13 @@ impl FilteredEventState {
     }
 }
 
+struct Column {
+    header: &'static str,
+    constraint: ratatui::prelude::Constraint,
+    visible: bool,
+    value_fn: Box<dyn Fn(i32, &ProcData) -> String>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedCpuPerfSetAction {
     pub cpu: u32,

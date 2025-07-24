@@ -14,6 +14,7 @@ use crate::get_default_events;
 use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
+use crate::Column;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -49,7 +50,7 @@ use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
         RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
@@ -97,6 +98,7 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
+    process_columns: Vec<Column>,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
@@ -255,6 +257,7 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
+            process_columns: Self::create_process_columns(),
             cpu_data,
             llc_data,
             node_data,
@@ -2206,28 +2209,106 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn create_process_columns() -> Vec<Column> {
+        vec![
+            Column {
+                header: "TGID",
+                constraint: Constraint::Length(8),
+                visible: true,
+                value_fn: Box::new(|tgid, _| tgid.to_string()),
+            },
+            Column {
+                header: "Name",
+                constraint: Constraint::Length(15),
+                visible: true,
+                value_fn: Box::new(|_, data| data.process_name.clone()),
+            },
+            Column {
+                header: "Command Line",
+                constraint: Constraint::Fill(1),
+                visible: true,
+                value_fn: Box::new(|_, data| data.cmdline.join(" ")),
+            },
+            Column {
+                header: "Last DSQ",
+                constraint: Constraint::Length(18),
+                visible: true,
+                value_fn: Box::new(|_, data| {
+                    data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))
+                }),
+            },
+            Column {
+                header: "Slice ns",
+                constraint: Constraint::Length(8),
+                visible: true,
+                value_fn: Box::new(|_, data| {
+                    let stats = VecStats::new(&data.event_data_immut("slice_consumed"), None);
+                    stats.avg.to_string()
+                }),
+            },
+            Column {
+                header: "Avg/Max Lat us",
+                constraint: Constraint::Length(14),
+                visible: true,
+                value_fn: Box::new(|_, data| {
+                    let stats = VecStats::new(&data.event_data_immut("lat_us"), None);
+                    format!("{}/{}", stats.avg, stats.max)
+                }),
+            },
+            Column {
+                header: "CPU",
+                constraint: Constraint::Length(3),
+                visible: true,
+                value_fn: Box::new(|_, data| data.cpu.to_string()),
+            },
+            Column {
+                header: "LLC",
+                constraint: Constraint::Length(3),
+                visible: true,
+                value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
+            },
+            Column {
+                header: "NUMA",
+                constraint: Constraint::Length(4),
+                visible: true,
+                value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
+            },
+            Column {
+                header: "Threads",
+                constraint: Constraint::Length(7),
+                visible: true,
+                value_fn: Box::new(|_, data| data.threads.len().to_string()),
+            },
+            Column {
+                header: "CPU%",
+                constraint: Constraint::Length(4),
+                visible: true,
+                value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
+            },
+        ]
+    }
+
     /// Render the process view.
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let header = [
-            "TGID",
-            "Name",
-            "Command Line",
-            "Last DSQ",
-            "Slice ns",
-            "Max Lat us",
-            "CPU",
-            "LLC",
-            "NUMA",
-            "Threads",
-            "CPU%",
-        ]
-        .into_iter()
-        .map(Cell::from)
-        .collect::<Row>()
-        .height(1)
-        .style(self.theme().text_color())
-        .bold()
-        .underlined();
+        let visible_columns: Vec<&Column> = self
+            .process_columns
+            .iter()
+            .filter(|col| col.visible)
+            .collect();
+
+        let header = visible_columns
+            .iter()
+            .map(|col| Cell::from(col.header))
+            .collect::<Row>()
+            .height(1)
+            .style(self.theme().text_color())
+            .bold()
+            .underlined();
+
+        let constraints = visible_columns
+            .iter()
+            .map(|col| col.constraint.clone())
+            .collect::<Vec<_>>();
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -2247,54 +2328,15 @@ impl<'a> App<'a> {
         });
 
         let rows = sorted_view.into_iter().map(|(i, data)| {
-            let slice_data = data.event_data_immut("slice_consumed");
-            let slice_stats = VecStats::new(&slice_data, None);
-
-            let lat_data = data.event_data_immut("lat_us");
-            let lat_stats = VecStats::new(&lat_data, None);
-            [
-                Cell::from(Text::from(i.to_string())),
-                Cell::from(Text::from(data.process_name.clone())),
-                Cell::from(Text::from(data.cmdline.join(" "))),
-                Cell::from(Text::from(
-                    data.dsq.map_or(String::new(), |v| format!("0x{v:X}")),
-                )),
-                Cell::from(Text::from(slice_stats.avg.to_string())),
-                Cell::from(Text::from(lat_stats.max.to_string())),
-                Cell::from(Text::from(data.cpu.to_string())),
-                Cell::from(Text::from(
-                    data.llc.map_or(String::new(), |v| v.to_string()),
-                )),
-                Cell::from(Text::from(
-                    data.node.map_or(String::new(), |v| v.to_string()),
-                )),
-                Cell::from(Text::from(data.threads.len().to_string())),
-                Cell::from(Text::from(format!("{:?}", data.cpu_util_perc))),
-            ]
-            .into_iter()
-            .collect::<Row>()
-            .height(1)
-            .style(self.theme().text_color())
+            visible_columns
+                .iter()
+                .map(|col| Cell::from((col.value_fn)(*i, data)))
+                .collect::<Row>()
+                .height(1)
+                .style(self.theme().text_color())
         });
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(8),
-                Constraint::Length(15),
-                Constraint::Fill(1),
-                Constraint::Length(18),
-                Constraint::Length(8),
-                Constraint::Length(10),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(4),
-                Constraint::Length(7),
-                Constraint::Length(4),
-            ],
-        )
-        .header(header)
-        .block(block);
+        let table = Table::new(rows, constraints).header(header).block(block);
 
         frame.render_widget(table, area);
 
