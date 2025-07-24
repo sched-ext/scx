@@ -463,6 +463,13 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->last_stopping_clk = now;
 
 	/*
+	 * Account for how much of the slice was used for this instance.
+	 */
+	if (is_monitored) {
+		taskc->last_slice_used = time_delta(now, taskc->last_running_clk);
+	}
+
+	/*
 	 * Reset waker's latency criticality here to limit the latency boost of
 	 * a task. A task will be latency-boosted only once after wake-up.
 	 */

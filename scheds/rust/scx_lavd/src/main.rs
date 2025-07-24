@@ -587,6 +587,7 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
+            slice_used: tc.last_slice_used,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
             Err(e) => panic!("failed to send on intrspc_tx ({})", e),
