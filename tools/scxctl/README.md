@@ -15,12 +15,6 @@
 
 ## Installation
 
-### Arch Linux
-
-`scxctl` is available on the AUR as [scxctl](https://aur.archlinux.org/packages/scxctl)
-
-### Other Distros
-
 `scxctl` can be installed from crates.io through cargo
 
 ```
@@ -90,4 +84,10 @@ Switch to lavd with verbose and performance flags
 
 ```
 scxctl switch -s lavd -a="-v,--performance"
+```
+
+Switch to flash and increase the maximum time slice from 4ms (default) to 20ms
+
+```
+scxctl switch -s flash -a="-s,20000"
 ```
