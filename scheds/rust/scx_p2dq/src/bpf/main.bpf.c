@@ -11,6 +11,7 @@
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/bpf_arena_common.bpf.h"
+#include "../../../../include/scx/percpu.bpf.h"
 #include "../../../../include/lib/atq.h"
 #include "../../../../include/lib/cpumask.h"
 #include "../../../../include/lib/minheap.h"
@@ -20,6 +21,7 @@
 #else
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include <lib/atq.h>
 #include <lib/cpumask.h>
 #include <lib/minheap.h>
@@ -139,9 +141,6 @@ const volatile struct {
 	.kthreads_local = true,
 	.select_idle_in_enqueue = true,
 };
-
-extern int sched_core_priority __ksym __weak;
-extern bool sched_itmt_capable __ksym __weak;
 
 const volatile u32 debug = 2;
 const u32 zero_u32 = 0;
@@ -317,22 +316,6 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cpuc;
-}
-
-static inline int cpu_priority(s32 cpu)
-{
-	bool itmt_enabled;
-	int *prio;
-
-	itmt_enabled = (bool)&sched_itmt_capable;
-	if (!itmt_enabled)
-		return 1;
-
-	prio = bpf_per_cpu_ptr(&sched_core_priority, cpu);
-	if (!prio)
-		return 1;
-
-	return *prio;
 }
 
 struct {
@@ -1730,7 +1713,7 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 		priority = 1;
 
 	// Since we use a minheap convert the highest prio to lowest score.
-	idle_score = (1<<10) - (u64)priority;
+	idle_score = scx_bpf_now() - ((1<<7) * (u64)priority);
 
 	if ((ret = arena_spin_lock((void __arena *)&llcx->idle_lock)))
 		return;
