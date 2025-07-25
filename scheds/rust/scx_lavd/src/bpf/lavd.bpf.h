@@ -35,6 +35,8 @@ enum consts_internal {
 	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS_DFL		= (500ULL * NSEC_PER_USEC), /* min time slice */
 	LAVD_SLICE_MAX_NS_DFL		= (5ULL * NSEC_PER_MSEC), /* max time slice */
+	LAVD_SLICE_BOOST_BONUS		= LAVD_SLICE_MIN_NS_DFL,
+	LAVD_SLICE_BOOST_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_ACC_RUNTIME_MAX		= LAVD_SLICE_MAX_NS_DFL,
 	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 14), /* assuming task's latency
 									    criticality is around 1000. */
@@ -48,7 +50,7 @@ enum consts_internal {
 
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
 
-	LAVD_SYS_STAT_INTERVAL_NS	= LAVD_TARGETED_LATENCY_NS,
+	LAVD_SYS_STAT_INTERVAL_NS	= (2 * LAVD_SLICE_MAX_NS_DFL),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
 	LAVD_CC_PER_CORE_SHIFT		= 1,  /* 50%: maximum per-core CPU utilization */
@@ -79,6 +81,7 @@ enum consts_flags {
 	LAVD_FLAG_IS_SYNC_WAKEUP	= (0x1 << 5), /* is this a sync wake up? */
 	LAVD_FLAG_ON_BIG		= (0x1 << 6), /* can a task run on a big core? */
 	LAVD_FLAG_ON_LITTLE		= (0x1 << 7), /* can a task run on a little core? */
+	LAVD_FLAG_SLICE_BOOST		= (0x1 << 8), /* task's time slice is boosted. */
 };
 
 /*
@@ -149,6 +152,7 @@ struct cpu_ctx {
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	flags;		/* cached copy of task's flags */
 	volatile s32	futex_op;	/* futex op in futex V1 */
+	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
 

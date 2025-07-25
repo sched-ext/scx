@@ -59,7 +59,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
 	c->duration = time_delta(c->now, sys_stat.last_update_clk);
-	sys_stat.last_update_clk = c->now;
+	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
@@ -89,6 +89,17 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (!cpuc) {
 			c->compute_total = 0;
 			break;
+		}
+
+		/*
+		 * When pinned tasks are waiting to run on this CPU
+		 * or a system is overloaded (so the slice cannot be boosted
+		 * or there are pending tasks to run)), shrink the time slice
+		 * of slice-boosted tasks.
+		 */
+		if (cpuc->nr_pinned_tasks || !can_boost_slice() ||
+		    have_pending_tasks(cpuc)) {
+			shrink_boosted_slice_remote(cpuc, c->now);
 		}
 
 		/*
@@ -206,15 +217,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
 			c->tsct_spike += cpuc_tot_sc_time;
 	}
-}
-
-static u64 clamp_time_slice_ns(u64 slice)
-{
-	if (slice < slice_min_ns)
-		slice = slice_min_ns;
-	else if (slice > slice_max_ns)
-		slice = slice_max_ns;
-	return slice;
 }
 
 static void calc_sys_stat(struct sys_stat_ctx *c)
@@ -351,7 +353,7 @@ static void calc_sys_time_slice(void)
 	 */
 	nr_queued = sys_stat.nr_queued_task + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_queued;
-	slice = clamp_time_slice_ns(slice);
+	slice = clamp(slice, slice_min_ns, slice_max_ns);
 	sys_stat.slice = calc_avg(sys_stat.slice, slice);
 }
 
@@ -425,7 +427,7 @@ static s32 init_sys_stat(u64 now)
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
-	sys_stat.slice = LAVD_SLICE_MAX_NS_DFL;
+	sys_stat.slice = slice_max_ns;
 	bpf_for(dsq_id, 0, nr_cpdoms) {
 		if (dsq_id >= LAVD_CPDOM_MAX_NR)
 			break;

@@ -631,6 +631,28 @@ int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
     return 0;
 }
 
+SEC("?tp_btf/sched_process_hang")
+int BPF_PROG(on_sched_hang, struct task_struct *p)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+    event->type = SCHED_HANG;
+    event->ts = bpf_ktime_get_ns();
+    event->cpu = bpf_get_smp_processor_id();
+    record_real_comm(event->event.hang.comm, p);
+    event->event.hang.pid = p->pid;
+
+    bpf_ringbuf_submit(event, 0);
+
+    return 0;
+}
+
 SEC("tp_btf/softirq_entry")
 int BPF_PROG(on_softirq_entry, unsigned int nr)
 {
@@ -856,7 +878,7 @@ int BPF_PROG(on_sched_exit, struct task_struct *task)
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	if (!(event = try_reserve_event()))
@@ -880,7 +902,7 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	if (!(event = try_reserve_event()))
@@ -890,7 +912,9 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.fork.parent_pid = BPF_CORE_READ(parent, pid);
+	event->event.fork.parent_tgid = BPF_CORE_READ(parent, tgid);
 	event->event.fork.child_pid = BPF_CORE_READ(child, pid);
+	event->event.fork.child_tgid = BPF_CORE_READ(child, tgid);
 	record_real_comm(event->event.fork.parent_comm, parent);
 	record_real_comm(event->event.fork.child_comm, child);
 
@@ -904,7 +928,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 {
 	struct bpf_event *event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	if (!(event = try_reserve_event()))
@@ -921,7 +945,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	return 0;
 }
 
-SEC("tp_btf/sched_process_wait")
+SEC("?tp_btf/sched_process_wait")
 int BPF_PROG(on_sched_wait, struct pid *pid)
 {
 	struct bpf_event *event;
@@ -1050,27 +1074,6 @@ int BPF_PROG(on_hw_pressure_update, u32 cpu, u64 hw_pressure)
 	event->ts = bpf_ktime_get_ns();
 	event->event.hwp.hw_pressure = hw_pressure;
 	event->event.hwp.cpu = cpu;
-
-	bpf_ringbuf_submit(event, 0);
-
-	return 0;
-}
-
-SEC("tp_btf/pstate_sample")
-int BPF_PROG(on_pstate_sample, u32 core_busy, u32 scaled_busy, u32 from, u32 to, u64 mperf, u64 aperf, u64 tsc, u32 freq, u32 io_boost)
-{
-	struct bpf_event *event;
-
-	if (!enable_bpf_events || !should_sample())
-		return 0;
-
-	if (!(event = try_reserve_event()))
-		return -ENOMEM;
-
-	event->type = PSTATE_SAMPLE;
-	event->cpu = bpf_get_smp_processor_id();
-	event->ts = bpf_ktime_get_ns();
-	event->event.pstate.busy = scaled_busy;
 
 	bpf_ringbuf_submit(event, 0);
 

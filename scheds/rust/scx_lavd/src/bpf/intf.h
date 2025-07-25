@@ -106,6 +106,7 @@ struct task_ctx {
 	 */
 	u64	last_runnable_clk;	/* last time when a task became runnable */
 	u64	last_running_clk;	/* last time when scheduled in */
+	u64	last_measured_clk;	/* last time when running time was measured */
 	u64	last_stopping_clk;	/* last time when scheduled out */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
 
@@ -126,12 +127,12 @@ struct task_ctx {
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
-	u32	slice_ns;		/* time slice */
+	u64	slice;			/* time slice */
 
 	/*
 	 * Task status
 	 */
-	u64	flags;			/* LAVD_FLAG_* */
+	volatile u64	flags;		/* LAVD_FLAG_* */
 
 	/*
 	 * Additional information when the scheduler is monitored,

@@ -36,3 +36,8 @@ pub fn get_clock_value(clock_id: libc::c_int) -> u64 {
 pub fn sanitize_nbsp(s: String) -> String {
     s.replace('\u{202F}', " ")
 }
+
+/// Converts a u32 to a i32, panics on failure
+pub fn u32_to_i32(x: u32) -> i32 {
+    i32::try_from(x).expect("u32 to i32 conversion failed")
+}

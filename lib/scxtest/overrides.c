@@ -8,6 +8,7 @@ __weak unsigned long CONFIG_NR_CPUS = 1024;
 
 struct cpumask;
 struct task_struct;
+struct scx_minheap_elem;
 
 __weak
 void scx_bpf_error_bstr(char *fmt __attribute__((unused)),
@@ -109,4 +110,11 @@ void *scx_task_data(struct task_struct *p __attribute__((unused)))
 {
 	// No arena support in scxtest yet, we can drop this when it's available.
 	return NULL;
+}
+
+__weak
+int scx_minheap_pop(void *heap_ptr __attribute__((unused)),
+		    struct scx_minheap_elem *helem __attribute__((unused)))
+{
+	return 0;
 }

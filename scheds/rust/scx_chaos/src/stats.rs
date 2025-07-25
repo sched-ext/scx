@@ -27,18 +27,21 @@ pub struct Metrics {
     pub chaos_skipped: u64,
     #[stat(desc = "Number of timer-based CPU kicks for delayed tasks")]
     pub timer_kicks: u64,
+    #[stat(desc = "Number of times a kprobe caused a random delay to be applied")]
+    pub kprobe_random_delays: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}\n\tchaos excluded/skipped {}/{}\n\ttimer kicks: {}",
+            "chaos traits: random_delays/cpu_freq/degradation {}/{}/{}\n\tchaos excluded/skipped {}/{}\n\tkprobe_random_delays {}\n\ttimer kicks: {}",
             self.trait_random_delays,
             self.trait_cpu_freq,
             self.trait_degradation,
             self.chaos_excluded,
             self.chaos_skipped,
+            self.kprobe_random_delays,
             self.timer_kicks,
         )?;
         Ok(())
@@ -51,6 +54,7 @@ impl Metrics {
             trait_degradation: self.trait_degradation - rhs.trait_degradation,
             chaos_excluded: self.chaos_excluded - rhs.chaos_excluded,
             chaos_skipped: self.chaos_skipped - rhs.chaos_skipped,
+            kprobe_random_delays: self.kprobe_random_delays - rhs.kprobe_random_delays,
             timer_kicks: self.timer_kicks - rhs.timer_kicks,
         }
     }

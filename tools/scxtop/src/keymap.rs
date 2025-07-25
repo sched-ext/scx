@@ -38,6 +38,7 @@ impl Default for KeyMap {
     fn default() -> Self {
         let mut bindings = HashMap::new();
         bindings.insert(Key::Char('d'), Action::SetState(AppState::Default));
+        bindings.insert(Key::Char(' '), Action::SetState(AppState::Pause));
         bindings.insert(Key::Char('e'), Action::SetState(AppState::PerfEvent));
         bindings.insert(Key::Char('K'), Action::SetState(AppState::KprobeEvent));
         bindings.insert(Key::Char('f'), Action::ToggleCpuFreq);
@@ -354,6 +355,7 @@ pub fn parse_key(key_str: &str) -> Result<Key> {
 pub fn parse_action(action_str: &str) -> Result<Action> {
     match action_str {
         "AppStateDefault" => Ok(Action::SetState(AppState::Default)),
+        "AppStatePause" => Ok(Action::SetState(AppState::Pause)),
         "AppStatePerfEvent" => Ok(Action::SetState(AppState::PerfEvent)),
         "AppStateKprobeEvent" => Ok(Action::SetState(AppState::KprobeEvent)),
         "ToggleCpuFreq" => Ok(Action::ToggleCpuFreq),

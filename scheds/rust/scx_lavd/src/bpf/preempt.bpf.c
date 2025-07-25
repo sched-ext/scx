@@ -14,11 +14,11 @@ struct preemption_info {
 
 static u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
 {
-	return now + min(taskc->avg_runtime, taskc->slice_ns);
+	return now + min(taskc->avg_runtime, taskc->slice);
 }
 
 static bool can_x_kick_y(struct preemption_info *prm_x,
-			    struct preemption_info *prm_y)
+			 struct preemption_info *prm_y)
 {
 	/*
 	 * A caller should ensure that Y is not a lock holder.
@@ -57,6 +57,14 @@ static bool can_x_kick_cpu2(struct preemption_info *prm_x,
 	return can_x_kick_y(prm_x, prm_cpu2);
 }
 
+static void init_prm_by_task(struct preemption_info *prm_task,
+			     struct task_ctx *taskc, u64 now)
+{
+	prm_task->est_stopping_clk = get_est_stopping_clk(taskc, now);
+	prm_task->lat_cri = taskc->lat_cri;
+	prm_task->cpuc = NULL;
+}
+
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
 {
 	/*
@@ -89,9 +97,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	/*
 	 * Get task's preemption information for comparison.
 	 */
-	prm_task.est_stopping_clk = get_est_stopping_clk(taskc, now);
-	prm_task.lat_cri = taskc->lat_cri;
-	prm_task.cpuc = NULL;
+	init_prm_by_task(&prm_task, taskc, now);
 
 	/*
 	 * If there is a preferred CPU on which a task wants to run,
@@ -171,7 +177,7 @@ null_out:
 	return NULL;
 }
 
-static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
+static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 {
 	/*
 	 * Note that we avoid using scx_bpf_kick_cpu() on purpose.
@@ -207,13 +213,74 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 		 * (SCX_SLICE_DFL, 20 msec).
 		 */
 		u64 old = victim_cpuc->est_stopping_clk;
-		if (old) {
+		if (!old)
+			return;
+
+		/*
+		 * If the new slice is one, this is the last time to be kicked,
+		 * so set est_stopping_clk to zero. Otherwise, do not update
+		 * est_stopping_clk so that the task can be kicked again with
+		 * a shorter time slice later.
+		 */
+		new_slice = max(new_slice, 1);
+		if (new_slice == 1) {
 			bool ret = __sync_bool_compare_and_swap(
 				&victim_cpuc->est_stopping_clk, old, 0);
 			if (ret)
-				WRITE_ONCE(victim_p->scx.slice, 1);
+				WRITE_ONCE(victim_p->scx.slice, new_slice);
+		} else {
+			if (victim_p->scx.slice > new_slice)
+				WRITE_ONCE(victim_p->scx.slice, new_slice);
 		}
 	}
+}
+
+static void shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
+{
+	u64 dur, new_slice = 0;
+
+	/*
+	 * Shrink the time slice of the slice-boosted task into a regular
+	 * slice. If a task has already overrun, kick it immediately using
+	 * IPI. Otherwise, just reduce the remaining time slice to the
+	 * regular one.
+	 */
+	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
+
+	dur = time_delta(now, cpuc->running_clk);
+	if (sys_stat.slice > dur)
+		new_slice = time_delta(sys_stat.slice, dur);
+
+	if (!new_slice)
+		scx_bpf_kick_cpu(cpuc->cpu_id, SCX_KICK_PREEMPT);
+	else
+		ask_cpu_yield_after(cpuc, new_slice);
+
+	cpuc->nr_preempt++;
+}
+
+static void shrink_boosted_slice_at_tick(struct task_struct *p,
+					 struct cpu_ctx *cpuc, u64 now)
+{
+	u64 dur, new_slice = 0;
+
+	/*
+	 * Shrink the time slice of the slice-boosted task into a regular
+	 * slice by reducing the remaining time slice to the regular one.
+	 */
+	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
+
+	dur = time_delta(now, cpuc->running_clk);
+	if (sys_stat.slice > dur)
+		new_slice = time_delta(sys_stat.slice, dur);
+
+	/*
+	 * It is okay to set p->scx.slice to zero since this is supposed to
+	 * be called by ops.tick(), which is the scheduling point.
+	 */
+	p->scx.slice = new_slice;
+
+	cpuc->nr_preempt++;
 }
 
 static void try_find_and_kick_victim_cpu(struct task_struct *p,
@@ -221,23 +288,59 @@ static void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 s32 preferred_cpu,
 					 u64 dsq_id)
 {
+	struct preemption_info prm_t, prm_c;
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
-	struct cpu_ctx *victim_cpuc;
-	struct cpu_ctx *cpuc_cur;
-	u64 now;
+	struct cpu_ctx *cpuc_victim;
+	struct cpu_ctx *cpuc_cur = NULL;
+	u64 now, dur, new_slice = 0;
 
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
+	 * And, check if it is worth to try to kick other CPU.
 	 */
-	if (test_task_flag(taskc, LAVD_FLAG_IS_GREEDY))
+	if (test_task_flag(taskc, LAVD_FLAG_IS_GREEDY) ||
+	    !is_worth_kick_other_task(taskc))
 		return;
 
 	/*
-	 * Check if it is worth to try to kick other CPU.
+	 * If a slice-boosted task is running on the preferred CPU, check
+	 * if it is necessary to preempt the task immediately or reduce
+	 * its time slice.
 	 */
-	if (!is_worth_kick_other_task(taskc))
-		return;
+	now = scx_bpf_now();
+	if (!no_slice_boost &&
+	    (preferred_cpu >= 0) &&
+	    (cpuc_victim = get_cpu_ctx_id(preferred_cpu)) &&
+	    test_cpu_flag(cpuc_victim, LAVD_FLAG_SLICE_BOOST)) {
+		/*
+		 * If the enqueuing task is more latency-critical, let's
+		 * cancel the slice boosting and kick the boosted task
+		 * immediately.
+		 */
+		dur = time_delta(now, cpuc_victim->running_clk);
+		if (dur >= sys_stat.slice) {
+			init_prm_by_task(&prm_t, taskc, now);
+			if (can_x_kick_cpu2(&prm_t, &prm_c, cpuc_victim)) {
+				reset_cpu_flag(cpuc_victim, LAVD_FLAG_SLICE_BOOST);
+				goto kick_out;
+			}
+		}
+
+		/*
+		 * If the enqueuing task is affinitized, it should run on
+		 * the preferred CPU. To avoid the affinitized task being
+		 * delayed too long, let's cancel the slice boosting so that
+		 * the currently running task on the preferred CPU is
+		 * scheduled out, just like other regular tasks.
+		 */
+		if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED)) {
+			if (sys_stat.slice > dur)
+				new_slice = time_delta(sys_stat.slice, dur);
+			reset_cpu_flag(cpuc_victim, LAVD_FLAG_SLICE_BOOST);
+			goto kick_out;
+		}
+	}
 
 	/*
 	 * Prepare a cpumak so we find a victim in @p's compute domain.
@@ -257,15 +360,17 @@ static void try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
-	now = scx_bpf_now();
-	victim_cpuc = find_victim_cpu(cast_mask(cpumask), preferred_cpu, taskc, now);
+	cpuc_victim = find_victim_cpu(cast_mask(cpumask), preferred_cpu, taskc, now);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
-	if (victim_cpuc) {
-		ask_cpu_yield(victim_cpuc);
-		cpuc_cur->nr_preempt++;
+	if (cpuc_victim) {
+kick_out:
+		ask_cpu_yield_after(cpuc_victim, new_slice);
+
+		if (cpuc_cur || (cpuc_cur = get_cpu_ctx()))
+			cpuc_cur->nr_preempt++;
 	}
 }
 

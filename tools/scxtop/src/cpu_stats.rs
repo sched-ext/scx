@@ -3,7 +3,7 @@ use procfs::{CpuTime, CurrentSI, KernelStats};
 use std::collections::BTreeMap;
 use sysinfo::System;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuUtilData {
     pub user: u64,
     pub nice: u64,
@@ -34,7 +34,7 @@ impl CpuUtilData {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatSnapshot {
     pub cpu_util_data: CpuUtilData,
     pub freq_khz: u64,
@@ -42,6 +42,8 @@ pub struct CpuStatSnapshot {
 
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatTracker {
+    pub system_prev: CpuStatSnapshot,
+    pub system_current: CpuStatSnapshot,
     pub prev: BTreeMap<usize, CpuStatSnapshot>,
     pub current: BTreeMap<usize, CpuStatSnapshot>,
 }
@@ -49,23 +51,41 @@ pub struct CpuStatTracker {
 impl CpuStatTracker {
     pub fn update(&mut self, sys: &mut System) -> Result<()> {
         self.prev = std::mem::take(&mut self.current);
+        self.system_prev = std::mem::take(&mut self.system_current);
 
         let kernel_stats = KernelStats::current()?;
         let cpu_stat_data = kernel_stats.cpu_time;
         sys.refresh_cpu_frequency();
 
+        let mut total_freq_khz = 0;
         for (i, cpu) in sys.cpus().iter().enumerate() {
             if let Some(cpu_time) = cpu_stat_data.get(i) {
                 let cpu_util_data = procfs_cpu_to_util_data(cpu_time);
+                let freq_khz = cpu.frequency();
+                total_freq_khz += freq_khz;
                 let snapshot = CpuStatSnapshot {
                     cpu_util_data,
-                    freq_khz: cpu.frequency(),
+                    freq_khz,
                 };
                 self.current.insert(i, snapshot);
             }
         }
 
+        self.system_current = CpuStatSnapshot {
+            cpu_util_data: procfs_cpu_to_util_data(&kernel_stats.total),
+            freq_khz: total_freq_khz,
+        };
+
         Ok(())
+    }
+
+    pub fn system_active_util(&self) -> u64 {
+        self.system_current.cpu_util_data.active_util()
+            - self.system_prev.cpu_util_data.active_util()
+    }
+
+    pub fn system_total_util(&self) -> u64 {
+        self.system_current.cpu_util_data.total_util() - self.system_prev.cpu_util_data.total_util()
     }
 }
 
@@ -158,6 +178,22 @@ mod tests {
 
         assert_eq!(snap.total_util(), 36);
         assert_eq!(snap.active_util(), 27);
+    }
+
+    #[test]
+    fn test_system_active_total() -> Result<()> {
+        let mut tracker = CpuStatTracker::default();
+        assert_eq!(tracker.system_active_util(), 0);
+        assert_eq!(tracker.system_total_util(), 0);
+
+        let sys = Arc::new(Mutex::new(System::new_all()));
+        let mut sys_guard = sys.lock().unwrap();
+        tracker.update(&mut sys_guard)?;
+
+        assert!(tracker.system_active_util() > 0);
+        assert!(tracker.system_total_util() > 0);
+
+        Ok(())
     }
 
     #[test]

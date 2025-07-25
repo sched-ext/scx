@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lib/atq.h>
+#include <lib/minheap.h>
 
 struct p2dq_timer {
 	// if set to 0 the timer will only be scheduled once
@@ -54,6 +55,8 @@ struct llc_ctx {
 
 	scx_atq_t			*intr_atq;
 	scx_atq_t			*mig_atq;
+	scx_minheap_t			*idle_cpu_heap;
+	arena_spinlock_t		idle_lock;
 };
 
 struct node_ctx {

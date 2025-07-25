@@ -137,6 +137,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 use log::debug;
@@ -533,14 +534,16 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let num_numa_nodes = self.dom_group.nr_nodes();
         let numa_load_avg = total_load / num_numa_nodes as f64;
 
-        let mut nodes: Vec<NumaNode> = Vec::with_capacity(num_numa_nodes);
-        for id in 0..num_numa_nodes {
-            nodes.push(NumaNode::new(id, numa_load_avg));
-        }
+        let mut nodes: Vec<NumaNode> = (0..num_numa_nodes)
+            .map(|id| NumaNode::new(id, numa_load_avg))
+            .collect();
 
         let dom_load_avg = total_load / dom_loads.len() as f64;
         for (dom_id, load) in dom_loads.iter().enumerate() {
-            let numa_id = self.dom_group.dom_numa_id(&dom_id).unwrap();
+            let numa_id = self
+                .dom_group
+                .dom_numa_id(&dom_id)
+                .ok_or_else(|| anyhow!("Failed to get NUMA ID for domain {}", dom_id))?;
 
             if numa_id >= num_numa_nodes {
                 bail!("NUMA ID {} exceeds maximum {}", numa_id, num_numa_nodes);
@@ -550,9 +553,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             node.allocate_domain(dom_id, *load, dom_load_avg);
         }
 
-        for _ in 0..num_numa_nodes {
-            self.nodes.insert(nodes.pop().unwrap());
-        }
+        self.nodes = SortedVec::from_unsorted(nodes);
 
         Ok(())
     }

@@ -141,6 +141,8 @@ pub enum RequiresPpid {
 pub struct KprobeRandomDelays {
     pub kprobes: Vec<String>,
     pub freq: f64,
+    pub min_us: u64,
+    pub max_us: u64,
 }
 
 #[derive(Debug)]
@@ -197,6 +199,8 @@ impl Scheduler {
                 [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_DEGRADATION as usize],
             chaos_excluded: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_EXCLUDED as usize],
             chaos_skipped: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_SKIPPED as usize],
+            kprobe_random_delays: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_KPROBE_RANDOM_DELAYS as usize],
             timer_kicks: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TIMER_KICKS as usize],
         }
     }
@@ -425,6 +429,7 @@ impl Builder<'_> {
         if self.p2dq_opts.queued_wakeup {
             open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
+        open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
 
         match self.requires_ppid {
             None => {
@@ -443,6 +448,8 @@ impl Builder<'_> {
         if let Some(kprobe_random_delays) = &self.kprobe_random_delays {
             rodata.kprobe_delays_freq_frac32 =
                 (kprobe_random_delays.freq * 2_f64.powf(32_f64)) as u32;
+            rodata.kprobe_delays_min_ns = kprobe_random_delays.min_us * 1000;
+            rodata.kprobe_delays_max_ns = kprobe_random_delays.max_us * 1000;
         }
 
         // Set up the frequency array. The first element means nothing, so should be what's
@@ -608,12 +615,20 @@ pub struct PerfDegradationArgs {
 #[derive(Debug, Parser)]
 pub struct KprobeArgs {
     /// Introduce random delays in the scheduler whenever a provided kprobe is hit.
-    #[clap(long, num_args = 1.., value_parser)]
+    #[clap(long, num_args = 1.., value_parser, requires = "kprobe_random_delay_min_us")]
     pub kprobes_for_random_delays: Vec<String>,
 
-    /// Chance of kprobe random delays. Must be between 0 and 1.
+    /// Chance of kprobe random delays. Must be between 0 and 1. [default=0.1]
     #[clap(long, requires = "kprobes_for_random_delays")]
     pub kprobe_random_delay_frequency: Option<f64>,
+
+    /// Minimum time to add for kprobe random delay.
+    #[clap(long, requires = "kprobe_random_delay_max_us")]
+    pub kprobe_random_delay_min_us: Option<u64>,
+
+    /// Maximum time to add for kprobe random delay.
+    #[clap(long, requires = "kprobes_for_random_delays")]
+    pub kprobe_random_delay_max_us: Option<u64>,
 }
 
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
@@ -763,9 +778,13 @@ impl<'a> Iterator for BuilderIterator<'a> {
                 KprobeArgs {
                     kprobes_for_random_delays,
                     kprobe_random_delay_frequency,
+                    kprobe_random_delay_min_us: Some(min_us),
+                    kprobe_random_delay_max_us: Some(max_us),
                 } if !kprobes_for_random_delays.is_empty() => Some(KprobeRandomDelays {
                     kprobes: kprobes_for_random_delays.clone(),
                     freq: kprobe_random_delay_frequency.unwrap_or(0.1),
+                    min_us: *min_us,
+                    max_us: *max_us,
                 }),
                 _ => None,
             };

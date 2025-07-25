@@ -820,12 +820,14 @@ unlock_out:
 
 static
 s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
-		    s32 task_cpu, s32 *cpu, bool *is_idle)
+		    s32 task_cpu, s32 *cpu, bool *is_idle,
+		    struct cpu_ctx *cpuc_cur)
 {
 	struct pick_ctx ictx = {
 		.p = p,
 		.taskc = taskc,
 		.prev_cpu = task_cpu,
+		.cpuc_cur = cpuc_cur,
 		.wake_flags = 0,
 		.cpdom_id = -ENOMEM,
 	};

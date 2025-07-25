@@ -82,7 +82,6 @@ use log::warn;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
@@ -370,7 +369,7 @@ fn cpus_online() -> Result<Cpumask> {
     Cpumask::from_cpulist(&online)
 }
 
-fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level: usize) -> usize {
+fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &Path, cache_level: usize) -> usize {
     // Check if the cache id is already cached
     let id_map = match cache_level {
         2 => &mut topo_ctx.l2_ids,
@@ -404,7 +403,7 @@ fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level:
     id
 }
 
-fn get_per_cpu_cache_size(cache_path: &PathBuf) -> Result<usize> {
+fn get_per_cpu_cache_size(cache_path: &Path) -> Result<usize> {
     let path_str = cache_path.to_str().unwrap();
     let paths = glob(&(path_str.to_owned() + "/index[0-9]*"))?;
     let mut tot_size = 0;

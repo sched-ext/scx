@@ -10,12 +10,11 @@ use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::config::get_config_path;
 use crate::config::Config;
-use crate::format_hz;
 use crate::get_default_events;
-use crate::read_file_string;
-use crate::sanitize_nbsp;
+use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
+use crate::Column;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -25,6 +24,7 @@ use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
+use crate::ProcData;
 use crate::ProfilingEvent;
 use crate::Search;
 use crate::VecStats;
@@ -34,8 +34,8 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, KprobeAction, MangoAppAction, PstateSampleAction,
-    SchedCpuPerfSetAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
+    HwPressureAction, IPIAction, KprobeAction, MangoAppAction, SchedCpuPerfSetAction,
+    SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
     SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction, WaitAction,
 };
 
@@ -44,6 +44,7 @@ use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
 use num_format::{SystemLocale, ToFormattedString};
+use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
@@ -51,8 +52,8 @@ use ratatui::{
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, Paragraph,
-        RenderDirection, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
+        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
     },
     Frame,
 };
@@ -66,14 +67,12 @@ use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
-
-const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
 /// App is the struct for scxtop application state.
 pub struct App<'a> {
@@ -99,12 +98,13 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
-    pstate: bool,
+    process_columns: Vec<Column>,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
     dsq_data: BTreeMap<u64, EventData>,
+    proc_data: BTreeMap<i32, ProcData>,
 
     // Event related
     active_event: ProfilingEvent,
@@ -152,6 +152,7 @@ impl<'a> App<'a> {
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
+        let mut proc_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
         let active_event = ProfilingEvent::from_str_args(
             &config.default_profiling_event(),
@@ -193,6 +194,12 @@ impl<'a> App<'a> {
             let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
             data.initialize_events(&default_events_str);
             node_data.insert(node.id, data);
+        }
+
+        for process in all_processes()?.flatten() {
+            if let Ok(data) = ProcData::new(&process, max_cpu_events) {
+                proc_data.insert(process.pid, data);
+            }
         }
 
         let initial_perf_events_list: Vec<String> = available_perf_events()?
@@ -250,11 +257,12 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            pstate: true,
+            process_columns: Self::create_process_columns(),
             cpu_data,
             llc_data,
             node_data,
             dsq_data: BTreeMap::new(),
+            proc_data,
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -287,9 +295,14 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
+        if self.state == AppState::Tracing {
+            return;
+        }
+
         if self.state != AppState::Help
             && self.state != AppState::PerfEvent
             && self.state != AppState::KprobeEvent
+            && self.state != AppState::Pause
         {
             self.prev_state = self.state.clone();
         }
@@ -509,6 +522,21 @@ impl<'a> App<'a> {
                 .update(&mut system_guard)?;
         }
 
+        let system_active_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let mut to_remove = vec![];
+
+        for (&i, proc_data) in self.proc_data.iter_mut() {
+            match proc_data.update_cpu_usage() {
+                Ok(_) => proc_data.set_cpu_util(system_active_util),
+                Err(_) => to_remove.push(i),
+            }
+        }
+
+        // If we weren't able to update the stats, it is because the process is no longer alive
+        for key in to_remove {
+            self.proc_data.remove(&key);
+        }
+
         if self.state == AppState::Scheduler {
             if self.scheduler.is_empty() {
                 self.sched_stats_raw.clear();
@@ -594,7 +622,7 @@ impl<'a> App<'a> {
         Bar::default()
             .value(value)
             .label(Line::from(format!(
-                "{}{}{}{}",
+                "{}{}{}",
                 cpu,
                 if self.collect_cpu_freq {
                     format!(
@@ -606,18 +634,6 @@ impl<'a> App<'a> {
                                 .copied()
                                 .unwrap_or(0)
                         )
-                    )
-                } else {
-                    "".to_string()
-                },
-                if self.pstate {
-                    format!(
-                        " {}",
-                        cpu_data
-                            .event_data_immut("pstate")
-                            .last()
-                            .copied()
-                            .unwrap_or(0)
                     )
                 } else {
                     "".to_string()
@@ -637,30 +653,16 @@ impl<'a> App<'a> {
 
     /// Creates a sparkline for a cpu.
     fn cpu_sparkline(&self, cpu: usize, max: u64, borders: Borders, small: bool) -> Sparkline {
-        let mut perf: u64 = 0;
         let mut cpu_freq: u64 = 0;
         let mut hw_pressure: u64 = 0;
-        let mut pstate: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self
                 .cpu_data
                 .get(&cpu)
                 .expect("CpuData should have been present");
-            perf = cpu_data
-                .event_data_immut("perf")
-                .last()
-                .copied()
-                .unwrap_or(0);
             if self.collect_cpu_freq {
                 cpu_freq = cpu_data
                     .event_data_immut("cpu_freq")
-                    .last()
-                    .copied()
-                    .unwrap_or(0);
-            }
-            if self.pstate {
-                pstate = cpu_data
-                    .event_data_immut("pstate")
                     .last()
                     .copied()
                     .unwrap_or(0);
@@ -685,21 +687,8 @@ impl<'a> App<'a> {
             .block(
                 Block::new()
                     .title(format!(
-                        "{} perf({}){}{}",
+                        "{}{}{}",
                         cpu,
-                        if perf == 0 {
-                            "".to_string()
-                        } else {
-                            format!(
-                                "{}{}",
-                                perf,
-                                if self.pstate {
-                                    format!("/{pstate}")
-                                } else {
-                                    "".to_string()
-                                }
-                            )
-                        },
                         if self.collect_cpu_freq {
                             format!(" {}", format_hz(cpu_freq))
                         } else {
@@ -850,7 +839,6 @@ impl<'a> App<'a> {
             self.resize_events(area_events);
         }
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_llcs = self.topo.all_llcs.len();
 
         let llc_iter = self
@@ -967,10 +955,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
-
-        Ok(())
+        self.render_process_table(frame, left)
     }
 
     /// Renders the node application state.
@@ -981,7 +966,6 @@ impl<'a> App<'a> {
             self.resize_events(area_events);
         }
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_nodes = self.topo.nodes.len();
 
         let node_iter = self
@@ -1104,9 +1088,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
-        Ok(())
+        self.render_process_table(frame, left)
     }
 
     /// Creates a sparkline for a dsq.
@@ -1774,18 +1756,22 @@ impl<'a> App<'a> {
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
-        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
 
         self.render_event(frame, right)?;
-        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
-        Ok(())
+        self.render_process_table(frame, left)
     }
 
     /// Renders the help TUI.
     fn render_help(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
         let theme = self.theme();
+        let mut pause = self
+            .config
+            .active_keymap
+            .action_keys_string(Action::SetState(AppState::Pause));
+        if pause == " " {
+            pause = "Space".to_string();
+        }
         let text = vec![
             Line::from(Span::styled(
                 LICENSE,
@@ -1958,6 +1944,10 @@ impl<'a> App<'a> {
                     "{}: quit",
                     self.config.active_keymap.action_keys_string(Action::Quit),
                 ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!("{pause}: press to pause/unpause"),
                 Style::default(),
             )),
             Line::from(Span::styled(
@@ -2219,6 +2209,140 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn create_process_columns() -> Vec<Column> {
+        vec![
+            Column {
+                header: "TGID",
+                constraint: Constraint::Length(8),
+                visible: true,
+                value_fn: Box::new(|tgid, _| tgid.to_string()),
+            },
+            Column {
+                header: "Name",
+                constraint: Constraint::Length(15),
+                visible: true,
+                value_fn: Box::new(|_, data| data.process_name.clone()),
+            },
+            Column {
+                header: "Command Line",
+                constraint: Constraint::Fill(1),
+                visible: true,
+                value_fn: Box::new(|_, data| data.cmdline.join(" ")),
+            },
+            Column {
+                header: "Last DSQ",
+                constraint: Constraint::Length(18),
+                visible: true,
+                value_fn: Box::new(|_, data| {
+                    data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))
+                }),
+            },
+            Column {
+                header: "Slice ns",
+                constraint: Constraint::Length(8),
+                visible: true,
+                value_fn: Box::new(|_, data| {
+                    let stats = VecStats::new(&data.event_data_immut("slice_consumed"), None);
+                    stats.avg.to_string()
+                }),
+            },
+            Column {
+                header: "Avg/Max Lat us",
+                constraint: Constraint::Length(14),
+                visible: true,
+                value_fn: Box::new(|_, data| {
+                    let stats = VecStats::new(&data.event_data_immut("lat_us"), None);
+                    format!("{}/{}", stats.avg, stats.max)
+                }),
+            },
+            Column {
+                header: "CPU",
+                constraint: Constraint::Length(3),
+                visible: true,
+                value_fn: Box::new(|_, data| data.cpu.to_string()),
+            },
+            Column {
+                header: "LLC",
+                constraint: Constraint::Length(3),
+                visible: true,
+                value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
+            },
+            Column {
+                header: "NUMA",
+                constraint: Constraint::Length(4),
+                visible: true,
+                value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
+            },
+            Column {
+                header: "Threads",
+                constraint: Constraint::Length(7),
+                visible: true,
+                value_fn: Box::new(|_, data| data.threads.len().to_string()),
+            },
+            Column {
+                header: "CPU%",
+                constraint: Constraint::Length(4),
+                visible: true,
+                value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
+            },
+        ]
+    }
+
+    /// Render the process view.
+    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let visible_columns: Vec<&Column> = self
+            .process_columns
+            .iter()
+            .filter(|col| col.visible)
+            .collect();
+
+        let header = visible_columns
+            .iter()
+            .map(|col| Cell::from(col.header))
+            .collect::<Row>()
+            .height(1)
+            .style(self.theme().text_color())
+            .bold()
+            .underlined();
+
+        let constraints = visible_columns
+            .iter()
+            .map(|col| col.constraint)
+            .collect::<Vec<_>>();
+
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(self.theme().border_style())
+            .title_top(
+                Line::from(format!("Processes (total: {})", self.proc_data.len()))
+                    .style(self.theme().title_style())
+                    .centered(),
+            );
+
+        let mut sorted_view: Vec<(&i32, &ProcData)> = self.proc_data.iter().collect();
+        sorted_view.sort_unstable_by(|a, b| {
+            b.1.cpu_util_perc
+                .partial_cmp(&a.1.cpu_util_perc)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.threads.len().cmp(&a.1.threads.len()))
+        });
+
+        let rows = sorted_view.into_iter().map(|(i, data)| {
+            visible_columns
+                .iter()
+                .map(|col| Cell::from((col.value_fn)(*i, data)))
+                .collect::<Row>()
+                .height(1)
+                .style(self.theme().text_color())
+        });
+
+        let table = Table::new(rows, constraints).header(header).block(block);
+
+        frame.render_widget(table, area);
+
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
@@ -2241,7 +2365,7 @@ impl<'a> App<'a> {
                         .areas(right);
                 self.render_scheduler("dsq_lat_us", frame, left_top, true, true)?;
                 self.render_scheduler("dsq_slice_consumed", frame, left_center, true, false)?;
-                self.render_scheduler("dsq_vtime_delta", frame, left_bottom, true, false)?;
+                self.render_scheduler("dsq_vtime", frame, left_bottom, true, false)?;
                 self.render_scheduler("dsq_nr_queued", frame, right_bottom, true, false)?;
                 self.render_scheduler_stats(frame, right_top)
             }
@@ -2488,28 +2612,69 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("perf", perf as u64);
     }
 
-    fn on_pstate_sample(&mut self, action: &PstateSampleAction) {
-        let PstateSampleAction { cpu, busy } = action;
-        let cpu_data = self
-            .cpu_data
-            .get_mut(&(*cpu as usize))
-            .expect("CpuData should have been present");
-        cpu_data.add_event_data("pstate", *busy as u64);
-    }
-
     fn on_exec(&mut self, action: &ExecAction) {
+        let ExecAction { old_pid, pid, .. } = action;
+
+        // In case pid != old_pid
+        let old_pid: i32 = u32_to_i32(*old_pid);
+        self.proc_data.remove(&old_pid);
+
+        let pid = u32_to_i32(*pid);
+        if let Ok(new_proc_data) = ProcData::from_tgid(pid, self.max_cpu_events) {
+            self.proc_data.insert(pid, new_proc_data);
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exec(action);
         }
     }
 
     fn on_exit(&mut self, action: &ExitAction) {
+        let ExitAction { pid, tgid, .. } = action;
+
+        let pid: i32 = u32_to_i32(*pid);
+        let tgid: i32 = u32_to_i32(*tgid);
+
+        if pid == tgid {
+            self.proc_data.remove(&pid);
+        } else if let Entry::Occupied(entry) = self.proc_data.entry(tgid) {
+            entry.into_mut().remove_thread(pid);
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exit(action);
         }
     }
 
     fn on_fork(&mut self, action: &ForkAction) {
+        let ForkAction {
+            parent_tgid,
+            child_pid,
+            child_tgid,
+            ..
+        } = action;
+
+        let parent_tgid: i32 = u32_to_i32(*parent_tgid);
+        let child_tgid: i32 = u32_to_i32(*child_tgid);
+        let child_pid: i32 = u32_to_i32(*child_pid);
+
+        if parent_tgid == child_tgid {
+            // Fork created a new thread for an existing process
+            match self.proc_data.entry(parent_tgid) {
+                Entry::Vacant(entry) => {
+                    if let Ok(proc_data) = ProcData::from_tgid(parent_tgid, self.max_cpu_events) {
+                        entry.insert(proc_data);
+                    }
+                }
+                Entry::Occupied(entry) => entry.into_mut().add_thread(child_pid),
+            }
+        } else {
+            // Fork created a fully new process
+            if let Ok(new_proc_data) = ProcData::from_tgid(child_pid, self.max_cpu_events) {
+                self.proc_data.insert(child_pid, new_proc_data);
+            }
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_fork(action);
         }
@@ -2542,10 +2707,55 @@ impl<'a> App<'a> {
             next_dsq_nr_queued,
             next_dsq_lat_us,
             next_dsq_vtime,
+            next_tgid,
             prev_dsq_id,
             prev_used_slice_ns,
+            prev_tgid,
             ..
         } = action;
+
+        let topo_cpu = self
+            .topo
+            .all_cpus
+            .get(&(*cpu as usize))
+            .expect("Cpu should exist in topology");
+        let llc = topo_cpu.llc_id;
+        let node = topo_cpu.node_id;
+
+        let mut insert_or_update = |tgid: i32, dsq: u64| {
+            match self.proc_data.entry(tgid) {
+                Entry::Vacant(entry) => {
+                    if let Ok(mut proc_data) = ProcData::from_tgid(tgid, self.max_cpu_events) {
+                        proc_data.cpu = u32_to_i32(*cpu);
+                        proc_data.llc = Some(llc as u32);
+                        proc_data.node = Some(node as u32);
+                        proc_data.dsq = Some(dsq);
+                        entry.insert(proc_data);
+                    }
+                }
+                Entry::Occupied(mut entry) => {
+                    let proc_data = entry.get_mut();
+                    proc_data.cpu = u32_to_i32(*cpu);
+                    proc_data.llc = Some(llc as u32);
+                    proc_data.node = Some(node as u32);
+                    proc_data.dsq = Some(dsq);
+                }
+            };
+        };
+
+        let next_tgid = u32_to_i32(*next_tgid);
+        let prev_tgid = u32_to_i32(*prev_tgid);
+
+        insert_or_update(next_tgid, *next_dsq_id);
+        insert_or_update(prev_tgid, *prev_dsq_id);
+
+        if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
+            proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
+        }
+
+        if let Some(proc_data) = self.proc_data.get_mut(&next_tgid) {
+            proc_data.add_event_data("lat_us", *next_dsq_lat_us);
+        }
 
         if self.state == AppState::Tracing {
             if action.ts > self.trace_start {
@@ -2553,6 +2763,7 @@ impl<'a> App<'a> {
             }
             return;
         }
+
         if self.scheduler.is_empty() {
             return;
         }
@@ -2584,22 +2795,7 @@ impl<'a> App<'a> {
             }
 
             if *next_dsq_vtime > 0 {
-                // vtime is special because we want the delta
-                let last = next_dsq_data
-                    .event_data_immut("dsq_vtime_delta")
-                    .last()
-                    .copied()
-                    .unwrap_or(0_u64);
-                if next_dsq_vtime.saturating_sub(last) < DSQ_VTIME_CUTOFF {
-                    next_dsq_data.add_event_data(
-                        "dsq_vtime_delta",
-                        if last > 0 {
-                            next_dsq_vtime.saturating_sub(last)
-                        } else {
-                            0
-                        },
-                    );
-                }
+                next_dsq_data.add_event_data("dsq_vtime", *next_dsq_vtime);
             }
         }
 
@@ -2621,6 +2817,12 @@ impl<'a> App<'a> {
     fn on_sched_migrate(&mut self, action: &SchedMigrateTaskAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_migrate(action);
+        }
+    }
+
+    fn on_sched_hang(&mut self, action: &SchedHangAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_sched_hang(action);
         }
     }
 
@@ -2754,9 +2956,6 @@ impl<'a> App<'a> {
                 }
             }
             Action::NextViewState => self.next_view_state(),
-            Action::PstateSample(a) => {
-                self.on_pstate_sample(a);
-            }
             Action::SchedReg => {
                 self.on_scheduler_load()?;
             }
@@ -2802,6 +3001,9 @@ impl<'a> App<'a> {
             }
             Action::SchedMigrateTask(a) => {
                 self.on_sched_migrate(a);
+            }
+            Action::SchedHang(a) => {
+                self.on_sched_hang(a);
             }
             Action::SoftIRQ(a) => {
                 self.on_softirq(a);

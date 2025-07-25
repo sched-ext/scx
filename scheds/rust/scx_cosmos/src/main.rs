@@ -102,10 +102,22 @@ struct Opts {
     ///
     /// This option can help reducing some overhead when trying to allocate idle CPUs and it can be
     /// quite effective with simple CPU topologies.
-    ///
-    /// This option is automatically disabled if --primary-domain is used.
     #[arg(short = 'i', action = clap::ArgAction::SetTrue)]
     flat_idle_scan: bool,
+
+    /// Enable preferred idle CPU scanning.
+    ///
+    /// With this opition enabled, the scheduler will prioritize assigning tasks to higher-ranked
+    /// cores before considering lower-ranked ones.
+    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
+    preferred_idle_scan: bool,
+
+    /// Disable SMT.
+    ///
+    /// This option can only be used together with --flat-idle-scan or --preferred-idle-scan,
+    /// otherwise it is ignored.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_smt: bool,
 
     /// Disable direct dispatch during synchronous wakeups.
     ///
@@ -115,6 +127,15 @@ struct Opts {
     /// coupling.
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
+
+    /// Enable address space affinity.
+    ///
+    /// This option allows to keep tasks that share the same address space (e.g., threads of the
+    /// same process) on the same CPU across wakeups.
+    ///
+    /// This can improve locality and performance in certain cache-sensitive workloads.
+    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
+    mm_affinity: bool,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -260,10 +281,17 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         set_rlimit_infinity();
 
+        // Initialize CPU topology.
+        let topo = Topology::new().unwrap();
+
+        // Check host topology to determine if we need to enable SMT capabilities.
+        let smt_enabled = !opts.disable_smt && topo.smt_enabled;
+
         info!(
-            "{} {}",
+            "{} {} {}",
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION")),
+            if smt_enabled { "SMT on" } else { "SMT off" }
         );
 
         // Print command line.
@@ -285,11 +313,27 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
         rodata.flat_idle_scan = opts.flat_idle_scan;
+        rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = opts.enable_numa;
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.mm_affinity = opts.mm_affinity;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
+
+        // Generate the list of available CPUs sorted by capacity in descending order.
+        if opts.preferred_idle_scan {
+            let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+            cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+            for (i, cpu) in cpus.iter().enumerate() {
+                rodata.preferred_cpus[i] = cpu.id as u64;
+            }
+            info!(
+                "Preferred CPUs: {:?}",
+                &rodata.preferred_cpus[0..cpus.len()]
+            );
+        }
+        rodata.preferred_idle_scan = opts.preferred_idle_scan;
 
         // Define the primary scheduling domain.
         let primary_cpus = if let Some(ref domain) = opts.primary_domain {

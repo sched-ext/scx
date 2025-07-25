@@ -22,6 +22,7 @@ fn main() {
     let include_path = &[
         root_dir.join("lib/scxtest/"),
         root_dir.join("scheds/include/"),
+        root_dir.join("scheds/include/lib"),
         root_dir.join("scheds/include/arch/x86/"),
         root_dir.join("scheds/include/bpf-compat/"),
         env::var("DEP_BPF_INCLUDE").unwrap().into(),

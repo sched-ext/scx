@@ -19,13 +19,15 @@ pub mod mangoapp;
 mod mem_stats;
 mod node_data;
 mod perfetto_trace;
+mod proc_data;
 pub mod profiling_events;
 mod search;
 mod stats;
 mod theme;
+mod thread_data;
 pub mod tracer;
 mod tui;
-mod util;
+pub mod util;
 
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
@@ -39,6 +41,7 @@ pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
+pub use proc_data::ProcData;
 pub use profiling_events::{
     available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
     ProfilingEvent,
@@ -47,12 +50,9 @@ pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
 pub use theme::AppTheme;
+pub use thread_data::ThreadData;
 pub use tui::Event;
 pub use tui::Tui;
-pub use util::format_hz;
-pub use util::get_clock_value;
-pub use util::read_file_string;
-pub use util::sanitize_nbsp;
 
 pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
@@ -76,22 +76,24 @@ pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 pub enum AppState {
     /// Application is in the default state.
     Default,
-    /// Application is in the PerfEvent list state.
-    PerfEvent,
-    /// Application is in the KprobeEvent list state.
-    KprobeEvent,
     /// Application is in the help state.
     Help,
+    /// Application is in the KprobeEvent list state.
+    KprobeEvent,
     /// Application is in the Llc state.
     Llc,
+    /// Application is in the mangoapp state.
+    MangoApp,
     /// Application is in the NUMA node state.
     Node,
+    /// Application is in the paused state.
+    Pause,
+    /// Application is in the PerfEvent list state.
+    PerfEvent,
     /// Application is in the scheduler state.
     Scheduler,
     /// Application is in the tracing  state.
     Tracing,
-    /// Application is in the mangoapp state.
-    MangoApp,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -136,6 +138,15 @@ impl FilteredEventState {
     }
 }
 
+type ColumnFn = Box<dyn Fn(i32, &ProcData) -> String>;
+
+struct Column {
+    header: &'static str,
+    constraint: ratatui::prelude::Constraint,
+    visible: bool,
+    value_fn: ColumnFn,
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedCpuPerfSetAction {
     pub cpu: u32,
@@ -157,7 +168,9 @@ pub struct ForkAction {
     pub ts: u64,
     pub cpu: u32,
     pub parent_pid: u32,
+    pub parent_tgid: u32,
     pub child_pid: u32,
+    pub child_tgid: u32,
     pub parent_comm: SsoString,
     pub child_comm: SsoString,
 }
@@ -228,6 +241,14 @@ pub struct SchedMigrateTaskAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedHangAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub comm: SsoString,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SoftIRQAction {
     pub cpu: u32,
     pub pid: u32,
@@ -291,12 +312,6 @@ pub struct HwPressureAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PstateSampleAction {
-    pub cpu: u32,
-    pub busy: u32,
-}
-
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct KprobeAction {
     pub ts: u64,
     pub cpu: u32,
@@ -356,7 +371,6 @@ pub enum Action {
     PageDown,
     PageUp,
     PrevEvent,
-    PstateSample(PstateSampleAction),
     Quit,
     RequestTrace,
     TraceStarted(TraceStartedAction),
@@ -364,6 +378,7 @@ pub enum Action {
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedHang(SchedHangAction),
     SchedMigrateTask(SchedMigrateTaskAction),
     SchedReg,
     SchedStats(String),
@@ -503,6 +518,19 @@ impl TryFrom<&bpf_event> for Action {
                     comm: comm.into(),
                 }))
             }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_SCHED_HANG => {
+                let hang = unsafe { &event.event.hang };
+
+                let comm = String::from_utf8_lossy(&hang.comm);
+
+                Ok(Action::SchedHang(SchedHangAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    comm: comm.into(),
+                    pid: hang.pid,
+                }))
+            }
             bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
                 ts: event.ts,
                 cpu: event.cpu,
@@ -532,7 +560,9 @@ impl TryFrom<&bpf_event> for Action {
                     ts: event.ts,
                     cpu: event.cpu,
                     parent_pid: fork.parent_pid,
+                    parent_tgid: fork.parent_tgid,
                     child_pid: fork.child_pid,
+                    child_tgid: fork.child_tgid,
                     parent_comm: parent_comm.into(),
                     child_comm: child_comm.into(),
                 }))
@@ -548,11 +578,6 @@ impl TryFrom<&bpf_event> for Action {
                     instruction_pointer: kprobe.instruction_pointer,
                 }))
             }
-            #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_PSTATE_SAMPLE => Ok(Action::PstateSample(PstateSampleAction {
-                cpu: event.cpu,
-                busy: unsafe { event.event.pstate.busy },
-            })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_SWITCH => {
                 let sched_switch = unsafe { &event.event.sched_switch };
@@ -617,6 +642,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
+            Action::SetState(AppState::Pause) => write!(f, "AppStatePause"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),

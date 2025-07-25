@@ -40,7 +40,7 @@ enum event_type {
 	GPU_MEM,
 	HW_PRESSURE,
 	IPI,
-	PSTATE_SAMPLE,
+	SCHED_HANG,
     	SCHED_MIGRATE,
 	SCHED_REG,
 	SCHED_SWITCH,
@@ -110,7 +110,9 @@ struct exit_event {
 
 struct fork_event {
 	u32		parent_pid;
+	u32		parent_tgid;
 	u32		child_pid;
+	u32		child_tgid;
 	u8		parent_comm[MAX_COMM];
 	u8		child_comm[MAX_COMM];
 };
@@ -124,6 +126,11 @@ struct wait_event {
 	u8              comm[MAX_COMM];
 	u32             pid;
 	int             prio;
+};
+
+struct hang_event {
+	u8              comm[MAX_COMM];
+	u32             pid;
 };
 
 struct ipi_event {
@@ -162,10 +169,6 @@ struct trace_started_event {
 	bool		stop_scheduled;
 };
 
-struct pstate_sample_event {
-	u32             busy;
-};
-
 struct kprobe_event {
 	u32             pid;
 	u64             instruction_pointer;
@@ -185,13 +188,13 @@ struct bpf_event {
 		struct  cpuhp_enter_event chp;
 		struct  cpuhp_exit_event cxp;
 		struct	ipi_event ipi;
-		struct  pstate_sample_event pstate;
 		struct	sched_switch_event sched_switch;
 		struct	set_perf_event perf;
 		struct	softirq_event softirq;
 		struct	wakeup_event wakeup;
 		struct	wakeup_event waking;
 		struct  migrate_event migrate;
+		struct  hang_event hang;
 		struct  trace_started_event trace;
 		struct  kprobe_event kprobe;
 	} event;
