@@ -154,6 +154,8 @@ pub struct SchedSample {
     pub waker_comm: String,
     #[stat(desc = "Assigned time slice")]
     pub slice: u64,
+    #[stat(desc = "Amount of time actually used by task in a slice")]
+    pub slice_used: u64,
     #[stat(desc = "Latency criticality of this task")]
     pub lat_cri: u32,
     #[stat(desc = "Average latency criticality in a system")]
@@ -194,7 +196,7 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:6} | {:10} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:6} | {:10} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
@@ -205,6 +207,7 @@ impl SchedSample {
             "WKER_PID",
             "WKER_COMM",
             "SLC_NS",
+            "SLC_USED_NS",
             "LAT_CRI",
             "AVG_LC",
             "ST_PRIO",
@@ -233,7 +236,7 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:12} | {:12} |",
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:12} | {:12} |",
             self.mseq,
             self.pid,
             self.comm,
@@ -244,6 +247,7 @@ impl SchedSample {
             self.waker_pid,
             self.waker_comm,
             self.slice,
+            self.slice_used,
             self.lat_cri,
             self.avg_lat_cri,
             self.static_prio,
