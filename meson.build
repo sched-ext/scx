@@ -368,8 +368,7 @@ if enable_rust
                  'scx_flash', 'scx_cosmos', 'scx_rusty', 'scx_p2dq',
                  'scx_layered', 'scx_mitosis', 'scx_tickless', 'scx_chaos']
   rust_misc = ['scx_stats', 'scx_stats_derive', 'scx_utils',
-               'scx_rustland_core',
-               'scx_loader']
+               'scx_rustland_core']
 
   sched_deps = [libbpf, bpftool_target]
   cargo_cmd = [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',

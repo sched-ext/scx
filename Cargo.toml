@@ -2,7 +2,6 @@
 members = [
     "rust/scx_bpf_unittests",
     "rust/scx_lib_selftests",
-    "rust/scx_loader",
     "rust/scx_rustland_core",
     "rust/scx_stats",
     "rust/scx_stats/scx_stats_derive",
@@ -21,6 +20,7 @@ members = [
     "scheds/rust/scx_rusty",
     "scheds/rust/scx_tickless",
     "scheds/rust/scx_wd40",
+    "tools/scx_loader",
     "tools/scxctl",
     "tools/scxtop",
     "tools/vmlinux_docify",
