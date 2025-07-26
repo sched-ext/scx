@@ -227,8 +227,13 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         },
         // scx_rustland doesn't support any of these modes
         SupportedSched::Rustland => vec![],
-        // scx_cosmos doesn't support any of these modes
-        SupportedSched::Cosmos => vec![],
+        SupportedSched::Cosmos => match sched_mode {
+            SchedMode::Gaming => vec!["-c", "0", "-p", "0"],
+            SchedMode::LowLatency => vec!["-m", "performance", "-c", "0", "-p", "0", "-w"],
+            SchedMode::PowerSave => vec!["-m", "powersave", "-d", "-p", "5000"],
+            SchedMode::Server => vec!["-a", "-s", "20000"],
+            SchedMode::Auto => vec!["-d"],
+        },
     }
 }
 
@@ -300,11 +305,11 @@ powersave_mode = []
 server_mode = []
 
 [scheds.scx_cosmos]
-auto_mode = []
-gaming_mode = []
-lowlatency_mode = []
-powersave_mode = []
-server_mode = []
+auto_mode = ["-d"]
+gaming_mode = ["-c", "0", "-p", "0"]
+lowlatency_mode = ["-m", "performance", "-c", "0", "-p", "0", "-w"]
+powersave_mode = ["-m", "powersave", "-d", "-p", "5000"]
+server_mode = ["-a", "-s", "20000"]
 "#;
 
         let parsed_config = parse_config_content(config_str).expect("Failed to parse config");
