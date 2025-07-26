@@ -2212,10 +2212,10 @@ impl<'a> App<'a> {
     fn create_process_columns() -> Vec<Column> {
         vec![
             Column {
-                header: "TGID",
+                header: "TGID/UID",
                 constraint: Constraint::Length(8),
                 visible: true,
-                value_fn: Box::new(|tgid, _| tgid.to_string()),
+                value_fn: Box::new(|tgid, data| format!("{tgid}/{}", data.uid)),
             },
             Column {
                 header: "Name",
@@ -2325,6 +2325,7 @@ impl<'a> App<'a> {
                 .partial_cmp(&a.1.cpu_util_perc)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.1.threads.len().cmp(&a.1.threads.len()))
+                .then_with(|| b.1.uid.cmp(&a.1.uid))
         });
 
         let rows = sorted_view.into_iter().map(|(i, data)| {
