@@ -343,7 +343,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 
 static void calc_sys_time_slice(void)
 {
-	u64 nr_queued, slice;
+	u64 nr_q, slice;
 
 	/*
 	 * Given the updated state, recalculate the time slice for the next
@@ -351,9 +351,13 @@ static void calc_sys_time_slice(void)
 	 * runnable tasks at least once within a targeted latency using the
 	 * active CPUs.
 	 */
-	nr_queued = sys_stat.nr_queued_task + 1;
-	slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_queued;
-	slice = clamp(slice, slice_min_ns, slice_max_ns);
+	nr_q = sys_stat.nr_queued_task;
+	if (nr_q > 0) {
+		slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_q;
+		slice = clamp(slice, slice_min_ns, slice_max_ns);
+	} else {
+		slice = slice_max_ns;
+	}
 	sys_stat.slice = calc_avg(sys_stat.slice, slice);
 }
 

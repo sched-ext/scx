@@ -45,6 +45,7 @@ enum consts_internal {
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
 	LAVD_LC_GREEDY_SHIFT		= 3, /* 12.5% */
+	LAVD_LC_WAKE_INTERVAL_MIN	= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_LC_INH_WAKEE_SHIFT		= 2, /* 25.0% of wakee's latency criticality */
 	LAVD_LC_INH_WAKER_SHIFT		= 3, /* 12.5 of waker's latency criticality */
 

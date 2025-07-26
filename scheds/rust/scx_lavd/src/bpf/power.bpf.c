@@ -256,7 +256,7 @@ static void do_core_compaction(void)
 	struct cpdom_ctx *cpdomc;
 	int nr_active, nr_active_old, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
-	bool clear;
+	bool need_kick;
 	u64 cpdom_id;
 
 	bpf_rcu_read_lock();
@@ -302,10 +302,11 @@ static void do_core_compaction(void)
 		/*
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
+		need_kick = false;
 		if (i < nr_active) {
 			bpf_cpumask_set_cpu(cpu, active);
 			bpf_cpumask_clear_cpu(cpu, ovrflw);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			need_kick = true;
 
 			/*
 			 * Accumulate the capacity of active CPUs and
@@ -325,7 +326,12 @@ static void do_core_compaction(void)
 				big_capacity += cpuc->capacity;
 		} else if (i < nr_active_old) {
 			bpf_cpumask_clear_cpu(cpu, active);
-			bpf_cpumask_clear_cpu(cpu, ovrflw);
+			if (cpuc->nr_pinned_tasks) {
+				bpf_cpumask_set_cpu(cpu, ovrflw);
+				need_kick = true;
+			} else {
+				bpf_cpumask_clear_cpu(cpu, ovrflw);
+			}
 		} else {
 			/*
 			 * This is the case when a CPU belongs to the
@@ -342,10 +348,19 @@ static void do_core_compaction(void)
 			 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
 			 */
 			bpf_cpumask_clear_cpu(cpu, active);
-			clear = clear_cpu_periodically(cpu, ovrflw);
-			if (!clear)
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			if (cpuc->nr_pinned_tasks) {
+				bpf_cpumask_set_cpu(cpu, ovrflw);
+				need_kick = true;
+			} else {
+				need_kick = !clear_cpu_periodically(cpu, ovrflw);
+			}
 		}
+
+		/*
+		 * When the CPU is in either an active or overflow set, kick it.
+		 */
+		if (need_kick)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
 
 	cur_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
