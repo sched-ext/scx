@@ -473,8 +473,8 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
 			       struct llc_ctx *llcx)
 {
-	u64 slice_ns, nr_idle;
-
+	u64 nr_idle;
+	u64 max_ns = scale_by_task_weight(p, max_dsq_time_slice());
 	u64 nr_queued = llc_nr_queued(llcx);
 
 	const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -484,12 +484,12 @@ static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
 	if (nr_idle == 0)
 		nr_idle = 1;
 
-	if (nr_queued > nr_idle) {
-		slice_ns = (max_dsq_time_slice() * nr_idle) / nr_queued;
-		taskc->slice_ns = clamp_slice(slice_ns);
-	} else {
-		taskc->slice_ns = max_dsq_time_slice();
-	}
+	if (nr_queued > nr_idle)
+		taskc->slice_ns = (max_ns * nr_idle) / nr_queued;
+	else
+		taskc->slice_ns = max_ns;
+
+	taskc->slice_ns = clamp_slice(taskc->slice_ns);
 }
 
 /*
