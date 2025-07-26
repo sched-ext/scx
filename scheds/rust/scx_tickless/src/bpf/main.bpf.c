@@ -240,7 +240,6 @@ s32 BPF_STRUCT_OPS(tickless_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 
 void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 	u64 deadline;
 
