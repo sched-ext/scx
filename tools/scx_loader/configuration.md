@@ -71,11 +71,11 @@ powersave_mode = ["-f", "50", "-p"]
 server_mode = ["-f", "100"]
 
 [scheds.scx_cosmos]
-auto_mode = []
-gaming_mode = []
-lowlatency_mode = []
-powersave_mode = []
-server_mode = []
+auto_mode = ["-d"]
+gaming_mode = ["-c", "0", "-p", "0"]
+lowlatency_mode = ["-m", "performance", "-c", "0", "-p", "0", "-w"]
+powersave_mode = ["-m", "powersave", "-d", "-p", "5000"]
+server_mode = ["-a", "-s", "20000"]
 ```
 
 **`default_sched`:**
