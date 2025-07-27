@@ -1592,12 +1592,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 			 * the ATQ. Otherwise there may be priority inversions.
 			 * This probably needs to be done for the DSQs as well.
 			 */
+			if (!(taskc = lookup_task_ctx(p))) {
+				bpf_task_release(p);
+				scx_bpf_error("failed to get task ctx");
+				return;
+			}
 			if (p->pid == peeked_pid) {
-				if (!(taskc = lookup_task_ctx(p))) {
-					bpf_task_release(p);
-					scx_bpf_error("failed to get task ctx");
-					return;
-				}
 				scx_bpf_dsq_insert(p,
 						   SCX_DSQ_LOCAL,
 						   taskc->slice_ns,
@@ -1609,11 +1609,13 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 				 * The task that was popped was already
 				 * consumed. The next task that was popped
 				 * might have a higher vtime so reenqueue it
-				 * back to the ATQ.
+				 * back to the LLC DSQ.
 				 */
-				scx_atq_insert_vtime(min_atq,
-						     (u64)p->pid,
-						     p->scx.dsq_vtime);
+				scx_bpf_dsq_insert_vtime(p,
+						   cpuc->llc_dsq,
+						   taskc->slice_ns,
+						   p->scx.dsq_vtime,
+						   taskc->enq_flags);
 				bpf_task_release(p);
 				stat_inc(P2DQ_STAT_ATQ_REENQ);
 			}
@@ -1631,12 +1633,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		if (p2dq_config.atq_enabled) {
 			pid = scx_atq_pop(cpuc->intr_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
+				if (!(taskc = lookup_task_ctx(p))) {
+					bpf_task_release(p);
+					scx_bpf_error("failed to get task ctx");
+					return;
+				}
 				if (p->pid == peeked_pid) {
-					if (!(taskc = lookup_task_ctx(p))) {
-						bpf_task_release(p);
-						scx_bpf_error("failed to get task ctx");
-						return;
-					}
 					scx_bpf_dsq_insert(p,
 							   SCX_DSQ_LOCAL,
 							   taskc->slice_ns,
@@ -1644,9 +1646,11 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 					bpf_task_release(p);
 					return;
 				} else {
-					scx_atq_insert_vtime(cpuc->intr_atq,
-							     (u64)p->pid,
-							     p->scx.dsq_vtime);
+					scx_bpf_dsq_insert_vtime(p,
+							   cpuc->llc_dsq,
+							   taskc->slice_ns,
+							   p->scx.dsq_vtime,
+							   taskc->enq_flags);
 					bpf_task_release(p);
 					stat_inc(P2DQ_STAT_ATQ_REENQ);
 				}
@@ -1661,6 +1665,27 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	if (dsq_id != cpuc->llc_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
 		return;
+
+	if (p2dq_config.atq_enabled) {
+		pid = scx_atq_pop(cpuc->mig_atq);
+		if ((p = bpf_task_from_pid((s32)pid))) {
+			if (!(taskc = lookup_task_ctx(p))) {
+				bpf_task_release(p);
+				scx_bpf_error("failed to get task ctx");
+				return;
+			}
+			scx_bpf_dsq_insert(p,
+					   SCX_DSQ_LOCAL,
+					   taskc->slice_ns,
+					   taskc->enq_flags);
+			bpf_task_release(p);
+			return;
+		}
+	} else {
+		if (dsq_id != cpuc->mig_dsq &&
+		    scx_bpf_dsq_move_to_local(cpuc->mig_dsq))
+			return;
+	}
 
 	if (!(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		scx_bpf_error("invalid llc id %u", cpuc->llc_id);
