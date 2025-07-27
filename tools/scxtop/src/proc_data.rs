@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 pub struct ProcData {
     pub tgid: i32,
+    pub uid: u32,
     pub process_name: String,
     pub cpu: i32,
     pub llc: Option<u32>,
@@ -48,6 +49,7 @@ impl ProcData {
 
         let proc_data = Self {
             tgid: process.pid,
+            uid: process.uid().unwrap(),
             process_name: std::mem::take(&mut proc_stats.comm),
             cpu,
             llc: None,
