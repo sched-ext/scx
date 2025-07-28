@@ -1484,28 +1484,19 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		return;
 	}
 
-	bool has_affn_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0;
-	bool has_intr_queued;
-	if (p2dq_config.atq_enabled)
-		has_intr_queued = scx_atq_nr_queued(cpuc->intr_atq) > 0;
-	else
-		has_intr_queued = scx_bpf_dsq_nr_queued(cpuc->intr_dsq) > 0;
-
 	u64 min_vtime = 0;
 
 	// First search affinitized DSQ
-	if (has_affn_queued) {
-		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->affn_dsq;
-			}
-			break;
+	bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+			min_vtime = p->scx.dsq_vtime;
+			dsq_id = cpuc->affn_dsq;
 		}
+		break;
 	}
 
 	// Next search interactive
-	if (p2dq_config.interactive_dsq && has_intr_queued) {
+	if (p2dq_config.interactive_dsq) {
 		if (p2dq_config.atq_enabled) {
 			pid = scx_atq_peek(cpuc->intr_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
@@ -1530,14 +1521,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	}
 
 	// LLC DSQ
-	if (scx_bpf_dsq_nr_queued(cpuc->llc_dsq) > 0) {
-		bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->llc_dsq;
-			}
-			break;
+	bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
+		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+			min_vtime = p->scx.dsq_vtime;
+			dsq_id = cpuc->llc_dsq;
 		}
+		break;
 	}
 
 	// Migration eligible
@@ -1565,15 +1554,13 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 				bpf_task_release(p);
 			}
 		} else {
-			if (scx_bpf_dsq_nr_queued(cpuc->mig_dsq) > 0) {
-				bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
-					if (p->scx.dsq_vtime < min_vtime ||
-					    min_vtime == 0) {
-						min_vtime = p->scx.dsq_vtime;
-						dsq_id = cpuc->mig_dsq;
-					}
-					break;
+			bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
+				if (p->scx.dsq_vtime < min_vtime ||
+				    min_vtime == 0) {
+					min_vtime = p->scx.dsq_vtime;
+					dsq_id = cpuc->mig_dsq;
 				}
+				break;
 			}
 		}
 	}
@@ -1625,7 +1612,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 			return;
 	}
 
-	if (has_affn_queued && dsq_id != cpuc->affn_dsq &&
+	if (dsq_id != cpuc->affn_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
