@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef TEST
+#ifdef SCX_BPF_UNITTEST
 
 #ifndef __weak
 #define __weak __attribute__((weak))
@@ -32,4 +32,4 @@ void __fail_assert(const char *condition, const char *file, int line) __attribut
 	}							\
 	static __always_inline void name##_scxtest_impl(void)
 
-#endif /* TEST */
+#endif /* SCX_BPF_UNITTEST */
