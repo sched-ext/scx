@@ -223,7 +223,6 @@ pub struct SchedWakeActionCtx {
     pub tgid: u32,
     pub prio: i32,
     pub comm: SsoString,
-    pub layer_id: i32,
 }
 
 pub type SchedWakeupNewAction = SchedWakeActionCtx;
@@ -238,7 +237,6 @@ pub struct SchedMigrateTaskAction {
     pub pid: u32,
     pub prio: i32,
     pub comm: SsoString,
-    pub layer_id: i32,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -496,7 +494,6 @@ impl TryFrom<&bpf_event> for Action {
                     tgid: wakeup.tgid,
                     prio: wakeup.prio,
                     comm: comm.into(),
-                    layer_id: wakeup.layer_id,
                 }))
             }
             #[allow(non_upper_case_globals)]
@@ -512,7 +509,6 @@ impl TryFrom<&bpf_event> for Action {
                     tgid: waking.tgid,
                     prio: waking.prio,
                     comm: comm.into(),
-                    layer_id: waking.layer_id,
                 }))
             }
             #[allow(non_upper_case_globals)]
@@ -528,7 +524,6 @@ impl TryFrom<&bpf_event> for Action {
                     pid: migrate.pid,
                     prio: migrate.prio,
                     comm: comm.into(),
-                    layer_id: migrate.layer_id,
                 }))
             }
             #[allow(non_upper_case_globals)]
