@@ -19,9 +19,9 @@ Please see the following `README` files for details on each of the various types
 of schedulers:
 
 - [`rust`](rust/README.md) describes all of the schedulers with `Rust`
-  user space components. All of these schedulers are production ready.
+  user space components.
 - [`c`](c/README.md) describes all of the schedulers with `C` user space
-  components. All of these schedulers are production ready.
+  components.
 
 ## Note on syncing
 
