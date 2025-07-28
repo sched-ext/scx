@@ -336,7 +336,10 @@ if enable_rust
     cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
   endforeach
 
-  if libbpf_a != ''
+  # Cargo already uses a vendored and locked libbpf in the form of libbpf-sys.
+  # Don't attempt to further complicate things by building one for them if we
+  # built it, but do still provide it if it was supplied by the user.
+  if libbpf_a != '' and not should_build_libbpf
     foreach header: libbpf_h
       cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
     endforeach
