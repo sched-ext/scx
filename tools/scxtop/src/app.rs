@@ -11,10 +11,11 @@ use crate::bpf_stats::BpfStats;
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
+use crate::get_process_columns;
 use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
-use crate::Column;
+use crate::Columns;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -36,7 +37,8 @@ use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, KprobeAction, MangoAppAction, SchedCpuPerfSetAction,
     SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction, WaitAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    UpdateColVisibilityAction, WaitAction,
 };
 
 use anyhow::{bail, Result};
@@ -98,7 +100,7 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
-    process_columns: Vec<Column>,
+    process_columns: Columns<i32, ProcData>,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
@@ -231,6 +233,8 @@ impl<'a> App<'a> {
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
+        let process_columns = Columns::new(get_process_columns());
+
         // There isn't a 'is_loaded' method on a prog in libbpf-rs so do the next best thing and
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
@@ -257,7 +261,7 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            process_columns: Self::create_process_columns(),
+            process_columns,
             cpu_data,
             llc_data,
             node_data,
@@ -2209,92 +2213,9 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn create_process_columns() -> Vec<Column> {
-        vec![
-            Column {
-                header: "TGID",
-                constraint: Constraint::Length(8),
-                visible: true,
-                value_fn: Box::new(|tgid, _| tgid.to_string()),
-            },
-            Column {
-                header: "Name",
-                constraint: Constraint::Length(15),
-                visible: true,
-                value_fn: Box::new(|_, data| data.process_name.clone()),
-            },
-            Column {
-                header: "Command Line",
-                constraint: Constraint::Fill(1),
-                visible: true,
-                value_fn: Box::new(|_, data| data.cmdline.join(" ")),
-            },
-            Column {
-                header: "Last DSQ",
-                constraint: Constraint::Length(18),
-                visible: true,
-                value_fn: Box::new(|_, data| {
-                    data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))
-                }),
-            },
-            Column {
-                header: "Slice ns",
-                constraint: Constraint::Length(8),
-                visible: true,
-                value_fn: Box::new(|_, data| {
-                    let stats = VecStats::new(&data.event_data_immut("slice_consumed"), None);
-                    stats.avg.to_string()
-                }),
-            },
-            Column {
-                header: "Avg/Max Lat us",
-                constraint: Constraint::Length(14),
-                visible: true,
-                value_fn: Box::new(|_, data| {
-                    let stats = VecStats::new(&data.event_data_immut("lat_us"), None);
-                    format!("{}/{}", stats.avg, stats.max)
-                }),
-            },
-            Column {
-                header: "CPU",
-                constraint: Constraint::Length(3),
-                visible: true,
-                value_fn: Box::new(|_, data| data.cpu.to_string()),
-            },
-            Column {
-                header: "LLC",
-                constraint: Constraint::Length(3),
-                visible: true,
-                value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
-            },
-            Column {
-                header: "NUMA",
-                constraint: Constraint::Length(4),
-                visible: true,
-                value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
-            },
-            Column {
-                header: "Threads",
-                constraint: Constraint::Length(7),
-                visible: true,
-                value_fn: Box::new(|_, data| data.threads.len().to_string()),
-            },
-            Column {
-                header: "CPU%",
-                constraint: Constraint::Length(4),
-                visible: true,
-                value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
-            },
-        ]
-    }
-
     /// Render the process view.
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let visible_columns: Vec<&Column> = self
-            .process_columns
-            .iter()
-            .filter(|col| col.visible)
-            .collect();
+        let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
 
         let header = visible_columns
             .iter()
@@ -2919,6 +2840,22 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Updates a column's visibility
+    pub fn update_col_visibility(&mut self, action: &UpdateColVisibilityAction) -> Result<()> {
+        let UpdateColVisibilityAction {
+            table,
+            col,
+            visible,
+        } = action;
+
+        match table.as_str() {
+            "Process" => self.process_columns.update_visibility(col, *visible),
+            _ => bail!("Invalid table name"),
+        };
+
+        Ok(())
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.as_mut().unwrap().sample_rate = sample_rate;
@@ -3042,6 +2979,9 @@ impl<'a> App<'a> {
                 self.on_kprobe(a);
             }
             Action::ClearEvent => self.reset_prof_events()?,
+            Action::UpdateColVisibility(a) => {
+                self.update_col_visibility(a)?;
+            }
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
