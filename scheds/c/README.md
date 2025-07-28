@@ -3,11 +3,11 @@ EXAMPLE SCHEDULERS
 
 # Introduction
 
-This directory contains example schedulers that are shipped with the sched_ext
+This directory contains example schedulers that are shipped with the `sched_ext`
 Linux kernel tree.
 
 While these schedulers can be loaded and used to schedule on your system, their
-primary purpose is to illustrate how various features of sched_ext can be used.
+primary purpose is to illustrate how various features of `sched_ext` can be used.
 
 This document will give some background on each example scheduler, including
 describing the types of workloads or scenarios they're designed to accommodate.
@@ -109,7 +109,7 @@ how some useful kfuncs such as `scx_bpf_kick_cpu()` can be utilized.
 
 ### Typical Use Case
 
-While this scheduler is only meant to be used to illustrate certain sched_ext
+While this scheduler is only meant to be used to illustrate certain `sched_ext`
 features, with a bit more work (e.g. by adding some form of priority handling
 inside and across cgroups), it could have been used as a way to quickly
 mitigate L1TF before core scheduling was implemented and rolled out.
@@ -132,7 +132,7 @@ enqueue tasks. It also illustrates how core-sched support could be implemented.
 
 ### Typical Use Case
 
-Purely used to illustrate sched_ext features.
+Purely used to illustrate `sched_ext` features.
 
 ### Production Ready?
 
@@ -145,7 +145,7 @@ No
 
 ### Overview
 
-A simple scheduler that provides an example of a minimal sched_ext
+A simple scheduler that provides an example of a minimal `sched_ext`
 scheduler. `scx_simple` can be run in either global weighted vtime mode, or
 FIFO mode.
 
@@ -201,7 +201,7 @@ structures bundled with your favorite library.
 
 On the other hand, user space scheduling can be hard to get right. You can
 potentially deadlock due to not scheduling a task that's required for the
-scheduler itself to make forward progress (though the sched_ext watchdog will
+scheduler itself to make forward progress (though the `sched_ext` watchdog will
 protect the system by unloading your scheduler after a timeout if that
 happens). You also have to bootstrap some communication protocol between the
 kernel and user space.
@@ -214,4 +214,4 @@ framework that abstracts much of this complexity away from you.
 No. This scheduler uses an ordered list for vtime scheduling, and is strictly
 less performant than just using something like `scx_simple`. It is purely
 meant to illustrate that it's possible to build a user space scheduler on
-top of sched_ext.
+top of `sched_ext`.

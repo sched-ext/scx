@@ -1,10 +1,10 @@
 # scx_tickless
 
-This is a single user-defined scheduler used within [sched_ext](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about sched_ext](https://github.com/sched-ext/scx/tree/main).
+This is a single user-defined scheduler used within [`sched_ext`](https://github.com/sched-ext/scx/tree/main), which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. [Read more about `sched_ext`](https://github.com/sched-ext/scx/tree/main).
 
 ## Overview
 
-scx_tickless is a server-oriented scheduler designed for cloud computing,
+`scx_tickless` is a server-oriented scheduler designed for cloud computing,
 virtualization, and high-performance computing workloads.
 
 The scheduler works by routing all scheduling events through a pool of

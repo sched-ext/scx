@@ -1,10 +1,12 @@
 # scxtop
-`scxtop` is a top like utility for sched_ext schedulers. It collects and
+
+`scxtop` is a top like utility for `sched_ext` schedulers. It collects and
 aggregates system performance metrics and scheduler events via bpf and
 aggregates the data in a live view across CPUs, LLCs, and NUMA nodes. It uses
 [`ratatui`](https://ratatui.rs/) for rendering the TUI.
 
 ### Using `scxtop`
+
 `scxtop` must be run as root or with capabilities as it uses `perf_event_open`
 as well as BPF programs for data collection. Use the help menu (`h` key is the
 default to see keybindings) to view the current keybindings:
@@ -18,11 +20,13 @@ The sparkline view is useful for seeing a historical view of the metrics:
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/83238b44-5580-4587-a370-b2f9a68d925a" />
 
 ### Configuration
+
 `scxtop` can use a configuration file, which can be generated using the `S` key
 in the default keymap configuration. The config file follows the
 [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/).
 
 An example configuration shows customization of default tick rates, theme and keymaps:
+
 ```
 theme = "IAmBlue"
 tick_rate_ms = 250
@@ -63,8 +67,10 @@ x = "ClearEvent"
 ```
 
 ### Shell completions
+
 `scxtop` is able to generate shell completions for various shells using the
 `scxtop generate-completions` subcommand:
+
 ```
 scxtop generate-completions -h
 Usage: scxtop generate-completions [OPTIONS]
@@ -76,14 +82,16 @@ Options:
 ```
 
 ### Generating Traces
+
 `scxtop` is able to generate [Perfetto](https://perfetto.dev/) compatible traces.
-The trace data also contains DSQ (dispatch queue) data for any active sched_ext
+The trace data also contains DSQ (dispatch queue) data for any active `sched_ext`
 scheduler. Soft IRQs are also collected as part of the trace. Traces can be
 collected with the `scxtop trace` subcommand as well as from keybindings from
 the TUI.
 ![scxtop](https://github.com/user-attachments/assets/1be4ace4-e153-48ad-b63e-16f2b4e4c756)
 
 ### Aggregating Across Hardware Boundaries
+
 `scxtop` can be used to observe scheduling decisions across hardware boundaries
 by using the LLC aggregated view:
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/f7b867d8-7afa-4f69-a64a-584859919795" />
@@ -92,6 +100,7 @@ level:
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/32b6b27d-d7fa-4893-890d-84070caf3497" />
 
 ### Scheduler Stats
+
 The scheduler view displays scheduler related stats. For schedulers that use
 [`scx_stats`](https://github.com/sched-ext/scx/tree/main/rust/scx_stats) the stats
 will be collected and aggregated. The scheduler view displays stats such as DSQ latency,

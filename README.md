@@ -2,49 +2,48 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sched-ext/scx)
 
-[sched_ext](https://github.com/sched-ext/scx) is a Linux kernel feature
+[`sched_ext`](https://github.com/sched-ext/scx) is a Linux kernel feature
 which enables implementing kernel thread schedulers in BPF and dynamically
 loading them. This repository contains various scheduler implementations and
 support utilities.
 
-sched_ext enables safe and rapid iterations of scheduler implementations, thus
+`sched_ext` enables safe and rapid iterations of scheduler implementations, thus
 radically widening the scope of scheduling strategies that can be experimented
 with and deployed; even in massive and complex production environments.
 
 You can find more information, links to blog posts and recordings, in the [wiki](https://github.com/sched-ext/scx/wiki).
 The following are a few highlights of this repository.
 
-- The [scx_layered case
+- The [`scx_layered` case
   study](https://github.com/sched-ext/scx/blob/case-studies/case-studies/scx_layered.md)
-  concretely demonstrates the power and benefits of sched_ext.
-- For a high-level but thorough overview of the sched_ext (especially its
+  concretely demonstrates the power and benefits of `sched_ext`.
+- For a high-level but thorough overview of the `sched_ext` (especially its
   motivation), please refer to the [overview document](OVERVIEW.md).
 - For a description of the schedulers shipped with this tree, please refer to
   the [schedulers document](scheds/README.md).
-- The following video is the [scx_rustland](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rustland)
-  scheduler which makes most scheduling decisions in userspace Rust code showing
+- The following video is the [`scx_rustland`](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rustland)
+  scheduler which makes most scheduling decisions in userspace `Rust` code showing
   better FPS in terraria while kernel is being compiled. This doesn't mean that
-  scx_rustland is a better scheduler but does demonstrate how safe and easy it is to
+  `scx_rustland` is a better scheduler but does demonstrate how safe and easy it is to
   implement a scheduler which is generally usable and can outperform the default
   scheduler in certain scenarios.
 
 [scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
 
-sched_ext is supported by the upstream kernel starting from version 6.12. Both 
-Meta and Google are fully committed to sched_ext and Meta is in the process of
-mass production deployment. See (#kernel-feature-status) for more details.
+`sched_ext` is supported by the upstream kernel starting from version 6.12. Both
+Meta and Google are fully committed to `sched_ext` and Meta is in the process of
+mass production deployment. See [`#kernel-feature-status`](#kernel-feature-status) for more details.
 
 In all example shell commands, `$SCX` refers to the root of this repository.
 
-
 ## Getting Started
 
-All that's necessary for running sched_ext schedulers is a kernel with
-sched_ext support and the scheduler binaries along with the libraries they
-depend on. Switching to a sched_ext scheduler is as simple as running a
-sched_ext binary:
+All that's necessary for running `sched_ext` schedulers is a kernel with
+`sched_ext` support and the scheduler binaries along with the libraries they
+depend on. Switching to a `sched_ext` scheduler is as simple as running a
+`sched_ext` binary:
 
-```
+```bash
 root@test ~# cat /sys/kernel/sched_ext/state /sys/kernel/sched_ext/*/ops 2>/dev/null
 disabled
 root@test ~# scx_simple
@@ -76,13 +75,13 @@ behavior because all that the userspace component does is print statistics.
 This doesn't hold for all schedulers.
 
 In addition to terminating the program, there are two more ways to disable a
-sched_ext scheduler - `sysrq-S` and the watchdog timer. Ignoring kernel
-bugs, the worst damage a sched_ext scheduler can do to a system is starving
+`sched_ext` scheduler - `sysrq-S` and the watchdog timer. Ignoring kernel
+bugs, the worst damage a `sched_ext` scheduler can do to a system is starving
 some threads until the watchdog timer triggers.
 
-As illustrated, once the kernel and binaries are in place, using sched_ext
+As illustrated, once the kernel and binaries are in place, using `sched_ext`
 schedulers is straightforward and safe. While developing and building
-schedulers in this repository isn't complicated either, sched_ext makes use
+schedulers in this repository isn't complicated either, `sched_ext` makes use
 of many new BPF features, some of which require build tools which are newer
 than what many distros are currently shipping. This should become less of an
 issue in the future. For the time being, the following custom repositories
@@ -106,13 +105,12 @@ scx
 |   |-- c                : Example schedulers - userspace code written C
 |   \-- rust             : Example schedulers - userspace code written Rust
 \-- rust                 : Rust support code
-    \-- scx_utils        : Common utility library for rust schedulers
+    \-- scx_utils        : Common utility library for Rust schedulers
 ```
-
 
 ## Build & Install
 
-`meson` is the main build system but each Rust sub-project is its own
+`meson` is the main build system but each `Rust` sub-project is its own
 self-contained cargo project and can be built and published separately. The
 following are the dependencies and version requirements.
 
@@ -126,11 +124,12 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 - `clang`: >=16 required, >=17 recommended
 - `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
   new in 1.3). It's preferred to link statically against the source from the libbpf git repo, which is cloned during setup.
-- Rust toolchain: >=1.82
+- `Rust` toolchain: >=1.82
 - `libelf`, `libz`, `libzstd` if linking against static `libbpf.a`
 - `bpftool` By default this is cloned and built as part of the default build process. Alternatively it's usually available in `linux-tools-common`.
 
 The kernel has to be built with the following configuration:
+
 - `CONFIG_BPF=y`
 - `CONFIG_BPF_SYSCALL=y`
 - `CONFIG_BPF_JIT=y`
@@ -174,9 +173,11 @@ pacman -S base-devel
 ```
 
 ### Static linking against system libbpf
+
 Note, depending on your system configuration `libbpf_a` and `libbpf_h` may be
 in different directories. The system libbpf version needs to match the minimum
 libbpf version for scx.
+
 ```shell
 $ cd $SCX
 $ meson setup build --prefix ~ -D libbpf_a=/usr/lib64/libbpf.a -D libbpf_h=/usr/include/bpf/
@@ -185,6 +186,7 @@ $ meson install -C build
 ```
 
 #### Dynamic linking against libbpf
+
 ```shell
 $ cd $SCX
 $ meson setup build --prefix ~ -D libbpf_a=disabled
@@ -193,11 +195,15 @@ $ meson install -C build
 ```
 
 #### Using a different bpftool
+
 This will check the system for an installed bpftool
+
 ```shell
 $ meson setup build --prefix ~ -D bpftool=disabled
 ```
+
 Using a custom built bpftool
+
 ```shell
 $ meson setup build --prefix ~ -D bpftool=/path/to/bpftool
 ```
@@ -220,13 +226,12 @@ options. For more information on `meson` arguments and built-in options,
 please refer to `meson --help` and its
 [documentation](https://mesonbuild.com/Builtin-options.html).
 
-
 ### Building Specific Schedulers and Binary Locations
 
 If you just want to build a subset of schedulers, you can specify the
 scheduler names as arguments to `meson compile`. For example, if we just
 want to build the simple example scheduler
-`scheds/c/scx_simple` and the Rust userspace scheduler
+`scheds/c/scx_simple` and the `Rust` userspace scheduler
 `scheds/rust/scx_rusty`:
 
 ```shell
@@ -246,14 +251,13 @@ You can also specify `-v` if you want to see the commands being used:
 $ meson compile -C build -v scx_pair
 ```
 
-For C userspace schedulers such as the ones under `scheds/c`,
+For `C` userspace schedulers such as the ones under `scheds/c`,
 the built binaries are located in the same directory under the build root.
 For example, here, the `scx_simple` binary can be found at
 `$SCX/build/scheds/c/scx_simple`.
 
-For Rust userspace schedulers such as the ones under `scheds/rust`, the
+For `Rust` userspace schedulers such as the ones under `scheds/rust`, the
 `scx_rusty` binary can be found at `$SCX/build/scheds/rust/release`.
-
 
 ### SCX specific build options
 
@@ -266,10 +270,10 @@ options can be used in such cases.
 - `bpftool`: `bpftool` to use when generating `.bpf.skel.h`. Set this to "disabled" to check the system for an already installed bpftool
 - `libbpf_a`: Static `libbpf.a` to use. Set this to "disabled" to link libbpf dynamically
 - `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
-- `cargo`: `cargo` to use when building Rust sub-projects
+- `cargo`: `cargo` to use when building `Rust` sub-projects
 - `cargo_home`: `CARGO_HOME` env to use when invoking `cargo`
 - `offline`: Compilation step should not access the internet
-- `enable_rust`: Enable the build of Rust sub-projects
+- `enable_rust`: Enable the build of `Rust` sub-projects
 
 For example, let's say you want to use `bpftool` and `libbpf` shipped in the
 kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel
@@ -293,15 +297,14 @@ process rather than building `libbpf` directly. This is necessary because
 `libbpf` header files need to be installed for them to be in the expected
 relative locations.
 
-
 ### Offline Compilation
 
-Rust builds automatically download dependencies from `crates.io`; however,
+`Rust` builds automatically download dependencies from `crates.io`; however,
 some build environments might not allow internet access requiring all
 dependencies to be available offline. The `fetch` target and `offline`
 option are provided for such cases.
 
-The following downloads all Rust dependencies into `$HOME/cargo-deps`.
+The following downloads all `Rust` dependencies into `$HOME/cargo-deps`.
 
 ```shell
 $ cd $SCX
@@ -322,7 +325,7 @@ $ meson compile -C build
 
 ### Working with Rust Sub-projects
 
-Each Rust sub-project is its own self-contained cargo project. When building
+Each `Rust` sub-project is its own self-contained cargo project. When building
 as a part of this repository, `meson` invokes `cargo` with the appropriate
 options and environment variables to sync the build environment. When
 building separately by running `cargo build` directly in a sub-project
@@ -342,7 +345,7 @@ $ cargo run --release
 Here too, the `build` step is not strictly necessary as it's implied by
 `run`.
 
-Note that Rust userspace schedulers are published on `crates.io` and can be
+Note that `Rust` userspace schedulers are published on `crates.io` and can be
 built and installed without cloning this repository as long as the necessary
 toolchains are available. Simply run:
 
@@ -354,26 +357,27 @@ and `scx_rusty` will be built and installed as `~/.cargo/bin/scx_rusty`.
 
 ## Checking scx_stats
 
-With the implementation of scx_stats, schedulers no longer display statistics by default. To display the statistics from the currently running scheduler, a manual user action is required.
+With the implementation of `scx_stats`, schedulers no longer display statistics by default. To display the statistics from the currently running scheduler, a manual user action is required.
 Below are examples of how to do this.
 
 - To check the scheduler statistics, use the
 
 ```shell
-scx_SCHEDNAME --monitor $INTERVAL
+$ scx_SCHEDNAME --monitor $INTERVAL
 ```
 
-for example 0.5 - this will print the output every half a second
+for example `0.5` - this will print the output every half a second
 
 ```shell
-scx_bpfland --monitor 0.5
+$ scx_bpfland --monitor 0.5
 ```
-Some schedulers may implement different or multiple monitoring options. Refer to --help of each scheduler for details.
-Most schedulers also accept ` --stats $INTERVAL` to print the statistics directly from the scheduling instance.
+
+Some schedulers may implement different or multiple monitoring options. Refer to `--help` of each scheduler for details.
+Most schedulers also accept `--stats $INTERVAL` to print the statistics directly from the scheduling instance.
 
 #### Examples
 
-- scx_bpfland
+- `scx_bpfland`
 
 ```shell
 $ scx_bpfland --monitor 5
@@ -383,7 +387,7 @@ $ scx_bpfland --monitor 5
 [scx_bpfland] tasks -> run:  4/4  int: 2  wait: 3    | nvcsw: 3    | dispatch -> dir: 2     prio: 3270  shr: 1748
 ```
 
-- scx_rusty
+- `scx_rusty`
 
 ```shell
 $ scx_rusty --monitor 5
@@ -402,7 +406,7 @@ direct_greedy_cpus=f
    DOM[00] load=  0.17 imbal=  +0.00 delta=  +0.00
 ```
 
-- scx_lavd
+- `scx_lavd`
 
 ```shell
 $ scx_lavd --monitor 5
@@ -411,7 +415,7 @@ $ scx_lavd --monitor 5
 |       14 |       941 |         3 |         1 |      5223 |    31.323 |     1.704 |   99.215 |  100.019 |  59.1614 |      100 |  100.019 |  59.1614 | performance |          100 |            0 |            0 |
 ```
 
-- scx_rustland
+- `scx_rustland`
 
 ```shell
 $ scx_rustland --monitor 5
@@ -430,18 +434,18 @@ See: [services](services/README.md)
 ## Kernel Feature Status
 
 The kernel feature is not yet upstream and can be found in the
-[sched_ext](https://github.com/sched-ext/sched_ext) repository. The
+[`sched_ext`](https://github.com/sched-ext/sched_ext) repository. The
 following are important branches:
 
 - [`sched_ext`](https://github.com/sched-ext/sched_ext): The main development
   branch. This branch periodically pulls from the
   [bpf-next](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/)
   tree to stay in sync with the kernel and BPF developments.
-- `sched_ext-release-*`: sched_ext backports on top of released kernels. We
+- `sched_ext-release-*`: `sched_ext` backports on top of released kernels. We
   plan to maintain backports for a few recent kernel releases until
-  sched_ext is merged upstream. Currently maintained backports:
+  `sched_ext` is merged upstream. Currently maintained backports:
   - [`sched_ext-release-v6.6`](https://github.com/sched-ext/sched_ext/tree/sched_ext-release-v6.6)
-- `sched_ext-vN`: Patchsets posted upstream. The v4 LKML thread has
+- `sched_ext-vN`: Patchsets posted upstream. The `v4` LKML thread has
   high-level discussions.
   - [RFC](https://github.com/htejun/sched_ext):
     [LMKL thread](http://lkml.kernel.org/r/20221130082313.3241517-1-tj@kernel.org)
@@ -456,7 +460,7 @@ following are important branches:
 
 ## [Breaking Changes](./BREAKING_CHANGES.md)
 
-[A list of the breaking changes](./BREAKING_CHANGES.md) in the sched_ext kernel tree and the associated commits for the schedulers in this repo.
+[A list of the breaking changes](./BREAKING_CHANGES.md) in the `sched_ext` kernel tree and the associated commits for the schedulers in this repo.
 
 ## [Developer Guide](./DEVELOPER_GUIDE.md)
 
@@ -465,7 +469,7 @@ with schedulers? See the developer guide for more details.
 
 ## Getting in Touch
 
-We aim to build a friendly and approachable community around sched_ext. You
+We aim to build a friendly and approachable community around `sched_ext`. You
 can reach us through the following channels:
 
 - `GitHub`: https://github.com/sched-ext/scx
@@ -477,12 +481,12 @@ channel on `Discord` for details.
 
 ## Additional Resources
 
-There are blog posts and articles about sched_ext, which helps you to explore
-sched_ext in various ways. Followings are some examples:
+There are blog posts and articles about `sched_ext`, which helps you to explore
+`sched_ext` in various ways. Followings are some examples:
 
 - [LWN: The extensible scheduler class (February, 2023)](https://lwn.net/Articles/922405/)
-- [arighi's blog: Implement your own kernel CPU scheduler in Ubuntu with sched-ext (July, 2023)](https://arighi.blogspot.com/2023/07/implement-your-own-cpu-scheduler-in.html)
-- [Changwoo's blog: sched_ext: a BPF-extensible scheduler class (Part 1) (December, 2023)](https://blogs.igalia.com/changwoo/sched-ext-a-bpf-extensible-scheduler-class-part-1/)
-- [arighi's blog: Getting started with sched-ext development (April, 2024)](https://arighi.blogspot.com/2024/04/getting-started-with-sched-ext.html)
-- [Changwoo's blog: sched_ext: scheduler architecture and interfaces (Part 2) (June, 2024)](https://blogs.igalia.com/changwoo/sched-ext-scheduler-architecture-and-interfaces-part-2/)
-- [arighi's YT channel: scx_bpfland Linux scheduler demo: topology awareness (August, 2024)](https://youtu.be/R-FEZOveG-I)
+- [arighi's blog: Implement your own kernel CPU scheduler in Ubuntu with `sched_ext` (July, 2023)](https://arighi.blogspot.com/2023/07/implement-your-own-cpu-scheduler-in.html)
+- [Changwoo's blog: `sched_ext`: a BPF-extensible scheduler class (Part 1) (December, 2023)](https://blogs.igalia.com/changwoo/sched-ext-a-bpf-extensible-scheduler-class-part-1/)
+- [arighi's blog: Getting started with `sched_ext` development (April, 2024)](https://arighi.blogspot.com/2024/04/getting-started-with-sched-ext.html)
+- [Changwoo's blog: `sched_ext`: scheduler architecture and interfaces (Part 2) (June, 2024)](https://blogs.igalia.com/changwoo/sched-ext-scheduler-architecture-and-interfaces-part-2/)
+- [arighi's YT channel: `scx_bpfland` Linux scheduler demo: topology awareness (August, 2024)](https://youtu.be/R-FEZOveG-I)

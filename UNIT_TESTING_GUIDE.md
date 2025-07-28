@@ -3,19 +3,19 @@
 ## Introduction
 
 This is a guide to lay out how to approach the unit testing of the BPF side of
-the sched_ext schedulers.  The user space components of the schedulers utilize
+the `sched_ext` schedulers.  The user space components of the schedulers utilize
 the same patterns as their respective language's unit testing framework.
 
 ## How do I run the existing tests
 
 Run `cargo test` and that will include unittests from the BPF side. This applies
-regardless of whether the test is for a C scheduler or a Rust scheduler as the
-driver code for the tests is written in Rust.
+regardless of whether the test is for a `C` scheduler or a `Rust` scheduler as the
+driver code for the tests is written in `Rust`.
 
 ## The basic design
 
 Currently, the way to create a unit test of the BPF side of the schedulers is to
-add a new file along side the existing BPF code and include the C file into this
+add a new file along side the existing BPF code and include the `C` file into this
 test file.
 
 For example, if your main BPF file is `main.bpf.c`, you create a new file called
@@ -77,7 +77,7 @@ tricky.  There are a few things that need to be kept in mind.
 
 ## Outstanding items
 
-A lot of the sched_ext library helpers haven't been stubbed out yet. This is
+A lot of the `sched_ext` library helpers haven't been stubbed out yet. This is
 code like `sdt_task` and such. This will take some more care as they have
 private maps that are more difficult to provide clean stubs for.
 

@@ -1,11 +1,13 @@
 # Developer Guide
+
 ## eBPF
-The scheduling logic for sched_ext schedulers is written in eBPF (BPF). For
+
+The scheduling logic for `sched_ext` schedulers is written in eBPF (BPF). For
 high level documentation the kernel docs should be referenced.
 
 - [kernel documentation](https://docs.kernel.org/bpf/index.html)
 - [eBPF docs](https://ebpf-docs.dylanreimerink.nl/)
-- [rustdocs and sched_ext for-next docs](https://sched-ext.github.io/scx/)
+- [`rustdocs` and `sched_ext` for-next docs](https://sched-ext.github.io/scx/)
 
 When working on schedulers the following documentation is rather useful as
 schedulers will use a combination of BPF cpumasks, helper functions, kfuncs and
@@ -20,6 +22,7 @@ The [kernel BPF tests](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/
 are also a useful source of examples of BPF functionality.
 
 ## Scheduling
+
 The [kernel scheduling docs](https://docs.kernel.org/scheduler/index.html)
 provide a high level overview of the existing scheduler subsystem. The kernel
 docs cover various topics such as deadline scheduling, realtime scheduling and
@@ -27,18 +30,19 @@ the interaction of schedulers with other system resources.
 
 When schedulers are written to scale beyond more than a single core eventually
 the scheduler needs to implement a load balancing algorithm. Calculating the
-load between scheduling domains becomes a difficult problem. sched_ext has a
+load between scheduling domains becomes a difficult problem. `sched_ext` has a
 common crate for calculating weights between scheduling domains. See the
 `infeasible` crate in `rust/scx_utils/src` for the implementation.
 
 ## Development kernels
+
 This repository has a kernel lock file at `./kernel-versions.json` where we track
 several kernels important to development.
 
 If your change requires a new commit from a branch, you can update this file with:
-    nix run ./.github/include#update-kernels
+    `nix run ./.github/include#update-kernels`
 or with:
-    python3 ./.github/include/update-kernels.py
+    `python3 ./.github/include/update-kernels.py`
 
 Otherwise new changes will be picked up automatically. If the changes that are
 picked up automatically fail CI, you can fix this in a PR separately - the automatic
@@ -48,41 +52,46 @@ both updating the kernel lock and making necessary fixes to the codebase.
 We use `virtme-ng` for testing in the CI environment, and it should be possible
 to reproduce behaviour locally with the same pinned kernels. To get an identical
 kernel to the CI with Nix installed, run:
-    nix build ./.github/include#kernel_sched_ext/for-next
+    `nix build ./.github/include#kernel_sched_ext/for-next`
 And the kernel image will be available at `result/bzImage`. Alternatively you
 can clone the repo/commit from `kernel-versions.json`, but this isn't guaranteed
 to be reproducible.
 
 ## Rust
-We use `cargo fmt` to ensure consistency in our Rust code. This runs on PRs in
+
+We use `cargo fmt` to ensure consistency in our `Rust` code. This runs on PRs in
 the CI and will fail with a patch if your code doesn't match. We currently need
-a nightly version of Rust to format so have pinned this for consistency. If you
-have rustup installed this will use the version in `rust-toolchain.toml`.
+a nightly version of `Rust` to format so have pinned this for consistency. If you
+have `rustup` installed this will use the version in `rust-toolchain.toml`.
 
     $ cargo fmt
 
 ## Useful Tools
 
 ## [systing](https://github.com/josefbacik/systing)
+
 `systing` is a tool that generates perfetto traces and collects stack traces.
 It produces a large amount of process specific info for debugging scheduling
 issues. It is able to target by pid or cgroup.
 
 ## [scxtop](https://github.com/sched-ext/scx/blob/main/tools/scxtop/README.md)
+
 `scxtop` is a top like tool that collects and aggregates various perf and
-sched_ext events. See the
+`sched_ext` events. See the
 [README](https://github.com/sched-ext/scx/blob/main/tools/scxtop/README.md) for
 more details.
 
 ### [Perfetto](https://perfetto.dev/)
+
 [Perfetto](https://perfetto.dev/) is a profiling and trace visualization
 platform. It can be used to view scheduling data, which is useful for
 understanding scheduling decisions. The [`sched_ftrace.py`](scripts/sched_ftrace.py)
 script can be used to generate a ftrace compatible with Perfetto.
 
-```
+```bash
 $ sudo ./scripts/sched_ftrace.py > sched.ftrace
 ```
+
 The output of the script can then be loaded into the perfetto UI:
 ![perfetto](https://github.com/user-attachments/assets/23e18bd4-8016-40e7-8b49-d2be8ef62f1b)
 
@@ -93,7 +102,7 @@ The interface is text driven, but is able to provide various timeline views and
 aggregations of scheduler events. The following is an example of using `perf
 sched` to get a timeline histogram with additional scheduling metrics.
 
-```
+```bash
 $ perf sched record
 $ perf sched timehist -Vw --state
            time    cpu  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0  task name                       wait time  sch delay   run time  state
@@ -127,32 +136,37 @@ $ perf sched timehist -Vw --state
 ```
 
 ### `bpftool`
+
 [`bpftool`](https://github.com/libbpf/bpftool) contains many utilities for
 interacting with the BPF subsystem and BPF programs. If you need to know
 what BPF programs, maps, iterators are loaded on a system `bpftool` will
 provide all this information.
 
 Listing BPF maps:
-```
+
+```bash
 $ sudo bpftool map list
 11: hash_of_maps  name cgroup_hash  flags 0x0
         key 8B  value 4B  max_entries 2048  memlock 172992B
         pids systemd(1)
 ```
+
 Listing `struct_ops`:
-```
-$ sudo bpftool struct_ops list 
-21381: layered         sched_ext_ops                   
+
+```bash
+$ sudo bpftool struct_ops list
+21381: layered         sched_ext_ops
 ```
 
 ### `retsnoop`
+
 [`retsnoop`](https://github.com/anakryiko/retsnoop) is a BPF tool for tracing
 linux. It is very useful if you are trying to understand the flow of kernel
 functions. This can be useful when BPF verification issues are encountered. The
 following example shows how the verifier `do_check_common` function can be
 traced.
 
-```
+```bash
 $ sudo retsnoop -e 'do_check*' -a ':kernel/bpf/*.c' -T
 07:55:28.049718 -> 07:55:28.049797 TID/PID 270611/270611 (bpftool/bpftool):
 
@@ -190,42 +204,49 @@ FUNCTION CALL TRACE                 RESULT     DURATION
 ```
 
 ### `bpftrace`
+
 [`bpftrace`](https://github.com/bpftrace/bpftrace) is a high level tracing
-language for BPF. When working with sched_ext `bpftrace` programs can be used
+language for BPF. When working with `sched_ext` `bpftrace` programs can be used
 for understanding scheduler run queue latency as other scheduler internals. See
 the `scripts` dir for examples.
 
 ### `bpftop`
+
 [`bpftop`](https://github.com/Netflix/bpftop) is a top/htop like program that
 provides an overview of bpf program usage. It shows period and total average
 runtime for each eBPF program, which is useful in understanding each scheduler
 subprogram.
 
 ### `stress-ng`
+
 For generating synthetic load on a system
 [`stress-ng`](https://github.com/ColinIanKing/stress-ng) can be used.
 `stress-ng` can generate different types of load on the system including cpu
 bound, fork heavy, NUMA, cache heavy and more.
 
 ### `veristat`
+
 [`veristat`](https://github.com/libbpf/veristat) is a tool to provide statics
 from the BPF verifier for BPF programs. It can also be used to compare
 verification stats across runs. This is useful when trying to optimize BPF
 programs for their instruction count.
 
 ### `turbostat`
+
 [`turbostat`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/power/x86/turbostat)
 is a tool for inspecting CPU frequency as well as power utilization. When
 optimizing schedulers for energy performance `turbostat` can be used to
 understand the energy required per operation.
 
 ### `schbench`
+
 [`schbench`](https://github.com/masoncl/schbench)
 is a synthetic scheduler benchmark designed to mimic production web workloads.
 It targets three key aspects: full CPU saturation, long timeslices, and low wakeup latency.
 These characteristics help reveal scheduler issues that can affect request-per-second (RPS) performance.
 
 ### `cachyos-benchmarker`
+
 [`cachyos-benchmarker`](https://github.com/CachyOS/cachyos-benchmarker)
 is a lightweight benchmarking and stress testing tool, based on [mini-benchmarker](https://gitlab.com/torvic9/mini-benchmarker) by Tor Vic.
 It runs a variety of real-world and synthetic workloads, such as kernel build, ffmpeg, x265, y-cruncher, and more.
