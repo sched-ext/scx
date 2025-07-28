@@ -2534,14 +2534,20 @@ impl<'a> App<'a> {
     }
 
     fn on_exec(&mut self, action: &ExecAction) {
-        let ExecAction { old_pid, pid, .. } = action;
+        let ExecAction {
+            old_pid,
+            pid,
+            layer_id,
+            ..
+        } = action;
 
         // In case pid != old_pid
         let old_pid: i32 = u32_to_i32(*old_pid);
         self.proc_data.remove(&old_pid);
 
         let pid = u32_to_i32(*pid);
-        if let Ok(new_proc_data) = ProcData::from_tgid(pid, self.max_cpu_events) {
+        if let Ok(mut new_proc_data) = ProcData::from_tgid(pid, self.max_cpu_events) {
+            new_proc_data.layer_id = Some(*layer_id);
             self.proc_data.insert(pid, new_proc_data);
         }
 
@@ -2572,6 +2578,8 @@ impl<'a> App<'a> {
             parent_tgid,
             child_pid,
             child_tgid,
+            parent_layer_id,
+            child_layer_id,
             ..
         } = action;
 
@@ -2583,15 +2591,22 @@ impl<'a> App<'a> {
             // Fork created a new thread for an existing process
             match self.proc_data.entry(parent_tgid) {
                 Entry::Vacant(entry) => {
-                    if let Ok(proc_data) = ProcData::from_tgid(parent_tgid, self.max_cpu_events) {
+                    if let Ok(mut proc_data) = ProcData::from_tgid(parent_tgid, self.max_cpu_events)
+                    {
+                        proc_data.layer_id = Some(*parent_layer_id);
                         entry.insert(proc_data);
                     }
                 }
-                Entry::Occupied(entry) => entry.into_mut().add_thread(child_pid),
+                Entry::Occupied(entry) => {
+                    let proc_data = entry.into_mut();
+                    proc_data.add_thread(child_pid);
+                    proc_data.layer_id = Some(*parent_layer_id);
+                }
             }
         } else {
             // Fork created a fully new process
-            if let Ok(new_proc_data) = ProcData::from_tgid(child_pid, self.max_cpu_events) {
+            if let Ok(mut new_proc_data) = ProcData::from_tgid(child_pid, self.max_cpu_events) {
+                new_proc_data.layer_id = Some(*child_layer_id);
                 self.proc_data.insert(child_pid, new_proc_data);
             }
         }
@@ -2629,9 +2644,11 @@ impl<'a> App<'a> {
             next_dsq_lat_us,
             next_dsq_vtime,
             next_tgid,
+            next_layer_id,
             prev_dsq_id,
             prev_used_slice_ns,
             prev_tgid,
+            prev_layer_id,
             ..
         } = action;
 
@@ -2643,7 +2660,7 @@ impl<'a> App<'a> {
         let llc = topo_cpu.llc_id;
         let node = topo_cpu.node_id;
 
-        let mut insert_or_update = |tgid: i32, dsq: u64| {
+        let mut insert_or_update = |tgid: i32, dsq: u64, layer: i32| {
             match self.proc_data.entry(tgid) {
                 Entry::Vacant(entry) => {
                     if let Ok(mut proc_data) = ProcData::from_tgid(tgid, self.max_cpu_events) {
@@ -2651,6 +2668,7 @@ impl<'a> App<'a> {
                         proc_data.llc = Some(llc as u32);
                         proc_data.node = Some(node as u32);
                         proc_data.dsq = Some(dsq);
+                        proc_data.layer_id = Some(layer);
                         entry.insert(proc_data);
                     }
                 }
@@ -2660,6 +2678,7 @@ impl<'a> App<'a> {
                     proc_data.llc = Some(llc as u32);
                     proc_data.node = Some(node as u32);
                     proc_data.dsq = Some(dsq);
+                    proc_data.layer_id = Some(layer);
                 }
             };
         };
@@ -2667,8 +2686,8 @@ impl<'a> App<'a> {
         let next_tgid = u32_to_i32(*next_tgid);
         let prev_tgid = u32_to_i32(*prev_tgid);
 
-        insert_or_update(next_tgid, *next_dsq_id);
-        insert_or_update(prev_tgid, *prev_dsq_id);
+        insert_or_update(next_tgid, *next_dsq_id, *next_layer_id);
+        insert_or_update(prev_tgid, *prev_dsq_id, *prev_layer_id);
 
         if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
             proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);

@@ -24,6 +24,7 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile u64 long_tail_tracing_min_latency_ns = 0;
+const volatile bool layered = false;
 
 u64 trace_duration_ns = 1000000000;
 u64 trace_warmup_ns = 500000000;
@@ -110,6 +111,18 @@ struct {
 	__uint(max_entries, 1000000);
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, void *);
+} task_ctxs SEC(".maps");
+
+static __always_inline u32 *try_lookup_layered_task_ctx(struct task_struct *p)
+{
+	return (u32 *)bpf_task_storage_get(&task_ctxs, p, 0, 0);
+}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -525,6 +538,8 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	// We need to check if this is the tail end of a sample
 	if (prev && prev_tctx && prev_tctx->last_run_ns > 0) {
 
+		u32 *lctx;
+
 		if (!(event = try_reserve_event()))
 			return -ENOMEM;
 
@@ -532,6 +547,11 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		event->type = SCHED_SWITCH;
 		event->cpu = bpf_get_smp_processor_id();
 		event->ts = now;
+
+		if (layered && (lctx = try_lookup_layered_task_ctx(prev)))
+			event->event.sched_switch.prev_layer_id = lctx[LAYER_ID_INDEX];
+		else
+			event->event.sched_switch.prev_layer_id = -1;
 
 		event->event.sched_switch.preempt = preempt;
 		event->event.sched_switch.prev_pid = prev->pid;
@@ -559,6 +579,11 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		* when tasks are moved from iterators.
 		*/
 		if (next) {
+			if (layered && (lctx = try_lookup_layered_task_ctx(next)))
+				event->event.sched_switch.next_layer_id = lctx[LAYER_ID_INDEX];
+			else
+				event->event.sched_switch.next_layer_id = -1;
+
 			next_tctx = try_lookup_task_ctx(next);
 			event->event.sched_switch.next_pid = next->pid;
 			event->event.sched_switch.next_tgid = next->tgid;
@@ -901,6 +926,7 @@ SEC("tp_btf/sched_process_fork")
 int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *child)
 {
 	struct bpf_event *event;
+	u32 *lctx;
 
 	if (!enable_bpf_events)
 		return 0;
@@ -918,6 +944,16 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 	record_real_comm(event->event.fork.parent_comm, parent);
 	record_real_comm(event->event.fork.child_comm, child);
 
+	if (layered && (lctx = try_lookup_layered_task_ctx(parent)))
+		event->event.fork.parent_layer_id = lctx[LAYER_ID_INDEX];
+	else
+		event->event.fork.parent_layer_id = -1;
+
+	if (layered && (lctx = try_lookup_layered_task_ctx(child)))
+		event->event.fork.child_layer_id = lctx[LAYER_ID_INDEX];
+	else
+		event->event.fork.child_layer_id = -1;
+
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -927,6 +963,7 @@ SEC("tp_btf/sched_process_exec")
 int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_binprm *prm)
 {
 	struct bpf_event *event;
+	u32 *lctx;
 
 	if (!enable_bpf_events)
 		return 0;
@@ -939,6 +976,11 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	event->ts = bpf_ktime_get_ns();
 	event->event.exec.old_pid = old_pid;
 	event->event.exec.pid = BPF_CORE_READ(p, pid);
+
+	if (layered && (lctx = try_lookup_layered_task_ctx(p)))
+		event->event.exec.layer_id = lctx[LAYER_ID_INDEX];
+	else
+		event->event.exec.layer_id = -1;
 
 	bpf_ringbuf_submit(event, 0);
 
