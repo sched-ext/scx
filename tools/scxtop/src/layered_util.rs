@@ -61,7 +61,8 @@ pub fn attach_to_existing_map(
     check_bpftool_available().expect("bpftool availability check failed");
 
     // Find the map by name
-    let map_id = find_map_id_by_name(existing_map_name).expect("Failed to find map by name");
+    let map_id = find_map_id_by_name(existing_map_name)
+        .expect("Failed to find map by name, check if scx_layered is running");
 
     // Create MapHandle from ID
     let map_handle = create_map_handle(map_id).expect("Failed to create MapHandle");
