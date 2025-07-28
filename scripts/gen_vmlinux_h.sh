@@ -85,8 +85,8 @@ generate_vmlinux_for_arch() {
     echo "" > ${LOG}
     echo "Writing compile logs to ${LOG}"
 
-    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} olddefconfig 2>&1 >> ${LOG}
-    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} -j$(nproc) vmlinux 2>&1 >> ${LOG}
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} olddefconfig &>> ${LOG}
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} -j$(nproc) vmlinux &>> ${LOG}
 
     if [ -f ./vmlinux ]; then
         echo "Generating ${OUTPUT_FILE}..."
