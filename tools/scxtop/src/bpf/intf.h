@@ -16,6 +16,12 @@ typedef unsigned long long u64;
 
 enum consts {
 	MAX_COMM	= 16,
+	/*
+	* LAYER_ID_INDEX is the current index of layer_id in the layered task_ctx struct
+	* (https://github.com/sched-ext/scx/blob/main/scheds/rust/scx_layered/src/bpf/main.bpf.c#L577).
+	* Whenever a new field is added above layer_id, LAYER_ID_INDEX must be incremented.
+	*/
+	LAYER_ID_INDEX	= 2,
 };
 
 enum stat_id {
@@ -66,6 +72,7 @@ struct sched_switch_event {
 	u32		next_pid;
 	u32		next_tgid;
 	int		next_prio;
+	int 	next_layer_id;
 	u8		prev_comm[MAX_COMM];
 	u64		prev_dsq_id;
 	u64		prev_used_slice_ns;
@@ -74,6 +81,7 @@ struct sched_switch_event {
 	u32		prev_tgid;
 	u64		prev_state;
 	int		prev_prio;
+	int		prev_layer_id;
 };
 
 struct wakeup_event {
@@ -81,6 +89,7 @@ struct wakeup_event {
 	u32		tgid;
 	int		prio;
 	u8		comm[MAX_COMM];
+	int		layer_id;
 };
 
 struct migrate_event {
@@ -88,6 +97,7 @@ struct migrate_event {
     u32     pid;
     int     prio;
     u32     dest_cpu;
+		int			layer_id;
 };
 
 struct set_perf_event {
@@ -115,11 +125,14 @@ struct fork_event {
 	u32		child_tgid;
 	u8		parent_comm[MAX_COMM];
 	u8		child_comm[MAX_COMM];
+	int 	parent_layer_id;
+	int 	child_layer_id;
 };
 
 struct exec_event {
 	u32             old_pid;
 	u32             pid;
+	int             layer_id;
 };
 
 struct wait_event {
@@ -211,6 +224,12 @@ struct task_ctx {
 
 struct schedule_stop_trace_args {
 	u64		stop_timestamp;
+};
+
+struct layered_task_ctx {
+	u32		data_a;
+	u32		data_b;
+	u32		layer_id;
 };
 
 #endif /* __INTF_H */

@@ -4,11 +4,11 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
-use scxtop::available_kprobe_events;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
+use scxtop::layered_util;
 use scxtop::mangoapp::poll_mangoapp;
 use scxtop::tracer::Tracer;
 use scxtop::util::{get_clock_value, read_file_string};
@@ -24,6 +24,7 @@ use scxtop::Search;
 use scxtop::SystemStatAction;
 use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
+use scxtop::{available_kprobe_events, UpdateColVisibilityAction};
 use scxtop::{bpf_skel::*, AppState};
 
 use anyhow::anyhow;
@@ -351,6 +352,18 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             skel.maps.rodata_data.as_mut().unwrap().long_tail_tracing_min_latency_ns =
                 tui_args.experimental_long_tail_tracing_min_latency_ns;
 
+            let map_handle = if tui_args.layered {
+                skel.maps.rodata_data.as_mut().unwrap().layered = true;
+                action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
+                    table: "Process".to_string(),
+                    col: "Layer ID".to_string(),
+                    visible: true,
+                }))?;
+                Some(layered_util::attach_to_existing_map("task_ctxs", &mut skel.maps.task_ctxs)?)
+            } else {
+                None
+            };
+
             compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
             compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
             compat::cond_tracepoint_enable("sched:sched_process_wait", &skel.progs.on_sched_wait)?;
@@ -479,6 +492,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             }
             tui.exit()?;
             drop(links);
+            drop(map_handle);
 
             Ok(())
         })

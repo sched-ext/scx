@@ -79,6 +79,17 @@ pub fn get_process_columns() -> Vec<Column<i32, ProcData>> {
             value_fn: Box::new(|_, data| data.cmdline.join(" ")),
         },
         Column {
+            header: "Layer ID",
+            constraint: Constraint::Length(8),
+            visible: false,
+            value_fn: Box::new(|_, data| {
+                data.layer_id
+                    .filter(|&v| v >= 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            }),
+        },
+        Column {
             header: "Last DSQ",
             constraint: Constraint::Length(18),
             visible: true,
