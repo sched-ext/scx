@@ -3,7 +3,7 @@ RUST SCHEDULERS
 
 # Introduction
 
-This directory contains schedulers with user space rust components.
+This directory contains schedulers with user space `Rust` components.
 
 The README in each scheduler directory provides some background and describes
 the types of workloads or scenarios they're designed to accommodate.  For more

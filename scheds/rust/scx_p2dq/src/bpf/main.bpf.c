@@ -11,6 +11,7 @@
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/bpf_arena_common.bpf.h"
+#include "../../../../include/scx/percpu.bpf.h"
 #include "../../../../include/lib/atq.h"
 #include "../../../../include/lib/cpumask.h"
 #include "../../../../include/lib/minheap.h"
@@ -20,6 +21,7 @@
 #else
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include <lib/atq.h>
 #include <lib/cpumask.h>
 #include <lib/minheap.h>
@@ -139,9 +141,6 @@ const volatile struct {
 	.kthreads_local = true,
 	.select_idle_in_enqueue = true,
 };
-
-extern int sched_core_priority __ksym __weak;
-extern bool sched_itmt_capable __ksym __weak;
 
 const volatile u32 debug = 2;
 const u32 zero_u32 = 0;
@@ -319,22 +318,6 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
-static inline int cpu_priority(s32 cpu)
-{
-	bool itmt_enabled;
-	int *prio;
-
-	itmt_enabled = (bool)&sched_itmt_capable;
-	if (!itmt_enabled)
-		return 1;
-
-	prio = bpf_per_cpu_ptr(&sched_core_priority, cpu);
-	if (!prio)
-		return 1;
-
-	return *prio;
-}
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -490,8 +473,8 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
 			       struct llc_ctx *llcx)
 {
-	u64 slice_ns, nr_idle;
-
+	u64 nr_idle;
+	u64 max_ns = scale_by_task_weight(p, max_dsq_time_slice());
 	u64 nr_queued = llc_nr_queued(llcx);
 
 	const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -501,12 +484,12 @@ static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
 	if (nr_idle == 0)
 		nr_idle = 1;
 
-	if (nr_queued > nr_idle) {
-		slice_ns = (max_dsq_time_slice() * nr_idle) / nr_queued;
-		taskc->slice_ns = clamp_slice(slice_ns);
-	} else {
-		taskc->slice_ns = max_dsq_time_slice();
-	}
+	if (nr_queued > nr_idle)
+		taskc->slice_ns = (max_ns * nr_idle) / nr_queued;
+	else
+		taskc->slice_ns = max_ns;
+
+	taskc->slice_ns = clamp_slice(taskc->slice_ns);
 }
 
 /*
@@ -1501,28 +1484,19 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		return;
 	}
 
-	bool has_affn_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq) > 0;
-	bool has_intr_queued;
-	if (p2dq_config.atq_enabled)
-		has_intr_queued = scx_atq_nr_queued(cpuc->intr_atq) > 0;
-	else
-		has_intr_queued = scx_bpf_dsq_nr_queued(cpuc->intr_dsq) > 0;
-
 	u64 min_vtime = 0;
 
 	// First search affinitized DSQ
-	if (has_affn_queued) {
-		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->affn_dsq;
-			}
-			break;
+	bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+			min_vtime = p->scx.dsq_vtime;
+			dsq_id = cpuc->affn_dsq;
 		}
+		break;
 	}
 
 	// Next search interactive
-	if (p2dq_config.interactive_dsq && has_intr_queued) {
+	if (p2dq_config.interactive_dsq) {
 		if (p2dq_config.atq_enabled) {
 			pid = scx_atq_peek(cpuc->intr_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
@@ -1547,14 +1521,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	}
 
 	// LLC DSQ
-	if (scx_bpf_dsq_nr_queued(cpuc->llc_dsq) > 0) {
-		bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->llc_dsq;
-			}
-			break;
+	bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
+		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+			min_vtime = p->scx.dsq_vtime;
+			dsq_id = cpuc->llc_dsq;
 		}
+		break;
 	}
 
 	// Migration eligible
@@ -1582,15 +1554,13 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 				bpf_task_release(p);
 			}
 		} else {
-			if (scx_bpf_dsq_nr_queued(cpuc->mig_dsq) > 0) {
-				bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
-					if (p->scx.dsq_vtime < min_vtime ||
-					    min_vtime == 0) {
-						min_vtime = p->scx.dsq_vtime;
-						dsq_id = cpuc->mig_dsq;
-					}
-					break;
+			bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
+				if (p->scx.dsq_vtime < min_vtime ||
+				    min_vtime == 0) {
+					min_vtime = p->scx.dsq_vtime;
+					dsq_id = cpuc->mig_dsq;
 				}
+				break;
 			}
 		}
 	}
@@ -1609,12 +1579,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 			 * the ATQ. Otherwise there may be priority inversions.
 			 * This probably needs to be done for the DSQs as well.
 			 */
+			if (!(taskc = lookup_task_ctx(p))) {
+				bpf_task_release(p);
+				scx_bpf_error("failed to get task ctx");
+				return;
+			}
 			if (p->pid == peeked_pid) {
-				if (!(taskc = lookup_task_ctx(p))) {
-					bpf_task_release(p);
-					scx_bpf_error("failed to get task ctx");
-					return;
-				}
 				scx_bpf_dsq_insert(p,
 						   SCX_DSQ_LOCAL,
 						   taskc->slice_ns,
@@ -1626,11 +1596,13 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 				 * The task that was popped was already
 				 * consumed. The next task that was popped
 				 * might have a higher vtime so reenqueue it
-				 * back to the ATQ.
+				 * back to the LLC DSQ.
 				 */
-				scx_atq_insert_vtime(min_atq,
-						     (u64)p->pid,
-						     p->scx.dsq_vtime);
+				scx_bpf_dsq_insert_vtime(p,
+						   cpuc->llc_dsq,
+						   taskc->slice_ns,
+						   p->scx.dsq_vtime,
+						   taskc->enq_flags);
 				bpf_task_release(p);
 				stat_inc(P2DQ_STAT_ATQ_REENQ);
 			}
@@ -1640,7 +1612,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 			return;
 	}
 
-	if (has_affn_queued && dsq_id != cpuc->affn_dsq &&
+	if (dsq_id != cpuc->affn_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
@@ -1648,12 +1620,12 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		if (p2dq_config.atq_enabled) {
 			pid = scx_atq_pop(cpuc->intr_atq);
 			if ((p = bpf_task_from_pid((s32)pid))) {
+				if (!(taskc = lookup_task_ctx(p))) {
+					bpf_task_release(p);
+					scx_bpf_error("failed to get task ctx");
+					return;
+				}
 				if (p->pid == peeked_pid) {
-					if (!(taskc = lookup_task_ctx(p))) {
-						bpf_task_release(p);
-						scx_bpf_error("failed to get task ctx");
-						return;
-					}
 					scx_bpf_dsq_insert(p,
 							   SCX_DSQ_LOCAL,
 							   taskc->slice_ns,
@@ -1661,9 +1633,11 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 					bpf_task_release(p);
 					return;
 				} else {
-					scx_atq_insert_vtime(cpuc->intr_atq,
-							     (u64)p->pid,
-							     p->scx.dsq_vtime);
+					scx_bpf_dsq_insert_vtime(p,
+							   cpuc->llc_dsq,
+							   taskc->slice_ns,
+							   p->scx.dsq_vtime,
+							   taskc->enq_flags);
 					bpf_task_release(p);
 					stat_inc(P2DQ_STAT_ATQ_REENQ);
 				}
@@ -1678,6 +1652,27 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	if (dsq_id != cpuc->llc_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
 		return;
+
+	if (p2dq_config.atq_enabled) {
+		pid = scx_atq_pop(cpuc->mig_atq);
+		if ((p = bpf_task_from_pid((s32)pid))) {
+			if (!(taskc = lookup_task_ctx(p))) {
+				bpf_task_release(p);
+				scx_bpf_error("failed to get task ctx");
+				return;
+			}
+			scx_bpf_dsq_insert(p,
+					   SCX_DSQ_LOCAL,
+					   taskc->slice_ns,
+					   taskc->enq_flags);
+			bpf_task_release(p);
+			return;
+		}
+	} else {
+		if (dsq_id != cpuc->mig_dsq &&
+		    scx_bpf_dsq_move_to_local(cpuc->mig_dsq))
+			return;
+	}
 
 	if (!(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		scx_bpf_error("invalid llc id %u", cpuc->llc_id);
@@ -1730,7 +1725,7 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 		priority = 1;
 
 	// Since we use a minheap convert the highest prio to lowest score.
-	idle_score = (1<<10) - (u64)priority;
+	idle_score = scx_bpf_now() - ((1<<7) * (u64)priority);
 
 	if ((ret = arena_spin_lock((void __arena *)&llcx->idle_lock)))
 		return;

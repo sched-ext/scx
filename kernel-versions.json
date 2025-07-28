@@ -10,25 +10,25 @@
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
     "branch": "master",
-    "commitHash": "95993dc3039e29dabb9a50d074145d4cb757b08b",
-    "lastModified": 1753157374,
-    "narHash": "sha256-zyJM5WHinNSMTr+UWN2SGzTPHcsfCZnawpbfpyX/0RY=",
+    "commitHash": "5345e64760d37524d38ddfa7471f42ec64b0f289",
+    "lastModified": 1753676157,
+    "narHash": "sha256-7vQ1AxNGdAXHk3S2Seu6t6Pxb3QQiTHfBL7EtrSflaI=",
     "kernelVersion": "6.16.0-rc6"
   },
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "cdf264c0a5906063a0e2b750d420d77cb992446d",
-    "lastModified": 1752811790,
-    "narHash": "sha256-WnY6+5h0gj4wO+7uSrKg0vRHnokWsd9rWU16MZ3fGUQ=",
-    "kernelVersion": "6.12.39"
+    "commitHash": "d90ecb2b1308b3e362ec4c21ff7cf0a051b445df",
+    "lastModified": 1753416581,
+    "narHash": "sha256-I0WY+eFS7+XqaKIjFOMaWr26C2ftCh83uKb7NXnmHwM=",
+    "kernelVersion": "6.12.40"
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "c02c0232f4b5a7b775c4819ec2d707bd6a696eee",
-    "lastModified": 1752811790,
-    "narHash": "sha256-YM6UU6jRhopFa7SL/cvF/2fUs02Tvf9BCQXyf6HcQi0=",
-    "kernelVersion": "6.15.7"
+    "commitHash": "46c7ff71b4b4638b172c9747c4e556bd8f98bad2",
+    "lastModified": 1753416581,
+    "narHash": "sha256-jHI56K42XFpJu9lZTNbw4+qV5Q2PCrhNOpCK1m5g+b0=",
+    "kernelVersion": "6.15.8"
   }
 }

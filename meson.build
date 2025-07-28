@@ -336,7 +336,10 @@ if enable_rust
     cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
   endforeach
 
-  if libbpf_a != ''
+  # Cargo already uses a vendored and locked libbpf in the form of libbpf-sys.
+  # Don't attempt to further complicate things by building one for them if we
+  # built it, but do still provide it if it was supplied by the user.
+  if libbpf_a != '' and not should_build_libbpf
     foreach header: libbpf_h
       cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
     endforeach
@@ -368,8 +371,7 @@ if enable_rust
                  'scx_flash', 'scx_cosmos', 'scx_rusty', 'scx_p2dq',
                  'scx_layered', 'scx_mitosis', 'scx_tickless', 'scx_chaos']
   rust_misc = ['scx_stats', 'scx_stats_derive', 'scx_utils',
-               'scx_rustland_core',
-               'scx_loader']
+               'scx_rustland_core']
 
   sched_deps = [libbpf, bpftool_target]
   cargo_cmd = [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',

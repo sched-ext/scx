@@ -11,10 +11,11 @@ use crate::bpf_stats::BpfStats;
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
+use crate::get_process_columns;
 use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
-use crate::Column;
+use crate::Columns;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -36,7 +37,8 @@ use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, KprobeAction, MangoAppAction, SchedCpuPerfSetAction,
     SchedHangAction, SchedMigrateTaskAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction, WaitAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    UpdateColVisibilityAction, WaitAction,
 };
 
 use anyhow::{bail, Result};
@@ -98,7 +100,7 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
-    process_columns: Vec<Column>,
+    process_columns: Columns<i32, ProcData>,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
@@ -231,6 +233,8 @@ impl<'a> App<'a> {
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
+        let process_columns = Columns::new(get_process_columns());
+
         // There isn't a 'is_loaded' method on a prog in libbpf-rs so do the next best thing and
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
@@ -257,7 +261,7 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            process_columns: Self::create_process_columns(),
+            process_columns,
             cpu_data,
             llc_data,
             node_data,
@@ -2209,92 +2213,9 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn create_process_columns() -> Vec<Column> {
-        vec![
-            Column {
-                header: "TGID",
-                constraint: Constraint::Length(8),
-                visible: true,
-                value_fn: Box::new(|tgid, _| tgid.to_string()),
-            },
-            Column {
-                header: "Name",
-                constraint: Constraint::Length(15),
-                visible: true,
-                value_fn: Box::new(|_, data| data.process_name.clone()),
-            },
-            Column {
-                header: "Command Line",
-                constraint: Constraint::Fill(1),
-                visible: true,
-                value_fn: Box::new(|_, data| data.cmdline.join(" ")),
-            },
-            Column {
-                header: "Last DSQ",
-                constraint: Constraint::Length(18),
-                visible: true,
-                value_fn: Box::new(|_, data| {
-                    data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))
-                }),
-            },
-            Column {
-                header: "Slice ns",
-                constraint: Constraint::Length(8),
-                visible: true,
-                value_fn: Box::new(|_, data| {
-                    let stats = VecStats::new(&data.event_data_immut("slice_consumed"), None);
-                    stats.avg.to_string()
-                }),
-            },
-            Column {
-                header: "Avg/Max Lat us",
-                constraint: Constraint::Length(14),
-                visible: true,
-                value_fn: Box::new(|_, data| {
-                    let stats = VecStats::new(&data.event_data_immut("lat_us"), None);
-                    format!("{}/{}", stats.avg, stats.max)
-                }),
-            },
-            Column {
-                header: "CPU",
-                constraint: Constraint::Length(3),
-                visible: true,
-                value_fn: Box::new(|_, data| data.cpu.to_string()),
-            },
-            Column {
-                header: "LLC",
-                constraint: Constraint::Length(3),
-                visible: true,
-                value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
-            },
-            Column {
-                header: "NUMA",
-                constraint: Constraint::Length(4),
-                visible: true,
-                value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
-            },
-            Column {
-                header: "Threads",
-                constraint: Constraint::Length(7),
-                visible: true,
-                value_fn: Box::new(|_, data| data.threads.len().to_string()),
-            },
-            Column {
-                header: "CPU%",
-                constraint: Constraint::Length(4),
-                visible: true,
-                value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
-            },
-        ]
-    }
-
     /// Render the process view.
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let visible_columns: Vec<&Column> = self
-            .process_columns
-            .iter()
-            .filter(|col| col.visible)
-            .collect();
+        let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
 
         let header = visible_columns
             .iter()
@@ -2613,14 +2534,20 @@ impl<'a> App<'a> {
     }
 
     fn on_exec(&mut self, action: &ExecAction) {
-        let ExecAction { old_pid, pid, .. } = action;
+        let ExecAction {
+            old_pid,
+            pid,
+            layer_id,
+            ..
+        } = action;
 
         // In case pid != old_pid
         let old_pid: i32 = u32_to_i32(*old_pid);
         self.proc_data.remove(&old_pid);
 
         let pid = u32_to_i32(*pid);
-        if let Ok(new_proc_data) = ProcData::from_tgid(pid, self.max_cpu_events) {
+        if let Ok(mut new_proc_data) = ProcData::from_tgid(pid, self.max_cpu_events) {
+            new_proc_data.layer_id = Some(*layer_id);
             self.proc_data.insert(pid, new_proc_data);
         }
 
@@ -2651,6 +2578,8 @@ impl<'a> App<'a> {
             parent_tgid,
             child_pid,
             child_tgid,
+            parent_layer_id,
+            child_layer_id,
             ..
         } = action;
 
@@ -2662,15 +2591,22 @@ impl<'a> App<'a> {
             // Fork created a new thread for an existing process
             match self.proc_data.entry(parent_tgid) {
                 Entry::Vacant(entry) => {
-                    if let Ok(proc_data) = ProcData::from_tgid(parent_tgid, self.max_cpu_events) {
+                    if let Ok(mut proc_data) = ProcData::from_tgid(parent_tgid, self.max_cpu_events)
+                    {
+                        proc_data.layer_id = Some(*parent_layer_id);
                         entry.insert(proc_data);
                     }
                 }
-                Entry::Occupied(entry) => entry.into_mut().add_thread(child_pid),
+                Entry::Occupied(entry) => {
+                    let proc_data = entry.into_mut();
+                    proc_data.add_thread(child_pid);
+                    proc_data.layer_id = Some(*parent_layer_id);
+                }
             }
         } else {
             // Fork created a fully new process
-            if let Ok(new_proc_data) = ProcData::from_tgid(child_pid, self.max_cpu_events) {
+            if let Ok(mut new_proc_data) = ProcData::from_tgid(child_pid, self.max_cpu_events) {
+                new_proc_data.layer_id = Some(*child_layer_id);
                 self.proc_data.insert(child_pid, new_proc_data);
             }
         }
@@ -2708,9 +2644,11 @@ impl<'a> App<'a> {
             next_dsq_lat_us,
             next_dsq_vtime,
             next_tgid,
+            next_layer_id,
             prev_dsq_id,
             prev_used_slice_ns,
             prev_tgid,
+            prev_layer_id,
             ..
         } = action;
 
@@ -2722,7 +2660,7 @@ impl<'a> App<'a> {
         let llc = topo_cpu.llc_id;
         let node = topo_cpu.node_id;
 
-        let mut insert_or_update = |tgid: i32, dsq: u64| {
+        let mut insert_or_update = |tgid: i32, dsq: u64, layer: i32| {
             match self.proc_data.entry(tgid) {
                 Entry::Vacant(entry) => {
                     if let Ok(mut proc_data) = ProcData::from_tgid(tgid, self.max_cpu_events) {
@@ -2730,6 +2668,7 @@ impl<'a> App<'a> {
                         proc_data.llc = Some(llc as u32);
                         proc_data.node = Some(node as u32);
                         proc_data.dsq = Some(dsq);
+                        proc_data.layer_id = Some(layer);
                         entry.insert(proc_data);
                     }
                 }
@@ -2739,6 +2678,7 @@ impl<'a> App<'a> {
                     proc_data.llc = Some(llc as u32);
                     proc_data.node = Some(node as u32);
                     proc_data.dsq = Some(dsq);
+                    proc_data.layer_id = Some(layer);
                 }
             };
         };
@@ -2746,8 +2686,8 @@ impl<'a> App<'a> {
         let next_tgid = u32_to_i32(*next_tgid);
         let prev_tgid = u32_to_i32(*prev_tgid);
 
-        insert_or_update(next_tgid, *next_dsq_id);
-        insert_or_update(prev_tgid, *prev_dsq_id);
+        insert_or_update(next_tgid, *next_dsq_id, *next_layer_id);
+        insert_or_update(prev_tgid, *prev_dsq_id, *prev_layer_id);
 
         if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
             proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
@@ -2919,6 +2859,22 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Updates a column's visibility
+    pub fn update_col_visibility(&mut self, action: &UpdateColVisibilityAction) -> Result<()> {
+        let UpdateColVisibilityAction {
+            table,
+            col,
+            visible,
+        } = action;
+
+        match table.as_str() {
+            "Process" => self.process_columns.update_visibility(col, *visible),
+            _ => bail!("Invalid table name"),
+        };
+
+        Ok(())
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.as_mut().unwrap().sample_rate = sample_rate;
@@ -3042,6 +2998,9 @@ impl<'a> App<'a> {
                 self.on_kprobe(a);
             }
             Action::ClearEvent => self.reset_prof_events()?,
+            Action::UpdateColVisibility(a) => {
+                self.update_col_visibility(a)?;
+            }
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }

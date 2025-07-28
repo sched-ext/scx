@@ -1,6 +1,6 @@
-# scx_loader: A DBUS Interface for Managing sched-ext Schedulers
+# scx_loader: A DBUS Interface for Managing sched_ext Schedulers
 
-`scx_loader` is a utility that provides a convenient DBUS interface for starting, stopping, and managing sched_ext schedulers.
+`scx_loader` is a utility that provides a convenient DBUS interface for starting, stopping, and managing `sched_ext` schedulers.
 
 ## Features
 
@@ -20,40 +20,51 @@
 **Examples using `dbus-send`:**
 
 * **Start a Scheduler:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.StartScheduler string:scx_rusty uint32:0
   ```
+
   (This starts `scx_rusty` with scheduler mode 0)
 
 * **Start a Scheduler with Arguments:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.StartSchedulerWithArgs string:scx_bpfland array:string:"-p","-s","5000"
   ```
+
   (This starts `scx_bpfland` with arguments `-p -s 5000`)
 
 * **Stop the Current Scheduler:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.StopScheduler
   ```
 
 * **Switch Scheduler:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.SwitchScheduler string:scx_lavd uint32:2
   ```
+
   (This switches to `scx_lavd` with scheduler mode 2)
 
 * **Switch Scheduler with Arguments:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.SwitchSchedulerWithArgs string:scx_bpfland array:string:"-p","-s","5000"
   ```
+
   (This switches to `scx_bpfland` with arguments `-p -s 5000`)
 
 * **Get the Currently Active Scheduler:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.freedesktop.DBus.Properties.Get string:org.scx.Loader string:CurrentScheduler
   ```
 
 * **Get the Supported Schedulers:**
+
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.freedesktop.DBus.Properties.Get string:org.scx.Loader string:SupportedSchedulers
   ```
@@ -71,30 +82,38 @@
 In case of issues with `scx_loader`, you can debug the service using the following steps:
 
 1. **Check the service status:**
+
    ```bash
    systemctl status scx_loader.service
    ```
 
 2. **View the service logs:**
+
    ```bash
    journalctl -u scx_loader.service
    ```
 
 3. **Enable debug logging:** You can temporarily enable debug logging by modifying the systemd service file:
 
-   - Edit the service file:
+   * Edit the service file:
+
      ```bash
      sudo systemctl edit scx_loader.service
      ```
-   - Add the following lines under the `[Service]` section:
-     ```
+
+   * Add the following lines under the `[Service]` section:
+
+     ```bash
      Environment=RUST_LOG=trace
      ```
-   - Restart the service:
+
+   * Restart the service:
+
      ```bash
      sudo systemctl restart scx_loader.service
      ```
-   - Check the logs again for detailed debugging information.
+
+   * Check the logs again for detailed debugging information.
 
 ## D-Bus Introspection XML
 
@@ -116,17 +135,15 @@ The introspection XML can be accessed in two ways:
 
    The XML file is also available in the provided file `org.scx.Loader.xml`.
 
-
 You can then use this XML with tools like `gdbus-codegen` or other language-specific D-Bus bindings to generate code that interacts with `scx_loader`.
 
-For example, with `gdbus-codegen`, you can generate C code for the interface:
+For example, with `gdbus-codegen`, you can generate `C` code for the interface:
 
 ```bash
 gdbus-codegen --generate-c-code scx-loader-bindings org.scx.Loader.xml
 ```
 
-This will produce header and source files that you can use to interact with `scx_loader` from your C code.
-
+This will produce header and source files that you can use to interact with `scx_loader` from your `C` code.
 
 ## Development Status
 

@@ -128,6 +128,13 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
+    /// Disable deferred wakeups.
+    ///
+    /// Enabling this option can reduce throughput and performance for certain workloads, but it
+    /// can also reduce power consumption (useful on battery-powered systems).
+    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
+    no_deferred_wakeup: bool,
+
     /// Enable address space affinity.
     ///
     /// This option allows to keep tasks that share the same address space (e.g., threads of the
@@ -312,6 +319,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_lag_us * 1000;
         rodata.cpufreq_enabled = !opts.disable_cpufreq;
+        rodata.deferred_wakeups = !opts.no_deferred_wakeup;
         rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = opts.enable_numa;

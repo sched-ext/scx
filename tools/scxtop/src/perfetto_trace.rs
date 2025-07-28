@@ -572,6 +572,7 @@ impl PerfettoTraceManager {
             cpu,
             old_pid,
             pid,
+            ..
         } = action;
 
         self.ftrace_events.entry(*cpu).or_default().push({
@@ -625,6 +626,7 @@ impl PerfettoTraceManager {
             tgid,
             prio,
             comm,
+            ..
         } = action;
 
         self.ftrace_events.entry(*cpu).or_default().push({
@@ -658,6 +660,7 @@ impl PerfettoTraceManager {
             tgid,
             prio,
             comm,
+            ..
         } = action;
 
         self.ftrace_events.entry(*cpu).or_default().push({
@@ -686,6 +689,7 @@ impl PerfettoTraceManager {
             pid,
             prio,
             comm,
+            ..
         } = action;
 
         self.ftrace_events.entry(*cpu).or_default().push({

@@ -8,12 +8,14 @@ pub mod bpf_intf;
 pub mod bpf_skel;
 mod bpf_stats;
 pub mod cli;
+mod columns;
 pub mod config;
 mod cpu_data;
 mod cpu_stats;
 pub mod edm;
 mod event_data;
 mod keymap;
+pub mod layered_util;
 mod llc_data;
 pub mod mangoapp;
 mod mem_stats;
@@ -32,6 +34,7 @@ pub mod util;
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
 pub use bpf_skel::*;
+pub use columns::{get_process_columns, Columns};
 pub use cpu_data::CpuData;
 pub use cpu_stats::{CpuStatSnapshot, CpuStatTracker};
 pub use event_data::EventData;
@@ -138,15 +141,6 @@ impl FilteredEventState {
     }
 }
 
-type ColumnFn = Box<dyn Fn(i32, &ProcData) -> String>;
-
-struct Column {
-    header: &'static str,
-    constraint: ratatui::prelude::Constraint,
-    visible: bool,
-    value_fn: ColumnFn,
-}
-
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedCpuPerfSetAction {
     pub cpu: u32,
@@ -173,6 +167,8 @@ pub struct ForkAction {
     pub child_tgid: u32,
     pub parent_comm: SsoString,
     pub child_comm: SsoString,
+    pub parent_layer_id: i32,
+    pub child_layer_id: i32,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -181,6 +177,7 @@ pub struct ExecAction {
     pub cpu: u32,
     pub old_pid: u32,
     pub pid: u32,
+    pub layer_id: i32,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -205,6 +202,7 @@ pub struct SchedSwitchAction {
     pub next_pid: u32,
     pub next_tgid: u32,
     pub next_prio: i32,
+    pub next_layer_id: i32,
     pub next_comm: SsoString,
     pub prev_dsq_id: u64,
     pub prev_used_slice_ns: u64,
@@ -214,6 +212,7 @@ pub struct SchedSwitchAction {
     pub prev_prio: i32,
     pub prev_comm: SsoString,
     pub prev_state: u64,
+    pub prev_layer_id: i32,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -328,6 +327,13 @@ pub struct SystemStatAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UpdateColVisibilityAction {
+    pub table: String,
+    pub col: String,
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MangoAppAction {
     pub pid: u32,
     pub vis_frametime: u64,
@@ -396,6 +402,7 @@ pub enum Action {
     ToggleHwPressure,
     ToggleUncoreFreq,
     Up,
+    UpdateColVisibility(UpdateColVisibilityAction),
     Wait(WaitAction),
     None,
 }
@@ -531,12 +538,17 @@ impl TryFrom<&bpf_event> for Action {
                     pid: hang.pid,
                 }))
             }
-            bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
-                ts: event.ts,
-                cpu: event.cpu,
-                old_pid: unsafe { event.event.exec.old_pid },
-                pid: unsafe { event.event.exec.pid },
-            })),
+            bpf_intf::event_type_EXEC => {
+                let exec = unsafe { &event.event.exec };
+
+                Ok(Action::Exec(ExecAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    old_pid: exec.old_pid,
+                    pid: exec.pid,
+                    layer_id: exec.layer_id,
+                }))
+            }
             bpf_intf::event_type_EXIT => {
                 let exit = unsafe { &event.event.exit };
                 let comm = String::from_utf8_lossy(&exit.comm);
@@ -565,6 +577,8 @@ impl TryFrom<&bpf_event> for Action {
                     child_tgid: fork.child_tgid,
                     parent_comm: parent_comm.into(),
                     child_comm: child_comm.into(),
+                    parent_layer_id: fork.parent_layer_id,
+                    child_layer_id: fork.child_layer_id,
                 }))
             }
             #[allow(non_upper_case_globals)]
@@ -596,6 +610,7 @@ impl TryFrom<&bpf_event> for Action {
                     next_pid: sched_switch.next_pid,
                     next_tgid: sched_switch.next_tgid,
                     next_prio: sched_switch.next_prio,
+                    next_layer_id: sched_switch.next_layer_id,
                     next_comm: next_comm.into(),
                     prev_dsq_id: sched_switch.prev_dsq_id,
                     prev_used_slice_ns: sched_switch.prev_used_slice_ns,
@@ -605,6 +620,7 @@ impl TryFrom<&bpf_event> for Action {
                     prev_comm: prev_comm.into(),
                     prev_prio: sched_switch.prev_prio,
                     prev_state: sched_switch.prev_state,
+                    prev_layer_id: sched_switch.prev_layer_id,
                 }))
             }
             #[allow(non_upper_case_globals)]
@@ -646,6 +662,7 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
+            Action::UpdateColVisibility(_) => write!(f, "UpdateColVisibility"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),

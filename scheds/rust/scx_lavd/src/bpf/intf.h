@@ -141,6 +141,7 @@ struct task_ctx {
 	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
 	u32	cpu_id;			/* where a task is running now */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
+	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 };

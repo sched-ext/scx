@@ -1,6 +1,6 @@
 # Framework to implement `sched_ext` schedulers running in user-space
 
-`scx_rustland_core` is a Rust framework designed to facilitate the
+`scx_rustland_core` is a `Rust` framework designed to facilitate the
 implementation of user-space schedulers based on the Linux kernel
 `sched_ext` feature.
 
@@ -8,13 +8,13 @@ implementation of user-space schedulers based on the Linux kernel
 kernel, leveraging BPF to manage scheduling policies.
 
 This crate provides an abstraction layer for `sched_ext`, enabling
-developers to write schedulers in Rust without dealing with low-level
+developers to write schedulers in `Rust` without dealing with low-level
 kernel or BPF details.
 
 ## Features
 
 - **Generic BPF Abstraction**: Interact with BPF components using a
-  high-level Rust API.
+  high-level `Rust` API.
 - **Task Scheduling**: Enqueue and dispatch tasks using provided methods.
 - **CPU Selection**: Select idle CPUs for task execution with a preference
   for reusing previous CPUs.

@@ -1,6 +1,6 @@
 # scx_wd40
 
-An experimental fork of the scx_rusty scheduler that uses BPF arenas to simplify scheduler development. Found in the main [sched_ext](https://github.com/sched-ext/scx/tree/main) repository. [Read more about sched_ext](https://github.com/sched-ext/scx/tree/main).
+An experimental fork of the `scx_rusty` scheduler that uses BPF arenas to simplify scheduler development. Found in the main [`sched_ext`](https://github.com/sched-ext/scx/tree/main) repository. [Read more about `sched_ext`](https://github.com/sched-ext/scx/tree/main).
 
 ## Overview
 

@@ -68,6 +68,9 @@ pub struct TuiArgs {
     /// where source is one of 'kprobe', 'perf', 'cpu'. Ex: "cpu:cpu_total_util_percent", "perf:hw:cycles"
     #[arg(long, default_value = "cpu:cpu_total_util_percent")]
     pub default_profiling_event: String,
+    /// Show scx_layered data (process level layer_id's)
+    #[arg(long)]
+    pub layered: bool,
 
     /// Automatically start a trace when a function takes too long to return.
     #[arg(

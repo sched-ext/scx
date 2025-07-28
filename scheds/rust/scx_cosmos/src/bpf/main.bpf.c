@@ -77,6 +77,11 @@ const volatile bool numa_enabled;
 const volatile bool mm_affinity;
 
 /*
+ * Enable deferred wakeup.
+ */
+const volatile bool deferred_wakeups = true;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -124,7 +129,6 @@ static u64 vtime_now;
 struct task_ctx {
 	u64 last_run_at;
 	u64 exec_runtime;
-	u64 vtime;
 };
 
 struct {
@@ -483,31 +487,33 @@ static u64 task_slice(const struct task_struct *p)
 /*
  * Calculate and return the virtual deadline for the given task.
  *
- * The goal is to limit how much virtual time budget a sleeping task can
- * accumulate.
+ *  The deadline is defined as:
  *
- * This budget is:
- *   - proportional to the task's weight (heavier tasks get more),
- *   - inversely proportional to the amount of CPU time the task has
- *     accumulated since it last slept (exec_runtime).
+ *    deadline = vruntime + exec_vruntime
  *
- * As a result:
- *   - tasks that sleep often are rewarded with a longer budget,
- *   - CPU-bound tasks accumulate less budget.
+ * Here, `vruntime` represents the task's total accumulated runtime,
+ * inversely scaled by its weight, while `exec_vruntime` accounts the
+ * runtime accumulated since the last sleep event, also inversely scaled by
+ * the task's weight.
  *
- * Then the vruntime is clamped to a minimum value using this budget,
- * preventing it from falling too far behind to avoid starvation and
- * preserving fairness over time.
+ * Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize
+ * tasks that sleep frequently and use the CPU in short bursts (resulting
+ * in a small `exec_vruntime` value), which are typically latency critical.
+ *
+ * Additionally, to prevent over-prioritizing tasks that sleep for long
+ * periods of time, the vruntime credit they can accumulate while sleeping
+ * is limited by @slice_lag, which is also scaled based on the task's
+ * weight.
  */
-static u64 task_dl(const struct task_struct *p, struct task_ctx *tctx)
+static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag - tctx->exec_runtime);
+	u64 vsleep_max = scale_by_task_weight(p, slice_lag);
 	u64 vtime_min = vtime_now - vsleep_max;
 
-	if (time_before(tctx->vtime, vtime_min))
-		tctx->vtime = vtime_min;
+	if (time_before(p->scx.dsq_vtime, vtime_min))
+		p->scx.dsq_vtime = vtime_min;
 
-	return tctx->vtime;
+	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
 
 /*
@@ -656,6 +662,20 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	return cpu >= 0 ? cpu : prev_cpu;
 }
 
+/*
+ * Wake-up @cpu if it's idle.
+ */
+static inline void wakeup_cpu(s32 cpu)
+{
+	/*
+	 * If deferred wakeups are enabled all the wakeup events are
+	 * performed asynchronously by wakeup_timerfn().
+	 */
+	if (deferred_wakeups)
+		return;
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -669,6 +689,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		cpu = pick_idle_cpu(p, prev_cpu, 0, true);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
+			wakeup_cpu(cpu);
 			return;
 		}
 	}
@@ -679,6 +700,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_system_busy()) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		wakeup_cpu(prev_cpu);
 		return;
 	}
 
@@ -691,6 +713,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
 				 task_slice(p), task_dl(p, tctx), enq_flags);
+	wakeup_cpu(prev_cpu);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
@@ -753,8 +776,8 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	/*
 	 * Update current system's vruntime.
 	 */
-	if (time_before(vtime_now, tctx->vtime))
-		vtime_now = tctx->vtime;
+	if (time_before(vtime_now, p->scx.dsq_vtime))
+		vtime_now = p->scx.dsq_vtime;
 
 	/*
 	 * Refresh cpufreq performance level.
@@ -774,7 +797,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_lag);
+	slice = MIN(scx_bpf_now() - tctx->last_run_at, slice_ns);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
@@ -783,13 +806,18 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Cap the maximum accumulated time since last sleep to @slice_lag,
 	 * to prevent starving CPU-intensive tasks.
 	 */
-	tctx->vtime += scale_by_task_weight_inverse(p, slice);
+	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
 	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
 
 	/*
 	 * Update per-CPU statistics.
 	 */
 	update_cpu_load(p, slice);
+}
+
+void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
+{
+	p->scx.dsq_vtime = vtime_now;
 }
 
 s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
@@ -835,19 +863,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		}
 	}
 
-	timer = bpf_map_lookup_elem(&wakeup_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup wakeup timer");
-		return -ESRCH;
-	}
+	if (deferred_wakeups) {
+		timer = bpf_map_lookup_elem(&wakeup_timer, &key);
+		if (!timer) {
+			scx_bpf_error("Failed to lookup wakeup timer");
+			return -ESRCH;
+		}
 
-	bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
-	bpf_timer_set_callback(timer, wakeup_timerfn);
+		bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
+		bpf_timer_set_callback(timer, wakeup_timerfn);
 
-	err = bpf_timer_start(timer, slice_ns, 0);
-	if (err) {
-		scx_bpf_error("Failed to arm wakeup timer");
-		return err;
+		err = bpf_timer_start(timer, slice_ns, 0);
+		if (err) {
+			scx_bpf_error("Failed to arm wakeup timer");
+			return err;
+		}
 	}
 
 	return 0;
@@ -866,6 +896,7 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .running			= (void *)cosmos_running,
 	       .stopping		= (void *)cosmos_stopping,
 	       .cpu_release		= (void *)cosmos_cpu_release,
+	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
 	       .init			= (void *)cosmos_init,
 	       .exit			= (void *)cosmos_exit,
