@@ -39,6 +39,22 @@
         "type": "github"
       }
     },
+    "libbpf-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1752884596,
+        "narHash": "sha256-atjH2mL5PreCPj+VcJ//U9bdv4gAd57VU60KhbS7IqE=",
+        "owner": "libbpf",
+        "repo": "libbpf",
+        "rev": "58dd1f58b57294b2e59482245b29e46f1812b82d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "libbpf",
+        "repo": "libbpf",
+        "type": "github"
+      }
+    },
     "nix-develop-gha": {
       "inputs": {
         "nixpkgs": [
@@ -79,6 +95,7 @@
       "inputs": {
         "fenix": "fenix",
         "flake-utils": "flake-utils",
+        "libbpf-src": "libbpf-src",
         "nix-develop-gha": "nix-develop-gha",
         "nixpkgs": "nixpkgs",
         "veristat-src": "veristat-src"
@@ -119,11 +136,11 @@
     "veristat-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1736364478,
-        "narHash": "sha256-07awVCMrFFG69cGtucLYGT+mqcRZ9F9ZHvxARLLYpM0=",
+        "lastModified": 1751555249,
+        "narHash": "sha256-7NbKM9GA2N2CZGXZKllh00bqWGKb8+ftG/lGG/JNPng=",
         "owner": "libbpf",
         "repo": "veristat",
-        "rev": "3bf5cdf98b05faf53dca21492e69ffb4605c6d42",
+        "rev": "1b386f2cd5d798bc74dba1af5208f5273aba2b9d",
         "type": "github"
       },
       "original": {

@@ -18,17 +18,32 @@
     nix-develop-gha.url = "github:nicknovitski/nix-develop";
     nix-develop-gha.inputs.nixpkgs.follows = "nixpkgs";
 
+    libbpf-src = {
+      url = "github:libbpf/libbpf";
+      flake = false;
+    };
+
     veristat-src = {
       url = "github:libbpf/veristat";
       flake = false;
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, nix-develop-gha, veristat-src, ... }:
+  outputs = { self, nixpkgs, flake-utils, fenix, nix-develop-gha, libbpf-src, veristat-src, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" ]
       (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [
+              (final: prev: {
+                libbpf-git = prev.libbpf.overrideAttrs (oldAttrs: {
+                  src = libbpf-src;
+                  version = "git";
+                });
+              })
+            ];
+          };
           lib = pkgs.lib;
 
           rust-toolchain = fenix.packages.${system}.stable.withComponents [
@@ -127,6 +142,7 @@
             veristat = pkgs.callPackage ./veristat.nix {
               version = "git";
               src = veristat-src;
+              libbpf = pkgs.libbpf-git;
             };
 
             list-integration-tests = pkgs.python3Packages.buildPythonApplication rec {
