@@ -9,22 +9,22 @@ use crate::VecStats;
 use ratatui::prelude::Constraint;
 use std::collections::HashMap;
 
-type ColumnFn = Box<dyn Fn(i32, &ProcData) -> String>;
+type ColumnFn<K, D> = Box<dyn Fn(K, &D) -> String>;
 
-pub struct Column {
+pub struct Column<K, D> {
     pub header: &'static str,
     pub constraint: ratatui::prelude::Constraint,
     pub visible: bool,
-    pub value_fn: ColumnFn,
+    pub value_fn: ColumnFn<K, D>,
 }
 
-pub struct Columns {
-    columns: Vec<Column>,
+pub struct Columns<K, D> {
+    columns: Vec<Column<K, D>>,
     header_to_index: HashMap<&'static str, usize>,
 }
 
-impl Columns {
-    pub fn new(columns: Vec<Column>) -> Self {
+impl<K, D> Columns<K, D> {
+    pub fn new(columns: Vec<Column<K, D>>) -> Self {
         let header_to_index = columns
             .iter()
             .enumerate()
@@ -48,17 +48,17 @@ impl Columns {
     }
 
     /// Return a slice of only the visible columns
-    pub fn visible_columns(&self) -> impl Iterator<Item = &Column> {
+    pub fn visible_columns(&self) -> impl Iterator<Item = &Column<K, D>> {
         self.columns.iter().filter(|c| c.visible)
     }
 
     /// Return all columns
-    pub fn all_columns(&self) -> &[Column] {
+    pub fn all_columns(&self) -> &[Column<K, D>] {
         &self.columns
     }
 }
 
-pub fn get_process_columns() -> Vec<Column> {
+pub fn get_process_columns() -> Vec<Column<i32, ProcData>> {
     vec![
         Column {
             header: "TGID",
@@ -140,7 +140,11 @@ mod tests {
     use super::*;
     use ratatui::prelude::Constraint;
 
-    fn make_column(header: &'static str, visible: bool) -> Column {
+    fn make_column<K, D>(header: &'static str, visible: bool) -> Column<K, D>
+    where
+        K: 'static,
+        D: 'static,
+    {
         Column {
             header,
             constraint: Constraint::Length(10),
@@ -151,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_new_columns_builds_header_index() {
-        let columns = vec![
+        let columns: Vec<Column<i32, i32>> = vec![
             make_column("PID", true),
             make_column("Name", false),
             make_column("CPU%", true),
@@ -165,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_visible_columns_filters_properly() {
-        let columns = vec![
+        let columns: Vec<Column<i32, i32>> = vec![
             make_column("PID", true),
             make_column("Name", false),
             make_column("CPU%", true),
@@ -178,7 +182,8 @@ mod tests {
 
     #[test]
     fn test_update_visibility_success() {
-        let columns = vec![make_column("PID", true), make_column("Name", false)];
+        let columns: Vec<Column<i32, i32>> =
+            vec![make_column("PID", true), make_column("Name", false)];
         let mut c = Columns::new(columns);
         let visible: Vec<&str> = c.visible_columns().map(|c| c.header).collect();
         assert_eq!(visible, vec!["PID"]);
@@ -192,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_update_visibility_fails_gracefully() {
-        let columns = vec![make_column("PID", true)];
+        let columns: Vec<Column<i32, i32>> = vec![make_column("PID", true)];
         let mut c = Columns::new(columns);
         let updated = c.update_visibility("Nonexistent", false);
 
@@ -203,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_all_columns_returns_all() {
-        let columns = vec![make_column("A", true), make_column("B", false)];
+        let columns: Vec<Column<i32, i32>> = vec![make_column("A", true), make_column("B", false)];
         let c = Columns::new(columns);
         let headers: Vec<&str> = c.all_columns().iter().map(|c| c.header).collect();
 
@@ -212,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_headers_fail_to_map_properly() {
-        let columns = vec![make_column("A", true), make_column("A", false)];
+        let columns: Vec<Column<i32, i32>> = vec![make_column("A", true), make_column("A", false)];
         let c = Columns::new(columns);
 
         // Only the last one will remain in header_to_index

@@ -100,7 +100,7 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
-    process_columns: Columns,
+    process_columns: Columns<i32, ProcData>,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
