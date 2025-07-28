@@ -2,9 +2,9 @@
 
 A simple tool for annotating vmlinux.h with documentation from kernel sources.
 
-To help bridge the tooling gap between writing c code for the bpf vm vs c code for err, everything else.
+To help bridge the tooling gap between writing `C` code for the bpf vm vs `C` code for err, everything else.
 
-```
+```bash
 Usage: vmlinux_docify [OPTIONS] --kernel-dir <KERNEL_DIR> --vmlinux-h <VMLINUX_H>
 
 Options:
@@ -25,4 +25,3 @@ Options:
   -V, --version
           Print version
 ```
-

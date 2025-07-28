@@ -1,6 +1,6 @@
 # Statistics transport library for sched_ext schedulers
 
-[sched_ext](https://github.com/sched-ext/scx) is a Linux kernel feature
+[`sched_ext`](https://github.com/sched-ext/scx) is a Linux kernel feature
 which enables implementing kernel thread schedulers in BPF and dynamically
 loading them.
 
