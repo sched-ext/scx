@@ -28,7 +28,6 @@ use crate::PerfettoTraceManager;
 use crate::ProcData;
 use crate::ProfilingEvent;
 use crate::Search;
-use crate::UpdateColVisibilityAction;
 use crate::VecStats;
 use crate::ViewState;
 use crate::APP;

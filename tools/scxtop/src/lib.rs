@@ -371,7 +371,6 @@ pub enum Action {
     IncTickRate,
     InputEntry(String),
     IPI(IPIAction),
-    UpdateColVisibility(UpdateColVisibilityAction),
     MangoApp(MangoAppAction),
     NextEvent,
     NextViewState,
