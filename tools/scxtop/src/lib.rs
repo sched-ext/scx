@@ -8,6 +8,7 @@ pub mod bpf_intf;
 pub mod bpf_skel;
 mod bpf_stats;
 pub mod cli;
+mod columns;
 pub mod config;
 mod cpu_data;
 mod cpu_stats;
@@ -32,6 +33,7 @@ pub mod util;
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
 pub use bpf_skel::*;
+pub use columns::{get_process_columns, Columns};
 pub use cpu_data::CpuData;
 pub use cpu_stats::{CpuStatSnapshot, CpuStatTracker};
 pub use event_data::EventData;
@@ -136,15 +138,6 @@ impl FilteredEventState {
         self.scroll = 0;
         self.selected = 0;
     }
-}
-
-type ColumnFn = Box<dyn Fn(i32, &ProcData) -> String>;
-
-struct Column {
-    header: &'static str,
-    constraint: ratatui::prelude::Constraint,
-    visible: bool,
-    value_fn: ColumnFn,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -328,6 +321,13 @@ pub struct SystemStatAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UpdateColVisibilityAction {
+    pub table: String,
+    pub col: String,
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MangoAppAction {
     pub pid: u32,
     pub vis_frametime: u64,
@@ -396,6 +396,7 @@ pub enum Action {
     ToggleHwPressure,
     ToggleUncoreFreq,
     Up,
+    UpdateColVisibility(UpdateColVisibilityAction),
     Wait(WaitAction),
     None,
 }
@@ -646,6 +647,7 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
+            Action::UpdateColVisibility(_) => write!(f, "UpdateColVisibility"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),
