@@ -193,6 +193,8 @@
                 # fenix managed rust toolchain + nixpkgs cargo-nextest
                 cargo-nextest
                 rust-toolchain
+              ] ++ [
+                self.packages.${system}.veristat
               ];
 
               makeWrapperArgs = lib.lists.flatten ([
