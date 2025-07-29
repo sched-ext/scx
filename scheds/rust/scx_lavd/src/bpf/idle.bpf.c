@@ -257,6 +257,27 @@ s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
 }
 
 static
+s32 pick_random_cpu(struct pick_ctx *ctx)
+{
+	/*
+	 * Pick a less loaded CPU using the random of two choices technique.
+	 */
+	s32 cpu0 = cpumask_any_dsitribute(ctx);
+	s32 cpu1 = cpumask_any_dsitribute(ctx);
+	struct cpu_ctx *cpuc0, *cpuc1;
+
+	if (cpu0 == cpu1 && cpu0 != -ENOENT)
+		return cpu0;
+
+	cpuc0 = get_cpu_ctx_id(cpu0);
+	cpuc1 = get_cpu_ctx_id(cpu1);
+	if (!cpuc0 || !cpuc1)
+		return ctx->prev_cpu;
+
+	return (cpuc0->cur_sc_util < cpuc1->cur_sc_util) ? cpu0 : cpu1;
+}
+
+static
 s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cpdom)
 {
 	struct bpf_cpumask *cpd_mask;
@@ -629,7 +650,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * overflow set.
 	 */
 	if (sticky_cpdom < 0) {
-		cpu = cpumask_any_dsitribute(ctx);
+		cpu = pick_random_cpu(ctx);
 		goto unlock_out;
 	}
 	/* NOTE: There is a sticky domain. */
@@ -802,12 +823,6 @@ skip_fully_idle_neighbor:
 err_out:
 	cpu = -ENOENT;
 unlock_out:
-	if (idle_smtmask)
-		scx_bpf_put_idle_cpumask(idle_smtmask);
-	if (idle_cpumask)
-		scx_bpf_put_idle_cpumask(idle_cpumask);
-	bpf_rcu_read_unlock();
-
 	if (sticky_cpdom < 0) {
 		struct cpu_ctx *cpuc;
 		cpuc = get_cpu_ctx_id(cpu >= 0 ? cpu : ctx->prev_cpu);
@@ -815,6 +830,16 @@ unlock_out:
 			ctx->cpdom_id = cpuc->cpdom_id;
 	} else
 		ctx->cpdom_id = sticky_cpdom;
+
+	if (cpu == -ENOENT)
+		cpu = pick_random_cpu(ctx);
+
+	if (idle_smtmask)
+		scx_bpf_put_idle_cpumask(idle_smtmask);
+	if (idle_cpumask)
+		scx_bpf_put_idle_cpumask(idle_cpumask);
+	bpf_rcu_read_unlock();
+
 	return cpu;
 }
 
