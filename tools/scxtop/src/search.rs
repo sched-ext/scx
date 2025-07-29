@@ -5,85 +5,68 @@
 
 use std::cmp::min;
 
-#[derive(Debug, Clone)]
-pub struct Search {
-    entries: Vec<String>,
+#[allow(dead_code)]
+pub fn binary_search(entries: &Vec<String>, input: &str) -> Option<usize> {
+    entries.binary_search_by(|s| s.as_str().cmp(input)).ok()
 }
 
-impl Search {
-    pub fn new(mut entries: Vec<String>) -> Self {
-        entries.sort();
-        Self { entries }
-    }
+#[allow(dead_code)]
+pub fn substring_search(entries: &Vec<String>, input: &str) -> Vec<String> {
+    let input = &input.to_lowercase();
 
-    pub fn binary_search(&self, input: &str) -> Option<usize> {
-        self.entries
-            .binary_search_by(|s| s.as_str().cmp(input))
-            .ok()
-    }
+    entries
+        .iter()
+        .filter(|entry| entry.to_lowercase().contains(input))
+        .cloned()
+        .collect()
+}
 
-    pub fn contains(&self, input: &str) -> bool {
-        self.binary_search(input).is_some()
-    }
+pub fn sorted_contains(entries: &Vec<String>, input: &str) -> bool {
+    binary_search(entries, input).is_some()
+}
 
-    pub fn contains_all(&self, inputs: &[String]) -> bool {
-        inputs.iter().all(|input| self.contains(input))
-    }
+pub fn sorted_contains_all(entries: &Vec<String>, inputs: &[String]) -> bool {
+    inputs.iter().all(|input| sorted_contains(entries, input))
+}
 
-    pub fn substring_search(&self, input: &str) -> Vec<String> {
-        let input = &input.to_lowercase();
+/**
+ * We'll want check fuzzily in three ways using the following scoring system:
+ * 1: Is it a substring (contains)? 100 points
+ * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
+ * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
+ *
+ * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
+ */
+pub fn fuzzy_search(entries: &Vec<String>, input: &str) -> Vec<String> {
+    let input = &input.to_lowercase();
 
-        self.entries
-            .iter()
-            .filter(|entry| entry.to_lowercase().contains(input))
-            .cloned()
-            .collect()
-    }
+    let mut fuzzy_results: Vec<(&String, u32)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let entry_lower = &entry.to_lowercase();
+            entry_lower
+                .contains(input)
+                .then_some((entry, 100))
+                .or_else(|| contains_spread(entry_lower, input).map(|score| (entry, 100 - score)))
+        })
+        .collect();
 
-    /**
-     * We'll want check fuzzily in three ways using the following scoring system:
-     * 1: Is it a substring (contains)? 100 points
-     * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
-     * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
-     *
-     * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
-     */
-    pub fn fuzzy_search(&self, input: &str) -> Vec<String> {
-        let input = &input.to_lowercase();
-
-        let mut fuzzy_results: Vec<(&String, u32)> = self
-            .entries
+    // We only check if our input has a typo if we haven't matched to anything else (for performance reasons)
+    if fuzzy_results.is_empty() {
+        fuzzy_results = entries
             .iter()
             .filter_map(|entry| {
-                let entry_lower = &entry.to_lowercase();
-                entry_lower
-                    .contains(input)
-                    .then_some((entry, 100))
-                    .or_else(|| {
-                        contains_spread(entry_lower, input).map(|score| (entry, 100 - score))
-                    })
+                contains_with_typo(&entry.to_lowercase(), input).map(|score| (entry, 75 - score))
             })
-            .collect();
-
-        // We only check if our input has a typo if we haven't matched to anything else (for performance reasons)
-        if fuzzy_results.is_empty() {
-            fuzzy_results = self
-                .entries
-                .iter()
-                .filter_map(|entry| {
-                    contains_with_typo(&entry.to_lowercase(), input)
-                        .map(|score| (entry, 75 - score))
-                })
-                .collect()
-        }
-
-        fuzzy_results.sort_by(|a, b| b.1.cmp(&a.1));
-
-        fuzzy_results
-            .into_iter()
-            .map(|(entry, _)| entry.clone())
             .collect()
     }
+
+    fuzzy_results.sort_by(|a, b| b.1.cmp(&a.1));
+
+    fuzzy_results
+        .into_iter()
+        .map(|(entry, _)| entry.clone())
+        .collect()
 }
 
 /**
@@ -418,33 +401,39 @@ mod tests {
     }
 
     #[test]
-    fn test_contains() {
+    fn test_sorted_contains() {
         let events = test_events();
-        let search = Search::new(events);
+        events.sort();
 
-        let result1 = search.contains("ext4:ext4_mb_new_inode_pa");
+        let result1 = sorted_contains(events, "ext4:ext4_mb_new_inode_pa");
         assert!(result1);
 
-        let result2 = search.contains("ext4:ext4_mb_new_inode");
+        let result2 = sorted_contains(events, "ext4:ext4_mb_new_inode");
         assert!(!result2);
     }
 
     #[test]
-    fn test_contains_all() {
+    fn test_sorted_contains_all() {
         let events = test_events();
-        let search = Search::new(events);
+        events.sort();
 
-        let result1 = search.contains_all(&[
-            "ext4:ext4_mb_new_inode_pa".to_string(),
-            "ext4:ext4_mb_new_inode".to_string(),
-        ]);
+        let result1 = sorted_contains_all(
+            events,
+            &[
+                "ext4:ext4_mb_new_inode_pa".to_string(),
+                "ext4:ext4_mb_new_inode".to_string(),
+            ],
+        );
         assert!(!result1);
 
-        let result2 = search.contains_all(&[
-            "syscalls:sys_enter_timerfd_settime".to_string(),
-            "alarmtimer:alarmtimer_fired".to_string(),
-            "ext4:ext4_fc_stats".to_string(),
-        ]);
+        let result2 = sorted_contains_all(
+            events,
+            &[
+                "syscalls:sys_enter_timerfd_settime".to_string(),
+                "alarmtimer:alarmtimer_fired".to_string(),
+                "ext4:ext4_fc_stats".to_string(),
+            ],
+        );
         assert!(result2);
     }
 }
