@@ -3,11 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-#include <vmlinux.h>
-
-#include <bpf/bpf_core_read.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
+#include <scx/common.bpf.h>
 
 char _license[] SEC("license") = "GPL";
 
