@@ -83,7 +83,6 @@ const volatile struct {
 	u64 slack_factor;
 	u64 backoff_ns;
 	u64 min_nr_queued_pick2;
-	int pick2_mode;
 	bool max_dsq_pick2;
 	bool eager_load_balance;
 
@@ -97,7 +96,6 @@ const volatile struct {
 	.slack_factor = LOAD_BALANCE_SLACK,
 	.backoff_ns = 5LLU * NSEC_PER_MSEC,
 	.min_nr_queued_pick2 = 10,
-	.pick2_mode = PICK2_LOAD,
 	.max_dsq_pick2 = false,
 	.eager_load_balance = true,
 
@@ -229,6 +227,11 @@ static u32 nr_idle_cpus(void)
 	scx_bpf_put_cpumask(idle_cpumask);
 
 	return nr_idle;
+}
+
+static u32 idle_cpu_percent(void)
+{
+	return (100 * nr_idle_cpus()) / topo_config.nr_cpus;
 }
 
 static __always_inline u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
@@ -449,7 +452,7 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 	    taskc->dsq_index != p2dq_config.nr_dsqs_per_llc - 1)
 		return false;
 
-	if ((taskc->all_cpus && taskc->llc_runs < min_llc_runs_pick2))
+	if (taskc->llc_runs < min_llc_runs_pick2)
 		return false;
 
 	return true;
@@ -1424,17 +1427,17 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
 	      cpu, first->id, first->load, second->id, second->load);
 
-	if (lb_config.pick2_mode == PICK2_LOAD) {
-		cur_load = cur_llcx->load + ((cur_llcx->load * lb_config.slack_factor) / 100);
+	cur_load = cur_llcx->load + ((cur_llcx->load * lb_config.slack_factor) / 100);
 
-		if (first->load > cur_load &&
-		    consume_llc(first))
-			return 0;
+	if (first->load >= cur_load &&
+	    consume_llc(first))
+		return 0;
 
-		if (second->load > cur_load &&
-		    consume_llc(second))
-			return 0;
-	} else if (lb_config.pick2_mode == PICK2_NR_QUEUED) {
+	if (second->load >= cur_load &&
+	    consume_llc(second))
+		return 0;
+
+	if (saturated) {
 		cur_load = llc_nr_queued(cur_llcx);
 
 		if (llc_nr_queued(first) >= cur_load &&
@@ -1688,23 +1691,21 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 	struct llc_ctx *llcx;
 	u64 idle_score;
 	int ret, priority;
-	u32 nr_idle;
 	u32 percent_idle;
 
-	nr_idle = nr_idle_cpus();
-	percent_idle = (100 * nr_idle) / topo_config.nr_cpus;
+	percent_idle = idle_cpu_percent();
 	saturated = percent_idle < p2dq_config.saturated_percent;
 
-	u32 llc_scaler = topo_config.nr_llcs == 2 ? 1 : 0;
-
-	min_llc_runs_pick2 = saturated ? 1 : log2_u32(percent_idle) + llc_scaler;
-
-	if (!idle || !p2dq_config.cpu_priority)
-		return;
-
-	if (!(llcx = lookup_cpu_llc_ctx(cpu))) {
-		return;
+	if (saturated)
+		min_llc_runs_pick2 = 0;
+	else {
+		u32 llc_scaler = log2_u32(topo_config.nr_llcs);
+		min_llc_runs_pick2 = log2_u32(percent_idle) + llc_scaler;
 	}
+
+	if (!idle || !p2dq_config.cpu_priority ||
+	    !(llcx = lookup_cpu_llc_ctx(cpu)))
+		return;
 
 	/*
 	 * The idle_score factors relative CPU performance. It could also

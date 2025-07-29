@@ -141,7 +141,7 @@ pub struct SchedulerOpts {
     #[clap(short = 's', long, default_value = "100")]
     pub min_slice_us: u64,
 
-    /// Load balance mode
+    /// ***DEPRECATED*** Load balance mode
     #[arg(value_enum, long, default_value_t = LbMode::Load)]
     pub lb_mode: LbMode,
 
@@ -260,7 +260,6 @@ macro_rules! init_open_skel {
             rodata.lb_config.slack_factor = opts.lb_slack_factor;
             rodata.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
             rodata.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
-            rodata.lb_config.pick2_mode = opts.lb_mode.as_i32();
             rodata.lb_config.eager_load_balance = MaybeUninit::new(!opts.eager_load_balance);
             rodata.lb_config.dispatch_pick2_disable = MaybeUninit::new(opts.dispatch_pick2_disable);
             rodata.lb_config.dispatch_lb_busy = opts.dispatch_lb_busy;
