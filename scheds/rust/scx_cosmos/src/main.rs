@@ -102,7 +102,7 @@ struct Opts {
     ///
     /// This option can help reducing some overhead when trying to allocate idle CPUs and it can be
     /// quite effective with simple CPU topologies.
-    #[arg(short = 'i', action = clap::ArgAction::SetTrue)]
+    #[arg(short = 'i', long, action = clap::ArgAction::SetTrue)]
     flat_idle_scan: bool,
 
     /// Enable preferred idle CPU scanning.
