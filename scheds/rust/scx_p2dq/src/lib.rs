@@ -62,7 +62,7 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub deadline: bool,
 
-    /// *DEPRECATED* Disables eager pick2 load balancing.
+    /// ***DEPRECATED*** Disables eager pick2 load balancing.
     #[clap(short = 'e', long, help="DEPRECATED", action = clap::ArgAction::SetTrue)]
     pub eager_load_balance: bool,
 
@@ -150,10 +150,15 @@ pub struct SchedulerOpts {
     #[clap(long, default_value = "5", value_parser = clap::value_parser!(u64).range(0..99))]
     pub lb_slack_factor: u64,
 
-    /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
+    /// ***DEPRECATED** Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
     /// path.
     #[clap(short = 'l', long, default_value_t = get_default_llc_runs())]
     pub min_llc_runs_pick2: u64,
+
+    /// Saturated percent is the percent at which the system is considered saturated in terms of
+    /// free CPUs.
+    #[clap(long, default_value_t = 5)]
+    pub saturated_percent: u32,
 
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
     /// dumb_queues.
@@ -253,7 +258,6 @@ macro_rules! init_open_skel {
 
             // load balance config
             rodata.lb_config.slack_factor = opts.lb_slack_factor;
-            rodata.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
             rodata.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
             rodata.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
             rodata.lb_config.pick2_mode = opts.lb_mode.as_i32();
@@ -272,6 +276,7 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.kthreads_local = MaybeUninit::new(!opts.disable_kthreads_local);
             rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
+            rodata.p2dq_config.saturated_percent = opts.saturated_percent;
 
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
