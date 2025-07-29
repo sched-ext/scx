@@ -3154,19 +3154,21 @@ __hidden void dump_cpumask_word(s32 word, struct cpumask *cpumask)
 	scx_bpf_dump("%08x", v);
 }
 
-static void dump_layer_cpumask(int id)
+int dump_layer_cpumask(int id)
 {
 	struct cpumask *layer_cpumask;
 	u32 word, nr_words = (nr_cpu_ids + 31) / 32;
 
 	if (!(layer_cpumask = lookup_layer_cpumask(id)))
-		return;
+		return -ENOENT;
 
 	bpf_for(word, 0, nr_words) {
 		if (word)
 			scx_bpf_dump(",");
 		dump_cpumask_word(nr_words - word - 1, layer_cpumask);
 	}
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
@@ -3178,11 +3180,16 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 
 	scx_bpf_dump_header();
 
+	if (nr_layers > MAX_LAYERS) {
+		scx_bpf_error("Invalid number of layers %d", nr_layers);
+		return;
+	}
+
 	bpf_for(i, 0, nr_layers) {
 		layer = lookup_layer(i);
 		if (!layer) {
 			scx_bpf_error("unabled to lookup layer %d", i);
-			continue;
+			return;
 		}
 
 		bpf_for(j, 0, nr_llcs) {
