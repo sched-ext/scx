@@ -83,6 +83,7 @@ enum consts_flags {
 	LAVD_FLAG_ON_BIG		= (0x1 << 6), /* can a task run on a big core? */
 	LAVD_FLAG_ON_LITTLE		= (0x1 << 7), /* can a task run on a little core? */
 	LAVD_FLAG_SLICE_BOOST		= (0x1 << 8), /* task's time slice is boosted. */
+	LAVD_FLAG_IDLE_CPU_PICKED	= (0x1 << 9), /* an idle CPU is picked at ops.select_cpu() */
 };
 
 /*
@@ -152,8 +153,8 @@ struct cpu_ctx {
 	volatile u64	running_clk;	/* when a task starts running */
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	flags;		/* cached copy of task's flags */
-	volatile s32	futex_op;	/* futex op in futex V1 */
 	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
+	volatile s32	futex_op;	/* futex op in futex V1 */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
 

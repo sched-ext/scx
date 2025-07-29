@@ -538,8 +538,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	cpu_id = pick_idle_cpu(&ictx, &found_idle);
 	cpu_id = cpu_id >= 0 ? cpu_id : prev_cpu;
+	taskc->suggested_cpu_id = cpu_id;
 
 	if (found_idle) {
+		set_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+
 		/*
 		 * If there is an idle cpu and its associated DSQ is empty,
 		 * disptach the task to the idle cpu right now.
@@ -557,14 +560,10 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			goto out;
 		}
+	} else {
+		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
-
 out:
-	/*
-	 * Collect additional information when the scheduler is monitored.
-	 */
-	if (is_monitored)
-		taskc->suggested_cpu_id = cpu_id;
 	return cpu_id;
 }
 
@@ -587,8 +586,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
-	if (!taskc || !cpuc_cur)
+	if (!taskc || !cpuc_cur) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
+	}
 
 	/*
 	 * Calculate when a task can be scheduled for how long.
@@ -611,15 +612,33 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Find a proper DSQ for the task, which is either the task's
 	 * associated compute domain or its alternative domain, or
 	 * the closest available domain from the previous domain.
+	 *
+	 * If the CPU is already picked at ops.select_cpu(),
+	 * let's use the chosen CPU.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
-	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle, cpuc_cur);
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu,
+					 &is_idle, cpuc_cur);
+		taskc->suggested_cpu_id = cpu;
+	} else {
+		cpu = scx_bpf_task_cpu(p);
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+			return;
+		}
+		dsq_id = cpuc->cpdom_id;
+		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+	}
 
 	/*
 	 * Increase the number of pinned tasks waiting for execution.
 	 */
-	if (cpu >= 0 && is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu)))
+	if (cpu >= 0 && is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu))) {
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+	}
 
 	/*
 	 * Enqueue the task to a DSQ. If it is safe to directly dispatch
@@ -633,12 +652,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
-
-	/*
-	 * Collect additional information when the scheduler is monitored.
-	 */
-	if (is_monitored)
-		taskc->suggested_cpu_id = cpu;
 
 	/*
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
