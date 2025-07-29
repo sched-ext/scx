@@ -2843,7 +2843,7 @@ impl<'a> App<'a> {
                 search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
             }
             AppState::KprobeEvent => {
-                search::fuzzy_search(&self.kprobe_events, &&self.event_input_buffer)
+                search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
             }
             _ => vec![],
         };
