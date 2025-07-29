@@ -24,12 +24,10 @@ pub struct CellMetrics {
     pub num_cpus: u32,
     #[stat(desc = "Local queue %")]
     pub local_q_pct: f64,
-    #[stat(desc = "Default queue %")]
-    pub default_q_pct: f64,
-    #[stat(desc = "HI queue %")]
-    pub hi_q_pct: f64,
-    #[stat(desc = "LO queue %")]
-    pub lo_q_pct: f64,
+    #[stat(desc = "CPU queue %")]
+    pub cpu_q_pct: f64,
+    #[stat(desc = "Cell queue %")]
+    pub cell_q_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Decision share % of global")]
@@ -41,9 +39,8 @@ pub struct CellMetrics {
 impl CellMetrics {
     pub fn update(&mut self, ds: &DistributionStats) {
         self.local_q_pct = ds.local_q_pct;
-        self.default_q_pct = ds.default_q_pct;
-        self.hi_q_pct = ds.hi_q_pct;
-        self.lo_q_pct = ds.lo_q_pct;
+        self.cpu_q_pct = ds.cpu_q_pct;
+        self.cell_q_pct = ds.cell_q_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
@@ -58,12 +55,10 @@ pub struct Metrics {
     pub num_cells: u32,
     #[stat(desc = "Local queue %")]
     pub local_q_pct: f64,
-    #[stat(desc = "Default queue %")]
-    pub default_q_pct: f64,
-    #[stat(desc = "HI queue %")]
-    pub hi_q_pct: f64,
-    #[stat(desc = "LO queue %")]
-    pub lo_q_pct: f64,
+    #[stat(desc = "CPU queue %")]
+    pub cpu_q_pct: f64,
+    #[stat(desc = "Cell queue %")]
+    pub cell_q_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Decision share % of global")]
@@ -77,9 +72,8 @@ pub struct Metrics {
 impl Metrics {
     pub fn update(&mut self, ds: &DistributionStats) {
         self.local_q_pct = ds.local_q_pct;
-        self.default_q_pct = ds.default_q_pct;
-        self.hi_q_pct = ds.hi_q_pct;
-        self.lo_q_pct = ds.lo_q_pct;
+        self.cpu_q_pct = ds.cpu_q_pct;
+        self.cell_q_pct = ds.cell_q_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
