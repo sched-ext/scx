@@ -73,10 +73,13 @@ def run_format():
 
     run_command(["cargo", "fmt"])
 
-    run_command(
-        ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"],
-        cwd=".github/include",
-    )
+    nix_files = glob.glob("**/*.nix", root_dir=".github/include/", recursive=True)
+    if nix_files:
+        run_command(
+            ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
+            + nix_files,
+            cwd=".github/include",
+        )
 
     run_command(["git", "diff", "--exit-code"])
     print("✓ Format completed successfully", flush=True)
