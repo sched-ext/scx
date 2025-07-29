@@ -23,7 +23,7 @@ mod node_data;
 mod perfetto_trace;
 mod proc_data;
 pub mod profiling_events;
-mod search;
+pub mod search;
 mod stats;
 mod theme;
 mod thread_data;
@@ -49,7 +49,6 @@ pub use profiling_events::{
     available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
     ProfilingEvent,
 };
-pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
 pub use theme::AppTheme;

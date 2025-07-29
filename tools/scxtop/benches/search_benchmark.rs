@@ -5,10 +5,10 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use scxtop::available_perf_events;
-use scxtop::Search;
+use scxtop::search;
 
-fn get_search() -> Search {
-    let available_perf_events_list: Vec<String> = available_perf_events()
+fn get_search() -> Vec<String> {
+    let mut available_perf_events_list: Vec<String> = available_perf_events()
         .unwrap()
         .into_iter()
         .flat_map(|(subsystem, events)| {
@@ -17,7 +17,8 @@ fn get_search() -> Search {
                 .map(move |event| format!("{}:{}", &subsystem, &event))
         })
         .collect();
-    Search::new(available_perf_events_list)
+    available_perf_events_list.sort();
+    available_perf_events_list
 }
 
 fn bench_empty(c: &mut Criterion) {
@@ -27,10 +28,10 @@ fn bench_empty(c: &mut Criterion) {
     let mut group = c.benchmark_group("Empty String Search");
 
     group.bench_with_input(BenchmarkId::new("Fuzzy Empty", i), i, |b, i| {
-        b.iter(|| search.fuzzy_search(i))
+        b.iter(|| search::fuzzy_search(&search, i))
     });
     group.bench_with_input(BenchmarkId::new("Substring Empty", i), i, |b, i| {
-        b.iter(|| search.substring_search(i))
+        b.iter(|| search::substring_search(&search, i))
     });
     group.finish();
 }
@@ -42,10 +43,10 @@ fn bench_easy_string(c: &mut Criterion) {
     let mut group = c.benchmark_group("Easy String Search");
 
     group.bench_with_input(BenchmarkId::new("Fuzzy Easy String", i), i, |b, i| {
-        b.iter(|| search.fuzzy_search(i))
+        b.iter(|| search::fuzzy_search(&search, i))
     });
     group.bench_with_input(BenchmarkId::new("Substring Easy String", i), i, |b, i| {
-        b.iter(|| search.substring_search(i))
+        b.iter(|| search::substring_search(&search, i))
     });
     group.finish();
 }
@@ -57,12 +58,12 @@ fn bench_complex_string(c: &mut Criterion) {
     let mut group = c.benchmark_group("Complex String Search");
 
     group.bench_with_input(BenchmarkId::new("Fuzzy Complex String", i), i, |b, i| {
-        b.iter(|| search.fuzzy_search(i))
+        b.iter(|| search::fuzzy_search(&search, i))
     });
     group.bench_with_input(
         BenchmarkId::new("Substring Complex String", i),
         i,
-        |b, i| b.iter(|| search.substring_search(i)),
+        |b, i| b.iter(|| search::substring_search(&search, i)),
     );
     group.finish();
 }
@@ -76,12 +77,12 @@ fn bench_long_complex_string(c: &mut Criterion) {
     group.bench_with_input(
         BenchmarkId::new("Fuzzy Long Complex String", i),
         i,
-        |b, i| b.iter(|| search.fuzzy_search(i)),
+        |b, i| b.iter(|| search::fuzzy_search(&search, i)),
     );
     group.bench_with_input(
         BenchmarkId::new("Substring Long Complex String", i),
         i,
-        |b, i| b.iter(|| search.substring_search(i)),
+        |b, i| b.iter(|| search::substring_search(&search, i)),
     );
     group.finish();
 }
