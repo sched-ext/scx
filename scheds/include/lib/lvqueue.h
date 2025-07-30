@@ -6,17 +6,17 @@ struct lv_arr;
 #define LV_ARR_ORDERS 10
 
 struct lv_arr {
-	u64 *data;
+	u64 __arena *data;
 	u64 order;
 };
 
 typedef volatile struct lv_arr __arena lv_arr_t;
 
 struct lv_queue {
-	struct lv_arr arr[LV_ARR_ORDERS];
 	lv_arr_t *cur;
 	volatile u64 top;
 	volatile u64 bottom;
+	struct lv_arr arr[LV_ARR_ORDERS];
 };
 
 typedef struct lv_queue __arena lv_queue_t;

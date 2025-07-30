@@ -41,6 +41,9 @@ int lvq_order_init(lv_queue_t __arg_arena *lvq, int order)
 {
 	lv_arr_t *arr = &lvq->arr[order];
 
+	if (unlikely(!lvq))
+		return -EINVAL;
+
 	if (order >= LV_ARR_ORDERS)
 		return -E2BIG;
 
@@ -48,7 +51,7 @@ int lvq_order_init(lv_queue_t __arg_arena *lvq, int order)
 	if (arr->data)
 		return 0;
 
-	arr->data = (u64 * __arena)scx_static_alloc((LV_ARR_BASESZ << order) * sizeof(*arr->data), 1);
+	arr->data = (u64 __arena *)scx_static_alloc((LV_ARR_BASESZ << order) * sizeof(*arr->data), 1);
 	if (!arr->data)
 		return -ENOMEM;
 
@@ -63,6 +66,9 @@ int lvq_push(lv_queue_t __arg_arena *lvq, u64 val)
 	lv_arr_t *arr;
 	ssize_t sz;
 	int ret;
+
+	if (unlikely(!lvq))
+		return -EINVAL;
 
 	b = lvq->bottom;
 	t = lvq->top;
@@ -94,6 +100,9 @@ int lvq_pop(lv_queue_t __arg_arena *lvq, u64 *val)
 	volatile u64 b, t;
 	ssize_t sz;
 	u64 value;
+
+	if (unlikely(!lvq || !val))
+		return -EINVAL;
 
 	arr = lvq->cur;
 
@@ -132,6 +141,9 @@ int lvq_steal(lv_queue_t __arg_arena *lvq, u64 *val)
 	ssize_t sz;
 	u64 value;
 
+	if (unlikely(!lvq || !val))
+		return -EINVAL;
+
 	b = lvq->bottom;
 	t = lvq->top;
 	arr = lvq->cur;
@@ -154,7 +166,12 @@ int lvq_steal(lv_queue_t __arg_arena *lvq, u64 *val)
 __weak
 u64 lvq_create_internal(void)
 {
-	lv_queue_t *lvq;
+	/* 
+	 * Marked as volatile because otherwise the array 
+	 * reference in the internal loop gets demoted to 
+	 * scalar and the program fails verification.
+	 */
+	volatile lv_queue_t *lvq;
 	int ret, i;
 
 	lvq = scx_static_alloc(sizeof(*lvq), 1);
@@ -168,7 +185,7 @@ u64 lvq_create_internal(void)
 		lvq->arr[i].order = i;
 	}
 
-	ret = lvq_order_init(lvq, 0);
+	ret = lvq_order_init((lv_queue_t *)lvq, 0);
 	if (ret) {
 		/* XXX Free when migrating from the static allocator. */
 		return (u64)NULL;
@@ -182,5 +199,8 @@ u64 lvq_create_internal(void)
 __weak
 int lvq_destroy(lv_queue_t __arg_arena *lvq)
 {
+	if (unlikely(!lvq))
+		return -EINVAL;
+
 	return -EOPNOTSUPP;
 }
