@@ -76,7 +76,7 @@ pub fn fuzzy_search(entries: &[String], input: &str) -> Vec<String> {
  * This operates at the byte level, so Unicode scores may be unintuitive but will always be Some
  * if the pattern matches and None if it does not. See test_contains_spread_unicode for details.
  */
-fn contains_spread(word: &str, pattern: &str) -> Option<u32> {
+pub fn contains_spread(word: &str, pattern: &str) -> Option<u32> {
     if pattern.is_empty() {
         return Some(0);
     }

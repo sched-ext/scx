@@ -62,21 +62,29 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
             Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms))
         }
         Event::Key(key) => handle_key_event(app, keymap, key),
-        Event::Paste(paste) => match app.state() {
-            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(paste),
-            _ => Action::None,
-        },
+        Event::Paste(paste) => handle_input_entry(app, paste).unwrap_or(Action::None),
         _ => Action::None,
     }
 }
 
 fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
     match key.code {
-        Char(c) => match app.state() {
-            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(c.to_string()),
-            _ => keymap.action(&Key::Char(c)),
-        },
+        Char(c) => handle_input_entry(app, c.to_string()).unwrap_or(keymap.action(&Key::Char(c))),
         _ => keymap.action(&Key::Code(key.code)),
+    }
+}
+
+fn handle_input_entry(app: &App, s: String) -> Option<Action> {
+    match app.state() {
+        AppState::PerfEvent | AppState::KprobeEvent => Some(Action::InputEntry(s)),
+        AppState::Default | AppState::Llc | AppState::Node => {
+            if app.filtering() {
+                Some(Action::InputEntry(s))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
