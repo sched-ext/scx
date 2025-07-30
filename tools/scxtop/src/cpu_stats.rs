@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_convert_to_stat_snapshot_success() {
-        let kernel_stats = KernelStats::current().unwrap();
+        let kernel_stats = KernelStats::new().unwrap();
         let mut cpu_time = kernel_stats.total;
 
         // We'll just take over the cpu_time in order to test it
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "missing iowait")]
     fn test_convert_to_stat_snapshot_missing_iowait_panics() {
-        let kernel_stats = KernelStats::current().unwrap();
+        let kernel_stats = KernelStats::new().unwrap();
         let mut cpu_time = kernel_stats.total;
 
         // We'll just take over the cpu_time in order to test it
