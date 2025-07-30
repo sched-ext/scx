@@ -276,13 +276,17 @@ extern volatile bool		no_preemption;
 extern volatile bool		no_core_compaction;
 extern volatile bool		no_freq_scaling;
 
+bool is_lock_holder(struct task_ctx *taskc);
 bool is_lock_holder_running(struct cpu_ctx *cpuc);
 bool have_scheduled(struct task_ctx *taskc);
 bool have_pending_tasks(struct cpu_ctx *cpuc);
 bool can_boost_slice(void);
 bool is_lat_cri(struct task_ctx *taskc);
 
+void set_task_flag(struct task_ctx *taskc, u64 flag);
+void reset_task_flag(struct task_ctx *taskc, u64 flag);
 bool test_task_flag(struct task_ctx *taskc, u64 flag);
+void reset_task_flag(struct task_ctx *taskc, u64 flag);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
@@ -325,5 +329,9 @@ int plan_x_cpdom_migration(void);
 /* Preemption management helpers. */
 
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+
+/* Futex lock-related helpers. */
+
+void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc);
 
 #endif /* __LAVD_H */

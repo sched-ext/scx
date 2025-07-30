@@ -149,12 +149,14 @@ bool test_task_flag(struct task_ctx *taskc, u64 flag)
 	return (taskc->flags & flag) == flag;
 }
 
-static inline void set_task_flag(struct task_ctx *taskc, u64 flag)
+__hidden
+void set_task_flag(struct task_ctx *taskc, u64 flag)
 {
 	taskc->flags |= flag;
 }
 
-static inline void reset_task_flag(struct task_ctx *taskc, u64 flag)
+__hidden
+void reset_task_flag(struct task_ctx *taskc, u64 flag)
 {
 	taskc->flags &= ~flag;
 }
@@ -179,11 +181,13 @@ bool is_lat_cri(struct task_ctx *taskc)
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
 }
 
+__hidden
 bool is_lock_holder(struct task_ctx *taskc)
 {
 	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 }
 
+__hidden
 bool is_lock_holder_running(struct cpu_ctx *cpuc)
 {
 	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
