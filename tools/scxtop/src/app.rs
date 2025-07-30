@@ -1644,17 +1644,6 @@ impl<'a> App<'a> {
                 let node_areas = Layout::vertical(constraints).split(area);
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
-                    let node_constraints =
-                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
-                    let [top, bottom] = Layout::vertical(node_constraints).areas(node_areas[i]);
-
-                    let node_cpus = node.all_cpus.len();
-                    let col_scale = if node_cpus <= 128 { 2 } else { 4 };
-
-                    let cpus_constraints =
-                        vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
-                    let cpus_areas = Layout::horizontal(cpus_constraints).split(bottom);
-
                     let node_iter = self
                         .cpu_data
                         .values()
@@ -1718,6 +1707,15 @@ impl<'a> App<'a> {
                         .border_type(BorderType::Rounded)
                         .style(self.theme().border_style());
 
+                    let node_area = node_areas[i];
+                    let node_cpus = node.all_cpus.len();
+                    let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+
+                    let cpus_constraints =
+                        vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
+                    let cpus_areas =
+                        Layout::horizontal(cpus_constraints).split(node_block.inner(node_area));
+
                     let mut bar_col_data: Vec<Vec<Bar>> = vec![Vec::new(); 4];
                     let _: Vec<_> = node
                         .all_cpus
@@ -1728,24 +1726,9 @@ impl<'a> App<'a> {
                             bar_col_data[j % col_scale as usize].push(cpu_bar);
                         })
                         .collect();
-                    frame.render_widget(node_block, top);
+
                     for (j, col_data) in bar_col_data.iter().enumerate() {
-                        let cpu_block = Block::new()
-                            .borders(
-                                if j == col_scale as usize - 1
-                                    || j % col_scale as usize == col_scale as usize - 1
-                                {
-                                    Borders::RIGHT | Borders::BOTTOM
-                                } else if j == 0 || j % col_scale as usize == 0 {
-                                    Borders::LEFT | Borders::BOTTOM
-                                } else {
-                                    Borders::BOTTOM
-                                },
-                            )
-                            .border_type(BorderType::Rounded)
-                            .style(self.theme().border_style());
                         let bar_chart = BarChart::default()
-                            .block(cpu_block)
                             .data(BarGroup::default().bars(col_data))
                             .max(stats.max)
                             .direction(Direction::Horizontal)
@@ -1754,6 +1737,7 @@ impl<'a> App<'a> {
                             .bar_width(1);
                         frame.render_widget(bar_chart, cpus_areas[j % col_scale as usize]);
                     }
+                    frame.render_widget(node_block, node_area);
                 }
             }
         }
