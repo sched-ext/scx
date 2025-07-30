@@ -128,6 +128,12 @@ fn cmd_stop(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+fn cmd_restart(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
+    scx_loader.restart_scheduler()?;
+    println!("restarted");
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let conn = Connection::system()?;
@@ -139,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Start { args } => cmd_start(scx_loader, args.sched, args.mode, args.args)?,
         Commands::Switch { args } => cmd_switch(scx_loader, args.sched, args.mode, args.args)?,
         Commands::Stop => cmd_stop(scx_loader)?,
+        Commands::Restart => cmd_restart(scx_loader)?,
     }
 
     Ok(())
