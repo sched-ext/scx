@@ -11,6 +11,7 @@ fn main() {
         .add_source("src/bpf/introspec.bpf.c")
         .add_source("src/bpf/lock.bpf.c")
         .add_source("src/bpf/power.bpf.c")
+        .add_source("src/bpf/preempt.bpf.c")
         .add_source("src/bpf/sys_stat.bpf.c")
         .compile_link_gen()
         .unwrap();

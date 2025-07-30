@@ -161,17 +161,20 @@ void reset_task_flag(struct task_ctx *taskc, u64 flag)
 	taskc->flags &= ~flag;
 }
 
-static inline bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+__hidden
+inline bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 {
 	return (cpuc->flags & flag) == flag;
 }
 
-static inline void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+__hidden
+inline void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 {
 	cpuc->flags |= flag;
 }
 
-static inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+__hidden
+inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 {
 	cpuc->flags &= ~flag;
 }

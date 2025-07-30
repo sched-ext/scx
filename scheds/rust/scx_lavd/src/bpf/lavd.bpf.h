@@ -225,6 +225,8 @@ extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
 
 /* Logging helpers. */
 
+extern const volatile bool	no_wake_sync;
+extern const volatile bool	no_slice_boost;
 extern const volatile u8	verbose;
 
 #define debugln(fmt, ...)						\
@@ -275,6 +277,10 @@ extern volatile bool		reinit_cpumask_for_performance;
 extern volatile bool		no_preemption;
 extern volatile bool		no_core_compaction;
 extern volatile bool		no_freq_scaling;
+
+bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
+void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
+void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
 
 bool is_lock_holder(struct task_ctx *taskc);
 bool is_lock_holder_running(struct cpu_ctx *cpuc);
@@ -337,7 +343,17 @@ void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc);
 
 /* Scheduler introspection-related helpers. */
 
+u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now);
 void try_proc_introspec_cmd(struct task_struct *p, struct task_ctx *taskc);
+void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released);
+int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+void shrink_boosted_slice_at_tick(struct task_struct *p,
+					 struct cpu_ctx *cpuc, u64 now);
+void try_find_and_kick_victim_cpu(struct task_struct *p,
+					 struct task_ctx *taskc,
+					 s32 preferred_cpu,
+					 u64 dsq_id);
+
 extern volatile bool is_monitored;
 
 #endif /* __LAVD_H */
