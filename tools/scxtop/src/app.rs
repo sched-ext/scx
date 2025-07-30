@@ -2309,12 +2309,7 @@ impl<'a> App<'a> {
 
         let table = Table::new(rows, constraints).header(header).block(block);
 
-        frame.render_stateful_widget(
-            table,
-            area,
-            &mut TableState::new()
-                .with_offset(selected),
-        );
+        frame.render_stateful_widget(table, area, &mut TableState::new().with_offset(selected));
 
         Ok(())
     }
