@@ -214,7 +214,6 @@ static volatile u64	nr_cpus_big;
  * Include sub-modules
  */
 #include "util.bpf.c"
-#include "power.bpf.c"
 #include "introspec.bpf.c"
 #include "preempt.bpf.c"
 #include "lock.bpf.c"

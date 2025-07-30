@@ -143,7 +143,8 @@ static bool is_pinned(const struct task_struct *p)
 	return p->nr_cpus_allowed == 1;
 }
 
-static inline bool test_task_flag(struct task_ctx *taskc, u64 flag)
+__hidden
+bool test_task_flag(struct task_ctx *taskc, u64 flag)
 {
 	return (taskc->flags & flag) == flag;
 }

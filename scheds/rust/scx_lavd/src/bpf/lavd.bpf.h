@@ -118,8 +118,9 @@ struct cpdom_ctx {
 	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
-extern struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
-extern int		nr_cpdoms;
+extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
+extern int			nr_cpdoms;
 
 struct task_ctx *get_task_ctx(struct task_struct *p);
 struct cpu_ctx *get_cpu_ctx(void);
@@ -218,6 +219,10 @@ struct cpu_ctx {
 extern const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
+extern const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
+extern const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
+extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
+
 /* Logging helpers. */
 
 extern const volatile u8	verbose;
@@ -266,18 +271,52 @@ extern volatile u64		powersave_mode_ns;
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
 
+extern volatile bool		reinit_cpumask_for_performance;
+extern volatile bool		no_preemption;
+extern volatile bool		no_core_compaction;
+extern volatile bool		no_freq_scaling;
+
 bool is_lock_holder_running(struct cpu_ctx *cpuc);
 bool have_scheduled(struct task_ctx *taskc);
 bool have_pending_tasks(struct cpu_ctx *cpuc);
 bool can_boost_slice(void);
 bool is_lat_cri(struct task_ctx *taskc);
 
+bool test_task_flag(struct task_ctx *taskc, u64 flag);
+
+extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
+extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
+extern struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
+extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
+extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+
 /* Power management helpers. */
 int do_core_compaction(void);
 int update_thr_perf_cri(void);
 int reinit_active_cpumask_for_performance(void);
+bool is_perf_cri(struct task_ctx *taskc);
 
 extern bool			have_little_core;
+extern bool			have_turbo_core;
+extern const volatile bool	is_smt_active;
+
+extern u64			total_capacity;
+extern u64			one_little_capacity;
+extern u32			cur_big_core_scale;
+extern u32			default_big_core_scale;
+
+int init_autopilot_caps(void);
+int update_autopilot_high_cap(void);
+u64 scale_cap_freq(u64 dur, s32 cpu);
+
+int reset_cpuperf_target(struct cpu_ctx *cpuc);
+int update_cpuperf_target(struct cpu_ctx *cpuc);
+u16 get_cpuperf_cap(s32 cpu);
+
+int reset_suspended_duration(struct cpu_ctx *cpuc);
+u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc);
+
+const volatile u16 *get_cpu_order(void);
 
 /* Load balancer helpers. */
 
