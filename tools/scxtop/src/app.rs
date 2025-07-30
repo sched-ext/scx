@@ -12,6 +12,7 @@ use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::get_process_columns;
+use crate::search;
 use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
@@ -27,7 +28,6 @@ use crate::PerfEvent;
 use crate::PerfettoTraceManager;
 use crate::ProcData;
 use crate::ProfilingEvent;
-use crate::Search;
 use crate::VecStats;
 use crate::ViewState;
 use crate::APP;
@@ -114,8 +114,8 @@ pub struct App<'a> {
     active_prof_events: BTreeMap<usize, ProfilingEvent>,
     available_events: Vec<ProfilingEvent>,
     event_input_buffer: String,
-    perf_event_search: Search,
-    kprobe_event_search: Search,
+    perf_events: Vec<String>,
+    kprobe_events: Vec<String>,
     kprobe_links: Vec<Link>,
     filtered_events_state: Arc<StdMutex<FilteredEventState>>,
 
@@ -204,7 +204,7 @@ impl<'a> App<'a> {
             }
         }
 
-        let initial_perf_events_list: Vec<String> = available_perf_events()?
+        let mut initial_perf_events_list: Vec<String> = available_perf_events()?
             .iter()
             .flat_map(|(subsystem, events)| {
                 events
@@ -212,7 +212,10 @@ impl<'a> App<'a> {
                     .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
             })
             .collect();
-        let initial_kprobe_events_list = available_kprobe_events()?;
+        initial_perf_events_list.sort();
+
+        let mut initial_kprobe_events_list = available_kprobe_events()?;
+        initial_kprobe_events_list.sort();
 
         let filtered_events_state = Arc::new(StdMutex::new(FilteredEventState::default()));
 
@@ -272,8 +275,8 @@ impl<'a> App<'a> {
             active_prof_events,
             available_events: default_events,
             event_input_buffer: String::new(),
-            perf_event_search: Search::new(initial_perf_events_list),
-            kprobe_event_search: Search::new(initial_kprobe_events_list),
+            perf_events: initial_perf_events_list,
+            kprobe_events: initial_kprobe_events_list,
             kprobe_links: Vec::new(),
             filtered_events_state,
             events_list_size: 1,
@@ -2836,12 +2839,12 @@ impl<'a> App<'a> {
 
     pub fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
-            AppState::PerfEvent => self
-                .perf_event_search
-                .fuzzy_search(&self.event_input_buffer),
-            AppState::KprobeEvent => self
-                .kprobe_event_search
-                .fuzzy_search(&self.event_input_buffer),
+            AppState::PerfEvent => {
+                search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
+            }
+            AppState::KprobeEvent => {
+                search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
+            }
             _ => vec![],
         };
 

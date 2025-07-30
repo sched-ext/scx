@@ -1,142 +1,69 @@
 #!/usr/bin/env python3
 
 import argparse
+import asyncio
 import glob
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 from typing import List, Optional
 
 
-def run_command(
-    cmd: List[str],
-    check: bool = True,
-    env: Optional[dict] = None,
-    cwd: Optional[str] = None,
-) -> subprocess.CompletedProcess:
-    """Run a command and return the result."""
+async def run_command(cmd: List[str], cwd: Optional[str] = None) -> str:
     print(f"Running: {' '.join(cmd)}", flush=True)
-    merged_env = os.environ.copy()
-    if env:
-        merged_env.update(env)
-    return subprocess.run(cmd, check=check, env=merged_env, cwd=cwd)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        if stderr:
+            print(
+                f"Command failed with stderr: {stderr.decode()}",
+                file=sys.stderr,
+                flush=True,
+            )
+        raise subprocess.CalledProcessError(
+            proc.returncode, cmd, output=stdout, stderr=stderr
+        )
+
+    return stdout.decode()
 
 
-def get_kernel_path(kernel_name: str) -> str:
+async def get_kernel_path(kernel_name: str) -> str:
     """Get the kernel path from Nix store for the given kernel name."""
-    result = subprocess.run(
+    stdout = await run_command(
         [
             "nix",
             "build",
             "--no-link",
             "--print-out-paths",
             f"./.github/include#kernel_{kernel_name}",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+        ]
     )
-    return result.stdout.strip() + "/bzImage"
+    return stdout.strip() + "/bzImage"
 
 
-def get_clippy_packages() -> List[str]:
-    """Get list of packages that should be linted with clippy."""
-    result = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    metadata = json.loads(result.stdout)
-
-    clippy_packages = []
-    for pkg in metadata.get("packages", []):
-        pkg_metadata = pkg.get("metadata")
-        if pkg_metadata:
-            scx_metadata = pkg_metadata.get("scx")
-            if scx_metadata and scx_metadata.get("ci", {}).get("use_clippy") == True:
-                clippy_packages.append(pkg["name"])
-
-    return clippy_packages
-
-
-def run_format():
-    """Format all targets."""
-    print("Running format...", flush=True)
-
-    py_files = glob.glob(".github/include/**/*.py", recursive=True)
-    if py_files:
-        run_command(["black"] + py_files)
-        run_command(["isort"] + py_files)
-
-    run_command(["cargo", "fmt"])
-
-    run_command(
-        ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"],
-        cwd=".github/include",
-    )
-
-    run_command(["git", "diff", "--exit-code"])
-    print("✓ Format completed successfully", flush=True)
-
-
-def run_build():
-    """Build all targets."""
-    print("Running build...", flush=True)
-
-    run_command(["cargo", "build", "--all-targets", "--locked"])
-    print("✓ Build completed successfully", flush=True)
-
-
-def run_clippy():
-    """Run clippy on packages marked for CI linting."""
-    print("Running clippy...", flush=True)
-
-    clippy_packages = get_clippy_packages()
-    for package in clippy_packages:
-        run_command(["cargo", "clippy", "--no-deps", "-p", package, "--", "-Dwarnings"])
-
-    print("✓ Clippy checks passed", flush=True)
-
-
-def run_tests():
-    """Run the test suite."""
-    print("Running tests...", flush=True)
-
-    result = subprocess.run(
-        [
-            "cargo",
-            "nextest",
-            "archive",
-            "--archive-file",
-            "target/nextest-archive.tar.zst",
-        ],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        text=True,
-    )
-
-    # Get CPU count
-    cpu_count = min(os.cpu_count(), 16)
-
-    # Find kernel image
-    kernel_path = get_kernel_path("sched_ext/for-next")
-    if not os.path.exists(kernel_path):
-        print(f"Error: Kernel image not found at {kernel_path}")
-        print("Make sure to run the build-kernel job first")
-        sys.exit(1)
+async def run_command_in_vm(
+    kernel: str, command: List[str], memory: int = 1024 * 1024 * 1024, cpus: int = 2
+) -> str:
+    mem_mb = int(memory / 1024 / 1024)
 
     cmd = [
         "vng",
-        "--memory",
-        "10G",
-        "--cpu",
-        str(cpu_count),
         "-r",
-        kernel_path,
+        await get_kernel_path(kernel),
+        "--memory",
+        f"{mem_mb}M",
+        "--cpus",
+        str(cpus),
     ]
     if os.environ.get("CI") == "true":
         # verbose in CI but not locally
@@ -150,14 +77,99 @@ def run_tests():
             "--cwd=/tmp/workspace",
         ]
 
-    cmd += [
-        "--",
-        sys.argv[0],
-        "test-in-vm",
-    ]
+    # VM gets a different PATH to this program so fix the path of the binary. Other args left to the user.
+    arg0 = shutil.which(command[0])
+    cmd += ["--", arg0] + command[1:]
 
-    # Run tests in VM
-    run_command(cmd)
+    return await run_command(cmd)
+
+
+async def get_clippy_packages() -> List[str]:
+    """Get list of packages that should be linted with clippy."""
+    stdout = await run_command(["cargo", "metadata", "--format-version", "1"])
+    metadata = json.loads(stdout)
+
+    clippy_packages = []
+    for pkg in metadata.get("packages", []):
+        pkg_metadata = pkg.get("metadata")
+        if pkg_metadata:
+            scx_metadata = pkg_metadata.get("scx")
+            if scx_metadata and scx_metadata.get("ci", {}).get("use_clippy") == True:
+                clippy_packages.append(pkg["name"])
+
+    return clippy_packages
+
+
+async def run_format():
+    """Format all targets."""
+    print("Running format...", flush=True)
+
+    py_files = glob.glob(".github/include/**/*.py", recursive=True)
+    if py_files:
+        await run_command(["black"] + py_files)
+        await run_command(["isort"] + py_files)
+
+    await run_command(["cargo", "fmt"])
+
+    nix_files = glob.glob("**/*.nix", root_dir=".github/include/", recursive=True)
+    if nix_files:
+        await run_command(
+            ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
+            + nix_files,
+            cwd=".github/include",
+        )
+
+    await run_command(["git", "diff", "--exit-code"])
+    print("✓ Format completed successfully", flush=True)
+
+
+async def run_build():
+    """Build all targets."""
+    print("Running build...", flush=True)
+
+    await run_command(["cargo", "build", "--all-targets", "--locked"])
+    print("✓ Build completed successfully", flush=True)
+
+
+async def run_clippy():
+    """Run clippy on packages marked for CI linting."""
+    print("Running clippy...", flush=True)
+
+    clippy_packages = await get_clippy_packages()
+    for package in clippy_packages:
+        await run_command(
+            ["cargo", "clippy", "--no-deps", "-p", package, "--", "-Dwarnings"]
+        )
+
+    print("✓ Clippy checks passed", flush=True)
+
+
+async def run_tests():
+    """Run the test suite."""
+    print("Running tests...", flush=True)
+
+    await run_command(
+        [
+            "cargo",
+            "nextest",
+            "archive",
+            "--archive-file",
+            "target/nextest-archive.tar.zst",
+        ]
+    )
+
+    # Get CPU count
+    cpu_count = min(os.cpu_count(), 16)
+
+    await run_command_in_vm(
+        "sched_ext/for-next",
+        [
+            sys.argv[0],
+            "test-in-vm",
+        ],
+        memory=10 * 1024 * 1024 * 1024,
+        cpus=min(os.cpu_count(), 16),
+    )
 
     print("✓ Tests completed successfully", flush=True)
 
@@ -165,7 +177,7 @@ def run_tests():
 def run_tests_in_vm():
     """Run tests when already inside the VM."""
 
-    run_command(
+    subprocess.run(
         [
             "cargo-nextest",
             "nextest",
@@ -175,21 +187,22 @@ def run_tests_in_vm():
             "--workspace-remap",
             ".",
             "--no-fail-fast",
-        ]
+        ],
+        check=True,
     )
 
-    run_command(["target/debug/scx_lib_selftests"])
+    subprocess.run(["target/debug/scx_lib_selftests"], check=True)
 
 
-def run_all():
+async def run_all():
     """Run all CI steps in the correct order."""
-    run_format()
-    run_build()
-    run_clippy()
-    run_tests()
+    await run_format()
+    await run_build()
+    await run_clippy()
+    await run_tests()
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="SCX CI Script")
 
     subparsers = parser.add_subparsers(
@@ -214,18 +227,18 @@ def main():
     args = parser.parse_args()
 
     if args.command == "format":
-        run_format()
+        await run_format()
     elif args.command == "build":
-        run_build()
+        await run_build()
     elif args.command == "clippy":
-        run_clippy()
+        await run_clippy()
     elif args.command == "test":
-        run_tests()
+        await run_tests()
     elif args.command == "test-in-vm":
         run_tests_in_vm()
     elif args.command == "all":
-        run_all()
+        await run_all()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

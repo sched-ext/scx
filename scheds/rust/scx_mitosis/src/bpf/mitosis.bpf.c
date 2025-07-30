@@ -46,6 +46,35 @@ private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 
 UEI_DEFINE(uei);
 
+/*
+ * We store per-cpu values along with per-cell values. Helper functions to
+ * translate.
+ */
+static inline u32 cpu_dsq(u32 cpu)
+{
+	return PCPU_BASE | cpu;
+}
+
+static inline u32 cell_dsq(u32 cell)
+{
+	return cell;
+}
+
+static inline u32 dsq_to_cpu(u32 dsq)
+{
+	return dsq & ~PCPU_BASE;
+}
+
+static inline u32 dsq_to_cell(u32 dsq)
+{
+	return dsq;
+}
+
+static inline bool is_pcpu(u32 dsq)
+{
+	return dsq & PCPU_BASE;
+}
+
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 						  u32 ancestor)
 {
@@ -91,20 +120,24 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 
 /*
  * task_ctx is the per-task information kept by scx_mitosis
-*/
+ */
 struct task_ctx {
 	/* cpumask is the set of valid cpus this task can schedule on */
 	/* (tasks cpumask anded with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
-	/* cell assignment */
+	u64 basis_vtime;
+	/* For the sake of monitoring, each task is owned by a cell */
 	u32 cell;
+	/* For the sake of scheduling, a task is exclusively owned by either a cell
+	 * or a cpu */
+	u32 dsq;
 	/* latest configuration that was applied for this task */
 	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
-	/* Is this task allowed on all cores? */
-	bool all_cpus_allowed;
+	/* Is this task allowed on all cores of its cell? */
+	bool all_cell_cpus_allowed;
 };
 
 struct {
@@ -168,7 +201,7 @@ static inline struct cell *lookup_cell(int idx)
 /*
  * Cells are allocated concurrently in some cases (e.g. cgroup_init).
  * allocate_cell and free_cell enable these allocations to be done safely
-*/
+ */
 static inline int allocate_cell()
 {
 	int cell_idx;
@@ -207,8 +240,10 @@ static inline int free_cell(int cell_idx)
  */
 struct cell_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
-	/* To avoid allocation on the reconfiguration path, have a second cpumask we
-	   can just do an xchg on. */
+	/*
+	 * To avoid allocation on the reconfiguration path, have a second cpumask we
+	 * can just do an xchg on.
+	 */
 	struct bpf_cpumask __kptr *tmp_cpumask;
 };
 
@@ -340,6 +375,9 @@ static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
 	const struct cpumask *cell_cpumask;
+	struct cpu_ctx *cpu_ctx;
+	struct cell *cell;
+	u32 cpu;
 
 	if (!(cell_cpumask = lookup_cell_cpumask(tctx->cell)))
 		return -ENOENT;
@@ -349,17 +387,43 @@ static inline int update_task_cpumask(struct task_struct *p,
 
 	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
 
+	if (cell_cpumask)
+		tctx->all_cell_cpus_allowed =
+			bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
+
+	/*
+	 * XXX - To be correct, we'd need to calculate the vtime
+	 * delta in the previous dsq, scale it by the load
+	 * fraction difference and then offset from the new
+	 * dsq's vtime_now. For now, just do the simple thing
+	 * and assume the offset to be zero.
+	 *
+	 * Revisit if high frequency dynamic cell switching
+	 * needs to be supported.
+	 */
+	if (tctx->all_cell_cpus_allowed) {
+		tctx->dsq = cell_dsq(tctx->cell);
+		if (!(cell = lookup_cell(tctx->cell)))
+			return -ENOENT;
+		p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
+	} else {
+		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
+			return -ENOENT;
+		tctx->dsq = cpu_dsq(cpu);
+		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
+	}
+
 	return 0;
 }
 
 /*
- * Figure out the task's cell and store the corresponding cpumask in the
+ * Figure out the task's cell, dsq and store the corresponding cpumask in the
  * task_ctx.
-*/
+ */
 static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 				   struct cgroup *cg)
 {
-	struct cell *cell;
 	struct cgrp_ctx *cgc;
 
 	if (!(cgc = lookup_cgrp_ctx(cg)))
@@ -374,20 +438,6 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
-
-	if (!(cell = lookup_cell(tctx->cell)))
-		return -ENOENT;
-	/*
-	 * XXX - To be correct, we'd need to calculate the vtime
-	 * delta in the previous cell, scale it by the load
-	 * fraction difference and then offset from the new
-	 * cell's vtime_now. For now, just do the simple thing
-	 * and assume the offset to be zero.
-	 *
-	 * Revisit if high frequency dynamic cell switching
-	 * needs to be supported.
-	 */
-	p->scx.dsq_vtime = cell->vtime_now;
 
 	return update_task_cpumask(p, tctx);
 }
@@ -492,20 +542,17 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
-		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+	if (!tctx->all_cell_cpus_allowed) {
+		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
+		cpu = dsq_to_cpu(tctx->dsq);
+		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		goto out;
 	}
 
-	if (tctx->cpumask && bpf_cpumask_empty(cast_mask(tctx->cpumask))) {
-		/*
-		 * This is an affinity violation (no overlap between task cpus and cell
-		 * cpus) but we also failed to find an idle cpu in the task cpus. No
-		 * need to count this as an AFFN_VIOL (we've already done so in
-		 * pick_idle_cpu), just distribute it to some core.
-		 */
-		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
+		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		goto out;
 	}
 
@@ -529,23 +576,6 @@ out:
 	return cpu;
 }
 
-static __always_inline bool pick_idle_cpu_and_kick(struct task_struct *p,
-						   s32 task_cpu,
-						   struct cpu_ctx *cctx,
-						   struct task_ctx *tctx)
-{
-	s32 cpu;
-
-	cpu = pick_idle_cpu(p, task_cpu, cctx, tctx);
-
-	if (cpu >= 0) {
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		return true;
-	} else {
-		return false;
-	}
-}
-
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cctx;
@@ -553,8 +583,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	struct cell *cell;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
+	s32 cpu = -1;
+	u64 basis_vtime;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
 
 	/*
@@ -563,43 +595,77 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	 * cell's DSQ. This allows us to publish new cell assignments and establish
 	 * a point at which all future enqueues will be on the new assignments.
 	 */
-	critical_section_enter();
+	if (critical_section_enter())
+		return;
+
 	if (maybe_refresh_cell(p, tctx) < 0)
 		goto out;
 
-	if (!(cell = lookup_cell(tctx->cell)))
-		goto out;
+	if (!tctx->all_cell_cpus_allowed) {
+		cpu = dsq_to_cpu(tctx->dsq);
+	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		/*
+		 * If we haven't selected a cpu, then we haven't looked for and kicked an
+		 * idle CPU. Let's do the lookup now and kick at the end.
+		 */
+		if (!(cctx = lookup_cpu_ctx(-1)))
+			goto out;
+		cpu = pick_idle_cpu(p, task_cpu, cctx, tctx);
+		if (cpu == -1)
+			goto out;
+		if (cpu == -EBUSY) {
+			/*
+			 * Verifier gets unhappy claiming two different pointer types for
+			 * the same instruction here. This fixes it
+			 */
+			barrier_var(tctx);
+			if (tctx->cpumask)
+				cpu = bpf_cpumask_any_distribute(
+					(const struct cpumask *)tctx->cpumask);
+		}
+	}
 
+	if (tctx->all_cell_cpus_allowed) {
+		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
+		/* Task can use any CPU in its cell, so use the cell DSQ */
+		if (!(cell = lookup_cell(tctx->cell)))
+			goto out;
+		basis_vtime = READ_ONCE(cell->vtime_now);
+	} else {
+		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
+
+		/*
+		 * cctx is the local core cpu (where enqueue is running), not the core
+		 * the task belongs to. Fetch the right cctx
+		 */
+		if (!(cctx = lookup_cpu_ctx(cpu)))
+			goto out;
+		/* Task is pinned to specific CPUs, use per-CPU DSQ */
+		basis_vtime = READ_ONCE(cctx->vtime_now);
+	}
+
+	tctx->basis_vtime = basis_vtime;
+
+	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
+		scx_bpf_error("vtime is too far in the future for %d", p->pid);
+		goto out;
+	}
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
 	 */
-	if (time_before(vtime, cell->vtime_now - slice_ns))
-		vtime = cell->vtime_now - slice_ns;
+	if (time_before(vtime, basis_vtime - slice_ns))
+		vtime = basis_vtime - slice_ns;
 
-	if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, HI_FALLBACK_DSQ, slice_ns, 0);
-		cstat_inc(CSTAT_HI_FALLBACK_Q, tctx->cell, cctx);
-	} else if (!tctx->all_cpus_allowed) {
-		// FIXME: With cpusets, most schedules will fall into this section and
-		// not actually get distributed to the correct cell. We need to loosen
-		// the check on tctx->all_cpus_allowed
-		scx_bpf_dsq_insert(p, LO_FALLBACK_DSQ, slice_ns, 0);
-		cstat_inc(CSTAT_LO_FALLBACK_Q, tctx->cell, cctx);
-	} else {
-		scx_bpf_dsq_insert_vtime(p, tctx->cell, slice_ns, vtime,
-					 enq_flags);
-		cstat_inc(CSTAT_DEFAULT_Q, tctx->cell, cctx);
-	}
+	scx_bpf_dsq_insert_vtime(p, tctx->dsq, slice_ns, vtime, enq_flags);
 
-	/*
-	 * If we aren't in the wakeup path, layered_select_cpu() hasn't run and thus
-	 * we haven't looked for and kicked an idle CPU. Let's do it now.
-	 */
-	if (!(enq_flags & SCX_ENQ_WAKEUP))
-		pick_idle_cpu_and_kick(p, task_cpu, cctx, tctx);
+	/* Kick the CPU if needed */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
 out:
-	critical_section_exit();
+	if (critical_section_exit())
+		return;
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
@@ -612,18 +678,40 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	cell = READ_ONCE(cctx->cell);
 
-	if (scx_bpf_dsq_move_to_local(HI_FALLBACK_DSQ))
-		return;
+	bool found = false;
+	u64 min_vtime_dsq;
+	u64 min_vtime;
 
-	if (scx_bpf_dsq_move_to_local(cell))
-		return;
+	struct task_struct *p;
+	bpf_for_each(scx_dsq, p, cell, 0) {
+		min_vtime = p->scx.dsq_vtime;
+		min_vtime_dsq = cell;
+		found = true;
+		break;
+	}
 
-	scx_bpf_dsq_move_to_local(LO_FALLBACK_DSQ);
+	u64 dsq = cpu_dsq(cpu);
+	bpf_for_each(scx_dsq, p, dsq, 0) {
+		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
+			min_vtime = p->scx.dsq_vtime;
+			min_vtime_dsq = dsq;
+			found = true;
+		}
+		break;
+	}
+
+	/*
+	 * The move_to_local can fail if we raced with some other cpu in the cell
+	 * and now the cell is empty. We have to ensure to try the cpu_dsq or else
+	 * we might never wakeup.
+	 */
+	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq))
+		scx_bpf_dsq_move_to_local(dsq);
 }
 
 /*
  * On tick, we apply CPU assignment
-*/
+ */
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
 	if (bpf_get_smp_processor_id())
@@ -633,7 +721,7 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	if (local_configuration_seq == READ_ONCE(applied_configuration_seq))
 		return;
 
-	// Get the root cell (cell 0) and its cpumask
+	/* Get the root cell (cell 0) and its cpumask */
 	struct cell_cpumask_wrapper *root_cell_cpumaskw;
 	int zero = 0;
 	if (!(root_cell_cpumaskw =
@@ -660,9 +748,11 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	}
 	bpf_cpumask_copy(root_bpf_cpumask, (const struct cpumask *)all_cpumask);
 
-	// Iterate through the rest of the cells and (if in_use), clear their cpus
-	// from the root cell and assign them to the correct core
-	// TODO: Handle freed cells by giving their cores back to the root cell
+	/*
+	 * Iterate through the rest of the cells and (if in_use), clear their cpus
+	 * from the root cell and assign them to the correct core
+	 * TODO: Handle freed cells by giving their cores back to the root cell
+	 */
 	int cell_idx;
 	bpf_for(cell_idx, 1, MAX_CELLS)
 	{
@@ -712,14 +802,23 @@ out:
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
+	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct cell *cell;
 
-	if (!(tctx = lookup_task_ctx(p)) || !(cell = lookup_cell(tctx->cell)))
+	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
+	    !(cell = lookup_cell(cctx->cell)))
 		return;
 
-	if (time_before(cell->vtime_now, p->scx.dsq_vtime))
-		cell->vtime_now = p->scx.dsq_vtime;
+	/*
+	 * Update both the CPU's cell and the cpu's vtime so the vtime's are
+	 * comparable at dispatch time.
+	 */
+	if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
+		WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
+
+	if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
+		WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 
 	tctx->started_running_at = scx_bpf_now();
 }
@@ -745,7 +844,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	/* scale the execution time by the inverse of the weight and charge */
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
-	if (cidx != 0 || tctx->all_cpus_allowed) {
+	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
 		u64 *cell_cycles = MEMBER_VPTR(cctx->cell_cycles, [cidx]);
 		if (!cell_cycles) {
 			scx_bpf_error("Cell index is too large: %d", cidx);
@@ -766,11 +865,13 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
  * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
  * and with different lengths. Some bpf_core_type_matches finagling can make
  * this all work.
-*/
+ */
 #define MAX_CPUMASK_ENTRIES (4)
 
-/* We don't know how big struct cpumask is at compile time, so just allocate a
-   large space and check that it is big enough at runtime */
+/*
+ * We don't know how big struct cpumask is at compile time, so just allocate a
+ * large space and check that it is big enough at runtime
+ */
 #define CPUMASK_LONG_ENTRIES (128)
 #define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
 
@@ -828,7 +929,7 @@ struct cpuset___cpumask_arr {
  * If we see a cgroup with a cpuset, that will define a new cell and we can
  * allocate it right here. Note, full core assignment must be synchronized so
  * that happens in tick()
-*/
+ */
 static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 					  struct cgroup *cgrp)
 {
@@ -979,7 +1080,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 	}
 
 	bpf_cgroup_release(parent_cg);
-	// Otherwise initialize to parent's cell
+	/* Otherwise initialize to parent's cell */
 	cgc->cell = parent_cgc->cell;
 	return 0;
 }
@@ -1024,8 +1125,6 @@ void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	tctx->all_cpus_allowed = bpf_cpumask_subset(
-		(const struct cpumask *)all_cpumask, cpumask);
 	update_task_cpumask(p, tctx);
 }
 
@@ -1059,8 +1158,6 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		scx_bpf_error("missing all_cpumask");
 		return -EINVAL;
 	}
-	tctx->all_cpus_allowed = bpf_cpumask_subset(
-		(const struct cpumask *)all_cpumask, p->cpus_ptr);
 
 	if ((ret = update_task_cell(p, tctx, args->cgroup))) {
 		return ret;
@@ -1069,21 +1166,103 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	return 0;
 }
 
+__hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
+{
+	u32 u, v = 0;
+
+	bpf_for(u, 0, 32)
+	{
+		s32 cpu = 32 * word + u;
+		if (cpu < nr_possible_cpus &&
+		    bpf_cpumask_test_cpu(cpu, cpumask))
+			v |= 1 << u;
+	}
+	scx_bpf_dump("%08x", v);
+}
+
+static void dump_cpumask(const struct cpumask *cpumask)
+{
+	u32 word, nr_words = (nr_possible_cpus + 31) / 32;
+
+	bpf_for(word, 0, nr_words)
+	{
+		if (word)
+			scx_bpf_dump(",");
+		dump_cpumask_word(nr_words - word - 1, cpumask);
+	}
+}
+
+static void dump_cell_cpumask(int id)
+{
+	const struct cpumask *cell_cpumask;
+
+	if (!(cell_cpumask = lookup_cell_cpumask(id)))
+		return;
+
+	dump_cpumask(cell_cpumask);
+}
+
+void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
+{
+	u64 dsq_id;
+	int i;
+	struct cell *cell;
+	struct cpu_ctx *cpu_ctx;
+
+	scx_bpf_dump_header();
+
+	bpf_for(i, 0, MAX_CELLS)
+	{
+		if (!(cell = lookup_cell(i)))
+			return;
+
+		if (!cell->in_use)
+			continue;
+
+		scx_bpf_dump("CELL[%d] CPUS=", i);
+		dump_cell_cpumask(i);
+		scx_bpf_dump("\n");
+		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
+			     READ_ONCE(cell->vtime_now),
+			     scx_bpf_dsq_nr_queued(i));
+	}
+
+	bpf_for(i, 0, nr_possible_cpus)
+	{
+		if (!(cpu_ctx = lookup_cpu_ctx(i)))
+			return;
+
+		dsq_id = cpu_dsq(i);
+		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
+			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
+			     scx_bpf_dsq_nr_queued(dsq_id));
+	}
+}
+
+void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx,
+		    struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	if (!(tctx = lookup_task_ctx(p)))
+		return;
+
+	scx_bpf_dump(
+		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u dsq=%x all_cell_cpus_allowed=%d\n",
+		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell,
+		tctx->dsq, tctx->all_cell_cpus_allowed);
+	scx_bpf_dump("Task[%d] CPUS=", p->pid);
+	dump_cpumask(p->cpus_ptr);
+	scx_bpf_dump("\n");
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 {
 	struct bpf_cpumask *cpumask;
 	u32 i;
 	s32 ret;
 
-	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
-	if (ret < 0)
-		return ret;
-
-	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
-	if (ret < 0)
-		return ret;
-
-	// setup all_cpumask
+	/* setup all_cpumask */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
@@ -1095,6 +1274,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
+				ret = scx_bpf_create_dsq(cpu_dsq(i), -1);
+				if (ret < 0) {
+					bpf_cpumask_release(cpumask);
+					return ret;
+				}
 			}
 		} else {
 			return -EINVAL;
@@ -1167,6 +1351,8 @@ struct sched_ext_ops mitosis = {
 	.cgroup_init = (void *)mitosis_cgroup_init,
 	.cgroup_exit = (void *)mitosis_cgroup_exit,
 	.cgroup_move = (void *)mitosis_cgroup_move,
+	.dump = (void *)mitosis_dump,
+	.dump_task = (void *)mitosis_dump_task,
 	.init = (void *)mitosis_init,
 	.exit = (void *)mitosis_exit,
 	.name = "mitosis",

@@ -5,85 +5,67 @@
 
 use std::cmp::min;
 
-#[derive(Debug, Clone)]
-pub struct Search {
-    entries: Vec<String>,
+#[allow(dead_code)]
+pub fn binary_search(entries: &[String], input: &str) -> Option<usize> {
+    entries.binary_search_by(|s| s.as_str().cmp(input)).ok()
 }
 
-impl Search {
-    pub fn new(mut entries: Vec<String>) -> Self {
-        entries.sort();
-        Self { entries }
-    }
+pub fn substring_search(entries: &[String], input: &str) -> Vec<String> {
+    let input = &input.to_lowercase();
 
-    pub fn binary_search(&self, input: &str) -> Option<usize> {
-        self.entries
-            .binary_search_by(|s| s.as_str().cmp(input))
-            .ok()
-    }
+    entries
+        .iter()
+        .filter(|entry| entry.to_lowercase().contains(input))
+        .cloned()
+        .collect()
+}
 
-    pub fn contains(&self, input: &str) -> bool {
-        self.binary_search(input).is_some()
-    }
+pub fn sorted_contains(entries: &[String], input: &str) -> bool {
+    binary_search(entries, input).is_some()
+}
 
-    pub fn contains_all(&self, inputs: &[String]) -> bool {
-        inputs.iter().all(|input| self.contains(input))
-    }
+pub fn sorted_contains_all(entries: &[String], inputs: &[String]) -> bool {
+    inputs.iter().all(|input| sorted_contains(entries, input))
+}
 
-    pub fn substring_search(&self, input: &str) -> Vec<String> {
-        let input = &input.to_lowercase();
+/**
+ * We'll want check fuzzily in three ways using the following scoring system:
+ * 1: Is it a substring (contains)? 100 points
+ * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
+ * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
+ *
+ * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
+ */
+pub fn fuzzy_search(entries: &[String], input: &str) -> Vec<String> {
+    let input = &input.to_lowercase();
 
-        self.entries
-            .iter()
-            .filter(|entry| entry.to_lowercase().contains(input))
-            .cloned()
-            .collect()
-    }
+    let mut fuzzy_results: Vec<(&String, u32)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let entry_lower = &entry.to_lowercase();
+            entry_lower
+                .contains(input)
+                .then_some((entry, 100))
+                .or_else(|| contains_spread(entry_lower, input).map(|score| (entry, 100 - score)))
+        })
+        .collect();
 
-    /**
-     * We'll want check fuzzily in three ways using the following scoring system:
-     * 1: Is it a substring (contains)? 100 points
-     * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
-     * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
-     *
-     * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
-     */
-    pub fn fuzzy_search(&self, input: &str) -> Vec<String> {
-        let input = &input.to_lowercase();
-
-        let mut fuzzy_results: Vec<(&String, u32)> = self
-            .entries
+    // We only check if our input has a typo if we haven't matched to anything else (for performance reasons)
+    if fuzzy_results.is_empty() {
+        fuzzy_results = entries
             .iter()
             .filter_map(|entry| {
-                let entry_lower = &entry.to_lowercase();
-                entry_lower
-                    .contains(input)
-                    .then_some((entry, 100))
-                    .or_else(|| {
-                        contains_spread(entry_lower, input).map(|score| (entry, 100 - score))
-                    })
+                contains_with_typo(&entry.to_lowercase(), input).map(|score| (entry, 75 - score))
             })
-            .collect();
-
-        // We only check if our input has a typo if we haven't matched to anything else (for performance reasons)
-        if fuzzy_results.is_empty() {
-            fuzzy_results = self
-                .entries
-                .iter()
-                .filter_map(|entry| {
-                    contains_with_typo(&entry.to_lowercase(), input)
-                        .map(|score| (entry, 75 - score))
-                })
-                .collect()
-        }
-
-        fuzzy_results.sort_by(|a, b| b.1.cmp(&a.1));
-
-        fuzzy_results
-            .into_iter()
-            .map(|(entry, _)| entry.clone())
             .collect()
     }
+
+    fuzzy_results.sort_by(|a, b| b.1.cmp(&a.1));
+
+    fuzzy_results
+        .into_iter()
+        .map(|(entry, _)| entry.clone())
+        .collect()
 }
 
 /**
@@ -276,9 +258,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_empty() {
-        let events = test_events();
-        let search = Search::new(events);
-        let results = search.fuzzy_search("");
+        let mut events = test_events();
+        events.sort();
+        let results = fuzzy_search(&events, "");
 
         assert_eq!(
             results.len(),
@@ -290,10 +272,10 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_basic() {
-        let events = test_events();
-        let search = Search::new(events);
+        let mut events = test_events();
+        events.sort();
 
-        let results = search.fuzzy_search("gettid");
+        let results = fuzzy_search(&events, "gettid");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "syscalls:sys_exit_gettid".to_string());
@@ -301,9 +283,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_exact_input() {
-        let events = test_events();
-        let search = Search::new(events);
-        let results = search.fuzzy_search("alarmtimer_cancel");
+        let mut events = test_events();
+        events.sort();
+        let results = fuzzy_search(&events, "alarmtimer_cancel");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
@@ -311,9 +293,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_exact_input_multiple_results() {
-        let events = test_events();
-        let search = Search::new(events);
-        let results = search.fuzzy_search("alarm");
+        let mut events = test_events();
+        events.sort();
+        let results = fuzzy_search(&events, "alarm");
 
         let expected_matches = [
             "alarmtimer:alarmtimer_suspend",
@@ -333,9 +315,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_complex_input() {
-        let events = test_events();
-        let search = Search::new(events);
-        let results = search.fuzzy_search("alrMcacEL");
+        let mut events = test_events();
+        events.sort();
+        let results = fuzzy_search(&events, "alrMcacEL");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
@@ -343,9 +325,9 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_long_complex_input() {
-        let events = test_events();
-        let search = Search::new(events);
-        let results = search.fuzzy_search("alrMtIImeralarmmer_cacEL");
+        let mut events = test_events();
+        events.sort();
+        let results = fuzzy_search(&events, "alrMtIImeralarmmer_cacEL");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
@@ -353,10 +335,10 @@ mod tests {
 
     #[test]
     fn test_fuzzy_search_reuse_search() {
-        let events = test_events();
-        let search = Search::new(events);
+        let mut events = test_events();
+        events.sort();
 
-        let results = search.fuzzy_search("");
+        let results = fuzzy_search(&events, "");
         assert_eq!(
             results.len(),
             19,
@@ -364,15 +346,15 @@ mod tests {
             results.len()
         );
 
-        let results = search.fuzzy_search("gettid");
+        let results = fuzzy_search(&events, "gettid");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "syscalls:sys_exit_gettid".to_string());
 
-        let results = search.fuzzy_search("alarmtimer_cancel");
+        let results = fuzzy_search(&events, "alarmtimer_cancel");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
 
-        let results = search.fuzzy_search("alarm");
+        let results = fuzzy_search(&events, "alarm");
         let expected_matches = [
             "alarmtimer:alarmtimer_suspend",
             "alarmtimer:alarmtimer_fired",
@@ -392,59 +374,65 @@ mod tests {
             results.len()
         );
 
-        let results = search.fuzzy_search("alrMcacEL");
+        let results = fuzzy_search(&events, "alrMcacEL");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
     }
 
     #[test]
     fn test_binary_search_basic() {
-        let events = test_events();
-        let search = Search::new(events);
+        let mut events = test_events();
+        events.sort();
 
-        let result = search.binary_search("alarmtimer:alarmtimer_cancel");
+        let result = binary_search(&events, "alarmtimer:alarmtimer_cancel");
 
         assert_eq!(result, Some(0));
     }
 
     #[test]
     fn test_binary_search_basic_2() {
-        let events = test_events();
-        let search = Search::new(events);
+        let mut events = test_events();
+        events.sort();
 
-        let result = search.binary_search("syscalls:sys_enter_settimeofday");
+        let result = binary_search(&events, "syscalls:sys_enter_settimeofday");
 
         assert_eq!(result, Some(11));
     }
 
     #[test]
-    fn test_contains() {
-        let events = test_events();
-        let search = Search::new(events);
+    fn test_sorted_contains() {
+        let mut events = test_events();
+        events.sort();
 
-        let result1 = search.contains("ext4:ext4_mb_new_inode_pa");
+        let result1 = sorted_contains(&events, "ext4:ext4_mb_new_inode_pa");
         assert!(result1);
 
-        let result2 = search.contains("ext4:ext4_mb_new_inode");
+        let result2 = sorted_contains(&events, "ext4:ext4_mb_new_inode");
         assert!(!result2);
     }
 
     #[test]
-    fn test_contains_all() {
-        let events = test_events();
-        let search = Search::new(events);
+    fn test_sorted_contains_all() {
+        let mut events = test_events();
+        events.sort();
 
-        let result1 = search.contains_all(&[
-            "ext4:ext4_mb_new_inode_pa".to_string(),
-            "ext4:ext4_mb_new_inode".to_string(),
-        ]);
+        let result1 = sorted_contains_all(
+            &events,
+            &[
+                "ext4:ext4_mb_new_inode_pa".to_string(),
+                "ext4:ext4_mb_new_inode".to_string(),
+            ],
+        );
         assert!(!result1);
 
-        let result2 = search.contains_all(&[
-            "syscalls:sys_enter_timerfd_settime".to_string(),
-            "alarmtimer:alarmtimer_fired".to_string(),
-            "ext4:ext4_fc_stats".to_string(),
-        ]);
+        let result2 = sorted_contains_all(
+            &events,
+            &[
+                "syscalls:sys_enter_timerfd_settime".to_string(),
+                "alarmtimer:alarmtimer_fired".to_string(),
+                "ext4:ext4_fc_stats".to_string(),
+            ],
+        );
         assert!(result2);
     }
 }
