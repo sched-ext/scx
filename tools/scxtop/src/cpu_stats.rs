@@ -1,5 +1,5 @@
 use anyhow::Result;
-use procfs::{CpuTime, CurrentSI, KernelStats};
+use procfs::{CpuTime, KernelStats};
 use std::collections::BTreeMap;
 use sysinfo::System;
 
@@ -53,7 +53,7 @@ impl CpuStatTracker {
         self.prev = std::mem::take(&mut self.current);
         self.system_prev = std::mem::take(&mut self.system_current);
 
-        let kernel_stats = KernelStats::current()?;
+        let kernel_stats = KernelStats::new()?;
         let cpu_stat_data = kernel_stats.cpu_time;
         sys.refresh_cpu_frequency();
 

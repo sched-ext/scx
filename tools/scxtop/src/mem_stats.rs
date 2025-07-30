@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::Result;
-use procfs::{Current, Meminfo};
+use procfs::Meminfo;
 
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MemStatSnapshot {
@@ -20,7 +20,7 @@ pub struct MemStatSnapshot {
 
 impl MemStatSnapshot {
     pub fn update(&mut self) -> Result<()> {
-        let meminfo = Meminfo::current()?;
+        let meminfo = Meminfo::new()?;
         self.total_kb = meminfo.mem_total;
         self.free_kb = meminfo.mem_free;
         self.available_kb = meminfo

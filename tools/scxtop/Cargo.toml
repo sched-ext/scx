@@ -30,7 +30,7 @@ log = "0.4.17"
 num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }
 perfetto_protos = "0.49.0"
 plain = "0.2.3"
-procfs = "0.17.0"
+procfs = "0.15.1"
 protobuf = "3.7.2"
 rand = "0.8.5"
 ratatui = { version = "0.29.0", features = ["serde", "macros"] }
