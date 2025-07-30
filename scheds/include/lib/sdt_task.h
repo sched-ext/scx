@@ -53,7 +53,8 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
 #define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
 
-void __arena *scx_static_alloc(size_t bytes, size_t alignment);
+u64 scx_static_alloc_internal(size_t bytes, size_t alignment);
+#define scx_static_alloc(bytes, alignment) ((void __arena *)scx_static_alloc_internal((bytes), (alignment)))
 int scx_static_init(size_t max_alloc_pages);
 
 u64 scx_stk_alloc(struct scx_stk *stack);
