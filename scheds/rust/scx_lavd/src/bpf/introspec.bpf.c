@@ -4,9 +4,15 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
 
 /*
  * Flag to represent whether the scheduler is being monitored or not.
@@ -105,8 +111,8 @@ static void proc_introspec_sched_n(struct task_struct *p,
 	}
 }
 
-static void try_proc_introspec_cmd(struct task_struct *p,
-				   struct task_ctx *taskc)
+__hidden
+void try_proc_introspec_cmd(struct task_struct *p, struct task_ctx *taskc)
 {
 	if (!is_monitored)
 		return;

@@ -282,6 +282,7 @@ bool have_scheduled(struct task_ctx *taskc);
 bool have_pending_tasks(struct cpu_ctx *cpuc);
 bool can_boost_slice(void);
 bool is_lat_cri(struct task_ctx *taskc);
+u16 get_nice_prio(struct task_struct *p);
 
 void set_task_flag(struct task_ctx *taskc, u64 flag);
 void reset_task_flag(struct task_ctx *taskc, u64 flag);
@@ -333,5 +334,10 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
 /* Futex lock-related helpers. */
 
 void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc);
+
+/* Scheduler introspection-related helpers. */
+
+void try_proc_introspec_cmd(struct task_struct *p, struct task_ctx *taskc);
+extern volatile bool is_monitored;
 
 #endif /* __LAVD_H */

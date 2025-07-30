@@ -176,6 +176,7 @@ static inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 	cpuc->flags &= ~flag;
 }
 
+__hidden
 bool is_lat_cri(struct task_ctx *taskc)
 {
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
@@ -207,7 +208,7 @@ bool can_boost_slice(void)
 	return sys_stat.nr_queued_task <= sys_stat.nr_active;
 }
 
-static u16 get_nice_prio(struct task_struct *p)
+u16 get_nice_prio(struct task_struct __arg_trusted *p)
 {
 	u16 prio = p->static_prio - MAX_RT_PRIO; /* [0, 40) */
 	return prio;
