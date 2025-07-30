@@ -552,6 +552,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
 			goto out;
 		}
+
 		dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
@@ -581,7 +582,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
-	u64 dsq_id;
+	u64 cpdom_id;
 	bool is_idle = false;
 
 	taskc = get_task_ctx(p);
@@ -618,7 +619,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu,
+		cpdom_id = pick_proper_dsq(p, taskc, task_cpu, &cpu,
 					 &is_idle, cpuc_cur);
 		taskc->suggested_cpu_id = cpu;
 		cpuc = get_cpu_ctx_id(cpu);
@@ -633,7 +634,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 			return;
 		}
-		dsq_id = cpuc->cpdom_id;
+		cpdom_id = cpuc->cpdom_id;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
@@ -650,11 +651,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * to the local DSQ of the chosen CPU, do it. Otherwise, enqueue
 	 * to the chosen DSQ of the chosen domain.
 	 */
-	if (can_direct_dispatch(dsq_id, cpu, is_idle)) {
+	if (can_direct_dispatch(cpu_to_dsq(cpu), cpu, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
+	} else if (per_cpu_dsq) {
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
+					 p->scx.dsq_vtime, enq_flags);
 	} else {
-		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+		scx_bpf_dsq_insert_vtime(p, cpdom_to_dsq(cpdom_id), p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
 
@@ -673,7 +677,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
 	if (!no_preemption)
-		try_find_and_kick_victim_cpu(p, taskc, cpu, dsq_id);
+		try_find_and_kick_victim_cpu(p, taskc, cpu, cpdom_to_dsq(cpdom_id));
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
@@ -682,16 +686,20 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	struct task_ctx *taskc_prev = NULL;
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
-	u64 dsq_id;
+	u32 dsq_type;
 	s32 new_cpu;
 	bool try_consume;
+	u64 dsq_ids[LAVD_DSQ_NR_TYPES];
+	int dsq_start = LAVD_DSQ_TYPE_CPDOM;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
-	dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
+
+	dsq_ids[LAVD_DSQ_TYPE_CPU] = cpu_to_dsq(cpu);
+	dsq_ids[LAVD_DSQ_TYPE_CPDOM] = cpdom_to_dsq(cpuc->cpdom_id);
 
 	/*
 	 * If a task is holding a new lock, continue to execute it
@@ -762,80 +770,91 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
+	 * Refactor this later to use some mapping to check if certain
+	 * dsq types are enabled.
+	 */
+	if (per_cpu_dsq)
+		dsq_start = LAVD_DSQ_TYPE_CPU;
+	/*
 	 * If this CPU is neither in active nor overflow CPUs,
 	 * try to find and run the task affinitized on this CPU.
 	 */
 	try_consume = false;
-	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-		struct task_ctx *taskc;
+	bpf_for(dsq_type, dsq_start, LAVD_DSQ_NR_TYPES) {
+		u64 dsq_id = dsq_ids[dsq_type];
+		bpf_for_each(scx_dsq, p, dsq_id, 0) {
+			struct task_ctx *taskc;
 
-		/*
-		 * Note that this is a hack to bypass the restriction of the
-		 * current BPF not trusting the pointer p. Once the BPF
-		 * verifier gets smarter, we can remove bpf_task_from_pid().
-		 */
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
+			/*
+			 * note that this is a hack to bypass the restriction of the
+			 * current bpf not trusting the pointer p. once the bpf
+			 * verifier gets smarter, we can remove bpf_task_from_pid().
+			 */
+			p = bpf_task_from_pid(p->pid);
+			if (!p)
+				break;
+
+			/*
+			 * if the task is pinned to this cpu,
+			 * extend the overflow set and go.
+			 * but not on this cpu, try another task.
+			 */
+			if (is_pinned(p)) {
+				new_cpu = scx_bpf_task_cpu(p);
+				if (new_cpu == cpu) {
+					bpf_cpumask_set_cpu(new_cpu, ovrflw);
+					bpf_task_release(p);
+					try_consume = true;
+					break;
+				}
+				if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+					scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+				bpf_task_release(p);
+				continue;
+			} else if (is_migration_disabled(p)) {
+				new_cpu = scx_bpf_task_cpu(p);
+				if (new_cpu == cpu) {
+					bpf_task_release(p);
+					try_consume = true;
+					break;
+				}
+				bpf_task_release(p);
+				continue;
+			}
+
+			/*
+			 * if the task can run on either active or overflow set,
+			 * try another task.
+			 */
+			taskc = get_task_ctx(p);
+			if(taskc &&
+			(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+			bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+			bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+				bpf_task_release(p);
+				continue;
+			}
+
+			/*
+			 * now, we know that the task cannot run on either active
+			 * or overflow set. then, let's consider to extend the
+			 * overflow set.
+			 */
+			new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
+			if (new_cpu >= 0) {
+				if (new_cpu == cpu) {
+					bpf_cpumask_set_cpu(new_cpu, ovrflw);
+					bpf_task_release(p);
+					try_consume = true;
+					break;
+				}
+				else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+					scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			}
+			bpf_task_release(p);
+		}
+		if (try_consume)
 			break;
-
-		/*
-		 * If the task is pinned to this CPU,
-		 * extend the overflow set and go.
-		 * But not on this CPU, try another task.
-		 */
-		if (is_pinned(p)) {
-			new_cpu = scx_bpf_task_cpu(p);
-			if (new_cpu == cpu) {
-				bpf_cpumask_set_cpu(new_cpu, ovrflw);
-				bpf_task_release(p);
-				try_consume = true;
-				break;
-			}
-			if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
-				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
-			bpf_task_release(p);
-			continue;
-		} else if (is_migration_disabled(p)) {
-			new_cpu = scx_bpf_task_cpu(p);
-			if (new_cpu == cpu) {
-				bpf_task_release(p);
-				try_consume = true;
-				break;
-			}
-			bpf_task_release(p);
-			continue;
-		}
-
-		/*
-		 * If the task can run on either active or overflow set,
-		 * try another task.
-		 */
-		taskc = get_task_ctx(p);
-		if(taskc &&
-		   (!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
-		    bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
-			bpf_task_release(p);
-			continue;
-		}
-
-		/*
-		 * Now, we know that the task cannot run on either active
-		 * or overflow set. Then, let's consider to extend the
-		 * overflow set.
-		 */
-		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
-		if (new_cpu >= 0) {
-			if (new_cpu == cpu) {
-				bpf_cpumask_set_cpu(new_cpu, ovrflw);
-				bpf_task_release(p);
-				try_consume = true;
-				break;
-			}
-			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
-				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
-		}
-		bpf_task_release(p);
 	}
 
 unlock_out:
@@ -851,7 +870,7 @@ consume_out:
 	/*
 	 * Otherwise, consume a task.
 	 */
-	if (consume_task(dsq_id))
+	if (consume_task(dsq_ids[LAVD_DSQ_TYPE_CPU], dsq_ids[LAVD_DSQ_TYPE_CPDOM]))
 		return;
 
 	/*
@@ -1677,6 +1696,41 @@ unlock_out:
 	return err;
 }
 
+
+static int init_per_cpu_dsqs(void)
+{
+	struct cpdom_ctx *cpdomc;
+	struct cpu_ctx *cpuc;
+	int cpu, err = 0;
+
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		/*
+		 * Create Per-CPU DSQs on its associated NUMA domain.
+		 */
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			return -ESRCH;
+		}
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+		if (!cpdomc) {
+			scx_bpf_error("Failed to lookup cpdom_ctx for %hhu", cpuc->cpdom_id);
+			return -ESRCH;
+		}
+
+		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->node_id);
+		if (err) {
+			scx_bpf_error("Failed to create a DSQ for cpu %d on NUMA node %d",
+				      cpu, cpdomc->node_id);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
 	u64 now = scx_bpf_now();
@@ -1705,6 +1759,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	err = init_per_cpu_ctx(now);
 	if (err)
 		return err;
+
+	/*
+	 * Initialize per-CPU DSQs.
+	 */
+	if (per_cpu_dsq) {
+		err = init_per_cpu_dsqs();
+		if (err)
+			return err;
+	}
 
 	/*
 	 * Initialize the last update clock and the update timer to track

@@ -77,7 +77,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_sum = 0;
-		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_id);
+		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
 		c->nr_queued_task += cpdomc->nr_queued_task;
 	}
 

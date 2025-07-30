@@ -149,7 +149,10 @@ static void plan_x_cpdom_migration(void)
 	sys_stat.nr_stealee = nr_stealee;
 }
 
-static bool consume_dsq(struct cpdom_ctx *cpdomc)
+/*
+ * dsq_id: candidate DSQ to consume from, can be per-cpdom or per-cpu.
+ */
+static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 {
 	bool ret;
 	u64 before = 0;
@@ -159,7 +162,7 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc)
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	ret = scx_bpf_dsq_move_to_local(cpdom_to_dsq(cpdomc->id));
+	ret = scx_bpf_dsq_move_to_local(dsq_id);
 
 	if (is_monitored)
 		cpdomc->dsq_consume_lat = time_delta(bpf_ktime_get_ns(), before);
@@ -227,7 +230,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * because the chance is low and there is no harm
 			 * in slight over-stealing.
 			 */
-			if (consume_dsq(cpdomc_pick)) {
+			if (consume_dsq(cpdomc_pick, cpdom_to_dsq(cpdom_id))) {
 				WRITE_ONCE(cpdomc_pick->is_stealee, false);
 				WRITE_ONCE(cpdomc->is_stealer, false);
 				return true;
@@ -285,7 +288,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			if (consume_dsq(cpdomc_pick))
+			if (consume_dsq(cpdomc_pick, cpdom_to_dsq(cpdom_id)))
 				return true;
 		}
 	}
@@ -293,14 +296,15 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 	return false;
 }
 
-static bool consume_task(u64 dsq_id)
+static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 cpdom_id = dsq_to_cpdom(dsq_id);
+	struct task_struct *p;
+	u64 vtime, dsq_id = cpu_dsq_id;
 
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
 	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_to_cpdom(cpdom_dsq_id));
 		return false;
 	}
 
@@ -312,10 +316,25 @@ static bool consume_task(u64 dsq_id)
 	    try_to_steal_task(cpdomc))
 		goto x_domain_migration_out;
 
+	if (per_cpu_dsq) {
+		bpf_for_each(scx_dsq, p, cpu_dsq_id, 0) {
+			vtime = p->scx.dsq_vtime;
+			break;
+		}
+
+		bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
+			if (p->scx.dsq_vtime < vtime)
+				dsq_id = cpdom_dsq_id;
+			break;
+		}
+	} else {
+		dsq_id = cpdom_dsq_id;
+	}
+
 	/*
-	 * Try to consume a task from CPU's associated DSQ.
+	 * Try to consume a task from selected DSQ.
 	 */
-	if (consume_dsq(cpdomc))
+	if (consume_dsq(cpdomc, dsq_id))
 		return true;
 
 	/*
