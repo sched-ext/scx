@@ -588,8 +588,8 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 
 struct scx_static scx_static;
 
-__hidden
-void __arena *scx_static_alloc(size_t bytes, size_t alignment)
+__weak
+u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 {
 	void __arena *memory, *old;
 	size_t alloc_bytes;
@@ -609,7 +609,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 		bpf_spin_unlock(&alloc_lock);
 		bpf_printk("invalid request %ld, max is %ld\n", alloc_bytes,
 			      scx_static.max_alloc_bytes);
-		return NULL;
+		return (u64)NULL;
 	}
 
 	/*
@@ -632,7 +632,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 					       scx_static.max_alloc_bytes / PAGE_SIZE,
 					       NUMA_NO_NODE, 0);
 		if (!memory)
-			return NULL;
+			return (u64)NULL;
 
 		bpf_spin_lock(&alloc_lock);
 
@@ -642,7 +642,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 			bpf_arena_free_pages(&arena, memory, scx_static.max_alloc_bytes);
 
 			bpf_printk("concurrent static memory allocations unsupported");
-			return NULL;
+			return (u64)NULL;
 		}
 
 		/*
@@ -665,7 +665,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 
 	bpf_spin_unlock(&alloc_lock);
 
-	return ptr;
+	return (u64)ptr;
 }
 
 __weak
