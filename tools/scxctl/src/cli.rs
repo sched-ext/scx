@@ -59,7 +59,7 @@ pub struct SwitchArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    #[command(about = "Get the current scheduler and mode")]
+    #[command(about = "Get the info on the running scheduler")]
     Get,
     #[command(about = "List all supported schedulers")]
     List,
