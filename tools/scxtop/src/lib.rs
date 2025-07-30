@@ -123,15 +123,36 @@ impl std::fmt::Display for ViewState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterItem {
+    String(String),
+    Int(i32),
+}
+impl FilterItem {
+    pub fn as_string(&self) -> String {
+        match self {
+            FilterItem::String(s) => s.clone(),
+            FilterItem::Int(int) => int.to_string(),
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            FilterItem::Int(int) => Some(*int),
+            FilterItem::String(_) => None,
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone)]
-pub struct FilteredEventState {
-    pub list: Vec<String>,
+pub struct FilteredState {
+    pub list: Vec<FilterItem>,
     pub count: u16,
     pub scroll: u16,
     pub selected: usize,
 }
 
-impl FilteredEventState {
+impl FilteredState {
     pub fn reset(&mut self) {
         self.list.clear();
         self.count = 0;
@@ -361,6 +382,7 @@ pub enum Action {
     Esc,
     Exec(ExecAction),
     Exit(ExitAction),
+    Filter,
     Fork(ForkAction),
     Kprobe(KprobeAction),
     GpuMem(GpuMemAction),
@@ -661,6 +683,7 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
+            Action::Filter => write!(f, "Filter"),
             Action::UpdateColVisibility(_) => write!(f, "UpdateColVisibility"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
