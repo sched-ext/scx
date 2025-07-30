@@ -9,6 +9,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import List, Optional
 
 
@@ -55,6 +56,7 @@ async def run_command_in_vm(
     kernel: str, command: List[str], memory: int = 1024 * 1024 * 1024, cpus: int = 2
 ) -> str:
     mem_mb = int(memory / 1024 / 1024)
+    is_ci = os.environ.get("CI") == "true"
 
     cmd = [
         "vng",
@@ -65,7 +67,7 @@ async def run_command_in_vm(
         "--cpus",
         str(cpus),
     ]
-    if os.environ.get("CI") == "true":
+    if is_ci:
         # verbose in CI but not locally
         cmd += ["-v"]
 
@@ -77,11 +79,26 @@ async def run_command_in_vm(
             "--cwd=/tmp/workspace",
         ]
 
-    # VM gets a different PATH to this program so fix the path of the binary. Other args left to the user.
-    arg0 = shutil.which(command[0])
-    cmd += ["--", arg0] + command[1:]
+    # To support long commands create a temporary bash script to avoid command line limits
+    temp_dir = "." if is_ci else None
+    prefix = "." if is_ci else ""
+    with tempfile.NamedTemporaryFile(mode="w", prefix=prefix, suffix=".sh", dir=temp_dir) as file:
+        file.write("#!/bin/bash\n")
+        file.write("set -e\n")
 
-    return await run_command(cmd)
+        escaped_command = []
+        for arg in command:
+            escaped_arg = arg.replace("'", "'\"'\"'")
+            escaped_command.append(f"'{escaped_arg}'")
+
+        file.write(" ".join(escaped_command) + "\n")
+
+        os.chmod(file.name, 0o755)
+
+        # In CI, use relative path since current dir is mapped to /tmp/workspace
+        script_path = os.path.relpath(file.name) if is_ci else file.name
+        cmd += ["--", shutil.which("bash"), script_path]
+        return await run_command(cmd)
 
 
 async def get_clippy_packages() -> List[str]:
