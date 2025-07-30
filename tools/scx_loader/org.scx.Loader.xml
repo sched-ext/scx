@@ -31,6 +31,14 @@
     <property name="SchedulerMode" type="u" access="read"/>
 
     <!--
+        CurrentSchedulerArgs:
+
+        The arguments used for the currently running scheduler. If no scheduler
+        is active or the scheduler was started with a predefined mode (not custom
+        arguments), this property will return an empty array.
+    -->
+    <property name="CurrentSchedulerArgs" type="as" access="read"/>
+    <!--
         SupportedSchedulers:
 
         A list of the schedulers currently supported by the Scheduler Loader.

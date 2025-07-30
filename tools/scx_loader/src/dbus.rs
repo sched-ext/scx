@@ -54,6 +54,12 @@ pub trait LoaderClient {
     #[zbus(property)]
     fn scheduler_mode(&self) -> zbus::Result<SchedMode>;
 
+    /// The arguments used for the currently running scheduler. If no scheduler
+    /// is active or the scheduler was started with a predefined mode (not custom
+    /// arguments), this property will return an empty array.
+    #[zbus(property)]
+    fn current_scheduler_args(&self) -> zbus::Result<Vec<String>>;
+
     /// A list of the schedulers currently supported by the Scheduler Loader.
     /// The names of the supported schedulers will be listed as strings in
     /// this array.
