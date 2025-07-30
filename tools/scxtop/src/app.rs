@@ -245,7 +245,7 @@ impl<'a> App<'a> {
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
 
-        let app = Self {
+        let mut app = Self {
             config,
             localize: true,
             hw_pressure,
@@ -296,6 +296,9 @@ impl<'a> App<'a> {
             max_fps: 1,
         };
 
+        // Set the initial filter state
+        app.filter_events();
+
         Ok(app)
     }
 
@@ -319,7 +322,12 @@ impl<'a> App<'a> {
         }
         self.state = state;
 
-        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+        if self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+        {
             self.filter_events();
         }
 
@@ -2271,7 +2279,7 @@ impl<'a> App<'a> {
                 .left_aligned(),
             );
 
-        let mut filtered_processes: Vec<(i32, &ProcData)> = if self.filtering {
+        let mut filtered_processes: Vec<(i32, &ProcData)> = {
             let filtered_state = self.filtered_state.lock().unwrap();
             filtered_state
                 .list
@@ -2280,11 +2288,6 @@ impl<'a> App<'a> {
                     item.as_int()
                         .and_then(|pid| self.proc_data.get(&pid).map(|data| (pid, data)))
                 })
-                .collect()
-        } else {
-            self.proc_data
-                .iter()
-                .map(|(pid, data)| (*pid, data))
                 .collect()
         };
 
