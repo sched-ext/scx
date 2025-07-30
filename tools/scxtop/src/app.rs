@@ -2292,12 +2292,12 @@ impl<'a> App<'a> {
         });
 
         let rows = filtered_processes
-            .into_iter()
+            .iter()
             .enumerate()
             .map(|(i, (tgid, data))| {
                 visible_columns
                     .iter()
-                    .map(|col| Cell::from((col.value_fn)(tgid, data)))
+                    .map(|col| Cell::from((col.value_fn)(*tgid, data)))
                     .collect::<Row>()
                     .height(1)
                     .style(if i == selected {
