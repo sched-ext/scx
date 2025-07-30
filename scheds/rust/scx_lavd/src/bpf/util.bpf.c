@@ -18,15 +18,11 @@ private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active 
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
 
 const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
-static volatile u64	nr_cpus_onln;	/* current number of online CPUs */
-static volatile u64	nr_cpus_big;
-
-struct sys_stat	sys_stat;
+volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
 /*
  * Options
  */
-volatile bool		is_powersave_mode;
 volatile bool		reinit_cpumask_for_performance;
 volatile bool		no_preemption;
 volatile bool		no_core_compaction;
@@ -34,9 +30,7 @@ volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
 const volatile bool	no_slice_boost;
-const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
-const volatile u8	preempt_shift;
 
 /*
  * Exit information
@@ -64,50 +58,28 @@ struct {
 } task_ctx_stor SEC(".maps");
 
 
-#define debugln(fmt, ...)						\
-({									\
-	if (verbose > 0)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
-					##__VA_ARGS__);			\
-})
-
-#define traceln(fmt, ...)						\
-({									\
-	if (verbose > 1)						\
-		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
-					##__VA_ARGS__);			\
-})
-
-#ifndef min
-#define min(X, Y) (((X) < (Y)) ? (X) : (Y))
-#endif
-
-#ifndef max
-#define max(X, Y) (((X) < (Y)) ? (Y) : (X))
-#endif
-
-#ifndef clamp
-#define clamp(val, lo, hi) min(max(val, lo), hi)
-#endif
-
-static struct task_ctx *get_task_ctx(struct task_struct *p)
+__hidden
+struct task_ctx *get_task_ctx(struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 }
 
-static struct cpu_ctx *get_cpu_ctx(void)
+__hidden
+struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
 }
 
-static struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
+__hidden
+struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu_id);
 }
 
-static struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
+__hidden
+struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 {
 	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
@@ -199,22 +171,22 @@ static inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 	cpuc->flags &= ~flag;
 }
 
-static bool is_lat_cri(struct task_ctx *taskc)
+bool is_lat_cri(struct task_ctx *taskc)
 {
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
 }
 
-static bool is_lock_holder(struct task_ctx *taskc)
+bool is_lock_holder(struct task_ctx *taskc)
 {
 	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 }
 
-static bool is_lock_holder_running(struct cpu_ctx *cpuc)
+bool is_lock_holder_running(struct cpu_ctx *cpuc)
 {
 	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
 }
 
-static bool have_scheduled(struct task_ctx *taskc)
+bool have_scheduled(struct task_ctx *taskc)
 {
 	/*
 	 * If task's time slice hasn't been updated, that means the task has
@@ -223,12 +195,13 @@ static bool have_scheduled(struct task_ctx *taskc)
 	return taskc->slice != 0;
 }
 
-static bool can_boost_slice(void)
+bool can_boost_slice(void)
 {
 	return slice_max_ns <= sys_stat.slice;
 }
 
-static bool have_pending_tasks(struct cpu_ctx *cpuc)
+__hidden
+bool have_pending_tasks(struct cpu_ctx *cpuc)
 {
 	return scx_bpf_dsq_nr_queued(cpuc->cpdom_id) ||
 	       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
