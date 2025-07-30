@@ -45,11 +45,11 @@ int scx_selftest_lvqueue_steal_one(lv_queue_t *lvq)
 		val = i;
 
 		ret = lvq_push(lvq, val);
-		if (ret != -ENOENT)
+		if (ret)
 			return 1;
 
 		ret = lvq_steal(lvq, &newval);
-		if (ret != -ENOENT)
+		if (ret)
 			return 2;
 
 		if (val != newval)
@@ -68,11 +68,11 @@ int scx_selftest_lvqueue_pop_one(lv_queue_t *lvq)
 		val = i;
 
 		ret = lvq_push(lvq, val);
-		if (ret != -ENOENT)
+		if (ret)
 			return 1;
 
 		ret = lvq_pop(lvq, &newval);
-		if (ret != -ENOENT)
+		if (ret)
 			return 2;
 
 		if (val != newval)
