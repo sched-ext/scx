@@ -54,7 +54,8 @@ fn cmd_start(
     args: Option<Vec<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Verify scx_loader is not running a scheduler
-    if scx_loader.current_scheduler().unwrap() != "unknown" {
+    let current_scheduler = scx_loader.current_scheduler().unwrap();
+    if current_scheduler != "unknown" {
         println!(
             "{} scx scheduler already running, use '{}' instead of '{}'",
             "error:".red().bold(),
@@ -86,8 +87,11 @@ fn cmd_switch(
     mode_name: Option<SchedMode>,
     args: Option<Vec<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Cache DBUS call result
+    let current_scheduler = scx_loader.current_scheduler().unwrap();
+
     // Verify scx_loader is running a scheduler
-    if scx_loader.current_scheduler().unwrap() == "unknown" {
+    if current_scheduler == "unknown" {
         println!(
             "{} no scx scheduler running, use '{}' instead of '{}'",
             "error:".red().bold(),
@@ -100,7 +104,7 @@ fn cmd_switch(
 
     let sched: SupportedSched = match sched_name {
         Some(sched_name) => validate_sched(scx_loader.clone(), sched_name),
-        None => SupportedSched::try_from(scx_loader.current_scheduler().unwrap().as_str()).unwrap(),
+        None => SupportedSched::try_from(current_scheduler.as_str()).unwrap(),
     };
     let mode: SchedMode = match mode_name {
         Some(mode_name) => mode_name,
