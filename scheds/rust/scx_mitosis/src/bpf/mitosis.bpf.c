@@ -65,16 +65,6 @@ static inline u32 dsq_to_cpu(u32 dsq)
 	return dsq & ~PCPU_BASE;
 }
 
-static inline u32 dsq_to_cell(u32 dsq)
-{
-	return dsq;
-}
-
-static inline bool is_pcpu(u32 dsq)
-{
-	return dsq & PCPU_BASE;
-}
-
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 						  u32 ancestor)
 {
