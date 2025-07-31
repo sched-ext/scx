@@ -33,11 +33,12 @@ fn cmd_get(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::err
 fn cmd_list(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
     match scx_loader.supported_schedulers() {
         Ok(sl) => {
-            let supported_scheds = sl
+            let sched_names = sl
                 .iter()
                 .map(|s| remove_scx_prefix(&s.to_string()))
-                .collect::<Vec<String>>();
-            println!("supported schedulers: {:?}", supported_scheds);
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("supported schedulers: [{}]", sched_names);
             return Ok(());
         }
         Err(e) => {
