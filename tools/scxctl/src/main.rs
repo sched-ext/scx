@@ -8,13 +8,23 @@ use std::process::exit;
 use zbus::blocking::Connection;
 
 fn cmd_get(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
-    let current_scheduler: String = scx_loader.current_scheduler().unwrap();
-    let sched_mode: SchedMode = scx_loader.scheduler_mode().unwrap();
+    let current_scheduler: String = scx_loader.current_scheduler()?;
+
     match current_scheduler.as_str() {
         "unknown" => println!("no scx scheduler running"),
         _ => {
-            let sched = SupportedSched::try_from(current_scheduler.as_str()).unwrap();
-            println!("running {sched:?} in {sched_mode:?} mode");
+            let sched = SupportedSched::try_from(current_scheduler.as_str())?;
+            let current_args: Vec<String> = scx_loader.current_scheduler_args()?;
+
+            if current_args.is_empty() {
+                let sched_mode: SchedMode = scx_loader.scheduler_mode()?;
+                println!("running {sched:?} in {sched_mode:?} mode");
+            } else {
+                println!(
+                    "running {sched:?} with arguments \"{}\"",
+                    current_args.join(" ")
+                );
+            }
         }
     }
     Ok(())
