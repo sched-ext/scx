@@ -131,9 +131,10 @@ impl ScxLoader {
     ) -> zbus::fdo::Result<()> {
         log::info!("starting {scx_name:?} with args {scx_args:?}..");
 
-        let _ = self
-            .channel
-            .send(ScxMessage::StartSchedArgs((scx_name.clone(), scx_args.clone())));
+        let _ = self.channel.send(ScxMessage::StartSchedArgs((
+            scx_name.clone(),
+            scx_args.clone(),
+        )));
         self.current_scx = Some(scx_name);
         // reset mode to auto
         self.current_mode = SchedMode::Auto;
@@ -167,9 +168,10 @@ impl ScxLoader {
     ) -> zbus::fdo::Result<()> {
         log::info!("switching {scx_name:?} with args {scx_args:?}..");
 
-        let _ = self
-            .channel
-            .send(ScxMessage::SwitchSchedArgs((scx_name.clone(), scx_args.clone())));
+        let _ = self.channel.send(ScxMessage::SwitchSchedArgs((
+            scx_name.clone(),
+            scx_args.clone(),
+        )));
         self.current_scx = Some(scx_name);
         // reset mode to auto
         self.current_mode = SchedMode::Auto;
