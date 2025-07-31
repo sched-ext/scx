@@ -116,7 +116,8 @@ static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx 
 
 static __always_inline bool chaos_trait_skips_select_cpu(struct chaos_task_ctx *taskc)
 {
-	return taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS;
+	return taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS || 
+		taskc->next_trait == CHAOS_TRAIT_KPROBE_RANDOM_DELAYS;
 }
 
 static __always_inline u64 get_cpu_delay_dsq(int cpu_idx)
