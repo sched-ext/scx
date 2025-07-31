@@ -583,9 +583,7 @@ impl<'a> App<'a> {
         }
 
         // Now that we updated the process data, we need to also update the filtered data
-        if self.filtering {
-            self.filter_events();
-        }
+        self.filter_events();
 
         if self.state == AppState::Scheduler {
             if self.scheduler.is_empty() {
