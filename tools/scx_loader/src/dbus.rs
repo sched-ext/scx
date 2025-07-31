@@ -42,6 +42,11 @@ pub trait LoaderClient {
         scx_args: &[String],
     ) -> zbus::Result<()>;
 
+    /// Restarts the currently running scheduler with its original configuration.
+    /// This method will stop the currently running scheduler and then restart
+    /// it with the same scheduler and arguments/mode that were used originally.
+    fn restart_scheduler(&self) -> zbus::Result<()>;
+
     /// The name of the currently running scheduler. If no scheduler is active,
     /// this property will be set to "unknown".
     #[zbus(property)]

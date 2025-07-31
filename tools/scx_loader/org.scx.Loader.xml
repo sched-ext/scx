@@ -114,5 +114,16 @@
     -->
     <method name="StopScheduler">
     </method>
+
+    <!--
+        RestartScheduler:
+
+        Restarts the currently running scheduler with its original configuration.
+        This method will stop the currently running scheduler and then restart 
+        it with the same scheduler and arguments/mode that were used originally.
+        Returns an error if no scheduler is currently running.
+    -->
+    <method name="RestartScheduler">
+    </method>
   </interface>
 </node>
