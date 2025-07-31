@@ -117,8 +117,6 @@ const volatile struct {
 	bool atq_enabled;
 	bool cpu_priority;
 	bool freq_control;
-	bool interactive_dsq;
-	bool interactive_fifo;
 	bool interactive_sticky;
 	bool keep_running_enabled;
 	bool kthreads_local;
@@ -133,7 +131,6 @@ const volatile struct {
 	.atq_enabled = false,
 	.cpu_priority = false,
 	.freq_control = false,
-	.interactive_fifo = true,
 	.interactive_sticky = false,
 	.keep_running_enabled = true,
 	.kthreads_local = true,
@@ -254,12 +251,6 @@ static u64 llc_nr_queued(struct llc_ctx *llcx)
 		else
 			nr_queued += scx_bpf_dsq_nr_queued(llcx->mig_dsq);
 	}
-	if (p2dq_config.interactive_dsq) {
-		if (p2dq_config.atq_enabled)
-			nr_queued += scx_atq_nr_queued(llcx->intr_atq);
-		else
-			nr_queued += scx_bpf_dsq_nr_queued(llcx->intr_dsq);
-	}
 
 	return nr_queued;
 }
@@ -279,13 +270,6 @@ static int llc_create_atqs(struct llc_ctx *llcx)
 		}
 		trace("ATQ mig_atq %llu created for LLC %llu",
 		      (u64)llcx->mig_atq, llcx->id);
-	}
-	if (p2dq_config.interactive_dsq) {
-		size_t intr_dsq_sz = topo_config.nr_cpus;
-		llcx->intr_atq = (scx_atq_t *)scx_atq_create_size(false,
-								  intr_dsq_sz);
-		trace("ATQ intr_atq %llu created for LLC %llu",
-		      (u64)llcx->intr_atq, llcx->id);
 	}
 
 	return 0;
@@ -928,18 +912,11 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		if (p2dq_config.interactive_fifo && taskc->interactive) {
-			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-			ret->fifo.dsq_id = taskc->dsq_id;
-			ret->fifo.slice_ns = taskc->slice_ns;
-			ret->fifo.enq_flags = enq_flags;
-		} else {
-			ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
-			ret->vtime.dsq_id = taskc->dsq_id;
-			ret->vtime.slice_ns = taskc->slice_ns;
-			ret->vtime.enq_flags = enq_flags;
-			ret->vtime.vtime = p->scx.dsq_vtime;
-		}
+		ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
+		ret->vtime.dsq_id = taskc->dsq_id;
+		ret->vtime.slice_ns = taskc->slice_ns;
+		ret->vtime.enq_flags = enq_flags;
+		ret->vtime.vtime = p->scx.dsq_vtime;
 
 		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
 		      p->comm, p->scx.weight, taskc->slice_ns,
@@ -980,14 +957,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		}
 
 		bool migrate = can_migrate(taskc, llcx);
-		if (p2dq_config.interactive_fifo && taskc->interactive && !migrate) {
-			taskc->dsq_id = llcx->intr_dsq;
-			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-			ret->fifo.dsq_id = taskc->dsq_id;
-			ret->fifo.slice_ns = taskc->slice_ns;
-			ret->fifo.enq_flags = enq_flags;
-			stat_inc(P2DQ_STAT_ENQ_INTR);
-		} else if (migrate) {
+		if (migrate) {
 			taskc->dsq_id = llcx->mig_dsq;
 			if (p2dq_config.atq_enabled) {
 				taskc->enq_flags = enq_flags;
@@ -1046,20 +1016,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	bool migrate = can_migrate(taskc, llcx);
-	if (p2dq_config.interactive_dsq && taskc->interactive && !migrate) {
-		taskc->dsq_id = llcx->intr_dsq;
-		if (p2dq_config.atq_enabled) {
-			taskc->enq_flags = enq_flags;
-			ret->kind = P2DQ_ENQUEUE_PROMISE_ATQ_VTIME;
-			ret->vtime.dsq_id = llcx->dsq;
-			ret->vtime.atq = llcx->intr_atq;
-			ret->vtime.slice_ns = taskc->slice_ns;
-			ret->vtime.vtime = p->scx.dsq_vtime;
-
-			return;
-		}
-		stat_inc(P2DQ_STAT_ENQ_INTR);
-	} else if (migrate) {
+	if (migrate) {
 		taskc->dsq_id = llcx->mig_dsq;
 		stat_inc(P2DQ_STAT_ENQ_MIG);
 		if (p2dq_config.atq_enabled) {
@@ -1080,15 +1037,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
 	      p->comm, p->scx.weight, taskc->slice_ns,
 	      p->scx.dsq_vtime, llcx->vtime);
-
-	if (p2dq_config.interactive_fifo && taskc->interactive) {
-		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-		ret->fifo.dsq_id = taskc->dsq_id;
-		ret->fifo.enq_flags = enq_flags;
-		ret->fifo.slice_ns = taskc->slice_ns;
-
-		return;
-	}
 
 	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 	ret->vtime.dsq_id = taskc->dsq_id;
@@ -1483,31 +1431,6 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		break;
 	}
 
-	// Next search interactive
-	if (p2dq_config.interactive_dsq) {
-		if (p2dq_config.atq_enabled) {
-			pid = scx_atq_peek(cpuc->intr_atq);
-			if ((p = bpf_task_from_pid((s32)pid))) {
-				if (p->scx.dsq_vtime < min_vtime ||
-				    min_vtime == 0) {
-					min_vtime = p->scx.dsq_vtime;
-					min_atq = cpuc->intr_atq;
-					peeked_pid = p->pid;
-				}
-				bpf_task_release(p);
-			}
-		} else {
-			bpf_for_each(scx_dsq, p, cpuc->intr_dsq, 0) {
-				if (p->scx.dsq_vtime < min_vtime ||
-				    min_vtime == 0) {
-					min_vtime = p->scx.dsq_vtime;
-					dsq_id = cpuc->intr_dsq;
-				}
-				break;
-			}
-		}
-	}
-
 	// LLC DSQ
 	bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
 		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
@@ -1603,39 +1526,6 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	if (dsq_id != cpuc->affn_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
-
-	if (p2dq_config.interactive_dsq) {
-		if (p2dq_config.atq_enabled) {
-			pid = scx_atq_pop(cpuc->intr_atq);
-			if ((p = bpf_task_from_pid((s32)pid))) {
-				if (!(taskc = lookup_task_ctx(p))) {
-					bpf_task_release(p);
-					scx_bpf_error("failed to get task ctx");
-					return;
-				}
-				if (p->pid == peeked_pid) {
-					scx_bpf_dsq_insert(p,
-							   SCX_DSQ_LOCAL,
-							   taskc->slice_ns,
-							   taskc->enq_flags);
-					bpf_task_release(p);
-					return;
-				} else {
-					scx_bpf_dsq_insert_vtime(p,
-							   cpuc->llc_dsq,
-							   taskc->slice_ns,
-							   p->scx.dsq_vtime,
-							   taskc->enq_flags);
-					bpf_task_release(p);
-					stat_inc(P2DQ_STAT_ATQ_REENQ);
-				}
-			}
-		} else {
-			if (dsq_id != cpuc->intr_dsq &&
-			    scx_bpf_dsq_move_to_local(cpuc->intr_dsq))
-			return;
-		}
-	}
 
 	if (dsq_id != cpuc->llc_dsq &&
 	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
@@ -1837,13 +1727,6 @@ static int init_llc(u32 llc_index)
 		return -EINVAL;
 	}
 
-	llcx->intr_dsq = llcx->id | P2DQ_INTR_DSQ;
-	ret = scx_bpf_create_dsq(llcx->intr_dsq, llcx->node_id);
-	if (ret) {
-		scx_bpf_error("failed to create DSQ %llu", llcx->intr_dsq);
-		return -EINVAL;
-	}
-
 	llcx->mig_dsq = llcx->id | P2DQ_MIG_DSQ;
 	ret = scx_bpf_create_dsq(llcx->mig_dsq, llcx->node_id);
 	if (ret) {
@@ -1984,7 +1867,6 @@ static s32 init_cpu(int cpu)
 	llcx->id = cpu_llc_ids[cpu];
 	llcx->node_id = cpu_node_ids[cpu];
 	nodec->id = cpu_node_ids[cpu];
-	cpuc->intr_atq = llcx->intr_atq;
 	cpuc->mig_atq = llcx->mig_atq;
 
 	if (cpuc->is_big) {
@@ -2269,7 +2151,6 @@ static __always_inline s32 p2dq_init_impl()
 		}
 		cpuc->affn_dsq = dsq_id;
 		cpuc->mig_dsq = llcx->mig_dsq;
-		cpuc->intr_dsq = llcx->intr_dsq;
 	}
 
 	if (p2dq_config.cpu_priority) {

@@ -22,12 +22,10 @@ struct cpu_ctx {
 	bool				nice_task;
 	u64				ran_for;
 	u32				node_id;
-	u64				intr_dsq;
 	u64				mig_dsq;
 	u64				llc_dsq;
 	u64				max_load_dsq;
 
-	scx_atq_t			*intr_atq;
 	scx_atq_t			*mig_atq;
 };
 
@@ -39,7 +37,6 @@ struct llc_ctx {
 	u32				lb_llc_id;
 	u64				last_period_ns;
 	u64				dsq;
-	u64				intr_dsq;
 	u64				mig_dsq;
 	u32				index;
 	u64				load;
@@ -53,7 +50,6 @@ struct llc_ctx {
 	struct bpf_cpumask __kptr	*little_cpumask;
 	struct bpf_cpumask __kptr	*node_cpumask;
 
-	scx_atq_t			*intr_atq;
 	scx_atq_t			*mig_atq;
 	scx_minheap_t			*idle_cpu_heap;
 	arena_spinlock_t		idle_lock;
