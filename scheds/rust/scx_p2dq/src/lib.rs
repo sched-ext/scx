@@ -79,7 +79,7 @@ pub struct SchedulerOpts {
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
     pub interactive_sticky: bool,
 
-    /// Interactive tasks are FIFO scheduled
+    /// ***DEPRECATED*** Interactive tasks are FIFO scheduled
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub interactive_fifo: bool,
 
@@ -109,7 +109,7 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub cpu_priority: bool,
 
-    /// Use a separate DSQ for interactive tasks
+    /// ***DEPRECATED*** Use a separate DSQ for interactive tasks
     #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub interactive_dsq: bool,
 
@@ -271,7 +271,6 @@ macro_rules! init_open_skel {
             // p2dq config
             rodata.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
             rodata.p2dq_config.dsq_shift = opts.dsq_shift as u64;
-            rodata.p2dq_config.interactive_dsq = MaybeUninit::new(opts.interactive_dsq);
             rodata.p2dq_config.kthreads_local = MaybeUninit::new(!opts.disable_kthreads_local);
             rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
@@ -283,7 +282,6 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority);
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
-            rodata.p2dq_config.interactive_fifo = MaybeUninit::new(opts.interactive_fifo);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
             rodata.p2dq_config.select_idle_in_enqueue =
                 MaybeUninit::new(opts.select_idle_in_enqueue);
