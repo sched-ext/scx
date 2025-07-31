@@ -3137,6 +3137,7 @@ dependencies = [
 name = "scxctl"
 version = "1.0.16"
 dependencies = [
+ "anyhow",
  "clap",
  "colored 3.0.0",
  "scx_loader",
