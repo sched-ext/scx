@@ -12,12 +12,15 @@ import sys
 from typing import List, Optional
 
 
-async def run_command(cmd: List[str], cwd: Optional[str] = None) -> str:
+async def run_command(
+    cmd: List[str], cwd: Optional[str] = None, no_capture: bool = False
+) -> Optional[str]:
     print(f"Running: {' '.join(cmd)}", flush=True)
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=None if no_capture else asyncio.subprocess.PIPE,
+        stderr=None if no_capture else asyncio.subprocess.PIPE,
         cwd=cwd,
     )
 
@@ -34,7 +37,7 @@ async def run_command(cmd: List[str], cwd: Optional[str] = None) -> str:
             proc.returncode, cmd, output=stdout, stderr=stderr
         )
 
-    return stdout.decode()
+    return stdout.decode() if stdout else None
 
 
 async def get_kernel_path(kernel_name: str) -> str:
@@ -52,8 +55,12 @@ async def get_kernel_path(kernel_name: str) -> str:
 
 
 async def run_command_in_vm(
-    kernel: str, command: List[str], memory: int = 1024 * 1024 * 1024, cpus: int = 2
-) -> str:
+    kernel: str,
+    command: List[str],
+    memory: int = 1024 * 1024 * 1024,
+    cpus: int = 2,
+    no_capture: bool = False,
+) -> Optional[str]:
     mem_mb = int(memory / 1024 / 1024)
 
     cmd = [
@@ -81,7 +88,7 @@ async def run_command_in_vm(
     arg0 = shutil.which(command[0])
     cmd += ["--", arg0] + command[1:]
 
-    return await run_command(cmd)
+    return await run_command(cmd, no_capture=no_capture)
 
 
 async def get_clippy_packages() -> List[str]:
@@ -106,10 +113,10 @@ async def run_format():
 
     py_files = glob.glob(".github/include/**/*.py", recursive=True)
     if py_files:
-        await run_command(["black"] + py_files)
-        await run_command(["isort"] + py_files)
+        await run_command(["black"] + py_files, no_capture=True)
+        await run_command(["isort"] + py_files, no_capture=True)
 
-    await run_command(["cargo", "fmt"])
+    await run_command(["cargo", "fmt"], no_capture=True)
 
     nix_files = glob.glob("**/*.nix", root_dir=".github/include/", recursive=True)
     if nix_files:
@@ -117,9 +124,10 @@ async def run_format():
             ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
             + nix_files,
             cwd=".github/include",
+            no_capture=True,
         )
 
-    await run_command(["git", "diff", "--exit-code"])
+    await run_command(["git", "diff", "--exit-code"], no_capture=True)
     print("✓ Format completed successfully", flush=True)
 
 
@@ -127,7 +135,7 @@ async def run_build():
     """Build all targets."""
     print("Running build...", flush=True)
 
-    await run_command(["cargo", "build", "--all-targets", "--locked"])
+    await run_command(["cargo", "build", "--all-targets", "--locked"], no_capture=True)
     print("✓ Build completed successfully", flush=True)
 
 
@@ -138,7 +146,8 @@ async def run_clippy():
     clippy_packages = await get_clippy_packages()
     for package in clippy_packages:
         await run_command(
-            ["cargo", "clippy", "--no-deps", "-p", package, "--", "-Dwarnings"]
+            ["cargo", "clippy", "--no-deps", "-p", package, "--", "-Dwarnings"],
+            no_capture=True,
         )
 
     print("✓ Clippy checks passed", flush=True)
@@ -155,7 +164,8 @@ async def run_tests():
             "archive",
             "--archive-file",
             "target/nextest-archive.tar.zst",
-        ]
+        ],
+        no_capture=True,
     )
 
     # Get CPU count
@@ -169,6 +179,7 @@ async def run_tests():
         ],
         memory=10 * 1024 * 1024 * 1024,
         cpus=min(os.cpu_count(), 16),
+        no_capture=True,
     )
 
     print("✓ Tests completed successfully", flush=True)
