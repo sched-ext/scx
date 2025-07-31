@@ -1386,14 +1386,10 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 		return 0;
 
 	if (saturated) {
-		cur_load = llc_nr_queued(cur_llcx);
-
-		if (llc_nr_queued(first) >= cur_load &&
-		    consume_llc(first))
+		if (consume_llc(first))
 			return 0;
 
-		if (llc_nr_queued(second) >= cur_load &&
-		    consume_llc(second))
+		if (consume_llc(second))
 			return 0;
 	}
 
@@ -1411,11 +1407,6 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	scx_atq_t *min_atq = NULL;
 
 	if (!(cpuc = lookup_cpu_ctx(cpu))) {
-		scx_bpf_error("can't happen");
-		return;
-	}
-
-	if (p2dq_config.nr_dsqs_per_llc > MAX_DSQS_PER_LLC) {
 		scx_bpf_error("can't happen");
 		return;
 	}
