@@ -57,6 +57,7 @@ use ratatui::{
     widgets::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
         RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
+        TableState,
     },
     Frame,
 };
@@ -328,6 +329,7 @@ impl<'a> App<'a> {
             || self.state == AppState::Llc
             || self.state == AppState::Node
         {
+            self.filtered_state.lock().unwrap().reset();
             self.filter_events();
         }
 
@@ -2224,6 +2226,11 @@ impl<'a> App<'a> {
 
     /// Render the process view.
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let height = if area.height > 0 { area.height - 1 } else { 1 };
+        if height != self.events_list_size {
+            self.events_list_size = height
+        }
+
         let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
 
         let header = visible_columns
@@ -2263,16 +2270,18 @@ impl<'a> App<'a> {
                 .left_aligned(),
             );
 
-        let mut filtered_processes: Vec<(i32, &ProcData)> = {
+        // We want to hold the lock for as short as possible
+        let (mut filtered_processes, selected): (Vec<(i32, &ProcData)>, usize) = {
             let filtered_state = self.filtered_state.lock().unwrap();
-            filtered_state
+            let processes = filtered_state
                 .list
                 .iter()
                 .filter_map(|item| {
                     item.as_int()
                         .and_then(|pid| self.proc_data.get(&pid).map(|data| (pid, data)))
                 })
-                .collect()
+                .collect();
+            (processes, filtered_state.selected)
         };
 
         filtered_processes.sort_unstable_by(|a, b| {
@@ -2282,18 +2291,25 @@ impl<'a> App<'a> {
                 .then_with(|| b.1.threads.len().cmp(&a.1.threads.len()))
         });
 
-        let rows = filtered_processes.into_iter().map(|(i, data)| {
-            visible_columns
-                .iter()
-                .map(|col| Cell::from((col.value_fn)(i, data)))
-                .collect::<Row>()
-                .height(1)
-                .style(self.theme().text_color())
-        });
+        let rows = filtered_processes
+            .iter()
+            .enumerate()
+            .map(|(i, (tgid, data))| {
+                visible_columns
+                    .iter()
+                    .map(|col| Cell::from((col.value_fn)(*tgid, data)))
+                    .collect::<Row>()
+                    .height(1)
+                    .style(if i == selected {
+                        self.theme().text_important_color()
+                    } else {
+                        self.theme().text_color()
+                    })
+            });
 
         let table = Table::new(rows, constraints).header(header).block(block);
 
-        frame.render_widget(table, area);
+        frame.render_stateful_widget(table, area, &mut TableState::new().with_offset(selected));
 
         Ok(())
     }
@@ -2332,7 +2348,11 @@ impl<'a> App<'a> {
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
         let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node)
             && filtered_state.scroll < filtered_state.count - 1
         {
             filtered_state.scroll += 1;
@@ -2343,7 +2363,11 @@ impl<'a> App<'a> {
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
         let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node)
             && filtered_state.scroll > 0
         {
             filtered_state.scroll -= 1;
@@ -2354,7 +2378,11 @@ impl<'a> App<'a> {
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
         let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent)
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node)
             && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
             filtered_state.scroll += self.events_list_size - 1;
@@ -2365,7 +2393,12 @@ impl<'a> App<'a> {
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
         let mut filtered_state = self.filtered_state.lock().unwrap();
-        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+        if self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+        {
             if filtered_state.scroll > self.events_list_size {
                 filtered_state.scroll -= self.events_list_size - 1;
                 filtered_state.selected -= (self.events_list_size - 1) as usize;
@@ -2379,6 +2412,7 @@ impl<'a> App<'a> {
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) -> Result<()> {
         if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
+            self.event_input_buffer.clear();
             let selected = {
                 let mut filtered_state = self.filtered_state.lock().unwrap();
                 if filtered_state.list.is_empty() {
@@ -2946,7 +2980,6 @@ impl<'a> App<'a> {
             Action::PageDown => self.on_pg_down(),
             Action::Enter => {
                 self.on_enter()?;
-                self.event_input_buffer.clear();
             }
             Action::SetState(state) => {
                 if *state == self.state {
