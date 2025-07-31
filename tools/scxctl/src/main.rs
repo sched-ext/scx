@@ -193,17 +193,17 @@ fn format_scheduler_message(
 }
 
 fn ensure_scx_prefix(input: &str) -> String {
-    if !input.starts_with(SCHED_PREFIX) {
-        return format!("{}{}", SCHED_PREFIX, input);
+    if input.starts_with(SCHED_PREFIX) {
+        input.to_string()
+    } else {
+        format!("{}{}", SCHED_PREFIX, input)
     }
-    input.to_string()
 }
 
 fn remove_scx_prefix(input: &str) -> String {
-    if let Some(strip_input) = input.strip_prefix(SCHED_PREFIX) {
-        return strip_input.to_string();
-    }
-    input.to_string()
+    input.strip_prefix(SCHED_PREFIX)
+        .unwrap_or(input)
+        .to_string()
 }
 
 fn validate_sched(scx_loader: LoaderClientProxyBlocking, sched: String) -> anyhow::Result<SupportedSched> {
