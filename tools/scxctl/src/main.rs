@@ -35,7 +35,7 @@ fn cmd_list(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::er
         Ok(sl) => {
             let sched_names = sl
                 .iter()
-                .map(|s| remove_scx_prefix(&s.to_string()))
+                .map(|s| remove_scx_prefix(s))
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("supported schedulers: [{}]", sched_names);
@@ -162,14 +162,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 const SCHED_PREFIX: &str = "scx_";
 
-fn ensure_scx_prefix(input: String) -> String {
+fn ensure_scx_prefix(input: &str) -> String {
     if !input.starts_with(SCHED_PREFIX) {
         return format!("{}{}", SCHED_PREFIX, input);
     }
-    input
+    input.to_string()
 }
 
-fn remove_scx_prefix(input: &String) -> String {
+fn remove_scx_prefix(input: &str) -> String {
     if let Some(strip_input) = input.strip_prefix(SCHED_PREFIX) {
         return strip_input.to_string();
     }
@@ -194,5 +194,5 @@ fn validate_sched(scx_loader: LoaderClientProxyBlocking, sched: String) -> Suppo
         exit(1);
     }
 
-    SupportedSched::try_from(ensure_scx_prefix(sched).as_str()).unwrap()
+    SupportedSched::try_from(ensure_scx_prefix(&sched).as_str()).unwrap()
 }
