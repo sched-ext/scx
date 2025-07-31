@@ -8,10 +8,10 @@ use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
+use crate::columns::{get_process_columns, get_thread_columns};
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
-use crate::get_process_columns;
 use crate::search;
 use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
@@ -29,6 +29,7 @@ use crate::PerfEvent;
 use crate::PerfettoTraceManager;
 use crate::ProcData;
 use crate::ProfilingEvent;
+use crate::ThreadData;
 use crate::VecStats;
 use crate::ViewState;
 use crate::APP;
@@ -102,7 +103,11 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
+
     process_columns: Columns<i32, ProcData>,
+    thread_columns: Columns<i32, ThreadData>,
+    selected_process: Option<i32>,
+    in_thread_view: bool,
 
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
@@ -241,6 +246,7 @@ impl<'a> App<'a> {
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
         let process_columns = Columns::new(get_process_columns());
+        let thread_columns = Columns::new(get_thread_columns());
 
         // There isn't a 'is_loaded' method on a prog in libbpf-rs so do the next best thing and
         // try to infer from the fd
@@ -269,6 +275,9 @@ impl<'a> App<'a> {
             collect_cpu_freq: true,
             collect_uncore_freq: true,
             process_columns,
+            thread_columns,
+            selected_process: None,
+            in_thread_view: false,
             cpu_data,
             llc_data,
             node_data,
@@ -356,6 +365,11 @@ impl<'a> App<'a> {
     /// Returns whether we are currently filtering or not
     pub fn filtering(&self) -> bool {
         self.filtering
+    }
+
+    fn selected_proc_data(&mut self) -> Option<&mut ProcData> {
+        self.selected_process
+            .and_then(|tgid| self.proc_data.get_mut(&tgid))
     }
 
     /// Stop all active profiling events.
@@ -552,15 +566,20 @@ impl<'a> App<'a> {
         let mut to_remove = vec![];
 
         for (&i, proc_data) in self.proc_data.iter_mut() {
-            match proc_data.update_cpu_usage() {
-                Ok(_) => proc_data.set_cpu_util(system_active_util),
-                Err(_) => to_remove.push(i),
+            if proc_data.update(system_active_util).is_err() {
+                to_remove.push(i);
             }
         }
 
         // If we weren't able to update the stats, it is because the process is no longer alive
         for key in to_remove {
             self.proc_data.remove(&key);
+        }
+
+        if self.in_thread_view {
+            if let Some(proc_data) = self.selected_proc_data() {
+                proc_data.update_threads(system_active_util);
+            }
         }
 
         // Now that we updated the process data, we need to also update the filtered data
@@ -986,7 +1005,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_process_table(frame, left)
+        self.render_table(frame, left)
     }
 
     /// Renders the node application state.
@@ -1119,7 +1138,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_process_table(frame, left)
+        self.render_table(frame, left)
     }
 
     /// Creates a sparkline for a dsq.
@@ -1462,8 +1481,8 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Draw the "Missing Scheduler" message.
-    fn missing_scheduler_msg(&self, frame: &mut Frame, area: Rect) {
+    /// Draw an error message.
+    fn render_error_msg(&self, frame: &mut Frame, area: Rect, msg: &str) {
         frame.render_widget(Clear, area);
 
         let top_pad = area.height.saturating_sub(1) / 2;
@@ -1473,7 +1492,7 @@ impl<'a> App<'a> {
             lines.push(Line::raw(""));
         }
         lines.push(Line::from(Span::styled(
-            "Missing Scheduler",
+            msg,
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
 
@@ -1500,7 +1519,7 @@ impl<'a> App<'a> {
     ) -> Result<()> {
         // If no scheduler is attached, display a message and return early.
         if self.scheduler.is_empty() {
-            self.missing_scheduler_msg(frame, area);
+            self.render_error_msg(frame, area, "Missing Scheduler");
             return Ok(());
         }
 
@@ -1773,7 +1792,7 @@ impl<'a> App<'a> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
         self.render_event(frame, right)?;
-        self.render_process_table(frame, left)
+        self.render_table(frame, left)
     }
 
     /// Renders the help TUI.
@@ -2057,10 +2076,7 @@ impl<'a> App<'a> {
         ])
         .split(area);
 
-        let height = if area.height > 0 { area.height - 1 } else { 1 };
-        if height != self.events_list_size {
-            self.events_list_size = height
-        }
+        self.update_events_list_size(area);
 
         let list_type = match self.state {
             AppState::PerfEvent => "perf",
@@ -2224,15 +2240,11 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Render the process view.
-    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let height = if area.height > 0 { area.height - 1 } else { 1 };
-        if height != self.events_list_size {
-            self.events_list_size = height
-        }
-
-        let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
-
+    /// Common helper to create table header and constraints from visible columns
+    fn create_table_header_and_constraints<T, D>(
+        &self,
+        visible_columns: &[&crate::columns::Column<T, D>],
+    ) -> (Row, Vec<Constraint>) {
         let header = visible_columns
             .iter()
             .map(|col| Cell::from(col.header))
@@ -2246,6 +2258,24 @@ impl<'a> App<'a> {
             .iter()
             .map(|col| col.constraint)
             .collect::<Vec<_>>();
+
+        (header, constraints)
+    }
+
+    /// Common helper to update events list size
+    fn update_events_list_size(&mut self, area: Rect) {
+        let height = if area.height > 0 { area.height - 1 } else { 1 };
+        if height != self.events_list_size {
+            self.events_list_size = height;
+        }
+    }
+
+    /// Render the process view.
+    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        self.update_events_list_size(area);
+
+        let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
+        let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -2288,7 +2318,7 @@ impl<'a> App<'a> {
             b.1.cpu_util_perc
                 .partial_cmp(&a.1.cpu_util_perc)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.1.threads.len().cmp(&a.1.threads.len()))
+                .then_with(|| b.1.num_threads.cmp(&a.1.num_threads))
         });
 
         let rows = filtered_processes
@@ -2311,7 +2341,78 @@ impl<'a> App<'a> {
 
         frame.render_stateful_widget(table, area, &mut TableState::new().with_offset(selected));
 
+        if let Some((tgid, _)) = filtered_processes.get(selected) {
+            self.selected_process = Some(*tgid);
+        }
+
         Ok(())
+    }
+
+    fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        self.update_events_list_size(area);
+
+        let Some(tgid) = self.selected_process else {
+            self.render_error_msg(
+                frame,
+                area,
+                "Process has been killed. Press escape to return to process view.",
+            );
+            return Ok(());
+        };
+        let Some(proc_data) = self.proc_data.get(&tgid) else {
+            self.render_error_msg(
+                frame,
+                area,
+                "Process has been killed. Press escape to return to process view.",
+            );
+            return Ok(());
+        };
+
+        let visible_columns: Vec<_> = self.thread_columns.visible_columns().collect();
+        let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
+
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(self.theme().border_style())
+            .title_top(
+                Line::from(format!(
+                    "Process: {} {:.15} (total threads: {})",
+                    proc_data.tgid, proc_data.process_name, proc_data.num_threads,
+                ))
+                .style(self.theme().title_style())
+                .centered(),
+            );
+
+        let mut threads = proc_data.threads.iter().collect::<Vec<_>>();
+
+        threads.sort_unstable_by(|a, b| {
+            b.1.cpu_util_perc
+                .partial_cmp(&a.1.cpu_util_perc)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let rows = threads.into_iter().map(|(tid, data)| {
+            visible_columns
+                .iter()
+                .map(|col| Cell::from((col.value_fn)(*tid, data)))
+                .collect::<Row>()
+                .height(1)
+                .style(self.theme().text_color())
+        });
+
+        let table = Table::new(rows, constraints).header(header).block(block);
+
+        frame.render_widget(table, area);
+
+        Ok(())
+    }
+
+    fn render_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        if self.in_thread_view {
+            self.render_thread_table(frame, area)
+        } else {
+            self.render_process_table(frame, area)
+        }
     }
 
     /// Renders the application to the frame.
@@ -2462,6 +2563,48 @@ impl<'a> App<'a> {
                 self.state = prev_state;
                 self.available_events.push(prof_event);
             }
+        } else if self.state == AppState::Default
+            || self.state == AppState::Node
+            || self.state == AppState::Llc
+        {
+            // Reset process view
+            self.filtering = false;
+            self.event_input_buffer.clear();
+            self.filter_events();
+
+            if let Some(proc_data) = self.selected_proc_data() {
+                proc_data.init_threads()?;
+
+                // Kick off thread view
+                self.in_thread_view = true;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_escape(&mut self) -> Result<()> {
+        match self.state() {
+            AppState::PerfEvent | AppState::KprobeEvent => {
+                self.event_input_buffer.clear();
+                self.filter_events();
+                self.handle_action(&Action::SetState(self.prev_state.clone()))?;
+            }
+            AppState::Default | AppState::Llc | AppState::Node => {
+                if self.filtering {
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_events();
+                } else if self.in_thread_view {
+                    if let Some(proc_data) = self.selected_proc_data() {
+                        proc_data.clear_threads();
+                    }
+                    self.in_thread_view = false;
+                } else {
+                    self.handle_action(&Action::Quit)?;
+                }
+            }
+            _ => self.handle_action(&Action::Quit)?,
         }
 
         Ok(())
@@ -2633,7 +2776,9 @@ impl<'a> App<'a> {
         if pid == tgid {
             self.proc_data.remove(&pid);
         } else if let Entry::Occupied(entry) = self.proc_data.entry(tgid) {
-            entry.into_mut().remove_thread(pid);
+            if self.in_thread_view {
+                entry.into_mut().remove_thread(pid);
+            }
         }
 
         if self.state == AppState::Tracing && action.ts > self.trace_start {
@@ -2667,8 +2812,12 @@ impl<'a> App<'a> {
                 }
                 Entry::Occupied(entry) => {
                     let proc_data = entry.into_mut();
-                    proc_data.add_thread(child_pid);
                     proc_data.layer_id = Some(*parent_layer_id);
+                    if self.in_thread_view {
+                        if let Some(proc_data) = self.selected_proc_data() {
+                            proc_data.add_thread(child_pid);
+                        }
+                    }
                 }
             }
         } else {
@@ -2712,10 +2861,12 @@ impl<'a> App<'a> {
             next_dsq_lat_us,
             next_dsq_vtime,
             next_tgid,
+            next_pid,
             next_layer_id,
             prev_dsq_id,
             prev_used_slice_ns,
             prev_tgid,
+            prev_pid,
             prev_layer_id,
             ..
         } = action;
@@ -2725,37 +2876,80 @@ impl<'a> App<'a> {
             .all_cpus
             .get(&(*cpu as usize))
             .expect("Cpu should exist in topology");
-        let llc = topo_cpu.llc_id;
-        let node = topo_cpu.node_id;
+        let cpu_i32 = u32_to_i32(*cpu);
+        let llc = Some(topo_cpu.llc_id as u32);
+        let node = Some(topo_cpu.node_id as u32);
+        let max_cpu_events = self.max_cpu_events;
 
-        let mut insert_or_update = |tgid: i32, dsq: u64, layer: i32| {
-            match self.proc_data.entry(tgid) {
-                Entry::Vacant(entry) => {
-                    if let Ok(mut proc_data) = ProcData::from_tgid(tgid, self.max_cpu_events) {
-                        proc_data.cpu = u32_to_i32(*cpu);
-                        proc_data.llc = Some(llc as u32);
-                        proc_data.node = Some(node as u32);
-                        proc_data.dsq = Some(dsq);
-                        proc_data.layer_id = Some(layer);
-                        entry.insert(proc_data);
+        macro_rules! update_fields {
+            ($data:expr, $cpu:expr, $llc:expr, $node:expr, $dsq:expr, $layer:expr) => {{
+                $data.cpu = $cpu;
+                $data.llc = $llc;
+                $data.node = $node;
+                $data.dsq = $dsq;
+                $data.layer_id = $layer;
+            }};
+        }
+
+        let insert_or_update_thread =
+            |proc_data: &mut ProcData, tid: i32, dsq: Option<u64>, layer: Option<i32>| {
+                match proc_data.threads.entry(tid) {
+                    Entry::Vacant(entry) => {
+                        if let Ok(mut thread_data) =
+                            ThreadData::from_tgid_tid(proc_data.tgid, tid, max_cpu_events)
+                        {
+                            update_fields!(thread_data, cpu_i32, llc, node, dsq, layer);
+                            entry.insert(thread_data);
+                        }
+                    }
+                    Entry::Occupied(mut entry) => {
+                        let thread_data = entry.get_mut();
+                        update_fields!(thread_data, cpu_i32, llc, node, dsq, layer);
+                    }
+                };
+            };
+
+        let mut insert_or_update_proc =
+            |tgid: i32, tid: i32, dsq: Option<u64>, layer: Option<i32>| {
+                match self.proc_data.entry(tgid) {
+                    Entry::Vacant(entry) => {
+                        if let Ok(mut proc_data) = ProcData::from_tgid(tgid, max_cpu_events) {
+                            update_fields!(proc_data, cpu_i32, llc, node, dsq, layer);
+                            entry.insert(proc_data);
+                        }
+                    }
+                    Entry::Occupied(mut entry) => {
+                        let proc_data = entry.get_mut();
+                        update_fields!(proc_data, cpu_i32, llc, node, dsq, layer);
+                    }
+                };
+
+                if self.in_thread_view {
+                    if let Some(proc_data) = self.selected_proc_data() {
+                        if proc_data.tgid == tgid {
+                            insert_or_update_thread(proc_data, tid, dsq, layer);
+                        }
                     }
                 }
-                Entry::Occupied(mut entry) => {
-                    let proc_data = entry.get_mut();
-                    proc_data.cpu = u32_to_i32(*cpu);
-                    proc_data.llc = Some(llc as u32);
-                    proc_data.node = Some(node as u32);
-                    proc_data.dsq = Some(dsq);
-                    proc_data.layer_id = Some(layer);
-                }
             };
-        };
 
         let next_tgid = u32_to_i32(*next_tgid);
         let prev_tgid = u32_to_i32(*prev_tgid);
+        let next_tid = u32_to_i32(*next_pid);
+        let prev_tid = u32_to_i32(*prev_pid);
 
-        insert_or_update(next_tgid, *next_dsq_id, *next_layer_id);
-        insert_or_update(prev_tgid, *prev_dsq_id, *prev_layer_id);
+        insert_or_update_proc(
+            next_tgid,
+            next_tid,
+            Some(*next_dsq_id),
+            Some(*next_layer_id),
+        );
+        insert_or_update_proc(
+            prev_tgid,
+            prev_tid,
+            Some(*prev_dsq_id),
+            Some(*prev_layer_id),
+        );
 
         if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
             proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
@@ -3119,6 +3313,13 @@ impl<'a> App<'a> {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
+                AppState::Default | AppState::Llc | AppState::Node => {
+                    if self.in_thread_view {
+                        self.in_thread_view = false;
+                    } else {
+                        self.should_quit.store(true, Ordering::Relaxed);
+                    }
+                }
                 _ => {
                     self.should_quit.store(true, Ordering::Relaxed);
                 }
@@ -3138,23 +3339,9 @@ impl<'a> App<'a> {
                 self.event_input_buffer.pop();
                 self.filter_events();
             }
-            Action::Esc => match self.state() {
-                AppState::PerfEvent | AppState::KprobeEvent => {
-                    self.event_input_buffer.clear();
-                    self.filter_events();
-                    self.handle_action(&Action::SetState(self.prev_state.clone()))?;
-                }
-                AppState::Default | AppState::Llc | AppState::Node => {
-                    if self.filtering {
-                        self.filtering = false;
-                        self.event_input_buffer.clear();
-                        self.filter_events();
-                    } else {
-                        self.handle_action(&Action::Quit)?;
-                    }
-                }
-                _ => self.handle_action(&Action::Quit)?,
-            },
+            Action::Esc => {
+                self.on_escape()?;
+            }
             _ => {}
         };
         Ok(())

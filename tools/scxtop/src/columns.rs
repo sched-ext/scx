@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use crate::ProcData;
+use crate::ThreadData;
 use crate::VecStats;
 
 use ratatui::prelude::Constraint;
@@ -135,7 +136,48 @@ pub fn get_process_columns() -> Vec<Column<i32, ProcData>> {
             header: "Threads",
             constraint: Constraint::Length(7),
             visible: true,
-            value_fn: Box::new(|_, data| data.threads.len().to_string()),
+            value_fn: Box::new(|_, data| data.num_threads.to_string()),
+        },
+        Column {
+            header: "CPU%",
+            constraint: Constraint::Length(4),
+            visible: true,
+            value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
+        },
+    ]
+}
+
+pub fn get_thread_columns() -> Vec<Column<i32, ThreadData>> {
+    vec![
+        Column {
+            header: "TID",
+            constraint: Constraint::Length(8),
+            visible: true,
+            value_fn: Box::new(|tid, _| tid.to_string()),
+        },
+        Column {
+            header: "Last DSQ",
+            constraint: Constraint::Length(18),
+            visible: true,
+            value_fn: Box::new(|_, data| data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))),
+        },
+        Column {
+            header: "CPU",
+            constraint: Constraint::Length(3),
+            visible: true,
+            value_fn: Box::new(|_, data| data.cpu.to_string()),
+        },
+        Column {
+            header: "LLC",
+            constraint: Constraint::Length(3),
+            visible: true,
+            value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
+        },
+        Column {
+            header: "NUMA",
+            constraint: Constraint::Length(4),
+            visible: true,
+            value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
         },
         Column {
             header: "CPU%",
