@@ -55,32 +55,22 @@ fn cmd_start(
     mode_name: Option<SchedMode>,
     args: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
-    // Verify scx_loader is not running a scheduler
-    let current_scheduler = scx_loader.current_scheduler()
-        .context("Failed to get current scheduler status")?;
-    if current_scheduler != "unknown" {
-        println!(
-            "{} scx scheduler already running, use '{}' instead of '{}'",
-            "error:".red().bold(),
-            "switch".bold(),
-            "start".bold()
-        );
-        println!("\nFor more information, try '{}'", "--help".bold());
-        exit(1);
-    }
+    // Verify no scheduler is running
+    check_scheduler_state(&scx_loader, false)?;
 
-    let sched: SupportedSched = validate_sched(scx_loader.clone(), sched_name)?;
-    let mode: SchedMode = mode_name.unwrap_or(SchedMode::Auto);
-    match args {
+    let sched = validate_sched(scx_loader.clone(), sched_name)?;
+    let mode = mode_name.unwrap_or(SchedMode::Auto);
+
+    match &args {
         Some(args) => {
-            scx_loader.start_scheduler_with_args(sched.clone(), &args.clone())?;
-            println!("started {sched:?} with arguments \"{}\"", args.join(" "));
+            scx_loader.start_scheduler_with_args(sched.clone(), args)?;
         }
         None => {
             scx_loader.start_scheduler(sched.clone(), mode.clone())?;
-            println!("started {sched:?} in {mode:?} mode");
         }
     }
+
+    println!("{}", format_scheduler_message("started", &sched, Some(&mode), args.as_ref()));
     Ok(())
 }
 
@@ -90,45 +80,31 @@ fn cmd_switch(
     mode_name: Option<SchedMode>,
     args: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
-    // Cache DBUS call result
-    let current_scheduler = scx_loader.current_scheduler()
-        .context("Failed to get current scheduler status")?;
+    // Verify a scheduler is running
+    let current_scheduler = check_scheduler_state(&scx_loader, true)?;
 
-    // Verify scx_loader is running a scheduler
-    if current_scheduler == "unknown" {
-        println!(
-            "{} no scx scheduler running, use '{}' instead of '{}'",
-            "error:".red().bold(),
-            "start".bold(),
-            "switch".bold()
-        );
-        println!("\nFor more information, try '{}'", "--help".bold());
-        exit(1);
-    }
-
-    let sched: SupportedSched = match sched_name {
-        Some(sched_name) => validate_sched(scx_loader.clone(), sched_name)?,
+    let sched = match sched_name {
+        Some(name) => validate_sched(scx_loader.clone(), name)?,
         None => SupportedSched::try_from(current_scheduler.as_str())
             .context("Failed to parse current scheduler")?,
     };
-    let mode: SchedMode = match mode_name {
-        Some(mode_name) => mode_name,
+
+    let mode = match mode_name {
+        Some(mode) => mode,
         None => scx_loader.scheduler_mode()
             .context("Failed to get current scheduler mode")?,
     };
-    match args {
+
+    match &args {
         Some(args) => {
-            scx_loader.switch_scheduler_with_args(sched.clone(), &args.clone())?;
-            println!(
-                "switched to {sched:?} with arguments \"{}\"",
-                args.join(" ")
-            );
+            scx_loader.switch_scheduler_with_args(sched.clone(), args)?;
         }
         None => {
             scx_loader.switch_scheduler(sched.clone(), mode.clone())?;
-            println!("switched to {sched:?} in {mode:?} mode");
         }
     }
+
+    println!("{}", format_scheduler_message("switched to", &sched, Some(&mode), args.as_ref()));
     Ok(())
 }
 
@@ -166,6 +142,55 @@ fn main() -> anyhow::Result<()> {
  */
 
 const SCHED_PREFIX: &str = "scx_";
+
+fn check_scheduler_state(
+    scx_loader: &LoaderClientProxyBlocking,
+    expecting_running: bool
+) -> anyhow::Result<String> {
+    let current_scheduler = scx_loader.current_scheduler()
+        .context("Failed to get current scheduler status")?;
+
+    let is_running = current_scheduler != "unknown";
+
+    if expecting_running && !is_running {
+        println!(
+            "{} no scx scheduler running, use '{}' instead of '{}'",
+            "error:".red().bold(),
+            "start".bold(),
+            "switch".bold()
+        );
+        println!("\nFor more information, try '{}'", "--help".bold());
+        exit(1);
+    }
+
+    if !expecting_running && is_running {
+        println!(
+            "{} scx scheduler already running, use '{}' instead of '{}'",
+            "error:".red().bold(),
+            "switch".bold(),
+            "start".bold()
+        );
+        println!("\nFor more information, try '{}'", "--help".bold());
+        exit(1);
+    }
+
+    Ok(current_scheduler)
+}
+
+fn format_scheduler_message(
+    action: &str,
+    sched: &SupportedSched,
+    mode: Option<&SchedMode>,
+    args: Option<&Vec<String>>
+) -> String {
+    match args {
+        Some(args) => format!("{} {sched:?} with arguments \"{}\"", action, args.join(" ")),
+        None => {
+            let mode = mode.unwrap_or(&SchedMode::Auto);
+            format!("{} {sched:?} in {mode:?} mode", action)
+        }
+    }
+}
 
 fn ensure_scx_prefix(input: &str) -> String {
     if !input.starts_with(SCHED_PREFIX) {
