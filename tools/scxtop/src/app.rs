@@ -1968,9 +1968,7 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: filter processes",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::Filter)
+                    self.config.active_keymap.action_keys_string(Action::Filter)
                 ),
                 Style::default(),
             )),
