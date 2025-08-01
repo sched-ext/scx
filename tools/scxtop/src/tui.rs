@@ -103,7 +103,7 @@ impl Tui {
     /// Starts the tui.
     pub fn start(&mut self) {
         let mut tick_delay = std::time::Duration::from_millis(self.tick_rate_ms as u64);
-        self.frame_rate_ms = self.frame_rate_ms.max(15);
+        self.frame_rate_ms = self.frame_rate_ms.max(15).min(5000);
         let render_delay = std::time::Duration::from_millis(self.frame_rate_ms as u64);
         self.cancel();
         self.cancellation_token = CancellationToken::new();
