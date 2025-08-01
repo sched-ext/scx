@@ -58,7 +58,7 @@ pub struct Tui {
     pub cancellation_token: CancellationToken,
     pub event_rx: UnboundedReceiver<Event>,
     pub event_tx: UnboundedSender<Event>,
-    pub frame_rate: f64,
+    pub frame_rate_ms: usize,
     pub tick_rate_ms: usize,
     pub mouse: bool,
     pub paste: bool,
@@ -67,8 +67,7 @@ pub struct Tui {
 
 impl Tui {
     /// Returns a new Tui.
-    pub fn new(keymap: KeyMap, tick_rate_ms: usize) -> Result<Self> {
-        let frame_rate = 60.0;
+    pub fn new(keymap: KeyMap, tick_rate_ms: usize, frame_rate_ms: usize) -> Result<Self> {
         let terminal = ratatui::Terminal::new(CrosstermBackend::new(stderr()))?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let cancellation_token = CancellationToken::new();
@@ -81,18 +80,12 @@ impl Tui {
             cancellation_token,
             event_rx,
             event_tx,
-            frame_rate,
+            frame_rate_ms,
             tick_rate_ms,
             mouse,
             paste,
             keymap,
         })
-    }
-
-    /// Sets the frame rate for the Tui.
-    pub fn frame_rate(mut self, frame_rate: f64) -> Self {
-        self.frame_rate = frame_rate;
-        self
     }
 
     #[allow(dead_code)]
@@ -110,7 +103,7 @@ impl Tui {
     /// Starts the tui.
     pub fn start(&mut self) {
         let mut tick_delay = std::time::Duration::from_millis(self.tick_rate_ms as u64);
-        let render_delay = std::time::Duration::from_secs_f64(1.0 / self.frame_rate);
+        let render_delay = std::time::Duration::from_millis(self.frame_rate_ms as u64);
         self.cancel();
         self.cancellation_token = CancellationToken::new();
         let _cancellation_token = self.cancellation_token.clone();

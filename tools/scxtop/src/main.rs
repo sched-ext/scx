@@ -417,7 +417,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                 ]);
             };
 
-            let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms())?;
+            let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms(), config.frame_rate_ms())?;
             let mut event_rbb = RingBufferBuilder::new();
             let event_handler = move |data: &[u8]| {
                 let mut event = bpf_event::default();
@@ -465,7 +465,6 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                     .await
                 });
             }
-
 
             loop {
                 tokio::select! {
