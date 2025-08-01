@@ -13,6 +13,7 @@ use procfs::process::{ProcState, Process, Task};
 pub struct ThreadData {
     pub tid: i32,
     pub tgid: i32,
+    pub thread_name: String,
     pub cpu: i32,
     pub llc: Option<u32>,
     pub node: Option<u32>,
@@ -29,7 +30,7 @@ pub struct ThreadData {
 impl ThreadData {
     /// Creates a new ThreadData.
     pub fn new(thread: Task, max_data_size: usize) -> Result<Self> {
-        let thread_stats = thread.stat()?;
+        let mut thread_stats = thread.stat()?;
         let cpu = thread_stats
             .processor
             .expect("thread_stats should have processor");
@@ -39,6 +40,7 @@ impl ThreadData {
         let thread_data = Self {
             tid: thread.tid,
             tgid: thread.pid,
+            thread_name: std::mem::take(&mut thread_stats.comm),
             cpu,
             llc: None,
             node: None,
@@ -82,5 +84,15 @@ impl ThreadData {
             let delta = self.current_cpu_time.saturating_sub(self.prev_cpu_time);
             (delta as f64 / system_util as f64) * 100.0
         };
+    }
+
+    /// Returns the data for an event and updates if no entry is present.
+    pub fn event_data_immut(&self, event: &str) -> Vec<u64> {
+        self.data.event_data_immut(event)
+    }
+
+    /// Adds data for an event.
+    pub fn add_event_data(&mut self, event: &str, val: u64) {
+        self.data.add_event_data(event, val)
     }
 }

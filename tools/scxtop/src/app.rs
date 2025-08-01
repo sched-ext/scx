@@ -562,11 +562,11 @@ impl<'a> App<'a> {
                 .update(&mut system_guard)?;
         }
 
-        let system_active_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
         let mut to_remove = vec![];
 
         for (&i, proc_data) in self.proc_data.iter_mut() {
-            if proc_data.update(system_active_util).is_err() {
+            if proc_data.update(system_util).is_err() {
                 to_remove.push(i);
             }
         }
@@ -578,7 +578,7 @@ impl<'a> App<'a> {
 
         if self.in_thread_view {
             if let Some(proc_data) = self.selected_proc_data() {
-                proc_data.update_threads(system_active_util);
+                proc_data.update_threads(system_util);
             }
         }
 
@@ -2349,20 +2349,16 @@ impl<'a> App<'a> {
     fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         self.update_events_list_size(area);
 
+        let error_str = format!(
+            "Process has been killed. Press escape or {} to return to process view.",
+            self.config.active_keymap.action_keys_string(Action::Quit)
+        );
         let Some(tgid) = self.selected_process else {
-            self.render_error_msg(
-                frame,
-                area,
-                "Process has been killed. Press escape to return to process view.",
-            );
+            self.render_error_msg(frame, area, &error_str);
             return Ok(());
         };
         let Some(proc_data) = self.proc_data.get(&tgid) else {
-            self.render_error_msg(
-                frame,
-                area,
-                "Process has been killed. Press escape to return to process view.",
-            );
+            self.render_error_msg(frame, area, &error_str);
             return Ok(());
         };
 
@@ -2374,8 +2370,8 @@ impl<'a> App<'a> {
             .border_style(self.theme().border_style())
             .title_top(
                 Line::from(format!(
-                    "Process: {} {:.15} (total threads: {})",
-                    proc_data.tgid, proc_data.process_name, proc_data.num_threads,
+                    "Process: {:.15} [{}] (total threads: {})",
+                    proc_data.process_name, proc_data.tgid, proc_data.num_threads,
                 ))
                 .style(self.theme().title_style())
                 .centered(),
@@ -2951,10 +2947,20 @@ impl<'a> App<'a> {
 
         if let Some(proc_data) = self.proc_data.get_mut(&prev_tgid) {
             proc_data.add_event_data("slice_consumed", *prev_used_slice_ns);
+            if self.in_thread_view {
+                if let Some(thread_data) = proc_data.threads.get_mut(&prev_tid) {
+                    thread_data.add_event_data("slice_consumed", *prev_used_slice_ns);
+                }
+            }
         }
 
         if let Some(proc_data) = self.proc_data.get_mut(&next_tgid) {
             proc_data.add_event_data("lat_us", *next_dsq_lat_us);
+            if self.in_thread_view {
+                if let Some(thread_data) = proc_data.threads.get_mut(&next_tid) {
+                    thread_data.add_event_data("lat_us", *next_dsq_lat_us);
+                }
+            }
         }
 
         if self.state == AppState::Tracing {

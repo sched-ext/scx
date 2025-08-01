@@ -59,132 +59,184 @@ impl<K, D> Columns<K, D> {
     }
 }
 
-pub fn get_process_columns() -> Vec<Column<i32, ProcData>> {
-    vec![
+/// Macros to generate individual common columns shared between process and thread views
+macro_rules! id_column {
+    ($header:expr) => {
         Column {
-            header: "TGID",
+            header: $header,
             constraint: Constraint::Length(8),
             visible: true,
-            value_fn: Box::new(|tgid, _| tgid.to_string()),
-        },
+            value_fn: Box::new(|id, _| id.to_string()),
+        }
+    };
+}
+
+macro_rules! name_column {
+    ($data_type:ty, $name_field:ident) => {
         Column {
             header: "Name",
             constraint: Constraint::Length(15),
             visible: true,
-            value_fn: Box::new(|_, data| data.process_name.clone()),
-        },
+            value_fn: Box::new(|_, data: &$data_type| data.$name_field.clone()),
+        }
+    };
+}
+
+macro_rules! last_dsq_column {
+    ($data_type:ty) => {
+        Column {
+            header: "Last DSQ",
+            constraint: Constraint::Length(18),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| {
+                data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))
+            }),
+        }
+    };
+}
+
+macro_rules! slice_ns_column {
+    ($data_type:ty) => {
+        Column {
+            header: "Slice ns",
+            constraint: Constraint::Length(8),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| {
+                let stats = VecStats::new(&data.event_data_immut("slice_consumed"), None);
+                stats.avg.to_string()
+            }),
+        }
+    };
+}
+
+macro_rules! avg_max_lat_column {
+    ($data_type:ty) => {
+        Column {
+            header: "Avg/Max Lat us",
+            constraint: Constraint::Length(14),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| {
+                let stats = VecStats::new(&data.event_data_immut("lat_us"), None);
+                format!("{}/{}", stats.avg, stats.max)
+            }),
+        }
+    };
+}
+
+macro_rules! cpu_column {
+    ($data_type:ty) => {
+        Column {
+            header: "CPU",
+            constraint: Constraint::Length(3),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| data.cpu.to_string()),
+        }
+    };
+}
+
+macro_rules! llc_column {
+    ($data_type:ty) => {
+        Column {
+            header: "LLC",
+            constraint: Constraint::Length(3),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| {
+                data.llc.map_or(String::new(), |v| v.to_string())
+            }),
+        }
+    };
+}
+
+macro_rules! numa_column {
+    ($data_type:ty) => {
+        Column {
+            header: "NUMA",
+            constraint: Constraint::Length(4),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| {
+                data.node.map_or(String::new(), |v| v.to_string())
+            }),
+        }
+    };
+}
+
+macro_rules! cpu_util_column {
+    ($data_type:ty) => {
+        Column {
+            header: "CPU%",
+            constraint: Constraint::Length(4),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| format!("{:.2?}", data.cpu_util_perc)),
+        }
+    };
+}
+
+macro_rules! state_column {
+    ($data_type:ty) => {
+        Column {
+            header: "State",
+            constraint: Constraint::Fill(1),
+            visible: true,
+            value_fn: Box::new(|_, data: &$data_type| format!("{:?}", data.state)),
+        }
+    };
+}
+
+macro_rules! layer_id_column {
+    ($data_type:ty) => {
+        Column {
+            header: "Layer ID",
+            constraint: Constraint::Length(8),
+            visible: false,
+            value_fn: Box::new(|_, data: &$data_type| {
+                data.layer_id
+                    .filter(|&v| v >= 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            }),
+        }
+    };
+}
+
+pub fn get_process_columns() -> Vec<Column<i32, ProcData>> {
+    vec![
+        id_column!("TGID"),
+        name_column!(ProcData, process_name),
         Column {
             header: "Command Line",
             constraint: Constraint::Fill(1),
             visible: true,
             value_fn: Box::new(|_, data| data.cmdline.join(" ")),
         },
-        Column {
-            header: "Layer ID",
-            constraint: Constraint::Length(8),
-            visible: false,
-            value_fn: Box::new(|_, data| {
-                data.layer_id
-                    .filter(|&v| v >= 0)
-                    .map(|v| v.to_string())
-                    .unwrap_or_default()
-            }),
-        },
-        Column {
-            header: "Last DSQ",
-            constraint: Constraint::Length(18),
-            visible: true,
-            value_fn: Box::new(|_, data| data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))),
-        },
-        Column {
-            header: "Slice ns",
-            constraint: Constraint::Length(8),
-            visible: true,
-            value_fn: Box::new(|_, data| {
-                let stats = VecStats::new(&data.event_data_immut("slice_consumed"), None);
-                stats.avg.to_string()
-            }),
-        },
-        Column {
-            header: "Avg/Max Lat us",
-            constraint: Constraint::Length(14),
-            visible: true,
-            value_fn: Box::new(|_, data| {
-                let stats = VecStats::new(&data.event_data_immut("lat_us"), None);
-                format!("{}/{}", stats.avg, stats.max)
-            }),
-        },
-        Column {
-            header: "CPU",
-            constraint: Constraint::Length(3),
-            visible: true,
-            value_fn: Box::new(|_, data| data.cpu.to_string()),
-        },
-        Column {
-            header: "LLC",
-            constraint: Constraint::Length(3),
-            visible: true,
-            value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
-        },
-        Column {
-            header: "NUMA",
-            constraint: Constraint::Length(4),
-            visible: true,
-            value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
-        },
+        layer_id_column!(ProcData),
+        last_dsq_column!(ProcData),
+        slice_ns_column!(ProcData),
+        avg_max_lat_column!(ProcData),
+        cpu_column!(ProcData),
+        llc_column!(ProcData),
+        numa_column!(ProcData),
         Column {
             header: "Threads",
             constraint: Constraint::Length(7),
             visible: true,
             value_fn: Box::new(|_, data| data.num_threads.to_string()),
         },
-        Column {
-            header: "CPU%",
-            constraint: Constraint::Length(4),
-            visible: true,
-            value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
-        },
+        cpu_util_column!(ProcData),
     ]
 }
 
 pub fn get_thread_columns() -> Vec<Column<i32, ThreadData>> {
     vec![
-        Column {
-            header: "TID",
-            constraint: Constraint::Length(8),
-            visible: true,
-            value_fn: Box::new(|tid, _| tid.to_string()),
-        },
-        Column {
-            header: "Last DSQ",
-            constraint: Constraint::Length(18),
-            visible: true,
-            value_fn: Box::new(|_, data| data.dsq.map_or(String::new(), |v| format!("0x{v:X}"))),
-        },
-        Column {
-            header: "CPU",
-            constraint: Constraint::Length(3),
-            visible: true,
-            value_fn: Box::new(|_, data| data.cpu.to_string()),
-        },
-        Column {
-            header: "LLC",
-            constraint: Constraint::Length(3),
-            visible: true,
-            value_fn: Box::new(|_, data| data.llc.map_or(String::new(), |v| v.to_string())),
-        },
-        Column {
-            header: "NUMA",
-            constraint: Constraint::Length(4),
-            visible: true,
-            value_fn: Box::new(|_, data| data.node.map_or(String::new(), |v| v.to_string())),
-        },
-        Column {
-            header: "CPU%",
-            constraint: Constraint::Length(4),
-            visible: true,
-            value_fn: Box::new(|_, data| format!("{:?}", data.cpu_util_perc)),
-        },
+        id_column!("TID"),
+        name_column!(ThreadData, thread_name),
+        state_column!(ThreadData),
+        last_dsq_column!(ThreadData),
+        slice_ns_column!(ThreadData),
+        avg_max_lat_column!(ThreadData),
+        cpu_column!(ThreadData),
+        llc_column!(ThreadData),
+        numa_column!(ThreadData),
+        cpu_util_column!(ThreadData),
     ]
 }
 
