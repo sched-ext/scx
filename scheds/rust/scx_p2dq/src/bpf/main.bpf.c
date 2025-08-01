@@ -1072,7 +1072,7 @@ static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
 			break;
 		}
 		ret = scx_atq_insert(pro->fifo.atq, (u64)p->pid);
-		if (ret) {
+		if (!ret) {
 			// The ATQ was full, fallback to the DSQ.
 			scx_bpf_dsq_insert(p,
 					   pro->vtime.dsq_id,
@@ -1091,7 +1091,7 @@ static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
 		ret = scx_atq_insert_vtime(pro->vtime.atq,
 					       (u64)p->pid,
 					       pro->vtime.vtime);
-		if (ret) {
+		if (!ret) {
 			// The ATQ was full, fallback to the DSQ.
 			scx_bpf_dsq_insert_vtime(p,
 						 pro->vtime.dsq_id,
