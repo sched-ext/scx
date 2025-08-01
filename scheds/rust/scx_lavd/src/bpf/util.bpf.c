@@ -297,11 +297,16 @@ static void set_on_core_type(struct task_ctx *taskc,
 
 static bool prob_x_out_of_y(u32 x, u32 y)
 {
+	u32 r;
+
+	if (x >= y)
+		return true;
+
 	/*
 	 * [0, r, y)
 	 *  ---- x?
 	 */
-	u32 r = bpf_get_prandom_u32() % y;
+	r = bpf_get_prandom_u32() % y;
 	return r < x;
 }
 
