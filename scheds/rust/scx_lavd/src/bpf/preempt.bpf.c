@@ -235,7 +235,8 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 	}
 }
 
-static void shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
+__hidden
+int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
 	u64 dur, new_slice = 0;
 
@@ -257,6 +258,8 @@ static void shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 		ask_cpu_yield_after(cpuc, new_slice);
 
 	cpuc->nr_preempt++;
+
+	return 0;
 }
 
 static void shrink_boosted_slice_at_tick(struct task_struct *p,
