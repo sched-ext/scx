@@ -2268,6 +2268,14 @@ impl<'a> App<'a> {
                     ),
                 ])
                 .left_aligned(),
+            )
+            .title_top(
+                Line::from(format!(
+                    "sample rate {}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ))
+                .style(self.theme().text_important_color())
+                .right_aligned(),
             );
 
         // We want to hold the lock for as short as possible
