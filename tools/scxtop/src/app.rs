@@ -2270,7 +2270,9 @@ impl<'a> App<'a> {
 
     /// Render the process view.
     fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        self.update_events_list_size(area);
+        let [scroll_area, data_area] =
+            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
+        self.update_events_list_size(data_area);
 
         let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
         let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
@@ -2337,7 +2339,19 @@ impl<'a> App<'a> {
 
         let table = Table::new(rows, constraints).header(header).block(block);
 
-        frame.render_stateful_widget(table, area, &mut TableState::new().with_offset(selected));
+        frame.render_stateful_widget(
+            table,
+            data_area,
+            &mut TableState::new().with_offset(selected),
+        );
+
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            scroll_area,
+            &mut ScrollbarState::new(filtered_processes.len().into()).position(selected as usize),
+        );
 
         if let Some((tgid, _)) = filtered_processes.get(selected) {
             self.selected_process = Some(*tgid);
