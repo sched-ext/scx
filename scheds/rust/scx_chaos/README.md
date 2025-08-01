@@ -19,7 +19,7 @@ The scheduler supports several "chaos traits" that can be enabled individually o
 
 ### CPU Frequency Scaling
 - Randomly scales CPU frequency for processes
-- Configurable frequency range and application probability  
+- Configurable frequency range and application probability
 - Tests application behavior under varying CPU performance
 
 ### Performance Degradation
@@ -47,7 +47,7 @@ sudo scx_chaos
 sudo scx_chaos --random-delay-frequency 0.1 --random-delay-min-us 100 --random-delay-max-us 1000
 ```
 
-### CPU Frequency Scaling  
+### CPU Frequency Scaling
 ```bash
 sudo scx_chaos --cpufreq-frequency 0.2 --cpufreq-min 400000 --cpufreq-max 2000000
 ```
@@ -59,7 +59,7 @@ sudo scx_chaos --degradation-frequency 0.15 --degradation-frac7 64
 
 ### Kprobe Delays
 ```bash
-sudo scx_chaos --kprobes-for-random-delays schedule,do_exit --kprobe-random-delay-frequency 0.05 --kprobe-random-delay-min-us 50 --kprobe-random-delay-max-us 500
+sudo scx_chaos --kprobes-for-random-delays schedule do_exit --kprobe-random-delay-frequency 0.05 --kprobe-random-delay-min-us 50 --kprobe-random-delay-max-us 500
 ```
 
 ### Testing Specific Applications
@@ -97,7 +97,7 @@ Automatically restart applications for continuous testing:
 # Restart on failure
 sudo scx_chaos --repeat-failure [chaos-options] -- ./test-app
 
-# Restart on success  
+# Restart on success
 sudo scx_chaos --repeat-success [chaos-options] -- ./test-app
 ```
 
@@ -152,7 +152,7 @@ sudo scx_chaos --repeat-success [chaos-options] -- ./test-app
 
 The scheduler provides various statistics including:
 - Random delay applications
-- CPU frequency scaling events  
+- CPU frequency scaling events
 - Performance degradation applications
 - Kprobe delay triggers
 - Process targeting exclusions
