@@ -31,7 +31,7 @@ pub struct TuiArgs {
     /// App tick rate in milliseconds.
     #[arg(short = 'r', long, default_missing_value = "250")]
     pub tick_rate_ms: Option<usize>,
-    /// App render rate in milliseconds.
+    /// App render rate in milliseconds (min=15).
     #[arg(short = 'f', long, default_missing_value = "250")]
     pub frame_rate_ms: Option<usize>,
     /// Extra verbose output.

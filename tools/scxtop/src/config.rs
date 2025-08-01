@@ -25,7 +25,7 @@ use xdg;
 /// ```text
 /// theme = "IAmBlue"
 /// tick_rate_ms = 250
-/// frame_rate_ms =
+/// frame_rate_ms = 20
 /// debug = false
 /// exclude_bpf = false
 /// worker_threads = 4
