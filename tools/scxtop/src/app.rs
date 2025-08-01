@@ -2375,6 +2375,14 @@ impl<'a> App<'a> {
                 ))
                 .style(self.theme().title_style())
                 .centered(),
+            )
+            .title_top(
+                Line::from(format!(
+                    "sample rate {}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ))
+                .style(self.theme().text_important_color())
+                .right_aligned(),
             );
 
         let mut threads = proc_data.threads.iter().collect::<Vec<_>>();
