@@ -2350,7 +2350,7 @@ impl<'a> App<'a> {
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓")),
             scroll_area,
-            &mut ScrollbarState::new(filtered_processes.len().into()).position(selected),
+            &mut ScrollbarState::new(filtered_processes.len()).position(selected),
         );
 
         if let Some((tgid, _)) = filtered_processes.get(selected) {
