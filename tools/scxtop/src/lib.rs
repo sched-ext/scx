@@ -34,7 +34,7 @@ pub mod util;
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
 pub use bpf_skel::*;
-pub use columns::{get_process_columns, Columns};
+pub use columns::Columns;
 pub use cpu_data::CpuData;
 pub use cpu_stats::{CpuStatSnapshot, CpuStatTracker};
 pub use event_data::EventData;
