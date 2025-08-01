@@ -2808,8 +2808,10 @@ impl<'a> App<'a> {
                     let proc_data = entry.into_mut();
                     proc_data.layer_id = Some(*parent_layer_id);
                     if self.in_thread_view {
-                        if let Some(proc_data) = self.selected_proc_data() {
-                            proc_data.add_thread(child_pid);
+                        if let Some(selected_tgid) = self.selected_process {
+                            if selected_tgid == parent_tgid {
+                                proc_data.add_thread(child_pid);
+                            }
                         }
                     }
                 }
