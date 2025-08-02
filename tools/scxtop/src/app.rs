@@ -1979,7 +1979,14 @@ impl<'a> App<'a> {
                 Style::default(),
             )),
             Line::from(Span::styled(
-                format!("{pause}: press to pause/unpause"),
+                format!("{pause}: pause/unpause"),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: filter processes",
+                    self.config.active_keymap.action_keys_string(Action::Filter)
+                ),
                 Style::default(),
             )),
             Line::from(Span::styled(
