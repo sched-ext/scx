@@ -621,6 +621,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu,
 					 &is_idle, cpuc_cur);
 		taskc->suggested_cpu_id = cpu;
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+			return;
+		}
 	} else {
 		cpu = scx_bpf_task_cpu(p);
 		cpuc = get_cpu_ctx_id(cpu);
@@ -632,15 +637,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
-	if (cpuc < 0) {
-		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
-		return;
-	}
 
 	/*
 	 * Increase the number of pinned tasks waiting for execution.
 	 */
-	if (is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu))) {
+	if (is_pinned(p)) {
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 	}
 
