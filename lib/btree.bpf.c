@@ -297,6 +297,10 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 
 		btn_parent = btn_old->parent;
 		btn_new = btnode_alloc(btn_parent, btn_old->flags);
+		if (!btn_new) {
+			// scx_buddy_free(buddy, btn_new);
+			return -ENOMEM;
+		}
 
 		if (btn_old->flags & BT_F_LEAF)
 			key = btnode_split_leaf(btn_new, btn_old);
@@ -308,6 +312,10 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 			btn_new->flags &= ~BT_F_ROOT;
 
 			btn_root = btnode_alloc(NULL, BT_F_ROOT);
+			if (!btn_root) {
+				//scx_buddy_free(buddy, btn_root);
+				return -ENOMEM;
+			}
 			btn_root->keys[0] = key;
 			btn_root->values[0] = (u64)btn_old;
 			btn_root->values[1] = (u64)btn_new;
