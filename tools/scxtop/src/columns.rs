@@ -112,7 +112,7 @@ macro_rules! slice_ns_column {
 macro_rules! avg_max_lat_column {
     ($data_type:ty) => {
         Column {
-            header: "Avg/Max Lat us",
+            header: "Lat us Avg/Max",
             constraint: Constraint::Length(14),
             visible: true,
             value_fn: Box::new(|_, data: &$data_type| {
