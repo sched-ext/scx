@@ -228,12 +228,6 @@ static bool can_boost_slice(void)
 	return slice_max_ns <= sys_stat.slice;
 }
 
-static bool have_pending_tasks(struct cpu_ctx *cpuc)
-{
-	return scx_bpf_dsq_nr_queued(cpuc->cpdom_id) ||
-	       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
-}
-
 static u16 get_nice_prio(struct task_struct *p)
 {
 	u16 prio = p->static_prio - MAX_RT_PRIO; /* [0, 40) */
@@ -297,11 +291,16 @@ static void set_on_core_type(struct task_ctx *taskc,
 
 static bool prob_x_out_of_y(u32 x, u32 y)
 {
+	u32 r;
+
+	if (x >= y)
+		return true;
+
 	/*
 	 * [0, r, y)
 	 *  ---- x?
 	 */
-	u32 r = bpf_get_prandom_u32() % y;
+	r = bpf_get_prandom_u32() % y;
 	return r < x;
 }
 

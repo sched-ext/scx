@@ -582,7 +582,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
 	u64 dsq_id;
-	bool is_idle = false, shrinked = false;
+	bool is_idle = false;
 
 	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
@@ -632,11 +632,15 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
+	if (cpuc < 0) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		return;
+	}
 
 	/*
 	 * Increase the number of pinned tasks waiting for execution.
 	 */
-	if (cpu >= 0 && is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu))) {
+	if (is_pinned(p) && (cpuc = get_cpu_ctx_id(cpu))) {
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
 	}
 
@@ -657,7 +661,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
 	 * kick the new CPU and go.
 	 */
-	if (is_idle && cpu >= 0) {
+	if (is_idle) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
@@ -667,7 +671,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
-	if (!shrinked && !no_preemption)
+	if (!no_preemption)
 		try_find_and_kick_victim_cpu(p, taskc, cpu, dsq_id);
 }
 
