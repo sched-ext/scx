@@ -199,6 +199,24 @@ static __always_inline s32 __pick_idle_cpu(struct bpf_cpumask *mask, int flags)
 	return scx_bpf_pick_idle_cpu(cast_mask(mask), flags);
 }
 
+static int init_cpumask(struct bpf_cpumask **mask_p)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		return -ENOMEM;
+	}
+
+	cpumask = bpf_kptr_xchg(mask_p, cpumask);
+	if (cpumask) {
+		bpf_cpumask_release(cpumask);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 static __always_inline s32 pref_idle_cpu(struct llc_ctx *llcx)
 {
 	struct scx_minheap_elem helem;
@@ -1689,7 +1707,6 @@ void BPF_STRUCT_OPS(p2dq_exit_task, struct task_struct *p,
 
 static int init_llc(u32 llc_index)
 {
-	struct bpf_cpumask *cpumask, *big_cpumask, *little_cpumask, *node_cpumask;
 	struct llc_ctx *llcx;
 	u32 llc_id = llc_ids[llc_index];
 	int ret;
@@ -1725,16 +1742,10 @@ static int init_llc(u32 llc_index)
 		return -EINVAL;
 	}
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(&llcx->cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
+	ret = init_cpumask(&llcx->cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC cpumask");
+		return ret;
 	}
 
 	// Topology related setup, first we assume all CPUs are big. When CPUs
@@ -1742,43 +1753,22 @@ static int init_llc(u32 llc_index)
 	llcx->all_big = true;
 
 	// big cpumask
-	big_cpumask = bpf_cpumask_create();
-	if (!big_cpumask) {
-		scx_bpf_error("failed to create big cpumask");
-		return -ENOMEM;
+	ret = init_cpumask(&llcx->big_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC big cpumask");
+		return ret;
 	}
 
-	big_cpumask = bpf_kptr_xchg(&llcx->big_cpumask,
-				    big_cpumask);
-	if (big_cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(big_cpumask);
+	ret = init_cpumask(&llcx->little_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC little cpumask");
+		return ret;
 	}
 
-	little_cpumask = bpf_cpumask_create();
-	if (!little_cpumask) {
-		scx_bpf_error("failed to create tmp cpumask");
-		return -ENOMEM;
-	}
-
-	little_cpumask = bpf_kptr_xchg(&llcx->little_cpumask,
-				       little_cpumask);
-	if (little_cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(little_cpumask);
-	}
-
-	node_cpumask = bpf_cpumask_create();
-	if (!node_cpumask) {
-		scx_bpf_error("failed to create node cpumask");
-		return -ENOMEM;
-	}
-
-	node_cpumask = bpf_kptr_xchg(&llcx->node_cpumask,
-				     node_cpumask);
-	if (node_cpumask) {
-		scx_bpf_error("kptr already had node_cpumask");
-		bpf_cpumask_release(node_cpumask);
+	ret = init_cpumask(&llcx->node_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC node cpumask");
+		return ret;
 	}
 
 	return 0;
@@ -1786,8 +1776,8 @@ static int init_llc(u32 llc_index)
 
 static int init_node(u32 node_id)
 {
-	struct bpf_cpumask *cpumask, *big_cpumask;
 	struct node_ctx *nodec;
+	int ret;
 
 	nodec = bpf_map_lookup_elem(&node_ctxs, &node_id);
 	if (!nodec) {
@@ -1797,16 +1787,10 @@ static int init_node(u32 node_id)
 
 	nodec->id = node_id;
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("failed to create cpumask for node %u", node_id);
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(&nodec->cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
+	ret = init_cpumask(&nodec->cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create node cpumask");
+		return ret;
 	}
 
 	// Topology related setup, first we assume all CPUs are big. When CPUs
@@ -1814,18 +1798,12 @@ static int init_node(u32 node_id)
 	nodec->all_big = true;
 
 	// big cpumask
-	big_cpumask = bpf_cpumask_create();
-	if (!big_cpumask) {
-		scx_bpf_error("failed to create big cpumask");
-		return -ENOMEM;
+	ret = init_cpumask(&nodec->big_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create node cpumask");
+		return ret;
 	}
 
-	big_cpumask = bpf_kptr_xchg(&nodec->big_cpumask,
-				    big_cpumask);
-	if (big_cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(big_cpumask);
-	}
 	dbg("CFG NODE[%u] configured", node_id);
 
 	return 0;
