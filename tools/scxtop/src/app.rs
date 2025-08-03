@@ -764,7 +764,7 @@ impl<'a> App<'a> {
             ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
             _ => 1,
         };
-        let data = llc_data
+        let data: Vec<u64> = llc_data
             .event_data_immut(self.active_event.event_name())
             .iter()
             .map(|x| x / divisor as u64)
@@ -817,7 +817,7 @@ impl<'a> App<'a> {
             ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
             _ => 1,
         };
-        let data = node_data
+        let data: Vec<u64> = node_data
             .event_data_immut(self.active_event.event_name())
             .iter()
             .map(|x| x / divisor as u64)

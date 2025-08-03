@@ -42,7 +42,7 @@ impl NodeData {
         self.data.event_data(event)
     }
 
-    /// Returns the data for an event and updates if no entry is present.
+    /// Returns the data for an event. Returns empty Vec if event doesn't exist.
     pub fn event_data_immut(&self, event: &str) -> Vec<u64> {
         self.data.event_data_immut(event)
     }
