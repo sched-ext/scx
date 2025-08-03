@@ -53,6 +53,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('?'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
+        bindings.insert(Key::Char('N'), Action::SetState(AppState::Network));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
         bindings.insert(Key::Char('S'), Action::SaveConfig);
         bindings.insert(Key::Char('a'), Action::RequestTrace);
@@ -376,6 +377,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "AppStateMemory" | "SetState(Memory)" => Ok(Action::SetState(AppState::Memory)),
         "AppStateNode" | "SetState(Node)" => Ok(Action::SetState(AppState::Node)),
         "AppStateScheduler" | "SetState(Scheduler)" => Ok(Action::SetState(AppState::Scheduler)),
+        "AppStateNetwork" | "SetState(Network)" => Ok(Action::SetState(AppState::Network)),
         "SaveConfig" => Ok(Action::SaveConfig),
         "RequestTrace" => Ok(Action::RequestTrace),
         "ClearEvent" => Ok(Action::ClearEvent),

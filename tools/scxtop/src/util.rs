@@ -79,6 +79,25 @@ pub fn read_file_string(path: &str) -> Result<String> {
     Ok(contents)
 }
 
+/// Formats bytes to human readable bits format (bps, Kbps, Mbps, Gbps, Tbps).
+/// Converts bytes to bits (multiply by 8) and uses decimal units (1000) for network standards.
+pub fn format_bits(bytes: u64) -> String {
+    const KBPS: f64 = 1000.0;
+    const MBPS: f64 = KBPS * 1000.0;
+    const GBPS: f64 = MBPS * 1000.0;
+    const TBPS: f64 = GBPS * 1000.0;
+
+    let bits = (bytes as f64) * 8.0; // Convert bytes to bits
+
+    match bits {
+        b if b < KBPS => format!("{b:.0} bps"),
+        b if b < MBPS => format!("{:.2} Kbps", b / KBPS),
+        b if b < GBPS => format!("{:.2} Mbps", b / MBPS),
+        b if b < TBPS => format!("{:.2} Gbps", b / GBPS),
+        b => format!("{:.2} Tbps", b / TBPS),
+    }
+}
+
 /// Returns the current clock_id time in nanoseconds.
 pub fn get_clock_value(clock_id: libc::c_int) -> u64 {
     let ts = clock_gettime(ClockId::from_raw(clock_id)).expect("Failed to get clock time");
