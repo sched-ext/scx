@@ -21,16 +21,7 @@ pub struct MemStatSnapshot {
 impl MemStatSnapshot {
     pub fn update(&mut self) -> Result<()> {
         let meminfo = Meminfo::new()?;
-        self.total_kb = meminfo.mem_total;
-        self.free_kb = meminfo.mem_free;
-        self.available_kb = meminfo
-            .mem_available
-            .expect("available memory should be present");
-        self.active_kb = meminfo.active;
-        self.inactive_kb = meminfo.inactive;
-        self.shmem_kb = meminfo.shmem.expect("shmem memory should be present");
-        self.swap_total_kb = meminfo.swap_total;
-        self.swap_free_kb = meminfo.swap_free;
+        *self = (&meminfo).into();
         Ok(())
     }
 
@@ -46,6 +37,23 @@ impl MemStatSnapshot {
             return 0.0;
         }
         self.swap_free_kb as f64 / self.swap_total_kb as f64
+    }
+}
+
+impl From<&Meminfo> for MemStatSnapshot {
+    fn from(meminfo: &Meminfo) -> Self {
+        Self {
+            total_kb: meminfo.mem_total,
+            free_kb: meminfo.mem_free,
+            available_kb: meminfo
+                .mem_available
+                .expect("available memory should be present"),
+            active_kb: meminfo.active,
+            inactive_kb: meminfo.inactive,
+            shmem_kb: meminfo.shmem.expect("shmem memory should be present"),
+            swap_total_kb: meminfo.swap_total,
+            swap_free_kb: meminfo.swap_free,
+        }
     }
 }
 
