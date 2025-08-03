@@ -43,12 +43,14 @@ struct llc_ctx {
 	u64				affn_load;
 	u64				intr_load;
 	u64				dsq_load[MAX_DSQS_PER_LLC];
+	bool				saturated;
 	bool				all_big;
 
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 	struct bpf_cpumask __kptr	*little_cpumask;
 	struct bpf_cpumask __kptr	*node_cpumask;
+	struct bpf_cpumask __kptr	*tmp_cpumask;
 
 	scx_atq_t			*mig_atq;
 	scx_minheap_t			*idle_cpu_heap;

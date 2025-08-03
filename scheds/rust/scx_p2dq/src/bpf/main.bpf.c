@@ -194,6 +194,11 @@ static __always_inline u64 clamp_slice(u64 slice_ns)
 		   max_dsq_time_slice());
 }
 
+static __always_inline u64 cpu_dsq_id(s32 cpu)
+{
+	return ((MAX_DSQS_PER_LLC * MAX_LLCS) << 2) + cpu;
+}
+
 static __always_inline s32 __pick_idle_cpu(struct bpf_cpumask *mask, int flags)
 {
 	return scx_bpf_pick_idle_cpu(cast_mask(mask), flags);
@@ -232,21 +237,18 @@ static __always_inline s32 pref_idle_cpu(struct llc_ctx *llcx)
 	return (s32)helem.elem;
 }
 
-static u32 nr_idle_cpus(void)
+static u32 nr_idle_cpus(const struct cpumask *idle_cpumask)
 {
-	const struct cpumask *idle_cpumask;
 	u32 nr_idle;
 
-	idle_cpumask = scx_bpf_get_idle_cpumask();
 	nr_idle = bpf_cpumask_weight(idle_cpumask);
-	scx_bpf_put_cpumask(idle_cpumask);
 
 	return nr_idle;
 }
 
-static u32 idle_cpu_percent(void)
+static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
 {
-	return (100 * nr_idle_cpus()) / topo_config.nr_cpus;
+	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_cpus;
 }
 
 static __always_inline u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
@@ -457,7 +459,7 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 	if (taskc->llc_runs < min_llc_runs_pick2)
 		return false;
 
-	return true;
+	return llcx->saturated;
 }
 
 static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
@@ -808,8 +810,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 found_cpu:
 	scx_bpf_put_cpumask(idle_cpumask);
 	scx_bpf_put_cpumask(idle_smtmask);
-	if (cpu >= topo_config.nr_cpus || cpu < 0)
-		cpu = prev_cpu;
 
 	return cpu;
 }
@@ -1592,12 +1592,15 @@ void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 
 void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 {
+	const struct cpumask *idle_cpumask;
 	struct llc_ctx *llcx;
 	u64 idle_score;
 	int ret, priority;
 	u32 percent_idle;
 
-	percent_idle = idle_cpu_percent();
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	percent_idle = idle_cpu_percent(idle_cpumask);
 	saturated = percent_idle < p2dq_config.saturated_percent;
 
 	if (saturated)
@@ -1607,8 +1610,25 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 		min_llc_runs_pick2 = log2_u32(percent_idle) + llc_scaler;
 	}
 
-	if (!idle || !p2dq_config.cpu_priority ||
-	    !(llcx = lookup_cpu_llc_ctx(cpu)))
+	if (!(llcx = lookup_cpu_llc_ctx(cpu))) {
+		scx_bpf_put_cpumask(idle_cpumask);
+		return;
+	}
+
+	if (idle)
+		llcx->saturated = false;
+	else if (!idle && llcx->cpumask && idle_cpumask && llcx->tmp_cpumask) {
+		bpf_cpumask_and(llcx->tmp_cpumask,
+				cast_mask(llcx->cpumask),
+				idle_cpumask);
+		if (llcx->tmp_cpumask &&
+		    bpf_cpumask_weight(cast_mask(llcx->tmp_cpumask)) == 0)
+			llcx->saturated = true;
+	}
+
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	if (!p2dq_config.cpu_priority)
 		return;
 
 	/*
@@ -1750,6 +1770,12 @@ static int init_llc(u32 llc_index)
 	ret = init_cpumask(&llcx->cpumask);
 	if (ret) {
 		scx_bpf_error("failed to create LLC cpumask");
+		return ret;
+	}
+
+	ret = init_cpumask(&llcx->tmp_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC tmp_cpumask");
 		return ret;
 	}
 
@@ -2116,7 +2142,7 @@ static __always_inline s32 p2dq_init_impl()
 		cpuc->llc_dsq = llcx->dsq;
 		cpuc->mig_atq = llcx->mig_atq;
 
-		dsq_id = ((MAX_DSQS_PER_LLC * MAX_LLCS) << 2) + i;
+		dsq_id = cpu_dsq_id(i);
 		dbg("CFG creating affn CPU[%d]DSQ[%llu]", i, dsq_id);
 		ret = scx_bpf_create_dsq(dsq_id, llcx->node_id);
 		if (ret < 0) {
