@@ -26,6 +26,43 @@ pub fn format_hz(hz: u64) -> String {
     }
 }
 
+/// Formats bytes to human readable format (B, KB, MB, GB, TB).
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
+
+    let bytes_f64 = bytes as f64;
+
+    match bytes_f64 {
+        b if b < KB => format!("{} B", bytes),
+        b if b < MB => format!("{:.2} KB", b / KB),
+        b if b < GB => format!("{:.2} MB", b / MB),
+        b if b < TB => format!("{:.2} GB", b / GB),
+        b => format!("{:.2} TB", b / TB),
+    }
+}
+
+/// Formats bytes to human readable bits format (bps, Kbps, Mbps, Gbps, Tbps).
+/// Converts bytes to bits (multiply by 8) and uses decimal units (1000) for network standards.
+pub fn format_bits(bytes: u64) -> String {
+    const KBPS: f64 = 1000.0;
+    const MBPS: f64 = KBPS * 1000.0;
+    const GBPS: f64 = MBPS * 1000.0;
+    const TBPS: f64 = GBPS * 1000.0;
+
+    let bits = (bytes as f64) * 8.0; // Convert bytes to bits
+
+    match bits {
+        b if b < KBPS => format!("{:.0} bps", b),
+        b if b < MBPS => format!("{:.2} Kbps", b / KBPS),
+        b if b < GBPS => format!("{:.2} Mbps", b / MBPS),
+        b if b < TBPS => format!("{:.2} Gbps", b / GBPS),
+        b => format!("{:.2} Tbps", b / TBPS),
+    }
+}
+
 /// Returns the current clock_id time in nanoseconds.
 pub fn get_clock_value(clock_id: libc::c_int) -> u64 {
     let ts = clock_gettime(ClockId::from_raw(clock_id)).expect("Failed to get clock time");
