@@ -29,4 +29,3 @@ u64 lvq_create_internal(void);
 #define lvq_create() ((lv_queue_t *)lvq_create_internal())
 
 int lvq_destroy(lv_queue_t *lvq);
-
