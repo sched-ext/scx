@@ -2321,7 +2321,7 @@ impl<'a> App<'a> {
             );
 
         // We want to hold the lock for as short as possible
-        let (mut filtered_processes, selected): (Vec<(i32, &ProcData)>, usize) = {
+        let (mut filtered_processes, selected): (Vec<_>, usize) = {
             let filtered_state = self.filtered_state.lock().unwrap();
             let processes = filtered_state
                 .list
@@ -2435,7 +2435,7 @@ impl<'a> App<'a> {
                 .right_aligned(),
             );
 
-        let (mut filtered_threads, selected): (Vec<(i32, &ThreadData)>, usize) = {
+        let (mut filtered_threads, selected): (Vec<_>, usize) = {
             let filtered_state = self.filtered_state.lock().unwrap();
             let threads = filtered_state
                 .list
