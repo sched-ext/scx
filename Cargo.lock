@@ -2887,8 +2887,6 @@ dependencies = [
  "plain",
  "scx_utils",
  "seccomp",
- "tar",
- "walkdir",
 ]
 
 [[package]]
