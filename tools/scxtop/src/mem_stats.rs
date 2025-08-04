@@ -76,7 +76,6 @@ pub struct MemStatSnapshot {
 impl MemStatSnapshot {
     pub fn update(&mut self) -> Result<()> {
         let meminfo = Meminfo::new()?;
-        *self = (&meminfo).into();
 
         // Save previous values for delta calculation
         self.prev_swap_pages_in = self.swap_pages_in;
