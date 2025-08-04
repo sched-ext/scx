@@ -72,12 +72,27 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	 * Collect statistics for each compute domain.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		int i, j;
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_sum = 0;
 		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
+		if (per_cpu_dsq) {
+			bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+				u64 cpumask = cpdomc->__cpumask[i];
+				bpf_for(j, 0, 64) {
+					if (cpumask & 0x1LLU << j) {
+						cpu = (i * 64) + j;
+						if (cpu >= nr_cpu_ids)
+							break;
+						cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+					}
+				}
+			}
+		}
+
 		c->nr_queued_task += cpdomc->nr_queued_task;
 	}
 
