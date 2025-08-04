@@ -34,6 +34,23 @@ impl CpuUtilData {
     }
 }
 
+impl From<&CpuTime> for CpuUtilData {
+    fn from(stat: &CpuTime) -> Self {
+        CpuUtilData {
+            user: stat.user,
+            nice: stat.nice,
+            system: stat.system,
+            idle: stat.idle,
+            iowait: stat.iowait.expect("missing iowait"),
+            irq: stat.irq.expect("missing irq"),
+            softirq: stat.softirq.expect("missing softirq"),
+            steal: stat.steal.expect("missing steal"),
+            guest: stat.guest.expect("missing guest"),
+            guest_nice: stat.guest_nice.expect("missing guest_nice"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CpuStatSnapshot {
     pub cpu_util_data: CpuUtilData,
@@ -60,11 +77,10 @@ impl CpuStatTracker {
         let mut total_freq_khz = 0;
         for (i, cpu) in sys.cpus().iter().enumerate() {
             if let Some(cpu_time) = cpu_stat_data.get(i) {
-                let cpu_util_data = procfs_cpu_to_util_data(cpu_time);
                 let freq_khz = cpu.frequency();
                 total_freq_khz += freq_khz;
                 let snapshot = CpuStatSnapshot {
-                    cpu_util_data,
+                    cpu_util_data: cpu_time.into(),
                     freq_khz,
                 };
                 self.current.insert(i, snapshot);
@@ -72,7 +88,7 @@ impl CpuStatTracker {
         }
 
         self.system_current = CpuStatSnapshot {
-            cpu_util_data: procfs_cpu_to_util_data(&kernel_stats.total),
+            cpu_util_data: (&kernel_stats.total).into(),
             freq_khz: total_freq_khz,
         };
 
@@ -86,21 +102,6 @@ impl CpuStatTracker {
 
     pub fn system_total_util(&self) -> u64 {
         self.system_current.cpu_util_data.total_util() - self.system_prev.cpu_util_data.total_util()
-    }
-}
-
-fn procfs_cpu_to_util_data(stat: &CpuTime) -> CpuUtilData {
-    CpuUtilData {
-        user: stat.user,
-        nice: stat.nice,
-        system: stat.system,
-        idle: stat.idle,
-        iowait: stat.iowait.expect("missing iowait"),
-        irq: stat.irq.expect("missing irq"),
-        softirq: stat.softirq.expect("missing softirq"),
-        steal: stat.steal.expect("missing steal"),
-        guest: stat.guest.expect("missing guest"),
-        guest_nice: stat.guest_nice.expect("missing guest_nice"),
     }
 }
 
@@ -126,7 +127,7 @@ mod tests {
         cpu_time.guest = Some(900);
         cpu_time.guest_nice = Some(1000);
 
-        let snapshot = procfs_cpu_to_util_data(&cpu_time);
+        let snapshot: CpuUtilData = (&cpu_time).into();
 
         assert_eq!(snapshot.user, 100);
         assert_eq!(snapshot.nice, 200);
@@ -158,7 +159,7 @@ mod tests {
         cpu_time.guest = Some(900);
         cpu_time.guest_nice = Some(1000);
 
-        let _ = procfs_cpu_to_util_data(&cpu_time);
+        let _: CpuUtilData = (&cpu_time).into();
     }
 
     #[test]
