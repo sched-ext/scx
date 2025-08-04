@@ -1898,8 +1898,8 @@ impl<'a> App<'a> {
                 Span::styled(
                     format!(
                         "in {} out {}",
-                        format_bytes_per_sec(mem_stats.delta_swap_in),
-                        format_bytes_per_sec(mem_stats.delta_swap_out)
+                        format_bytes_per_sec(mem_stats.delta_swap_in * 4096),
+                        format_bytes_per_sec(mem_stats.delta_swap_out * 4096)
                     ),
                     self.theme().text_important_color(),
                 ),
@@ -3235,7 +3235,7 @@ impl<'a> App<'a> {
                 Span::styled(
                     format!(
                         "{} ({:.1}% of slab)",
-                        format_kb(mem_stats.sunreclaim_kb),
+                        format_bytes(mem_stats.sunreclaim_kb),
                         if mem_stats.slab_kb > 0 {
                             (mem_stats.sunreclaim_kb as f64 / mem_stats.slab_kb as f64) * 100.0
                         } else {
