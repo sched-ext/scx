@@ -38,7 +38,7 @@ enum consts_internal {
 	LAVD_SLICE_BOOST_BONUS		= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_SLICE_BOOST_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_ACC_RUNTIME_MAX		= LAVD_SLICE_MAX_NS_DFL,
-	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 14), /* assuming task's latency
+	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 16), /* assuming task's latency
 									    criticality is around 1000. */
 
 	LAVD_LC_FREQ_MAX                = 400000,
