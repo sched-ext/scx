@@ -1101,7 +1101,7 @@ s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 	 */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
-		return -ENOMEM;
+		goto fail;
 	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
@@ -1111,12 +1111,20 @@ s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 	 */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
-		return -ENOMEM;
+		goto fail;
 	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
 	return 0;
+
+fail:
+	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, NULL);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	bpf_task_storage_delete(&task_ctx_stor, p);
+	return -ENOMEM;
 }
 
 /*
