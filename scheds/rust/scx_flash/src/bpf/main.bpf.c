@@ -1985,15 +1985,13 @@ static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct task_struct *p;
-		struct rq *rq = scx_bpf_cpu_rq(cpu);
+		struct task_struct *p = scx_bpf_task_acquire_remote_curr(cpu);
 
-		if (!rq)
+		if (!p)
 			continue;
 		/*
 		 * Ignore CPU if idle task is running.
 		 */
-		p = rq->curr;
 		if (p->flags & PF_IDLE)
 			continue;
 
@@ -2009,6 +2007,7 @@ static int tickless_timerfn(void *map, int *key, struct bpf_timer *timer)
 		 */
 		if (p->scx.slice == SCX_SLICE_INF)
 			p->scx.slice = slice_min;
+		bpf_task_release(p);
 	}
 	bpf_rcu_read_unlock();
 
