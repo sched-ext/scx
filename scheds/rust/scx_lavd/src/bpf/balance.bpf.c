@@ -170,6 +170,38 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 	return ret;
 }
 
+/*
+ * For simplicity, try to just steal from the CPU with
+ * the highest number of queued_tasks in this domain.
+ */
+static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
+	u64 highest_queued = 0;
+	int pick_cpu = -ENOENT;
+	int cpu, i, j;
+
+	if (!per_cpu_dsq)
+		return -ENOENT;
+
+	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+		u64 cpumask = cpdomc->__cpumask[i];
+		bpf_for(j, 0, 64) {
+			if (cpumask & 0x1LLU << j) {
+				u64 queued;
+				cpu = (i * 64) + j;
+				if (cpu >= nr_cpu_ids)
+					break;
+				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+				if (queued > highest_queued) {
+					highest_queued = queued;
+					pick_cpu = cpu;
+				}
+			}
+		}
+	}
+
+	return pick_cpu;
+}
+
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
@@ -203,6 +235,8 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
 		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
+			int pick_cpu;
+			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
 
@@ -219,6 +253,12 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
 
+			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
+			if (pick_cpu >= 0)
+				dsq_id = cpu_to_dsq(pick_cpu);
+			else
+				dsq_id = cpdom_to_dsq(cpdom_id);
+
 			/*
 			 * If task stealing is successful, mark the stealer
 			 * and the stealee's job done. By marking done,
@@ -230,7 +270,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			 * because the chance is low and there is no harm
 			 * in slight over-stealing.
 			 */
-			if (consume_dsq(cpdomc_pick, cpdom_to_dsq(cpdom_id))) {
+			if (consume_dsq(cpdomc_pick, dsq_id)) {
 				WRITE_ONCE(cpdomc_pick->is_stealee, false);
 				WRITE_ONCE(cpdomc->is_stealer, false);
 				return true;
@@ -272,6 +312,8 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
 		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
+			int pick_cpu;
+			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
 
@@ -288,7 +330,13 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			if (consume_dsq(cpdomc_pick, cpdom_to_dsq(cpdom_id)))
+			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
+			if (pick_cpu >= 0)
+				dsq_id = cpu_to_dsq(pick_cpu);
+			else
+				dsq_id = cpdom_to_dsq(cpdom_id);
+
+			if (consume_dsq(cpdomc_pick, dsq_id))
 				return true;
 		}
 	}
@@ -300,7 +348,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
 	struct task_struct *p;
-	u64 vtime, dsq_id = cpu_dsq_id;
+	u64 vtime = U64_MAX, dsq_id = cpu_dsq_id;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
 	if (!cpdomc) {
