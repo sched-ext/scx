@@ -372,6 +372,11 @@ impl<'a> App<'a> {
             .and_then(|tgid| self.proc_data.get_mut(&tgid))
     }
 
+    fn selected_proc_data_immut(&self) -> Option<&ProcData> {
+        self.selected_process
+            .and_then(|tgid| self.proc_data.get(&tgid))
+    }
+
     /// Stop all active profiling events.
     fn stop_prof_events(&mut self) {
         for cpu_data in self.cpu_data.values_mut() {
@@ -2376,7 +2381,9 @@ impl<'a> App<'a> {
     }
 
     fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        self.update_events_list_size(area);
+        let [scroll_area, data_area] =
+            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
+        self.update_events_list_size(data_area);
 
         let error_str = format!(
             "Process has been killed. Press escape or {} to return to process view.",
@@ -2406,6 +2413,20 @@ impl<'a> App<'a> {
                 .centered(),
             )
             .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .title_top(
                 Line::from(format!(
                     "sample rate {}",
                     self.skel.maps.data_data.as_ref().unwrap().sample_rate
@@ -2414,26 +2435,53 @@ impl<'a> App<'a> {
                 .right_aligned(),
             );
 
-        let mut threads = proc_data.threads.iter().collect::<Vec<_>>();
+        let (mut filtered_threads, selected): (Vec<(i32, &ThreadData)>, usize) = {
+            let filtered_state = self.filtered_state.lock().unwrap();
+            let threads = filtered_state
+                .list
+                .iter()
+                .filter_map(|item| {
+                    item.as_int()
+                        .and_then(|tid| proc_data.threads.get(&tid).map(|data| (tid, data)))
+                })
+                .collect();
+            (threads, filtered_state.selected)
+        };
 
-        threads.sort_unstable_by(|a, b| {
+        filtered_threads.sort_unstable_by(|a, b| {
             b.1.cpu_util_perc
                 .partial_cmp(&a.1.cpu_util_perc)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let rows = threads.into_iter().map(|(tid, data)| {
+        let rows = filtered_threads.iter().enumerate().map(|(i, (tid, data))| {
             visible_columns
                 .iter()
                 .map(|col| Cell::from((col.value_fn)(*tid, data)))
                 .collect::<Row>()
                 .height(1)
-                .style(self.theme().text_color())
+                .style(if i == selected {
+                    self.theme().text_important_color()
+                } else {
+                    self.theme().text_color()
+                })
         });
 
         let table = Table::new(rows, constraints).header(header).block(block);
 
-        frame.render_widget(table, area);
+        frame.render_stateful_widget(
+            table,
+            data_area,
+            &mut TableState::new().with_offset(selected),
+        );
+
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            scroll_area,
+            &mut ScrollbarState::new(filtered_threads.len()).position(selected),
+        );
 
         Ok(())
     }
@@ -2601,7 +2649,6 @@ impl<'a> App<'a> {
             // Reset process view
             self.filtering = false;
             self.event_input_buffer.clear();
-            self.filter_events();
 
             if let Some(proc_data) = self.selected_proc_data() {
                 proc_data.init_threads()?;
@@ -2609,6 +2656,8 @@ impl<'a> App<'a> {
                 // Kick off thread view
                 self.in_thread_view = true;
             }
+
+            self.filter_events();
         }
 
         Ok(())
@@ -2622,17 +2671,18 @@ impl<'a> App<'a> {
                 self.handle_action(&Action::SetState(self.prev_state.clone()))?;
             }
             AppState::Default | AppState::Llc | AppState::Node => {
-                if self.filtering {
-                    self.filtering = false;
-                    self.event_input_buffer.clear();
-                    self.filter_events();
-                } else if self.in_thread_view {
+                if !self.filtering && !self.in_thread_view {
+                    self.handle_action(&Action::Quit)?;
+                } else if !self.filtering {
                     if let Some(proc_data) = self.selected_proc_data() {
                         proc_data.clear_threads();
                     }
                     self.in_thread_view = false;
+                    self.filter_events();
                 } else {
-                    self.handle_action(&Action::Quit)?;
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_events();
                 }
             }
             _ => self.handle_action(&Action::Quit)?,
@@ -3153,20 +3203,48 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node => self
-                .proc_data
-                .iter()
-                .filter(|(_, proc_data)| {
-                    search::contains_spread(&proc_data.process_name, &self.event_input_buffer)
-                        .is_some()
-                        || search::contains_spread(
-                            &proc_data.tgid.to_string(),
-                            &self.event_input_buffer,
-                        )
-                        .is_some()
-                })
-                .map(|(tgid, _)| FilterItem::Int(*tgid))
-                .collect(),
+            AppState::Default | AppState::Llc | AppState::Node => {
+                if self.in_thread_view {
+                    if let Some(proc_data) = self.selected_proc_data_immut() {
+                        proc_data
+                            .threads
+                            .iter()
+                            .filter(|(_, thread_data)| {
+                                search::contains_spread(
+                                    &thread_data.thread_name,
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                                    || search::contains_spread(
+                                        &thread_data.tid.to_string(),
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                            })
+                            .map(|(tid, _)| FilterItem::Int(*tid))
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    self.proc_data
+                        .iter()
+                        .filter(|(_, proc_data)| {
+                            search::contains_spread(
+                                &proc_data.process_name,
+                                &self.event_input_buffer,
+                            )
+                            .is_some()
+                                || search::contains_spread(
+                                    &proc_data.tgid.to_string(),
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                        })
+                        .map(|(tgid, _)| FilterItem::Int(*tgid))
+                        .collect()
+                }
+            }
             _ => vec![],
         };
 
