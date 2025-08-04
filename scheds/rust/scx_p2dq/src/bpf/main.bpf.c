@@ -1585,6 +1585,11 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 		p->nr_cpus_allowed == topo_config.nr_cpus;
 }
 
+void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
+{
+	scx_bpf_reenqueue_local();
+}
+
 void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 {
 	struct llc_ctx *llcx;
@@ -2179,6 +2184,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
 
 SCX_OPS_DEFINE(p2dq,
 	       .select_cpu		= (void *)p2dq_select_cpu,
+	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .enqueue			= (void *)p2dq_enqueue,
 	       .dispatch		= (void *)p2dq_dispatch,
 	       .running			= (void *)p2dq_running,
