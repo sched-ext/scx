@@ -414,12 +414,17 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct task_struct *p;
+		bool idle;
 
 		/*
 		 * Ignore CPU if idle task is running.
 		 */
-		p = scx_bpf_cpu_rq(cpu)->curr;
-		if (p->flags & PF_IDLE)
+		p = scx_bpf_task_acquire_remote_curr(cpu);
+		if (!p)
+			continue;
+		idle = p->flags & PF_IDLE;
+		bpf_task_release(p);
+		if (idle)
 			continue;
 
 		/*
