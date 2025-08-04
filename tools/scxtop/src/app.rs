@@ -13,10 +13,14 @@ use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::search;
-use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
+use crate::util::{
+    format_bytes, format_bytes_per_sec, format_hz, format_kb, format_number, read_file_string,
+    sanitize_nbsp, u32_to_i32,
+};
 use crate::AppState;
 use crate::AppTheme;
 use crate::Columns;
+use crate::ComponentViewState;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -24,6 +28,7 @@ use crate::FilterItem;
 use crate::FilteredState;
 use crate::KprobeEvent;
 use crate::LlcData;
+use crate::MemStatSnapshot;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
@@ -56,9 +61,9 @@ use ratatui::{
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
-        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
-        TableState,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, LineGauge,
+        Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Sparkline, Table, TableState,
     },
     Frame,
 };
@@ -89,6 +94,8 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     sys: Arc<StdMutex<System>>,
+    mem_info: MemStatSnapshot,
+    memory_view_state: ComponentViewState,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -165,6 +172,9 @@ impl<'a> App<'a> {
         let mut node_data = BTreeMap::new();
         let mut proc_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let mut mem_info = MemStatSnapshot::default();
+        mem_info.update()?;
+
         let active_event = ProfilingEvent::from_str_args(
             &config.default_profiling_event(),
             Some(cpu_stat_tracker.clone()),
@@ -261,6 +271,8 @@ impl<'a> App<'a> {
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             sys: Arc::new(StdMutex::new(System::new_all())),
+            mem_info,
+            memory_view_state: ComponentViewState::Default,
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -566,6 +578,9 @@ impl<'a> App<'a> {
                 .unwrap()
                 .update(&mut system_guard)?;
         }
+
+        // Update memory information
+        self.mem_info.update()?;
 
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
         let mut to_remove = vec![];
@@ -1795,7 +1810,155 @@ impl<'a> App<'a> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
         self.render_event(frame, right)?;
-        self.render_table(frame, left)
+
+        // Conditionally split the left area based on memory view state
+        match self.memory_view_state {
+            ComponentViewState::Hidden => {
+                // Memory is hidden, process table takes the entire left side
+                self.render_table(frame, left)?;
+            }
+            ComponentViewState::Default => {
+                // Memory summary is shown, split the left area
+                let [table_area, memory_area] =
+                    Layout::vertical([Constraint::Percentage(80), Constraint::Percentage(20)])
+                        .areas(left);
+                self.render_table(frame, table_area)?;
+                self.render_memory_summary(frame, memory_area)?;
+            }
+            ComponentViewState::Detail => {
+                // This shouldn't happen in default view, but handle it gracefully
+                self.render_table(frame, left)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders a memory summary in the default view.
+    fn render_memory_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Only render memory summary if the memory view state is Default
+        if self.memory_view_state != ComponentViewState::Default {
+            return Ok(());
+        }
+
+        let mem_stats = &self.mem_info;
+        let memory_key = self
+            .config
+            .active_keymap
+            .action_keys_string(Action::SetState(AppState::Memory));
+
+        // Calculate memory usage percentages
+        let available_percent = (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
+        let used_percent = 100.0 - available_percent;
+        let swap_used_percent = 100.0 - mem_stats.swap_ratio() * 100.0;
+        let slab_percent = (mem_stats.slab_kb as f64 / mem_stats.total_kb as f64) * 100.0;
+        let reclaimable_percent =
+            (mem_stats.sreclaimable_kb as f64 / mem_stats.slab_kb as f64) * 100.0;
+
+        // Create a compact multi-line display
+        let text = vec![
+            // First line: Main memory stats
+            Line::from(vec![
+                Span::raw("Mem: "),
+                Span::styled(
+                    format_bytes(mem_stats.total_kb),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw(" | Used: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}%)",
+                        format_bytes(mem_stats.total_kb - mem_stats.available_kb),
+                        used_percent
+                    ),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw(" | Free: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}%)",
+                        format_bytes(mem_stats.available_kb),
+                        available_percent
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            // Second line: Swap and pagefault stats
+            Line::from(vec![
+                Span::raw("Swap: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}%)",
+                        format_bytes(mem_stats.swap_total_kb - mem_stats.swap_free_kb),
+                        swap_used_percent
+                    ),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw("  I/O: "),
+                Span::styled(
+                    format!(
+                        "in {} out {}",
+                        format_bytes_per_sec(mem_stats.delta_swap_in),
+                        format_bytes_per_sec(mem_stats.delta_swap_out)
+                    ),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw("  PF: "),
+                Span::styled(
+                    format!(
+                        "{}/s (maj: {}/s)",
+                        format_number(mem_stats.delta_pgfault),
+                        format_number(mem_stats.delta_pgmajfault)
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            // Third line: Slab stats
+            Line::from(vec![
+                Span::raw("Slab: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}% of RAM)",
+                        format_bytes(mem_stats.slab_kb),
+                        slab_percent
+                    ),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw("  Reclaimable: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}%)",
+                        format_bytes(mem_stats.sreclaimable_kb),
+                        reclaimable_percent
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+        ];
+
+        let block = Block::bordered()
+            .title_top({
+                if memory_key == "M" || memory_key == "m" {
+                    Line::from(vec![
+                        Span::styled(memory_key, self.theme().text_important_color()),
+                        Span::raw("emory"),
+                    ])
+                    .style(self.theme().title_style())
+                    .centered()
+                } else {
+                    Line::from(format!("Memory (press {} for full view)", memory_key))
+                        .style(self.theme().title_style())
+                        .centered()
+                }
+            })
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let paragraph = Paragraph::new(text).block(block).alignment(Alignment::Left);
+
+        frame.render_widget(paragraph, area);
+
+        Ok(())
     }
 
     /// Renders the help TUI.
@@ -1842,6 +2005,16 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::RequestTrace),
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: memory view ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Memory)),
+                    self.memory_view_state
                 ),
                 Style::default(),
             )),
@@ -1962,8 +2135,11 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: profiling event list scroll up",
-                    self.config.active_keymap.action_keys_string(Action::PageUp)
+                    "{} ({}%)",
+                    format_bytes(self.mem_info.swap_total_kb * 1024),
+                    ((self.mem_info.swap_total_kb - self.mem_info.swap_free_kb) as f64
+                        / self.mem_info.swap_total_kb as f64
+                        * 100.0) as u64
                 ),
                 Style::default(),
             )),
@@ -2027,6 +2203,15 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::SetState(AppState::Scheduler))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display memory view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Memory))
                 ),
                 Style::default(),
             )),
@@ -2494,12 +2679,612 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Renders the memory application state.
+    fn render_memory(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+
+        // Create a table for the memory statistics
+        let header = Row::new(vec![
+            Cell::from("Metric"),
+            Cell::from("Value"),
+            Cell::from("Percentage"),
+        ])
+        .height(1)
+        .style(self.theme().text_color())
+        .bold()
+        .underlined();
+
+        let constraints = vec![
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+        ];
+
+        let mem_stats = &self.mem_info;
+
+        let mut rows = vec![
+            // Basic Memory Information
+            Row::new(vec![
+                Cell::from("Total Memory"),
+                Cell::from(format_bytes(mem_stats.total_kb)),
+                Cell::from("100%"),
+            ]),
+            Row::new(vec![
+                Cell::from("Free Memory"),
+                Cell::from(format_bytes(mem_stats.free_kb)),
+                Cell::from(format!("{:.1}%", mem_stats.free_ratio() * 100.0)),
+            ]),
+            Row::new(vec![
+                Cell::from("Available Memory"),
+                Cell::from(format_bytes(mem_stats.available_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Buffers"),
+                Cell::from(format_bytes(mem_stats.buffers_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.buffers_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Cached"),
+                Cell::from(format_bytes(mem_stats.cached_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.cached_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            // Active/Inactive Memory
+            Row::new(vec![
+                Cell::from("Active Memory"),
+                Cell::from(format_bytes(mem_stats.active_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.active_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Inactive Memory"),
+                Cell::from(format_bytes(mem_stats.inactive_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.inactive_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Active(anon)"),
+                Cell::from(format_bytes(mem_stats.active_anon_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.active_anon_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Inactive(anon)"),
+                Cell::from(format_bytes(mem_stats.inactive_anon_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.inactive_anon_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Active(file)"),
+                Cell::from(format_bytes(mem_stats.active_file_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.active_file_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Inactive(file)"),
+                Cell::from(format_bytes(mem_stats.inactive_file_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.inactive_file_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Unevictable"),
+                Cell::from(format_bytes(mem_stats.unevictable_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.unevictable_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Mlocked"),
+                Cell::from(format_bytes(mem_stats.mlocked_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.mlocked_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            // Memory Types
+            Row::new(vec![
+                Cell::from("Anonymous Pages"),
+                Cell::from(format_bytes(mem_stats.anon_pages_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.anon_pages_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Mapped"),
+                Cell::from(format_bytes(mem_stats.mapped_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.mapped_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Shared Memory"),
+                Cell::from(format_bytes(mem_stats.shmem_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.shmem_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            // Kernel Memory
+            Row::new(vec![
+                Cell::from("Slab Memory"),
+                Cell::from(format_bytes(mem_stats.slab_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.slab_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Slab Reclaimable"),
+                Cell::from(format_bytes(mem_stats.sreclaimable_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.sreclaimable_kb as f64 / mem_stats.slab_kb.max(1) as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Slab Unreclaimable"),
+                Cell::from(format_bytes(mem_stats.sunreclaim_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.sunreclaim_kb as f64 / mem_stats.slab_kb.max(1) as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Kernel Stack"),
+                Cell::from(format_bytes(mem_stats.kernel_stack_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.kernel_stack_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Page Tables"),
+                Cell::from(format_bytes(mem_stats.page_tables_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.page_tables_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            // I/O and Dirty Pages
+            Row::new(vec![
+                Cell::from("Dirty"),
+                Cell::from(format_bytes(mem_stats.dirty_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.dirty_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Writeback"),
+                Cell::from(format_bytes(mem_stats.writeback_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.writeback_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Writeback Tmp"),
+                Cell::from(format_bytes(mem_stats.writeback_tmp_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.writeback_tmp_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            // Swap Information
+            Row::new(vec![
+                Cell::from("Total Swap"),
+                Cell::from(format_bytes(mem_stats.swap_total_kb)),
+                Cell::from("100%"),
+            ]),
+            Row::new(vec![
+                Cell::from("Free Swap"),
+                Cell::from(format_bytes(mem_stats.swap_free_kb)),
+                Cell::from(format!("{:.1}%", mem_stats.swap_ratio() * 100.0)),
+            ]),
+            Row::new(vec![
+                Cell::from("Swap Cached"),
+                Cell::from(format_bytes(mem_stats.swap_cached_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    if mem_stats.swap_total_kb > 0 {
+                        (mem_stats.swap_cached_kb as f64 / mem_stats.swap_total_kb as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                )),
+            ]),
+            // Virtual Memory
+            Row::new(vec![
+                Cell::from("Commit Limit"),
+                Cell::from(format_bytes(mem_stats.commit_limit_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.commit_limit_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("Committed AS"),
+                Cell::from(format_bytes(mem_stats.committed_as_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    if mem_stats.commit_limit_kb > 0 {
+                        (mem_stats.committed_as_kb as f64 / mem_stats.commit_limit_kb as f64)
+                            * 100.0
+                    } else {
+                        0.0
+                    }
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("VMalloc Total"),
+                Cell::from(format_bytes(mem_stats.vmalloc_total_kb)),
+                Cell::from("-"),
+            ]),
+            Row::new(vec![
+                Cell::from("VMalloc Used"),
+                Cell::from(format_bytes(mem_stats.vmalloc_used_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    if mem_stats.vmalloc_total_kb > 0 {
+                        (mem_stats.vmalloc_used_kb as f64 / mem_stats.vmalloc_total_kb as f64)
+                            * 100.0
+                    } else {
+                        0.0
+                    }
+                )),
+            ]),
+            Row::new(vec![
+                Cell::from("VMalloc Chunk"),
+                Cell::from(format_bytes(mem_stats.vmalloc_chunk_kb)),
+                Cell::from("-"),
+            ]),
+        ];
+
+        // Add huge pages information if available
+        if mem_stats.huge_pages_total > 0 {
+            rows.extend(vec![
+                Row::new(vec![
+                    Cell::from("Huge Pages Total"),
+                    Cell::from(format!("{}", mem_stats.huge_pages_total)),
+                    Cell::from("100%"),
+                ]),
+                Row::new(vec![
+                    Cell::from("Huge Pages Free"),
+                    Cell::from(format!("{}", mem_stats.huge_pages_free)),
+                    Cell::from(format!(
+                        "{:.1}%",
+                        (mem_stats.huge_pages_free as f64 / mem_stats.huge_pages_total as f64)
+                            * 100.0
+                    )),
+                ]),
+                Row::new(vec![
+                    Cell::from("Huge Pages Reserved"),
+                    Cell::from(format!("{}", mem_stats.huge_pages_rsvd)),
+                    Cell::from(format!(
+                        "{:.1}%",
+                        (mem_stats.huge_pages_rsvd as f64 / mem_stats.huge_pages_total as f64)
+                            * 100.0
+                    )),
+                ]),
+                Row::new(vec![
+                    Cell::from("Huge Page Size"),
+                    Cell::from(format_kb(mem_stats.hugepagesize_kb)),
+                    Cell::from("-"),
+                ]),
+                Row::new(vec![
+                    Cell::from("Anonymous Huge Pages"),
+                    Cell::from(format_kb(mem_stats.anon_huge_pages_kb)),
+                    Cell::from(format!(
+                        "{:.1}%",
+                        (mem_stats.anon_huge_pages_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                    )),
+                ]),
+            ]);
+        }
+
+        // Add CMA information if available
+        if mem_stats.cma_total_kb > 0 {
+            rows.extend(vec![
+                Row::new(vec![
+                    Cell::from("CMA Total"),
+                    Cell::from(format_kb(mem_stats.cma_total_kb)),
+                    Cell::from(format!(
+                        "{:.1}%",
+                        (mem_stats.cma_total_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                    )),
+                ]),
+                Row::new(vec![
+                    Cell::from("CMA Free"),
+                    Cell::from(format_kb(mem_stats.cma_free_kb)),
+                    Cell::from(format!(
+                        "{:.1}%",
+                        (mem_stats.cma_free_kb as f64 / mem_stats.cma_total_kb as f64) * 100.0
+                    )),
+                ]),
+            ]);
+        }
+
+        // Add direct mapping information if available
+        if mem_stats.direct_map_4k_kb > 0
+            || mem_stats.direct_map_2m_kb > 0
+            || mem_stats.direct_map_1g_kb > 0
+        {
+            rows.extend(vec![
+                Row::new(vec![
+                    Cell::from("DirectMap4k"),
+                    Cell::from(format_bytes(mem_stats.direct_map_4k_kb)),
+                    Cell::from("-"),
+                ]),
+                Row::new(vec![
+                    Cell::from("DirectMap2M"),
+                    Cell::from(format_bytes(mem_stats.direct_map_2m_kb)),
+                    Cell::from("-"),
+                ]),
+                Row::new(vec![
+                    Cell::from("DirectMap1G"),
+                    Cell::from(format_bytes(mem_stats.direct_map_1g_kb)),
+                    Cell::from("-"),
+                ]),
+            ]);
+        }
+
+        // Add hardware corruption information if available
+        if mem_stats.hardware_corrupted_kb > 0 {
+            rows.push(Row::new(vec![
+                Cell::from("Hardware Corrupted"),
+                Cell::from(format_bytes(mem_stats.hardware_corrupted_kb)),
+                Cell::from(format!(
+                    "{:.1}%",
+                    (mem_stats.hardware_corrupted_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                )),
+            ]));
+        }
+
+        let block = Block::bordered()
+            .title_top(
+                Line::from("Memory Statistics")
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                    .style(self.theme().text_important_color())
+                    .right_aligned(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let table = Table::new(rows, constraints).header(header).block(block);
+
+        frame.render_widget(table, left);
+
+        // Create memory usage gauges and additional stats for the right side
+        let [right_top, right_middle, right_bottom] = Layout::vertical([
+            Constraint::Percentage(8),
+            Constraint::Percentage(46),
+            Constraint::Percentage(46),
+        ])
+        .areas(right);
+
+        // Split the top section into two columns for memory and swap gauges
+        let [gauge_left, gauge_right] =
+            Layout::horizontal([Constraint::Fill(1); 2]).areas(right_top);
+
+        // Memory usage gauge
+        let mem_used_percent =
+            100.0 - (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
+        let mem_used_kb = mem_stats.total_kb - mem_stats.available_kb;
+        let mem_gauge = LineGauge::default()
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from("Memory Usage")
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .filled_style(self.theme().text_important_color())
+            .ratio(mem_used_percent / 100.0)
+            .label(format!(
+                "{} / {} ({:.1}%)",
+                format_bytes(mem_used_kb),
+                format_bytes(mem_stats.total_kb),
+                mem_used_percent
+            ));
+
+        frame.render_widget(mem_gauge, gauge_left);
+
+        // Swap usage gauge
+        let swap_used_percent = if mem_stats.swap_total_kb > 0 {
+            100.0 - (mem_stats.swap_free_kb as f64 / mem_stats.swap_total_kb as f64) * 100.0
+        } else {
+            0.0
+        };
+        let swap_used_kb = mem_stats.swap_total_kb - mem_stats.swap_free_kb;
+        let swap_gauge = LineGauge::default()
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from("Swap Usage")
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .filled_style(self.theme().text_important_color())
+            .ratio(swap_used_percent / 100.0)
+            .label(format!(
+                "{} / {} ({:.1}%)",
+                format_bytes(swap_used_kb),
+                format_bytes(mem_stats.swap_total_kb),
+                swap_used_percent
+            ));
+
+        frame.render_widget(swap_gauge, gauge_right);
+
+        // Memory rates (pagefaults, swap I/O)
+        let rates_block = Block::bordered()
+            .title_top(
+                Line::from("Memory Activity Rates")
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let rates_text = vec![
+            Line::from(vec![
+                Span::raw("Page Faults: "),
+                Span::styled(
+                    format!("{}/s", format_number(mem_stats.delta_pgfault)),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw("  Major: "),
+                Span::styled(
+                    format!("{}/s", format_number(mem_stats.delta_pgmajfault)),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Swap In: "),
+                Span::styled(
+                    format_bytes_per_sec(mem_stats.delta_swap_in * 1024),
+                    self.theme().text_important_color(),
+                ),
+                Span::raw("  Swap Out: "),
+                Span::styled(
+                    format_bytes_per_sec(mem_stats.delta_swap_out * 1024),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+        ];
+
+        let rates_paragraph = Paragraph::new(rates_text)
+            .block(rates_block)
+            .alignment(Alignment::Left);
+
+        frame.render_widget(rates_paragraph, right_middle);
+
+        // Slab information section
+        let slab_block = Block::bordered()
+            .title_top(
+                Line::from("Slab Information")
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let slab_text = vec![
+            Line::from(vec![
+                Span::raw("Total Slab: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}% of RAM)",
+                        format_bytes(mem_stats.slab_kb),
+                        (mem_stats.slab_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Reclaimable: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}% of slab)",
+                        format_bytes(mem_stats.sreclaimable_kb),
+                        if mem_stats.slab_kb > 0 {
+                            (mem_stats.sreclaimable_kb as f64 / mem_stats.slab_kb as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Unreclaimable: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}% of slab)",
+                        format_kb(mem_stats.sunreclaim_kb),
+                        if mem_stats.slab_kb > 0 {
+                            (mem_stats.sunreclaim_kb as f64 / mem_stats.slab_kb as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Kernel Stack: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}% of RAM)",
+                        format_bytes(mem_stats.kernel_stack_kb),
+                        (mem_stats.kernel_stack_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Page Tables: "),
+                Span::styled(
+                    format!(
+                        "{} ({:.1}% of RAM)",
+                        format_bytes(mem_stats.page_tables_kb),
+                        (mem_stats.page_tables_kb as f64 / mem_stats.total_kb as f64) * 100.0
+                    ),
+                    self.theme().text_important_color(),
+                ),
+            ]),
+        ];
+
+        let slab_paragraph = Paragraph::new(slab_text)
+            .block(slab_block)
+            .alignment(Alignment::Left);
+
+        frame.render_widget(slab_paragraph, right_bottom);
+
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
             AppState::MangoApp => self.render_mangoapp(frame),
+            AppState::Memory => self.render_memory(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
             AppState::Scheduler => {
@@ -3298,7 +4083,21 @@ impl<'a> App<'a> {
                 self.on_enter()?;
             }
             Action::SetState(state) => {
-                if *state == self.state {
+                if *state == AppState::Memory {
+                    // Handle memory view tristate cycling
+                    self.memory_view_state = self.memory_view_state.next();
+                    match self.memory_view_state {
+                        ComponentViewState::Detail => {
+                            self.set_state(AppState::Memory);
+                        }
+                        ComponentViewState::Hidden | ComponentViewState::Default => {
+                            // Stay in current state but update memory view
+                            if self.state == AppState::Memory {
+                                self.set_state(self.prev_state.clone());
+                            }
+                        }
+                    }
+                } else if *state == self.state {
                     self.set_state(self.prev_state.clone());
                 } else {
                     self.set_state(state.clone());
