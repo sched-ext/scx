@@ -2381,6 +2381,10 @@ impl<'a> App<'a> {
     }
 
     fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let [scroll_area, data_area] =
+            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
+        self.update_events_list_size(data_area);
+
         let error_str = format!(
             "Process has been killed. Press escape or {} to return to process view.",
             self.config.active_keymap.action_keys_string(Action::Quit)
@@ -2393,10 +2397,6 @@ impl<'a> App<'a> {
             self.render_error_msg(frame, area, &error_str);
             return Ok(());
         };
-
-        let [scroll_area, data_area] =
-            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
-        self.update_events_list_size(data_area);
 
         let visible_columns: Vec<_> = self.thread_columns.visible_columns().collect();
         let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
