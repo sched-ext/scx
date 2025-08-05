@@ -106,4 +106,3 @@ struct scx_static {
 	void __arena *memory;
 	size_t off;
 };
-
