@@ -19,7 +19,7 @@ pub fn format_bytes(bytes: u64) -> String {
     let bytes_f64 = bytes as f64;
 
     if bytes_f64 < KB {
-        format!("{}B", bytes)
+        format!("{bytes}B")
     } else if bytes_f64 < MB {
         format!("{:.2}KB", bytes_f64 / KB)
     } else if bytes_f64 < GB {
@@ -47,7 +47,7 @@ pub fn format_bytes_per_sec(bytes: u64) -> String {
 /// Formats a number to be more readable with K, M, B suffixes.
 pub fn format_number(num: u64) -> String {
     match num {
-        0..=999 => format!("{}", num),
+        0..=999 => format!("{num}"),
         1_000..=999_999 => format!("{:.1}K", num as f64 / 1_000.0),
         1_000_000..=999_999_999 => format!("{:.1}M", num as f64 / 1_000_000.0),
         _ => format!("{:.1}B", num as f64 / 1_000_000_000.0),
@@ -64,7 +64,7 @@ pub fn format_pages(pages: u64) -> String {
 /// Formats a frequency value in Hz to a human-readable format
 pub fn format_hz(hz: u64) -> String {
     match hz {
-        0..=999 => format!("{}Hz", hz),
+        0..=999 => format!("{hz}Hz"),
         1_000..=999_999 => format!("{:.2}kHz", hz as f64 / 1_000.0),
         1_000_000..=999_999_999 => format!("{:.2}MHz", hz as f64 / 1_000_000.0),
         _ => format!("{:.2}GHz", hz as f64 / 1_000_000_000.0),
@@ -93,6 +93,11 @@ pub fn sanitize_nbsp(s: String) -> String {
 /// Converts a u32 to a i32, panics on failure
 pub fn u32_to_i32(x: u32) -> i32 {
     i32::try_from(x).expect("u32 to i32 conversion failed")
+}
+
+/// Formats a percentage value (0.0 to 1.0) to a string with % suffix
+pub fn format_percentage(value: f64) -> String {
+    format!("{:.1}%", value * 100.0)
 }
 
 #[cfg(test)]

@@ -8,15 +8,16 @@ use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
-use crate::columns::{get_process_columns, get_thread_columns};
+use crate::columns::{
+    get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
+    get_memory_summary_columns, get_pagefault_summary_columns, get_process_columns,
+    get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+};
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::search;
-use crate::util::{
-    format_bytes, format_bytes_per_sec, format_hz, format_kb, format_number, read_file_string,
-    sanitize_nbsp, u32_to_i32,
-};
+use crate::util::{format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
 use crate::Columns;
@@ -319,7 +320,48 @@ impl<'a> App<'a> {
         };
 
         // Set the initial filter state
-        app.filter_events();
+        app.filtering = true;
+        app.event_input_buffer.clear();
+        let filtered_events_list = match app.state {
+            AppState::PerfEvent => search::fuzzy_search(&app.perf_events, &app.event_input_buffer)
+                .into_iter()
+                .map(FilterItem::String)
+                .collect(),
+            AppState::KprobeEvent => {
+                search::fuzzy_search(&app.kprobe_events, &app.event_input_buffer)
+                    .into_iter()
+                    .map(FilterItem::String)
+                    .collect()
+            }
+            AppState::Default | AppState::Llc | AppState::Node => app
+                .proc_data
+                .iter()
+                .filter(|(_, proc_data)| {
+                    search::contains_spread(&proc_data.process_name, &app.event_input_buffer)
+                        .is_some()
+                        || search::contains_spread(
+                            &proc_data.tgid.to_string(),
+                            &app.event_input_buffer,
+                        )
+                        .is_some()
+                })
+                .map(|(tgid, _)| FilterItem::Int(*tgid))
+                .collect(),
+            _ => vec![],
+        };
+
+        {
+            let mut filtered_state = app.filtered_state.lock().unwrap();
+            filtered_state.list = filtered_events_list;
+            filtered_state.count = filtered_state.list.len() as u16;
+            if (filtered_state.count as usize) <= filtered_state.selected {
+                filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
+            }
+            if filtered_state.count <= filtered_state.scroll {
+                filtered_state.scroll = filtered_state.count.saturating_sub(1);
+            }
+        }
+        app.filtering = false;
 
         Ok(app)
     }
@@ -351,7 +393,76 @@ impl<'a> App<'a> {
             || self.state == AppState::Node
         {
             self.filtered_state.lock().unwrap().reset();
-            self.filter_events();
+            let filtered_events_list = match self.state {
+                AppState::PerfEvent => {
+                    search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
+                        .into_iter()
+                        .map(FilterItem::String)
+                        .collect()
+                }
+                AppState::KprobeEvent => {
+                    search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
+                        .into_iter()
+                        .map(FilterItem::String)
+                        .collect()
+                }
+                AppState::Default | AppState::Llc | AppState::Node => {
+                    if self.in_thread_view {
+                        if let Some(proc_data) = self.selected_proc_data_immut() {
+                            proc_data
+                                .threads
+                                .iter()
+                                .filter(|(_, thread_data)| {
+                                    search::contains_spread(
+                                        &thread_data.thread_name,
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                                        || search::contains_spread(
+                                            &thread_data.tid.to_string(),
+                                            &self.event_input_buffer,
+                                        )
+                                        .is_some()
+                                })
+                                .map(|(tid, _)| FilterItem::Int(*tid))
+                                .collect()
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        self.proc_data
+                            .iter()
+                            .filter(|(_, proc_data)| {
+                                search::contains_spread(
+                                    &proc_data.process_name,
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                                    || search::contains_spread(
+                                        &proc_data.tgid.to_string(),
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                            })
+                            .map(|(tgid, _)| FilterItem::Int(*tgid))
+                            .collect()
+                    }
+                }
+                _ => vec![],
+            };
+
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+
+            filtered_state.list = filtered_events_list;
+            filtered_state.count = filtered_state.list.len() as u16;
+
+            if (filtered_state.count as usize) <= filtered_state.selected {
+                filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
+            }
+
+            if filtered_state.count <= filtered_state.scroll {
+                filtered_state.scroll = filtered_state.count.saturating_sub(1);
+            }
         }
 
         if self.prev_state == AppState::MangoApp {
@@ -580,7 +691,10 @@ impl<'a> App<'a> {
         }
 
         // Update memory information
-        self.mem_info.update()?;
+        match self.memory_view_state {
+            ComponentViewState::Default | ComponentViewState::Detail => self.mem_info.update()?,
+            _ => {}
+        }
 
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
         let mut to_remove = vec![];
@@ -603,7 +717,78 @@ impl<'a> App<'a> {
         }
 
         // Now that we updated the process data, we need to also update the filtered data
-        self.filter_events();
+        let filtered_events_list = match self.state {
+            AppState::PerfEvent => {
+                search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
+                    .into_iter()
+                    .map(FilterItem::String)
+                    .collect()
+            }
+            AppState::KprobeEvent => {
+                search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
+                    .into_iter()
+                    .map(FilterItem::String)
+                    .collect()
+            }
+            AppState::Default | AppState::Llc | AppState::Node => {
+                if self.in_thread_view {
+                    if let Some(proc_data) = self.selected_proc_data_immut() {
+                        proc_data
+                            .threads
+                            .iter()
+                            .filter(|(_, thread_data)| {
+                                search::contains_spread(
+                                    &thread_data.thread_name,
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                                    || search::contains_spread(
+                                        &thread_data.tid.to_string(),
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                            })
+                            .map(|(tid, _)| FilterItem::Int(*tid))
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    self.proc_data
+                        .iter()
+                        .filter(|(_, proc_data)| {
+                            search::contains_spread(
+                                &proc_data.process_name,
+                                &self.event_input_buffer,
+                            )
+                            .is_some()
+                                || search::contains_spread(
+                                    &proc_data.tgid.to_string(),
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                        })
+                        .map(|(tgid, _)| FilterItem::Int(*tgid))
+                        .collect()
+                }
+            }
+            _ => vec![],
+        };
+
+        {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+
+            filtered_state.list = filtered_events_list;
+            filtered_state.count = filtered_state.list.len() as u16;
+
+            if (filtered_state.count as usize) <= filtered_state.selected {
+                filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
+            }
+
+            if filtered_state.count <= filtered_state.scroll {
+                filtered_state.scroll = filtered_state.count.saturating_sub(1);
+            }
+        }
 
         if self.state == AppState::Scheduler {
             if self.scheduler.is_empty() {
@@ -1813,21 +1998,16 @@ impl<'a> App<'a> {
 
         // Conditionally split the left area based on memory view state
         match self.memory_view_state {
-            ComponentViewState::Hidden => {
+            ComponentViewState::Detail | ComponentViewState::Hidden => {
                 // Memory is hidden, process table takes the entire left side
                 self.render_table(frame, left)?;
             }
             ComponentViewState::Default => {
                 // Memory summary is shown, split the left area
                 let [table_area, memory_area] =
-                    Layout::vertical([Constraint::Percentage(80), Constraint::Percentage(20)])
-                        .areas(left);
+                    Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
                 self.render_table(frame, table_area)?;
                 self.render_memory_summary(frame, memory_area)?;
-            }
-            ComponentViewState::Detail => {
-                // This shouldn't happen in default view, but handle it gracefully
-                self.render_table(frame, left)?;
             }
         }
 
@@ -1838,125 +2018,135 @@ impl<'a> App<'a> {
     fn render_memory_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         // Only render memory summary if the memory view state is Default
         if self.memory_view_state != ComponentViewState::Default {
-            return Ok(());
+            anyhow::bail!("invalid memory view state: ComponentViewState::Default");
         }
 
-        let mem_stats = &self.mem_info;
         let memory_key = self
             .config
             .active_keymap
             .action_keys_string(Action::SetState(AppState::Memory));
 
-        // Calculate memory usage percentages
-        let available_percent = (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
-        let used_percent = 100.0 - available_percent;
-        let swap_used_percent = 100.0 - mem_stats.swap_ratio() * 100.0;
-        let slab_percent = (mem_stats.slab_kb as f64 / mem_stats.total_kb as f64) * 100.0;
-        let reclaimable_percent =
-            (mem_stats.sreclaimable_kb as f64 / mem_stats.slab_kb as f64) * 100.0;
+        // Check if the memory key is bound
+        if memory_key.is_empty() {
+            panic!("Memory key is not bound");
+        }
 
-        // Create a compact multi-line display
-        let text = vec![
-            // First line: Main memory stats
+        // Create a single block for all memory tables with keybinding in title
+        let title = if memory_key == "m" || memory_key == "M" {
             Line::from(vec![
-                Span::raw("Mem: "),
                 Span::styled(
-                    format_bytes(mem_stats.total_kb),
-                    self.theme().text_important_color(),
+                    &memory_key,
+                    self.theme().title_style().add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" | Used: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}%)",
-                        format_bytes(mem_stats.total_kb - mem_stats.available_kb),
-                        used_percent
-                    ),
-                    self.theme().text_important_color(),
-                ),
-                Span::raw(" | Free: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}%)",
-                        format_bytes(mem_stats.available_kb),
-                        available_percent
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            // Second line: Swap and pagefault stats
+                Span::raw("emory Statistics"),
+            ])
+        } else {
             Line::from(vec![
-                Span::raw("Swap: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}%)",
-                        format_bytes(mem_stats.swap_total_kb - mem_stats.swap_free_kb),
-                        swap_used_percent
-                    ),
-                    self.theme().text_important_color(),
-                ),
-                Span::raw("  I/O: "),
-                Span::styled(
-                    format!(
-                        "in {} out {}",
-                        format_bytes_per_sec(mem_stats.delta_swap_in * 4096),
-                        format_bytes_per_sec(mem_stats.delta_swap_out * 4096)
-                    ),
-                    self.theme().text_important_color(),
-                ),
-                Span::raw("  PF: "),
-                Span::styled(
-                    format!(
-                        "{}/s (maj: {}/s)",
-                        format_number(mem_stats.delta_pgfault),
-                        format_number(mem_stats.delta_pgmajfault)
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            // Third line: Slab stats
-            Line::from(vec![
-                Span::raw("Slab: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}% of RAM)",
-                        format_bytes(mem_stats.slab_kb),
-                        slab_percent
-                    ),
-                    self.theme().text_important_color(),
-                ),
-                Span::raw("  Reclaimable: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}%)",
-                        format_bytes(mem_stats.sreclaimable_kb),
-                        reclaimable_percent
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-        ];
+                Span::raw("Memory Statistics ("),
+                Span::styled(&memory_key, self.theme().title_style()),
+                Span::raw(")"),
+            ])
+        };
 
         let block = Block::bordered()
-            .title_top({
-                if memory_key == "M" || memory_key == "m" {
-                    Line::from(vec![
-                        Span::styled(memory_key, self.theme().text_important_color()),
-                        Span::raw("emory"),
-                    ])
-                    .style(self.theme().title_style())
-                    .centered()
-                } else {
-                    Line::from(format!("Memory (press {} for full view)", memory_key))
-                        .style(self.theme().title_style())
-                        .centered()
-                }
-            })
+            .title(title)
+            .title_alignment(Alignment::Center)
             .border_type(BorderType::Rounded)
             .style(self.theme().border_style());
 
-        let paragraph = Paragraph::new(text).block(block).alignment(Alignment::Left);
+        // Get the inner area of the block
+        let inner_area = block.inner(area);
 
-        frame.render_widget(paragraph, area);
+        // Split the inner area into three sections for different memory tables
+        // Use proportional heights based on content - memory needs more space than swap and page faults
+        let [memory_area, swap_area, pagefault_area] = Layout::vertical([
+            Constraint::Length(3), // Memory table (header + 1 row + padding)
+            Constraint::Length(3), // Swap table (header + 1 row + padding)
+            Constraint::Length(3), // Page faults table (header + 1 row + padding)
+        ])
+        .margin(0) // Remove margin between tables
+        .areas(inner_area);
+
+        // Get the columns for memory, swap, and pagefault stats
+        let memory_columns = get_memory_summary_columns();
+        let swap_columns = get_swap_summary_columns();
+        let pagefault_columns = get_pagefault_summary_columns();
+
+        // Render the block first
+        frame.render_widget(block, area);
+
+        // Render memory statistics table (without border)
+        self.render_memory_table(frame, memory_area, None, &memory_columns, false)?;
+
+        // Render swap statistics table (without border)
+        self.render_memory_table(frame, swap_area, None, &swap_columns, false)?;
+
+        // Render page fault statistics table (without border)
+        self.render_memory_table(frame, pagefault_area, None, &pagefault_columns, false)?;
+
+        Ok(())
+    }
+
+    /// Renders a memory table with the given columns
+    fn render_memory_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: Option<&str>,
+        columns: &[Column<(), MemStatSnapshot>],
+        with_border: bool,
+    ) -> Result<()> {
+        let mem_stats = &self.mem_info;
+
+        // Create header cells from column headers
+        let header_cells: Vec<Cell> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
+            .collect();
+
+        // Create row data
+        let row_cells: Vec<Cell> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| {
+                let value = (col.value_fn)((), mem_stats);
+                Cell::from(value).style(self.theme().text_color())
+            })
+            .collect();
+
+        // Get constraints for visible columns
+        let constraints: Vec<Constraint> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| col.constraint)
+            .collect();
+
+        // Create the table with rows and constraints
+        let mut table = Table::new(vec![Row::new(row_cells)], constraints)
+            .header(Row::new(header_cells))
+            .column_spacing(1);
+
+        // Add border and title if requested
+        if with_border {
+            if let Some(table_title) = title {
+                table = table.block(
+                    Block::bordered()
+                        .title(table_title)
+                        .title_alignment(Alignment::Center)
+                        .border_type(BorderType::Rounded)
+                        .style(self.theme().border_style()),
+                );
+            } else {
+                table = table.block(
+                    Block::bordered()
+                        .border_type(BorderType::Rounded)
+                        .style(self.theme().border_style()),
+                );
+            }
+        }
+
+        frame.render_widget(table, area);
 
         Ok(())
     }
@@ -2684,386 +2874,36 @@ impl<'a> App<'a> {
         let area = frame.area();
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
 
-        // Create a table for the memory statistics
-        let header = Row::new(vec![
-            Cell::from("Metric"),
-            Cell::from("Value"),
-            Cell::from("Percentage"),
-        ])
-        .height(1)
-        .style(self.theme().text_color())
-        .bold()
-        .underlined();
-
-        let constraints = vec![
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(30),
-        ];
-
         let mem_stats = &self.mem_info;
 
-        let mut rows = vec![
-            // Basic Memory Information
-            Row::new(vec![
-                Cell::from("Total Memory"),
-                Cell::from(format_bytes(mem_stats.total_kb)),
-                Cell::from("100%"),
-            ]),
-            Row::new(vec![
-                Cell::from("Free Memory"),
-                Cell::from(format_bytes(mem_stats.free_kb)),
-                Cell::from(format!("{:.1}%", mem_stats.free_ratio() * 100.0)),
-            ]),
-            Row::new(vec![
-                Cell::from("Available Memory"),
-                Cell::from(format_bytes(mem_stats.available_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Buffers"),
-                Cell::from(format_bytes(mem_stats.buffers_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.buffers_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Cached"),
-                Cell::from(format_bytes(mem_stats.cached_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.cached_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            // Active/Inactive Memory
-            Row::new(vec![
-                Cell::from("Active Memory"),
-                Cell::from(format_bytes(mem_stats.active_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.active_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Inactive Memory"),
-                Cell::from(format_bytes(mem_stats.inactive_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.inactive_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Active(anon)"),
-                Cell::from(format_bytes(mem_stats.active_anon_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.active_anon_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Inactive(anon)"),
-                Cell::from(format_bytes(mem_stats.inactive_anon_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.inactive_anon_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Active(file)"),
-                Cell::from(format_bytes(mem_stats.active_file_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.active_file_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Inactive(file)"),
-                Cell::from(format_bytes(mem_stats.inactive_file_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.inactive_file_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Unevictable"),
-                Cell::from(format_bytes(mem_stats.unevictable_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.unevictable_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Mlocked"),
-                Cell::from(format_bytes(mem_stats.mlocked_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.mlocked_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            // Memory Types
-            Row::new(vec![
-                Cell::from("Anonymous Pages"),
-                Cell::from(format_bytes(mem_stats.anon_pages_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.anon_pages_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Mapped"),
-                Cell::from(format_bytes(mem_stats.mapped_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.mapped_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Shared Memory"),
-                Cell::from(format_bytes(mem_stats.shmem_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.shmem_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            // Kernel Memory
-            Row::new(vec![
-                Cell::from("Slab Memory"),
-                Cell::from(format_bytes(mem_stats.slab_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.slab_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Slab Reclaimable"),
-                Cell::from(format_bytes(mem_stats.sreclaimable_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.sreclaimable_kb as f64 / mem_stats.slab_kb.max(1) as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Slab Unreclaimable"),
-                Cell::from(format_bytes(mem_stats.sunreclaim_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.sunreclaim_kb as f64 / mem_stats.slab_kb.max(1) as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Kernel Stack"),
-                Cell::from(format_bytes(mem_stats.kernel_stack_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.kernel_stack_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Page Tables"),
-                Cell::from(format_bytes(mem_stats.page_tables_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.page_tables_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            // I/O and Dirty Pages
-            Row::new(vec![
-                Cell::from("Dirty"),
-                Cell::from(format_bytes(mem_stats.dirty_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.dirty_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Writeback"),
-                Cell::from(format_bytes(mem_stats.writeback_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.writeback_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Writeback Tmp"),
-                Cell::from(format_bytes(mem_stats.writeback_tmp_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.writeback_tmp_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            // Swap Information
-            Row::new(vec![
-                Cell::from("Total Swap"),
-                Cell::from(format_bytes(mem_stats.swap_total_kb)),
-                Cell::from("100%"),
-            ]),
-            Row::new(vec![
-                Cell::from("Free Swap"),
-                Cell::from(format_bytes(mem_stats.swap_free_kb)),
-                Cell::from(format!("{:.1}%", mem_stats.swap_ratio() * 100.0)),
-            ]),
-            Row::new(vec![
-                Cell::from("Swap Cached"),
-                Cell::from(format_bytes(mem_stats.swap_cached_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    if mem_stats.swap_total_kb > 0 {
-                        (mem_stats.swap_cached_kb as f64 / mem_stats.swap_total_kb as f64) * 100.0
-                    } else {
-                        0.0
-                    }
-                )),
-            ]),
-            // Virtual Memory
-            Row::new(vec![
-                Cell::from("Commit Limit"),
-                Cell::from(format_bytes(mem_stats.commit_limit_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.commit_limit_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("Committed AS"),
-                Cell::from(format_bytes(mem_stats.committed_as_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    if mem_stats.commit_limit_kb > 0 {
-                        (mem_stats.committed_as_kb as f64 / mem_stats.commit_limit_kb as f64)
-                            * 100.0
-                    } else {
-                        0.0
-                    }
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("VMalloc Total"),
-                Cell::from(format_bytes(mem_stats.vmalloc_total_kb)),
-                Cell::from("-"),
-            ]),
-            Row::new(vec![
-                Cell::from("VMalloc Used"),
-                Cell::from(format_bytes(mem_stats.vmalloc_used_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    if mem_stats.vmalloc_total_kb > 0 {
-                        (mem_stats.vmalloc_used_kb as f64 / mem_stats.vmalloc_total_kb as f64)
-                            * 100.0
-                    } else {
-                        0.0
-                    }
-                )),
-            ]),
-            Row::new(vec![
-                Cell::from("VMalloc Chunk"),
-                Cell::from(format_bytes(mem_stats.vmalloc_chunk_kb)),
-                Cell::from("-"),
-            ]),
-        ];
+        // Get the columns and metrics for the detailed memory view
+        let memory_columns = get_memory_detail_columns();
+        let memory_metrics = get_memory_detail_metrics();
 
-        // Add huge pages information if available
-        if mem_stats.huge_pages_total > 0 {
-            rows.extend(vec![
-                Row::new(vec![
-                    Cell::from("Huge Pages Total"),
-                    Cell::from(format!("{}", mem_stats.huge_pages_total)),
-                    Cell::from("100%"),
-                ]),
-                Row::new(vec![
-                    Cell::from("Huge Pages Free"),
-                    Cell::from(format!("{}", mem_stats.huge_pages_free)),
-                    Cell::from(format!(
-                        "{:.1}%",
-                        (mem_stats.huge_pages_free as f64 / mem_stats.huge_pages_total as f64)
-                            * 100.0
-                    )),
-                ]),
-                Row::new(vec![
-                    Cell::from("Huge Pages Reserved"),
-                    Cell::from(format!("{}", mem_stats.huge_pages_rsvd)),
-                    Cell::from(format!(
-                        "{:.1}%",
-                        (mem_stats.huge_pages_rsvd as f64 / mem_stats.huge_pages_total as f64)
-                            * 100.0
-                    )),
-                ]),
-                Row::new(vec![
-                    Cell::from("Huge Page Size"),
-                    Cell::from(format_kb(mem_stats.hugepagesize_kb)),
-                    Cell::from("-"),
-                ]),
-                Row::new(vec![
-                    Cell::from("Anonymous Huge Pages"),
-                    Cell::from(format_kb(mem_stats.anon_huge_pages_kb)),
-                    Cell::from(format!(
-                        "{:.1}%",
-                        (mem_stats.anon_huge_pages_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                    )),
-                ]),
-            ]);
-        }
+        // Create header cells from column headers
+        let header_cells: Vec<Cell> = memory_columns
+            .iter()
+            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
+            .collect();
 
-        // Add CMA information if available
-        if mem_stats.cma_total_kb > 0 {
-            rows.extend(vec![
-                Row::new(vec![
-                    Cell::from("CMA Total"),
-                    Cell::from(format_kb(mem_stats.cma_total_kb)),
-                    Cell::from(format!(
-                        "{:.1}%",
-                        (mem_stats.cma_total_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                    )),
-                ]),
-                Row::new(vec![
-                    Cell::from("CMA Free"),
-                    Cell::from(format_kb(mem_stats.cma_free_kb)),
-                    Cell::from(format!(
-                        "{:.1}%",
-                        (mem_stats.cma_free_kb as f64 / mem_stats.cma_total_kb as f64) * 100.0
-                    )),
-                ]),
-            ]);
-        }
+        // Create constraints from column constraints
+        let constraints: Vec<Constraint> =
+            memory_columns.iter().map(|col| col.constraint).collect();
 
-        // Add direct mapping information if available
-        if mem_stats.direct_map_4k_kb > 0
-            || mem_stats.direct_map_2m_kb > 0
-            || mem_stats.direct_map_1g_kb > 0
-        {
-            rows.extend(vec![
-                Row::new(vec![
-                    Cell::from("DirectMap4k"),
-                    Cell::from(format_bytes(mem_stats.direct_map_4k_kb)),
-                    Cell::from("-"),
-                ]),
-                Row::new(vec![
-                    Cell::from("DirectMap2M"),
-                    Cell::from(format_bytes(mem_stats.direct_map_2m_kb)),
-                    Cell::from("-"),
-                ]),
-                Row::new(vec![
-                    Cell::from("DirectMap1G"),
-                    Cell::from(format_bytes(mem_stats.direct_map_1g_kb)),
-                    Cell::from("-"),
-                ]),
-            ]);
-        }
-
-        // Add hardware corruption information if available
-        if mem_stats.hardware_corrupted_kb > 0 {
-            rows.push(Row::new(vec![
-                Cell::from("Hardware Corrupted"),
-                Cell::from(format_bytes(mem_stats.hardware_corrupted_kb)),
-                Cell::from(format!(
-                    "{:.1}%",
-                    (mem_stats.hardware_corrupted_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                )),
-            ]));
-        }
+        // Create rows for memory metrics
+        let rows = memory_metrics
+            .iter()
+            .map(|metric| {
+                let cells = memory_columns
+                    .iter()
+                    .map(|col| {
+                        Cell::from((col.value_fn)(metric, mem_stats))
+                            .style(self.theme().text_important_color())
+                    })
+                    .collect::<Vec<Cell>>();
+                Row::new(cells)
+            })
+            .collect::<Vec<Row>>();
 
         let block = Block::bordered()
             .title_top(
@@ -3079,15 +2919,17 @@ impl<'a> App<'a> {
             .border_type(BorderType::Rounded)
             .style(self.theme().border_style());
 
-        let table = Table::new(rows, constraints).header(header).block(block);
+        let table = Table::new(rows, constraints)
+            .header(Row::new(header_cells).style(self.theme().title_style()))
+            .block(block);
 
         frame.render_widget(table, left);
 
         // Create memory usage gauges and additional stats for the right side
         let [right_top, right_middle, right_bottom] = Layout::vertical([
-            Constraint::Percentage(8),
-            Constraint::Percentage(46),
-            Constraint::Percentage(46),
+            Constraint::Min(3),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
         ])
         .areas(right);
 
@@ -3113,10 +2955,9 @@ impl<'a> App<'a> {
             .filled_style(self.theme().text_important_color())
             .ratio(mem_used_percent / 100.0)
             .label(format!(
-                "{} / {} ({:.1}%)",
+                "{}/{}",
                 format_bytes(mem_used_kb),
                 format_bytes(mem_stats.total_kb),
-                mem_used_percent
             ));
 
         frame.render_widget(mem_gauge, gauge_left);
@@ -3142,138 +2983,32 @@ impl<'a> App<'a> {
             .filled_style(self.theme().text_important_color())
             .ratio(swap_used_percent / 100.0)
             .label(format!(
-                "{} / {} ({:.1}%)",
+                "{}/{}",
                 format_bytes(swap_used_kb),
                 format_bytes(mem_stats.swap_total_kb),
-                swap_used_percent
             ));
 
         frame.render_widget(swap_gauge, gauge_right);
 
         // Memory rates (pagefaults, swap I/O)
-        let rates_block = Block::bordered()
-            .title_top(
-                Line::from("Memory Activity Rates")
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        let rates_text = vec![
-            Line::from(vec![
-                Span::raw("Page Faults: "),
-                Span::styled(
-                    format!("{}/s", format_number(mem_stats.delta_pgfault)),
-                    self.theme().text_important_color(),
-                ),
-                Span::raw("  Major: "),
-                Span::styled(
-                    format!("{}/s", format_number(mem_stats.delta_pgmajfault)),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Swap In: "),
-                Span::styled(
-                    format_bytes_per_sec(mem_stats.delta_swap_in * 1024),
-                    self.theme().text_important_color(),
-                ),
-                Span::raw("  Swap Out: "),
-                Span::styled(
-                    format_bytes_per_sec(mem_stats.delta_swap_out * 1024),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-        ];
-
-        let rates_paragraph = Paragraph::new(rates_text)
-            .block(rates_block)
-            .alignment(Alignment::Left);
-
-        frame.render_widget(rates_paragraph, right_middle);
+        let memory_rates_columns = get_memory_rates_columns();
+        self.render_memory_table(
+            frame,
+            right_middle,
+            Some("Memory Activity Rates"),
+            &memory_rates_columns,
+            true,
+        )?;
 
         // Slab information section
-        let slab_block = Block::bordered()
-            .title_top(
-                Line::from("Slab Information")
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        let slab_text = vec![
-            Line::from(vec![
-                Span::raw("Total Slab: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}% of RAM)",
-                        format_bytes(mem_stats.slab_kb),
-                        (mem_stats.slab_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Reclaimable: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}% of slab)",
-                        format_bytes(mem_stats.sreclaimable_kb),
-                        if mem_stats.slab_kb > 0 {
-                            (mem_stats.sreclaimable_kb as f64 / mem_stats.slab_kb as f64) * 100.0
-                        } else {
-                            0.0
-                        }
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Unreclaimable: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}% of slab)",
-                        format_bytes(mem_stats.sunreclaim_kb),
-                        if mem_stats.slab_kb > 0 {
-                            (mem_stats.sunreclaim_kb as f64 / mem_stats.slab_kb as f64) * 100.0
-                        } else {
-                            0.0
-                        }
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Kernel Stack: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}% of RAM)",
-                        format_bytes(mem_stats.kernel_stack_kb),
-                        (mem_stats.kernel_stack_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Page Tables: "),
-                Span::styled(
-                    format!(
-                        "{} ({:.1}% of RAM)",
-                        format_bytes(mem_stats.page_tables_kb),
-                        (mem_stats.page_tables_kb as f64 / mem_stats.total_kb as f64) * 100.0
-                    ),
-                    self.theme().text_important_color(),
-                ),
-            ]),
-        ];
-
-        let slab_paragraph = Paragraph::new(slab_text)
-            .block(slab_block)
-            .alignment(Alignment::Left);
-
-        frame.render_widget(slab_paragraph, right_bottom);
+        let slab_columns = get_slab_columns();
+        self.render_memory_table(
+            frame,
+            right_bottom,
+            Some("Slab Information"),
+            &slab_columns,
+            true,
+        )?;
 
         Ok(())
     }
@@ -3853,8 +3588,8 @@ impl<'a> App<'a> {
             .get_mut(&(*cpu as usize))
             .expect("CpuData should have been present");
 
-        let next_dsq_id = Self::classify_dsq(*next_dsq_id);
-        let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
+        let next_dsq_id = App::classify_dsq(*next_dsq_id);
+        let prev_dsq_id = App::classify_dsq(*prev_dsq_id);
 
         if next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
             let next_dsq_data = self
@@ -3974,7 +3709,8 @@ impl<'a> App<'a> {
         }
     }
 
-    pub fn filter_events(&mut self) {
+    /// Updates the filtered events list based on the current input buffer
+    fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
             AppState::PerfEvent => {
                 search::fuzzy_search(&self.perf_events, &self.event_input_buffer)

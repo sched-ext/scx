@@ -399,6 +399,7 @@ pub struct MangoAppAction {
     pub display_refresh: u16,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Backspace,

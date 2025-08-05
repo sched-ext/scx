@@ -137,7 +137,7 @@ impl MemStatSnapshot {
         // Read directly from /proc/vmstat since procfs doesn't expose these directly
         if let Ok(file) = File::open("/proc/vmstat") {
             let reader = BufReader::new(file);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 if line.starts_with("pswpin ") {
                     if let Some(val_str) = line.split_whitespace().nth(1) {
                         if let Ok(val) = val_str.parse::<u64>() {
