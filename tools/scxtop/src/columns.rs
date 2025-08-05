@@ -230,6 +230,7 @@ pub fn get_thread_columns() -> Vec<Column<i32, ThreadData>> {
         id_column!("TID"),
         name_column!(ThreadData, thread_name),
         state_column!(ThreadData),
+        layer_id_column!(ThreadData),
         last_dsq_column!(ThreadData),
         slice_ns_column!(ThreadData),
         avg_max_lat_column!(ThreadData),

@@ -367,6 +367,11 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                     col: "Layer ID".to_string(),
                     visible: true,
                 }))?;
+                action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
+                    table: "Thread".to_string(),
+                    col: "Layer ID".to_string(),
+                    visible: true,
+                }))?;
                 Some(layered_util::attach_to_existing_map("task_ctxs", &mut skel.maps.task_ctxs)?)
             } else {
                 None
