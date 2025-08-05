@@ -3272,6 +3272,7 @@ impl<'a> App<'a> {
 
         match table.as_str() {
             "Process" => self.process_columns.update_visibility(col, *visible),
+            "Thread" => self.thread_columns.update_visibility(col, *visible),
             _ => bail!("Invalid table name"),
         };
 
