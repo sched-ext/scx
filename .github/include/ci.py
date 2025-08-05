@@ -6,9 +6,11 @@ import glob
 import json
 import os
 import random
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import List, Optional
 
 
@@ -84,11 +86,20 @@ async def run_command_in_vm(
             "--cwd=/tmp/workspace",
         ]
 
-    # VM gets a different PATH to this program so fix the path of the binary. Other args left to the user.
-    arg0 = shutil.which(command[0])
-    cmd += ["--", arg0] + command[1:]
+    # virtme-ng passes the commands on the kernel command line which has a short
+    # maximum length. write all commands to a shell script and run that instead,
+    # allowing us to bypass this restriction.
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as file:
+        # VM gets a different PATH to this program so fix the path of the binary.
+        # Other args left to the caller.
+        arg0 = shutil.which(command[0])
+        cmd_quoted = " ".join(shlex.quote(arg) for arg in [arg0] + command[1:])
 
-    return await run_command(cmd, no_capture=no_capture)
+        file.write(f"exec {cmd_quoted}\n")
+        file.flush()
+
+        cmd += ["--", shutil.which("bash"), file.name]
+        return await run_command(cmd, no_capture=no_capture)
 
 
 async def get_clippy_packages() -> List[str]:
