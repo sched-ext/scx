@@ -222,7 +222,7 @@ static int init_cpumask(struct bpf_cpumask **mask_p)
 	return 0;
 }
 
-static __always_inline s32 pref_idle_cpu(struct llc_ctx *llcx)
+static s32 pref_idle_cpu(struct llc_ctx *llcx)
 {
 	struct scx_minheap_elem helem;
 	int ret;
@@ -251,7 +251,7 @@ static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
 	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_cpus;
 }
 
-static __always_inline u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
+static u64 task_slice_ns(struct task_struct *p, u64 slice_ns)
 {
 	return clamp_slice(scale_by_task_weight(p, slice_ns));
 }
@@ -488,10 +488,8 @@ static void set_deadline_slice(struct task_struct *p, task_ctx *taskc,
  * Updates a tasks vtime based on the newly assigned cpu_ctx and returns the
  * updated vtime.
  */
-static __always_inline void update_vtime(struct task_struct *p,
-					 struct cpu_ctx *cpuc,
-					 task_ctx *taskc,
-					 struct llc_ctx *llcx)
+static void update_vtime(struct task_struct *p, struct cpu_ctx *cpuc,
+			 task_ctx *taskc, struct llc_ctx *llcx)
 {
 	/*
 	 * If in the same LLC we only need to clamp the vtime to ensure no task
@@ -815,8 +813,7 @@ found_cpu:
 }
 
 
-static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p,
-						s32 prev_cpu, u64 wake_flags)
+static s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	task_ctx *taskc;
 	bool is_idle = false;
@@ -854,9 +851,8 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p,
  * - P2DQ_ENQUEUE_PROMISE_VTIME: The completer should enqueue this task on a vtime dsq.
  * - P2DQ_ENQUEUE_PROMISE_FAILED: The enqueue failed.
  */
-static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
-					       struct task_struct *p,
-					       u64 enq_flags)
+static void async_p2dq_enqueue(struct enqueue_promise *ret,
+			       struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
@@ -1063,8 +1059,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	ret->vtime.vtime = p->scx.dsq_vtime;
 }
 
-static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
-						  struct task_struct *p)
+static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struct *p)
 {
 	int ret;
 
@@ -1136,7 +1131,7 @@ static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 }
 
-static __always_inline int p2dq_running_impl(struct task_struct *p)
+static int p2dq_running_impl(struct task_struct *p)
 {
 	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
@@ -1284,7 +1279,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-static __always_inline bool consume_llc(struct llc_ctx *llcx)
+static bool consume_llc(struct llc_ctx *llcx)
 {
 	struct task_struct *p;
 	task_ctx *taskc;
@@ -1326,8 +1321,7 @@ static __always_inline bool consume_llc(struct llc_ctx *llcx)
 	return false;
 }
 
-static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
-					     struct cpu_ctx *cpuc)
+static int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
 {
 	struct llc_ctx *first, *second, *left, *right;
 	int i;
@@ -1415,7 +1409,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx,
 }
 
 
-static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
+static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 {
 	struct task_struct *p;
 	task_ctx *taskc;
@@ -1652,8 +1646,7 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 	return;
 }
 
-static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
-					       struct scx_init_task_args *args)
+static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args *args)
 {
 	struct mask_wrapper *wrapper;
 	struct bpf_cpumask *cpumask;
@@ -1680,7 +1673,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	}
 
 	wrapper = bpf_task_storage_get(&task_masks, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+				       BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!wrapper) {
 		bpf_cpumask_release(cpumask);
 		scx_bpf_error("task mask allocation failure");
@@ -1694,7 +1687,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	}
 
 	slice_ns = scale_by_task_weight(p,
-			dsq_time_slice(p2dq_config.init_dsq_index));
+					dsq_time_slice(p2dq_config.init_dsq_index));
 
 	taskc->enq_flags = 0;
 	taskc->llc_id = cpuc->llc_id;
@@ -2082,7 +2075,7 @@ s32 static start_timers(void)
 	return 0;
 }
 
-static __always_inline s32 p2dq_init_impl()
+static s32 p2dq_init_impl()
 {
 	struct bpf_cpumask *tmp_big_cpumask;
 	struct llc_ctx *llcx;
