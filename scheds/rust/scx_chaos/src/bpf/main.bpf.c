@@ -88,6 +88,46 @@ struct chaos_task_ctx *lookup_create_chaos_task_ctx(struct task_struct *p)
 	return bpf_task_storage_get(&chaos_task_ctxs, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
 
+static __always_inline u64 chaos_get_prandom_u64_limit(u64 s)
+{
+	// Implementation of Lemire's algorithm 5 without 128-bit arithmetic.
+	// See https://arxiv.org/pdf/1805.10941v2 for details.
+	// Uses a bounded loop given this is BPF, but given the loop should
+	// rarely be entered this is fine.
+	u64 x, m_low, m_high;
+	u64 t;
+
+	x = get_prandom_u64();
+
+	// Compute 64-bit multiplication high and low parts
+	// m = x * s, split into m_high and m_low
+	m_high = ((x >> 32) * (s >> 32)) +
+		 (((x & 0xFFFFFFFF) * (s >> 32)) >> 32) +
+		 (((x >> 32) * (s & 0xFFFFFFFF)) >> 32);
+	m_low = x * s;
+
+	if (m_low < s) {
+		t = ((u64)(-s)) % s;
+		bpf_repeat(CHAOS_MAX_RAND_ATTEMPTS) {
+			if (m_low >= t)
+				break;
+
+			x = get_prandom_u64();
+			m_high = ((x >> 32) * (s >> 32)) +
+				 (((x & 0xFFFFFFFF) * (s >> 32)) >> 32) +
+				 (((x >> 32) * (s & 0xFFFFFFFF)) >> 32);
+			m_low = x * s;
+		}
+	}
+
+	return m_high;
+}
+
+static __always_inline u64 chaos_get_uniform_u64(u64 min, u64 max)
+{
+	return min + chaos_get_prandom_u64_limit(max - min + 1);
+}
+
 static __always_inline void chaos_stat_inc(enum chaos_stat_idx stat)
 {
 	u64 *cnt_p = bpf_map_lookup_elem(&chaos_stats, &stat);
@@ -256,15 +296,8 @@ out:
 __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_flags,
 				struct chaos_task_ctx *taskc __arg_nonnull, u64 min_ns, u64 max_ns)
 {
-	u64 rand64 = ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
-
-	u64 vtime = bpf_ktime_get_ns() + min_ns;
-	if (min_ns != max_ns) {
-		vtime += rand64 % (max_ns - min_ns);
-	}
-
+	u64 vtime = chaos_get_uniform_u64(min_ns, max_ns);
 	scx_bpf_dsq_insert_vtime(p, get_cpu_delay_dsq(-1), 0, vtime, enq_flags);
-
 	return true;
 }
 
