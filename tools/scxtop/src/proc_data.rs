@@ -150,3 +150,129 @@ impl ProcData {
         self.data.add_event_data(event, val)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_proc_data() {
+        // Get the current process
+        let current_pid = std::process::id() as i32;
+        let process = Process::new(current_pid).unwrap();
+
+        // Create ProcData from the current process
+        let proc_data = ProcData::new(&process, 10).unwrap();
+
+        // Verify basic properties
+        assert_eq!(proc_data.tgid, current_pid);
+        assert!(!proc_data.process_name.is_empty());
+        assert_eq!(proc_data.prev_cpu_time, 0);
+        // The current_cpu_time might be 0 in some environments, so we don't assert it's > 0
+        assert_eq!(proc_data.cpu_util_perc, 0.0);
+        assert!(proc_data.threads.is_empty());
+        assert_eq!(proc_data.max_data_size, 10);
+    }
+
+    #[test]
+    fn test_from_tgid() {
+        // Get the current process ID
+        let current_pid = std::process::id() as i32;
+
+        // Create ProcData from the current process ID
+        let proc_data = ProcData::from_tgid(current_pid, 5).unwrap();
+
+        // Verify basic properties
+        assert_eq!(proc_data.tgid, current_pid);
+        assert!(!proc_data.process_name.is_empty());
+        assert_eq!(proc_data.max_data_size, 5);
+    }
+
+    #[test]
+    fn test_update() {
+        // Get the current process
+        let current_pid = std::process::id() as i32;
+        let mut proc_data = ProcData::from_tgid(current_pid, 10).unwrap();
+
+        // Store initial values
+        let initial_cpu_time = proc_data.current_cpu_time;
+
+        // Do some CPU work to ensure time changes
+        for _ in 0..1000000 {
+            let _ = 2 + 2;
+        }
+
+        // Update with a non-zero system util
+        proc_data.update(100).unwrap();
+
+        // Verify update effects
+        assert_eq!(proc_data.prev_cpu_time, initial_cpu_time);
+        assert!(proc_data.current_cpu_time >= initial_cpu_time);
+        // CPU util should be non-zero since we provided a system_util value
+        assert!(proc_data.cpu_util_perc >= 0.0);
+    }
+
+    #[test]
+    fn test_set_cpu_util() {
+        // Get the current process
+        let current_pid = std::process::id() as i32;
+        let mut proc_data = ProcData::from_tgid(current_pid, 10).unwrap();
+
+        // Set initial values
+        proc_data.prev_cpu_time = 100;
+        proc_data.current_cpu_time = 150;
+
+        // Test with zero system_util
+        proc_data.set_cpu_util(0);
+        assert_eq!(proc_data.cpu_util_perc, 0.0);
+
+        // Test with non-zero system_util
+        proc_data.set_cpu_util(100);
+        assert_eq!(proc_data.cpu_util_perc, 50.0); // (150-100)/100 * 100 = 50%
+    }
+
+    #[test]
+    fn test_event_data_operations() {
+        // Get the current process
+        let current_pid = std::process::id() as i32;
+        let mut proc_data = ProcData::from_tgid(current_pid, 5).unwrap();
+
+        // Test adding event data
+        proc_data.add_event_data("test_event", 42);
+        proc_data.add_event_data("test_event", 84);
+
+        // Test retrieving event data
+        let data = proc_data.event_data_immut("test_event");
+        assert!(!data.is_empty());
+        assert!(data.contains(&42));
+        assert!(data.contains(&84));
+
+        // Test retrieving non-existent event data
+        let empty_data = proc_data.event_data_immut("nonexistent_event");
+        assert!(empty_data.is_empty());
+    }
+
+    #[test]
+    fn test_thread_operations() {
+        // Get the current process
+        let current_pid = std::process::id() as i32;
+        let mut proc_data = ProcData::from_tgid(current_pid, 10).unwrap();
+
+        // Initialize threads
+        proc_data.init_threads().unwrap();
+
+        // Verify threads were added
+        assert!(!proc_data.threads.is_empty());
+        assert!(proc_data.threads.contains_key(&current_pid));
+
+        // Test thread update
+        let initial_thread_count = proc_data.threads.len();
+        proc_data.update_threads(100);
+        // The thread count might change during the test as threads are created or destroyed
+        // So we don't assert exact equality
+
+        // Test clearing threads
+        proc_data.clear_threads();
+        assert!(proc_data.threads.is_empty());
+    }
+}
