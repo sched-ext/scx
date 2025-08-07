@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use ratatui::style::{Color, Style};
+use ratatui::symbols::Marker;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -177,6 +178,33 @@ impl AppTheme {
             AppTheme::AyuDark => Style::default().fg(Color::Rgb(95, 175, 239)), // Ayu Dark blue
             AppTheme::USA => Style::default().fg(Color::Rgb(10, 49, 97)), // Navy blue for USA theme
             AppTheme::Default => Style::default().fg(Color::Yellow),
+        }
+    }
+
+    /// Returns the plot marker for charts in the theme.
+    pub fn plot_marker(&self) -> Marker {
+        match self {
+            AppTheme::MidnightGreen => Marker::Braille,
+            AppTheme::IAmBlue => Marker::Dot,
+            AppTheme::Default => Marker::Block,
+        }
+    }
+
+    /// Returns the color for positive values (e.g., TX data) in the theme.
+    pub fn positive_value_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Green,
+            AppTheme::IAmBlue => Color::Blue,
+            AppTheme::Default => Color::Green,
+        }
+    }
+
+    /// Returns the color for negative values (e.g., RX data) in the theme.
+    pub fn negative_value_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Yellow,
+            AppTheme::IAmBlue => Color::Cyan,
+            AppTheme::Default => Color::Red,
         }
     }
 
