@@ -27,7 +27,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * latency-critical jobs.
 	 */
 	if (is_kernel_task(p))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Further prioritize kworkers.
@@ -47,7 +47,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * so it tends to be delayed.
 	 */
 	if (is_pinned(p) || is_migration_disabled(p))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
