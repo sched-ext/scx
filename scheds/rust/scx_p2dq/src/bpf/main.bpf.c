@@ -1425,56 +1425,58 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 
 	u64 min_vtime = 0;
 
-	// First search affinitized DSQ
-	bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
-		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-			min_vtime = p->scx.dsq_vtime;
-			dsq_id = cpuc->affn_dsq;
-		}
-		break;
-	}
-
-	// LLC DSQ
-	bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
-		if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-			min_vtime = p->scx.dsq_vtime;
-			dsq_id = cpuc->llc_dsq;
-		}
-		break;
-	}
-
-	// Migration eligible
-	if (topo_config.nr_llcs > 1) {
-		if (p2dq_config.atq_enabled) {
-			pid = scx_atq_peek(cpuc->mig_atq);
-			if ((p = bpf_task_from_pid((s32)pid))) {
-				if (p->scx.dsq_vtime < min_vtime ||
-				    min_vtime == 0) {
-					min_vtime = p->scx.dsq_vtime;
-					min_atq = cpuc->mig_atq;
-					/*
-					 * Normally doing these peeks would be
-					 * racy with scx_bpf_dsq_move_to_local.
-					 * However, with ATQs we can peek and
-					 * pop so we can check that the popped
-					 * task is the same as the peeked task.
-					 * This gives slightly better
-					 * prioritization with the potential
-					 * cost of having to reenqueue popped
-					 * tasks.
-					 */
-					peeked_pid = p->pid;
-				}
-				bpf_task_release(p);
+	if (!saturated) {
+		// First search affinitized DSQ
+		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cpuc->affn_dsq;
 			}
-		} else {
-			bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
-				if (p->scx.dsq_vtime < min_vtime ||
-				    min_vtime == 0) {
-					min_vtime = p->scx.dsq_vtime;
-					dsq_id = cpuc->mig_dsq;
+			break;
+		}
+
+		// LLC DSQ
+		bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
+			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cpuc->llc_dsq;
+			}
+			break;
+		}
+
+		// Migration eligible
+		if (topo_config.nr_llcs > 1) {
+			if (p2dq_config.atq_enabled) {
+				pid = scx_atq_peek(cpuc->mig_atq);
+				if ((p = bpf_task_from_pid((s32)pid))) {
+					if (p->scx.dsq_vtime < min_vtime ||
+					    min_vtime == 0) {
+						min_vtime = p->scx.dsq_vtime;
+						min_atq = cpuc->mig_atq;
+						/*
+						 * Normally doing these peeks would be
+						 * racy with scx_bpf_dsq_move_to_local.
+						 * However, with ATQs we can peek and
+						 * pop so we can check that the popped
+						 * task is the same as the peeked task.
+						 * This gives slightly better
+						 * prioritization with the potential
+						 * cost of having to reenqueue popped
+						 * tasks.
+						 */
+						peeked_pid = p->pid;
+					}
+					bpf_task_release(p);
 				}
-				break;
+			} else {
+				bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
+					if (p->scx.dsq_vtime < min_vtime ||
+					    min_vtime == 0) {
+						min_vtime = p->scx.dsq_vtime;
+						dsq_id = cpuc->mig_dsq;
+					}
+					break;
+				}
 			}
 		}
 	}
