@@ -24,13 +24,11 @@ jobs:
       - integration-test
     steps:
     - uses: actions/checkout@v2
-    - name: Slack Notification
-      uses: rtCamp/action-slack-notify@v2
-      env:
-        SLACK_USERNAME: ci
-        SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
-        SLACK_TITLE: Workflow failed
-        SLACK_MESSAGE: stable ci job failed.
-        SLACK_COLOR: failure
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+    - name: Discord Notification
+      uses: devlander/discord-webhook-notifier-action@v1
+      with:
+        webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        avatar-url: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
+        content: stable ci job failed.
+        color: 15548997
 

@@ -1,6 +1,8 @@
 name: 6_12-test
 
 on:
+  # TODO: back to normal
+  push:
   # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
   schedule:
     - cron: "46 1,7,13,19 * * *"
@@ -19,18 +21,28 @@ jobs:
 
   notify-job:
     runs-on: ubuntu-latest
-    if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    # TODO: put back main branch requirement: if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    if: ${{ failure() }}
     needs:
       - integration-test
     steps:
     - uses: actions/checkout@v2
-    - name: Slack Notification
-      uses: rtCamp/action-slack-notify@v2
-      env:
-        SLACK_USERNAME: ci
-        SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
-        SLACK_TITLE: Workflow failed
-        SLACK_MESSAGE: 6.12 ci job failed.
-        SLACK_COLOR: failure
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+    - name: Test step that fails
+      run: exit 1
+    - name: Discord Notification
+      if: always()
+      uses: Devlander-Software/discord-webhook-notifier-action@v1.0.1
+      with:
+        webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        status: ${{ needs.integration-test.result }}
+        workflow: ${{ github.workflow }}
+        job: integration-test
+        repo: ${{ github.repository }}
+        branch: ${{ github.ref_name }}
+        commit: ${{ github.sha }}
+        actor: ${{ github.actor }}
+        run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
+        avatar_url: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
+        content: Testing Discord notification - 6.12 ci job failed.
+        color_failure: 15548997
