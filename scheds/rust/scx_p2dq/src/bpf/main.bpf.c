@@ -786,7 +786,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		    scx_bpf_test_and_clear_cpu_idle(pref_cpu)) {
 			*is_idle = true;
 			cpu = pref_cpu;
-			trace("PREF idle %s->%d", p->comm, pref_cpu);
 			goto found_cpu;
 		}
 	}
