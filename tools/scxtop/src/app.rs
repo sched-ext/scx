@@ -8,15 +8,20 @@ use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
-use crate::columns::{get_process_columns, get_thread_columns};
+use crate::columns::{
+    get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
+    get_memory_summary_columns, get_pagefault_summary_columns, get_process_columns,
+    get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+};
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::search;
-use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
+use crate::util::{format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
 use crate::Columns;
+use crate::ComponentViewState;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -24,6 +29,7 @@ use crate::FilterItem;
 use crate::FilteredState;
 use crate::KprobeEvent;
 use crate::LlcData;
+use crate::MemStatSnapshot;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
@@ -56,9 +62,9 @@ use ratatui::{
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
-        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
-        TableState,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, LineGauge,
+        Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Sparkline, Table, TableState,
     },
     Frame,
 };
@@ -89,6 +95,8 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     sys: Arc<StdMutex<System>>,
+    mem_info: MemStatSnapshot,
+    memory_view_state: ComponentViewState,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -165,6 +173,9 @@ impl<'a> App<'a> {
         let mut node_data = BTreeMap::new();
         let mut proc_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let mut mem_info = MemStatSnapshot::default();
+        mem_info.update()?;
+
         let active_event = ProfilingEvent::from_str_args(
             &config.default_profiling_event(),
             Some(cpu_stat_tracker.clone()),
@@ -261,6 +272,8 @@ impl<'a> App<'a> {
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             sys: Arc::new(StdMutex::new(System::new_all())),
+            mem_info,
+            memory_view_state: ComponentViewState::Default,
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -307,7 +320,10 @@ impl<'a> App<'a> {
         };
 
         // Set the initial filter state
+        app.filtering = true;
+        app.event_input_buffer.clear();
         app.filter_events();
+        app.filtering = false;
 
         Ok(app)
     }
@@ -337,6 +353,7 @@ impl<'a> App<'a> {
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
+            || self.state == AppState::Memory
         {
             self.filtered_state.lock().unwrap().reset();
             self.filter_events();
@@ -565,6 +582,12 @@ impl<'a> App<'a> {
                 .write()
                 .unwrap()
                 .update(&mut system_guard)?;
+        }
+
+        // Update memory information
+        match self.memory_view_state {
+            ComponentViewState::Default | ComponentViewState::Detail => self.mem_info.update()?,
+            _ => {}
         }
 
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
@@ -1795,7 +1818,160 @@ impl<'a> App<'a> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
         self.render_event(frame, right)?;
-        self.render_table(frame, left)
+
+        // Conditionally split the left area based on memory view state
+        match self.memory_view_state {
+            ComponentViewState::Detail | ComponentViewState::Hidden => {
+                // Memory is hidden, process table takes the entire left side
+                self.render_table(frame, left)?;
+            }
+            ComponentViewState::Default => {
+                // Memory summary is shown, split the left area
+                let [table_area, memory_area] =
+                    Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
+                self.render_table(frame, table_area)?;
+                self.render_memory_summary(frame, memory_area)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders a memory summary in the default view.
+    fn render_memory_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Only render memory summary if the memory view state is Default
+        if self.memory_view_state != ComponentViewState::Default {
+            anyhow::bail!("invalid memory view state: ComponentViewState::Default");
+        }
+
+        let memory_key = self
+            .config
+            .active_keymap
+            .action_keys_string(Action::SetState(AppState::Memory));
+
+        // Check if the memory key is bound
+        if memory_key.is_empty() {
+            panic!("Memory key is not bound");
+        }
+
+        // Create a single block for all memory tables with keybinding in title
+        let title = if memory_key == "m" || memory_key == "M" {
+            Line::from(vec![
+                Span::styled(
+                    &memory_key,
+                    self.theme().title_style().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("emory Statistics"),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw("Memory Statistics ("),
+                Span::styled(&memory_key, self.theme().title_style()),
+                Span::raw(")"),
+            ])
+        };
+
+        let block = Block::bordered()
+            .title(title)
+            .title_alignment(Alignment::Center)
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        // Get the inner area of the block
+        let inner_area = block.inner(area);
+
+        // Split the inner area into three sections for different memory tables
+        // Use proportional heights based on content - memory needs more space than swap and page faults
+        let [memory_area, swap_area, pagefault_area] = Layout::vertical([
+            Constraint::Length(3), // Memory table (header + 1 row + padding)
+            Constraint::Length(3), // Swap table (header + 1 row + padding)
+            Constraint::Length(3), // Page faults table (header + 1 row + padding)
+        ])
+        .margin(0) // Remove margin between tables
+        .areas(inner_area);
+
+        // Get the columns for memory, swap, and pagefault stats
+        let memory_columns = get_memory_summary_columns();
+        let swap_columns = get_swap_summary_columns();
+        let pagefault_columns = get_pagefault_summary_columns();
+
+        // Render the block first
+        frame.render_widget(block, area);
+
+        // Render memory statistics table (without border)
+        self.render_memory_table(frame, memory_area, None, &memory_columns, false)?;
+
+        // Render swap statistics table (without border)
+        self.render_memory_table(frame, swap_area, None, &swap_columns, false)?;
+
+        // Render page fault statistics table (without border)
+        self.render_memory_table(frame, pagefault_area, None, &pagefault_columns, false)?;
+
+        Ok(())
+    }
+
+    /// Renders a memory table with the given columns
+    fn render_memory_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: Option<&str>,
+        columns: &[Column<(), MemStatSnapshot>],
+        with_border: bool,
+    ) -> Result<()> {
+        let mem_stats = &self.mem_info;
+
+        // Create header cells from column headers
+        let header_cells: Vec<Cell> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
+            .collect();
+
+        // Create row data
+        let row_cells: Vec<Cell> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| {
+                let value = (col.value_fn)((), mem_stats);
+                Cell::from(value).style(self.theme().text_color())
+            })
+            .collect();
+
+        // Get constraints for visible columns
+        let constraints: Vec<Constraint> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| col.constraint)
+            .collect();
+
+        // Create the table with rows and constraints
+        let mut table = Table::new(vec![Row::new(row_cells)], constraints)
+            .header(Row::new(header_cells))
+            .column_spacing(1);
+
+        // Add border and title if requested
+        if with_border {
+            if let Some(table_title) = title {
+                table = table.block(
+                    Block::bordered()
+                        .title(table_title)
+                        .title_alignment(Alignment::Center)
+                        .border_type(BorderType::Rounded)
+                        .style(self.theme().border_style()),
+                );
+            } else {
+                table = table.block(
+                    Block::bordered()
+                        .border_type(BorderType::Rounded)
+                        .style(self.theme().border_style()),
+                );
+            }
+        }
+
+        frame.render_widget(table, area);
+
+        Ok(())
     }
 
     /// Renders the help TUI.
@@ -1842,6 +2018,16 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::RequestTrace),
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: memory view ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Memory)),
+                    self.memory_view_state
                 ),
                 Style::default(),
             )),
@@ -1962,8 +2148,11 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: profiling event list scroll up",
-                    self.config.active_keymap.action_keys_string(Action::PageUp)
+                    "{} ({}%)",
+                    format_bytes(self.mem_info.swap_total_kb * 1024),
+                    ((self.mem_info.swap_total_kb - self.mem_info.swap_free_kb) as f64
+                        / self.mem_info.swap_total_kb as f64
+                        * 100.0) as u64
                 ),
                 Style::default(),
             )),
@@ -2027,6 +2216,15 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::SetState(AppState::Scheduler))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display memory view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Memory))
                 ),
                 Style::default(),
             )),
@@ -2494,12 +2692,157 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Renders the memory application state.
+    fn render_memory(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+
+        let mem_stats = &self.mem_info;
+
+        // Get the columns and metrics for the detailed memory view
+        let memory_columns = get_memory_detail_columns();
+        let memory_metrics = get_memory_detail_metrics();
+
+        // Create header cells from column headers
+        let header_cells: Vec<Cell> = memory_columns
+            .iter()
+            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
+            .collect();
+
+        // Create constraints from column constraints
+        let constraints: Vec<Constraint> =
+            memory_columns.iter().map(|col| col.constraint).collect();
+
+        // Create rows for memory metrics
+        let rows = memory_metrics
+            .iter()
+            .map(|metric| {
+                let cells = memory_columns
+                    .iter()
+                    .map(|col| {
+                        Cell::from((col.value_fn)(metric, mem_stats))
+                            .style(self.theme().text_important_color())
+                    })
+                    .collect::<Vec<Cell>>();
+                Row::new(cells)
+            })
+            .collect::<Vec<Row>>();
+
+        let block = Block::bordered()
+            .title_top(
+                Line::from("Memory Statistics")
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                    .style(self.theme().text_important_color())
+                    .right_aligned(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let table = Table::new(rows, constraints)
+            .header(Row::new(header_cells).style(self.theme().title_style()))
+            .block(block);
+
+        frame.render_widget(table, left);
+
+        // Create memory usage gauges and additional stats for the right side
+        let [right_top, right_middle, right_bottom] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .areas(right);
+
+        // Split the top section into two columns for memory and swap gauges
+        let [gauge_left, gauge_right] =
+            Layout::horizontal([Constraint::Fill(1); 2]).areas(right_top);
+
+        // Memory usage gauge
+        let mem_used_percent =
+            100.0 - (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
+        let mem_used_kb = mem_stats.total_kb - mem_stats.available_kb;
+        let mem_gauge = LineGauge::default()
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from("Memory Usage")
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .filled_style(self.theme().text_important_color())
+            .ratio(mem_used_percent / 100.0)
+            .label(format!(
+                "{}/{}",
+                format_bytes(mem_used_kb),
+                format_bytes(mem_stats.total_kb),
+            ));
+
+        frame.render_widget(mem_gauge, gauge_left);
+
+        // Swap usage gauge
+        let swap_used_percent = if mem_stats.swap_total_kb > 0 {
+            100.0 - (mem_stats.swap_free_kb as f64 / mem_stats.swap_total_kb as f64) * 100.0
+        } else {
+            0.0
+        };
+        let swap_used_kb = mem_stats.swap_total_kb - mem_stats.swap_free_kb;
+        let swap_gauge = LineGauge::default()
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from("Swap Usage")
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .filled_style(self.theme().text_important_color())
+            .ratio(swap_used_percent / 100.0)
+            .label(format!(
+                "{}/{}",
+                format_bytes(swap_used_kb),
+                format_bytes(mem_stats.swap_total_kb),
+            ));
+
+        frame.render_widget(swap_gauge, gauge_right);
+
+        // Memory rates (pagefaults, swap I/O)
+        let memory_rates_columns = get_memory_rates_columns();
+        self.render_memory_table(
+            frame,
+            right_middle,
+            Some("Memory Activity Rates"),
+            &memory_rates_columns,
+            true,
+        )?;
+
+        // Slab information section
+        let slab_columns = get_slab_columns();
+        self.render_memory_table(
+            frame,
+            right_bottom,
+            Some("Slab Information"),
+            &slab_columns,
+            true,
+        )?;
+
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
             AppState::MangoApp => self.render_mangoapp(frame),
+            AppState::Memory => self.render_memory(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
             AppState::Scheduler => {
@@ -2670,7 +3013,7 @@ impl<'a> App<'a> {
                 self.filter_events();
                 self.handle_action(&Action::SetState(self.prev_state.clone()))?;
             }
-            AppState::Default | AppState::Llc | AppState::Node => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                 if !self.filtering && !self.in_thread_view {
                     self.handle_action(&Action::Quit)?;
                 } else if !self.filtering {
@@ -3068,8 +3411,8 @@ impl<'a> App<'a> {
             .get_mut(&(*cpu as usize))
             .expect("CpuData should have been present");
 
-        let next_dsq_id = Self::classify_dsq(*next_dsq_id);
-        let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
+        let next_dsq_id = App::classify_dsq(*next_dsq_id);
+        let prev_dsq_id = App::classify_dsq(*prev_dsq_id);
 
         if next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
             let next_dsq_data = self
@@ -3189,7 +3532,8 @@ impl<'a> App<'a> {
         }
     }
 
-    pub fn filter_events(&mut self) {
+    /// Updates the filtered events list based on the current input buffer
+    fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
             AppState::PerfEvent => {
                 search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
@@ -3203,7 +3547,7 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                 if self.in_thread_view {
                     if let Some(proc_data) = self.selected_proc_data_immut() {
                         proc_data
@@ -3298,7 +3642,21 @@ impl<'a> App<'a> {
                 self.on_enter()?;
             }
             Action::SetState(state) => {
-                if *state == self.state {
+                if *state == AppState::Memory {
+                    // Handle memory view tristate cycling
+                    self.memory_view_state = self.memory_view_state.next();
+                    match self.memory_view_state {
+                        ComponentViewState::Detail => {
+                            self.set_state(AppState::Memory);
+                        }
+                        ComponentViewState::Hidden | ComponentViewState::Default => {
+                            // Stay in current state but update memory view
+                            if self.state == AppState::Memory {
+                                self.set_state(self.prev_state.clone());
+                            }
+                        }
+                    }
+                } else if *state == self.state {
                     self.set_state(self.prev_state.clone());
                 } else {
                     self.set_state(state.clone());
@@ -3435,7 +3793,7 @@ impl<'a> App<'a> {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
-                AppState::Default | AppState::Llc | AppState::Node => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                     if self.in_thread_view {
                         self.in_thread_view = false;
                     } else {
@@ -3447,7 +3805,7 @@ impl<'a> App<'a> {
                 }
             },
             Action::Filter => match self.state {
-                AppState::Default | AppState::Llc | AppState::Node => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                     self.filtering = true;
                     self.filter_events();
                 }

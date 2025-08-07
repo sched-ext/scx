@@ -8,15 +8,60 @@ use nix::time::{clock_gettime, ClockId};
 use std::fs;
 use std::io::Read;
 
-/// Returns the file content as a String.
-pub fn read_file_string(path: &str) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(contents)
+/// Formats a byte value to human readable.
+/// The input value must be in bytes, not KB or other units.
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
+
+    let bytes_f64 = bytes as f64;
+
+    if bytes_f64 < KB {
+        format!("{bytes}B")
+    } else if bytes_f64 < MB {
+        format!("{:.2}KB", bytes_f64 / KB)
+    } else if bytes_f64 < GB {
+        format!("{:.2}MB", bytes_f64 / MB)
+    } else if bytes_f64 < TB {
+        format!("{:.2}GB", bytes_f64 / GB)
+    } else {
+        format!("{:.2}TB", bytes_f64 / TB)
+    }
 }
 
-/// Formats a value in hz to human readable.
+/// Formats a KB value to human readable.
+/// The input value must be in KB (kilobytes).
+pub fn format_kb(kb: u64) -> String {
+    // Convert KB to bytes and use the existing format_bytes function
+    format_bytes(kb * 1024)
+}
+
+/// Formats a bytes per second value to human readable.
+/// The input value must be in bytes per second, not KB/s or other units.
+pub fn format_bytes_per_sec(bytes: u64) -> String {
+    format!("{}/s", format_bytes(bytes))
+}
+
+/// Formats a number to be more readable with K, M, B suffixes.
+pub fn format_number(num: u64) -> String {
+    match num {
+        0..=999 => format!("{num}"),
+        1_000..=999_999 => format!("{:.1}K", num as f64 / 1_000.0),
+        1_000_000..=999_999_999 => format!("{:.1}M", num as f64 / 1_000_000.0),
+        _ => format!("{:.1}B", num as f64 / 1_000_000_000.0),
+    }
+}
+
+/// Formats pagefaults in terms of memory size (assuming 4KB page size)
+pub fn format_pages(pages: u64) -> String {
+    // Standard page size is 4KB on most Linux systems
+    const PAGE_SIZE: u64 = 4 * 1024;
+    format_bytes(pages * PAGE_SIZE)
+}
+
+/// Formats a frequency value in Hz to a human-readable format
 pub fn format_hz(hz: u64) -> String {
     match hz {
         0..=999 => format!("{hz}Hz"),
@@ -24,6 +69,14 @@ pub fn format_hz(hz: u64) -> String {
         1_000_000..=999_999_999 => format!("{:.3}GHz", hz as f64 / 1_000_000.0),
         _ => format!("{:.3}THz", hz as f64 / 1_000_000_000.0),
     }
+}
+
+/// Reads a file and returns its contents as a string
+pub fn read_file_string(path: &str) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 /// Returns the current clock_id time in nanoseconds.
@@ -40,6 +93,11 @@ pub fn sanitize_nbsp(s: String) -> String {
 /// Converts a u32 to a i32, panics on failure
 pub fn u32_to_i32(x: u32) -> i32 {
     i32::try_from(x).expect("u32 to i32 conversion failed")
+}
+
+/// Formats a percentage value (0.0 to 1.0) to a string with % suffix
+pub fn format_percentage(value: f64) -> String {
+    format!("{:.1}%", value * 100.0)
 }
 
 #[cfg(test)]
