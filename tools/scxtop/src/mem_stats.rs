@@ -83,95 +83,51 @@ impl MemStatSnapshot {
         self.prev_pgfault = self.pgfault;
         self.prev_pgmajfault = self.pgmajfault;
 
-        // Update memory info from /proc/meminfo
-        self.total_kb = meminfo.mem_total;
-        self.free_kb = meminfo.mem_free;
-        self.available_kb = meminfo.mem_available.unwrap_or(0);
-        self.active_kb = meminfo.active;
-        self.inactive_kb = meminfo.inactive;
-        self.active_anon_kb = meminfo.active_anon.unwrap_or(0);
-        self.inactive_anon_kb = meminfo.inactive_anon.unwrap_or(0);
-        self.active_file_kb = meminfo.active_file.unwrap_or(0);
-        self.inactive_file_kb = meminfo.inactive_file.unwrap_or(0);
-        self.unevictable_kb = meminfo.unevictable.unwrap_or(0);
-        self.mlocked_kb = meminfo.mlocked.unwrap_or(0);
-        self.shmem_kb = meminfo.shmem.unwrap_or(0);
-        self.buffers_kb = meminfo.buffers;
-        self.cached_kb = meminfo.cached;
-        self.swap_total_kb = meminfo.swap_total;
-        self.swap_free_kb = meminfo.swap_free;
-        self.swap_cached_kb = meminfo.swap_cached;
-        self.dirty_kb = meminfo.dirty;
-        self.writeback_kb = meminfo.writeback;
-        self.anon_pages_kb = meminfo.anon_pages.unwrap_or(0);
-        self.mapped_kb = meminfo.mapped;
-        self.slab_kb = meminfo.slab;
-        self.sreclaimable_kb = meminfo.s_reclaimable.unwrap_or(0);
-        self.sunreclaim_kb = meminfo.s_unreclaim.unwrap_or(0);
-        self.kernel_stack_kb = meminfo.kernel_stack.unwrap_or(0);
-        self.page_tables_kb = meminfo.page_tables.unwrap_or(0);
-        self.nfs_unstable_kb = meminfo.nfs_unstable.unwrap_or(0);
-        self.bounce_kb = meminfo.bounce.unwrap_or(0);
-        self.writeback_tmp_kb = meminfo.writeback_tmp.unwrap_or(0);
-        self.commit_limit_kb = meminfo.commit_limit.unwrap_or(0);
-        self.committed_as_kb = meminfo.committed_as;
-        self.vmalloc_total_kb = meminfo.vmalloc_total;
-        self.vmalloc_used_kb = meminfo.vmalloc_used;
-        self.vmalloc_chunk_kb = meminfo.vmalloc_chunk;
-        self.hardware_corrupted_kb = meminfo.hardware_corrupted.unwrap_or(0);
-        self.anon_huge_pages_kb = meminfo.anon_hugepages.unwrap_or(0);
-        self.shmem_huge_pages_kb = meminfo.shmem_hugepages.unwrap_or(0);
-        self.shmem_pmd_mapped_kb = meminfo.shmem_pmd_mapped.unwrap_or(0);
-        self.cma_total_kb = meminfo.cma_total.unwrap_or(0);
-        self.cma_free_kb = meminfo.cma_free.unwrap_or(0);
-        self.huge_pages_total = meminfo.hugepages_total.unwrap_or(0);
-        self.huge_pages_free = meminfo.hugepages_free.unwrap_or(0);
-        self.huge_pages_rsvd = meminfo.hugepages_rsvd.unwrap_or(0);
-        self.huge_pages_surp = meminfo.hugepages_surp.unwrap_or(0);
-        self.hugepagesize_kb = meminfo.hugepagesize.unwrap_or(0);
-        self.direct_map_4k_kb = meminfo.direct_map_4k.unwrap_or(0);
-        self.direct_map_2m_kb = meminfo.direct_map_2M.unwrap_or(0);
-        self.direct_map_1g_kb = meminfo.direct_map_1G.unwrap_or(0);
+        // Update memory info using TryFrom - this will fail fast with useful errors
+        let mut new_snapshot = Self::try_from(&meminfo)?;
+        
+        // Preserve our delta tracking fields
+        new_snapshot.prev_swap_pages_in = self.prev_swap_pages_in;
+        new_snapshot.prev_swap_pages_out = self.prev_swap_pages_out;
+        new_snapshot.prev_pgfault = self.prev_pgfault;
+        new_snapshot.prev_pgmajfault = self.prev_pgmajfault;
 
-        // Get swap pages in/out and pagefaults from /proc/vmstat
-        // Read directly from /proc/vmstat since procfs doesn't expose these directly
-        if let Ok(file) = File::open("/proc/vmstat") {
-            let reader = BufReader::new(file);
-            for line in reader.lines().map_while(Result::ok) {
-                if line.starts_with("pswpin ") {
-                    if let Some(val_str) = line.split_whitespace().nth(1) {
-                        if let Ok(val) = val_str.parse::<u64>() {
-                            self.swap_pages_in = val;
-                        }
-                    }
-                } else if line.starts_with("pswpout ") {
-                    if let Some(val_str) = line.split_whitespace().nth(1) {
-                        if let Ok(val) = val_str.parse::<u64>() {
-                            self.swap_pages_out = val;
-                        }
-                    }
-                } else if line.starts_with("pgfault ") {
-                    if let Some(val_str) = line.split_whitespace().nth(1) {
-                        if let Ok(val) = val_str.parse::<u64>() {
-                            self.pgfault = val;
-                        }
-                    }
-                } else if line.starts_with("pgmajfault ") {
-                    if let Some(val_str) = line.split_whitespace().nth(1) {
-                        if let Ok(val) = val_str.parse::<u64>() {
-                            self.pgmajfault = val;
-                        }
-                    }
+        // Update vmstat fields that aren't in /proc/meminfo
+        new_snapshot.update_vmstat_fields()?;
+
+        // Calculate deltas
+        new_snapshot.delta_swap_in = new_snapshot.swap_pages_in.saturating_sub(new_snapshot.prev_swap_pages_in);
+        new_snapshot.delta_swap_out = new_snapshot.swap_pages_out.saturating_sub(new_snapshot.prev_swap_pages_out);
+        new_snapshot.delta_pgfault = new_snapshot.pgfault.saturating_sub(new_snapshot.prev_pgfault);
+        new_snapshot.delta_pgmajfault = new_snapshot.pgmajfault.saturating_sub(new_snapshot.prev_pgmajfault);
+
+        // Replace self with the new snapshot
+        *self = new_snapshot;
+
+        Ok(())
+    }
+
+    fn update_vmstat_fields(&mut self) -> Result<()> {
+        let file = File::open("/proc/vmstat")
+            .map_err(|e| anyhow::anyhow!("Failed to open /proc/vmstat: {}", e))?;
+        
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.map_err(|e| anyhow::anyhow!("Failed to read /proc/vmstat line: {}", e))?;
+            
+            if let Some(val_str) = line.split_whitespace().nth(1) {
+                let val = val_str.parse::<u64>()
+                    .map_err(|e| anyhow::anyhow!("Failed to parse vmstat value '{}': {}", val_str, e))?;
+                
+                match line.split_whitespace().next() {
+                    Some("pswpin") => self.swap_pages_in = val,
+                    Some("pswpout") => self.swap_pages_out = val,
+                    Some("pgfault") => self.pgfault = val,
+                    Some("pgmajfault") => self.pgmajfault = val,
+                    _ => {} // Ignore other fields
                 }
             }
         }
-
-        // Calculate deltas
-        self.delta_swap_in = self.swap_pages_in.saturating_sub(self.prev_swap_pages_in);
-        self.delta_swap_out = self.swap_pages_out.saturating_sub(self.prev_swap_pages_out);
-        self.delta_pgfault = self.pgfault.saturating_sub(self.prev_pgfault);
-        self.delta_pgmajfault = self.pgmajfault.saturating_sub(self.prev_pgmajfault);
-
         Ok(())
     }
 
@@ -190,21 +146,34 @@ impl MemStatSnapshot {
     }
 }
 
-impl From<&Meminfo> for MemStatSnapshot {
-    fn from(meminfo: &Meminfo) -> Self {
-        Self {
+impl TryFrom<&Meminfo> for MemStatSnapshot {
+    type Error = anyhow::Error;
+
+    fn try_from(meminfo: &Meminfo) -> Result<Self> {
+        // Essential fields that must be present - fail fast if missing
+        let available_kb = meminfo.mem_available
+            .ok_or_else(|| anyhow::anyhow!("MemAvailable field missing from /proc/meminfo - kernel too old or corrupted"))?;
+
+        Ok(Self {
             total_kb: meminfo.mem_total,
             free_kb: meminfo.mem_free,
-            available_kb: meminfo.mem_available.unwrap_or(0),
+            available_kb,
             active_kb: meminfo.active,
             inactive_kb: meminfo.inactive,
-            active_anon_kb: meminfo.active_anon.unwrap_or(0),
-            inactive_anon_kb: meminfo.inactive_anon.unwrap_or(0),
-            active_file_kb: meminfo.active_file.unwrap_or(0),
-            inactive_file_kb: meminfo.inactive_file.unwrap_or(0),
-            unevictable_kb: meminfo.unevictable.unwrap_or(0),
-            mlocked_kb: meminfo.mlocked.unwrap_or(0),
-            shmem_kb: meminfo.shmem.unwrap_or(0),
+            active_anon_kb: meminfo.active_anon
+                .ok_or_else(|| anyhow::anyhow!("Active(anon) field missing from /proc/meminfo"))?,
+            inactive_anon_kb: meminfo.inactive_anon
+                .ok_or_else(|| anyhow::anyhow!("Inactive(anon) field missing from /proc/meminfo"))?,
+            active_file_kb: meminfo.active_file
+                .ok_or_else(|| anyhow::anyhow!("Active(file) field missing from /proc/meminfo"))?,
+            inactive_file_kb: meminfo.inactive_file
+                .ok_or_else(|| anyhow::anyhow!("Inactive(file) field missing from /proc/meminfo"))?,
+            unevictable_kb: meminfo.unevictable
+                .ok_or_else(|| anyhow::anyhow!("Unevictable field missing from /proc/meminfo"))?,
+            mlocked_kb: meminfo.mlocked
+                .ok_or_else(|| anyhow::anyhow!("Mlocked field missing from /proc/meminfo"))?,
+            shmem_kb: meminfo.shmem
+                .ok_or_else(|| anyhow::anyhow!("Shmem field missing from /proc/meminfo"))?,
             buffers_kb: meminfo.buffers,
             cached_kb: meminfo.cached,
             swap_total_kb: meminfo.swap_total,
@@ -212,35 +181,38 @@ impl From<&Meminfo> for MemStatSnapshot {
             swap_cached_kb: meminfo.swap_cached,
             dirty_kb: meminfo.dirty,
             writeback_kb: meminfo.writeback,
-            anon_pages_kb: meminfo.anon_pages.unwrap_or(0),
+            anon_pages_kb: meminfo.anon_pages
+                .ok_or_else(|| anyhow::anyhow!("AnonPages field missing from /proc/meminfo"))?,
             mapped_kb: meminfo.mapped,
             slab_kb: meminfo.slab,
-            sreclaimable_kb: meminfo.s_reclaimable.unwrap_or(0),
-            sunreclaim_kb: meminfo.s_unreclaim.unwrap_or(0),
-            kernel_stack_kb: meminfo.kernel_stack.unwrap_or(0),
-            page_tables_kb: meminfo.page_tables.unwrap_or(0),
-            nfs_unstable_kb: meminfo.nfs_unstable.unwrap_or(0),
-            bounce_kb: meminfo.bounce.unwrap_or(0),
-            writeback_tmp_kb: meminfo.writeback_tmp.unwrap_or(0),
-            commit_limit_kb: meminfo.commit_limit.unwrap_or(0),
+            sreclaimable_kb: meminfo.s_reclaimable
+                .ok_or_else(|| anyhow::anyhow!("SReclaimable field missing from /proc/meminfo"))?,
+            sunreclaim_kb: meminfo.s_unreclaim
+                .ok_or_else(|| anyhow::anyhow!("SUnreclaim field missing from /proc/meminfo"))?,
+            kernel_stack_kb: meminfo.kernel_stack.unwrap_or(0), // Optional on older kernels
+            page_tables_kb: meminfo.page_tables.unwrap_or(0), // Optional on older kernels
+            nfs_unstable_kb: meminfo.nfs_unstable.unwrap_or(0), // Optional, depends on NFS
+            bounce_kb: meminfo.bounce.unwrap_or(0), // Optional
+            writeback_tmp_kb: meminfo.writeback_tmp.unwrap_or(0), // Optional
+            commit_limit_kb: meminfo.commit_limit.unwrap_or(0), // Optional
             committed_as_kb: meminfo.committed_as,
             vmalloc_total_kb: meminfo.vmalloc_total,
             vmalloc_used_kb: meminfo.vmalloc_used,
             vmalloc_chunk_kb: meminfo.vmalloc_chunk,
-            hardware_corrupted_kb: meminfo.hardware_corrupted.unwrap_or(0),
-            anon_huge_pages_kb: meminfo.anon_hugepages.unwrap_or(0),
-            shmem_huge_pages_kb: meminfo.shmem_hugepages.unwrap_or(0),
-            shmem_pmd_mapped_kb: meminfo.shmem_pmd_mapped.unwrap_or(0),
-            cma_total_kb: meminfo.cma_total.unwrap_or(0),
-            cma_free_kb: meminfo.cma_free.unwrap_or(0),
-            huge_pages_total: meminfo.hugepages_total.unwrap_or(0),
-            huge_pages_free: meminfo.hugepages_free.unwrap_or(0),
-            huge_pages_rsvd: meminfo.hugepages_rsvd.unwrap_or(0),
-            huge_pages_surp: meminfo.hugepages_surp.unwrap_or(0),
-            hugepagesize_kb: meminfo.hugepagesize.unwrap_or(0),
-            direct_map_4k_kb: meminfo.direct_map_4k.unwrap_or(0),
-            direct_map_2m_kb: meminfo.direct_map_2M.unwrap_or(0),
-            direct_map_1g_kb: meminfo.direct_map_1G.unwrap_or(0),
+            hardware_corrupted_kb: meminfo.hardware_corrupted.unwrap_or(0), // Optional
+            anon_huge_pages_kb: meminfo.anon_hugepages.unwrap_or(0), // Optional
+            shmem_huge_pages_kb: meminfo.shmem_hugepages.unwrap_or(0), // Optional
+            shmem_pmd_mapped_kb: meminfo.shmem_pmd_mapped.unwrap_or(0), // Optional
+            cma_total_kb: meminfo.cma_total.unwrap_or(0), // Optional, depends on CMA
+            cma_free_kb: meminfo.cma_free.unwrap_or(0), // Optional, depends on CMA
+            huge_pages_total: meminfo.hugepages_total.unwrap_or(0), // Optional
+            huge_pages_free: meminfo.hugepages_free.unwrap_or(0), // Optional
+            huge_pages_rsvd: meminfo.hugepages_rsvd.unwrap_or(0), // Optional
+            huge_pages_surp: meminfo.hugepages_surp.unwrap_or(0), // Optional
+            hugepagesize_kb: meminfo.hugepagesize.unwrap_or(0), // Optional
+            direct_map_4k_kb: meminfo.direct_map_4k.unwrap_or(0), // Optional
+            direct_map_2m_kb: meminfo.direct_map_2M.unwrap_or(0), // Optional
+            direct_map_1g_kb: meminfo.direct_map_1G.unwrap_or(0), // Optional
             swap_pages_in: 0,
             swap_pages_out: 0,
             prev_swap_pages_in: 0,
@@ -253,7 +225,7 @@ impl From<&Meminfo> for MemStatSnapshot {
             prev_pgmajfault: 0,
             delta_pgfault: 0,
             delta_pgmajfault: 0,
-        }
+        })
     }
 }
 
