@@ -322,45 +322,7 @@ impl<'a> App<'a> {
         // Set the initial filter state
         app.filtering = true;
         app.event_input_buffer.clear();
-        let filtered_events_list = match app.state {
-            AppState::PerfEvent => search::fuzzy_search(&app.perf_events, &app.event_input_buffer)
-                .into_iter()
-                .map(FilterItem::String)
-                .collect(),
-            AppState::KprobeEvent => {
-                search::fuzzy_search(&app.kprobe_events, &app.event_input_buffer)
-                    .into_iter()
-                    .map(FilterItem::String)
-                    .collect()
-            }
-            AppState::Default | AppState::Llc | AppState::Node => app
-                .proc_data
-                .iter()
-                .filter(|(_, proc_data)| {
-                    search::contains_spread(&proc_data.process_name, &app.event_input_buffer)
-                        .is_some()
-                        || search::contains_spread(
-                            &proc_data.tgid.to_string(),
-                            &app.event_input_buffer,
-                        )
-                        .is_some()
-                })
-                .map(|(tgid, _)| FilterItem::Int(*tgid))
-                .collect(),
-            _ => vec![],
-        };
-
-        {
-            let mut filtered_state = app.filtered_state.lock().unwrap();
-            filtered_state.list = filtered_events_list;
-            filtered_state.count = filtered_state.list.len() as u16;
-            if (filtered_state.count as usize) <= filtered_state.selected {
-                filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
-            }
-            if filtered_state.count <= filtered_state.scroll {
-                filtered_state.scroll = filtered_state.count.saturating_sub(1);
-            }
-        }
+        app.filter_events();
         app.filtering = false;
 
         Ok(app)
@@ -391,78 +353,10 @@ impl<'a> App<'a> {
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
+            || self.state == AppState::Memory
         {
             self.filtered_state.lock().unwrap().reset();
-            let filtered_events_list = match self.state {
-                AppState::PerfEvent => {
-                    search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
-                        .into_iter()
-                        .map(FilterItem::String)
-                        .collect()
-                }
-                AppState::KprobeEvent => {
-                    search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
-                        .into_iter()
-                        .map(FilterItem::String)
-                        .collect()
-                }
-                AppState::Default | AppState::Llc | AppState::Node => {
-                    if self.in_thread_view {
-                        if let Some(proc_data) = self.selected_proc_data_immut() {
-                            proc_data
-                                .threads
-                                .iter()
-                                .filter(|(_, thread_data)| {
-                                    search::contains_spread(
-                                        &thread_data.thread_name,
-                                        &self.event_input_buffer,
-                                    )
-                                    .is_some()
-                                        || search::contains_spread(
-                                            &thread_data.tid.to_string(),
-                                            &self.event_input_buffer,
-                                        )
-                                        .is_some()
-                                })
-                                .map(|(tid, _)| FilterItem::Int(*tid))
-                                .collect()
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        self.proc_data
-                            .iter()
-                            .filter(|(_, proc_data)| {
-                                search::contains_spread(
-                                    &proc_data.process_name,
-                                    &self.event_input_buffer,
-                                )
-                                .is_some()
-                                    || search::contains_spread(
-                                        &proc_data.tgid.to_string(),
-                                        &self.event_input_buffer,
-                                    )
-                                    .is_some()
-                            })
-                            .map(|(tgid, _)| FilterItem::Int(*tgid))
-                            .collect()
-                    }
-                }
-                _ => vec![],
-            };
-
-            let mut filtered_state = self.filtered_state.lock().unwrap();
-
-            filtered_state.list = filtered_events_list;
-            filtered_state.count = filtered_state.list.len() as u16;
-
-            if (filtered_state.count as usize) <= filtered_state.selected {
-                filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
-            }
-
-            if filtered_state.count <= filtered_state.scroll {
-                filtered_state.scroll = filtered_state.count.saturating_sub(1);
-            }
+            self.filter_events();
         }
 
         if self.prev_state == AppState::MangoApp {
@@ -717,78 +611,7 @@ impl<'a> App<'a> {
         }
 
         // Now that we updated the process data, we need to also update the filtered data
-        let filtered_events_list = match self.state {
-            AppState::PerfEvent => {
-                search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
-                    .into_iter()
-                    .map(FilterItem::String)
-                    .collect()
-            }
-            AppState::KprobeEvent => {
-                search::fuzzy_search(&self.kprobe_events, &self.event_input_buffer)
-                    .into_iter()
-                    .map(FilterItem::String)
-                    .collect()
-            }
-            AppState::Default | AppState::Llc | AppState::Node => {
-                if self.in_thread_view {
-                    if let Some(proc_data) = self.selected_proc_data_immut() {
-                        proc_data
-                            .threads
-                            .iter()
-                            .filter(|(_, thread_data)| {
-                                search::contains_spread(
-                                    &thread_data.thread_name,
-                                    &self.event_input_buffer,
-                                )
-                                .is_some()
-                                    || search::contains_spread(
-                                        &thread_data.tid.to_string(),
-                                        &self.event_input_buffer,
-                                    )
-                                    .is_some()
-                            })
-                            .map(|(tid, _)| FilterItem::Int(*tid))
-                            .collect()
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    self.proc_data
-                        .iter()
-                        .filter(|(_, proc_data)| {
-                            search::contains_spread(
-                                &proc_data.process_name,
-                                &self.event_input_buffer,
-                            )
-                            .is_some()
-                                || search::contains_spread(
-                                    &proc_data.tgid.to_string(),
-                                    &self.event_input_buffer,
-                                )
-                                .is_some()
-                        })
-                        .map(|(tgid, _)| FilterItem::Int(*tgid))
-                        .collect()
-                }
-            }
-            _ => vec![],
-        };
-
-        {
-            let mut filtered_state = self.filtered_state.lock().unwrap();
-
-            filtered_state.list = filtered_events_list;
-            filtered_state.count = filtered_state.list.len() as u16;
-
-            if (filtered_state.count as usize) <= filtered_state.selected {
-                filtered_state.selected = (filtered_state.count as usize).saturating_sub(1);
-            }
-
-            if filtered_state.count <= filtered_state.scroll {
-                filtered_state.scroll = filtered_state.count.saturating_sub(1);
-            }
-        }
+        self.filter_events();
 
         if self.state == AppState::Scheduler {
             if self.scheduler.is_empty() {
@@ -3190,7 +3013,7 @@ impl<'a> App<'a> {
                 self.filter_events();
                 self.handle_action(&Action::SetState(self.prev_state.clone()))?;
             }
-            AppState::Default | AppState::Llc | AppState::Node => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                 if !self.filtering && !self.in_thread_view {
                     self.handle_action(&Action::Quit)?;
                 } else if !self.filtering {
@@ -3724,7 +3547,7 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                 if self.in_thread_view {
                     if let Some(proc_data) = self.selected_proc_data_immut() {
                         proc_data
@@ -3970,7 +3793,7 @@ impl<'a> App<'a> {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
-                AppState::Default | AppState::Llc | AppState::Node => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                     if self.in_thread_view {
                         self.in_thread_view = false;
                     } else {
@@ -3982,7 +3805,7 @@ impl<'a> App<'a> {
                 }
             },
             Action::Filter => match self.state {
-                AppState::Default | AppState::Llc | AppState::Node => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                     self.filtering = true;
                     self.filter_events();
                 }
