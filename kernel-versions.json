@@ -23,6 +23,14 @@
     "narHash": "sha256-KIUrzpGMDSsYjFlWaluZ5LA1MpunLiF+KHEq/4W9y3s=",
     "kernelVersion": "6.12.41"
   },
+  "arighi/6_12": {
+    "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/arighi/linux.git",
+    "branch": "scx-6.12",
+    "commitHash": "b51409746fbc4d9269bba1eef415b93596a82763",
+    "lastModified": 1754560679,
+    "narHash": "sha256-XlWDG/Qb/kUuaGtyrz3AbVIlvQg9V/mgOlyjn6pds/8=",
+    "kernelVersion": "6.12.41"
+  },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
