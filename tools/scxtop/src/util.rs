@@ -65,9 +65,9 @@ pub fn format_pages(pages: u64) -> String {
 pub fn format_hz(hz: u64) -> String {
     match hz {
         0..=999 => format!("{hz}Hz"),
-        1_000..=999_999 => format!("{:.2}kHz", hz as f64 / 1_000.0),
-        1_000_000..=999_999_999 => format!("{:.2}MHz", hz as f64 / 1_000_000.0),
-        _ => format!("{:.2}GHz", hz as f64 / 1_000_000_000.0),
+        1_000..=999_999 => format!("{:.0}MHz", hz as f64 / 1_000.0),
+        1_000_000..=999_999_999 => format!("{:.3}GHz", hz as f64 / 1_000_000.0),
+        _ => format!("{:.3}THz", hz as f64 / 1_000_000_000.0),
     }
 }
 
