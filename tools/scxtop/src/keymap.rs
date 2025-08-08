@@ -41,6 +41,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char(' '), Action::SetState(AppState::Pause));
         bindings.insert(Key::Char('e'), Action::SetState(AppState::PerfEvent));
         bindings.insert(Key::Char('K'), Action::SetState(AppState::KprobeEvent));
+        bindings.insert(Key::Char('p'), Action::SetState(AppState::Process));
         bindings.insert(Key::Char('f'), Action::Filter);
         bindings.insert(Key::Char('F'), Action::ToggleCpuFreq);
         bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
@@ -359,6 +360,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "AppStateDefault" | "SetState(Default)" => Ok(Action::SetState(AppState::Default)),
         "AppStatePause" | "SetState(Pause)" => Ok(Action::SetState(AppState::Pause)),
         "AppStatePerfEvent" | "SetState(PerfEvent)" => Ok(Action::SetState(AppState::PerfEvent)),
+        "AppStateProcess" | "SetState(Process)" => Ok(Action::SetState(AppState::Process)),
         "AppStateKprobeEvent" | "SetState(KprobeEvent)" => {
             Ok(Action::SetState(AppState::KprobeEvent))
         }
