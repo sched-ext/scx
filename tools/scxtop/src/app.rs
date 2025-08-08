@@ -365,7 +365,6 @@ impl<'a> App<'a> {
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
-            || self.state == AppState::Memory
             || self.state == AppState::Process
         {
             self.filtered_state.lock().unwrap().reset();
