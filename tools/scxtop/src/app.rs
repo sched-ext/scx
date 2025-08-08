@@ -1998,7 +1998,7 @@ impl<'a> App<'a> {
             )),
             "\n".into(),
             "\n".into(),
-            Line::from(Span::styled("Key Bindings:", Style::default())),
+            Line::from(Span::styled("General Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
                     "{}: (press to exit help)",
@@ -2010,11 +2010,42 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: change theme ({})",
+                    "{}: quit",
+                    self.config.active_keymap.action_keys_string(Action::Quit),
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!("{pause}: pause/unpause"),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll up",
+                    self.config.active_keymap.action_keys_string(Action::Up)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll down",
+                    self.config.active_keymap.action_keys_string(Action::Down)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll page up",
+                    self.config.active_keymap.action_keys_string(Action::PageUp)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll page down",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::ChangeTheme),
-                    serde_json::to_string_pretty(&theme)?
+                        .action_keys_string(Action::PageDown)
                 ),
                 Style::default(),
             )),
@@ -2024,56 +2055,6 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::RequestTrace),
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: memory view ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::SetState(AppState::Memory)),
-                    self.memory_view_state
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: decrease tick rate ({}ms)",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::DecTickRate),
-                    self.config.tick_rate_ms()
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: increase tick rate ({}ms)",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::IncTickRate),
-                    self.config.tick_rate_ms()
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: decrease bpf sample rate ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::DecBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: increase bpf sample rate ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::IncBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
                 ),
                 Style::default(),
             )),
@@ -2107,6 +2088,8 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("Event Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
                     "{}: show CPU perf event menu",
@@ -2152,39 +2135,11 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("View Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
-                    "{} ({}%)",
-                    format_bytes(self.mem_info.swap_total_kb * 1024),
-                    ((self.mem_info.swap_total_kb - self.mem_info.swap_free_kb) as f64
-                        / self.mem_info.swap_total_kb as f64
-                        * 100.0) as u64
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: profiling event list scroll down",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::PageDown)
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: quit",
-                    self.config.active_keymap.action_keys_string(Action::Quit),
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!("{pause}: pause/unpause"),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: filter processes",
+                    "{}: filter processes/threads",
                     self.config.active_keymap.action_keys_string(Action::Filter)
                 ),
                 Style::default(),
@@ -2236,10 +2191,21 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: display memory view",
+                    "{}: display next memory view ({})",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::SetState(AppState::Memory))
+                        .action_keys_string(Action::SetState(AppState::Memory)),
+                    self.memory_view_state
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: change theme ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ChangeTheme),
+                    serde_json::to_string_pretty(&theme)?
                 ),
                 Style::default(),
             )),
@@ -2253,6 +2219,49 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("Adjust Rates:", Style::default())),
+            Line::from(Span::styled(
+                format!(
+                    "{}: decrease tick rate ({}ms)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecTickRate),
+                    self.config.tick_rate_ms()
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: increase tick rate ({}ms)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncTickRate),
+                    self.config.tick_rate_ms()
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: decrease bpf sample rate ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate),
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: increase bpf sample rate ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate),
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ),
+                Style::default(),
+            )),
+            "\n".into(),
             Line::from(Span::styled(
                 format!(
                     "{}: Saves the current config ({})",
@@ -2263,7 +2272,7 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
-            Line::from(""),
+            "\n".into(),
             Line::from(Span::styled(
                 "For bug reporting and project updates, visit:",
                 Style::default(),
