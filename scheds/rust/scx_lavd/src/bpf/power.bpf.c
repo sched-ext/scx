@@ -588,7 +588,7 @@ static int reinit_active_cpumask_for_performance(void)
 	struct bpf_cpumask *active, *ovrflw;
 	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
-	u64 dsq_id;
+	u64 cpdom_id;
 	u32 nr_active_cpdoms = 0;
 	int cpu, err = 0;
 
@@ -667,11 +667,11 @@ static int reinit_active_cpumask_for_performance(void)
 	/*
 	 * Update nr_active_cpus, cap_sum_active_cpus, and pco_idx.
 	 */
-	bpf_for(dsq_id, 0, nr_cpdoms) {
-		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		WRITE_ONCE(cpdomc->nr_active_cpus, cpdomc->nr_acpus_temp);
 		WRITE_ONCE(cpdomc->nr_acpus_temp, 0);
 		WRITE_ONCE(cpdomc->cap_sum_active_cpus, cpdomc->cap_sum_temp);

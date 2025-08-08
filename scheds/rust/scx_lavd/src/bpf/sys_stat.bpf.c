@@ -65,19 +65,34 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 dsq_id, cpuc_tot_sc_time, compute;
+	u64 cpdom_id, cpuc_tot_sc_time, compute;
 	int cpu;
 
 	/*
 	 * Collect statistics for each compute domain.
 	 */
-	bpf_for(dsq_id, 0, nr_cpdoms) {
-		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		int i, j;
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_sum = 0;
-		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(dsq_id);
+		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
+		if (per_cpu_dsq) {
+			bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+				u64 cpumask = cpdomc->__cpumask[i];
+				bpf_for(j, 0, 64) {
+					if (cpumask & 0x1LLU << j) {
+						cpu = (i * 64) + j;
+						if (cpu >= nr_cpu_ids)
+							break;
+						cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+					}
+				}
+			}
+		}
+
 		c->nr_queued_task += cpdomc->nr_queued_task;
 	}
 
@@ -425,18 +440,18 @@ static s32 init_sys_stat(u64 now)
 {
 	struct cpdom_ctx *cpdomc;
 	struct bpf_timer *timer;
-	u64 dsq_id;
+	u64 cpdom_id;
 	u32 key = 0;
 	int err;
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
 	sys_stat.slice = slice_max_ns;
-	bpf_for(dsq_id, 0, nr_cpdoms) {
-		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		if (cpdomc->nr_active_cpus)
 			sys_stat.nr_active_cpdoms++;
 	}

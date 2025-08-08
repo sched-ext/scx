@@ -62,6 +62,28 @@ enum {
 };
 
 /*
+ *  DSQ (dispatch queue) IDs are 64bit of the format:
+ *  Lower 63 bits are reserved by users
+ *
+ *   Bits: [63] [62 .. 14] [13 .. 12] [11 .. 0]
+ *         [ B] [    R   ] [    T   ] [   ID  ]
+ *
+ *    B: Sched_ext built-in ID bit, see include/linux/sched/ext.h
+ *    R: Reserved
+ *    T: Type of LAVD DSQ
+ *   ID: DSQ ID
+ */
+enum {
+	LAVD_DSQ_TYPE_SHFT		= 12,
+	LAVD_DSQ_TYPE_MASK		= 0x3 << LAVD_DSQ_TYPE_SHFT,
+	LAVD_DSQ_ID_SHFT		= 0,
+	LAVD_DSQ_ID_MASK		= 0xfff << LAVD_DSQ_ID_SHFT,
+	LAVD_DSQ_NR_TYPES		= 2,
+	LAVD_DSQ_TYPE_CPDOM		= 1,
+	LAVD_DSQ_TYPE_CPU		= 0,
+};
+
+/*
  * System-wide stats
  */
 struct sys_stat {
