@@ -251,7 +251,7 @@ mod tests {
 
         let data = thread_data.event_data_immut("overflow_test");
         assert_eq!(data.len(), 3); // Should respect max_data_size
-        // Should contain the last 3 values: 30, 40, 50
+                                   // Should contain the last 3 values: 30, 40, 50
         assert!(data.contains(&30));
         assert!(data.contains(&40));
         assert!(data.contains(&50));
