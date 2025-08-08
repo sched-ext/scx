@@ -57,6 +57,7 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
+const SCHEDULER_NAME: &str = "scx_rusty";
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
@@ -618,6 +619,8 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
+        info!("Unregister {} scheduler", SCHEDULER_NAME);
+
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
         }
