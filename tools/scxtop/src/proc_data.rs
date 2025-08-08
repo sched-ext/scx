@@ -266,7 +266,6 @@ mod tests {
         assert!(proc_data.threads.contains_key(&current_pid));
 
         // Test thread update
-        let initial_thread_count = proc_data.threads.len();
         proc_data.update_threads(100);
         // The thread count might change during the test as threads are created or destroyed
         // So we don't assert exact equality
