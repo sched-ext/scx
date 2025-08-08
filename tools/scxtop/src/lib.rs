@@ -94,6 +94,8 @@ pub enum AppState {
     Pause,
     /// Application is in the PerfEvent list state.
     PerfEvent,
+    /// Application is in the Process state.
+    Process,
     /// Application is in the scheduler state.
     Scheduler,
     /// Application is in the tracing  state.
@@ -715,6 +717,7 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
             Action::SetState(AppState::Pause) => write!(f, "AppStatePause"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
+            Action::SetState(AppState::Process) => write!(f, "AppStateProcess"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
             Action::Filter => write!(f, "Filter"),

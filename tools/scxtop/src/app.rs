@@ -366,6 +366,7 @@ impl<'a> App<'a> {
             || self.state == AppState::Llc
             || self.state == AppState::Node
             || self.state == AppState::Memory
+            || self.state == AppState::Process
         {
             self.filtered_state.lock().unwrap().reset();
             self.filter_events();
@@ -1043,7 +1044,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table(frame, left)
+        self.render_table(frame, left, false)
     }
 
     /// Renders the node application state.
@@ -1176,7 +1177,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table(frame, left)
+        self.render_table(frame, left, false)
     }
 
     /// Creates a sparkline for a dsq.
@@ -1838,7 +1839,7 @@ impl<'a> App<'a> {
             self.render_memory_summary(frame, left_mem)?;
         }
 
-        self.render_table(frame, left)?;
+        self.render_table(frame, left, false)?;
 
         Ok(())
     }
@@ -2191,6 +2192,15 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: display process view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Process))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: display default view",
                     self.config
                         .active_keymap
@@ -2485,7 +2495,12 @@ impl<'a> App<'a> {
     }
 
     /// Render the process view.
-    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_process_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
         self.update_events_list_size(data_area);
@@ -2517,8 +2532,13 @@ impl<'a> App<'a> {
             )
             .title_top(
                 Line::from(format!(
-                    "sample rate {}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    "sample rate {}{}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    if render_tick_rate {
+                        format!(" --- tick rate {}", self.config.tick_rate_ms())
+                    } else {
+                        "".to_string()
+                    }
                 ))
                 .style(self.theme().text_important_color())
                 .right_aligned(),
@@ -2584,7 +2604,12 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_thread_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
         self.update_events_list_size(data_area);
@@ -2632,8 +2657,13 @@ impl<'a> App<'a> {
             )
             .title_top(
                 Line::from(format!(
-                    "sample rate {}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    "sample rate {}{}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    if render_tick_rate {
+                        format!(" --- tick rate {}", self.config.tick_rate_ms())
+                    } else {
+                        "".to_string()
+                    }
                 ))
                 .style(self.theme().text_important_color())
                 .right_aligned(),
@@ -2690,11 +2720,16 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn render_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         if self.in_thread_view {
-            self.render_thread_table(frame, area)
+            self.render_thread_table(frame, area, render_tick_rate)
         } else {
-            self.render_process_table(frame, area)
+            self.render_process_table(frame, area, render_tick_rate)
         }
     }
 
@@ -2847,6 +2882,7 @@ impl<'a> App<'a> {
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
+            AppState::Process => self.render_table(frame, frame.area(), true),
             AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Memory => self.render_memory(frame),
             AppState::Node => self.render_node(frame),
@@ -2881,7 +2917,8 @@ impl<'a> App<'a> {
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
-            || self.state == AppState::Node)
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
             && filtered_state.scroll < filtered_state.count - 1
         {
             filtered_state.scroll += 1;
@@ -2896,7 +2933,8 @@ impl<'a> App<'a> {
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
-            || self.state == AppState::Node)
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
             && filtered_state.scroll > 0
         {
             filtered_state.scroll -= 1;
@@ -2911,7 +2949,8 @@ impl<'a> App<'a> {
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
-            || self.state == AppState::Node)
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
             && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
             filtered_state.scroll += self.events_list_size - 1;
@@ -2927,6 +2966,7 @@ impl<'a> App<'a> {
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
+            || self.state == AppState::Process
         {
             if filtered_state.scroll > self.events_list_size {
                 filtered_state.scroll -= self.events_list_size - 1;
@@ -2994,6 +3034,7 @@ impl<'a> App<'a> {
         } else if self.state == AppState::Default
             || self.state == AppState::Node
             || self.state == AppState::Llc
+            || self.state == AppState::Process
         {
             // Reset process view
             self.filtering = false;
@@ -3019,7 +3060,7 @@ impl<'a> App<'a> {
                 self.filter_events();
                 self.handle_action(&Action::SetState(self.prev_state.clone()))?;
             }
-            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                 if !self.filtering && !self.in_thread_view {
                     self.handle_action(&Action::Quit)?;
                 } else if !self.filtering {
@@ -3553,7 +3594,7 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                 if self.in_thread_view {
                     if let Some(proc_data) = self.selected_proc_data_immut() {
                         proc_data
@@ -3781,7 +3822,7 @@ impl<'a> App<'a> {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
-                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                     if self.in_thread_view {
                         self.in_thread_view = false;
                     } else {
@@ -3793,7 +3834,7 @@ impl<'a> App<'a> {
                 }
             },
             Action::Filter => match self.state {
-                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                     self.filtering = true;
                     self.filter_events();
                 }
