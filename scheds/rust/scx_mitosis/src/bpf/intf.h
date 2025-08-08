@@ -26,7 +26,8 @@ enum consts {
 	MAX_CELLS = 16,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
-	PCPU_BASE = 0x80000000
+	PCPU_BASE = 0x80000000,
+	MAX_CG_DEPTH = 256,
 };
 
 /* Statistics */
