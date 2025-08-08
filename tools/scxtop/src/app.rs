@@ -334,9 +334,21 @@ impl<'a> App<'a> {
     }
 
     /// Sets the state of the application.
-    pub fn set_state(&mut self, state: AppState) {
+    pub fn set_state(&mut self, mut state: AppState) {
         if self.state == AppState::Tracing {
             return;
+        }
+
+        if state == AppState::Memory {
+            self.memory_view_state = self.memory_view_state.next();
+            match self.memory_view_state {
+                ComponentViewState::Default | ComponentViewState::Hidden => {
+                    state = AppState::Default;
+                }
+                _ => {}
+            }
+        } else if state == self.state {
+            state = self.prev_state.clone();
         }
 
         if self.state != AppState::Help
@@ -1815,24 +1827,18 @@ impl<'a> App<'a> {
 
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let [mut left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
         self.render_event(frame, right)?;
 
-        // Conditionally split the left area based on memory view state
-        match self.memory_view_state {
-            ComponentViewState::Detail | ComponentViewState::Hidden => {
-                // Memory is hidden, process table takes the entire left side
-                self.render_table(frame, left)?;
-            }
-            ComponentViewState::Default => {
-                // Memory summary is shown, split the left area
-                let [table_area, memory_area] =
-                    Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
-                self.render_table(frame, table_area)?;
-                self.render_memory_summary(frame, memory_area)?;
-            }
+        if self.memory_view_state == ComponentViewState::Default {
+            let [new_left, left_mem] =
+                Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
+            left = new_left;
+            self.render_memory_summary(frame, left_mem)?;
         }
+
+        self.render_table(frame, left)?;
 
         Ok(())
     }
@@ -3642,25 +3648,7 @@ impl<'a> App<'a> {
                 self.on_enter()?;
             }
             Action::SetState(state) => {
-                if *state == AppState::Memory {
-                    // Handle memory view tristate cycling
-                    self.memory_view_state = self.memory_view_state.next();
-                    match self.memory_view_state {
-                        ComponentViewState::Detail => {
-                            self.set_state(AppState::Memory);
-                        }
-                        ComponentViewState::Hidden | ComponentViewState::Default => {
-                            // Stay in current state but update memory view
-                            if self.state == AppState::Memory {
-                                self.set_state(self.prev_state.clone());
-                            }
-                        }
-                    }
-                } else if *state == self.state {
-                    self.set_state(self.prev_state.clone());
-                } else {
-                    self.set_state(state.clone());
-                }
+                self.set_state(state.clone());
             }
             Action::NextEvent => {
                 if self.next_event().is_err() {
