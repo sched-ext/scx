@@ -9,7 +9,8 @@ license = "GPL-2.0-only"
 publish = false
 
 [package.metadata.scx]
-ci.disable_veristat = true  # requires some changes to vmlinux handling, see https://github.com/sched-ext/scx/pull/2246
+ci.kernel.default = "bpf/bpf-next"
+ci.kernel.allowlist = ["bpf/bpf-next"]
 
 [dependencies]
 anyhow = "1.0.65"
