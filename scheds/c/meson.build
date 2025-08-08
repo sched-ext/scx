@@ -1,5 +1,5 @@
 c_scheds = ['scx_simple', 'scx_qmap', 'scx_central', 'scx_userland', 'scx_nest',
-            'scx_flatcg', 'scx_pair', 'scx_prev']
+            'scx_flatcg', 'scx_pair', 'scx_prev', 'scx_empty', 'scx_drop', 'scx_rr']
 
 c_scheds_lib = ['scx_sdt']
 
