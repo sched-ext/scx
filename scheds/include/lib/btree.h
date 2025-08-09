@@ -23,6 +23,7 @@ struct bt_node {
 
 struct btree {
 	bt_node *root;
+	bt_node *freelist;
 	/* XXXETSAL Locking */
 };
 
