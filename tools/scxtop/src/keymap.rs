@@ -42,8 +42,8 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('e'), Action::SetState(AppState::PerfEvent));
         bindings.insert(Key::Char('K'), Action::SetState(AppState::KprobeEvent));
         bindings.insert(Key::Char('p'), Action::SetState(AppState::Process));
+        bindings.insert(Key::Char('T'), Action::SetState(AppState::PerfTop));
         bindings.insert(Key::Char('f'), Action::Filter);
-        bindings.insert(Key::Char('F'), Action::ToggleCpuFreq);
         bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
         bindings.insert(Key::Char('L'), Action::ToggleLocalization);
         bindings.insert(Key::Char('P'), Action::ToggleHwPressure);
@@ -361,6 +361,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "AppStatePause" | "SetState(Pause)" => Ok(Action::SetState(AppState::Pause)),
         "AppStatePerfEvent" | "SetState(PerfEvent)" => Ok(Action::SetState(AppState::PerfEvent)),
         "AppStateProcess" | "SetState(Process)" => Ok(Action::SetState(AppState::Process)),
+        "AppStatePerfTop" | "SetState(PerfTop)" => Ok(Action::SetState(AppState::PerfTop)),
         "AppStateKprobeEvent" | "SetState(KprobeEvent)" => {
             Ok(Action::SetState(AppState::KprobeEvent))
         }
@@ -386,6 +387,8 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "IncTickRate" => Ok(Action::IncTickRate),
         "DecBpfSampleRate" => Ok(Action::DecBpfSampleRate),
         "IncBpfSampleRate" => Ok(Action::IncBpfSampleRate),
+        "PerfSampleRateIncrease" => Ok(Action::PerfSampleRateIncrease),
+        "PerfSampleRateDecrease" => Ok(Action::PerfSampleRateDecrease),
         "NextViewState" => Ok(Action::NextViewState),
         "Down" => Ok(Action::Down),
         "Up" => Ok(Action::Up),

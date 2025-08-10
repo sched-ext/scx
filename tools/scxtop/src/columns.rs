@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::symbol_data::SymbolSample;
 use crate::util::{format_bytes, format_percentage};
 use crate::MemStatSnapshot;
 use crate::ProcData;
@@ -488,6 +489,50 @@ pub fn get_memory_detail_columns() -> Vec<Column<&'static str, MemStatSnapshot>>
                 _ => String::from(""),
             }
         ),
+    ]
+}
+
+/// Returns columns for perf top symbol display
+pub fn get_perf_top_columns(layered_enabled: bool) -> Vec<Column<String, SymbolSample>> {
+    vec![
+        Column {
+            header: "Symbol",
+            constraint: Constraint::Fill(1),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                let prefix = if data.is_kernel { "[K] " } else { "[U] " };
+                format!("{}{}", prefix, data.symbol_info.symbol_name)
+            }),
+        },
+        Column {
+            header: "Module",
+            constraint: Constraint::Length(20),
+            visible: true,
+            value_fn: Box::new(|_, data| data.symbol_info.module_name.clone()),
+        },
+        Column {
+            header: "Layer ID",
+            constraint: Constraint::Length(8),
+            visible: layered_enabled,
+            value_fn: Box::new(|_, data| {
+                data.layer_id
+                    .filter(|&v| v >= 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            }),
+        },
+        Column {
+            header: "Samples",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| data.count.to_string()),
+        },
+        Column {
+            header: "Percentage",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| format!("{:.2}%", data.percentage)),
+        },
     ]
 }
 

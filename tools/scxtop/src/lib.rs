@@ -25,6 +25,7 @@ mod proc_data;
 pub mod profiling_events;
 pub mod search;
 mod stats;
+mod symbol_data;
 mod theme;
 mod thread_data;
 pub mod tracer;
@@ -94,6 +95,8 @@ pub enum AppState {
     Pause,
     /// Application is in the PerfEvent list state.
     PerfEvent,
+    /// Application is in the perf top view state.
+    PerfTop,
     /// Application is in the Process state.
     Process,
     /// Application is in the scheduler state.
@@ -401,6 +404,19 @@ pub struct MangoAppAction {
     pub display_refresh: u16,
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PerfSampleAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub instruction_pointer: u64,
+    pub cpu_id: u32,
+    pub is_kernel: bool,
+    pub kernel_stack: Vec<u64>,
+    pub user_stack: Vec<u64>,
+    pub layer_id: i32,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
@@ -433,6 +449,9 @@ pub enum Action {
     NextViewState,
     PageDown,
     PageUp,
+    PerfSample(PerfSampleAction),
+    PerfSampleRateIncrease,
+    PerfSampleRateDecrease,
     PrevEvent,
     Quit,
     RequestTrace,
@@ -650,6 +669,36 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_PERF_SAMPLE => {
+                let perf_sample = unsafe { &event.event.perf_sample };
+
+                // Extract kernel stack trace
+                let kernel_stack: Vec<u64> = if perf_sample.kernel_stack_size > 0 {
+                    perf_sample.kernel_stack[0..perf_sample.kernel_stack_size as usize].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                // Extract user stack trace
+                let user_stack: Vec<u64> = if perf_sample.user_stack_size > 0 {
+                    perf_sample.user_stack[0..perf_sample.user_stack_size as usize].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                Ok(Action::PerfSample(PerfSampleAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: perf_sample.pid,
+                    instruction_pointer: perf_sample.instruction_pointer,
+                    cpu_id: perf_sample.cpu_id,
+                    is_kernel: unsafe { perf_sample.is_kernel.assume_init() },
+                    kernel_stack,
+                    user_stack,
+                    layer_id: perf_sample.layer_id,
+                }))
+            }
+            #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_SWITCH => {
                 let sched_switch = unsafe { &event.event.sched_switch };
                 let prev_comm = String::from_utf8_lossy(&sched_switch.prev_comm);
@@ -733,10 +782,11 @@ impl std::fmt::Display for Action {
             Action::SaveConfig => write!(f, "SaveConfig"),
             Action::RequestTrace => write!(f, "RequestTrace"),
             Action::TraceStarted(_) => write!(f, "TraceStarted"),
-            Action::TraceStopped(_) => write!(f, "TraceStopped"),
-            Action::ClearEvent => write!(f, "ClearEvent"),
+            Action::PerfSampleRateIncrease => write!(f, "PerfSampleRateIncrease"),
+            Action::PerfSampleRateDecrease => write!(f, "PerfSampleRateDecrease"),
+            Action::PageUp => write!(f, "PageUp"),
+            Action::PageDown => write!(f, "PageDown"),
             Action::PrevEvent => write!(f, "PrevEvent"),
-            Action::NextEvent => write!(f, "NextEvent"),
             Action::Quit => write!(f, "Quit"),
             Action::ChangeTheme => write!(f, "ChangeTheme"),
             Action::DecTickRate => write!(f, "DecTickRate"),
@@ -746,8 +796,6 @@ impl std::fmt::Display for Action {
             Action::NextViewState => write!(f, "NextViewState"),
             Action::Down => write!(f, "Down"),
             Action::Up => write!(f, "Up"),
-            Action::PageDown => write!(f, "PageDown"),
-            Action::PageUp => write!(f, "PageUp"),
             Action::Enter => write!(f, "Enter"),
             _ => write!(f, "{self:?}"),
         }
