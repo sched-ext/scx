@@ -924,6 +924,7 @@ impl PerfettoTraceManager {
                 irq_ns: Some(current_data.irq - prev_data.irq),
                 softirq_ns: Some(current_data.softirq - prev_data.softirq),
                 special_fields: SpecialFields::new(),
+                steal_ns: None,
             };
             cpu_stat.insert(*cpu, cpu_time);
         }
