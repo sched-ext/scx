@@ -33,7 +33,7 @@ fn main() {
         .compiler(env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into()))
         .files(&[root_dir.join("scheds/rust/scx_p2dq/src/bpf/main.test.bpf.c")])
         .warnings(false)
-        .define("TEST", None)
+        .define("SCX_BPF_UNITTEST", None)
         .flags(&[
             "-Wno-attributes",
             "-Wno-unknown-pragmas",
@@ -53,7 +53,7 @@ fn main() {
             root_dir.join("lib/scxtest/scx_test_map.c"),
             root_dir.join("lib/scxtest/scx_test_cpumask.c"),
         ])
-        .define("TEST", None)
+        .define("SCX_BPF_UNITTEST", None)
         .includes(include_path)
         .compile("scxtest");
 
