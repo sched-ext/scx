@@ -716,6 +716,13 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		goto consume_out;
 
 	/*
+	 * If there is something to run on a per-CPU DSQ,
+	 * directly consume without checking CPU masks.
+	 */
+	if (per_cpu_dsq && scx_bpf_dsq_nr_queued(dsq_ids[LAVD_DSQ_TYPE_CPU]))
+		goto consume_out;
+
+	/*
 	 * Prepare cpumasks.
 	 */
 	bpf_rcu_read_lock();
