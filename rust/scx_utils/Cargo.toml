@@ -1,6 +1,6 @@
 [package]
 name = "scx_utils"
-version = "1.0.17"
+version = "1.0.18"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -14,9 +14,9 @@ bindgen = ">=0.69"
 glob = "0.3.2"
 hex = "0.4.3"
 lazy_static = "1.5.0"
-libbpf-sys = "=1.5.1"
-libbpf-cargo = "=0.26.0-beta.0"
-libbpf-rs = "=0.26.0-beta.0"
+libbpf-sys = "=1.6.1"
+libbpf-cargo = "=0.26.0-beta.1"
+libbpf-rs = "=0.26.0-beta.1"
 log = "0.4.17"
 nvml-wrapper = { version = "0.11.0", optional = true }
 nvml-wrapper-sys = { version = "0.9.0", optional = true }
@@ -43,7 +43,7 @@ anyhow = "1.0.65"
 bindgen = ">=0.69"
 glob = "0.3.2"
 lazy_static = "1.5.0"
-libbpf-cargo = "=0.26.0-beta.0"
+libbpf-cargo = "=0.26.0-beta.1"
 sscanf = "0.4"
 tar = "0.4"
 vergen = { version = "8.0.0", features = ["cargo", "git", "gitcl"] }

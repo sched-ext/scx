@@ -24,7 +24,7 @@ clap_complete = "4.5.45"
 crossterm = { version = "0.28.1", features = ["serde", "event-stream"] }
 futures = "0.3.31"
 glob = "0.3.2"
-libbpf-rs = "=0.26.0-beta.0"
+libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.137"
 log = "0.4.17"
 num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }
@@ -36,7 +36,7 @@ rand = "0.8.5"
 ratatui = { version = "0.29.0", features = ["serde", "macros"] }
 regex = "1.11.1"
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.14" }
-scx_utils = { path = "../../rust/scx_utils", version = "1.0.17" }
+scx_utils = { path = "../../rust/scx_utils", version = "1.0.18" }
 simplelog = "0.12"
 serde_json = "1.0.133"
 serde = { version = "1.0.215", features = ["derive"] }
@@ -61,4 +61,4 @@ harness = false
 
 [build-dependencies]
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.14" }
-scx_utils = { path = "../../rust/scx_utils", version = "1.0.17" }
+scx_utils = { path = "../../rust/scx_utils", version = "1.0.18" }
