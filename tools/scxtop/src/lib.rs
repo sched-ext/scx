@@ -19,6 +19,7 @@ pub mod layered_util;
 mod llc_data;
 pub mod mangoapp;
 mod mem_stats;
+mod network_stats;
 mod node_data;
 mod perfetto_trace;
 mod proc_data;
@@ -43,6 +44,7 @@ pub use keymap::Key;
 pub use keymap::KeyMap;
 pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
+pub use network_stats::NetworkStatSnapshot;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
 pub use proc_data::ProcData;
@@ -89,6 +91,8 @@ pub enum AppState {
     MangoApp,
     /// Application is in the Memory state.
     Memory,
+    /// Application is in the network state.
+    Network,
     /// Application is in the NUMA node state.
     Node,
     /// Application is in the paused state.
@@ -777,6 +781,7 @@ impl std::fmt::Display for Action {
             Action::ToggleHwPressure => write!(f, "ToggleHwPressure"),
             Action::SetState(AppState::Help) => write!(f, "AppStateHelp"),
             Action::SetState(AppState::Llc) => write!(f, "AppStateLlc"),
+            Action::SetState(AppState::Network) => write!(f, "AppStateNetwork"),
             Action::SetState(AppState::Node) => write!(f, "AppStateNode"),
             Action::SetState(AppState::Scheduler) => write!(f, "AppStateScheduler"),
             Action::SaveConfig => write!(f, "SaveConfig"),
