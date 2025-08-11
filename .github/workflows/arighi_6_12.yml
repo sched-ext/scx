@@ -1,0 +1,18 @@
+name: arighi-6_12-test
+
+on:
+  # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
+  schedule:
+    - cron: "42 3,9,15,21 * * *"
+
+jobs:
+  build-kernels:
+    uses: ./.github/workflows/build-kernels.yml
+    secrets: inherit
+
+  integration-test:
+    uses: ./.github/workflows/integration-tests.yml
+    needs: build-kernels
+    secrets: inherit
+    with:
+      repo-name: arighi/6_12

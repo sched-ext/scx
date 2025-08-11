@@ -86,12 +86,16 @@ pub enum AppState {
     Llc,
     /// Application is in the mangoapp state.
     MangoApp,
+    /// Application is in the Memory state.
+    Memory,
     /// Application is in the NUMA node state.
     Node,
     /// Application is in the paused state.
     Pause,
     /// Application is in the PerfEvent list state.
     PerfEvent,
+    /// Application is in the Process state.
+    Process,
     /// Application is in the scheduler state.
     Scheduler,
     /// Application is in the tracing  state.
@@ -119,6 +123,37 @@ impl std::fmt::Display for ViewState {
         match self {
             ViewState::Sparkline => write!(f, "sparkline"),
             ViewState::BarChart => write!(f, "barchart"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ComponentViewState {
+    /// Component view is hidden in the default view
+    Hidden,
+    /// Component view is shown in the default view (current behavior)
+    Default,
+    /// Switch to detailed component view
+    Detail,
+}
+
+impl ComponentViewState {
+    /// Returns the next ComponentViewState, cycling through the values.
+    pub fn next(&self) -> Self {
+        match self {
+            ComponentViewState::Hidden => ComponentViewState::Default,
+            ComponentViewState::Default => ComponentViewState::Detail,
+            ComponentViewState::Detail => ComponentViewState::Hidden,
+        }
+    }
+}
+
+impl std::fmt::Display for ComponentViewState {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ComponentViewState::Hidden => write!(f, "hidden"),
+            ComponentViewState::Default => write!(f, "default"),
+            ComponentViewState::Detail => write!(f, "detail"),
         }
     }
 }
@@ -366,6 +401,7 @@ pub struct MangoAppAction {
     pub display_refresh: u16,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Backspace,
@@ -681,6 +717,7 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
             Action::SetState(AppState::Pause) => write!(f, "AppStatePause"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
+            Action::SetState(AppState::Process) => write!(f, "AppStateProcess"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
             Action::Filter => write!(f, "Filter"),

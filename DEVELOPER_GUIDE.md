@@ -97,7 +97,7 @@ The output of the script can then be loaded into the perfetto UI:
 
 ### perf
 
-The linux `perf` tool has a subcommand for profiling scheduling `perf sched`.
+The Linux `perf` tool has a subcommand for profiling scheduling `perf sched`.
 The interface is text driven, but is able to provide various timeline views and
 aggregations of scheduler events. The following is an example of using `perf
 sched` to get a timeline histogram with additional scheduling metrics.

@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn test_merge_configs_no_overwrite() {
         let mut a = Config::empty_config();
-        a.theme = Some(AppTheme::MidnightGreen);
+        a.theme = Some(AppTheme::SolarizedDark);
         a.tick_rate_ms = Some(100);
         a.debug = Some(true);
         a.exclude_bpf = Some(true);
@@ -479,7 +479,7 @@ mod tests {
         // Test `or` method
         let merged_or = a.clone().or(b.clone());
 
-        assert_eq!(merged_or.theme(), &AppTheme::MidnightGreen);
+        assert_eq!(merged_or.theme(), &AppTheme::SolarizedDark);
         assert_eq!(merged_or.tick_rate_ms(), 100);
         assert!(merged_or.debug());
         assert!(merged_or.exclude_bpf());
@@ -495,7 +495,7 @@ mod tests {
         // Test `merge` method
         let merged = Config::merge([a, b]);
 
-        assert_eq!(merged.theme(), &AppTheme::MidnightGreen);
+        assert_eq!(merged.theme(), &AppTheme::SolarizedDark);
         assert_eq!(merged.tick_rate_ms(), 100);
         assert!(merged.debug());
         assert!(merged.exclude_bpf());

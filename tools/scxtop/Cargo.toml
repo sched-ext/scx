@@ -2,7 +2,7 @@
 name = "scxtop"
 version = "1.0.16"
 edition = "2021"
-authors = ["Daniel Hodges <hodges.daniel.scott@gmail.com>"]
+authors = ["Daniel Hodges <hodges.daniel.scott@gmail.com>", "Yaakov Stein <ymstein14@gmail.com>"]
 license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "sched_ext scheduler tool for observability"

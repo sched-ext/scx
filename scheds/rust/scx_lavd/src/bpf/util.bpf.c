@@ -226,7 +226,7 @@ static bool have_scheduled(struct task_ctx *taskc)
 
 static bool can_boost_slice(void)
 {
-	return slice_max_ns <= sys_stat.slice;
+	return sys_stat.nr_queued_task <= sys_stat.nr_active;
 }
 
 static u16 get_nice_prio(struct task_struct *p)

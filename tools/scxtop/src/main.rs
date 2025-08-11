@@ -77,7 +77,7 @@ fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
 fn handle_input_entry(app: &App, s: String) -> Option<Action> {
     match app.state() {
         AppState::PerfEvent | AppState::KprobeEvent => Some(Action::InputEntry(s)),
-        AppState::Default | AppState::Llc | AppState::Node => {
+        AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
             if app.filtering() {
                 Some(Action::InputEntry(s))
             } else {
@@ -364,6 +364,11 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                 skel.maps.rodata_data.as_mut().unwrap().layered = true;
                 action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
                     table: "Process".to_string(),
+                    col: "Layer ID".to_string(),
+                    visible: true,
+                }))?;
+                action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
+                    table: "Thread".to_string(),
                     col: "Layer ID".to_string(),
                     visible: true,
                 }))?;

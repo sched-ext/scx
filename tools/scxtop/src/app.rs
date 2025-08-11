@@ -8,15 +8,20 @@ use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
-use crate::columns::{get_process_columns, get_thread_columns};
+use crate::columns::{
+    get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
+    get_memory_summary_columns, get_pagefault_summary_columns, get_process_columns,
+    get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+};
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::search;
-use crate::util::{format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
+use crate::util::{format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
 use crate::Columns;
+use crate::ComponentViewState;
 use crate::CpuData;
 use crate::CpuStatTracker;
 use crate::EventData;
@@ -24,6 +29,7 @@ use crate::FilterItem;
 use crate::FilteredState;
 use crate::KprobeEvent;
 use crate::LlcData;
+use crate::MemStatSnapshot;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
@@ -56,9 +62,9 @@ use ratatui::{
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph,
-        RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
-        TableState,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, LineGauge,
+        Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Sparkline, Table, TableState,
     },
     Frame,
 };
@@ -89,6 +95,8 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     sys: Arc<StdMutex<System>>,
+    mem_info: MemStatSnapshot,
+    memory_view_state: ComponentViewState,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -165,6 +173,9 @@ impl<'a> App<'a> {
         let mut node_data = BTreeMap::new();
         let mut proc_data = BTreeMap::new();
         let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let mut mem_info = MemStatSnapshot::default();
+        mem_info.update()?;
+
         let active_event = ProfilingEvent::from_str_args(
             &config.default_profiling_event(),
             Some(cpu_stat_tracker.clone()),
@@ -261,6 +272,8 @@ impl<'a> App<'a> {
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
             sys: Arc::new(StdMutex::new(System::new_all())),
+            mem_info,
+            memory_view_state: ComponentViewState::Default,
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -307,7 +320,10 @@ impl<'a> App<'a> {
         };
 
         // Set the initial filter state
+        app.filtering = true;
+        app.event_input_buffer.clear();
         app.filter_events();
+        app.filtering = false;
 
         Ok(app)
     }
@@ -318,9 +334,21 @@ impl<'a> App<'a> {
     }
 
     /// Sets the state of the application.
-    pub fn set_state(&mut self, state: AppState) {
+    pub fn set_state(&mut self, mut state: AppState) {
         if self.state == AppState::Tracing {
             return;
+        }
+
+        if state == AppState::Memory {
+            self.memory_view_state = self.memory_view_state.next();
+            match self.memory_view_state {
+                ComponentViewState::Default | ComponentViewState::Hidden => {
+                    state = AppState::Default;
+                }
+                _ => {}
+            }
+        } else if state == self.state {
+            state = self.prev_state.clone();
         }
 
         if self.state != AppState::Help
@@ -337,6 +365,7 @@ impl<'a> App<'a> {
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
+            || self.state == AppState::Process
         {
             self.filtered_state.lock().unwrap().reset();
             self.filter_events();
@@ -370,6 +399,11 @@ impl<'a> App<'a> {
     fn selected_proc_data(&mut self) -> Option<&mut ProcData> {
         self.selected_process
             .and_then(|tgid| self.proc_data.get_mut(&tgid))
+    }
+
+    fn selected_proc_data_immut(&self) -> Option<&ProcData> {
+        self.selected_process
+            .and_then(|tgid| self.proc_data.get(&tgid))
     }
 
     /// Stop all active profiling events.
@@ -560,6 +594,12 @@ impl<'a> App<'a> {
                 .write()
                 .unwrap()
                 .update(&mut system_guard)?;
+        }
+
+        // Update memory information
+        match self.memory_view_state {
+            ComponentViewState::Default | ComponentViewState::Detail => self.mem_info.update()?,
+            _ => {}
         }
 
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
@@ -764,7 +804,7 @@ impl<'a> App<'a> {
             ProfilingEvent::CpuUtil(_) => llc_data.num_cpus,
             _ => 1,
         };
-        let data = llc_data
+        let data: Vec<u64> = llc_data
             .event_data_immut(self.active_event.event_name())
             .iter()
             .map(|x| x / divisor as u64)
@@ -817,7 +857,7 @@ impl<'a> App<'a> {
             ProfilingEvent::CpuUtil(_) => node_data.num_cpus,
             _ => 1,
         };
-        let data = node_data
+        let data: Vec<u64> = node_data
             .event_data_immut(self.active_event.event_name())
             .iter()
             .map(|x| x / divisor as u64)
@@ -1003,7 +1043,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table(frame, left)
+        self.render_table(frame, left, false)
     }
 
     /// Renders the node application state.
@@ -1136,7 +1176,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table(frame, left)
+        self.render_table(frame, left, false)
     }
 
     /// Creates a sparkline for a dsq.
@@ -1787,10 +1827,157 @@ impl<'a> App<'a> {
 
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let [mut left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
         self.render_event(frame, right)?;
-        self.render_table(frame, left)
+
+        if self.memory_view_state == ComponentViewState::Default {
+            let [new_left, left_mem] =
+                Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
+            left = new_left;
+            self.render_memory_summary(frame, left_mem)?;
+        }
+
+        self.render_table(frame, left, false)?;
+
+        Ok(())
+    }
+
+    /// Renders a memory summary in the default view.
+    fn render_memory_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Only render memory summary if the memory view state is Default
+        if self.memory_view_state != ComponentViewState::Default {
+            anyhow::bail!("invalid memory view state: ComponentViewState::Default");
+        }
+
+        let memory_key = self
+            .config
+            .active_keymap
+            .action_keys_string(Action::SetState(AppState::Memory));
+
+        // Check if the memory key is bound
+        if memory_key.is_empty() {
+            panic!("Memory key is not bound");
+        }
+
+        // Create a single block for all memory tables with keybinding in title
+        let title = if memory_key == "m" || memory_key == "M" {
+            Line::from(vec![
+                Span::styled(
+                    &memory_key,
+                    self.theme().title_style().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("emory Statistics"),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw("Memory Statistics ("),
+                Span::styled(&memory_key, self.theme().title_style()),
+                Span::raw(")"),
+            ])
+        };
+
+        let block = Block::bordered()
+            .title(title)
+            .title_alignment(Alignment::Center)
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        // Get the inner area of the block
+        let inner_area = block.inner(area);
+
+        // Split the inner area into three sections for different memory tables
+        // Use proportional heights based on content - memory needs more space than swap and page faults
+        let [memory_area, swap_area, pagefault_area] = Layout::vertical([
+            Constraint::Length(3), // Memory table (header + 1 row + padding)
+            Constraint::Length(3), // Swap table (header + 1 row + padding)
+            Constraint::Length(3), // Page faults table (header + 1 row + padding)
+        ])
+        .margin(0) // Remove margin between tables
+        .areas(inner_area);
+
+        // Get the columns for memory, swap, and pagefault stats
+        let memory_columns = get_memory_summary_columns();
+        let swap_columns = get_swap_summary_columns();
+        let pagefault_columns = get_pagefault_summary_columns();
+
+        // Render the block first
+        frame.render_widget(block, area);
+
+        // Render memory statistics table (without border)
+        self.render_memory_table(frame, memory_area, None, &memory_columns, false)?;
+
+        // Render swap statistics table (without border)
+        self.render_memory_table(frame, swap_area, None, &swap_columns, false)?;
+
+        // Render page fault statistics table (without border)
+        self.render_memory_table(frame, pagefault_area, None, &pagefault_columns, false)?;
+
+        Ok(())
+    }
+
+    /// Renders a memory table with the given columns
+    fn render_memory_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: Option<&str>,
+        columns: &[Column<(), MemStatSnapshot>],
+        with_border: bool,
+    ) -> Result<()> {
+        let mem_stats = &self.mem_info;
+
+        // Create header cells from column headers
+        let header_cells: Vec<Cell> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
+            .collect();
+
+        // Create row data
+        let row_cells: Vec<Cell> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| {
+                let value = (col.value_fn)((), mem_stats);
+                Cell::from(value).style(self.theme().text_color())
+            })
+            .collect();
+
+        // Get constraints for visible columns
+        let constraints: Vec<Constraint> = columns
+            .iter()
+            .filter(|col| col.visible)
+            .map(|col| col.constraint)
+            .collect();
+
+        // Create the table with rows and constraints
+        let mut table = Table::new(vec![Row::new(row_cells)], constraints)
+            .header(Row::new(header_cells))
+            .column_spacing(1);
+
+        // Add border and title if requested
+        if with_border {
+            if let Some(table_title) = title {
+                table = table.block(
+                    Block::bordered()
+                        .title(table_title)
+                        .title_alignment(Alignment::Center)
+                        .border_type(BorderType::Rounded)
+                        .style(self.theme().border_style()),
+                );
+            } else {
+                table = table.block(
+                    Block::bordered()
+                        .border_type(BorderType::Rounded)
+                        .style(self.theme().border_style()),
+                );
+            }
+        }
+
+        frame.render_widget(table, area);
+
+        Ok(())
     }
 
     /// Renders the help TUI.
@@ -1811,7 +1998,7 @@ impl<'a> App<'a> {
             )),
             "\n".into(),
             "\n".into(),
-            Line::from(Span::styled("Key Bindings:", Style::default())),
+            Line::from(Span::styled("General Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
                     "{}: (press to exit help)",
@@ -1823,11 +2010,42 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: change theme ({})",
+                    "{}: quit",
+                    self.config.active_keymap.action_keys_string(Action::Quit),
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!("{pause}: pause/unpause"),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll up",
+                    self.config.active_keymap.action_keys_string(Action::Up)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll down",
+                    self.config.active_keymap.action_keys_string(Action::Down)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll page up",
+                    self.config.active_keymap.action_keys_string(Action::PageUp)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll page down",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::ChangeTheme),
-                    serde_json::to_string_pretty(&theme)?
+                        .action_keys_string(Action::PageDown)
                 ),
                 Style::default(),
             )),
@@ -1837,46 +2055,6 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::RequestTrace),
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: decrease tick rate ({}ms)",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::DecTickRate),
-                    self.config.tick_rate_ms()
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: increase tick rate ({}ms)",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::IncTickRate),
-                    self.config.tick_rate_ms()
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: decrease bpf sample rate ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::DecBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: increase bpf sample rate ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::IncBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
                 ),
                 Style::default(),
             )),
@@ -1910,6 +2088,8 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("Event Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
                     "{}: show CPU perf event menu",
@@ -1955,37 +2135,21 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("View Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
-                    "{}: profiling event list scroll up",
-                    self.config.active_keymap.action_keys_string(Action::PageUp)
+                    "{}: filter processes/threads",
+                    self.config.active_keymap.action_keys_string(Action::Filter)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: profiling event list scroll down",
+                    "{}: display process view",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::PageDown)
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: quit",
-                    self.config.active_keymap.action_keys_string(Action::Quit),
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!("{pause}: pause/unpause"),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: filter processes",
-                    self.config.active_keymap.action_keys_string(Action::Filter)
+                        .action_keys_string(Action::SetState(AppState::Process))
                 ),
                 Style::default(),
             )),
@@ -2027,6 +2191,26 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: display next memory view ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Memory)),
+                    self.memory_view_state
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: change theme ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ChangeTheme),
+                    serde_json::to_string_pretty(&theme)?
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: change view state ({})",
                     self.config
                         .active_keymap
@@ -2035,6 +2219,49 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("Adjust Rates:", Style::default())),
+            Line::from(Span::styled(
+                format!(
+                    "{}: decrease tick rate ({}ms)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecTickRate),
+                    self.config.tick_rate_ms()
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: increase tick rate ({}ms)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncTickRate),
+                    self.config.tick_rate_ms()
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: decrease bpf sample rate ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate),
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: increase bpf sample rate ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate),
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ),
+                Style::default(),
+            )),
+            "\n".into(),
             Line::from(Span::styled(
                 format!(
                     "{}: Saves the current config ({})",
@@ -2045,7 +2272,7 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
-            Line::from(""),
+            "\n".into(),
             Line::from(Span::styled(
                 "For bug reporting and project updates, visit:",
                 Style::default(),
@@ -2276,7 +2503,12 @@ impl<'a> App<'a> {
     }
 
     /// Render the process view.
-    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_process_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
         self.update_events_list_size(data_area);
@@ -2308,15 +2540,20 @@ impl<'a> App<'a> {
             )
             .title_top(
                 Line::from(format!(
-                    "sample rate {}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    "sample rate {}{}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    if render_tick_rate {
+                        format!(" --- tick rate {}", self.config.tick_rate_ms())
+                    } else {
+                        "".to_string()
+                    }
                 ))
                 .style(self.theme().text_important_color())
                 .right_aligned(),
             );
 
         // We want to hold the lock for as short as possible
-        let (mut filtered_processes, selected): (Vec<(i32, &ProcData)>, usize) = {
+        let (mut filtered_processes, selected): (Vec<_>, usize) = {
             let filtered_state = self.filtered_state.lock().unwrap();
             let processes = filtered_state
                 .list
@@ -2375,8 +2612,15 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        self.update_events_list_size(area);
+    fn render_thread_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
+        let [scroll_area, data_area] =
+            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
+        self.update_events_list_size(data_area);
 
         let error_str = format!(
             "Process has been killed. Press escape or {} to return to process view.",
@@ -2406,44 +2650,239 @@ impl<'a> App<'a> {
                 .centered(),
             )
             .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .title_top(
                 Line::from(format!(
-                    "sample rate {}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    "sample rate {}{}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    if render_tick_rate {
+                        format!(" --- tick rate {}", self.config.tick_rate_ms())
+                    } else {
+                        "".to_string()
+                    }
                 ))
                 .style(self.theme().text_important_color())
                 .right_aligned(),
             );
 
-        let mut threads = proc_data.threads.iter().collect::<Vec<_>>();
+        let (mut filtered_threads, selected): (Vec<_>, usize) = {
+            let filtered_state = self.filtered_state.lock().unwrap();
+            let threads = filtered_state
+                .list
+                .iter()
+                .filter_map(|item| {
+                    item.as_int()
+                        .and_then(|tid| proc_data.threads.get(&tid).map(|data| (tid, data)))
+                })
+                .collect();
+            (threads, filtered_state.selected)
+        };
 
-        threads.sort_unstable_by(|a, b| {
+        filtered_threads.sort_unstable_by(|a, b| {
             b.1.cpu_util_perc
                 .partial_cmp(&a.1.cpu_util_perc)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let rows = threads.into_iter().map(|(tid, data)| {
+        let rows = filtered_threads.iter().enumerate().map(|(i, (tid, data))| {
             visible_columns
                 .iter()
                 .map(|col| Cell::from((col.value_fn)(*tid, data)))
                 .collect::<Row>()
                 .height(1)
-                .style(self.theme().text_color())
+                .style(if i == selected {
+                    self.theme().text_important_color()
+                } else {
+                    self.theme().text_color()
+                })
         });
 
         let table = Table::new(rows, constraints).header(header).block(block);
 
-        frame.render_widget(table, area);
+        frame.render_stateful_widget(
+            table,
+            data_area,
+            &mut TableState::new().with_offset(selected),
+        );
+
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            scroll_area,
+            &mut ScrollbarState::new(filtered_threads.len()).position(selected),
+        );
 
         Ok(())
     }
 
-    fn render_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         if self.in_thread_view {
-            self.render_thread_table(frame, area)
+            self.render_thread_table(frame, area, render_tick_rate)
         } else {
-            self.render_process_table(frame, area)
+            self.render_process_table(frame, area, render_tick_rate)
         }
+    }
+
+    /// Renders the memory application state.
+    fn render_memory(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+
+        let mem_stats = &self.mem_info;
+
+        // Get the columns and metrics for the detailed memory view
+        let memory_columns = get_memory_detail_columns();
+        let memory_metrics = get_memory_detail_metrics();
+
+        // Create header cells from column headers
+        let header_cells: Vec<Cell> = memory_columns
+            .iter()
+            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
+            .collect();
+
+        // Create constraints from column constraints
+        let constraints: Vec<Constraint> =
+            memory_columns.iter().map(|col| col.constraint).collect();
+
+        // Create rows for memory metrics
+        let rows = memory_metrics
+            .iter()
+            .map(|metric| {
+                let cells = memory_columns
+                    .iter()
+                    .map(|col| {
+                        Cell::from((col.value_fn)(metric, mem_stats))
+                            .style(self.theme().text_important_color())
+                    })
+                    .collect::<Vec<Cell>>();
+                Row::new(cells)
+            })
+            .collect::<Vec<Row>>();
+
+        let block = Block::bordered()
+            .title_top(
+                Line::from("Memory Statistics")
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                    .style(self.theme().text_important_color())
+                    .right_aligned(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let table = Table::new(rows, constraints)
+            .header(Row::new(header_cells).style(self.theme().title_style()))
+            .block(block);
+
+        frame.render_widget(table, left);
+
+        // Create memory usage gauges and additional stats for the right side
+        let [right_top, right_middle, right_bottom] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .areas(right);
+
+        // Split the top section into two columns for memory and swap gauges
+        let [gauge_left, gauge_right] =
+            Layout::horizontal([Constraint::Fill(1); 2]).areas(right_top);
+
+        // Memory usage gauge
+        let mem_used_percent =
+            100.0 - (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
+        let mem_used_kb = mem_stats.total_kb - mem_stats.available_kb;
+        let mem_gauge = LineGauge::default()
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from("Memory Usage")
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .filled_style(self.theme().text_important_color())
+            .ratio(mem_used_percent / 100.0)
+            .label(format!(
+                "{}/{}",
+                format_bytes(mem_used_kb),
+                format_bytes(mem_stats.total_kb),
+            ));
+
+        frame.render_widget(mem_gauge, gauge_left);
+
+        // Swap usage gauge
+        let swap_used_percent = if mem_stats.swap_total_kb > 0 {
+            100.0 - (mem_stats.swap_free_kb as f64 / mem_stats.swap_total_kb as f64) * 100.0
+        } else {
+            0.0
+        };
+        let swap_used_kb = mem_stats.swap_total_kb - mem_stats.swap_free_kb;
+        let swap_gauge = LineGauge::default()
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from("Swap Usage")
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .filled_style(self.theme().text_important_color())
+            .ratio(swap_used_percent / 100.0)
+            .label(format!(
+                "{}/{}",
+                format_bytes(swap_used_kb),
+                format_bytes(mem_stats.swap_total_kb),
+            ));
+
+        frame.render_widget(swap_gauge, gauge_right);
+
+        // Memory rates (pagefaults, swap I/O)
+        let memory_rates_columns = get_memory_rates_columns();
+        self.render_memory_table(
+            frame,
+            right_middle,
+            Some("Memory Activity Rates"),
+            &memory_rates_columns,
+            true,
+        )?;
+
+        // Slab information section
+        let slab_columns = get_slab_columns();
+        self.render_memory_table(
+            frame,
+            right_bottom,
+            Some("Slab Information"),
+            &slab_columns,
+            true,
+        )?;
+
+        Ok(())
     }
 
     /// Renders the application to the frame.
@@ -2451,7 +2890,9 @@ impl<'a> App<'a> {
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
+            AppState::Process => self.render_table(frame, frame.area(), true),
             AppState::MangoApp => self.render_mangoapp(frame),
+            AppState::Memory => self.render_memory(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
             AppState::Scheduler => {
@@ -2484,7 +2925,8 @@ impl<'a> App<'a> {
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
-            || self.state == AppState::Node)
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
             && filtered_state.scroll < filtered_state.count - 1
         {
             filtered_state.scroll += 1;
@@ -2499,7 +2941,8 @@ impl<'a> App<'a> {
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
-            || self.state == AppState::Node)
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
             && filtered_state.scroll > 0
         {
             filtered_state.scroll -= 1;
@@ -2514,7 +2957,8 @@ impl<'a> App<'a> {
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
-            || self.state == AppState::Node)
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
             && filtered_state.scroll <= filtered_state.count - self.events_list_size
         {
             filtered_state.scroll += self.events_list_size - 1;
@@ -2530,6 +2974,7 @@ impl<'a> App<'a> {
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
+            || self.state == AppState::Process
         {
             if filtered_state.scroll > self.events_list_size {
                 filtered_state.scroll -= self.events_list_size - 1;
@@ -2597,11 +3042,11 @@ impl<'a> App<'a> {
         } else if self.state == AppState::Default
             || self.state == AppState::Node
             || self.state == AppState::Llc
+            || self.state == AppState::Process
         {
             // Reset process view
             self.filtering = false;
             self.event_input_buffer.clear();
-            self.filter_events();
 
             if let Some(proc_data) = self.selected_proc_data() {
                 proc_data.init_threads()?;
@@ -2609,6 +3054,8 @@ impl<'a> App<'a> {
                 // Kick off thread view
                 self.in_thread_view = true;
             }
+
+            self.filter_events();
         }
 
         Ok(())
@@ -2621,18 +3068,19 @@ impl<'a> App<'a> {
                 self.filter_events();
                 self.handle_action(&Action::SetState(self.prev_state.clone()))?;
             }
-            AppState::Default | AppState::Llc | AppState::Node => {
-                if self.filtering {
-                    self.filtering = false;
-                    self.event_input_buffer.clear();
-                    self.filter_events();
-                } else if self.in_thread_view {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
+                if !self.filtering && !self.in_thread_view {
+                    self.handle_action(&Action::Quit)?;
+                } else if !self.filtering {
                     if let Some(proc_data) = self.selected_proc_data() {
                         proc_data.clear_threads();
                     }
                     self.in_thread_view = false;
+                    self.filter_events();
                 } else {
-                    self.handle_action(&Action::Quit)?;
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_events();
                 }
             }
             _ => self.handle_action(&Action::Quit)?,
@@ -3018,8 +3466,8 @@ impl<'a> App<'a> {
             .get_mut(&(*cpu as usize))
             .expect("CpuData should have been present");
 
-        let next_dsq_id = Self::classify_dsq(*next_dsq_id);
-        let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
+        let next_dsq_id = App::classify_dsq(*next_dsq_id);
+        let prev_dsq_id = App::classify_dsq(*prev_dsq_id);
 
         if next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
             let next_dsq_data = self
@@ -3139,7 +3587,8 @@ impl<'a> App<'a> {
         }
     }
 
-    pub fn filter_events(&mut self) {
+    /// Updates the filtered events list based on the current input buffer
+    fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
             AppState::PerfEvent => {
                 search::fuzzy_search(&self.perf_events, &self.event_input_buffer)
@@ -3153,20 +3602,48 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node => self
-                .proc_data
-                .iter()
-                .filter(|(_, proc_data)| {
-                    search::contains_spread(&proc_data.process_name, &self.event_input_buffer)
-                        .is_some()
-                        || search::contains_spread(
-                            &proc_data.tgid.to_string(),
-                            &self.event_input_buffer,
-                        )
-                        .is_some()
-                })
-                .map(|(tgid, _)| FilterItem::Int(*tgid))
-                .collect(),
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
+                if self.in_thread_view {
+                    if let Some(proc_data) = self.selected_proc_data_immut() {
+                        proc_data
+                            .threads
+                            .iter()
+                            .filter(|(_, thread_data)| {
+                                search::contains_spread(
+                                    &thread_data.thread_name,
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                                    || search::contains_spread(
+                                        &thread_data.tid.to_string(),
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                            })
+                            .map(|(tid, _)| FilterItem::Int(*tid))
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    self.proc_data
+                        .iter()
+                        .filter(|(_, proc_data)| {
+                            search::contains_spread(
+                                &proc_data.process_name,
+                                &self.event_input_buffer,
+                            )
+                            .is_some()
+                                || search::contains_spread(
+                                    &proc_data.tgid.to_string(),
+                                    &self.event_input_buffer,
+                                )
+                                .is_some()
+                        })
+                        .map(|(tgid, _)| FilterItem::Int(*tgid))
+                        .collect()
+                }
+            }
             _ => vec![],
         };
 
@@ -3194,6 +3671,7 @@ impl<'a> App<'a> {
 
         match table.as_str() {
             "Process" => self.process_columns.update_visibility(col, *visible),
+            "Thread" => self.thread_columns.update_visibility(col, *visible),
             _ => bail!("Invalid table name"),
         };
 
@@ -3219,11 +3697,7 @@ impl<'a> App<'a> {
                 self.on_enter()?;
             }
             Action::SetState(state) => {
-                if *state == self.state {
-                    self.set_state(self.prev_state.clone());
-                } else {
-                    self.set_state(state.clone());
-                }
+                self.set_state(state.clone());
             }
             Action::NextEvent => {
                 if self.next_event().is_err() {
@@ -3356,7 +3830,7 @@ impl<'a> App<'a> {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
-                AppState::Default | AppState::Llc | AppState::Node => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                     if self.in_thread_view {
                         self.in_thread_view = false;
                     } else {
@@ -3368,7 +3842,7 @@ impl<'a> App<'a> {
                 }
             },
             Action::Filter => match self.state {
-                AppState::Default | AppState::Llc | AppState::Node => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                     self.filtering = true;
                     self.filter_events();
                 }

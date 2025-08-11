@@ -41,11 +41,6 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - name: Install Veristat
-        run: |
-          VERISTAT_PATH=$(nix build --no-link --print-out-paths ./.github/include#veristat)
-          nix-env -i "$VERISTAT_PATH"
-
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
       - uses: Swatinem/rust-cache@v2
@@ -105,8 +100,6 @@ jobs:
         with:
           retries: 3
           command: meson compile -C build stress_tests_${{ matrix.scheduler['name'] }}
-      - run: meson compile -C build veristat_${{ matrix.scheduler['name'] }}
-        if: always()
       - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
         if: always()
       - run: mkdir -p ./log_save/
@@ -123,7 +116,7 @@ jobs:
             KERNEL_SUFFIX="_${KERNEL_CLEAN}"
           fi
           echo "ARTIFACT_NAME=${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}${KERNEL_SUFFIX}_logs_${{ github.run_id }}_${{ github.run_attempt }}" >> $GITHUB_ENV
-      - name: upload debug logs, bpftrace, veristat, dmesg, etc.
+      - name: upload debug logs, bpftrace, dmesg, etc.
         if: always()
         uses: actions/upload-artifact@v4
         with:

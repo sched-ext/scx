@@ -39,16 +39,18 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-
       - name: Build
         run: nix run ./.github/include#ci -- build
 
       - name: Test
         run: nix run ./.github/include#ci -- test
 
+      - name: Veristat
+        run: nix run ./.github/include#ci -- veristat
+
   integration-test:
     uses: ./.github/workflows/integration-tests.yml
-    needs: build-kernels
+    needs: build-and-test
     secrets: inherit
 
   required-checks:
