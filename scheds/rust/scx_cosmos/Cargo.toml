@@ -11,16 +11,16 @@ anyhow = "1.0.65"
 ctrlc = { version = "3.1", features = ["termination"] }
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8.4"
-libbpf-rs = "=0.26.0-beta.0"
+libbpf-rs = "=0.26.0-beta.1"
 log = "0.4.17"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.14" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.14" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.17", features = ["autopower"] }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.18", features = ["autopower"] }
 serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.17" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.18" }
 
 [features]
 enable_backtrace = []
