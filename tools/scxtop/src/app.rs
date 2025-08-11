@@ -10,8 +10,9 @@ use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
     get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
-    get_memory_summary_columns, get_pagefault_summary_columns, get_process_columns,
-    get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+    get_memory_summary_columns, get_pagefault_summary_columns, get_perf_top_columns,
+    get_process_columns, get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+    Columns,
 };
 use crate::config::get_config_path;
 use crate::config::Config;
@@ -20,7 +21,6 @@ use crate::search;
 use crate::util::{format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
 use crate::AppState;
 use crate::AppTheme;
-use crate::Columns;
 use crate::ComponentViewState;
 use crate::CpuData;
 use crate::CpuStatTracker;
@@ -48,6 +48,7 @@ use crate::{
     SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
     UpdateColVisibilityAction, WaitAction,
 };
+use scx_utils::perf;
 
 use anyhow::{bail, Result};
 use glob::glob;
@@ -57,14 +58,15 @@ use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
-    layout::{Alignment, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Alignment, Layout, Margin, Rect},
+    prelude::{Direction, Stylize},
+    style::{Color, Modifier, Style},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, LineGauge,
         Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Sparkline, Table, TableState,
+        Sparkline, Table, TableState, Wrap,
     },
     Frame,
 };
@@ -111,9 +113,11 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
+    layered_enabled: bool,
 
     process_columns: Columns<i32, ProcData>,
     thread_columns: Columns<i32, ThreadData>,
+    perf_top_columns: Columns<String, crate::symbol_data::SymbolSample>,
     selected_process: Option<i32>,
     in_thread_view: bool,
 
@@ -154,6 +158,15 @@ pub struct App<'a> {
     last_mangoapp_action: Option<MangoAppAction>,
     frames_since_update: u64,
     max_fps: u16,
+
+    // perf top related
+    symbol_data: crate::symbol_data::SymbolData,
+    perf_sample_rate: u32,
+    perf_links: Vec<Link>,
+    selected_symbol_index: usize,
+    current_sampling_event: Option<ProfilingEvent>,
+    perf_top_table_state: TableState,
+    perf_top_filtered_symbols: Vec<(String, crate::symbol_data::SymbolSample)>,
 }
 
 impl<'a> App<'a> {
@@ -164,6 +177,7 @@ impl<'a> App<'a> {
         scheduler: String,
         max_cpu_events: usize,
         process_id: i32,
+        layered_enabled: bool,
         action_tx: UnboundedSender<Action>,
         skel: BpfSkel<'a>,
     ) -> Result<Self> {
@@ -256,9 +270,6 @@ impl<'a> App<'a> {
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
-        let process_columns = Columns::new(get_process_columns());
-        let thread_columns = Columns::new(get_thread_columns());
-
         // There isn't a 'is_loaded' method on a prog in libbpf-rs so do the next best thing and
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
@@ -287,8 +298,10 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            process_columns,
-            thread_columns,
+            layered_enabled,
+            process_columns: Columns::new(get_process_columns()),
+            thread_columns: Columns::new(get_thread_columns()),
+            perf_top_columns: Columns::new(get_perf_top_columns(layered_enabled)),
             selected_process: None,
             in_thread_view: false,
             cpu_data,
@@ -317,6 +330,13 @@ impl<'a> App<'a> {
             last_mangoapp_action: None,
             frames_since_update: 0,
             max_fps: 1,
+            perf_sample_rate: 1_000_000, // Default perf sample rate (1 million cycles)
+            symbol_data: crate::symbol_data::SymbolData::new(),
+            perf_links: Vec::new(),
+            selected_symbol_index: 0,
+            current_sampling_event: None,
+            perf_top_table_state: TableState::default(),
+            perf_top_filtered_symbols: Vec::new(),
         };
 
         // Set the initial filter state
@@ -360,6 +380,22 @@ impl<'a> App<'a> {
         }
         self.state = state;
 
+        // Handle perf sampling attachment/detachment for PerfTop view
+        match (self.prev_state.clone(), self.state.clone()) {
+            (prev, AppState::PerfTop) if prev != AppState::PerfTop => {
+                // Entering PerfTop view - attach perf sampling and reset selection
+                self.selected_symbol_index = 0;
+                if let Err(e) = self.attach_perf_sampling() {
+                    eprintln!("Failed to attach perf sampling: {e}");
+                }
+            }
+            (AppState::PerfTop, new) if new != AppState::PerfTop => {
+                // Leaving PerfTop view - detach perf sampling
+                self.detach_perf_sampling();
+            }
+            _ => {}
+        }
+
         if self.state == AppState::PerfEvent
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
@@ -369,6 +405,10 @@ impl<'a> App<'a> {
         {
             self.filtered_state.lock().unwrap().reset();
             self.filter_events();
+        }
+        if self.state == AppState::PerfTop {
+            self.filtered_state.lock().unwrap().reset();
+            self.filter_symbols();
         }
 
         if self.prev_state == AppState::MangoApp {
@@ -394,6 +434,11 @@ impl<'a> App<'a> {
     /// Returns whether we are currently filtering or not
     pub fn filtering(&self) -> bool {
         self.filtering
+    }
+
+    /// Returns whether layered mode is enabled
+    pub fn layered_enabled(&self) -> bool {
+        self.layered_enabled
     }
 
     fn selected_proc_data(&mut self) -> Option<&mut ProcData> {
@@ -447,6 +492,14 @@ impl<'a> App<'a> {
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = prof_event.clone();
+
+        // Clear perf top data when switching events
+        if self.state == AppState::PerfTop {
+            self.symbol_data.clear();
+            self.selected_symbol_index = 0;
+            self.filter_symbols(); // Update filtered symbols after clearing
+        }
+
         self.activate_prof_event(prof_event)
     }
 
@@ -461,6 +514,14 @@ impl<'a> App<'a> {
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = prof_event.clone();
+
+        // Clear perf top data when switching events
+        if self.state == AppState::PerfTop {
+            self.symbol_data.clear();
+            self.selected_symbol_index = 0;
+            self.filter_symbols(); // Update filtered symbols after clearing
+        }
+
         self.activate_prof_event(prof_event)
     }
 
@@ -2191,6 +2252,15 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: display perf top view (symbolized sampling)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::PerfTop))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: display next memory view ({})",
                     self.config
                         .active_keymap
@@ -2741,6 +2811,463 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Renders the perf top view with symbolized samples.
+    fn render_perf_top(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+
+        // Split the area into left (table) and right (details) sections
+        let [left_area, right_area] = Layout::horizontal([
+            Constraint::Percentage(50), // Symbol table
+            Constraint::Percentage(50), // Symbol details
+        ])
+        .areas(area);
+        // Get the top symbols and convert to owned data
+        let max_symbols = (left_area.height as usize).saturating_sub(4); // Account for borders and header
+        let top_symbols_borrowed = self.symbol_data.get_top_symbols(max_symbols);
+
+        // Convert to owned data to avoid borrowing issues
+        let top_symbols: Vec<crate::symbol_data::SymbolSample> =
+            top_symbols_borrowed.iter().map(|s| (*s).clone()).collect();
+
+        // Ensure selected index is within bounds
+        if self.selected_symbol_index >= top_symbols.len() && !top_symbols.is_empty() {
+            self.selected_symbol_index = top_symbols.len() - 1;
+        }
+
+        // Render left side - symbol table
+        self.render_symbol_table(frame, left_area)?;
+
+        // Render right side - symbol details
+        self.render_symbol_details(frame, right_area, &top_symbols)?;
+
+        Ok(())
+    }
+
+    /// Renders the symbol table on the left side
+    fn render_symbol_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let total_samples = self.symbol_data.total_samples();
+        let block = Block::bordered()
+            .title_top(
+                Line::from({
+                    let filtered_count = self.perf_top_filtered_symbols.len();
+                    if self.filtering && !self.event_input_buffer.is_empty() {
+                        format!(
+                            "Perf Top - {} of {} symbols ({} samples)",
+                            filtered_count,
+                            self.symbol_data.get_top_symbols(1000).len(),
+                            total_samples
+                        )
+                    } else {
+                        format!("Perf Top - {total_samples} samples")
+                    }
+                })
+                .style(self.theme().title_style())
+                .centered(),
+            )
+            .title_top(
+                Line::from({
+                    format!(
+                        "sample rate {} --- {}ms",
+                        self.perf_sample_rate,
+                        self.config.tick_rate_ms()
+                    )
+                })
+                .style(self.theme().text_important_color())
+                .right_aligned(),
+            )
+            .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .title_bottom(
+                Line::from(vec![
+                    Span::styled(
+                        "[K] ",
+                        Style::default().fg(self.theme().kernel_symbol_color()),
+                    ),
+                    Span::styled("Kernel  ", Style::default().fg(self.theme().text_color())),
+                    Span::styled(
+                        "[U] ",
+                        Style::default().fg(self.theme().userspace_symbol_color()),
+                    ),
+                    Span::styled("Userspace", Style::default().fg(self.theme().text_color())),
+                ])
+                .left_aligned(),
+            )
+            .title_bottom(
+                Line::from({
+                    let clear_key = self
+                        .config
+                        .active_keymap
+                        .action_keys_string(Action::ClearEvent);
+                    let inc_key = self
+                        .config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate);
+                    let dec_key = self
+                        .config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate);
+                    let up_key = self.config.active_keymap.action_keys_string(Action::Up);
+                    let down_key = self.config.active_keymap.action_keys_string(Action::Down);
+
+                    format!(
+                        "{clear_key} clear • {dec_key}/{inc_key} adjust rate • {up_key}/{down_key} navigate"
+                    )
+                })
+                .style(self.theme().text_color())
+                .centered(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        // Extract colors first to avoid borrow conflicts
+        let kernel_color = self.theme().kernel_symbol_color();
+        let userspace_color = self.theme().userspace_symbol_color();
+        let text_important_color = self.theme().text_important_color();
+        let text_color = self.theme().text_color();
+
+        // Create table header manually to avoid borrowing conflicts
+        let visible_columns: Vec<_> = self.perf_top_columns.visible_columns().collect();
+
+        let header = visible_columns
+            .iter()
+            .map(|col| Cell::from(col.header))
+            .collect::<Row>()
+            .height(1)
+            .style(text_color)
+            .bold()
+            .underlined();
+
+        let constraints = visible_columns
+            .iter()
+            .map(|col| col.constraint)
+            .collect::<Vec<_>>();
+
+        // Use filtered symbols for display - clone to avoid borrowing conflicts
+        let symbol_data = self.perf_top_filtered_symbols.clone();
+
+        let rows: Vec<Row> = symbol_data
+            .iter()
+            .map(|(symbol_name, sample)| {
+                let style = if sample.is_kernel {
+                    Style::default().fg(kernel_color)
+                } else {
+                    Style::default().fg(userspace_color)
+                };
+
+                visible_columns
+                    .iter()
+                    .map(|col| {
+                        let cell_value = (col.value_fn)(symbol_name.clone(), sample);
+                        Cell::from(cell_value)
+                    })
+                    .collect::<Row>()
+                    .height(1)
+                    .style(style)
+            })
+            .collect();
+
+        let table = Table::new(rows, constraints)
+            .header(header.style(text_important_color).bottom_margin(1))
+            .block(block)
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        // Render table with proper scrolling state
+        frame.render_stateful_widget(table, area, &mut self.perf_top_table_state);
+
+        // Render scrollbar if there are more items than can fit on screen
+        let visible_rows = area.height.saturating_sub(4) as usize; // Account for borders and header
+        if symbol_data.len() > visible_rows {
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let mut scrollbar_state =
+                ScrollbarState::new(symbol_data.len()).position(self.selected_symbol_index);
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
+        Ok(())
+    }
+
+    /// Renders the symbol details on the right side
+    fn render_symbol_details(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        top_symbols: &[crate::symbol_data::SymbolSample],
+    ) -> Result<()> {
+        // Get the current event name
+        let event_name = if let Some(ref event) = self.current_sampling_event {
+            event.event_name()
+        } else {
+            self.active_event.event_name()
+        };
+
+        let block = Block::bordered()
+            .title_top(
+                Line::from(format!("Symbol Details - Event: {event_name}"))
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        if top_symbols.is_empty() || self.selected_symbol_index >= top_symbols.len() {
+            let paragraph = Paragraph::new("No symbol selected")
+                .alignment(Alignment::Center)
+                .block(block);
+            frame.render_widget(paragraph, area);
+            return Ok(());
+        }
+
+        let selected_symbol = &top_symbols[self.selected_symbol_index];
+        let symbol_info = &selected_symbol.symbol_info;
+
+        let mut details = vec![
+            Line::from(vec![
+                Span::styled("Symbol: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&symbol_info.symbol_name),
+            ]),
+            Line::from(vec![
+                Span::styled("Module: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&symbol_info.module_name),
+            ]),
+            Line::from(vec![
+                Span::styled("Address: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("0x{:x}", symbol_info.address)),
+            ]),
+            Line::from(vec![
+                Span::styled("Samples: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if self.localize {
+                    selected_symbol.count.to_formatted_string(&self.locale)
+                } else {
+                    selected_symbol.count.to_string()
+                }),
+            ]),
+            Line::from(vec![
+                Span::styled("Percentage: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:.2}%", selected_symbol.percentage)),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Process Details:",
+                Style::default()
+                    .fg(self.theme().text_important_color())
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled("PID: ", Style::default().fg(Color::Yellow)),
+                Span::raw(selected_symbol.pid.to_string()),
+            ]),
+        ];
+
+        // Add detailed process information if available
+        if let Some(proc_data) = self.proc_data.get(&(selected_symbol.pid as i32)) {
+            // First row: Process name, TGID, State
+            let first_row = vec![
+                Span::styled("Name: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&proc_data.process_name),
+                Span::raw("  "),
+                Span::styled("TGID: ", Style::default().fg(Color::Yellow)),
+                Span::raw(proc_data.tgid.to_string()),
+                Span::raw("  "),
+                Span::styled("State: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:?}", proc_data.state)),
+            ];
+            details.push(Line::from(first_row));
+
+            // Second row: CPU Util, Threads, CPU
+            let second_row = vec![
+                Span::styled("CPU Util: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:.2}%", proc_data.cpu_util_perc)),
+                Span::raw("  "),
+                Span::styled("Threads: ", Style::default().fg(Color::Yellow)),
+                Span::raw(proc_data.num_threads.to_string()),
+                Span::raw("  "),
+                Span::styled("CPU: ", Style::default().fg(Color::Yellow)),
+                Span::raw(selected_symbol.cpu_id.to_string()),
+            ];
+            details.push(Line::from(second_row));
+
+            // Third row: Scheduler info (only if available)
+            let mut third_row = Vec::new();
+            let mut has_third_row_content = false;
+
+            if let Some(layer_id) = proc_data.layer_id {
+                if self.layered_enabled && layer_id >= 0 {
+                    third_row.extend(vec![
+                        Span::styled("Layer: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(layer_id.to_string()),
+                        Span::raw("  "),
+                    ]);
+                    has_third_row_content = true;
+                }
+            }
+
+            if let Some(dsq) = proc_data.dsq {
+                third_row.extend(vec![
+                    Span::styled("DSQ: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(format!("0x{:x}", App::classify_dsq(dsq))),
+                ]);
+                has_third_row_content = true;
+            }
+
+            if has_third_row_content {
+                details.push(Line::from(third_row));
+            }
+
+            // Command line (on its own line due to potential length)
+            if !proc_data.cmdline.is_empty() {
+                let cmdline = proc_data.cmdline.join(" ");
+                let truncated_cmdline = if cmdline.len() > 60 {
+                    format!("{}...", &cmdline[..57])
+                } else {
+                    cmdline
+                };
+                details.push(Line::from(vec![
+                    Span::styled("Cmd: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(truncated_cmdline),
+                ]));
+            }
+        } else {
+            // Process data not available, show basic info with CPU
+            details.push(Line::from(vec![
+                Span::styled("Process Info: ", Style::default().fg(Color::Red)),
+                Span::raw("Not available"),
+                Span::raw("  "),
+                Span::styled("CPU: ", Style::default().fg(Color::Yellow)),
+                Span::raw(selected_symbol.cpu_id.to_string()),
+            ]));
+        }
+
+        if let Some(file_name) = &symbol_info.file_name {
+            details.push(Line::from(vec![
+                Span::styled("File: ", Style::default().fg(Color::Yellow)),
+                Span::raw(file_name),
+            ]));
+        }
+
+        if let Some(line_number) = symbol_info.line_number {
+            details.push(Line::from(vec![
+                Span::styled("Line: ", Style::default().fg(Color::Yellow)),
+                Span::raw(line_number.to_string()),
+            ]));
+        }
+
+        // Add the last stack trace if available - symbolize on demand
+        if !selected_symbol.stack_traces.is_empty() {
+            let raw_stack_trace = selected_symbol.stack_traces.last().unwrap();
+            let symbolized_trace = self.symbol_data.symbolize_stack_trace(raw_stack_trace);
+
+            details.push(Line::from(""));
+            details.push(Line::from(vec![Span::styled(
+                format!("Latest Stack Trace ({} samples):", symbolized_trace.count),
+                Style::default()
+                    .fg(self.theme().text_important_color())
+                    .add_modifier(Modifier::BOLD),
+            )]));
+
+            // Show kernel stack if present
+            if !symbolized_trace.kernel_stack.is_empty() {
+                details.push(Line::from(""));
+                details.push(Line::from(vec![Span::styled(
+                    "Kernel Stack:",
+                    Style::default()
+                        .fg(self.theme().kernel_symbol_color())
+                        .add_modifier(Modifier::BOLD),
+                )]));
+
+                for (frame_idx, symbol) in symbolized_trace.kernel_stack.iter().enumerate() {
+                    let frame_info =
+                        if let (Some(file), Some(line)) = (&symbol.file_name, symbol.line_number) {
+                            format!(
+                                "  #{}: {} ({}:{})",
+                                frame_idx, symbol.symbol_name, file, line
+                            )
+                        } else {
+                            format!(
+                                "  #{}: {} [0x{:x}]",
+                                frame_idx, symbol.symbol_name, symbol.address
+                            )
+                        };
+                    details.push(Line::from(vec![Span::styled(
+                        frame_info,
+                        Style::default().fg(self.theme().kernel_symbol_color()),
+                    )]));
+                }
+            }
+
+            // Show user stack if present
+            if !symbolized_trace.user_stack.is_empty() {
+                details.push(Line::from(""));
+                details.push(Line::from(vec![Span::styled(
+                    "User Stack:",
+                    Style::default()
+                        .fg(self.theme().userspace_symbol_color())
+                        .add_modifier(Modifier::BOLD),
+                )]));
+
+                for (frame_idx, symbol) in symbolized_trace.user_stack.iter().enumerate() {
+                    let frame_info =
+                        if let (Some(file), Some(line)) = (&symbol.file_name, symbol.line_number) {
+                            format!(
+                                "  #{}: {} ({}:{})",
+                                frame_idx, symbol.symbol_name, file, line
+                            )
+                        } else {
+                            format!(
+                                "  #{}: {} [0x{:x}]",
+                                frame_idx, symbol.symbol_name, symbol.address
+                            )
+                        };
+                    details.push(Line::from(vec![Span::styled(
+                        frame_info,
+                        Style::default().fg(self.theme().userspace_symbol_color()),
+                    )]));
+                }
+            }
+        }
+
+        let paragraph = Paragraph::new(details)
+            .block(block)
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
     /// Renders the memory application state.
     fn render_memory(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
@@ -2895,6 +3422,7 @@ impl<'a> App<'a> {
             AppState::Memory => self.render_memory(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
+            AppState::PerfTop => self.render_perf_top(frame),
             AppState::Scheduler => {
                 let [left, right] =
                     Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
@@ -2920,142 +3448,195 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node
-            || self.state == AppState::Process)
-            && filtered_state.scroll < filtered_state.count - 1
-        {
-            filtered_state.scroll += 1;
-            filtered_state.selected += 1;
+        if self.state == AppState::PerfTop {
+            // Handle PerfTop navigation separately
+            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+            if self.selected_symbol_index < max_index {
+                self.selected_symbol_index += 1;
+                self.perf_top_table_state
+                    .select(Some(self.selected_symbol_index));
+            }
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll < filtered_state.count - 1
+            {
+                filtered_state.scroll += 1;
+                filtered_state.selected += 1;
+            }
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node
-            || self.state == AppState::Process)
-            && filtered_state.scroll > 0
-        {
-            filtered_state.scroll -= 1;
-            filtered_state.selected -= 1;
+        if self.state == AppState::PerfTop {
+            // Handle PerfTop navigation separately
+            if self.selected_symbol_index > 0 {
+                self.selected_symbol_index -= 1;
+                self.perf_top_table_state
+                    .select(Some(self.selected_symbol_index));
+            }
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.selected > 0
+            {
+                filtered_state.scroll -= 1;
+                filtered_state.selected -= 1;
+            }
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node
-            || self.state == AppState::Process)
-            && filtered_state.scroll <= filtered_state.count - self.events_list_size
-        {
-            filtered_state.scroll += self.events_list_size - 1;
-            filtered_state.selected += (self.events_list_size - 1) as usize;
+        if self.state == AppState::PerfTop {
+            // Handle page down for PerfTop view
+            let page_size = 10;
+            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+
+            if self.selected_symbol_index + page_size <= max_index {
+                self.selected_symbol_index += page_size;
+            } else {
+                self.selected_symbol_index = max_index;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll <= filtered_state.count - self.events_list_size
+            {
+                filtered_state.scroll += self.events_list_size - 1;
+                filtered_state.selected += (self.events_list_size - 1) as usize;
+            }
         }
     }
-
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node
-            || self.state == AppState::Process
-        {
-            if filtered_state.scroll > self.events_list_size {
-                filtered_state.scroll -= self.events_list_size - 1;
-                filtered_state.selected -= (self.events_list_size - 1) as usize;
+        if self.state == AppState::PerfTop {
+            // Handle page up for PerfTop view
+            let page_size = 10;
+
+            if self.selected_symbol_index >= page_size {
+                self.selected_symbol_index -= page_size;
             } else {
-                filtered_state.scroll = 0;
-                filtered_state.selected = 0;
+                self.selected_symbol_index = 0;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll > 0
+            {
+                if filtered_state.scroll >= (self.events_list_size - 1) {
+                    filtered_state.scroll -= self.events_list_size - 1;
+                    filtered_state.selected -= (self.events_list_size - 1) as usize;
+                } else {
+                    filtered_state.selected -= filtered_state.scroll as usize;
+                    filtered_state.scroll = 0;
+                }
             }
         }
     }
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) -> Result<()> {
-        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
-            self.event_input_buffer.clear();
-            let selected = {
-                let mut filtered_state = self.filtered_state.lock().unwrap();
-                if filtered_state.list.is_empty() {
-                    return Ok(());
-                }
-                let selected = filtered_state.list[filtered_state.selected].clone();
-                filtered_state.reset();
-                selected.as_string()
-            };
+        match self.state {
+            AppState::PerfEvent | AppState::KprobeEvent => {
+                self.event_input_buffer.clear();
+                let selected = {
+                    let mut filtered_state = self.filtered_state.lock().unwrap();
+                    if filtered_state.list.is_empty() {
+                        return Ok(());
+                    }
+                    let selected = filtered_state.list[filtered_state.selected].clone();
+                    filtered_state.reset();
+                    selected.as_string()
+                };
 
-            let event = match self.state {
-                AppState::PerfEvent => selected.split_once(":").map(|(subsystem, event)| {
-                    ProfilingEvent::Perf(PerfEvent::new(
-                        subsystem.to_string(),
-                        event.to_string(),
+                let event = match self.state {
+                    AppState::PerfEvent => selected.split_once(":").map(|(subsystem, event)| {
+                        ProfilingEvent::Perf(PerfEvent::new(
+                            subsystem.to_string(),
+                            event.to_string(),
+                            0,
+                        ))
+                    }),
+                    AppState::KprobeEvent => Some(ProfilingEvent::Kprobe(KprobeEvent::new(
+                        selected.to_string(),
                         0,
-                    ))
-                }),
-                AppState::KprobeEvent => Some(ProfilingEvent::Kprobe(KprobeEvent::new(
-                    selected.to_string(),
-                    0,
-                ))),
-                _ => None,
-            };
+                    ))),
+                    _ => None,
+                };
 
-            if let Some(prof_event) = event {
-                if let ProfilingEvent::Kprobe(ref k) = prof_event {
-                    let already_exists = self.available_events.iter().any(
+                if let Some(prof_event) = event {
+                    if let ProfilingEvent::Kprobe(ref k) = prof_event {
+                        let already_exists = self.available_events.iter().any(
                         |e| matches!(e, ProfilingEvent::Kprobe(x) if x.event_name == k.event_name),
                     );
 
-                    if !already_exists {
-                        self.kprobe_links.push(
-                            self.skel
-                                .progs
-                                .generic_kprobe
-                                .attach_kprobe(false, &k.event_name)?,
-                        );
+                        if !already_exists {
+                            self.kprobe_links.push(
+                                self.skel
+                                    .progs
+                                    .generic_kprobe
+                                    .attach_kprobe(false, &k.event_name)?,
+                            );
+                        };
                     };
-                };
 
-                self.active_prof_events.clear();
-                self.active_event = prof_event.clone();
-                let _ = self.activate_prof_event(&prof_event);
-                let prev_state = self.prev_state.clone();
-                self.prev_state = self.state.clone();
-                self.state = prev_state;
-                self.available_events.push(prof_event);
+                    self.active_prof_events.clear();
+                    self.active_event = prof_event.clone();
+                    let _ = self.activate_prof_event(&prof_event);
+                    let prev_state = self.prev_state.clone();
+                    self.prev_state = self.state.clone();
+                    self.state = prev_state;
+                    self.available_events.push(prof_event);
+                }
             }
-        } else if self.state == AppState::Default
-            || self.state == AppState::Node
-            || self.state == AppState::Llc
-            || self.state == AppState::Process
-        {
-            // Reset process view
-            self.filtering = false;
-            self.event_input_buffer.clear();
-
-            if let Some(proc_data) = self.selected_proc_data() {
-                proc_data.init_threads()?;
-
-                // Kick off thread view
-                self.in_thread_view = true;
+            AppState::PerfTop => {
+                self.filtering = false;
+                self.filter_symbols();
             }
+            AppState::Default | AppState::Node | AppState::Llc | AppState::Process => {
+                // Reset process view
+                self.filtering = false;
+                self.event_input_buffer.clear();
 
-            self.filter_events();
+                if let Some(proc_data) = self.selected_proc_data() {
+                    proc_data.init_threads()?;
+
+                    // Kick off thread view
+                    self.in_thread_view = true;
+                }
+
+                self.filter_events();
+            }
+            _ => {
+                // Handle other states (Help, MangoApp, Memory, Pause, Scheduler, etc.)
+                // For these states, do nothing on Enter
+            }
         }
 
         Ok(())
@@ -3081,6 +3662,15 @@ impl<'a> App<'a> {
                     self.filtering = false;
                     self.event_input_buffer.clear();
                     self.filter_events();
+                }
+            }
+            AppState::PerfTop => {
+                if self.filtering {
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_symbols();
+                } else {
+                    self.handle_action(&Action::Quit)?;
                 }
             }
             _ => self.handle_action(&Action::Quit)?,
@@ -3587,6 +4177,251 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Gets the currently selected symbol in the perf top view.
+    fn get_selected_symbol(&self) -> Option<&crate::symbol_data::SymbolSample> {
+        if self.perf_top_filtered_symbols.is_empty() {
+            None
+        } else {
+            self.perf_top_table_state
+                .selected()
+                .and_then(|index| self.perf_top_filtered_symbols.get(index))
+                .map(|(_, symbol)| symbol)
+        }
+    }
+
+    /// Handles perf sample events for the perf top view.
+    pub fn on_perf_sample(&mut self, action: &crate::PerfSampleAction) {
+        // Only process perf samples when in PerfTop state
+        if self.state == AppState::PerfTop {
+            // Get layer ID from BPF sample (negative if not present)
+            let layer_id = if action.layer_id >= 0 {
+                Some(action.layer_id)
+            } else {
+                None
+            };
+
+            // Add the sample with full stack trace information
+            self.symbol_data.add_sample_with_stacks_and_layer(
+                action.instruction_pointer,
+                action.pid,
+                action.cpu_id,
+                action.is_kernel,
+                &action.kernel_stack,
+                &action.user_stack,
+                layer_id,
+            );
+
+            // Update filtered symbols with new data
+            self.filter_symbols();
+
+            // Only store detailed stack trace if this matches the highlighted instruction pointer
+            if let Some(selected_symbol) = self.get_selected_symbol() {
+                if selected_symbol.symbol_info.address == action.instruction_pointer {
+                    // Store the latest symbolized data for the selected symbol
+                    self.symbol_data.update_selected_symbol_details(
+                        action.instruction_pointer,
+                        &action.kernel_stack,
+                        &action.user_stack,
+                        action.pid,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Filters symbols based on the current filter text
+    fn filter_symbols(&mut self) {
+        let top_symbols = self.symbol_data.get_top_symbols(1000); // Get more symbols for filtering
+
+        if !self.event_input_buffer.is_empty() {
+            let filter_text = self.event_input_buffer.to_lowercase();
+            self.perf_top_filtered_symbols = top_symbols
+                .into_iter()
+                .filter(|sample| {
+                    sample
+                        .symbol_info
+                        .symbol_name
+                        .to_lowercase()
+                        .contains(&filter_text)
+                        || sample
+                            .symbol_info
+                            .module_name
+                            .to_lowercase()
+                            .contains(&filter_text)
+                })
+                .map(|sample| (sample.symbol_info.symbol_name.clone(), sample.clone()))
+                .collect();
+        } else {
+            self.perf_top_filtered_symbols = top_symbols
+                .into_iter()
+                .map(|sample| (sample.symbol_info.symbol_name.clone(), sample.clone()))
+                .collect();
+        }
+
+        // Reset selection if it's out of bounds
+        if self.selected_symbol_index >= self.perf_top_filtered_symbols.len()
+            && !self.perf_top_filtered_symbols.is_empty()
+        {
+            self.selected_symbol_index = 0;
+        }
+
+        // Update table state selection
+        if !self.perf_top_filtered_symbols.is_empty() {
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            self.perf_top_table_state.select(None);
+        }
+    }
+
+    /// Attaches perf event sampling for perf top view
+    fn attach_perf_sampling(&mut self) -> Result<()> {
+        // Clear any existing links
+        self.detach_perf_sampling();
+
+        // Determine which perf event to use for sampling
+        let sampling_event = if let ProfilingEvent::Perf(_) = &self.active_event {
+            // Use the currently active event if it's a perf event
+            self.active_event.clone()
+        } else {
+            // Find the first available perf event or default to CPU cycles
+            self.available_events
+                .iter()
+                .find(|event| matches!(event, ProfilingEvent::Perf(_)))
+                .cloned()
+                .unwrap_or_else(|| {
+                    ProfilingEvent::Perf(PerfEvent::new("hw".to_string(), "cycles".to_string(), 0))
+                })
+        };
+
+        let all_cpus = self.topo.all_cpus.clone();
+        let mut attached_count = 0;
+
+        for (cpu_id, _cpu_info) in all_cpus {
+            // Get the base perf event and configure it for sampling
+            let base_perf_event = match &sampling_event {
+                ProfilingEvent::Perf(p) => p,
+                _ => unreachable!("sampling_event should always be Perf"),
+            };
+
+            // Create custom perf event attributes for sampling with IP collection
+            let mut attr: perf::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+            attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
+
+            // Set the event type and config based on the existing perf event
+            match base_perf_event.subsystem.to_lowercase().as_str() {
+                "hw" | "hardware" => {
+                    attr.type_ = perf::bindings::PERF_TYPE_HARDWARE;
+                    match base_perf_event.event.to_lowercase().as_str() {
+                        "cycles" | "cpu-cycles" | "cpu_cycles" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+                        }
+                        "instructions" | "instr" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_INSTRUCTIONS as u64;
+                        }
+                        "branches" | "branch-instructions" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_BRANCH_INSTRUCTIONS as u64;
+                        }
+                        "cache-misses" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_CACHE_MISSES as u64;
+                        }
+                        _ => {
+                            // Default to CPU cycles if unknown hardware event
+                            attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+                        }
+                    }
+                }
+                "sw" | "software" => {
+                    attr.type_ = perf::bindings::PERF_TYPE_SOFTWARE;
+                    match base_perf_event.event.to_lowercase().as_str() {
+                        "cpu-clock" => {
+                            attr.config = perf::bindings::PERF_COUNT_SW_CPU_CLOCK as u64;
+                        }
+                        "task-clock" => {
+                            attr.config = perf::bindings::PERF_COUNT_SW_TASK_CLOCK as u64;
+                        }
+                        _ => {
+                            // Default to task clock for software events
+                            attr.config = perf::bindings::PERF_COUNT_SW_TASK_CLOCK as u64;
+                        }
+                    }
+                }
+                _ => {
+                    // For tracepoint events, default to hardware CPU cycles for sampling
+                    attr.type_ = perf::bindings::PERF_TYPE_HARDWARE;
+                    attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+                }
+            }
+
+            // Configure for sampling with instruction pointer collection
+            attr.sample_type = perf::bindings::PERF_SAMPLE_IP as u64;
+            attr.__bindgen_anon_1.sample_period = self.perf_sample_rate as u64;
+            attr.set_freq(0);
+            attr.set_disabled(0);
+            attr.set_exclude_kernel(0);
+            attr.set_exclude_hv(0);
+            attr.set_inherit(1); // inherit to all processes
+            attr.set_pinned(1);
+
+            // Use scx_utils perf event helper to open the perf event
+            let perf_fd = unsafe {
+                perf::perf_event_open(
+                    &mut attr as *mut perf::bindings::perf_event_attr,
+                    -1,            // pid (-1 for all processes)
+                    cpu_id as i32, // cpu
+                    -1,            // group_fd
+                    0,             // flags
+                )
+            };
+
+            if perf_fd <= 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Failed to open perf event for CPU {cpu_id}: {err}");
+                continue;
+            }
+
+            // Attach BPF program to the perf event
+            match self
+                .skel
+                .progs
+                .perf_sample_handler
+                .attach_perf_event(perf_fd)
+            {
+                Ok(link) => {
+                    // Enable the perf event using scx_utils ioctl helper
+                    if unsafe { perf::ioctls::enable(perf_fd, 0) } < 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!("Failed to enable perf event for CPU {cpu_id}: {err}");
+                        unsafe {
+                            libc::close(perf_fd);
+                        }
+                        continue;
+                    }
+
+                    self.perf_links.push(link);
+                    attached_count += 1;
+                }
+                Err(_e) => unsafe {
+                    libc::close(perf_fd);
+                },
+            }
+        }
+
+        if attached_count == 0 {
+            return Err(anyhow::anyhow!("Failed to attach perf events to any CPU"));
+        }
+
+        // Store the current sampling event for display in UI
+        self.current_sampling_event = Some(sampling_event);
+
+        Ok(())
+    }
+
+    /// Detaches perf event sampling
+    fn detach_perf_sampling(&mut self) {
+        self.perf_links.clear();
+    }
+
     /// Updates the filtered events list based on the current input buffer
     fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
@@ -3602,7 +4437,16 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
+            AppState::PerfTop => {
+                // For PerfTop, call the specialized filter_symbols method
+                self.filter_symbols();
+                return; // Early return since filter_symbols handles everything
+            }
+            AppState::Default
+            | AppState::Llc
+            | AppState::Node
+            | AppState::Memory
+            | AppState::Process => {
                 if self.in_thread_view {
                     if let Some(proc_data) = self.selected_proc_data_immut() {
                         proc_data
@@ -3674,6 +4518,32 @@ impl<'a> App<'a> {
             "Thread" => self.thread_columns.update_visibility(col, *visible),
             _ => bail!("Invalid table name"),
         };
+
+        // Track layered state based on Layer ID column visibility
+        if col == "Layer ID" {
+            if *visible {
+                self.layered_enabled = true;
+            } else {
+                // Check if any Layer ID column is still visible
+                let process_layer_visible = self
+                    .process_columns
+                    .all_columns()
+                    .iter()
+                    .find(|c| c.header == "Layer ID")
+                    .map(|c| c.visible)
+                    .unwrap_or(false);
+
+                let thread_layer_visible = self
+                    .thread_columns
+                    .all_columns()
+                    .iter()
+                    .find(|c| c.header == "Layer ID")
+                    .map(|c| c.visible)
+                    .unwrap_or(false);
+
+                self.layered_enabled = process_layer_visible || thread_layer_visible;
+            }
+        }
 
         Ok(())
     }
@@ -3795,7 +4665,21 @@ impl<'a> App<'a> {
             Action::Kprobe(a) => {
                 self.on_kprobe(a);
             }
-            Action::ClearEvent => self.reset_prof_events()?,
+            Action::PerfSample(a) => {
+                self.on_perf_sample(a);
+            }
+            Action::ClearEvent => {
+                match self.state {
+                    AppState::PerfTop => {
+                        self.symbol_data.clear();
+                        self.selected_symbol_index = 0;
+                        self.filter_symbols(); // Update filtered symbols after clearing
+                    }
+                    _ => {
+                        self.reset_prof_events()?;
+                    }
+                }
+            }
             Action::UpdateColVisibility(a) => {
                 self.update_col_visibility(a)?;
             }
@@ -3811,19 +4695,31 @@ impl<'a> App<'a> {
             Action::ToggleLocalization => self.localize = !self.localize,
             Action::ToggleHwPressure => self.hw_pressure = !self.hw_pressure,
             Action::IncBpfSampleRate => {
-                let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
-                if sample_rate == 0 {
-                    self.update_bpf_sample_rate(8_u32);
+                if self.state == AppState::PerfTop {
+                    // In PerfTop view, control perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
                 } else {
-                    self.update_bpf_sample_rate(sample_rate << 2);
+                    // Normal BPF sample rate control
+                    let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+                    if sample_rate == 0 {
+                        self.update_bpf_sample_rate(8_u32);
+                    } else {
+                        self.update_bpf_sample_rate(sample_rate << 2);
+                    }
                 }
             }
             Action::DecBpfSampleRate => {
-                let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
-                if sample_rate > 0 {
-                    // prevent overly aggressive bpf sampling, but allow disabling sampling
-                    let new_rate = sample_rate >> 2;
-                    self.update_bpf_sample_rate(if new_rate >= 8 { new_rate } else { 0 });
+                if self.state == AppState::PerfTop {
+                    // In PerfTop view, control perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
+                } else {
+                    // Normal BPF sample rate control
+                    let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+                    if sample_rate > 0 {
+                        // prevent overly aggressive bpf sampling, but allow disabling sampling
+                        let new_rate = sample_rate >> 2;
+                        self.update_bpf_sample_rate(if new_rate >= 8 { new_rate } else { 0 });
+                    }
                 }
             }
             Action::Quit => match self.state {
@@ -3842,19 +4738,37 @@ impl<'a> App<'a> {
                 }
             },
             Action::Filter => match self.state {
-                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
                     self.filtering = true;
                     self.filter_events();
+                }
+                AppState::PerfTop => {
+                    self.filtering = true;
+                    self.filter_symbols();
                 }
                 _ => {}
             },
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
-                self.filter_events();
+                match self.state {
+                    AppState::PerfTop => {
+                        self.filter_symbols();
+                    }
+                    _ => {
+                        self.filter_events();
+                    }
+                }
             }
             Action::Backspace => {
                 self.event_input_buffer.pop();
-                self.filter_events();
+                match self.state {
+                    AppState::PerfTop => {
+                        self.filter_symbols();
+                    }
+                    _ => {
+                        self.filter_events();
+                    }
+                }
             }
             Action::Esc => {
                 self.on_escape()?;

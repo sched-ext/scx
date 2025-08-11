@@ -180,6 +180,46 @@ impl AppTheme {
         }
     }
 
+    /// Returns the color for kernel space symbols in perf top view.
+    pub fn kernel_symbol_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Rgb(255, 100, 100), // Light red
+            AppTheme::IAmBlue => Color::Rgb(255, 140, 0),         // Orange
+            AppTheme::SolarizedDark => Color::Rgb(220, 50, 47),   // Solarized red
+            AppTheme::Greyscale => Color::Rgb(180, 180, 180),     // Light grey
+            AppTheme::Nord => Color::Rgb(191, 97, 106),           // Nord Aurora red
+            AppTheme::Dracula => Color::Rgb(255, 85, 85),         // Dracula red
+            AppTheme::Monokai => Color::Rgb(249, 38, 114),        // Monokai magenta
+            AppTheme::Gruvbox => Color::Rgb(251, 73, 52),         // Gruvbox red
+            AppTheme::TokyoNight => Color::Rgb(247, 118, 142),    // Tokyo Night red
+            AppTheme::CatppuccinMocha => Color::Rgb(243, 139, 168), // Catppuccin red
+            AppTheme::OneDark => Color::Rgb(224, 108, 117),       // One Dark red
+            AppTheme::AyuDark => Color::Rgb(255, 160, 122),       // Ayu Dark orange
+            AppTheme::USA => Color::Rgb(187, 19, 62),             // Red for USA theme
+            AppTheme::Default => Color::Red,
+        }
+    }
+
+    /// Returns the color for userspace symbols in perf top view.
+    pub fn userspace_symbol_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Rgb(100, 255, 100), // Light green
+            AppTheme::IAmBlue => Color::Rgb(100, 149, 237),       // Cornflower blue
+            AppTheme::SolarizedDark => Color::Rgb(42, 161, 152),  // Solarized cyan
+            AppTheme::Greyscale => Color::Rgb(120, 120, 120),     // Medium grey
+            AppTheme::Nord => Color::Rgb(136, 192, 208),          // Nord Frost cyan
+            AppTheme::Dracula => Color::Rgb(80, 250, 123),        // Dracula green
+            AppTheme::Monokai => Color::Rgb(166, 226, 46),        // Monokai green
+            AppTheme::Gruvbox => Color::Rgb(104, 157, 106),       // Gruvbox aqua
+            AppTheme::TokyoNight => Color::Rgb(158, 206, 106),    // Tokyo Night green
+            AppTheme::CatppuccinMocha => Color::Rgb(166, 227, 161), // Catppuccin green
+            AppTheme::OneDark => Color::Rgb(152, 195, 121),       // One Dark green
+            AppTheme::AyuDark => Color::Rgb(95, 175, 239),        // Ayu Dark blue
+            AppTheme::USA => Color::Rgb(10, 49, 97),              // Navy blue for USA theme
+            AppTheme::Default => Color::Blue,
+        }
+    }
+
     /// Returns the next theme.
     pub fn next(&self) -> Self {
         match self {

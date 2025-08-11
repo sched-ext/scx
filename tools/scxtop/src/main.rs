@@ -69,7 +69,14 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
 
 fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
     match key.code {
-        Char(c) => handle_input_entry(app, c.to_string()).unwrap_or(keymap.action(&Key::Char(c))),
+        Char(c) => {
+            // Check if we should handle this character as input for filtering
+            if let Some(action) = handle_input_entry(app, c.to_string()) {
+                action
+            } else {
+                keymap.action(&Key::Char(c))
+            }
+        }
         _ => keymap.action(&Key::Code(key.code)),
     }
 }
@@ -77,7 +84,18 @@ fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
 fn handle_input_entry(app: &App, s: String) -> Option<Action> {
     match app.state() {
         AppState::PerfEvent | AppState::KprobeEvent => Some(Action::InputEntry(s)),
-        AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
+        AppState::Default
+        | AppState::Llc
+        | AppState::Node
+        | AppState::Process
+        | AppState::Memory => {
+            if app.filtering() {
+                Some(Action::InputEntry(s))
+            } else {
+                None
+            }
+        }
+        AppState::PerfTop => {
             if app.filtering() {
                 Some(Action::InputEntry(s))
             } else {
@@ -439,6 +457,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                 scheduler,
                 100,
                 tui_args.process_id,
+                tui_args.layered,
                 action_tx.clone(),
                 skel,
             )?;
