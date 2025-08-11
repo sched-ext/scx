@@ -127,22 +127,6 @@ static bool is_perf_cri(struct task_ctx *taskc)
 	return test_task_flag(taskc, LAVD_FLAG_ON_BIG);
 }
 
-static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
-{
-	u32 clear;
-
-	/*
-	 * If the CPU is on, we clear the bit once every four times
-	 * (LAVD_CC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
-	 * probabilistically cleared once every 100 msec (4 * 25 msec).
-	 */
-	clear = !(bpf_get_prandom_u32() % LAVD_CC_CPU_PIN_INTERVAL_DIV);
-	if (clear)
-		bpf_cpumask_clear_cpu(cpu, cpumask);
-
-	return clear;
-}
-
 static const volatile u16 *get_cpu_order(void)
 {
 	int i = READ_ONCE(pco_idx);
@@ -324,35 +308,36 @@ static void do_core_compaction(void)
 			sum_capacity += cpuc->capacity;
 			if (cpuc->big_core)
 				big_capacity += cpuc->capacity;
-		} else if (i < nr_active_old) {
-			bpf_cpumask_clear_cpu(cpu, active);
-			if (cpuc->nr_pinned_tasks) {
-				bpf_cpumask_set_cpu(cpu, ovrflw);
-				need_kick = true;
-			} else {
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
-			}
 		} else {
-			/*
-			 * This is the case when a CPU belongs to the
-			 * overflow set even though that CPU was not an
-			 * overflow set initially. This can happen only
-			 * when a pinned userspace task ran on this
-			 * CPU. In this case, we keep the CPU in an
-			 * overflow set since the CPU will be used
-			 * anyway for the task. This will promote equal
-			 * use of all used CPUs, lowering the energy
-			 * consumption by avoiding a few CPUs being
-			 * turbo-boosted. Hence, we do not clear the
-			 * overflow cpumask here for a while,
-			 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
-			 */
 			bpf_cpumask_clear_cpu(cpu, active);
-			if (cpuc->nr_pinned_tasks) {
+
+			if (cpuc->nr_pinned_tasks || (per_cpu_dsq &&
+			    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)))) {
+				/*
+				 * If there is something to run on this CPU,
+				 * add this CPU{ to the overflow set.
+				 */
 				bpf_cpumask_set_cpu(cpu, ovrflw);
 				need_kick = true;
-			} else {
-				need_kick = !clear_cpu_periodically(cpu, ovrflw);
+			} else if ((bpf_get_prandom_u32() %
+				    LAVD_CC_CPU_PIN_INTERVAL_DIV)) {
+				/*
+				 * This is the case when a CPU belongs to the
+				 * overflow set even though that CPU was not an
+				 * overflow set initially. This can happen only
+				 * when a pinned userspace task ran on this
+				 * CPU. In this case, we keep the CPU in an
+				 * overflow set since the CPU will be used
+				 * anyway for the task. This will promote equal
+				 * use of all used CPUs, lowering the energy
+				 * consumption by avoiding a few CPUs being
+				 * turbo-boosted. Hence, we do not clear the
+				 * overflow cpumask here for a while,
+				 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
+				 */
+				bpf_cpumask_clear_cpu(cpu, ovrflw);
+			} else if (bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
+				need_kick = true;
 			}
 		}
 
