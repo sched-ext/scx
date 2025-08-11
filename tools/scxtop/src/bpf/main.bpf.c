@@ -1147,7 +1147,7 @@ int perf_sample_handler(struct bpf_perf_event_data *ctx)
 	event->event.perf_sample.cpu_id = bpf_get_smp_processor_id();
 
 	// Get current task for layer ID lookup
-	task = (struct task_struct *)bpf_get_current_task();
+	task = (struct task_struct *)bpf_get_current_task_btf();
 
 	// Get layer ID if layered mode is enabled
 	if (layered && task && (lctx = try_lookup_layered_task_ctx(task)))
