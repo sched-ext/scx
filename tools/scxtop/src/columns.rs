@@ -536,6 +536,70 @@ pub fn get_perf_top_columns(layered_enabled: bool) -> Vec<Column<String, SymbolS
     ]
 }
 
+/// Returns columns for power monitoring display
+pub fn get_power_columns(
+    has_temp_data: bool,
+    available_cstates: &[String],
+) -> Vec<Column<u32, crate::CorePowerData>> {
+    let mut columns = vec![
+        Column {
+            header: "Core",
+            constraint: Constraint::Length(4),
+            visible: true,
+            value_fn: Box::new(|core_id: u32, _: &crate::CorePowerData| core_id.to_string()),
+        },
+        Column {
+            header: "Freq",
+            constraint: Constraint::Length(11),
+            visible: true,
+            value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                crate::util::format_hz((data.frequency_mhz * 1_000.0) as u64)
+            }),
+        },
+        Column {
+            header: "Temp(°C)",
+            constraint: Constraint::Length(6),
+            visible: has_temp_data,
+            value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                if data.temperature_celsius > 0.0 {
+                    format!("{:.1}", data.temperature_celsius)
+                } else {
+                    "-".to_string()
+                }
+            }),
+        },
+        Column {
+            header: "Watts",
+            constraint: Constraint::Length(8),
+            visible: true,
+            value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                format!("{:.2}", data.power_watts)
+            }),
+        },
+        Column {
+            header: "Package",
+            constraint: Constraint::Length(4),
+            visible: true,
+            value_fn: Box::new(|_: u32, data: &crate::CorePowerData| data.package_id.to_string()),
+        },
+    ];
+
+    // Add C-state columns
+    for cstate in available_cstates {
+        columns.push(Column {
+            header: Box::leak(cstate.clone().into_boxed_str()),
+            constraint: Constraint::Length(6),
+            visible: true,
+            value_fn: Box::new(move |_core_id: u32, _: &crate::CorePowerData| {
+                // This will be updated with snapshot data during rendering
+                "0.0%".to_string()
+            }),
+        });
+    }
+
+    columns
+}
+
 /// Returns a list of memory metrics to display in the detailed view
 pub fn get_memory_detail_metrics() -> Vec<&'static str> {
     vec![
