@@ -6,8 +6,533 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
+
+// MSR-based RAPL (Running Average Power Limit) constants
+// Intel RAPL MSR registers - Complete Coverage
+const MSR_RAPL_POWER_UNIT: u32 = 0x606; // Power unit definitions
+
+// Energy Status Registers
+const MSR_PKG_ENERGY_STATUS: u32 = 0x611; // Package energy consumed
+const MSR_DRAM_ENERGY_STATUS: u32 = 0x619; // DRAM energy consumed
+const MSR_PP0_ENERGY_STATUS: u32 = 0x639; // Cores energy consumed
+const MSR_PP1_ENERGY_STATUS: u32 = 0x641; // GPU/uncore energy consumed
+const MSR_PSYS_ENERGY_STATUS: u32 = 0x64D; // Platform energy (Skylake+)
+
+// Power Limit Registers
+const MSR_PKG_POWER_LIMIT: u32 = 0x610; // Package power limits
+const MSR_DRAM_POWER_LIMIT: u32 = 0x618; // DRAM power limits
+const MSR_PP0_POWER_LIMIT: u32 = 0x638; // Cores power limits
+const MSR_PP1_POWER_LIMIT: u32 = 0x640; // GPU/uncore power limits
+const MSR_PSYS_POWER_LIMIT: u32 = 0x64C; // Platform power limits (Skylake+)
+
+// Power Info Registers
+const MSR_PKG_POWER_INFO: u32 = 0x614; // Package power info (TDP, etc.)
+const MSR_DRAM_POWER_INFO: u32 = 0x61C; // DRAM power info
+const MSR_PP0_POWER_INFO: u32 = 0x63C; // Cores power info
+const MSR_PP1_POWER_INFO: u32 = 0x644; // GPU/uncore power info
+const MSR_PSYS_POWER_INFO: u32 = 0x650; // Platform power info (Skylake+)
+
+// Performance Status Registers
+const MSR_PKG_PERF_STATUS: u32 = 0x613; // Package performance status
+const MSR_DRAM_PERF_STATUS: u32 = 0x61B; // DRAM performance status
+const MSR_PP0_PERF_STATUS: u32 = 0x63B; // Cores performance status
+const MSR_PP1_PERF_STATUS: u32 = 0x643; // GPU/uncore performance status
+
+// Additional Intel MSRs for newer processors
+#[allow(dead_code)]
+const MSR_PLATFORM_POWER_LIMIT: u32 = 0x65C; // Platform power limit (Ice Lake+)
+
+// AMD RAPL MSR registers - Complete Coverage
+const MSR_AMD_RAPL_POWER_UNIT: u32 = 0xC0010299; // Power unit definitions
+
+// Energy Status Registers
+const MSR_AMD_CORE_ENERGY_STAT: u32 = 0xC001029A; // Core energy consumed
+const MSR_AMD_PKG_ENERGY_STAT: u32 = 0xC001029B; // Package energy consumed
+const MSR_AMD_L3_ENERGY_STAT: u32 = 0xC001029C; // L3 cache energy (Zen 3+)
+
+// Power Limit Registers
+const MSR_AMD_CORE_POWER_LIMIT: u32 = 0xC0010290; // Core power limits
+const MSR_AMD_PKG_POWER_LIMIT: u32 = 0xC0010291; // Package power limits
+
+// Power Info Registers
+const MSR_AMD_CORE_POWER_INFO: u32 = 0xC0010292; // Core power info
+const MSR_AMD_PKG_POWER_INFO: u32 = 0xC0010293; // Package power info
+
+// Additional AMD MSRs for comprehensive monitoring
+#[allow(dead_code)]
+const MSR_AMD_RAPL_PWR_UNIT: u32 = 0xC0010299; // Alternative power unit
+#[allow(dead_code)]
+const MSR_AMD_PWR_REPORTING: u32 = 0xC001007A; // Power reporting enable
+
+// CPU vendor detection
+#[derive(Debug, Clone, PartialEq)]
+enum CpuVendor {
+    Intel,
+    Amd,
+    Unknown,
+}
+
+// RAPL Energy Units (for converting raw energy values)
+#[derive(Debug, Clone)]
+struct RaplUnits {
+    energy_unit: f64, // Joules per unit
+    power_unit: f64,  // Watts per unit
+    #[allow(dead_code)]
+    time_unit: f64, // Seconds per unit
+}
+
+impl Default for RaplUnits {
+    fn default() -> Self {
+        Self {
+            energy_unit: 1.0 / 65536.0, // Default: 1/2^16 joules
+            power_unit: 1.0 / 8.0,      // Default: 1/8 watts
+            time_unit: 1.0 / 1024.0,    // Default: 1/1024 seconds
+        }
+    }
+}
+
+// RAPL energy readings with comprehensive power information
+#[derive(Debug, Clone, Default)]
+struct RaplReading {
+    timestamp: u64,
+
+    // Energy counters (in microjoules)
+    package_energy_uj: u64, // Package energy consumed
+    core_energy_uj: u64,    // Core energy consumed
+    dram_energy_uj: u64,    // DRAM energy consumed
+    gpu_energy_uj: u64,     // GPU/uncore energy consumed (Intel)
+    psys_energy_uj: u64,    // Platform/system energy consumed (Intel Skylake+)
+    l3_energy_uj: u64,      // L3 cache energy consumed (AMD Zen 3+)
+
+    // Power limits (in watts)
+    package_power_limit: f64, // Package power limit
+    dram_power_limit: f64,    // DRAM power limit
+    core_power_limit: f64,    // Core power limit
+    gpu_power_limit: f64,     // GPU/uncore power limit
+    psys_power_limit: f64,    // Platform power limit (Intel Skylake+)
+
+    // Power info (in watts)
+    package_tdp: f64, // Package TDP (Thermal Design Power)
+    dram_tdp: f64,    // DRAM TDP
+    core_tdp: f64,    // Core TDP
+    gpu_tdp: f64,     // GPU/uncore TDP
+    psys_tdp: f64,    // Platform TDP
+
+    // Performance status (percentage throttled)
+    package_throttled_pct: f64, // Package throttling percentage
+    dram_throttled_pct: f64,    // DRAM throttling percentage
+    core_throttled_pct: f64,    // Core throttling percentage
+    gpu_throttled_pct: f64,     // GPU/uncore throttling percentage
+}
+
+// MSR reader with caching for performance
+struct MsrReader {
+    msr_files: Mutex<HashMap<u32, File>>, // CPU ID -> MSR file handle
+    cpu_vendor: CpuVendor,
+    rapl_units: HashMap<u32, RaplUnits>, // Per-package RAPL units
+}
+
+impl MsrReader {
+    pub fn new() -> Result<Self> {
+        let cpu_vendor = Self::detect_cpu_vendor()?;
+
+        let mut reader = Self {
+            msr_files: Mutex::new(HashMap::new()),
+            cpu_vendor,
+            rapl_units: HashMap::new(),
+        };
+
+        // Initialize RAPL units for available packages
+        reader.init_rapl_units()?;
+
+        Ok(reader)
+    }
+
+    fn detect_cpu_vendor() -> Result<CpuVendor> {
+        if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+            for line in cpuinfo.lines() {
+                if line.starts_with("vendor_id") {
+                    if line.contains("GenuineIntel") {
+                        return Ok(CpuVendor::Intel);
+                    } else if line.contains("AuthenticAMD") {
+                        return Ok(CpuVendor::Amd);
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(CpuVendor::Unknown)
+    }
+
+    fn init_rapl_units(&mut self) -> Result<()> {
+        // Get package count from topology
+        let package_count = self.get_package_count()?;
+
+        for package_id in 0..package_count {
+            // Find the first CPU in this package
+            if let Some(cpu_id) = self.find_first_cpu_in_package(package_id)? {
+                if let Ok(units) = self.read_rapl_units(cpu_id) {
+                    self.rapl_units.insert(package_id, units);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_package_count(&self) -> Result<u32> {
+        let mut max_package = 0;
+
+        // Scan all CPUs to find the maximum package ID
+        for cpu_id in 0..256 {
+            // Reasonable upper limit
+            let topology_path =
+                format!("/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id");
+            if let Ok(package_str) = fs::read_to_string(&topology_path) {
+                if let Ok(package_id) = package_str.trim().parse::<u32>() {
+                    max_package = max_package.max(package_id);
+                }
+            } else {
+                break; // No more CPUs
+            }
+        }
+
+        Ok(max_package + 1)
+    }
+
+    fn find_first_cpu_in_package(&self, package_id: u32) -> Result<Option<u32>> {
+        for cpu_id in 0..256 {
+            // Reasonable upper limit
+            let topology_path =
+                format!("/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id");
+            if let Ok(package_str) = fs::read_to_string(&topology_path) {
+                if let Ok(cpu_package_id) = package_str.trim().parse::<u32>() {
+                    if cpu_package_id == package_id {
+                        return Ok(Some(cpu_id));
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_rapl_units(&self, cpu_id: u32) -> Result<RaplUnits> {
+        let power_unit_msr = match self.cpu_vendor {
+            CpuVendor::Intel => MSR_RAPL_POWER_UNIT,
+            CpuVendor::Amd => MSR_AMD_RAPL_POWER_UNIT,
+            CpuVendor::Unknown => return Ok(RaplUnits::default()),
+        };
+
+        if let Ok(raw_value) = self.read_msr(cpu_id, power_unit_msr) {
+            let energy_unit = 1.0 / (1u64 << ((raw_value >> 8) & 0x1F)) as f64;
+            let power_unit = 1.0 / (1u64 << (raw_value & 0xF)) as f64;
+            let time_unit = 1.0 / (1u64 << ((raw_value >> 16) & 0xF)) as f64;
+
+            Ok(RaplUnits {
+                energy_unit,
+                power_unit,
+                time_unit,
+            })
+        } else {
+            Ok(RaplUnits::default())
+        }
+    }
+
+    fn read_msr(&self, cpu_id: u32, msr: u32) -> Result<u64> {
+        let mut files = self.msr_files.lock().unwrap();
+
+        // Get or create MSR file handle
+        let file = files.entry(cpu_id).or_insert_with(|| {
+            File::open(format!("/dev/cpu/{cpu_id}/msr")).unwrap_or_else(|_| {
+                // Fallback: try to access via msr module
+                std::process::Command::new("modprobe")
+                    .arg("msr")
+                    .output()
+                    .ok();
+                File::open(format!("/dev/cpu/{cpu_id}/msr")).unwrap()
+            })
+        });
+
+        // Seek to MSR address
+        file.seek(SeekFrom::Start(msr as u64))?;
+
+        // Read 8 bytes (64-bit value)
+        let mut buffer = [0u8; 8];
+        file.read_exact(&mut buffer)?;
+
+        Ok(u64::from_le_bytes(buffer))
+    }
+
+    pub fn read_rapl_energy(&self, package_id: u32) -> Result<RaplReading> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        // Find the first CPU in this package
+        let cpu_id = self
+            .find_first_cpu_in_package(package_id)?
+            .ok_or_else(|| anyhow!("No CPU found in package {}", package_id))?;
+
+        let mut reading = RaplReading {
+            timestamp,
+            ..Default::default()
+        };
+
+        // Get RAPL units for this package
+        let default_units = RaplUnits::default();
+        let units = self.rapl_units.get(&package_id).unwrap_or(&default_units);
+
+        match self.cpu_vendor {
+            CpuVendor::Intel => {
+                // Read Intel RAPL Energy Status MSRs
+                if let Ok(pkg_energy) = self.read_msr(cpu_id, MSR_PKG_ENERGY_STATUS) {
+                    reading.package_energy_uj =
+                        ((pkg_energy & 0xFFFFFFFF) as f64 * units.energy_unit * 1_000_000.0) as u64;
+                }
+
+                if let Ok(core_energy) = self.read_msr(cpu_id, MSR_PP0_ENERGY_STATUS) {
+                    reading.core_energy_uj = ((core_energy & 0xFFFFFFFF) as f64
+                        * units.energy_unit
+                        * 1_000_000.0) as u64;
+                }
+
+                if let Ok(dram_energy) = self.read_msr(cpu_id, MSR_DRAM_ENERGY_STATUS) {
+                    reading.dram_energy_uj = ((dram_energy & 0xFFFFFFFF) as f64
+                        * units.energy_unit
+                        * 1_000_000.0) as u64;
+                }
+
+                if let Ok(gpu_energy) = self.read_msr(cpu_id, MSR_PP1_ENERGY_STATUS) {
+                    reading.gpu_energy_uj =
+                        ((gpu_energy & 0xFFFFFFFF) as f64 * units.energy_unit * 1_000_000.0) as u64;
+                }
+
+                // Read Platform/System energy (Skylake+)
+                if let Ok(psys_energy) = self.read_msr(cpu_id, MSR_PSYS_ENERGY_STATUS) {
+                    reading.psys_energy_uj = ((psys_energy & 0xFFFFFFFF) as f64
+                        * units.energy_unit
+                        * 1_000_000.0) as u64;
+                }
+
+                // Read Intel Power Limit MSRs
+                if let Ok(pkg_power_limit) = self.read_msr(cpu_id, MSR_PKG_POWER_LIMIT) {
+                    // Power limit 1 is in bits 14:0, power limit 2 is in bits 46:32
+                    let pl1 = (pkg_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.package_power_limit = pl1;
+                }
+
+                if let Ok(dram_power_limit) = self.read_msr(cpu_id, MSR_DRAM_POWER_LIMIT) {
+                    let dram_limit = (dram_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.dram_power_limit = dram_limit;
+                }
+
+                if let Ok(pp0_power_limit) = self.read_msr(cpu_id, MSR_PP0_POWER_LIMIT) {
+                    let pp0_limit = (pp0_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.core_power_limit = pp0_limit;
+                }
+
+                if let Ok(pp1_power_limit) = self.read_msr(cpu_id, MSR_PP1_POWER_LIMIT) {
+                    let pp1_limit = (pp1_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.gpu_power_limit = pp1_limit;
+                }
+
+                if let Ok(psys_power_limit) = self.read_msr(cpu_id, MSR_PSYS_POWER_LIMIT) {
+                    let psys_limit = (psys_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.psys_power_limit = psys_limit;
+                }
+
+                // Read Intel Power Info MSRs (TDP values)
+                if let Ok(pkg_power_info) = self.read_msr(cpu_id, MSR_PKG_POWER_INFO) {
+                    // TDP is in bits 14:0
+                    let tdp = (pkg_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.package_tdp = tdp;
+                }
+
+                if let Ok(dram_power_info) = self.read_msr(cpu_id, MSR_DRAM_POWER_INFO) {
+                    let dram_tdp = (dram_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.dram_tdp = dram_tdp;
+                }
+
+                if let Ok(pp0_power_info) = self.read_msr(cpu_id, MSR_PP0_POWER_INFO) {
+                    let pp0_tdp = (pp0_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.core_tdp = pp0_tdp;
+                }
+
+                if let Ok(pp1_power_info) = self.read_msr(cpu_id, MSR_PP1_POWER_INFO) {
+                    let pp1_tdp = (pp1_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.gpu_tdp = pp1_tdp;
+                }
+
+                if let Ok(psys_power_info) = self.read_msr(cpu_id, MSR_PSYS_POWER_INFO) {
+                    let psys_tdp = (psys_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.psys_tdp = psys_tdp;
+                }
+
+                // Read Intel Performance Status MSRs (throttling info)
+                if let Ok(pkg_perf_status) = self.read_msr(cpu_id, MSR_PKG_PERF_STATUS) {
+                    // Throttling info is typically in higher bits, calculate percentage
+                    let throttle_cycles = (pkg_perf_status >> 32) & 0xFFFFFFFF;
+                    let total_cycles = pkg_perf_status & 0xFFFFFFFF;
+                    if total_cycles > 0 {
+                        reading.package_throttled_pct =
+                            (throttle_cycles as f64 / total_cycles as f64) * 100.0;
+                    }
+                }
+
+                if let Ok(dram_perf_status) = self.read_msr(cpu_id, MSR_DRAM_PERF_STATUS) {
+                    let throttle_cycles = (dram_perf_status >> 32) & 0xFFFFFFFF;
+                    let total_cycles = dram_perf_status & 0xFFFFFFFF;
+                    if total_cycles > 0 {
+                        reading.dram_throttled_pct =
+                            (throttle_cycles as f64 / total_cycles as f64) * 100.0;
+                    }
+                }
+
+                if let Ok(pp0_perf_status) = self.read_msr(cpu_id, MSR_PP0_PERF_STATUS) {
+                    let throttle_cycles = (pp0_perf_status >> 32) & 0xFFFFFFFF;
+                    let total_cycles = pp0_perf_status & 0xFFFFFFFF;
+                    if total_cycles > 0 {
+                        reading.core_throttled_pct =
+                            (throttle_cycles as f64 / total_cycles as f64) * 100.0;
+                    }
+                }
+
+                if let Ok(pp1_perf_status) = self.read_msr(cpu_id, MSR_PP1_PERF_STATUS) {
+                    let throttle_cycles = (pp1_perf_status >> 32) & 0xFFFFFFFF;
+                    let total_cycles = pp1_perf_status & 0xFFFFFFFF;
+                    if total_cycles > 0 {
+                        reading.gpu_throttled_pct =
+                            (throttle_cycles as f64 / total_cycles as f64) * 100.0;
+                    }
+                }
+            }
+            CpuVendor::Amd => {
+                // Read AMD RAPL Energy Status MSRs
+                if let Ok(pkg_energy) = self.read_msr(cpu_id, MSR_AMD_PKG_ENERGY_STAT) {
+                    reading.package_energy_uj =
+                        ((pkg_energy & 0xFFFFFFFF) as f64 * units.energy_unit * 1_000_000.0) as u64;
+                }
+
+                if let Ok(core_energy) = self.read_msr(cpu_id, MSR_AMD_CORE_ENERGY_STAT) {
+                    reading.core_energy_uj = ((core_energy & 0xFFFFFFFF) as f64
+                        * units.energy_unit
+                        * 1_000_000.0) as u64;
+                }
+
+                // Read L3 cache energy (Zen 3+)
+                if let Ok(l3_energy) = self.read_msr(cpu_id, MSR_AMD_L3_ENERGY_STAT) {
+                    reading.l3_energy_uj =
+                        ((l3_energy & 0xFFFFFFFF) as f64 * units.energy_unit * 1_000_000.0) as u64;
+                }
+
+                // Read AMD Power Limit MSRs
+                if let Ok(core_power_limit) = self.read_msr(cpu_id, MSR_AMD_CORE_POWER_LIMIT) {
+                    let core_limit = (core_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.core_power_limit = core_limit;
+                }
+
+                if let Ok(pkg_power_limit) = self.read_msr(cpu_id, MSR_AMD_PKG_POWER_LIMIT) {
+                    let pkg_limit = (pkg_power_limit & 0x7FFF) as f64 * units.power_unit;
+                    reading.package_power_limit = pkg_limit;
+                }
+
+                // Read AMD Power Info MSRs (TDP values)
+                if let Ok(core_power_info) = self.read_msr(cpu_id, MSR_AMD_CORE_POWER_INFO) {
+                    let core_tdp = (core_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.core_tdp = core_tdp;
+                }
+
+                if let Ok(pkg_power_info) = self.read_msr(cpu_id, MSR_AMD_PKG_POWER_INFO) {
+                    let pkg_tdp = (pkg_power_info & 0x7FFF) as f64 * units.power_unit;
+                    reading.package_tdp = pkg_tdp;
+                }
+            }
+            CpuVendor::Unknown => {
+                return Err(anyhow!("Unknown CPU vendor - cannot read RAPL MSRs"));
+            }
+        }
+
+        Ok(reading)
+    }
+
+    pub fn get_cpu_vendor(&self) -> &CpuVendor {
+        &self.cpu_vendor
+    }
+}
+
+// RAPL-based power monitor
+struct RaplPowerMonitor {
+    msr_reader: MsrReader,
+    previous_readings: HashMap<u32, RaplReading>, // Package ID -> Previous reading
+    package_count: u32,
+}
+
+impl RaplPowerMonitor {
+    pub fn new() -> Result<Self> {
+        let msr_reader = MsrReader::new()?;
+        let package_count = msr_reader.get_package_count()?;
+
+        Ok(Self {
+            msr_reader,
+            previous_readings: HashMap::new(),
+            package_count,
+        })
+    }
+
+    pub fn collect_power_data(&mut self) -> Result<HashMap<u32, f64>> {
+        let mut package_power = HashMap::new();
+
+        for package_id in 0..self.package_count {
+            if let Ok(current_reading) = self.msr_reader.read_rapl_energy(package_id) {
+                // Calculate power based on energy difference
+                if let Some(previous_reading) = self.previous_readings.get(&package_id) {
+                    let time_delta_seconds =
+                        (current_reading.timestamp - previous_reading.timestamp) as f64
+                            / 1_000_000.0;
+
+                    if time_delta_seconds > 0.0 {
+                        let energy_delta_joules = (current_reading.package_energy_uj
+                            - previous_reading.package_energy_uj)
+                            as f64
+                            / 1_000_000.0;
+                        let power_watts = energy_delta_joules / time_delta_seconds;
+
+                        // Sanity check - ignore unrealistic power values
+                        if (0.0..=1000.0).contains(&power_watts) {
+                            package_power.insert(package_id, power_watts);
+                        }
+                    }
+                }
+
+                // Store current reading for next iteration
+                self.previous_readings.insert(package_id, current_reading);
+            }
+        }
+
+        Ok(package_power)
+    }
+
+    pub fn get_cpu_vendor(&self) -> &CpuVendor {
+        self.msr_reader.get_cpu_vendor()
+    }
+
+    pub fn is_available(&self) -> bool {
+        // Check if we can read at least one package
+        for package_id in 0..self.package_count {
+            if self.msr_reader.read_rapl_energy(package_id).is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+}
 
 /// C-state information for a CPU core
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -27,6 +552,15 @@ pub struct CorePowerData {
     pub power_watts: f64,
     pub c_states: HashMap<String, CStateInfo>,
     pub package_id: u32,
+
+    // Enhanced RAPL data from comprehensive MSR readings
+    pub tdp: f64,              // Thermal Design Power (watts)
+    pub power_limit: f64,      // Current power limit (watts)
+    pub throttle_percent: f64, // Throttling percentage (0-100)
+    pub dram_energy_uj: u64,   // DRAM energy consumed (microjoules)
+    pub gpu_energy_uj: u64,    // GPU/uncore energy consumed (microjoules)
+    pub psys_energy_uj: u64,   // Platform/system energy (Intel Skylake+)
+    pub l3_energy_uj: u64,     // L3 cache energy (AMD Zen 3+)
 }
 
 /// System-wide power monitoring data
@@ -473,11 +1007,32 @@ pub struct PowerDataCollector {
     sysfs_cpufreq_path: String,
     sysfs_thermal_path: String,
     sysfs_cpuidle_path: String,
+    rapl_monitor: Option<RaplPowerMonitor>,
 }
 
 impl PowerDataCollector {
     pub fn new() -> Result<Self> {
         let cpu_count = Self::detect_cpu_count()?;
+
+        // Try to initialize RAPL monitor for MSR-based power readings
+        let rapl_monitor = match RaplPowerMonitor::new() {
+            Ok(monitor) => {
+                if monitor.is_available() {
+                    log::info!(
+                        "MSR-based RAPL power monitoring enabled for {:?} CPU",
+                        monitor.get_cpu_vendor()
+                    );
+                    Some(monitor)
+                } else {
+                    log::warn!("MSR-based RAPL not available, falling back to sysfs");
+                    None
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize RAPL monitor: {e}, falling back to sysfs");
+                None
+            }
+        };
 
         Ok(Self {
             cpu_count,
@@ -485,6 +1040,7 @@ impl PowerDataCollector {
             sysfs_cpufreq_path: "/sys/devices/system/cpu".to_string(),
             sysfs_thermal_path: "/sys/class/thermal".to_string(),
             sysfs_cpuidle_path: "/sys/devices/system/cpu".to_string(),
+            rapl_monitor,
         })
     }
 
@@ -506,7 +1062,7 @@ impl PowerDataCollector {
     }
 
     /// Collect current power data from the system
-    pub fn collect(&self) -> Result<SystemPowerData> {
+    pub fn collect(&mut self) -> Result<SystemPowerData> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -565,6 +1121,33 @@ impl PowerDataCollector {
         // Get package ID
         core_data.package_id = self.get_package_id(core_id)?;
 
+        // Enhance with comprehensive RAPL data if available
+        if let Some(ref rapl_monitor) = self.rapl_monitor {
+            if let Ok(rapl_reading) = rapl_monitor
+                .msr_reader
+                .read_rapl_energy(core_data.package_id)
+            {
+                // Populate TDP from RAPL power info
+                core_data.tdp = rapl_reading.core_tdp.max(rapl_reading.package_tdp);
+
+                // Populate power limits from RAPL
+                core_data.power_limit = rapl_reading
+                    .core_power_limit
+                    .max(rapl_reading.package_power_limit);
+
+                // Populate throttling information
+                core_data.throttle_percent = rapl_reading
+                    .core_throttled_pct
+                    .max(rapl_reading.package_throttled_pct);
+
+                // Store additional energy readings
+                core_data.dram_energy_uj = rapl_reading.dram_energy_uj;
+                core_data.gpu_energy_uj = rapl_reading.gpu_energy_uj;
+                core_data.psys_energy_uj = rapl_reading.psys_energy_uj;
+                core_data.l3_energy_uj = rapl_reading.l3_energy_uj;
+            }
+        }
+
         Ok(core_data)
     }
 
@@ -603,36 +1186,137 @@ impl PowerDataCollector {
     }
 
     fn read_cpu_temperature(&self, core_id: u32) -> Result<f64> {
-        // Try to find thermal zone for this CPU
+        // Strategy 1: Try to find thermal zone for this specific CPU core
         for i in 0..20 {
-            // Check up to 20 thermal zones
             let thermal_path = format!("{}/thermal_zone{i}/type", self.sysfs_thermal_path);
             if let Ok(thermal_type) = fs::read_to_string(&thermal_path) {
-                let thermal_type = thermal_type.trim();
-                if thermal_type.contains("cpu") || thermal_type.contains(&format!("Core {core_id}"))
+                let thermal_type = thermal_type.trim().to_lowercase();
+                if thermal_type.contains("cpu")
+                    || thermal_type.contains(&format!("core {core_id}"))
+                    || thermal_type.contains(&format!("core{core_id}"))
+                    || thermal_type.contains("x86_pkg_temp")
+                    || thermal_type.contains("coretemp")
                 {
                     let temp_path = format!("{}/thermal_zone{i}/temp", self.sysfs_thermal_path);
                     if let Ok(temp_str) = fs::read_to_string(&temp_path) {
                         if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
-                            return Ok(temp_millicelsius / 1000.0); // Convert to Celsius
+                            let temp_celsius = temp_millicelsius / 1000.0;
+                            // Sanity check: reasonable CPU temperature range
+                            if (0.0..=150.0).contains(&temp_celsius) {
+                                return Ok(temp_celsius);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Fallback: try core temperature files
-        let core_temp_path = format!(
-            "/sys/devices/platform/coretemp.0/hwmon/hwmon1/temp{}_input",
-            core_id + 2
-        );
-        if let Ok(temp_str) = fs::read_to_string(&core_temp_path) {
-            if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
-                return Ok(temp_millicelsius / 1000.0);
+        // Strategy 2: Try coretemp hwmon interface (multiple possible paths)
+        let hwmon_paths = [
+            format!(
+                "/sys/devices/platform/coretemp.0/hwmon/hwmon0/temp{}_input",
+                core_id + 2
+            ),
+            format!(
+                "/sys/devices/platform/coretemp.0/hwmon/hwmon1/temp{}_input",
+                core_id + 2
+            ),
+            format!(
+                "/sys/devices/platform/coretemp.0/hwmon/hwmon2/temp{}_input",
+                core_id + 2
+            ),
+            format!(
+                "/sys/devices/platform/coretemp.0/hwmon/hwmon3/temp{}_input",
+                core_id + 2
+            ),
+            format!("/sys/class/hwmon/hwmon0/temp{}_input", core_id + 2),
+            format!("/sys/class/hwmon/hwmon1/temp{}_input", core_id + 2),
+            format!("/sys/class/hwmon/hwmon2/temp{}_input", core_id + 2),
+            format!("/sys/class/hwmon/hwmon3/temp{}_input", core_id + 2),
+        ];
+
+        for path in &hwmon_paths {
+            if let Ok(temp_str) = fs::read_to_string(path) {
+                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+                    let temp_celsius = temp_millicelsius / 1000.0;
+                    if (0.0..=150.0).contains(&temp_celsius) {
+                        return Ok(temp_celsius);
+                    }
+                }
             }
         }
 
-        Ok(0.0) // Default if temperature not available
+        // Strategy 3: Try per-core temperature from coretemp with different numbering schemes
+        let alt_core_paths = [
+            format!("/sys/devices/platform/coretemp.0/temp{}_input", core_id + 1),
+            format!("/sys/devices/platform/coretemp.0/temp{}_input", core_id + 2),
+            format!("/sys/devices/platform/coretemp.0/temp{core_id}_input"),
+        ];
+
+        for path in &alt_core_paths {
+            if let Ok(temp_str) = fs::read_to_string(path) {
+                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+                    let temp_celsius = temp_millicelsius / 1000.0;
+                    if (0.0..=150.0).contains(&temp_celsius) {
+                        return Ok(temp_celsius);
+                    }
+                }
+            }
+        }
+
+        // Strategy 4: Try CPU package temperature (shared across cores in package)
+        let package_id = self.get_package_id(core_id).unwrap_or(0);
+        let package_temp_paths = [
+            format!("/sys/devices/platform/coretemp.{package_id}/temp1_input"),
+            format!(
+                "/sys/devices/platform/coretemp.{package_id}/hwmon/hwmon{package_id}/temp1_input"
+            ),
+            "/sys/devices/platform/coretemp.0/temp1_input".to_string(),
+            "/sys/class/hwmon/hwmon0/temp1_input".to_string(),
+            "/sys/class/hwmon/hwmon1/temp1_input".to_string(),
+        ];
+
+        for path in &package_temp_paths {
+            if let Ok(temp_str) = fs::read_to_string(path) {
+                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+                    let temp_celsius = temp_millicelsius / 1000.0;
+                    if (0.0..=150.0).contains(&temp_celsius) {
+                        return Ok(temp_celsius);
+                    }
+                }
+            }
+        }
+
+        // Strategy 5: Try to auto-discover available hwmon devices
+        if let Ok(hwmon_dir) = fs::read_dir("/sys/class/hwmon") {
+            for entry in hwmon_dir.flatten() {
+                let hwmon_path = entry.path();
+
+                // Check if this hwmon device is for CPU temperature
+                let name_path = hwmon_path.join("name");
+                if let Ok(name) = fs::read_to_string(&name_path) {
+                    let name = name.trim().to_lowercase();
+                    if name.contains("coretemp") || name.contains("cpu") || name.contains("k10temp")
+                    {
+                        // Try various temp inputs for this hwmon device
+                        for temp_input in 1..=10 {
+                            let temp_path = hwmon_path.join(format!("temp{temp_input}_input"));
+                            if let Ok(temp_str) = fs::read_to_string(&temp_path) {
+                                if let Ok(temp_millicelsius) = temp_str.trim().parse::<f64>() {
+                                    let temp_celsius = temp_millicelsius / 1000.0;
+                                    if (0.0..=150.0).contains(&temp_celsius) {
+                                        return Ok(temp_celsius);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If all strategies fail, return 0 (will be handled by the display logic)
+        Ok(0.0)
     }
 
     fn estimate_cpu_power(&self, core_id: u32, frequency_mhz: f64) -> Result<f64> {
@@ -777,10 +1461,19 @@ impl PowerDataCollector {
         Err(anyhow!("No battery found"))
     }
 
-    fn collect_package_power(&self) -> Result<HashMap<u32, f64>> {
+    fn collect_package_power(&mut self) -> Result<HashMap<u32, f64>> {
+        // Priority 1: Try MSR-based RAPL if available
+        if let Some(ref mut rapl_monitor) = self.rapl_monitor {
+            if let Ok(msr_power_data) = rapl_monitor.collect_power_data() {
+                if !msr_power_data.is_empty() {
+                    return Ok(msr_power_data);
+                }
+            }
+        }
+
+        // Priority 2: Fallback to sysfs-based RAPL data
         let mut package_power = HashMap::new();
 
-        // Try to read RAPL (Running Average Power Limit) data
         let intel_rapl_path = "/sys/class/powercap/intel-rapl";
         if Path::new(intel_rapl_path).exists() {
             for entry in fs::read_dir(intel_rapl_path)? {
@@ -832,6 +1525,7 @@ impl Default for PowerDataCollector {
             sysfs_cpufreq_path: "/sys/devices/system/cpu".to_string(),
             sysfs_thermal_path: "/sys/class/thermal".to_string(),
             sysfs_cpuidle_path: "/sys/devices/system/cpu".to_string(),
+            rapl_monitor: None,
         })
     }
 }

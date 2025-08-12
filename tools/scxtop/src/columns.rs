@@ -541,58 +541,135 @@ pub fn get_power_columns(
     has_temp_data: bool,
     available_cstates: &[String],
 ) -> Vec<Column<u32, crate::CorePowerData>> {
+    // Calculate constraints based on available C-states and temperature data
+    let base_columns = if has_temp_data { 5 } else { 4 }; // CPU, Freq, [Temp], Watt, Pkg
+    let cstate_columns = available_cstates.len().min(3); // Limit to 3 C-states
+
+    // Use percentage-based constraints for responsive layout
+    let base_pct = 70; // 70% for base columns
+    let cstate_pct = 30; // 30% for C-state columns
+
     let mut columns = vec![
         Column {
-            header: "Core",
-            constraint: Constraint::Length(4),
+            header: "CPU",
+            constraint: Constraint::Percentage((base_pct / base_columns as u16).max(8)),
             visible: true,
             value_fn: Box::new(|core_id: u32, _: &crate::CorePowerData| core_id.to_string()),
         },
         Column {
             header: "Freq",
-            constraint: Constraint::Length(11),
+            constraint: Constraint::Percentage((base_pct / base_columns as u16).max(10)),
             visible: true,
             value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
-                crate::util::format_hz((data.frequency_mhz * 1_000.0) as u64)
+                if data.frequency_mhz > 1000.0 {
+                    format!("{:.1}G", data.frequency_mhz / 1000.0)
+                } else {
+                    format!("{:.0}M", data.frequency_mhz)
+                }
             }),
         },
-        Column {
-            header: "Temp(°C)",
-            constraint: Constraint::Length(6),
-            visible: has_temp_data,
+    ];
+
+    if has_temp_data {
+        columns.push(Column {
+            header: "Temp",
+            constraint: Constraint::Percentage((base_pct / base_columns as u16).max(8)),
+            visible: true,
             value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
                 if data.temperature_celsius > 0.0 {
-                    format!("{:.1}", data.temperature_celsius)
+                    format!("{:.0}°", data.temperature_celsius)
+                } else {
+                    "-".to_string()
+                }
+            }),
+        });
+    }
+
+    columns.extend([
+        Column {
+            header: "Watt",
+            constraint: Constraint::Percentage((base_pct / base_columns as u16).max(10)),
+            visible: true,
+            value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                if data.power_watts > 0.0 {
+                    format!("{:.1}", data.power_watts)
                 } else {
                     "-".to_string()
                 }
             }),
         },
         Column {
-            header: "Watts",
-            constraint: Constraint::Length(8),
-            visible: true,
-            value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
-                format!("{:.2}", data.power_watts)
-            }),
-        },
-        Column {
-            header: "Package",
-            constraint: Constraint::Length(4),
+            header: "Pkg",
+            constraint: Constraint::Percentage((base_pct / base_columns as u16).max(6)),
             visible: true,
             value_fn: Box::new(|_: u32, data: &crate::CorePowerData| data.package_id.to_string()),
         },
-    ];
+    ]);
 
-    // Add C-state columns
-    for cstate in available_cstates {
+    // Add C-state columns with equal percentage distribution
+    let cstate_pct_each = if cstate_columns > 0 {
+        cstate_pct / cstate_columns as u16
+    } else {
+        0
+    };
+
+    for (idx, cstate) in available_cstates.iter().take(3).enumerate() {
+        let cstate_clone = cstate.clone();
+        // Create very compact header
+        let compact_header = match cstate.as_str() {
+            "POLL" => "PL",
+            "C1" | "C1_ACPI" => "C1",
+            "C1E" => "1E",
+            "C3" | "C3_ACPI" => "C3",
+            "C6" => "C6",
+            "C7" => "C7",
+            "C8" => "C8",
+            "C9" => "C9",
+            "C10" => "10",
+            _ => {
+                if cstate.len() <= 2 {
+                    cstate.as_str()
+                } else {
+                    match idx {
+                        0 => "C0",
+                        1 => "C1",
+                        2 => "C2",
+                        _ => "CX",
+                    }
+                }
+            }
+        };
+
         columns.push(Column {
-            header: Box::leak(cstate.clone().into_boxed_str()),
-            constraint: Constraint::Length(6),
+            header: Box::leak(compact_header.to_string().into_boxed_str()),
+            constraint: Constraint::Percentage(cstate_pct_each.max(8)),
             visible: true,
-            value_fn: Box::new(move |_core_id: u32, _: &crate::CorePowerData| {
-                // This will be updated with snapshot data during rendering
-                "0.0%".to_string()
+            value_fn: Box::new(move |_core_id: u32, data: &crate::CorePowerData| {
+                // Calculate C-state percentage from residency data
+                if let Some(cstate_info) = data.c_states.get(&cstate_clone) {
+                    // Calculate total residency across all C-states for this core
+                    let total_residency: u64 = data.c_states.values().map(|cs| cs.residency).sum();
+
+                    if total_residency > 0 {
+                        let percentage =
+                            (cstate_info.residency as f64 / total_residency as f64) * 100.0;
+                        if percentage >= 99.5 {
+                            "99+".to_string()
+                        } else if percentage >= 10.0 {
+                            format!("{percentage:.0}")
+                        } else if percentage >= 1.0 {
+                            format!("{percentage:.1}")
+                        } else if percentage > 0.0 {
+                            "<1".to_string()
+                        } else {
+                            "0".to_string()
+                        }
+                    } else {
+                        "-".to_string()
+                    }
+                } else {
+                    "-".to_string()
+                }
             }),
         });
     }
