@@ -1143,7 +1143,7 @@ int perf_sample_handler(struct bpf_perf_event_data *ctx)
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.perf_sample.pid = bpf_get_current_pid_tgid() & 0xffffffff;
-	event->event.perf_sample.instruction_pointer = ctx->regs.ip;
+	event->event.perf_sample.instruction_pointer = PT_REGS_IP(&ctx->regs);
 	event->event.perf_sample.cpu_id = bpf_get_smp_processor_id();
 
 	// Get current task for layer ID lookup
@@ -1165,7 +1165,7 @@ int perf_sample_handler(struct bpf_perf_event_data *ctx)
 		event->event.perf_sample.kernel_stack_size = 0;
 		// Try fallback method for kernel stack - get current IP
 		if (event->event.perf_sample.is_kernel) {
-			event->event.perf_sample.kernel_stack[0] = ctx->regs.ip;
+			event->event.perf_sample.kernel_stack[0] = PT_REGS_IP(&ctx->regs);
 			event->event.perf_sample.kernel_stack_size = 1;
 		}
 	}
@@ -1181,7 +1181,7 @@ int perf_sample_handler(struct bpf_perf_event_data *ctx)
 		event->event.perf_sample.user_stack_size = 0;
 		// Try fallback method for user stack - get current IP if userspace
 		if (!event->event.perf_sample.is_kernel) {
-			event->event.perf_sample.user_stack[0] = ctx->regs.ip;
+			event->event.perf_sample.user_stack[0] = PT_REGS_IP(&ctx->regs);
 			event->event.perf_sample.user_stack_size = 1;
 		}
 	}
