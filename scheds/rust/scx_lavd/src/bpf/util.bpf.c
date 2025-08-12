@@ -34,6 +34,7 @@ volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
 const volatile bool	no_slice_boost;
+const volatile bool	per_cpu_dsq;
 const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
 const volatile u8	preempt_shift;
@@ -289,7 +290,7 @@ static void set_on_core_type(struct task_ctx *taskc,
 		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
 }
 
-static bool prob_x_out_of_y(u32 x, u32 y)
+bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 {
 	u32 r;
 
