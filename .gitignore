@@ -6,3 +6,8 @@ target
 .cache/
 .vscode/
 tags
+
+# Makefile build artifacts
+*.bpf.o
+*.skel.h
+lib/lib.bpf.o
