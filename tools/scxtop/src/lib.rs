@@ -22,6 +22,7 @@ mod mem_stats;
 mod network_stats;
 mod node_data;
 mod perfetto_trace;
+mod power_data;
 mod proc_data;
 pub mod profiling_events;
 pub mod search;
@@ -47,6 +48,9 @@ pub use mem_stats::MemStatSnapshot;
 pub use network_stats::NetworkStatSnapshot;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
+pub use power_data::{
+    CStateInfo, CorePowerData, PowerDataCollector, PowerSnapshot, SystemPowerData,
+};
 pub use proc_data::ProcData;
 pub use profiling_events::{
     available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
@@ -101,6 +105,8 @@ pub enum AppState {
     PerfEvent,
     /// Application is in the perf top view state.
     PerfTop,
+    /// Application is in the Power state.
+    Power,
     /// Application is in the Process state.
     Process,
     /// Application is in the scheduler state.
