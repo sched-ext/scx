@@ -238,7 +238,7 @@ static void do_core_compaction(void)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	struct cpdom_ctx *cpdomc;
-	int nr_active, nr_active_old, cpu, i;
+	int nr_active, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
 	bool need_kick;
 	u64 cpdom_id;
@@ -261,7 +261,6 @@ static void do_core_compaction(void)
 	 * active CPUs. Finally, obtain the CPU order list based on the current
 	 * load.
 	 */
-	nr_active_old = sys_stat.nr_active;
 	nr_active = calc_nr_active_cpus();
 	cpu_order = get_cpu_order();
 
