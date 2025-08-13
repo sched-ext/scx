@@ -2,7 +2,9 @@
 
 import argparse
 import asyncio
+import csv
 import glob
+import io
 import json
 import os
 import random
@@ -279,30 +281,6 @@ async def run_veristat():
     """Run veristat verification on all schedulers across all compatible kernels."""
     print("Running veristat verification...", flush=True)
 
-    async def extract_bpf_objects(scheduler_name: str, output_dir: str) -> List[str]:
-        """Extract BPF objects from scheduler binary using existing script."""
-
-        # Find the scheduler binary in target/debug
-        binary_path = f"target/debug/{scheduler_name}"
-        if not os.path.exists(binary_path):
-            raise Exception(f"Warning: Scheduler binary {binary_path} not found")
-
-        result = await run_command(
-            ["./scripts/extract_bpf_objects.sh", binary_path, output_dir]
-        )
-
-        # Find extracted .bpf.o files
-        bpf_objects = []
-        for file in os.listdir(output_dir):
-            if not file.endswith(".bpf.o"):
-                raise Exception(f"unexpected file {file} in extract dir")
-            bpf_objects.append(os.path.join(output_dir, file))
-
-        if not bpf_objects:
-            raise Exception(f"No BPF objects found for {scheduler_name}")
-
-        return bpf_objects
-
     async def get_veristat_result(kernel: str, bpf_objects: List[str]):
         try:
             stdout = await run_command_in_vm(
@@ -561,6 +539,36 @@ async def run_veristat():
             print("-" * 60)
             print(result["output"])
 
+        # Generate reproduction commands for failed symbols
+        if readable_failures:
+            print(f"\n" + "=" * 80)
+            print("REPRODUCTION COMMANDS FOR FAILED SYMBOLS")
+            print("=" * 80)
+            print("Run these commands to debug specific symbol failures locally:")
+            print()
+
+            reproduction_cmds = set()
+            for result in failure_results:
+                # Parse CSV to extract failed symbols
+                reader = csv.DictReader(io.StringIO(result["csv_data"].strip()))
+                for row in reader:
+                    cleaned_row = {
+                        key.strip(): value.strip() if isinstance(value, str) else value
+                        for key, value in row.items()
+                    }
+
+                    verdict = cleaned_row.get("verdict", "").lower()
+                    if verdict != "success":
+                        prog_name = cleaned_row.get("prog_name", "")
+                        if prog_name:
+                            reproduction_cmd = f"nix run \".github/include#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
+                            reproduction_cmds.add(reproduction_cmd)
+
+            for cmd in sorted(reproduction_cmds):
+                print(f"  $ {cmd}")
+
+            print()
+
         # Print final status and throw if there were failures
         if readable_failures:
             print(
@@ -575,6 +583,71 @@ async def run_veristat():
                 f"\n✓ Veristat verification completed successfully ({len(readable_successes)} schedulers passed)",
                 flush=True,
             )
+
+
+async def extract_bpf_objects(scheduler_name: str, output_dir: str) -> List[str]:
+    """Extract BPF objects from scheduler binary using existing script."""
+
+    # Find the scheduler binary in target/debug
+    binary_path = f"target/debug/{scheduler_name}"
+    if not os.path.exists(binary_path):
+        raise Exception(f"Warning: Scheduler binary {binary_path} not found")
+
+    result = await run_command(
+        ["./scripts/extract_bpf_objects.sh", binary_path, output_dir]
+    )
+
+    # Find extracted .bpf.o files
+    bpf_objects = []
+    for file in os.listdir(output_dir):
+        if not file.endswith(".bpf.o"):
+            raise Exception(f"unexpected file {file} in extract dir")
+        bpf_objects.append(os.path.join(output_dir, file))
+
+    if not bpf_objects:
+        raise Exception(f"No BPF objects found for {scheduler_name}")
+
+    return bpf_objects
+
+
+async def run_veristat_debug(kernel_name: str, scheduler_name: str, symbol_name: str):
+    """Run veristat in debug mode for a specific kernel/scheduler/symbol combination."""
+    print(
+        f"Running veristat debug mode for {scheduler_name} on {kernel_name}, symbol: {symbol_name}",
+        flush=True,
+    )
+
+    # Build the specific scheduler first
+    await run_command(["cargo", "build", "-p", scheduler_name], no_capture=True)
+
+    # Create temporary directory for BPF object extraction
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Extract BPF objects for the specific scheduler
+        scheduler_dir = os.path.join(temp_dir, scheduler_name)
+        os.makedirs(scheduler_dir)
+
+        bpf_objects = await extract_bpf_objects(scheduler_name, scheduler_dir)
+
+        # Run veristat with debug flags
+        await run_command_in_vm(
+            kernel_name,
+            [
+                "veristat",
+                "-f",
+                symbol_name,
+                "-vl2",
+            ]
+            + bpf_objects,
+            memory=2
+            * 1024
+            * 1024
+            * 1024,  # gets impossible to understand SEGVs with less RAM
+            no_capture=True,
+        )
+        print(
+            f"✓ Debug veristat completed for {scheduler_name}/{symbol_name} on {kernel_name}",
+            flush=True,
+        )
 
 
 async def run_tests_in_vm():
@@ -623,6 +696,15 @@ async def main():
     parser_veristat = subparsers.add_parser(
         "veristat", help="Run veristat verification on all schedulers"
     )
+    parser_veristat.add_argument(
+        "kernel_name", nargs="?", help="Kernel name for debug mode (optional)"
+    )
+    parser_veristat.add_argument(
+        "scheduler_name", nargs="?", help="Scheduler name for debug mode (optional)"
+    )
+    parser_veristat.add_argument(
+        "symbol_name", nargs="?", help="Symbol name for debug mode (optional)"
+    )
 
     parser_all = subparsers.add_parser("all", help="Run all commands")
 
@@ -642,7 +724,20 @@ async def main():
     elif args.command == "test":
         await run_tests()
     elif args.command == "veristat":
-        await run_veristat()
+        # Check if any debug mode arguments are provided
+        debug_args = [args.kernel_name, args.scheduler_name, args.symbol_name]
+        provided_args = [arg for arg in debug_args if arg is not None]
+
+        if provided_args:
+            if len(provided_args) != len(debug_args):
+                parser.error(
+                    "veristat debug mode requires all three arguments: kernel_name, scheduler_name, symbol_name"
+                )
+            await run_veristat_debug(
+                args.kernel_name, args.scheduler_name, args.symbol_name
+            )
+        else:
+            await run_veristat()
     elif args.command == "test-in-vm":
         run_tests_in_vm()
     elif args.command == "all":

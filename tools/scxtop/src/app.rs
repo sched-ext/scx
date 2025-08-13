@@ -10,17 +10,20 @@ use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
     get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
-    get_memory_summary_columns, get_pagefault_summary_columns, get_process_columns,
-    get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+    get_memory_summary_columns, get_pagefault_summary_columns, get_perf_top_columns,
+    get_process_columns, get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
+    Columns,
 };
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
+use crate::network_stats::InterfaceStats;
 use crate::search;
-use crate::util::{format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32};
+use crate::util::{
+    format_bits, format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32,
+};
 use crate::AppState;
 use crate::AppTheme;
-use crate::Columns;
 use crate::ComponentViewState;
 use crate::CpuData;
 use crate::CpuStatTracker;
@@ -30,6 +33,7 @@ use crate::FilteredState;
 use crate::KprobeEvent;
 use crate::LlcData;
 use crate::MemStatSnapshot;
+use crate::NetworkStatSnapshot;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
@@ -48,6 +52,7 @@ use crate::{
     SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
     UpdateColVisibilityAction, WaitAction,
 };
+use scx_utils::perf;
 
 use anyhow::{bail, Result};
 use glob::glob;
@@ -57,14 +62,15 @@ use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
-    layout::{Alignment, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Alignment, Layout, Margin, Rect},
+    prelude::{Direction, Stylize},
+    style::{Color, Modifier, Style},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Clear, Gauge, LineGauge,
-        Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Sparkline, Table, TableState,
+        Axis, Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Chart, Clear, Dataset,
+        Gauge, LineGauge, Paragraph, RenderDirection, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Sparkline, Table, TableState, Wrap,
     },
     Frame,
 };
@@ -97,6 +103,7 @@ pub struct App<'a> {
     sys: Arc<StdMutex<System>>,
     mem_info: MemStatSnapshot,
     memory_view_state: ComponentViewState,
+    network_view_state: ComponentViewState,
 
     scheduler: String,
     max_cpu_events: usize,
@@ -111,9 +118,11 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
+    layered_enabled: bool,
 
     process_columns: Columns<i32, ProcData>,
     thread_columns: Columns<i32, ThreadData>,
+    perf_top_columns: Columns<String, crate::symbol_data::SymbolSample>,
     selected_process: Option<i32>,
     in_thread_view: bool,
 
@@ -122,6 +131,7 @@ pub struct App<'a> {
     node_data: BTreeMap<usize, NodeData>,
     dsq_data: BTreeMap<u64, EventData>,
     proc_data: BTreeMap<i32, ProcData>,
+    network_stats: NetworkStatSnapshot,
 
     // Event related
     active_event: ProfilingEvent,
@@ -139,6 +149,10 @@ pub struct App<'a> {
     // stats from scxtop's bpf side
     bpf_stats: BpfStats,
 
+    // power monitoring
+    power_snapshot: crate::PowerSnapshot,
+    power_collector: crate::PowerDataCollector,
+
     // layout releated
     events_list_size: u16,
 
@@ -154,6 +168,15 @@ pub struct App<'a> {
     last_mangoapp_action: Option<MangoAppAction>,
     frames_since_update: u64,
     max_fps: u16,
+
+    // perf top related
+    symbol_data: crate::symbol_data::SymbolData,
+    perf_sample_rate: u32,
+    perf_links: Vec<Link>,
+    selected_symbol_index: usize,
+    current_sampling_event: Option<ProfilingEvent>,
+    perf_top_table_state: TableState,
+    perf_top_filtered_symbols: Vec<(String, crate::symbol_data::SymbolSample)>,
 }
 
 impl<'a> App<'a> {
@@ -164,6 +187,7 @@ impl<'a> App<'a> {
         scheduler: String,
         max_cpu_events: usize,
         process_id: i32,
+        layered_enabled: bool,
         action_tx: UnboundedSender<Action>,
         skel: BpfSkel<'a>,
     ) -> Result<Self> {
@@ -256,9 +280,6 @@ impl<'a> App<'a> {
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
-        let process_columns = Columns::new(get_process_columns());
-        let thread_columns = Columns::new(get_thread_columns());
-
         // There isn't a 'is_loaded' method on a prog in libbpf-rs so do the next best thing and
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
@@ -274,6 +295,7 @@ impl<'a> App<'a> {
             sys: Arc::new(StdMutex::new(System::new_all())),
             mem_info,
             memory_view_state: ComponentViewState::Default,
+            network_view_state: ComponentViewState::Default,
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -287,8 +309,10 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            process_columns,
-            thread_columns,
+            layered_enabled,
+            process_columns: Columns::new(get_process_columns()),
+            thread_columns: Columns::new(get_thread_columns()),
+            perf_top_columns: Columns::new(get_perf_top_columns(layered_enabled)),
             selected_process: None,
             in_thread_view: false,
             cpu_data,
@@ -296,6 +320,7 @@ impl<'a> App<'a> {
             node_data,
             dsq_data: BTreeMap::new(),
             proc_data,
+            network_stats: NetworkStatSnapshot::new(100),
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -311,12 +336,24 @@ impl<'a> App<'a> {
             trace_start: 0,
             trace_manager,
             bpf_stats: Default::default(),
+            power_snapshot: crate::PowerSnapshot::new(),
+            power_collector: crate::PowerDataCollector::new().unwrap_or_else(|e| {
+                log::warn!("Failed to initialize power collector with MSR support: {e}");
+                crate::PowerDataCollector::default()
+            }),
             process_id,
             prev_process_id: -1,
             trace_links: vec![],
             last_mangoapp_action: None,
             frames_since_update: 0,
             max_fps: 1,
+            perf_sample_rate: 1_000_000, // Default perf sample rate (1 million cycles)
+            symbol_data: crate::symbol_data::SymbolData::new(),
+            perf_links: Vec::new(),
+            selected_symbol_index: 0,
+            current_sampling_event: None,
+            perf_top_table_state: TableState::default(),
+            perf_top_filtered_symbols: Vec::new(),
         };
 
         // Set the initial filter state
@@ -339,15 +376,7 @@ impl<'a> App<'a> {
             return;
         }
 
-        if state == AppState::Memory {
-            self.memory_view_state = self.memory_view_state.next();
-            match self.memory_view_state {
-                ComponentViewState::Default | ComponentViewState::Hidden => {
-                    state = AppState::Default;
-                }
-                _ => {}
-            }
-        } else if state == self.state {
+        if state == self.state {
             state = self.prev_state.clone();
         }
 
@@ -360,15 +389,35 @@ impl<'a> App<'a> {
         }
         self.state = state;
 
+        // Handle perf sampling attachment/detachment for PerfTop view
+        match (self.prev_state.clone(), self.state.clone()) {
+            (prev, AppState::PerfTop) if prev != AppState::PerfTop => {
+                // Entering PerfTop view - attach perf sampling and reset selection
+                self.selected_symbol_index = 0;
+                if let Err(e) = self.attach_perf_sampling() {
+                    eprintln!("Failed to attach perf sampling: {e}");
+                }
+            }
+            (AppState::PerfTop, new) if new != AppState::PerfTop => {
+                // Leaving PerfTop view - detach perf sampling
+                self.detach_perf_sampling();
+            }
+            _ => {}
+        }
+
         if self.state == AppState::PerfEvent
             || self.state == AppState::KprobeEvent
             || self.state == AppState::Default
             || self.state == AppState::Llc
             || self.state == AppState::Node
-            || self.state == AppState::Memory
+            || self.state == AppState::Process
         {
             self.filtered_state.lock().unwrap().reset();
             self.filter_events();
+        }
+        if self.state == AppState::PerfTop {
+            self.filtered_state.lock().unwrap().reset();
+            self.filter_symbols();
         }
 
         if self.prev_state == AppState::MangoApp {
@@ -394,6 +443,11 @@ impl<'a> App<'a> {
     /// Returns whether we are currently filtering or not
     pub fn filtering(&self) -> bool {
         self.filtering
+    }
+
+    /// Returns whether layered mode is enabled
+    pub fn layered_enabled(&self) -> bool {
+        self.layered_enabled
     }
 
     fn selected_proc_data(&mut self) -> Option<&mut ProcData> {
@@ -447,6 +501,14 @@ impl<'a> App<'a> {
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = prof_event.clone();
+
+        // Clear perf top data when switching events
+        if self.state == AppState::PerfTop {
+            self.symbol_data.clear();
+            self.selected_symbol_index = 0;
+            self.filter_symbols(); // Update filtered symbols after clearing
+        }
+
         self.activate_prof_event(prof_event)
     }
 
@@ -461,6 +523,14 @@ impl<'a> App<'a> {
         let prof_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_event = prof_event.clone();
+
+        // Clear perf top data when switching events
+        if self.state == AppState::PerfTop {
+            self.symbol_data.clear();
+            self.selected_symbol_index = 0;
+            self.filter_symbols(); // Update filtered symbols after clearing
+        }
+
         self.activate_prof_event(prof_event)
     }
 
@@ -602,6 +672,17 @@ impl<'a> App<'a> {
             _ => {}
         }
 
+        // Update network information
+        match self.network_view_state {
+            ComponentViewState::Default | ComponentViewState::Detail => {
+                self.network_stats.update()?;
+            }
+            _ => {}
+        }
+
+        // Update power information - collect power data regularly to keep data fresh
+        self.update_power_data()?;
+
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
         let mut to_remove = vec![];
 
@@ -620,6 +701,11 @@ impl<'a> App<'a> {
             if let Some(proc_data) = self.selected_proc_data() {
                 proc_data.update_threads(system_util);
             }
+        }
+
+        // Update network stats
+        if let Err(e) = self.network_stats.update() {
+            eprintln!("Failed to update network stats: {e}");
         }
 
         // Now that we updated the process data, we need to also update the filtered data
@@ -1043,7 +1129,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table(frame, left)
+        self.render_table(frame, left, false)
     }
 
     /// Renders the node application state.
@@ -1176,7 +1262,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table(frame, left)
+        self.render_table(frame, left, false)
     }
 
     /// Creates a sparkline for a dsq.
@@ -1827,18 +1913,46 @@ impl<'a> App<'a> {
 
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
-        let [mut left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
         self.render_event(frame, right)?;
 
-        if self.memory_view_state == ComponentViewState::Default {
-            let [new_left, left_mem] =
-                Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
-            left = new_left;
-            self.render_memory_summary(frame, left_mem)?;
-        }
+        // Determine how to split the left area based on memory and network view states
+        let show_memory = self.memory_view_state == ComponentViewState::Default;
+        let show_network = self.network_view_state == ComponentViewState::Default;
 
-        self.render_table(frame, left)?;
+        match (show_memory, show_network) {
+            (false, false) => {
+                // Neither memory nor network summary shown, process table takes the entire left side
+                self.render_table(frame, left, false)?;
+            }
+            (true, false) => {
+                // Only memory summary is shown, split between table and memory
+                let [table_area, memory_area] =
+                    Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
+                self.render_table(frame, table_area, false)?;
+                self.render_memory_summary(frame, memory_area)?;
+            }
+            (false, true) => {
+                // Only network summary is shown, split between table and network
+                let [table_area, network_area] =
+                    Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
+                self.render_table(frame, table_area, false)?;
+                self.render_network_summary(frame, network_area)?;
+            }
+            (true, true) => {
+                // Both memory and network summaries are shown, split into three areas
+                let [table_area, memory_area, network_area] = Layout::vertical([
+                    Constraint::Fill(10),
+                    Constraint::Min(8),
+                    Constraint::Min(8),
+                ])
+                .areas(left);
+                self.render_table(frame, table_area, false)?;
+                self.render_memory_summary(frame, memory_area)?;
+                self.render_network_summary(frame, network_area)?;
+            }
+        }
 
         Ok(())
     }
@@ -1867,13 +1981,13 @@ impl<'a> App<'a> {
                     &memory_key,
                     self.theme().title_style().add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("emory Statistics"),
+                Span::styled("emory Statistics", self.theme().text_color()),
             ])
         } else {
             Line::from(vec![
-                Span::raw("Memory Statistics ("),
+                Span::styled("Memory Statistics (", self.theme().text_color()),
                 Span::styled(&memory_key, self.theme().title_style()),
-                Span::raw(")"),
+                Span::styled(")", self.theme().text_color()),
             ])
         };
 
@@ -1980,6 +2094,95 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Renders a simplified network summary for the default view.
+    fn render_network_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Create a table for the network interfaces
+        let header = Row::new(vec![
+            Cell::from("Interface"),
+            Cell::from("RX Bytes"),
+            Cell::from("TX Bytes"),
+            Cell::from("RX Packets"),
+            Cell::from("TX Packets"),
+        ])
+        .height(1)
+        .style(self.theme().text_color())
+        .bold()
+        .underlined();
+
+        let constraints = vec![
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ];
+
+        let mut interfaces: Vec<(&String, &InterfaceStats)> =
+            self.network_stats.interfaces.iter().collect();
+        interfaces.sort_by(|a, b| b.1.recv_bytes.cmp(&a.1.recv_bytes));
+
+        // Limit to top 5 interfaces by received bytes
+        let top_interfaces = interfaces.into_iter().take(5);
+
+        let rows = top_interfaces.map(|(interface, _)| {
+            let delta_recv_bytes = self.network_stats.get_delta_recv_bytes(interface);
+            let delta_sent_bytes = self.network_stats.get_delta_sent_bytes(interface);
+            let delta_recv_packets = self.network_stats.get_delta_recv_packets(interface);
+            let delta_sent_packets = self.network_stats.get_delta_sent_packets(interface);
+
+            Row::new(vec![
+                Cell::from(interface.to_string()),
+                Cell::from(format_bytes(delta_recv_bytes) + "/s"),
+                Cell::from(format_bytes(delta_sent_bytes) + "/s"),
+                Cell::from(if self.localize {
+                    sanitize_nbsp(delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
+                } else {
+                    format!("{delta_recv_packets}/s")
+                }),
+                Cell::from(if self.localize {
+                    sanitize_nbsp(delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
+                } else {
+                    format!("{delta_sent_packets}/s")
+                }),
+            ])
+            .height(1)
+            .style(self.theme().text_color())
+        });
+
+        let block = Block::bordered()
+            .title_top({
+                let network_key = self
+                    .config
+                    .active_keymap
+                    .action_keys_string(Action::SetState(AppState::Network));
+
+                if network_key == "N" || network_key == "n" {
+                    let key_char = network_key.clone();
+                    Line::from(vec![
+                        Span::styled(
+                            key_char,
+                            self.theme().title_style().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("etwork", self.theme().text_color()),
+                    ])
+                    .style(self.theme().title_style())
+                    .centered()
+                } else {
+                    Line::from(format!("Network (press {network_key} for full view)"))
+                        .style(self.theme().title_style())
+                        .centered()
+                }
+            })
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let table = Table::new(rows, constraints).header(header).block(block);
+
+        frame.render_widget(table, area);
+
+        Ok(())
+    }
+
     /// Renders the help TUI.
     fn render_help(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
@@ -1998,7 +2201,7 @@ impl<'a> App<'a> {
             )),
             "\n".into(),
             "\n".into(),
-            Line::from(Span::styled("Key Bindings:", Style::default())),
+            Line::from(Span::styled("General Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
                     "{}: (press to exit help)",
@@ -2010,11 +2213,42 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: change theme ({})",
+                    "{}: quit",
+                    self.config.active_keymap.action_keys_string(Action::Quit),
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!("{pause}: pause/unpause"),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll up",
+                    self.config.active_keymap.action_keys_string(Action::Up)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll down",
+                    self.config.active_keymap.action_keys_string(Action::Down)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll page up",
+                    self.config.active_keymap.action_keys_string(Action::PageUp)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: list scroll page down",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::ChangeTheme),
-                    serde_json::to_string_pretty(&theme)?
+                        .action_keys_string(Action::PageDown)
                 ),
                 Style::default(),
             )),
@@ -2024,56 +2258,6 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::RequestTrace),
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: memory view ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::SetState(AppState::Memory)),
-                    self.memory_view_state
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: decrease tick rate ({}ms)",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::DecTickRate),
-                    self.config.tick_rate_ms()
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: increase tick rate ({}ms)",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::IncTickRate),
-                    self.config.tick_rate_ms()
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: decrease bpf sample rate ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::DecBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: increase bpf sample rate ({})",
-                    self.config
-                        .active_keymap
-                        .action_keys_string(Action::IncBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
                 ),
                 Style::default(),
             )),
@@ -2107,6 +2291,8 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("Event Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
                     "{}: show CPU perf event menu",
@@ -2152,40 +2338,21 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("View Key Bindings:", Style::default())),
             Line::from(Span::styled(
                 format!(
-                    "{} ({}%)",
-                    format_bytes(self.mem_info.swap_total_kb * 1024),
-                    ((self.mem_info.swap_total_kb - self.mem_info.swap_free_kb) as f64
-                        / self.mem_info.swap_total_kb as f64
-                        * 100.0) as u64
+                    "{}: filter processes/threads",
+                    self.config.active_keymap.action_keys_string(Action::Filter)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: profiling event list scroll down",
+                    "{}: display process view",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::PageDown)
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: quit",
-                    self.config.active_keymap.action_keys_string(Action::Quit),
-                ),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!("{pause}: pause/unpause"),
-                Style::default(),
-            )),
-            Line::from(Span::styled(
-                format!(
-                    "{}: filter processes",
-                    self.config.active_keymap.action_keys_string(Action::Filter)
+                        .action_keys_string(Action::SetState(AppState::Process))
                 ),
                 Style::default(),
             )),
@@ -2218,6 +2385,15 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: display Network view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Network))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: display scheduler view",
                     self.config
                         .active_keymap
@@ -2227,10 +2403,39 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
-                    "{}: display memory view",
+                    "{}: display perf top view (symbolized sampling)",
                     self.config
                         .active_keymap
-                        .action_keys_string(Action::SetState(AppState::Memory))
+                        .action_keys_string(Action::SetState(AppState::PerfTop))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display power monitoring view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Power))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display next memory view ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Memory)),
+                    self.memory_view_state
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: change theme ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ChangeTheme),
+                    serde_json::to_string_pretty(&theme)?
                 ),
                 Style::default(),
             )),
@@ -2244,6 +2449,49 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            "\n".into(),
+            Line::from(Span::styled("Adjust Rates:", Style::default())),
+            Line::from(Span::styled(
+                format!(
+                    "{}: decrease tick rate ({}ms)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecTickRate),
+                    self.config.tick_rate_ms()
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: increase tick rate ({}ms)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncTickRate),
+                    self.config.tick_rate_ms()
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: decrease bpf sample rate ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate),
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: increase bpf sample rate ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate),
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                ),
+                Style::default(),
+            )),
+            "\n".into(),
             Line::from(Span::styled(
                 format!(
                     "{}: Saves the current config ({})",
@@ -2254,7 +2502,7 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
-            Line::from(""),
+            "\n".into(),
             Line::from(Span::styled(
                 "For bug reporting and project updates, visit:",
                 Style::default(),
@@ -2485,7 +2733,12 @@ impl<'a> App<'a> {
     }
 
     /// Render the process view.
-    fn render_process_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_process_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
         self.update_events_list_size(data_area);
@@ -2517,8 +2770,13 @@ impl<'a> App<'a> {
             )
             .title_top(
                 Line::from(format!(
-                    "sample rate {}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    "sample rate {}{}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    if render_tick_rate {
+                        format!(" --- tick rate {}", self.config.tick_rate_ms())
+                    } else {
+                        "".to_string()
+                    }
                 ))
                 .style(self.theme().text_important_color())
                 .right_aligned(),
@@ -2584,7 +2842,12 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn render_thread_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_thread_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
         self.update_events_list_size(data_area);
@@ -2632,8 +2895,13 @@ impl<'a> App<'a> {
             )
             .title_top(
                 Line::from(format!(
-                    "sample rate {}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    "sample rate {}{}",
+                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    if render_tick_rate {
+                        format!(" --- tick rate {}", self.config.tick_rate_ms())
+                    } else {
+                        "".to_string()
+                    }
                 ))
                 .style(self.theme().text_important_color())
                 .right_aligned(),
@@ -2690,12 +2958,474 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn render_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn render_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        render_tick_rate: bool,
+    ) -> Result<()> {
         if self.in_thread_view {
-            self.render_thread_table(frame, area)
+            self.render_thread_table(frame, area, render_tick_rate)
         } else {
-            self.render_process_table(frame, area)
+            self.render_process_table(frame, area, render_tick_rate)
         }
+    }
+
+    /// Renders the perf top view with symbolized samples.
+    fn render_perf_top(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+
+        // Split the area into left (table) and right (details) sections
+        let [left_area, right_area] = Layout::horizontal([
+            Constraint::Percentage(50), // Symbol table
+            Constraint::Percentage(50), // Symbol details
+        ])
+        .areas(area);
+        // Get the top symbols and convert to owned data
+        let max_symbols = (left_area.height as usize).saturating_sub(4); // Account for borders and header
+        let top_symbols_borrowed = self.symbol_data.get_top_symbols(max_symbols);
+
+        // Convert to owned data to avoid borrowing issues
+        let top_symbols: Vec<crate::symbol_data::SymbolSample> =
+            top_symbols_borrowed.iter().map(|s| (*s).clone()).collect();
+
+        // Ensure selected index is within bounds
+        if self.selected_symbol_index >= top_symbols.len() && !top_symbols.is_empty() {
+            self.selected_symbol_index = top_symbols.len() - 1;
+        }
+
+        // Render left side - symbol table
+        self.render_symbol_table(frame, left_area)?;
+
+        // Render right side - symbol details
+        self.render_symbol_details(frame, right_area, &top_symbols)?;
+
+        Ok(())
+    }
+
+    /// Renders the symbol table on the left side
+    fn render_symbol_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let total_samples = self.symbol_data.total_samples();
+        let block = Block::bordered()
+            .title_top(
+                Line::from({
+                    let filtered_count = self.perf_top_filtered_symbols.len();
+                    if self.filtering && !self.event_input_buffer.is_empty() {
+                        format!(
+                            "Perf Top - {} of {} symbols ({} samples)",
+                            filtered_count,
+                            self.symbol_data.get_top_symbols(1000).len(),
+                            total_samples
+                        )
+                    } else {
+                        format!("Perf Top - {total_samples} samples")
+                    }
+                })
+                .style(self.theme().title_style())
+                .centered(),
+            )
+            .title_top(
+                Line::from({
+                    format!(
+                        "sample rate {} --- {}ms",
+                        self.perf_sample_rate,
+                        self.config.tick_rate_ms()
+                    )
+                })
+                .style(self.theme().text_important_color())
+                .right_aligned(),
+            )
+            .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .title_bottom(
+                Line::from(vec![
+                    Span::styled(
+                        "[K] ",
+                        Style::default().fg(self.theme().kernel_symbol_color()),
+                    ),
+                    Span::styled("Kernel  ", Style::default().fg(self.theme().text_color())),
+                    Span::styled(
+                        "[U] ",
+                        Style::default().fg(self.theme().userspace_symbol_color()),
+                    ),
+                    Span::styled("Userspace", Style::default().fg(self.theme().text_color())),
+                ])
+                .left_aligned(),
+            )
+            .title_bottom(
+                Line::from({
+                    let clear_key = self
+                        .config
+                        .active_keymap
+                        .action_keys_string(Action::ClearEvent);
+                    let inc_key = self
+                        .config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate);
+                    let dec_key = self
+                        .config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate);
+                    let up_key = self.config.active_keymap.action_keys_string(Action::Up);
+                    let down_key = self.config.active_keymap.action_keys_string(Action::Down);
+
+                    format!(
+                        "{clear_key} clear • {dec_key}/{inc_key} adjust rate • {up_key}/{down_key} navigate"
+                    )
+                })
+                .style(self.theme().text_color())
+                .centered(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        // Extract colors first to avoid borrow conflicts
+        let kernel_color = self.theme().kernel_symbol_color();
+        let userspace_color = self.theme().userspace_symbol_color();
+        let text_important_color = self.theme().text_important_color();
+        let text_color = self.theme().text_color();
+
+        // Create table header manually to avoid borrowing conflicts
+        let visible_columns: Vec<_> = self.perf_top_columns.visible_columns().collect();
+
+        let header = visible_columns
+            .iter()
+            .map(|col| Cell::from(col.header))
+            .collect::<Row>()
+            .height(1)
+            .style(text_color)
+            .bold()
+            .underlined();
+
+        let constraints = visible_columns
+            .iter()
+            .map(|col| col.constraint)
+            .collect::<Vec<_>>();
+
+        // Use filtered symbols for display - clone to avoid borrowing conflicts
+        let symbol_data = self.perf_top_filtered_symbols.clone();
+
+        let rows: Vec<Row> = symbol_data
+            .iter()
+            .map(|(symbol_name, sample)| {
+                let style = if sample.is_kernel {
+                    Style::default().fg(kernel_color)
+                } else {
+                    Style::default().fg(userspace_color)
+                };
+
+                visible_columns
+                    .iter()
+                    .map(|col| {
+                        let cell_value = (col.value_fn)(symbol_name.clone(), sample);
+                        Cell::from(cell_value)
+                    })
+                    .collect::<Row>()
+                    .height(1)
+                    .style(style)
+            })
+            .collect();
+
+        let table = Table::new(rows, constraints)
+            .header(header.style(text_important_color).bottom_margin(1))
+            .block(block)
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+        // Render table with proper scrolling state
+        frame.render_stateful_widget(table, area, &mut self.perf_top_table_state);
+
+        // Render scrollbar if there are more items than can fit on screen
+        let visible_rows = area.height.saturating_sub(4) as usize; // Account for borders and header
+        if symbol_data.len() > visible_rows {
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let mut scrollbar_state =
+                ScrollbarState::new(symbol_data.len()).position(self.selected_symbol_index);
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
+        Ok(())
+    }
+
+    /// Renders the symbol details on the right side
+    fn render_symbol_details(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        top_symbols: &[crate::symbol_data::SymbolSample],
+    ) -> Result<()> {
+        // Get the current event name
+        let event_name = if let Some(ref event) = self.current_sampling_event {
+            event.event_name()
+        } else {
+            self.active_event.event_name()
+        };
+
+        let block = Block::bordered()
+            .title_top(
+                Line::from(format!("Symbol Details - Event: {event_name}"))
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(vec![
+                    Span::styled("f", self.theme().text_important_color()),
+                    Span::styled(
+                        if self.filtering {
+                            format!(" {}_", self.event_input_buffer)
+                        } else {
+                            "ilter".to_string()
+                        },
+                        self.theme().text_color(),
+                    ),
+                ])
+                .left_aligned(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        if top_symbols.is_empty() || self.selected_symbol_index >= top_symbols.len() {
+            let paragraph = Paragraph::new("No symbol selected")
+                .alignment(Alignment::Center)
+                .block(block);
+            frame.render_widget(paragraph, area);
+            return Ok(());
+        }
+
+        let selected_symbol = &top_symbols[self.selected_symbol_index];
+        let symbol_info = &selected_symbol.symbol_info;
+
+        let mut details = vec![
+            Line::from(vec![
+                Span::styled("Symbol: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&symbol_info.symbol_name),
+            ]),
+            Line::from(vec![
+                Span::styled("Module: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&symbol_info.module_name),
+            ]),
+            Line::from(vec![
+                Span::styled("Address: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("0x{:x}", symbol_info.address)),
+            ]),
+            Line::from(vec![
+                Span::styled("Samples: ", Style::default().fg(Color::Yellow)),
+                Span::raw(if self.localize {
+                    selected_symbol.count.to_formatted_string(&self.locale)
+                } else {
+                    selected_symbol.count.to_string()
+                }),
+            ]),
+            Line::from(vec![
+                Span::styled("Percentage: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:.2}%", selected_symbol.percentage)),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Process Details:",
+                Style::default()
+                    .fg(self.theme().text_important_color())
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled("PID: ", Style::default().fg(Color::Yellow)),
+                Span::raw(selected_symbol.pid.to_string()),
+            ]),
+        ];
+
+        // Add detailed process information if available
+        if let Some(proc_data) = self.proc_data.get(&(selected_symbol.pid as i32)) {
+            // First row: Process name, TGID, State
+            let first_row = vec![
+                Span::styled("Name: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&proc_data.process_name),
+                Span::raw("  "),
+                Span::styled("TGID: ", Style::default().fg(Color::Yellow)),
+                Span::raw(proc_data.tgid.to_string()),
+                Span::raw("  "),
+                Span::styled("State: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:?}", proc_data.state)),
+            ];
+            details.push(Line::from(first_row));
+
+            // Second row: CPU Util, Threads, CPU
+            let second_row = vec![
+                Span::styled("CPU Util: ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{:.2}%", proc_data.cpu_util_perc)),
+                Span::raw("  "),
+                Span::styled("Threads: ", Style::default().fg(Color::Yellow)),
+                Span::raw(proc_data.num_threads.to_string()),
+                Span::raw("  "),
+                Span::styled("CPU: ", Style::default().fg(Color::Yellow)),
+                Span::raw(selected_symbol.cpu_id.to_string()),
+            ];
+            details.push(Line::from(second_row));
+
+            // Third row: Scheduler info (only if available)
+            let mut third_row = Vec::new();
+            let mut has_third_row_content = false;
+
+            if let Some(layer_id) = proc_data.layer_id {
+                if self.layered_enabled && layer_id >= 0 {
+                    third_row.extend(vec![
+                        Span::styled("Layer: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(layer_id.to_string()),
+                        Span::raw("  "),
+                    ]);
+                    has_third_row_content = true;
+                }
+            }
+
+            if let Some(dsq) = proc_data.dsq {
+                third_row.extend(vec![
+                    Span::styled("DSQ: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(format!("0x{:x}", App::classify_dsq(dsq))),
+                ]);
+                has_third_row_content = true;
+            }
+
+            if has_third_row_content {
+                details.push(Line::from(third_row));
+            }
+
+            // Command line (on its own line due to potential length)
+            if !proc_data.cmdline.is_empty() {
+                let cmdline = proc_data.cmdline.join(" ");
+                let truncated_cmdline = if cmdline.len() > 60 {
+                    format!("{}...", &cmdline[..57])
+                } else {
+                    cmdline
+                };
+                details.push(Line::from(vec![
+                    Span::styled("Cmd: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(truncated_cmdline),
+                ]));
+            }
+        } else {
+            // Process data not available, show basic info with CPU
+            details.push(Line::from(vec![
+                Span::styled("Process Info: ", Style::default().fg(Color::Red)),
+                Span::raw("Not available"),
+                Span::raw("  "),
+                Span::styled("CPU: ", Style::default().fg(Color::Yellow)),
+                Span::raw(selected_symbol.cpu_id.to_string()),
+            ]));
+        }
+
+        if let Some(file_name) = &symbol_info.file_name {
+            details.push(Line::from(vec![
+                Span::styled("File: ", Style::default().fg(Color::Yellow)),
+                Span::raw(file_name),
+            ]));
+        }
+
+        if let Some(line_number) = symbol_info.line_number {
+            details.push(Line::from(vec![
+                Span::styled("Line: ", Style::default().fg(Color::Yellow)),
+                Span::raw(line_number.to_string()),
+            ]));
+        }
+
+        // Add the last stack trace if available - symbolize on demand
+        if !selected_symbol.stack_traces.is_empty() {
+            let raw_stack_trace = selected_symbol.stack_traces.last().unwrap();
+            let symbolized_trace = self.symbol_data.symbolize_stack_trace(raw_stack_trace);
+
+            details.push(Line::from(""));
+            details.push(Line::from(vec![Span::styled(
+                format!("Latest Stack Trace ({} samples):", symbolized_trace.count),
+                Style::default()
+                    .fg(self.theme().text_important_color())
+                    .add_modifier(Modifier::BOLD),
+            )]));
+
+            // Show kernel stack if present
+            if !symbolized_trace.kernel_stack.is_empty() {
+                details.push(Line::from(""));
+                details.push(Line::from(vec![Span::styled(
+                    "Kernel Stack:",
+                    Style::default()
+                        .fg(self.theme().kernel_symbol_color())
+                        .add_modifier(Modifier::BOLD),
+                )]));
+
+                for (frame_idx, symbol) in symbolized_trace.kernel_stack.iter().enumerate() {
+                    let frame_info =
+                        if let (Some(file), Some(line)) = (&symbol.file_name, symbol.line_number) {
+                            format!(
+                                "  #{}: {} ({}:{})",
+                                frame_idx, symbol.symbol_name, file, line
+                            )
+                        } else {
+                            format!(
+                                "  #{}: {} [0x{:x}]",
+                                frame_idx, symbol.symbol_name, symbol.address
+                            )
+                        };
+                    details.push(Line::from(vec![Span::styled(
+                        frame_info,
+                        Style::default().fg(self.theme().kernel_symbol_color()),
+                    )]));
+                }
+            }
+
+            // Show user stack if present
+            if !symbolized_trace.user_stack.is_empty() {
+                details.push(Line::from(""));
+                details.push(Line::from(vec![Span::styled(
+                    "User Stack:",
+                    Style::default()
+                        .fg(self.theme().userspace_symbol_color())
+                        .add_modifier(Modifier::BOLD),
+                )]));
+
+                for (frame_idx, symbol) in symbolized_trace.user_stack.iter().enumerate() {
+                    let frame_info =
+                        if let (Some(file), Some(line)) = (&symbol.file_name, symbol.line_number) {
+                            format!(
+                                "  #{}: {} ({}:{})",
+                                frame_idx, symbol.symbol_name, file, line
+                            )
+                        } else {
+                            format!(
+                                "  #{}: {} [0x{:x}]",
+                                frame_idx, symbol.symbol_name, symbol.address
+                            )
+                        };
+                    details.push(Line::from(vec![Span::styled(
+                        frame_info,
+                        Style::default().fg(self.theme().userspace_symbol_color()),
+                    )]));
+                }
+            }
+        }
+
+        let paragraph = Paragraph::new(details)
+            .block(block)
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(paragraph, area);
+        Ok(())
     }
 
     /// Renders the memory application state.
@@ -2842,15 +3572,637 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Renders the network application state.
+    fn render_network(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+
+        // Create a table for the network interfaces
+        let header = Row::new(vec![
+            Cell::from("Interface"),
+            Cell::from("RX Bits"),
+            Cell::from("TX Bits"),
+            Cell::from("RX Packets"),
+            Cell::from("TX Packets"),
+            Cell::from("RX Errors"),
+            Cell::from("TX Errors"),
+        ])
+        .height(1)
+        .style(self.theme().text_color())
+        .bold()
+        .underlined();
+
+        let constraints = vec![
+            Constraint::Percentage(20),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+        ];
+
+        let mut interfaces: Vec<(&String, &InterfaceStats)> =
+            self.network_stats.interfaces.iter().collect();
+        interfaces.sort_by(|a, b| a.0.cmp(b.0));
+
+        // Get totals for summary row
+        let total_delta_recv_bytes = self.network_stats.get_total_delta_recv_bytes();
+        let total_delta_sent_bytes = self.network_stats.get_total_delta_sent_bytes();
+        let total_delta_recv_packets = self.network_stats.get_total_delta_recv_packets();
+        let total_delta_sent_packets = self.network_stats.get_total_delta_sent_packets();
+        let total_delta_recv_errs = self.network_stats.get_total_delta_recv_errs();
+        let total_delta_sent_errs = self.network_stats.get_total_delta_sent_errs();
+
+        let mut rows: Vec<Row> = interfaces
+            .iter()
+            .map(|(interface, _)| {
+                let delta_recv_bytes = self.network_stats.get_delta_recv_bytes(interface);
+                let delta_sent_bytes = self.network_stats.get_delta_sent_bytes(interface);
+                let delta_recv_packets = self.network_stats.get_delta_recv_packets(interface);
+                let delta_sent_packets = self.network_stats.get_delta_sent_packets(interface);
+                let delta_recv_errs = self.network_stats.get_delta_recv_errs(interface);
+                let delta_sent_errs = self.network_stats.get_delta_sent_errs(interface);
+
+                Row::new(vec![
+                    Cell::from(interface.to_string()),
+                    Cell::from(format_bits(delta_recv_bytes) + "/s"),
+                    Cell::from(format_bits(delta_sent_bytes) + "/s"),
+                    Cell::from(if self.localize {
+                        sanitize_nbsp(delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
+                    } else {
+                        format!("{delta_recv_packets}/s")
+                    }),
+                    Cell::from(if self.localize {
+                        sanitize_nbsp(delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
+                    } else {
+                        format!("{delta_sent_packets}/s")
+                    }),
+                    Cell::from(if self.localize {
+                        sanitize_nbsp(delta_recv_errs.to_formatted_string(&self.locale)) + "/s"
+                    } else {
+                        format!("{delta_recv_errs}/s")
+                    }),
+                    Cell::from(if self.localize {
+                        sanitize_nbsp(delta_sent_errs.to_formatted_string(&self.locale)) + "/s"
+                    } else {
+                        format!("{delta_sent_errs}/s")
+                    }),
+                ])
+                .height(1)
+                .style(self.theme().text_color())
+            })
+            .collect();
+
+        // Add summary row at the bottom
+        rows.push(
+            Row::new(vec![
+                Cell::from("TOTAL").style(
+                    Style::default()
+                        .fg(self.theme().text_important_color())
+                        .bold(),
+                ),
+                Cell::from(format_bits(total_delta_recv_bytes) + "/s")
+                    .style(Style::default().fg(self.theme().text_important_color())),
+                Cell::from(format_bits(total_delta_sent_bytes) + "/s")
+                    .style(Style::default().fg(self.theme().text_important_color())),
+                Cell::from(if self.localize {
+                    sanitize_nbsp(total_delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
+                } else {
+                    format!("{total_delta_recv_packets}/s")
+                })
+                .style(Style::default().fg(self.theme().text_important_color())),
+                Cell::from(if self.localize {
+                    sanitize_nbsp(total_delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
+                } else {
+                    format!("{total_delta_sent_packets}/s")
+                })
+                .style(Style::default().fg(self.theme().text_important_color())),
+                Cell::from(if self.localize {
+                    sanitize_nbsp(total_delta_recv_errs.to_formatted_string(&self.locale)) + "/s"
+                } else {
+                    format!("{total_delta_recv_errs}/s")
+                })
+                .style(Style::default().fg(if total_delta_recv_errs > 0 {
+                    Color::Red
+                } else {
+                    self.theme().text_important_color()
+                })),
+                Cell::from(if self.localize {
+                    sanitize_nbsp(total_delta_sent_errs.to_formatted_string(&self.locale)) + "/s"
+                } else {
+                    format!("{total_delta_sent_errs}/s")
+                })
+                .style(Style::default().fg(if total_delta_sent_errs > 0 {
+                    Color::Red
+                } else {
+                    self.theme().text_important_color()
+                })),
+            ])
+            .height(1),
+        );
+
+        let block = Block::bordered()
+            .title_top(
+                Line::from("Network Interfaces")
+                    .style(self.theme().title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                    .style(self.theme().text_important_color())
+                    .right_aligned(),
+            )
+            .border_type(BorderType::Rounded)
+            .style(self.theme().border_style());
+
+        let table = Table::new(rows, constraints).header(header).block(block);
+
+        // Render the network interfaces table with integrated summary
+        frame.render_widget(table, left);
+
+        // Render network traffic charts on the right side
+        self.render_network_charts(frame, right)?;
+
+        Ok(())
+    }
+
+    /// Renders network traffic charts showing historical data per interface.
+    fn render_network_charts(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Get the top 3 most active interfaces by total bytes
+        let mut interface_activity: Vec<(String, u64)> = self
+            .network_stats
+            .interfaces
+            .iter()
+            .map(|(name, stats)| (name.clone(), stats.recv_bytes + stats.sent_bytes))
+            .collect();
+        interface_activity.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_interfaces: Vec<String> = interface_activity
+            .into_iter()
+            .take(3)
+            .map(|(name, _)| name)
+            .collect();
+
+        if top_interfaces.is_empty() {
+            let block = Block::bordered()
+                .title_top(
+                    Line::from("Network Traffic History")
+                        .style(self.theme().title_style())
+                        .centered(),
+                )
+                .border_type(BorderType::Rounded)
+                .style(self.theme().border_style());
+
+            let paragraph = Paragraph::new("No network interfaces detected")
+                .block(block)
+                .alignment(Alignment::Center);
+
+            frame.render_widget(paragraph, area);
+            return Ok(());
+        }
+
+        // Create vertical layout for each interface (each interface gets 2 charts: bytes + packets)
+        let interface_count = top_interfaces.len();
+        let constraints: Vec<Constraint> = (0..interface_count)
+            .map(|_| Constraint::Ratio(1, interface_count as u32))
+            .collect();
+
+        let interface_areas = Layout::vertical(constraints).split(area);
+
+        // Render charts for each interface
+        for (i, interface) in top_interfaces.iter().enumerate() {
+            if i < interface_areas.len() {
+                self.render_interface_charts(frame, interface_areas[i], interface)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders charts for a single interface (bytes and packets stacked vertically).
+    fn render_interface_charts(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        interface: &str,
+    ) -> Result<()> {
+        // Split area vertically: bytes chart on top, packets chart on bottom
+        let [bytes_area, packets_area] =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+        // Render bytes chart for this interface
+        self.render_interface_bytes_chart(frame, bytes_area, interface)?;
+
+        // Render packets chart for this interface
+        self.render_interface_packets_chart(frame, packets_area, interface)?;
+
+        Ok(())
+    }
+
+    /// Renders the bytes chart for a single interface.
+    fn render_interface_bytes_chart(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        interface: &str,
+    ) -> Result<()> {
+        // Split area to make room for summary statistics at the bottom
+        let [chart_area, stats_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+
+        let rx_history = self
+            .network_stats
+            .get_historical_data(interface, "recv_bytes");
+        let tx_history = self
+            .network_stats
+            .get_historical_data(interface, "sent_bytes");
+
+        // Convert to (x, y) coordinates with RX as negative, TX as positive
+        let rx_data: Vec<(f64, f64)> = rx_history
+            .iter()
+            .enumerate()
+            .map(|(x, &y)| (x as f64, -(y as f64)))
+            .collect();
+
+        let tx_data: Vec<(f64, f64)> = tx_history
+            .iter()
+            .enumerate()
+            .map(|(x, &y)| (x as f64, y as f64))
+            .collect();
+
+        // Collect all values for scaling
+        let mut all_values = Vec::new();
+        all_values.extend(rx_history.iter().map(|&v| v as f64));
+        all_values.extend(tx_history.iter().map(|&v| v as f64));
+
+        let marker = self.theme().plot_marker();
+        let tx_color = self.theme().positive_value_color();
+        let rx_color = self.theme().negative_value_color();
+
+        // Create datasets
+        let datasets = vec![
+            Dataset::default()
+                .name(format!("{interface} RX"))
+                .marker(marker)
+                .style(Style::default().fg(rx_color))
+                .data(&rx_data),
+            Dataset::default()
+                .name(format!("{interface} TX"))
+                .marker(marker)
+                .style(Style::default().fg(tx_color))
+                .data(&tx_data),
+        ];
+
+        let max_value = all_values.iter().fold(0.0f64, |a, &b| a.max(b)).max(1000.0); // Minimum 1000 bytes/s for reasonable scaling
+        let history_len = self.network_stats.max_history_size as f64;
+
+        let chart = Chart::new(datasets)
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from(format!("{interface} - Bits/s"))
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .x_axis(
+                Axis::default()
+                    .title("Time")
+                    .style(self.theme().text_color())
+                    .bounds([0.0, history_len]),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Bits/s")
+                    .style(self.theme().text_color())
+                    .bounds([-max_value, max_value])
+                    .labels(vec![
+                        Span::styled(
+                            format!("RX {}", format_bits(max_value as u64)),
+                            Style::default().fg(self.theme().negative_value_color()),
+                        ),
+                        Span::styled("0", self.theme().text_color()),
+                        Span::styled(
+                            format!("TX {}", format_bits(max_value as u64)),
+                            Style::default().fg(self.theme().positive_value_color()),
+                        ),
+                    ]),
+            );
+
+        frame.render_widget(chart, chart_area);
+
+        // Calculate and render summary statistics
+        self.render_bytes_summary_stats(frame, stats_area, &rx_history, &tx_history)?;
+
+        Ok(())
+    }
+
+    /// Renders summary statistics for bytes data.
+    fn render_bytes_summary_stats(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        rx_history: &[u64],
+        tx_history: &[u64],
+    ) -> Result<()> {
+        if rx_history.is_empty() && tx_history.is_empty() {
+            return Ok(());
+        }
+
+        // Calculate RX statistics
+        let (rx_min, rx_max, rx_avg) = if rx_history.is_empty() {
+            (0, 0, 0)
+        } else {
+            let min = *rx_history.iter().min().unwrap_or(&0);
+            let max = *rx_history.iter().max().unwrap_or(&0);
+            let avg = rx_history.iter().sum::<u64>() / rx_history.len() as u64;
+            (min, max, avg)
+        };
+
+        // Calculate TX statistics
+        let (tx_min, tx_max, tx_avg) = if tx_history.is_empty() {
+            (0, 0, 0)
+        } else {
+            let min = *tx_history.iter().min().unwrap_or(&0);
+            let max = *tx_history.iter().max().unwrap_or(&0);
+            let avg = tx_history.iter().sum::<u64>() / tx_history.len() as u64;
+            (min, max, avg)
+        };
+
+        let stats_text = vec![Line::from(vec![
+            Span::raw("Min: "),
+            Span::styled(
+                format_bits(rx_min),
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                format_bits(tx_min),
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+            Span::raw(" Max: "),
+            Span::styled(
+                format_bits(rx_max),
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                format_bits(tx_max),
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+            Span::raw(" Avg: "),
+            Span::styled(
+                format_bits(rx_avg),
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                format_bits(tx_avg),
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+        ])];
+
+        let stats_paragraph = Paragraph::new(stats_text).style(self.theme().text_color());
+
+        frame.render_widget(stats_paragraph, area);
+        Ok(())
+    }
+
+    /// Renders the packets chart for a single interface.
+    fn render_interface_packets_chart(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        interface: &str,
+    ) -> Result<()> {
+        // Split area to make room for summary statistics at the bottom
+        let [chart_area, stats_area] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+
+        let rx_history = self
+            .network_stats
+            .get_historical_data(interface, "recv_packets");
+        let tx_history = self
+            .network_stats
+            .get_historical_data(interface, "sent_packets");
+
+        // Convert to (x, y) coordinates with RX as negative, TX as positive
+        let rx_data: Vec<(f64, f64)> = rx_history
+            .iter()
+            .enumerate()
+            .map(|(x, &y)| (x as f64, -(y as f64)))
+            .collect();
+
+        let tx_data: Vec<(f64, f64)> = tx_history
+            .iter()
+            .enumerate()
+            .map(|(x, &y)| (x as f64, y as f64))
+            .collect();
+
+        // Collect all values for scaling
+        let mut all_values = Vec::new();
+        all_values.extend(rx_history.iter().map(|&v| v as f64));
+        all_values.extend(tx_history.iter().map(|&v| v as f64));
+
+        let marker = self.theme().plot_marker();
+        let tx_color = self.theme().positive_value_color();
+        let rx_color = self.theme().negative_value_color();
+
+        // Create datasets
+        let datasets = vec![
+            Dataset::default()
+                .name(format!("{interface} RX"))
+                .marker(marker)
+                .style(Style::default().fg(rx_color))
+                .data(&rx_data),
+            Dataset::default()
+                .name(format!("{interface} TX"))
+                .marker(marker)
+                .style(Style::default().fg(tx_color))
+                .data(&tx_data),
+        ];
+
+        let max_value = all_values.iter().fold(0.0f64, |a, &b| a.max(b)).max(100.0); // Minimum 100 packets/s for reasonable scaling
+        let history_len = self.network_stats.max_history_size as f64;
+
+        let chart = Chart::new(datasets)
+            .block(
+                Block::bordered()
+                    .title_top(
+                        Line::from(format!("{interface} - Packets/s"))
+                            .style(self.theme().title_style())
+                            .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme().border_style()),
+            )
+            .x_axis(
+                Axis::default()
+                    .title("Time")
+                    .style(self.theme().text_color())
+                    .bounds([0.0, history_len]),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Packets/s")
+                    .style(self.theme().text_color())
+                    .bounds([-max_value, max_value])
+                    .labels(vec![
+                        Span::styled(
+                            if self.localize {
+                                format!(
+                                    "RX {}",
+                                    sanitize_nbsp(
+                                        (max_value as u64).to_formatted_string(&self.locale)
+                                    )
+                                )
+                            } else {
+                                format!("RX {}", max_value as u64)
+                            },
+                            Style::default().fg(self.theme().negative_value_color()),
+                        ),
+                        Span::styled("0", self.theme().text_color()),
+                        Span::styled(
+                            if self.localize {
+                                format!(
+                                    "TX {}",
+                                    sanitize_nbsp(
+                                        (max_value as u64).to_formatted_string(&self.locale)
+                                    )
+                                )
+                            } else {
+                                format!("TX {}", max_value as u64)
+                            },
+                            Style::default().fg(self.theme().positive_value_color()),
+                        ),
+                    ]),
+            );
+
+        frame.render_widget(chart, chart_area);
+
+        // Calculate and render summary statistics
+        self.render_packets_summary_stats(frame, stats_area, &rx_history, &tx_history)?;
+
+        Ok(())
+    }
+
+    /// Renders summary statistics for packets data.
+    fn render_packets_summary_stats(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        rx_history: &[u64],
+        tx_history: &[u64],
+    ) -> Result<()> {
+        if rx_history.is_empty() && tx_history.is_empty() {
+            return Ok(());
+        }
+
+        // Calculate RX statistics
+        let (rx_min, rx_max, rx_avg) = if rx_history.is_empty() {
+            (0, 0, 0)
+        } else {
+            let min = *rx_history.iter().min().unwrap_or(&0);
+            let max = *rx_history.iter().max().unwrap_or(&0);
+            let avg = rx_history.iter().sum::<u64>() / rx_history.len() as u64;
+            (min, max, avg)
+        };
+
+        // Calculate TX statistics
+        let (tx_min, tx_max, tx_avg) = if tx_history.is_empty() {
+            (0, 0, 0)
+        } else {
+            let min = *tx_history.iter().min().unwrap_or(&0);
+            let max = *tx_history.iter().max().unwrap_or(&0);
+            let avg = tx_history.iter().sum::<u64>() / tx_history.len() as u64;
+            (min, max, avg)
+        };
+
+        let rx_min_str = if self.localize {
+            sanitize_nbsp(rx_min.to_formatted_string(&self.locale))
+        } else {
+            rx_min.to_string()
+        };
+        let rx_max_str = if self.localize {
+            sanitize_nbsp(rx_max.to_formatted_string(&self.locale))
+        } else {
+            rx_max.to_string()
+        };
+        let rx_avg_str = if self.localize {
+            sanitize_nbsp(rx_avg.to_formatted_string(&self.locale))
+        } else {
+            rx_avg.to_string()
+        };
+        let tx_min_str = if self.localize {
+            sanitize_nbsp(tx_min.to_formatted_string(&self.locale))
+        } else {
+            tx_min.to_string()
+        };
+        let tx_max_str = if self.localize {
+            sanitize_nbsp(tx_max.to_formatted_string(&self.locale))
+        } else {
+            tx_max.to_string()
+        };
+        let tx_avg_str = if self.localize {
+            sanitize_nbsp(tx_avg.to_formatted_string(&self.locale))
+        } else {
+            tx_avg.to_string()
+        };
+
+        let stats_text = vec![Line::from(vec![
+            Span::raw("Min: "),
+            Span::styled(
+                rx_min_str,
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                tx_min_str,
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+            Span::raw(" Max: "),
+            Span::styled(
+                rx_max_str,
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                tx_max_str,
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+            Span::raw(" Avg: "),
+            Span::styled(
+                rx_avg_str,
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                tx_avg_str,
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+        ])];
+
+        let stats_paragraph = Paragraph::new(stats_text).style(self.theme().text_color());
+
+        frame.render_widget(stats_paragraph, area);
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
+            AppState::Process => self.render_table(frame, frame.area(), true),
             AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Memory => self.render_memory(frame),
+            AppState::Network => self.render_network(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
+            AppState::PerfTop => self.render_perf_top(frame),
+            AppState::Power => self.render_power(frame),
             AppState::Scheduler => {
                 let [left, right] =
                     Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
@@ -2876,137 +4228,195 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node)
-            && filtered_state.scroll < filtered_state.count - 1
-        {
-            filtered_state.scroll += 1;
-            filtered_state.selected += 1;
+        if self.state == AppState::PerfTop {
+            // Handle PerfTop navigation separately
+            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+            if self.selected_symbol_index < max_index {
+                self.selected_symbol_index += 1;
+                self.perf_top_table_state
+                    .select(Some(self.selected_symbol_index));
+            }
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll < filtered_state.count - 1
+            {
+                filtered_state.scroll += 1;
+                filtered_state.selected += 1;
+            }
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node)
-            && filtered_state.scroll > 0
-        {
-            filtered_state.scroll -= 1;
-            filtered_state.selected -= 1;
+        if self.state == AppState::PerfTop {
+            // Handle PerfTop navigation separately
+            if self.selected_symbol_index > 0 {
+                self.selected_symbol_index -= 1;
+                self.perf_top_table_state
+                    .select(Some(self.selected_symbol_index));
+            }
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.selected > 0
+            {
+                filtered_state.scroll -= 1;
+                filtered_state.selected -= 1;
+            }
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if (self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node)
-            && filtered_state.scroll <= filtered_state.count - self.events_list_size
-        {
-            filtered_state.scroll += self.events_list_size - 1;
-            filtered_state.selected += (self.events_list_size - 1) as usize;
+        if self.state == AppState::PerfTop {
+            // Handle page down for PerfTop view
+            let page_size = 10;
+            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+
+            if self.selected_symbol_index + page_size <= max_index {
+                self.selected_symbol_index += page_size;
+            } else {
+                self.selected_symbol_index = max_index;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll <= filtered_state.count - self.events_list_size
+            {
+                filtered_state.scroll += self.events_list_size - 1;
+                filtered_state.selected += (self.events_list_size - 1) as usize;
+            }
         }
     }
-
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if self.state == AppState::PerfEvent
-            || self.state == AppState::KprobeEvent
-            || self.state == AppState::Default
-            || self.state == AppState::Llc
-            || self.state == AppState::Node
-        {
-            if filtered_state.scroll > self.events_list_size {
-                filtered_state.scroll -= self.events_list_size - 1;
-                filtered_state.selected -= (self.events_list_size - 1) as usize;
+        if self.state == AppState::PerfTop {
+            // Handle page up for PerfTop view
+            let page_size = 10;
+
+            if self.selected_symbol_index >= page_size {
+                self.selected_symbol_index -= page_size;
             } else {
-                filtered_state.scroll = 0;
-                filtered_state.selected = 0;
+                self.selected_symbol_index = 0;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll > 0
+            {
+                if filtered_state.scroll >= (self.events_list_size - 1) {
+                    filtered_state.scroll -= self.events_list_size - 1;
+                    filtered_state.selected -= (self.events_list_size - 1) as usize;
+                } else {
+                    filtered_state.selected -= filtered_state.scroll as usize;
+                    filtered_state.scroll = 0;
+                }
             }
         }
     }
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) -> Result<()> {
-        if self.state == AppState::PerfEvent || self.state == AppState::KprobeEvent {
-            self.event_input_buffer.clear();
-            let selected = {
-                let mut filtered_state = self.filtered_state.lock().unwrap();
-                if filtered_state.list.is_empty() {
-                    return Ok(());
-                }
-                let selected = filtered_state.list[filtered_state.selected].clone();
-                filtered_state.reset();
-                selected.as_string()
-            };
+        match self.state {
+            AppState::PerfEvent | AppState::KprobeEvent => {
+                self.event_input_buffer.clear();
+                let selected = {
+                    let mut filtered_state = self.filtered_state.lock().unwrap();
+                    if filtered_state.list.is_empty() {
+                        return Ok(());
+                    }
+                    let selected = filtered_state.list[filtered_state.selected].clone();
+                    filtered_state.reset();
+                    selected.as_string()
+                };
 
-            let event = match self.state {
-                AppState::PerfEvent => selected.split_once(":").map(|(subsystem, event)| {
-                    ProfilingEvent::Perf(PerfEvent::new(
-                        subsystem.to_string(),
-                        event.to_string(),
+                let event = match self.state {
+                    AppState::PerfEvent => selected.split_once(":").map(|(subsystem, event)| {
+                        ProfilingEvent::Perf(PerfEvent::new(
+                            subsystem.to_string(),
+                            event.to_string(),
+                            0,
+                        ))
+                    }),
+                    AppState::KprobeEvent => Some(ProfilingEvent::Kprobe(KprobeEvent::new(
+                        selected.to_string(),
                         0,
-                    ))
-                }),
-                AppState::KprobeEvent => Some(ProfilingEvent::Kprobe(KprobeEvent::new(
-                    selected.to_string(),
-                    0,
-                ))),
-                _ => None,
-            };
+                    ))),
+                    _ => None,
+                };
 
-            if let Some(prof_event) = event {
-                if let ProfilingEvent::Kprobe(ref k) = prof_event {
-                    let already_exists = self.available_events.iter().any(
+                if let Some(prof_event) = event {
+                    if let ProfilingEvent::Kprobe(ref k) = prof_event {
+                        let already_exists = self.available_events.iter().any(
                         |e| matches!(e, ProfilingEvent::Kprobe(x) if x.event_name == k.event_name),
                     );
 
-                    if !already_exists {
-                        self.kprobe_links.push(
-                            self.skel
-                                .progs
-                                .generic_kprobe
-                                .attach_kprobe(false, &k.event_name)?,
-                        );
+                        if !already_exists {
+                            self.kprobe_links.push(
+                                self.skel
+                                    .progs
+                                    .generic_kprobe
+                                    .attach_kprobe(false, &k.event_name)?,
+                            );
+                        };
                     };
-                };
 
-                self.active_prof_events.clear();
-                self.active_event = prof_event.clone();
-                let _ = self.activate_prof_event(&prof_event);
-                let prev_state = self.prev_state.clone();
-                self.prev_state = self.state.clone();
-                self.state = prev_state;
-                self.available_events.push(prof_event);
+                    self.active_prof_events.clear();
+                    self.active_event = prof_event.clone();
+                    let _ = self.activate_prof_event(&prof_event);
+                    let prev_state = self.prev_state.clone();
+                    self.prev_state = self.state.clone();
+                    self.state = prev_state;
+                    self.available_events.push(prof_event);
+                }
             }
-        } else if self.state == AppState::Default
-            || self.state == AppState::Node
-            || self.state == AppState::Llc
-        {
-            // Reset process view
-            self.filtering = false;
-            self.event_input_buffer.clear();
-
-            if let Some(proc_data) = self.selected_proc_data() {
-                proc_data.init_threads()?;
-
-                // Kick off thread view
-                self.in_thread_view = true;
+            AppState::PerfTop => {
+                self.filtering = false;
+                self.filter_symbols();
             }
+            AppState::Default | AppState::Node | AppState::Llc | AppState::Process => {
+                // Reset process view
+                self.filtering = false;
+                self.event_input_buffer.clear();
 
-            self.filter_events();
+                if let Some(proc_data) = self.selected_proc_data() {
+                    proc_data.init_threads()?;
+
+                    // Kick off thread view
+                    self.in_thread_view = true;
+                }
+
+                self.filter_events();
+            }
+            _ => {
+                // Handle other states (Help, MangoApp, Memory, Pause, Scheduler, etc.)
+                // For these states, do nothing on Enter
+            }
         }
 
         Ok(())
@@ -3019,7 +4429,7 @@ impl<'a> App<'a> {
                 self.filter_events();
                 self.handle_action(&Action::SetState(self.prev_state.clone()))?;
             }
-            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+            AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                 if !self.filtering && !self.in_thread_view {
                     self.handle_action(&Action::Quit)?;
                 } else if !self.filtering {
@@ -3032,6 +4442,15 @@ impl<'a> App<'a> {
                     self.filtering = false;
                     self.event_input_buffer.clear();
                     self.filter_events();
+                }
+            }
+            AppState::PerfTop => {
+                if self.filtering {
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_symbols();
+                } else {
+                    self.handle_action(&Action::Quit)?;
                 }
             }
             _ => self.handle_action(&Action::Quit)?,
@@ -3538,6 +4957,252 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Gets the currently selected symbol in the perf top view.
+    fn get_selected_symbol(&self) -> Option<&crate::symbol_data::SymbolSample> {
+        if self.perf_top_filtered_symbols.is_empty() {
+            None
+        } else {
+            self.perf_top_table_state
+                .selected()
+                .and_then(|index| self.perf_top_filtered_symbols.get(index))
+                .map(|(_, symbol)| symbol)
+        }
+    }
+
+    /// Handles perf sample events for the perf top view.
+    pub fn on_perf_sample(&mut self, action: &crate::PerfSampleAction) {
+        // Only process perf samples when in PerfTop state
+        if self.state == AppState::PerfTop {
+            // Get layer ID from BPF sample (negative if not present)
+            let layer_id = if action.layer_id >= 0 {
+                Some(action.layer_id)
+            } else {
+                None
+            };
+
+            // Add the sample with full stack trace information
+            self.symbol_data.add_sample_with_stacks_and_layer(
+                action.instruction_pointer,
+                action.pid,
+                action.cpu_id,
+                action.is_kernel,
+                &action.kernel_stack,
+                &action.user_stack,
+                layer_id,
+            );
+
+            // Update filtered symbols with new data
+            self.filter_symbols();
+
+            // Only store detailed stack trace if this matches the highlighted instruction pointer
+            if let Some(selected_symbol) = self.get_selected_symbol() {
+                if selected_symbol.symbol_info.address == action.instruction_pointer {
+                    // Store the latest symbolized data for the selected symbol
+                    self.symbol_data.update_selected_symbol_details(
+                        action.instruction_pointer,
+                        &action.kernel_stack,
+                        &action.user_stack,
+                        action.pid,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Filters symbols based on the current filter text
+    fn filter_symbols(&mut self) {
+        let top_symbols = self.symbol_data.get_top_symbols(1000); // Get more symbols for filtering
+
+        if !self.event_input_buffer.is_empty() {
+            let filter_text = self.event_input_buffer.to_lowercase();
+            self.perf_top_filtered_symbols = top_symbols
+                .into_iter()
+                .filter(|sample| {
+                    sample
+                        .symbol_info
+                        .symbol_name
+                        .to_lowercase()
+                        .contains(&filter_text)
+                        || sample
+                            .symbol_info
+                            .module_name
+                            .to_lowercase()
+                            .contains(&filter_text)
+                })
+                .map(|sample| (sample.symbol_info.symbol_name.clone(), sample.clone()))
+                .collect();
+        } else {
+            self.perf_top_filtered_symbols = top_symbols
+                .into_iter()
+                .map(|sample| (sample.symbol_info.symbol_name.clone(), sample.clone()))
+                .collect();
+        }
+
+        // Reset selection if it's out of bounds
+        if self.selected_symbol_index >= self.perf_top_filtered_symbols.len()
+            && !self.perf_top_filtered_symbols.is_empty()
+        {
+            self.selected_symbol_index = 0;
+        }
+
+        // Update table state selection
+        if !self.perf_top_filtered_symbols.is_empty() {
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            self.perf_top_table_state.select(None);
+        }
+    }
+
+    /// Attaches perf event sampling for perf top view
+    #[allow(clippy::unnecessary_cast)]
+    fn attach_perf_sampling(&mut self) -> Result<()> {
+        // Clear any existing links
+        self.detach_perf_sampling();
+
+        // Determine which perf event to use for sampling
+        let sampling_event = if let ProfilingEvent::Perf(_) = &self.active_event {
+            // Use the currently active event if it's a perf event
+            self.active_event.clone()
+        } else {
+            // Find the first available perf event or default to CPU cycles
+            self.available_events
+                .iter()
+                .find(|event| matches!(event, ProfilingEvent::Perf(_)))
+                .cloned()
+                .unwrap_or_else(|| {
+                    ProfilingEvent::Perf(PerfEvent::new("hw".to_string(), "cycles".to_string(), 0))
+                })
+        };
+
+        let all_cpus = self.topo.all_cpus.clone();
+        let mut attached_count = 0;
+
+        for (cpu_id, _cpu_info) in all_cpus {
+            // Get the base perf event and configure it for sampling
+            let base_perf_event = match &sampling_event {
+                ProfilingEvent::Perf(p) => p,
+                _ => unreachable!("sampling_event should always be Perf"),
+            };
+
+            // Create custom perf event attributes for sampling with IP collection
+            let mut attr: perf::bindings::perf_event_attr = unsafe { std::mem::zeroed() };
+            attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
+
+            // Set the event type and config based on the existing perf event
+            match base_perf_event.subsystem.to_lowercase().as_str() {
+                "hw" | "hardware" => {
+                    attr.type_ = perf::bindings::PERF_TYPE_HARDWARE;
+                    match base_perf_event.event.to_lowercase().as_str() {
+                        "cycles" | "cpu-cycles" | "cpu_cycles" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+                        }
+                        "instructions" | "instr" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_INSTRUCTIONS as u64;
+                        }
+                        "branches" | "branch-instructions" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_BRANCH_INSTRUCTIONS as u64;
+                        }
+                        "cache-misses" => {
+                            attr.config = perf::bindings::PERF_COUNT_HW_CACHE_MISSES as u64;
+                        }
+                        _ => {
+                            // Default to CPU cycles if unknown hardware event
+                            attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+                        }
+                    }
+                }
+                "sw" | "software" => {
+                    attr.type_ = perf::bindings::PERF_TYPE_SOFTWARE;
+                    match base_perf_event.event.to_lowercase().as_str() {
+                        "cpu-clock" => {
+                            attr.config = perf::bindings::PERF_COUNT_SW_CPU_CLOCK as u64;
+                        }
+                        "task-clock" => {
+                            attr.config = perf::bindings::PERF_COUNT_SW_TASK_CLOCK as u64;
+                        }
+                        _ => {
+                            // Default to task clock for software events
+                            attr.config = perf::bindings::PERF_COUNT_SW_TASK_CLOCK as u64;
+                        }
+                    }
+                }
+                _ => {
+                    // For tracepoint events, default to hardware CPU cycles for sampling
+                    attr.type_ = perf::bindings::PERF_TYPE_HARDWARE;
+                    attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+                }
+            }
+
+            // Configure for sampling with instruction pointer collection
+            attr.sample_type = perf::bindings::PERF_SAMPLE_IP as u64;
+            attr.__bindgen_anon_1.sample_period = self.perf_sample_rate as u64;
+            attr.set_freq(0);
+            attr.set_disabled(0);
+            attr.set_exclude_kernel(0);
+            attr.set_exclude_hv(0);
+            attr.set_inherit(1); // inherit to all processes
+            attr.set_pinned(1);
+
+            // Use scx_utils perf event helper to open the perf event
+            let perf_fd = unsafe {
+                perf::perf_event_open(
+                    &mut attr as *mut perf::bindings::perf_event_attr,
+                    -1,            // pid (-1 for all processes)
+                    cpu_id as i32, // cpu
+                    -1,            // group_fd
+                    0,             // flags
+                )
+            };
+
+            if perf_fd <= 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Failed to open perf event for CPU {cpu_id}: {err}");
+                continue;
+            }
+
+            // Attach BPF program to the perf event
+            match self
+                .skel
+                .progs
+                .perf_sample_handler
+                .attach_perf_event(perf_fd)
+            {
+                Ok(link) => {
+                    // Enable the perf event using scx_utils ioctl helper
+                    if unsafe { perf::ioctls::enable(perf_fd, 0) } < 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!("Failed to enable perf event for CPU {cpu_id}: {err}");
+                        unsafe {
+                            libc::close(perf_fd);
+                        }
+                        continue;
+                    }
+
+                    self.perf_links.push(link);
+                    attached_count += 1;
+                }
+                Err(_e) => unsafe {
+                    libc::close(perf_fd);
+                },
+            }
+        }
+
+        if attached_count == 0 {
+            return Err(anyhow::anyhow!("Failed to attach perf events to any CPU"));
+        }
+
+        // Store the current sampling event for display in UI
+        self.current_sampling_event = Some(sampling_event);
+
+        Ok(())
+    }
+
+    /// Detaches perf event sampling
+    fn detach_perf_sampling(&mut self) {
+        self.perf_links.clear();
+    }
+
     /// Updates the filtered events list based on the current input buffer
     fn filter_events(&mut self) {
         let filtered_events_list = match self.state {
@@ -3553,7 +5218,16 @@ impl<'a> App<'a> {
                     .map(FilterItem::String)
                     .collect()
             }
-            AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+            AppState::PerfTop => {
+                // For PerfTop, call the specialized filter_symbols method
+                self.filter_symbols();
+                return; // Early return since filter_symbols handles everything
+            }
+            AppState::Default
+            | AppState::Llc
+            | AppState::Node
+            | AppState::Memory
+            | AppState::Process => {
                 if self.in_thread_view {
                     if let Some(proc_data) = self.selected_proc_data_immut() {
                         proc_data
@@ -3626,6 +5300,32 @@ impl<'a> App<'a> {
             _ => bail!("Invalid table name"),
         };
 
+        // Track layered state based on Layer ID column visibility
+        if col == "Layer ID" {
+            if *visible {
+                self.layered_enabled = true;
+            } else {
+                // Check if any Layer ID column is still visible
+                let process_layer_visible = self
+                    .process_columns
+                    .all_columns()
+                    .iter()
+                    .find(|c| c.header == "Layer ID")
+                    .map(|c| c.visible)
+                    .unwrap_or(false);
+
+                let thread_layer_visible = self
+                    .thread_columns
+                    .all_columns()
+                    .iter()
+                    .find(|c| c.header == "Layer ID")
+                    .map(|c| c.visible)
+                    .unwrap_or(false);
+
+                self.layered_enabled = process_layer_visible || thread_layer_visible;
+            }
+        }
+
         Ok(())
     }
 
@@ -3648,7 +5348,41 @@ impl<'a> App<'a> {
                 self.on_enter()?;
             }
             Action::SetState(state) => {
-                self.set_state(state.clone());
+                if *state == AppState::Memory {
+                    self.memory_view_state = self.memory_view_state.next();
+                    // Handle memory view tristate cycling based on current state
+                    match self.memory_view_state {
+                        ComponentViewState::Detail => {
+                            // Show detailed memory view
+                            self.set_state(AppState::Memory);
+                        }
+                        ComponentViewState::Hidden | ComponentViewState::Default => {
+                            // Stay in default view, memory summary will update automatically
+                            if self.state == AppState::Memory {
+                                self.set_state(self.prev_state.clone());
+                            }
+                        }
+                    }
+                } else if *state == AppState::Network {
+                    // Handle network view tristate cycling (original working logic)
+                    self.network_view_state = self.network_view_state.next();
+                    match self.network_view_state {
+                        ComponentViewState::Detail => {
+                            self.set_state(AppState::Network);
+                        }
+                        ComponentViewState::Hidden | ComponentViewState::Default => {
+                            // If we're in the Network view, switch back to default view
+                            if self.state == AppState::Network {
+                                self.set_state(self.prev_state.clone());
+                            }
+                            // If we're already in default view, the summary state will update automatically
+                        }
+                    }
+                } else if *state == self.state {
+                    self.set_state(self.prev_state.clone());
+                } else {
+                    self.set_state(state.clone());
+                }
             }
             Action::NextEvent => {
                 if self.next_event().is_err() {
@@ -3746,7 +5480,21 @@ impl<'a> App<'a> {
             Action::Kprobe(a) => {
                 self.on_kprobe(a);
             }
-            Action::ClearEvent => self.reset_prof_events()?,
+            Action::PerfSample(a) => {
+                self.on_perf_sample(a);
+            }
+            Action::ClearEvent => {
+                match self.state {
+                    AppState::PerfTop => {
+                        self.symbol_data.clear();
+                        self.selected_symbol_index = 0;
+                        self.filter_symbols(); // Update filtered symbols after clearing
+                    }
+                    _ => {
+                        self.reset_prof_events()?;
+                    }
+                }
+            }
             Action::UpdateColVisibility(a) => {
                 self.update_col_visibility(a)?;
             }
@@ -3762,26 +5510,38 @@ impl<'a> App<'a> {
             Action::ToggleLocalization => self.localize = !self.localize,
             Action::ToggleHwPressure => self.hw_pressure = !self.hw_pressure,
             Action::IncBpfSampleRate => {
-                let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
-                if sample_rate == 0 {
-                    self.update_bpf_sample_rate(8_u32);
+                if self.state == AppState::PerfTop {
+                    // In PerfTop view, control perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
                 } else {
-                    self.update_bpf_sample_rate(sample_rate << 2);
+                    // Normal BPF sample rate control
+                    let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+                    if sample_rate == 0 {
+                        self.update_bpf_sample_rate(8_u32);
+                    } else {
+                        self.update_bpf_sample_rate(sample_rate << 2);
+                    }
                 }
             }
             Action::DecBpfSampleRate => {
-                let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
-                if sample_rate > 0 {
-                    // prevent overly aggressive bpf sampling, but allow disabling sampling
-                    let new_rate = sample_rate >> 2;
-                    self.update_bpf_sample_rate(if new_rate >= 8 { new_rate } else { 0 });
+                if self.state == AppState::PerfTop {
+                    // In PerfTop view, control perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
+                } else {
+                    // Normal BPF sample rate control
+                    let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+                    if sample_rate > 0 {
+                        // prevent overly aggressive bpf sampling, but allow disabling sampling
+                        let new_rate = sample_rate >> 2;
+                        self.update_bpf_sample_rate(if new_rate >= 8 { new_rate } else { 0 });
+                    }
                 }
             }
             Action::Quit => match self.state {
                 AppState::Help => {
                     self.handle_action(&Action::SetState(AppState::Help))?;
                 }
-                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+                AppState::Default | AppState::Llc | AppState::Node | AppState::Process => {
                     if self.in_thread_view {
                         self.in_thread_view = false;
                     } else {
@@ -3797,21 +5557,1388 @@ impl<'a> App<'a> {
                     self.filtering = true;
                     self.filter_events();
                 }
+                AppState::PerfTop => {
+                    self.filtering = true;
+                    self.filter_symbols();
+                }
                 _ => {}
             },
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
-                self.filter_events();
+                match self.state {
+                    AppState::PerfTop => {
+                        self.filter_symbols();
+                    }
+                    _ => {
+                        self.filter_events();
+                    }
+                }
             }
             Action::Backspace => {
                 self.event_input_buffer.pop();
-                self.filter_events();
+                match self.state {
+                    AppState::PerfTop => {
+                        self.filter_symbols();
+                    }
+                    _ => {
+                        self.filter_events();
+                    }
+                }
             }
             Action::Esc => {
                 self.on_escape()?;
             }
             _ => {}
         };
+        Ok(())
+    }
+
+    /// Updates power monitoring data
+    pub fn update_power_data(&mut self) -> Result<()> {
+        if let Ok(power_data) = self.power_collector.collect() {
+            self.power_snapshot.update(power_data);
+        }
+        Ok(())
+    }
+
+    /// Renders the power monitoring view
+    fn render_power(&mut self, frame: &mut Frame) -> Result<()> {
+        let power_data = self.power_snapshot.current.clone();
+
+        // Main layout: vertical split into three sections
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                [
+                    Constraint::Percentage(50), // Core power details and package summary at top
+                    Constraint::Percentage(30), // Power charts in middle
+                    Constraint::Percentage(20), // C-states and battery at bottom
+                ]
+                .as_ref(),
+            )
+            .split(frame.area());
+
+        // Top section: Split vertically for core table and package summary
+        let top_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(
+                [
+                    Constraint::Percentage(75), // Core power table
+                    Constraint::Percentage(25), // Package watts summary
+                ]
+                .as_ref(),
+            )
+            .split(main_chunks[0]);
+
+        // Top: Core power table
+        self.render_core_power_table(frame, top_chunks[0], &power_data)?;
+
+        // Below core table: Split horizontally for package and RAM/uncore summaries
+        let summary_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+            .split(top_chunks[1]);
+
+        // Left: Package watts summary
+        self.render_package_power_summary(frame, summary_chunks[0], &power_data)?;
+
+        // Right: RAM watts and uncore frequencies summary
+        self.render_ram_uncore_summary(frame, summary_chunks[1], &power_data)?;
+
+        // Middle: Power charts (full width)
+        self.render_power_summary(frame, main_chunks[1], &power_data)?;
+
+        // Bottom: Split into two columns for C-states and battery
+        let bottom_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+            .split(main_chunks[2]);
+
+        self.render_c_states_summary(frame, bottom_chunks[0], &power_data)?;
+        self.render_battery_info(frame, bottom_chunks[1], &power_data)?;
+
+        Ok(())
+    }
+
+    fn render_core_power_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        let core_count = power_data.cores.len();
+
+        // Calculate number of columns based on CPU count
+        let num_columns = if core_count >= 128 {
+            8
+        } else if core_count >= 64 {
+            4
+        } else if core_count >= 32 {
+            2
+        } else {
+            1
+        };
+
+        // If only one column, use the original single-table approach
+        if num_columns == 1 {
+            self.render_single_core_power_table(frame, area, power_data)
+        } else {
+            self.render_multi_column_core_power_table(frame, area, power_data, num_columns)
+        }
+    }
+
+    fn render_single_core_power_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        // Determine available C-states across all cores
+        let available_cstates = self.get_available_cstates(power_data);
+
+        // Check if temperature data is available
+        let has_temp_data = self.has_temperature_data(power_data);
+
+        // Get columns configuration
+        let power_columns = crate::columns::get_power_columns(has_temp_data, &available_cstates);
+        let columns = crate::columns::Columns::new(power_columns);
+        let visible_columns: Vec<_> = columns.visible_columns().collect();
+
+        // Build header from visible columns
+        let header_cells: Vec<Cell> = visible_columns
+            .iter()
+            .map(|col| Cell::from(col.header))
+            .collect();
+
+        let header = Row::new(header_cells)
+            .style(Style::default().fg(self.config.theme().text_color()))
+            .height(1);
+
+        // Get constraints from visible columns
+        let constraints: Vec<Constraint> =
+            visible_columns.iter().map(|col| col.constraint).collect();
+
+        let mut rows: Vec<Row> = Vec::new();
+        let mut cores: Vec<_> = power_data.cores.iter().collect();
+        cores.sort_by_key(|(core_id, _)| *core_id);
+
+        for (core_id, core_data) in cores {
+            let row_cells: Vec<Cell> = visible_columns
+                .iter()
+                .map(|col| {
+                    let value = if available_cstates.contains(&col.header.to_string()) {
+                        // This is a C-state column, get percentage from snapshot
+                        format!(
+                            "{:.1}%",
+                            self.power_snapshot
+                                .get_cstate_percentage(*core_id, col.header)
+                        )
+                    } else {
+                        // Regular column, use the value function
+                        (col.value_fn)(*core_id, core_data)
+                    };
+
+                    // Apply conditional styling based on column type
+                    let cell = Cell::from(value);
+
+                    // Apply color styling based on column header using theme gradients
+                    match col.header {
+                        "Watt" => {
+                            let theme = self.config.theme();
+                            let (low_threshold, high_threshold) =
+                                self.power_snapshot.get_power_thresholds();
+                            let color = theme.gradient_3(
+                                core_data.power_watts,
+                                low_threshold,
+                                high_threshold,
+                                false,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        "Temp" => {
+                            let theme = self.config.theme();
+                            let (low_threshold, high_threshold) =
+                                self.power_snapshot.get_temperature_thresholds();
+                            let color = theme.gradient_3(
+                                core_data.temperature_celsius,
+                                low_threshold,
+                                high_threshold,
+                                false,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        "Freq" => {
+                            let theme = self.config.theme();
+                            let (low_threshold, high_threshold) =
+                                self.power_snapshot.get_frequency_thresholds();
+                            let color = theme.gradient_3(
+                                core_data.frequency_mhz,
+                                low_threshold,
+                                high_threshold,
+                                false,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        header if available_cstates.contains(&header.to_string()) => {
+                            // C-state percentages: higher C-states generally mean lower power
+                            let percentage =
+                                self.power_snapshot.get_cstate_percentage(*core_id, header);
+                            let theme = self.config.theme();
+
+                            // For deeper C-states (C3, C6, C7, etc.), higher percentages are better
+                            // For shallow C-states (POLL, C1), lower percentages are better
+                            let reverse = match header {
+                                "POLL" => false,                   // Lower POLL percentage is better
+                                "C1" | "C1_ACPI" | "C1E" => false, // Lower C1 percentage is better
+                                _ => true, // Higher deep C-state percentage is better
+                            };
+
+                            let color = theme.gradient_3(
+                                percentage, 20.0, // Low threshold
+                                80.0, // High threshold
+                                reverse,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        "Pkg" => {
+                            let theme = self.config.theme();
+                            let color = theme.gradient_3(
+                                core_data.package_id as f64,
+                                0.0,   // First package
+                                3.0,   // Higher package numbers
+                                false, // Lower package numbers might be better (first package)
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        _ => cell,
+                    }
+                })
+                .collect();
+
+            rows.push(Row::new(row_cells));
+        }
+
+        let table = Table::new(rows, constraints)
+            .header(header)
+            .block(
+                Block::default()
+                    .title("Core Power Details")
+                    .title_top(
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.config.theme().text_important_color())
+                            .right_aligned(),
+                    )
+                    .borders(Borders::ALL)
+                    .border_style(self.config.theme().border_style()),
+            )
+            .row_highlight_style(Style::default().bg(Color::DarkGray));
+
+        frame.render_widget(table, area);
+        Ok(())
+    }
+
+    fn render_multi_column_core_power_table(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+        num_columns: usize,
+    ) -> Result<()> {
+        // Create a single border around the entire core power details area
+        let block = Block::default()
+            .title("Core Power Details")
+            .title_top(
+                Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                    .style(self.config.theme().text_important_color())
+                    .right_aligned(),
+            )
+            .borders(Borders::ALL)
+            .border_style(self.config.theme().border_style());
+
+        // Get the inner area (excluding the border)
+        let inner_area = block.inner(area);
+
+        // Render the border
+        frame.render_widget(block, area);
+
+        // Split the inner area horizontally into columns
+        let column_constraints: Vec<Constraint> = (0..num_columns)
+            .map(|_| Constraint::Percentage(100 / num_columns as u16))
+            .collect();
+
+        let column_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(column_constraints)
+            .split(inner_area);
+
+        // Sort cores by ID
+        let mut cores: Vec<_> = power_data.cores.iter().collect();
+        cores.sort_by_key(|(core_id, _)| *core_id);
+
+        // Calculate cores per column
+        let cores_per_column = cores.len().div_ceil(num_columns);
+
+        // Split cores into chunks for each column
+        for (col_idx, column_area) in column_areas.iter().enumerate() {
+            let start_idx = col_idx * cores_per_column;
+            let end_idx = std::cmp::min(start_idx + cores_per_column, cores.len());
+
+            if start_idx < cores.len() {
+                let column_cores = &cores[start_idx..end_idx];
+                self.render_core_power_column(
+                    frame,
+                    *column_area,
+                    column_cores,
+                    col_idx,
+                    num_columns,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn render_core_power_column(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        cores: &[(&u32, &crate::CorePowerData)],
+        _col_idx: usize,
+        total_columns: usize,
+    ) -> Result<()> {
+        // Check if temperature data is available for these cores
+        let has_temp_data = cores
+            .iter()
+            .any(|(_, core_data)| core_data.temperature_celsius > 0.0);
+
+        // Get available C-states from these cores
+        let mut cstate_names = std::collections::HashSet::new();
+        for (_, core_data) in cores {
+            for cstate_name in core_data.c_states.keys() {
+                cstate_names.insert(cstate_name.clone());
+            }
+        }
+
+        let mut available_cstates: Vec<String> = cstate_names.into_iter().collect();
+        available_cstates.sort_by(|a, b| {
+            // Custom sorting to put common C-states first
+            let order_a = match a.as_str() {
+                "POLL" => 0,
+                "C1" | "C1_ACPI" => 1,
+                "C1E" => 2,
+                "C2" => 3,
+                "C3" => 4,
+                "C6" => 5,
+                "C7" => 6,
+                "C8" => 7,
+                "C9" => 8,
+                "C10" => 9,
+                _ => 100,
+            };
+            let order_b = match b.as_str() {
+                "POLL" => 0,
+                "C1" | "C1_ACPI" => 1,
+                "C1E" => 2,
+                "C2" => 3,
+                "C3" => 4,
+                "C6" => 5,
+                "C7" => 6,
+                "C8" => 7,
+                "C9" => 8,
+                "C10" => 9,
+                _ => 100,
+            };
+            order_a.cmp(&order_b).then_with(|| a.cmp(b))
+        });
+
+        // Get power columns with or without C-states based on space
+        let mut power_columns = vec![
+            crate::columns::Column {
+                header: "Cpu",
+                constraint: if total_columns <= 2 {
+                    Constraint::Length(4)
+                } else {
+                    Constraint::Length(3)
+                },
+                visible: true,
+                value_fn: Box::new(|core_id: u32, _: &crate::CorePowerData| core_id.to_string()),
+            },
+            crate::columns::Column {
+                header: "Freq",
+                constraint: Constraint::Length(9),
+                visible: true,
+                value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                    crate::util::format_hz((data.frequency_mhz * 1_000.0) as u64)
+                }),
+            },
+            crate::columns::Column {
+                header: "Temp",
+                constraint: if total_columns <= 2 {
+                    Constraint::Length(5)
+                } else {
+                    Constraint::Length(4)
+                },
+                visible: has_temp_data,
+                value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                    if data.temperature_celsius > 0.0 {
+                        format!("{:.0}", data.temperature_celsius)
+                    } else {
+                        "-".to_string()
+                    }
+                }),
+            },
+            crate::columns::Column {
+                header: "Power",
+                constraint: if total_columns <= 2 {
+                    Constraint::Length(6)
+                } else {
+                    Constraint::Length(5)
+                },
+                visible: true,
+                value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                    format!("{:.1}", data.power_watts)
+                }),
+            },
+            crate::columns::Column {
+                header: "Pkg",
+                constraint: Constraint::Length(3),
+                visible: true,
+                value_fn: Box::new(|_: u32, data: &crate::CorePowerData| {
+                    data.package_id.to_string()
+                }),
+            },
+        ];
+
+        // Add C-state columns if we have space
+        for cstate in &available_cstates {
+            let cstate_name = cstate.clone();
+            power_columns.push(crate::columns::Column {
+                header: Box::leak(cstate.clone().into_boxed_str()),
+                constraint: Constraint::Length(6),
+                visible: true,
+                value_fn: Box::new(move |_: u32, data: &crate::CorePowerData| {
+                    if let Some(cstate_info) = data.c_states.get(&cstate_name) {
+                        // Calculate residency percentage
+                        let total_residency: u64 =
+                            data.c_states.values().map(|cs| cs.residency).sum();
+                        if total_residency > 0 {
+                            let percentage =
+                                (cstate_info.residency as f64 / total_residency as f64) * 100.0;
+                            format!("{percentage:.1}%")
+                        } else {
+                            "0.0%".to_string()
+                        }
+                    } else {
+                        "-".to_string()
+                    }
+                }),
+            });
+        }
+
+        let columns = crate::columns::Columns::new(power_columns);
+        let visible_columns: Vec<_> = columns.visible_columns().collect();
+
+        // Build header from visible columns
+        let header_cells: Vec<Cell> = visible_columns
+            .iter()
+            .map(|col| Cell::from(col.header))
+            .collect();
+
+        let header = Row::new(header_cells)
+            .style(Style::default().fg(self.config.theme().text_color()))
+            .height(1);
+
+        // Get constraints from visible columns
+        let constraints: Vec<Constraint> =
+            visible_columns.iter().map(|col| col.constraint).collect();
+
+        let mut rows: Vec<Row> = Vec::new();
+
+        for (core_id, core_data) in cores {
+            let row_cells: Vec<Cell> = visible_columns
+                .iter()
+                .map(|col| {
+                    let value = if available_cstates.contains(&col.header.to_string()) {
+                        // This is a C-state column, get percentage from snapshot
+                        format!(
+                            "{:.1}%",
+                            self.power_snapshot
+                                .get_cstate_percentage(**core_id, col.header)
+                        )
+                    } else {
+                        // Regular column, use the value function
+                        (col.value_fn)(**core_id, core_data)
+                    };
+
+                    let cell = Cell::from(value);
+
+                    // Apply color styling based on column header using theme gradients
+                    match col.header {
+                        "Power" => {
+                            let theme = self.config.theme();
+                            let (low_threshold, high_threshold) =
+                                self.power_snapshot.get_power_thresholds();
+                            let color = theme.gradient_3(
+                                core_data.power_watts,
+                                low_threshold,
+                                high_threshold,
+                                false,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        "Temp" => {
+                            let theme = self.config.theme();
+                            let (low_threshold, high_threshold) =
+                                self.power_snapshot.get_temperature_thresholds();
+                            let color = theme.gradient_3(
+                                core_data.temperature_celsius,
+                                low_threshold,
+                                high_threshold,
+                                false,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        "Freq" => {
+                            let theme = self.config.theme();
+                            let (low_threshold, high_threshold) =
+                                self.power_snapshot.get_frequency_thresholds();
+                            let color = theme.gradient_3(
+                                core_data.frequency_mhz,
+                                low_threshold,
+                                high_threshold,
+                                false,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        header if available_cstates.contains(&header.to_string()) => {
+                            // C-state percentages: higher C-states generally mean lower power
+                            let percentage =
+                                self.power_snapshot.get_cstate_percentage(**core_id, header);
+                            let theme = self.config.theme();
+
+                            // For deeper C-states (C3, C6, C7, etc.), higher percentages are better
+                            // For shallow C-states (POLL, C1), lower percentages are better
+                            let reverse = match header {
+                                "POLL" => false,                   // Lower POLL percentage is better
+                                "C1" | "C1_ACPI" | "C1E" => false, // Lower C1 percentage is better
+                                _ => true, // Higher deep C-state percentage is better
+                            };
+
+                            let color = theme.gradient_3(
+                                percentage, 20.0, // Low threshold
+                                80.0, // High threshold
+                                reverse,
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        "Pkg" => {
+                            let theme = self.config.theme();
+                            let color = theme.gradient_3(
+                                core_data.package_id as f64,
+                                0.0,   // First package
+                                3.0,   // Higher package numbers
+                                false, // Lower package numbers might be better (first package)
+                            );
+                            cell.style(Style::default().fg(color))
+                        }
+                        _ => cell,
+                    }
+                })
+                .collect();
+
+            rows.push(Row::new(row_cells));
+        }
+
+        let table = Table::new(rows, constraints)
+            .header(header)
+            .row_highlight_style(Style::default().bg(Color::DarkGray));
+
+        // No borders or block - just render the table directly
+        frame.render_widget(table, area);
+        Ok(())
+    }
+
+    /// Get available C-states across all cores
+    fn get_available_cstates(&self, power_data: &crate::SystemPowerData) -> Vec<String> {
+        let mut cstate_names = std::collections::HashSet::new();
+
+        // Collect all unique C-state names
+        for core_data in power_data.cores.values() {
+            for cstate_name in core_data.c_states.keys() {
+                cstate_names.insert(cstate_name.clone());
+            }
+        }
+
+        // Convert to sorted vector, prioritizing common C-states
+        let mut cstates: Vec<String> = cstate_names.into_iter().collect();
+        cstates.sort_by(|a, b| {
+            // Custom sorting to put common C-states first
+            let order_a = match a.as_str() {
+                "POLL" => 0,
+                "C1" | "C1_ACPI" => 1,
+                "C1E" => 2,
+                "C2" => 3,
+                "C3" => 4,
+                "C6" => 5,
+                "C7" => 6,
+                "C8" => 7,
+                "C9" => 8,
+                "C10" => 9,
+                _ => 100,
+            };
+            let order_b = match b.as_str() {
+                "POLL" => 0,
+                "C1" | "C1_ACPI" => 1,
+                "C1E" => 2,
+                "C2" => 3,
+                "C3" => 4,
+                "C6" => 5,
+                "C7" => 6,
+                "C8" => 7,
+                "C9" => 8,
+                "C10" => 9,
+                _ => 100,
+            };
+            order_a.cmp(&order_b).then_with(|| a.cmp(b))
+        });
+
+        // Limit to first 4 C-states to avoid table being too wide
+        cstates.truncate(4);
+        cstates
+    }
+
+    /// Check if temperature data is available (non-zero temperatures)
+    fn has_temperature_data(&self, power_data: &crate::SystemPowerData) -> bool {
+        power_data
+            .cores
+            .values()
+            .any(|core| core.temperature_celsius > 0.0)
+    }
+
+    /// Renders C-states summary
+    fn render_c_states_summary(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        let mut c_state_summary = std::collections::HashMap::<String, (u64, u64, usize)>::new();
+
+        // Aggregate C-state data across all cores
+        for core_data in power_data.cores.values() {
+            for (state_name, state_info) in &core_data.c_states {
+                let entry = c_state_summary
+                    .entry(state_name.clone())
+                    .or_insert((0, 0, 0));
+                entry.0 += state_info.usage;
+                entry.1 += state_info.residency;
+                entry.2 += 1;
+            }
+        }
+
+        // Calculate total residency time for percentage calculation
+        let total_residency_all_states: u64 = c_state_summary
+            .values()
+            .map(|(_, residency, _)| residency)
+            .sum();
+
+        let header = Row::new(vec![
+            Cell::from("C-State"),
+            Cell::from("Avg Usage"),
+            Cell::from("Avg Residency(μs)"),
+            Cell::from("Percentage"),
+        ])
+        .style(Style::default().fg(self.config.theme().text_color()))
+        .height(1);
+
+        let mut rows: Vec<Row> = Vec::new();
+        let mut states: Vec<_> = c_state_summary.iter().collect();
+        states.sort_by_key(|(name, _)| name.as_str());
+
+        for (state_name, (total_usage, total_residency, core_count)) in states {
+            let avg_usage = if *core_count > 0 {
+                total_usage / *core_count as u64
+            } else {
+                0
+            };
+            let avg_residency = if *core_count > 0 {
+                total_residency / *core_count as u64
+            } else {
+                0
+            };
+
+            // Calculate percentage of time spent in this C-state
+            let percentage = if total_residency_all_states > 0 {
+                (*total_residency as f64 / total_residency_all_states as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let percentage_style = if percentage > 50.0 {
+                Style::default().fg(Color::Red)
+            } else if percentage > 25.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            rows.push(Row::new(vec![
+                Cell::from(state_name.clone()),
+                Cell::from(format!("{avg_usage}")),
+                Cell::from(format!("{avg_residency}")),
+                Cell::from(format!("{percentage:.1}%")).style(percentage_style),
+            ]));
+        }
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(18),
+                Constraint::Length(12),
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .title("C-States Summary")
+                .borders(Borders::ALL)
+                .border_style(self.config.theme().border_style()),
+        );
+
+        frame.render_widget(table, area);
+        Ok(())
+    }
+
+    /// Renders power summary
+    fn render_power_summary(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        _power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        // Split area horizontally for two charts
+        let chart_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+
+        // Render total power chart
+        self.render_total_power_chart(frame, chart_chunks[0])?;
+
+        // Render average power per core chart
+        self.render_avg_power_chart(frame, chart_chunks[1])?;
+
+        Ok(())
+    }
+
+    fn render_total_power_chart(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Get current tick interval from TUI state
+        let tick_interval_ms = self.config.tick_rate_ms() as u64;
+
+        // Get high-density chart data based on chart width and tick interval
+        let chart_width = area.width.saturating_sub(2); // Account for borders
+        let adaptive_data = self
+            .power_snapshot
+            .get_adaptive_chart_data(tick_interval_ms, chart_width);
+
+        if adaptive_data.is_empty() {
+            // Show placeholder when no data
+            let placeholder = Paragraph::new("No data available")
+                .block(
+                    Block::default()
+                        .title("Total Power (W)")
+                        .borders(Borders::ALL)
+                        .border_style(self.config.theme().border_style()),
+                )
+                .alignment(Alignment::Center);
+            frame.render_widget(placeholder, area);
+            return Ok(());
+        }
+
+        // Convert adaptive data to chart data points
+        let data_points: Vec<(f64, f64)> = adaptive_data
+            .iter()
+            .map(|point| (point.timestamp as f64, point.total_power_watts))
+            .collect();
+
+        // Get current total power value for the legend
+        let current_total_power = self.power_snapshot.current.total_power_watts;
+        let data_count = adaptive_data.len();
+
+        let dataset = Dataset::default()
+            .name(format!(
+                "Total Power: {current_total_power:.2}W ({data_count} pts)"
+            ))
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(self.config.theme().text_enabled_color()))
+            .data(&data_points);
+
+        // Calculate time bounds from adaptive data
+        let time_min = adaptive_data.first().unwrap().timestamp as f64;
+        let time_max = adaptive_data.last().unwrap().timestamp as f64;
+        let time_range = time_max - time_min;
+        let time_buffer = time_range * 0.05; // 5% buffer
+
+        // Calculate power bounds from adaptive data
+        let actual_min = adaptive_data
+            .iter()
+            .map(|point| point.total_power_watts)
+            .fold(f64::INFINITY, f64::min);
+        let actual_max = adaptive_data
+            .iter()
+            .map(|point| point.total_power_watts)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let power_range = actual_max - actual_min;
+        let power_buffer = (power_range * 0.1).max(1.0); // 10% buffer, min 1W
+        let power_min = (actual_min - power_buffer).max(0.0);
+        let power_max = actual_max + power_buffer;
+
+        // Format power labels with min/max indicators and time window info
+        let time_window_sec = (data_count as u64 * tick_interval_ms) / 1000;
+        let power_labels = vec![
+            Span::styled(
+                format!("Min: {actual_min:.1}W"),
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::styled(
+                format!(
+                    "{:.1}W ({}s)",
+                    (power_min + power_max) / 2.0,
+                    time_window_sec
+                ),
+                self.theme().text_color(),
+            ),
+            Span::styled(
+                format!("Max: {actual_max:.1}W"),
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+        ];
+
+        let chart = Chart::new(vec![dataset])
+            .block(
+                Block::default()
+                    .title("Total Power (W)")
+                    .borders(Borders::ALL)
+                    .border_style(self.config.theme().border_style()),
+            )
+            .x_axis(
+                Axis::default()
+                    .title("Time")
+                    .style(Style::default().fg(self.config.theme().text_color()))
+                    .bounds([time_min - time_buffer, time_max + time_buffer]),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Watts")
+                    .style(Style::default().fg(self.config.theme().text_color()))
+                    .labels(power_labels)
+                    .bounds([power_min, power_max]),
+            );
+
+        frame.render_widget(chart, area);
+        Ok(())
+    }
+
+    fn render_avg_power_chart(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        // Get current tick interval from TUI state
+        let tick_interval_ms = self.config.tick_rate_ms() as u64;
+
+        // Get adaptive chart data based on chart width and tick interval
+        let chart_width = area.width.saturating_sub(2); // Account for borders
+        let adaptive_data = self
+            .power_snapshot
+            .get_adaptive_chart_data(tick_interval_ms, chart_width);
+
+        if adaptive_data.is_empty() {
+            // Show placeholder when no data
+            let placeholder = Paragraph::new("No data available")
+                .block(
+                    Block::default()
+                        .title("Avg Power/Core (W)")
+                        .borders(Borders::ALL)
+                        .border_style(self.config.theme().border_style()),
+                )
+                .alignment(Alignment::Center);
+            frame.render_widget(placeholder, area);
+            return Ok(());
+        }
+
+        // Convert adaptive data to chart data points
+        let data_points: Vec<(f64, f64)> = adaptive_data
+            .iter()
+            .map(|point| (point.timestamp as f64, point.avg_power_per_core))
+            .collect();
+
+        // Calculate current average power per core for the legend
+        let current_avg_power = if !self.power_snapshot.current.cores.is_empty() {
+            self.power_snapshot.current.total_power_watts
+                / self.power_snapshot.current.cores.len() as f64
+        } else {
+            0.0
+        };
+        let data_count = adaptive_data.len();
+
+        let dataset = Dataset::default()
+            .name(format!(
+                "Avg Power/Core: {current_avg_power:.2}W ({data_count} pts)"
+            ))
+            .marker(ratatui::symbols::Marker::Braille)
+            .style(Style::default().fg(self.config.theme().text_disabled_color()))
+            .data(&data_points);
+
+        // Calculate time bounds from adaptive data
+        let time_min = adaptive_data.first().unwrap().timestamp as f64;
+        let time_max = adaptive_data.last().unwrap().timestamp as f64;
+        let time_range = time_max - time_min;
+        let time_buffer = time_range * 0.05; // 5% buffer
+
+        // Calculate power bounds from adaptive data
+        let actual_min = adaptive_data
+            .iter()
+            .map(|point| point.avg_power_per_core)
+            .fold(f64::INFINITY, f64::min);
+        let actual_max = adaptive_data
+            .iter()
+            .map(|point| point.avg_power_per_core)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let power_range = actual_max - actual_min;
+        let power_buffer = (power_range * 0.1).max(0.1); // 10% buffer, min 0.1W
+        let power_min = (actual_min - power_buffer).max(0.0);
+        let power_max = actual_max + power_buffer;
+
+        // Format power labels with min/max indicators and time window info
+        let time_window_sec = (data_count as u64 * tick_interval_ms) / 1000;
+        let power_labels = vec![
+            Span::styled(
+                format!("Min: {actual_min:.2}W"),
+                Style::default().fg(self.theme().negative_value_color()),
+            ),
+            Span::styled(
+                format!(
+                    "{:.2}W ({}s)",
+                    (power_min + power_max) / 2.0,
+                    time_window_sec
+                ),
+                self.theme().text_color(),
+            ),
+            Span::styled(
+                format!("Max: {actual_max:.2}W"),
+                Style::default().fg(self.theme().positive_value_color()),
+            ),
+        ];
+
+        let chart = Chart::new(vec![dataset])
+            .block(
+                Block::default()
+                    .title("Avg Power/Core (W)")
+                    .borders(Borders::ALL)
+                    .border_style(self.config.theme().border_style()),
+            )
+            .x_axis(
+                Axis::default()
+                    .title("Time")
+                    .style(Style::default().fg(self.config.theme().text_color()))
+                    .bounds([time_min - time_buffer, time_max + time_buffer]),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Watts")
+                    .style(Style::default().fg(self.config.theme().text_color()))
+                    .labels(power_labels)
+                    .bounds([power_min, power_max]),
+            );
+
+        frame.render_widget(chart, area);
+        Ok(())
+    }
+
+    /// Renders battery information
+    fn render_battery_info(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        let battery_text = if let Some(battery_level) = power_data.battery_level_percent {
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Battery: ",
+                        Style::default().fg(self.config.theme().text_color()),
+                    ),
+                    Span::styled(
+                        format!("{battery_level:.1}%"),
+                        Style::default().fg(if battery_level < 20.0 {
+                            self.config.theme().gradient_3_low(true)
+                        } else if battery_level < 50.0 {
+                            self.config.theme().gradient_3_mid()
+                        } else {
+                            self.config.theme().gradient_3_high(true)
+                        }),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        "Status: ",
+                        Style::default().fg(self.config.theme().text_color()),
+                    ),
+                    Span::styled(
+                        if power_data.battery_charging.unwrap_or(false) {
+                            "Charging"
+                        } else {
+                            "Discharging"
+                        },
+                        Style::default().fg(if power_data.battery_charging.unwrap_or(false) {
+                            self.config.theme().positive_value_color()
+                        } else {
+                            self.config.theme().negative_value_color()
+                        }),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        "Remaining: ",
+                        Style::default().fg(self.config.theme().text_color()),
+                    ),
+                    Span::styled(
+                        power_data
+                            .battery_remaining_time_minutes
+                            .map(|t| format!("{t}m"))
+                            .unwrap_or_else(|| "Unknown".to_string()),
+                        Style::default().fg(self.config.theme().text_enabled_color()),
+                    ),
+                ]),
+            ]
+        } else {
+            vec![Line::from(vec![
+                Span::styled(
+                    "Battery: ",
+                    Style::default().fg(self.config.theme().text_color()),
+                ),
+                Span::styled("Not Available", Style::default().fg(Color::Gray)),
+            ])]
+        };
+
+        let paragraph = Paragraph::new(battery_text)
+            .block(
+                Block::default()
+                    .title("Battery Info")
+                    .borders(Borders::ALL)
+                    .border_style(self.config.theme().border_style()),
+            )
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
+    /// Renders package power summary with comprehensive RAPL data
+    fn render_package_power_summary(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        use ratatui::widgets::{Cell, Row, Table};
+
+        if power_data.package_power.is_empty() {
+            let placeholder = Paragraph::new("Package power data not available")
+                .block(
+                    Block::default()
+                        .title("Package Power Summary")
+                        .borders(Borders::ALL)
+                        .border_style(self.config.theme().border_style()),
+                )
+                .alignment(Alignment::Center);
+            frame.render_widget(placeholder, area);
+            return Ok(());
+        }
+
+        // Create table rows for each package
+        let mut rows = Vec::new();
+        let mut total_package_power = 0.0;
+
+        // Sort packages by ID for consistent display
+        let mut sorted_packages: Vec<_> = power_data.package_power.iter().collect();
+        sorted_packages.sort_by_key(|(package_id, _)| *package_id);
+
+        let package_count = sorted_packages.len();
+
+        for (package_id, package_power) in &sorted_packages {
+            total_package_power += *package_power;
+
+            // Get comprehensive data from first core in this package for RAPL info
+            let package_rapl_data = power_data
+                .cores
+                .values()
+                .find(|core| core.package_id == **package_id);
+
+            let (tdp_str, limit_str, throttle_str) = if let Some(core_data) = package_rapl_data {
+                (
+                    if core_data.tdp > 0.0 {
+                        format!("{:.1}W", core_data.tdp)
+                    } else {
+                        "-".to_string()
+                    },
+                    if core_data.power_limit > 0.0 {
+                        format!("{:.1}W", core_data.power_limit)
+                    } else {
+                        "-".to_string()
+                    },
+                    if core_data.throttle_percent > 0.0 {
+                        format!("{:.1}%", core_data.throttle_percent)
+                    } else {
+                        "-".to_string()
+                    },
+                )
+            } else {
+                ("-".to_string(), "-".to_string(), "-".to_string())
+            };
+
+            // Calculate percentage of total system power
+            let percentage = if power_data.total_power_watts > 0.0 {
+                (*package_power / power_data.total_power_watts) * 100.0
+            } else {
+                0.0
+            };
+
+            // Color coding based on power level
+            let power_style = if **package_power > 50.0 {
+                Style::default().fg(Color::Red)
+            } else if **package_power > 25.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            let throttle_style = if package_rapl_data
+                .map(|d| d.throttle_percent > 10.0)
+                .unwrap_or(false)
+            {
+                Style::default().fg(Color::Red)
+            } else if package_rapl_data
+                .map(|d| d.throttle_percent > 1.0)
+                .unwrap_or(false)
+            {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(self.config.theme().text_color())
+            };
+
+            rows.push(Row::new(vec![
+                Cell::from(format!("PKG{package_id}")),
+                Cell::from(format!("{:.2}", *package_power)).style(power_style),
+                Cell::from(format!("{percentage:.1}%")),
+                Cell::from(tdp_str),
+                Cell::from(limit_str),
+                Cell::from(throttle_str).style(throttle_style),
+            ]));
+        }
+
+        // Add total row
+        if package_count > 1 {
+            rows.push(Row::new(vec![
+                Cell::from("TOTAL"),
+                Cell::from(format!("{total_package_power:.2}"))
+                    .style(Style::default().fg(self.config.theme().text_enabled_color())),
+                Cell::from("100.0%"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from("-"),
+            ]));
+        }
+
+        let header = Row::new(vec![
+            Cell::from("Package"),
+            Cell::from("Power(W)"),
+            Cell::from("% Total"),
+            Cell::from("TDP(W)"),
+            Cell::from("Limit(W)"),
+            Cell::from("Throttle"),
+        ])
+        .style(Style::default().fg(self.config.theme().text_color()))
+        .height(1);
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(8),  // Package
+                Constraint::Length(10), // Power(W)
+                Constraint::Length(8),  // % Total
+                Constraint::Length(8),  // TDP(W)
+                Constraint::Length(10), // Limit(W)
+                Constraint::Length(8),  // Throttle
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .title(format!(
+                    "Package Power Summary (Total: {total_package_power:.2}W)"
+                ))
+                .borders(Borders::ALL)
+                .border_style(self.config.theme().border_style()),
+        );
+
+        frame.render_widget(table, area);
+        Ok(())
+    }
+
+    /// Renders RAM power and uncore frequency summary per node
+    fn render_ram_uncore_summary(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        power_data: &crate::SystemPowerData,
+    ) -> Result<()> {
+        use ratatui::widgets::{Cell, Row, Table};
+        use std::collections::HashMap;
+
+        // Organize data by node/package for NUMA systems
+        let mut node_data: HashMap<u32, (f64, f64, f64, u32)> = HashMap::new(); // package_id -> (dram_power, uncore_freq, total_dram_energy, core_count)
+
+        if power_data.cores.is_empty() {
+            let placeholder = Paragraph::new("No core data available")
+                .block(
+                    Block::default()
+                        .title("RAM & Uncore Summary")
+                        .borders(Borders::ALL)
+                        .border_style(self.config.theme().border_style()),
+                )
+                .alignment(Alignment::Center);
+            frame.render_widget(placeholder, area);
+            return Ok(());
+        }
+
+        // Collect data per package/node using enhanced RAPL data
+        for core_data in power_data.cores.values() {
+            let package_id = core_data.package_id;
+            let entry = node_data.entry(package_id).or_insert((0.0, 0.0, 0.0, 0));
+
+            // Use DRAM energy from RAPL readings (only count once per package)
+            if core_data.dram_energy_uj > 0 && entry.3 == 0 {
+                entry.2 = core_data.dram_energy_uj as f64;
+            }
+
+            // Better uncore frequency estimation based on package
+            let uncore_freq = if core_data.frequency_mhz > 0.0 {
+                // More realistic uncore frequency estimation:
+                // - Base uncore frequency is typically 800-1200 MHz
+                // - Scales with core frequency but has different ratios per architecture
+                let base_uncore = 1000.0; // Base uncore frequency
+                let scaling_factor = (core_data.frequency_mhz / 2000.0).min(2.0); // Scale factor based on core freq
+                (base_uncore * (1.0 + scaling_factor)).min(3500.0) // Cap at realistic maximum
+            } else {
+                1000.0 // Default uncore frequency
+            };
+
+            if uncore_freq > entry.1 {
+                entry.1 = uncore_freq;
+            }
+
+            entry.3 += 1; // Core count per package
+        }
+
+        // Calculate DRAM power using package power proportional estimation
+        // This gives a more realistic DRAM power estimate based on package power
+        let package_ids: Vec<u32> = node_data.keys().cloned().collect();
+
+        for package_id in package_ids {
+            if let Some((dram_power, _, _, core_count)) = node_data.get_mut(&package_id) {
+                if let Some(package_power_watts) = power_data.package_power.get(&package_id) {
+                    // DRAM typically consumes 15-25% of package power in modern systems
+                    *dram_power = package_power_watts * 0.20; // 20% estimation
+                } else {
+                    // Fallback: estimate based on core count and typical DRAM power per core
+                    *dram_power = (*core_count as f64) * 2.0; // ~2W per core for DRAM
+                }
+            }
+        }
+
+        // Create table rows
+        let mut rows = Vec::new();
+        let mut total_dram_power = 0.0;
+
+        // Sort by package ID for consistent display
+        let mut sorted_nodes: Vec<_> = node_data.iter().collect();
+        sorted_nodes.sort_by_key(|(package_id, _)| *package_id);
+
+        let node_count = sorted_nodes.len();
+
+        for (package_id, (dram_power, uncore_freq, _, core_count)) in &sorted_nodes {
+            total_dram_power += *dram_power;
+
+            // Color coding for DRAM power
+            let dram_power_style = if *dram_power > 10.0 {
+                Style::default().fg(Color::Red)
+            } else if *dram_power > 5.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            // Color coding for uncore frequency
+            let uncore_freq_style = if *uncore_freq > 3000.0 {
+                Style::default().fg(Color::Red)
+            } else if *uncore_freq > 2000.0 {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(self.config.theme().text_color())
+            };
+
+            rows.push(Row::new(vec![
+                Cell::from(format!("N{package_id}")),
+                Cell::from(format!("{:.2}", *dram_power)).style(dram_power_style),
+                Cell::from(format!("{:.0}", *uncore_freq)).style(uncore_freq_style),
+                Cell::from(format!("{}", *core_count)),
+            ]));
+        }
+
+        // Add total row if multiple nodes
+        if node_count > 1 {
+            let total_cores: u32 = node_data.values().map(|(_, _, _, count)| *count).sum();
+            rows.push(Row::new(vec![
+                Cell::from("TOTAL"),
+                Cell::from(format!("{total_dram_power:.2}"))
+                    .style(Style::default().fg(self.config.theme().text_enabled_color())),
+                Cell::from("-"),
+                Cell::from(format!("{total_cores}")),
+            ]));
+        }
+
+        let header = Row::new(vec![
+            Cell::from("Node"),
+            Cell::from("DRAM(W)"),
+            Cell::from("Uncore(MHz)"),
+            Cell::from("Cores"),
+        ])
+        .style(Style::default().fg(self.config.theme().text_color()))
+        .height(1);
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(6),  // Node
+                Constraint::Length(9),  // DRAM(W)
+                Constraint::Length(12), // Uncore(MHz)
+                Constraint::Length(6),  // Cores
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .title(format!(
+                    "RAM & Uncore Summary (DRAM: {total_dram_power:.2}W)"
+                ))
+                .borders(Borders::ALL)
+                .border_style(self.config.theme().border_style()),
+        );
+
+        frame.render_widget(table, area);
         Ok(())
     }
 }

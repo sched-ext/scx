@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use ratatui::style::{Color, Style};
+use ratatui::symbols::Marker;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -177,6 +178,464 @@ impl AppTheme {
             AppTheme::AyuDark => Style::default().fg(Color::Rgb(95, 175, 239)), // Ayu Dark blue
             AppTheme::USA => Style::default().fg(Color::Rgb(10, 49, 97)), // Navy blue for USA theme
             AppTheme::Default => Style::default().fg(Color::Yellow),
+        }
+    }
+
+    /// Returns the color for kernel space symbols in perf top view.
+    pub fn kernel_symbol_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Rgb(255, 100, 100), // Light red
+            AppTheme::IAmBlue => Color::Rgb(255, 140, 0),         // Orange
+            AppTheme::SolarizedDark => Color::Rgb(220, 50, 47),   // Solarized red
+            AppTheme::Greyscale => Color::Rgb(180, 180, 180),     // Light grey
+            AppTheme::Nord => Color::Rgb(191, 97, 106),           // Nord Aurora red
+            AppTheme::Dracula => Color::Rgb(255, 85, 85),         // Dracula red
+            AppTheme::Monokai => Color::Rgb(249, 38, 114),        // Monokai magenta
+            AppTheme::Gruvbox => Color::Rgb(251, 73, 52),         // Gruvbox red
+            AppTheme::TokyoNight => Color::Rgb(247, 118, 142),    // Tokyo Night red
+            AppTheme::CatppuccinMocha => Color::Rgb(243, 139, 168), // Catppuccin red
+            AppTheme::OneDark => Color::Rgb(224, 108, 117),       // One Dark red
+            AppTheme::AyuDark => Color::Rgb(255, 160, 122),       // Ayu Dark orange
+            AppTheme::USA => Color::Rgb(187, 19, 62),             // Red for USA theme
+            AppTheme::Default => Color::Red,
+        }
+    }
+
+    /// Returns the color for userspace symbols in perf top view.
+    pub fn userspace_symbol_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Rgb(100, 255, 100), // Light green
+            AppTheme::IAmBlue => Color::Rgb(100, 149, 237),       // Cornflower blue
+            AppTheme::SolarizedDark => Color::Rgb(42, 161, 152),  // Solarized cyan
+            AppTheme::Greyscale => Color::Rgb(120, 120, 120),     // Medium grey
+            AppTheme::Nord => Color::Rgb(136, 192, 208),          // Nord Frost cyan
+            AppTheme::Dracula => Color::Rgb(80, 250, 123),        // Dracula green
+            AppTheme::Monokai => Color::Rgb(166, 226, 46),        // Monokai green
+            AppTheme::Gruvbox => Color::Rgb(104, 157, 106),       // Gruvbox aqua
+            AppTheme::TokyoNight => Color::Rgb(158, 206, 106),    // Tokyo Night green
+            AppTheme::CatppuccinMocha => Color::Rgb(166, 227, 161), // Catppuccin green
+            AppTheme::OneDark => Color::Rgb(152, 195, 121),       // One Dark green
+            AppTheme::AyuDark => Color::Rgb(95, 175, 239),        // Ayu Dark blue
+            AppTheme::USA => Color::Rgb(10, 49, 97),              // Navy blue for USA theme
+            AppTheme::Default => Color::Blue,
+        }
+    }
+
+    /// Returns the plot marker for charts in the theme.
+    pub fn plot_marker(&self) -> Marker {
+        match self {
+            AppTheme::MidnightGreen => Marker::Braille,
+            AppTheme::IAmBlue => Marker::Dot,
+            AppTheme::SolarizedDark => Marker::Braille,
+            AppTheme::Greyscale => Marker::Block,
+            AppTheme::Nord => Marker::Braille,
+            AppTheme::Dracula => Marker::Dot,
+            AppTheme::Monokai => Marker::Braille,
+            AppTheme::Gruvbox => Marker::Block,
+            AppTheme::TokyoNight => Marker::Braille,
+            AppTheme::CatppuccinMocha => Marker::Dot,
+            AppTheme::OneDark => Marker::Braille,
+            AppTheme::AyuDark => Marker::Block,
+            AppTheme::USA => Marker::Block,
+            AppTheme::Default => Marker::Block,
+        }
+    }
+
+    /// Returns the color for positive values (e.g., TX data) in the theme.
+    pub fn positive_value_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Green,
+            AppTheme::IAmBlue => Color::Blue,
+            AppTheme::SolarizedDark => Color::Rgb(133, 153, 0), // Solarized green
+            AppTheme::Greyscale => Color::Rgb(180, 180, 180),   // Light grey
+            AppTheme::Nord => Color::Rgb(163, 190, 140),        // Nord Aurora green
+            AppTheme::Dracula => Color::Rgb(80, 250, 123),      // Dracula green
+            AppTheme::Monokai => Color::Rgb(166, 226, 46),      // Monokai green
+            AppTheme::Gruvbox => Color::Rgb(184, 187, 38),      // Gruvbox green
+            AppTheme::TokyoNight => Color::Rgb(158, 206, 106),  // Tokyo Night green
+            AppTheme::CatppuccinMocha => Color::Rgb(166, 227, 161), // Catppuccin green
+            AppTheme::OneDark => Color::Rgb(152, 195, 121),     // One Dark green
+            AppTheme::AyuDark => Color::Rgb(195, 232, 141),     // Ayu Dark green
+            AppTheme::USA => Color::Rgb(10, 49, 97),            // Navy blue for USA theme
+            AppTheme::Default => Color::Green,
+        }
+    }
+
+    /// Returns the color for negative values (e.g., RX data) in the theme.
+    pub fn negative_value_color(&self) -> Color {
+        match self {
+            AppTheme::MidnightGreen => Color::Yellow,
+            AppTheme::IAmBlue => Color::Cyan,
+            AppTheme::SolarizedDark => Color::Rgb(42, 161, 152), // Solarized cyan
+            AppTheme::Greyscale => Color::Rgb(120, 120, 120),    // Medium grey
+            AppTheme::Nord => Color::Rgb(136, 192, 208),         // Nord Frost cyan
+            AppTheme::Dracula => Color::Rgb(139, 233, 253),      // Dracula cyan
+            AppTheme::Monokai => Color::Rgb(102, 217, 239),      // Monokai blue
+            AppTheme::Gruvbox => Color::Rgb(104, 157, 106),      // Gruvbox aqua
+            AppTheme::TokyoNight => Color::Rgb(125, 207, 255),   // Tokyo Night cyan
+            AppTheme::CatppuccinMocha => Color::Rgb(137, 220, 235), // Catppuccin sky
+            AppTheme::OneDark => Color::Rgb(86, 182, 194),       // One Dark cyan
+            AppTheme::AyuDark => Color::Rgb(95, 175, 239),       // Ayu Dark blue
+            AppTheme::USA => Color::Rgb(187, 19, 62),            // Red for USA theme
+            AppTheme::Default => Color::Red,
+        }
+    }
+
+    /// Returns the low-level color for a 3-level gradient.
+    ///
+    /// # Arguments
+    /// * `reverse` - If true, high values get the "good" color, if false, low values get the "good" color
+    pub fn gradient_3_low(&self, reverse: bool) -> Color {
+        if reverse {
+            // High values are good, so low values get the "bad" color
+            self.text_disabled_color()
+        } else {
+            // Low values are good, so low values get the "good" color
+            self.text_enabled_color()
+        }
+    }
+
+    /// Returns the mid-level color for a 3-level gradient.
+    /// Mid-level always uses the important/warning color regardless of reverse direction.
+    pub fn gradient_3_mid(&self) -> Color {
+        // Mid-level always uses the important/warning color regardless of reverse
+        self.text_important_color()
+    }
+
+    /// Returns the high-level color for a 3-level gradient.
+    ///
+    /// # Arguments
+    /// * `reverse` - If true, high values get the "good" color, if false, low values get the "good" color
+    pub fn gradient_3_high(&self, reverse: bool) -> Color {
+        if reverse {
+            // High values are good, so high values get the "good" color
+            self.text_enabled_color()
+        } else {
+            // Low values are good, so high values get the "bad" color
+            self.text_disabled_color()
+        }
+    }
+
+    /// Returns a color for a 3-level gradient (LOW, MID, HIGH) based on value and thresholds.
+    ///
+    /// # Arguments
+    /// * `value` - The current value to evaluate
+    /// * `low_threshold` - Values <= this are considered LOW
+    /// * `high_threshold` - Values >= this are considered HIGH
+    /// * `reverse` - If true, high values get the "good" color (green), if false, low values get the "good" color
+    pub fn gradient_3(
+        &self,
+        value: f64,
+        low_threshold: f64,
+        high_threshold: f64,
+        reverse: bool,
+    ) -> Color {
+        if value <= low_threshold {
+            self.gradient_3_low(reverse)
+        } else if value >= high_threshold {
+            self.gradient_3_high(reverse)
+        } else {
+            self.gradient_3_mid()
+        }
+    }
+
+    /// Returns a color for a 5-level gradient (VERY_LOW, LOW, MID, HIGH, VERY_HIGH) based on value and thresholds.
+    ///
+    /// # Arguments
+    /// * `value` - The current value to evaluate
+    /// * `very_low_threshold` - Values <= this are considered VERY_LOW
+    /// * `low_threshold` - Values <= this (but > very_low) are considered LOW
+    /// * `high_threshold` - Values >= this (but < very_high) are considered HIGH
+    /// * `very_high_threshold` - Values >= this are considered VERY_HIGH
+    /// * `reverse` - If true, high values get the "good" color, if false, low values get the "good" color
+    pub fn gradient_5(
+        &self,
+        value: f64,
+        very_low_threshold: f64,
+        low_threshold: f64,
+        high_threshold: f64,
+        very_high_threshold: f64,
+        reverse: bool,
+    ) -> Color {
+        let (very_low_color, low_color, mid_color, high_color, very_high_color) = match self {
+            AppTheme::Default => {
+                if reverse {
+                    (
+                        Color::Red,
+                        Color::Rgb(255, 165, 0),
+                        Color::Yellow,
+                        Color::LightGreen,
+                        Color::Green,
+                    )
+                } else {
+                    (
+                        Color::Green,
+                        Color::LightGreen,
+                        Color::Yellow,
+                        Color::Rgb(255, 165, 0),
+                        Color::Red,
+                    )
+                }
+            }
+            AppTheme::MidnightGreen => {
+                if reverse {
+                    (
+                        Color::Red,
+                        Color::Rgb(255, 140, 0),
+                        Color::Yellow,
+                        Color::LightGreen,
+                        Color::Green,
+                    )
+                } else {
+                    (
+                        Color::Green,
+                        Color::LightGreen,
+                        Color::Yellow,
+                        Color::Rgb(255, 140, 0),
+                        Color::Red,
+                    )
+                }
+            }
+            AppTheme::IAmBlue => {
+                if reverse {
+                    (
+                        Color::Red,
+                        Color::Rgb(255, 140, 0),
+                        Color::Yellow,
+                        Color::Cyan,
+                        Color::Blue,
+                    )
+                } else {
+                    (
+                        Color::Blue,
+                        Color::Cyan,
+                        Color::Yellow,
+                        Color::Rgb(255, 140, 0),
+                        Color::Red,
+                    )
+                }
+            }
+            AppTheme::SolarizedDark => {
+                if reverse {
+                    (
+                        Color::Rgb(220, 50, 47),
+                        Color::Rgb(203, 75, 22),
+                        Color::Rgb(181, 137, 0),
+                        Color::Rgb(133, 153, 0),
+                        Color::Rgb(42, 161, 152),
+                    )
+                } else {
+                    (
+                        Color::Rgb(42, 161, 152),
+                        Color::Rgb(133, 153, 0),
+                        Color::Rgb(181, 137, 0),
+                        Color::Rgb(203, 75, 22),
+                        Color::Rgb(220, 50, 47),
+                    )
+                }
+            }
+            AppTheme::Greyscale => {
+                if reverse {
+                    (
+                        Color::Rgb(80, 80, 80),
+                        Color::Rgb(120, 120, 120),
+                        Color::Rgb(160, 160, 160),
+                        Color::Rgb(200, 200, 200),
+                        Color::Rgb(240, 240, 240),
+                    )
+                } else {
+                    (
+                        Color::Rgb(240, 240, 240),
+                        Color::Rgb(200, 200, 200),
+                        Color::Rgb(160, 160, 160),
+                        Color::Rgb(120, 120, 120),
+                        Color::Rgb(80, 80, 80),
+                    )
+                }
+            }
+            AppTheme::Nord => {
+                if reverse {
+                    (
+                        Color::Rgb(191, 97, 106),
+                        Color::Rgb(208, 135, 112),
+                        Color::Rgb(235, 203, 139),
+                        Color::Rgb(163, 190, 140),
+                        Color::Rgb(136, 192, 208),
+                    )
+                } else {
+                    (
+                        Color::Rgb(136, 192, 208),
+                        Color::Rgb(163, 190, 140),
+                        Color::Rgb(235, 203, 139),
+                        Color::Rgb(208, 135, 112),
+                        Color::Rgb(191, 97, 106),
+                    )
+                }
+            }
+            AppTheme::Dracula => {
+                if reverse {
+                    (
+                        Color::Rgb(255, 85, 85),
+                        Color::Rgb(255, 184, 108),
+                        Color::Rgb(241, 250, 140),
+                        Color::Rgb(139, 233, 253),
+                        Color::Rgb(80, 250, 123),
+                    )
+                } else {
+                    (
+                        Color::Rgb(80, 250, 123),
+                        Color::Rgb(139, 233, 253),
+                        Color::Rgb(241, 250, 140),
+                        Color::Rgb(255, 184, 108),
+                        Color::Rgb(255, 85, 85),
+                    )
+                }
+            }
+            AppTheme::Monokai => {
+                if reverse {
+                    (
+                        Color::Rgb(249, 38, 114),
+                        Color::Rgb(253, 151, 31),
+                        Color::Rgb(230, 219, 116),
+                        Color::Rgb(102, 217, 239),
+                        Color::Rgb(166, 226, 46),
+                    )
+                } else {
+                    (
+                        Color::Rgb(166, 226, 46),
+                        Color::Rgb(102, 217, 239),
+                        Color::Rgb(230, 219, 116),
+                        Color::Rgb(253, 151, 31),
+                        Color::Rgb(249, 38, 114),
+                    )
+                }
+            }
+            AppTheme::Gruvbox => {
+                if reverse {
+                    (
+                        Color::Rgb(251, 73, 52),
+                        Color::Rgb(254, 128, 25),
+                        Color::Rgb(250, 189, 47),
+                        Color::Rgb(184, 187, 38),
+                        Color::Rgb(104, 157, 106),
+                    )
+                } else {
+                    (
+                        Color::Rgb(104, 157, 106),
+                        Color::Rgb(184, 187, 38),
+                        Color::Rgb(250, 189, 47),
+                        Color::Rgb(254, 128, 25),
+                        Color::Rgb(251, 73, 52),
+                    )
+                }
+            }
+            AppTheme::TokyoNight => {
+                if reverse {
+                    (
+                        Color::Rgb(247, 118, 142),
+                        Color::Rgb(255, 158, 100),
+                        Color::Rgb(224, 175, 104),
+                        Color::Rgb(125, 207, 255),
+                        Color::Rgb(158, 206, 106),
+                    )
+                } else {
+                    (
+                        Color::Rgb(158, 206, 106),
+                        Color::Rgb(125, 207, 255),
+                        Color::Rgb(224, 175, 104),
+                        Color::Rgb(255, 158, 100),
+                        Color::Rgb(247, 118, 142),
+                    )
+                }
+            }
+            AppTheme::CatppuccinMocha => {
+                if reverse {
+                    (
+                        Color::Rgb(243, 139, 168),
+                        Color::Rgb(250, 179, 135),
+                        Color::Rgb(249, 226, 175),
+                        Color::Rgb(137, 220, 235),
+                        Color::Rgb(166, 227, 161),
+                    )
+                } else {
+                    (
+                        Color::Rgb(166, 227, 161),
+                        Color::Rgb(137, 220, 235),
+                        Color::Rgb(249, 226, 175),
+                        Color::Rgb(250, 179, 135),
+                        Color::Rgb(243, 139, 168),
+                    )
+                }
+            }
+            AppTheme::OneDark => {
+                if reverse {
+                    (
+                        Color::Rgb(224, 108, 117),
+                        Color::Rgb(209, 154, 102),
+                        Color::Rgb(229, 192, 123),
+                        Color::Rgb(86, 182, 194),
+                        Color::Rgb(152, 195, 121),
+                    )
+                } else {
+                    (
+                        Color::Rgb(152, 195, 121),
+                        Color::Rgb(86, 182, 194),
+                        Color::Rgb(229, 192, 123),
+                        Color::Rgb(209, 154, 102),
+                        Color::Rgb(224, 108, 117),
+                    )
+                }
+            }
+            AppTheme::AyuDark => {
+                if reverse {
+                    (
+                        Color::Rgb(255, 51, 51),
+                        Color::Rgb(255, 160, 122),
+                        Color::Rgb(255, 204, 102),
+                        Color::Rgb(95, 175, 239),
+                        Color::Rgb(195, 232, 141),
+                    )
+                } else {
+                    (
+                        Color::Rgb(195, 232, 141),
+                        Color::Rgb(95, 175, 239),
+                        Color::Rgb(255, 204, 102),
+                        Color::Rgb(255, 160, 122),
+                        Color::Rgb(255, 51, 51),
+                    )
+                }
+            }
+            AppTheme::USA => {
+                if reverse {
+                    (
+                        Color::Rgb(187, 19, 62),
+                        Color::Rgb(255, 100, 100),
+                        Color::White,
+                        Color::Rgb(100, 149, 237),
+                        Color::Rgb(10, 49, 97),
+                    )
+                } else {
+                    (
+                        Color::Rgb(10, 49, 97),
+                        Color::Rgb(100, 149, 237),
+                        Color::White,
+                        Color::Rgb(255, 100, 100),
+                        Color::Rgb(187, 19, 62),
+                    )
+                }
+            }
+        };
+
+        if value <= very_low_threshold {
+            very_low_color
+        } else if value <= low_threshold {
+            low_color
+        } else if value < high_threshold {
+            mid_color
+        } else if value < very_high_threshold {
+            high_color
+        } else {
+            very_high_color
         }
     }
 

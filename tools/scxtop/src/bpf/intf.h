@@ -13,15 +13,19 @@ typedef unsigned long long u64;
 #endif
 #include <stdbool.h>
 
-
 enum consts {
 	MAX_COMM	= 16,
 	/*
-	* LAYER_ID_INDEX is the current index of layer_id in the layered task_ctx struct
-	* (https://github.com/sched-ext/scx/blob/main/scheds/rust/scx_layered/src/bpf/main.bpf.c#L577).
-	* Whenever a new field is added above layer_id, LAYER_ID_INDEX must be incremented.
-	*/
+	 * LAYER_ID_INDEX is the current index of layer_id in the layered task_ctx
+	 * struct
+	 * (https://github.com/sched-ext/scx/blob/main/scheds/rust/scx_layered/src/bpf/main.bpf.c#L577).
+	 * Whenever a new field is added above layer_id, LAYER_ID_INDEX must be
+	 * incremented.
+	 */
 	LAYER_ID_INDEX	= 2,
+
+	/* Stack trace configuration */
+	MAX_STACK_DEPTH	= 127, /* Maximum number of stack frames to capture */
 };
 
 enum stat_id {
@@ -46,8 +50,10 @@ enum event_type {
 	GPU_MEM,
 	HW_PRESSURE,
 	IPI,
+	KPROBE,
+	PERF_SAMPLE,
 	SCHED_HANG,
-    	SCHED_MIGRATE,
+	SCHED_MIGRATE,
 	SCHED_REG,
 	SCHED_SWITCH,
 	SCHED_UNREG,
@@ -57,7 +63,6 @@ enum event_type {
 	TRACE_STARTED,
 	TRACE_STOPPED,
 	EVENT_MAX,
-	KPROBE,
 };
 
 struct sched_switch_event {
@@ -65,23 +70,23 @@ struct sched_switch_event {
 	bool		preempt;
 	u8		next_comm[MAX_COMM];
 	u64		next_dsq_id;
-	u64		next_dsq_lat_us;
-	u32		next_dsq_nr;
-	u64		next_dsq_vtime;
-	u64		next_slice_ns;
-	u32		next_pid;
-	u32		next_tgid;
-	int		next_prio;
-	int		next_layer_id;
+	u64 		next_dsq_lat_us;
+	u32 		next_dsq_nr;
+	u64 		next_dsq_vtime;
+	u64 		next_slice_ns;
+	u32 		next_pid;
+	u32 		next_tgid;
+	int 		next_prio;
+	int 		next_layer_id;
 	u8		prev_comm[MAX_COMM];
 	u64		prev_dsq_id;
-	u64		prev_used_slice_ns;
-	u64		prev_slice_ns;
-	u32		prev_pid;
-	u32		prev_tgid;
-	u64		prev_state;
-	int		prev_prio;
-	int		prev_layer_id;
+	u64 		prev_used_slice_ns;
+	u64 		prev_slice_ns;
+	u32 		prev_pid;
+	u32 		prev_tgid;
+	u64 		prev_state;
+	int 		prev_prio;
+	int 		prev_layer_id;
 };
 
 struct wakeup_event {
@@ -92,10 +97,10 @@ struct wakeup_event {
 };
 
 struct migrate_event {
-    u8      comm[MAX_COMM];
-    u32     pid;
-    int     prio;
-    u32     dest_cpu;
+	u32		pid;
+	int		prio;
+	u32		dest_cpu;
+	u8		comm[MAX_COMM];
 };
 
 struct set_perf_event {
@@ -106,42 +111,42 @@ struct softirq_event {
 	u64		entry_ts;
 	u64		exit_ts;
 	u32		pid;
-	int		softirq_nr;
+	int 		softirq_nr;
 };
 
 struct exit_event {
 	u32		pid;
-	u32		prio;
-	u32		tgid;
+	u32 		prio;
+	u32 		tgid;
 	u8		comm[MAX_COMM];
 };
 
 struct fork_event {
 	u32		parent_pid;
-	u32		parent_tgid;
-	u32		child_pid;
-	u32		child_tgid;
+	u32 		parent_tgid;
+	u32 		child_pid;
+	u32 		child_tgid;
+	int 		parent_layer_id;
+	int 		child_layer_id;
 	u8		parent_comm[MAX_COMM];
-	u8		child_comm[MAX_COMM];
-	int		parent_layer_id;
-	int		child_layer_id;
+	u8 		child_comm[MAX_COMM];
 };
 
 struct exec_event {
-	u32             old_pid;
-	u32             pid;
-	int             layer_id;
+	u32		old_pid;
+	u32		pid;
+	int 		layer_id;
 };
 
 struct wait_event {
-	u8              comm[MAX_COMM];
-	u32             pid;
-	int             prio;
+	u32		pid;
+	int 		prio;
+	u8		comm[MAX_COMM];
 };
 
 struct hang_event {
-	u8              comm[MAX_COMM];
-	u32             pid;
+	u32		pid;
+	u8		comm[MAX_COMM];
 };
 
 struct ipi_event {
@@ -150,39 +155,51 @@ struct ipi_event {
 };
 
 struct gpu_mem_event {
-	u64             size;
-	u32             gpu;
-	u32             pid;
+	u64		size;
+	u32 		gpu;
+	u32 		pid;
 };
 
 struct cpuhp_enter_event {
-	u32             cpu;
-	u32             pid;
-	int             target;
-	int             state;
+	u32		cpu;
+	u32 		pid;
+	int 		target;
+	int 		state;
 };
 
 struct cpuhp_exit_event {
-	u32             cpu;
-	u32             pid;
-	int             state;
-	int             idx;
-	int             ret;
+	u32		cpu;
+	u32 		pid;
+	int 		state;
+	int 		idx;
+	int 		ret;
 };
 
 struct hw_pressure_event {
-	u64             hw_pressure;
-	u32             cpu;
+	u64		hw_pressure;
+	u32 		cpu;
 };
 
 struct trace_started_event {
 	bool		start_immediately;
-	bool		stop_scheduled;
+	bool 		stop_scheduled;
 };
 
 struct kprobe_event {
-	u32             pid;
-	u64             instruction_pointer;
+	u32		pid;
+	u64 		instruction_pointer;
+};
+
+struct perf_sample_event {
+	u32		pid;
+	u64 		instruction_pointer;
+	u32 		cpu_id;
+	int 		layer_id;
+	bool		is_kernel;
+	u32		kernel_stack_size;
+	u32 		user_stack_size;
+	u64 		kernel_stack[MAX_STACK_DEPTH];
+	u64 		user_stack[MAX_STACK_DEPTH];
 };
 
 struct bpf_event {
@@ -190,34 +207,35 @@ struct bpf_event {
 	u64		ts;
 	u32		cpu;
 	union {
-		struct  exit_event exit;
-		struct  fork_event fork;
-		struct  exec_event exec;
-		struct  wait_event wait;
-		struct  hw_pressure_event hwp;
-		struct  gpu_mem_event gm;
-		struct  cpuhp_enter_event chp;
-		struct  cpuhp_exit_event cxp;
-		struct	ipi_event ipi;
-		struct	sched_switch_event sched_switch;
-		struct	set_perf_event perf;
-		struct	softirq_event softirq;
-		struct	wakeup_event wakeup;
-		struct	wakeup_event waking;
-		struct  migrate_event migrate;
-		struct  hang_event hang;
-		struct  trace_started_event trace;
-		struct  kprobe_event kprobe;
+		struct exit_event		exit;
+		struct fork_event 		fork;
+		struct exec_event 		exec;
+		struct wait_event 		wait;
+		struct hw_pressure_event	hwp;
+		struct gpu_mem_event		gm;
+		struct cpuhp_enter_event	chp;
+		struct cpuhp_exit_event		cxp;
+		struct ipi_event		ipi;
+		struct sched_switch_event	sched_switch;
+		struct set_perf_event		perf;
+		struct softirq_event		softirq;
+		struct wakeup_event		wakeup;
+		struct wakeup_event 		waking;
+		struct migrate_event		migrate;
+		struct hang_event		hang;
+		struct trace_started_event	trace;
+		struct kprobe_event		kprobe;
+		struct perf_sample_event	perf_sample;
 	} event;
 };
 
 struct task_ctx {
 	u64		wakeup_ts;
-	u64		dsq_id;
-	u64		dsq_insert_time;
-	u64		dsq_vtime;
-	u64		slice_ns;
-	u64		last_run_ns;
+	u64 		dsq_id;
+	u64 		dsq_insert_time;
+	u64 		dsq_vtime;
+	u64 		slice_ns;
+	u64 		last_run_ns;
 };
 
 struct schedule_stop_trace_args {
@@ -226,8 +244,8 @@ struct schedule_stop_trace_args {
 
 struct layered_task_ctx {
 	u32		data_a;
-	u32		data_b;
-	u32		layer_id;
+	u32 		data_b;
+	u32 		layer_id;
 };
 
 #endif /* __INTF_H */
