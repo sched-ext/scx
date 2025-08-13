@@ -40,6 +40,29 @@ pub fn full_version(semver: &str) -> String {
     ver
 }
 
+pub fn ops_version(sched_name: &str, semver: &str) -> String {
+    let mut ver = sched_name.to_string();
+    ver.push('_');
+    ver.push_str(semver);
+    if !GIT_VERSION.is_empty() {
+        write!(ver, "_{}", &*GIT_VERSION).unwrap();
+    }
+    if !BUILD_TAG.is_empty() {
+        write!(ver, "_{}", &*BUILD_TAG).unwrap();
+    }
+    ver = ver
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    ver
+}
+
 lazy_static::lazy_static! {
     pub static ref SCX_CARGO_VERSION: &'static str = env!("CARGO_PKG_VERSION");
     pub static ref SCX_FULL_VERSION: String = full_version(*SCX_CARGO_VERSION);
