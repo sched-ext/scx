@@ -376,6 +376,29 @@ macro_rules! scx_ops_open {
                 };
             }
 
+            {
+                let ops = skel.struct_ops.[<$ops _mut>]();
+
+                let name_field = &mut ops.name;
+                let existing_name = unsafe {
+                    ::std::ffi::CStr::from_ptr(name_field.as_ptr())
+                        .to_str()
+                        .expect("name is not utf-8")
+                };
+
+                let version = ::scx_utils::build_id::ops_version(existing_name, env!("CARGO_PKG_VERSION"));
+                let bytes = version.as_bytes();
+                let mut i = 0;
+                while i < bytes.len()
+                    && i < name_field.len() - 1
+                    && bytes[i] != 0
+                {
+                    name_field[i] = bytes[i] as i8;
+                    i += 1;
+                }
+                name_field[i] = 0;
+            }
+
             $crate::import_enums!(skel);
 
             let result = ::anyhow::Result::Ok(skel);
