@@ -29,6 +29,8 @@ static_assertions = "1.1.0"
 plain = "0.2.3"
 gpoint = "0.2"
 combinations = "0.1.0"
+rlimit = "0.10.2"
+nix = "0.30.1"
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.19" }
