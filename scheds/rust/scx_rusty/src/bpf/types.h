@@ -63,6 +63,10 @@ struct task_ctx {
 	u32 pid;
 
 	struct ravg_data dcyc_rd;
+	struct ravg_data l3_rd;
+
+	u64 l3_traffic;
+	u64 l3_next;
 };
 
 /* XXXETSAL Same rationale as for dom_ptr. Remove once we dump Clang 18.*/
@@ -76,6 +80,9 @@ typedef struct task_ctx *task_ptr;
 struct bucket_ctx {
 	u64 dcycle;
 	struct ravg_data rd;
+
+	u64 l3;
+	struct ravg_data l3_rd;
 };
 
 struct dom_active_tasks {
