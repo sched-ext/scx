@@ -739,7 +739,7 @@ async def main():
         else:
             await run_veristat()
     elif args.command == "test-in-vm":
-        run_tests_in_vm()
+        await run_tests_in_vm()
     elif args.command == "all":
         await run_all()
 
