@@ -1087,15 +1087,20 @@ impl PowerDataCollector {
             system_data.battery_remaining_time_minutes = remaining_time;
         }
 
-        // Calculate total power
-        system_data.total_power_watts = system_data
-            .cores
-            .values()
-            .map(|core| core.power_watts)
-            .sum();
-
         // Collect package power if available
         system_data.package_power = self.collect_package_power()?;
+
+        // Calculate total power from package power (more accurate than core power sum)
+        system_data.total_power_watts = if !system_data.package_power.is_empty() {
+            system_data.package_power.values().sum()
+        } else {
+            // Fallback to core power sum if package power is not available
+            system_data
+                .cores
+                .values()
+                .map(|core| core.power_watts)
+                .sum()
+        };
 
         Ok(system_data)
     }
@@ -1112,8 +1117,8 @@ impl PowerDataCollector {
         // Get CPU temperature
         core_data.temperature_celsius = self.read_cpu_temperature(core_id)?;
 
-        // Get CPU power consumption (estimate based on frequency and usage)
-        core_data.power_watts = self.estimate_cpu_power(core_id, core_data.frequency_mhz)?;
+        // Only use actual RAPL power measurements, no estimates
+        core_data.power_watts = 0.0;
 
         // Get C-state information
         core_data.c_states = self.read_c_states(core_id)?;
@@ -1317,45 +1322,6 @@ impl PowerDataCollector {
 
         // If all strategies fail, return 0 (will be handled by the display logic)
         Ok(0.0)
-    }
-
-    fn estimate_cpu_power(&self, core_id: u32, frequency_mhz: f64) -> Result<f64> {
-        // Read CPU utilization from /proc/stat for this core
-        let stat_content = fs::read_to_string("/proc/stat")
-            .map_err(|e| anyhow!("Failed to read /proc/stat: {e}"))?;
-
-        let cpu_line = format!("cpu{core_id}");
-        for line in stat_content.lines() {
-            if line.starts_with(&cpu_line) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 8 {
-                    let user: u64 = parts[1].parse().unwrap_or(0);
-                    let nice: u64 = parts[2].parse().unwrap_or(0);
-                    let system: u64 = parts[3].parse().unwrap_or(0);
-                    let idle: u64 = parts[4].parse().unwrap_or(0);
-                    let iowait: u64 = parts[5].parse().unwrap_or(0);
-                    let irq: u64 = parts[6].parse().unwrap_or(0);
-                    let softirq: u64 = parts[7].parse().unwrap_or(0);
-
-                    let total = user + nice + system + idle + iowait + irq + softirq;
-                    let active = total - idle;
-
-                    if total > 0 {
-                        let utilization = active as f64 / total as f64;
-                        // Rough power estimation: Base power + (Frequency factor * Utilization factor)
-                        // This is a simplified model - real power monitoring would need RAPL or similar
-                        let base_power = 5.0; // Watts base power per core
-                        let freq_factor = frequency_mhz / 1000.0; // GHz
-                        let power_estimate = base_power + (freq_factor * utilization * 10.0);
-                        return Ok(power_estimate);
-                    }
-                }
-                break;
-            }
-        }
-
-        // Fallback basic estimation
-        Ok(frequency_mhz / 1000.0 * 5.0)
     }
 
     fn read_c_states(&self, core_id: u32) -> Result<HashMap<String, CStateInfo>> {
