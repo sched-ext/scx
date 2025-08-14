@@ -1,7 +1,7 @@
 use anyhow::Result;
 use anyhow::{anyhow, bail};
-use libc;
 use log::{info, warn};
+use nix::sys::resource::{setrlimit, Resource, RLIM_INFINITY};
 use scx_stats::prelude::*;
 use serde::Deserialize;
 use std::path::Path;
@@ -65,18 +65,9 @@ where
     Ok(())
 }
 
-pub fn set_rlimit_infinity() {
-    unsafe {
-        // Call setrlimit to set the locked-in-memory limit to unlimited.
-        let new_rlimit = libc::rlimit {
-            rlim_cur: libc::RLIM_INFINITY,
-            rlim_max: libc::RLIM_INFINITY,
-        };
-        let res = libc::setrlimit(libc::RLIMIT_MEMLOCK, &new_rlimit);
-        if res != 0 {
-            panic!("setrlimit failed with error code: {res}");
-        }
-    };
+pub fn set_rlimit_infinity() -> Result<()> {
+    setrlimit(Resource::RLIMIT_MEMLOCK, RLIM_INFINITY, RLIM_INFINITY)?;
+    Ok(())
 }
 
 /// Read a file and parse its content into the specified type.
