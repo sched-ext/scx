@@ -1,6 +1,6 @@
 [package]
 name = "scx_lib_selftests"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 
 publish = false
@@ -9,7 +9,7 @@ publish = false
 anyhow = "1.0.65"
 libbpf-rs = "=0.26.0-beta.1"
 simplelog = "0.12"
-scx_utils = { path = "../scx_utils", version = "1.0.18" }
+scx_utils = { path = "../scx_utils", version = "1.0.19" }
 
 [build-dependencies]
-scx_utils = { path = "../scx_utils", version = "1.0.18" }
+scx_utils = { path = "../scx_utils", version = "1.0.19" }
