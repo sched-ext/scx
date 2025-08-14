@@ -9,6 +9,8 @@
 #include <lib/sdt_task.h>
 #include <lib/btree.h>
 
+#define BTREE_MAX_DEPTH (20)
+
 /*
  * Temporary replacements for memcpy/arrzero, which the BPF
  * LLVM backend does not support.
@@ -335,8 +337,11 @@ int bt_split(btree_t __arg_arena *btree, bt_node __arg_arena *btn_old)
 	bt_node *btn_new, *btn_root, *btn_parent;
 	u64 key, ind;
 	int ret;
+	int i;
 
-	do {
+	/* Bounded loop to avoid spurious can_loop-related breaks. */
+	bpf_for (i, 0, BTREE_MAX_DEPTH) {
+
 		btn_parent = btn_old->parent;
 		btn_new = btnode_alloc(btree, btn_parent, btn_old->flags);
 		if (!btn_new)
@@ -376,9 +381,9 @@ int bt_split(btree_t __arg_arena *btree, bt_node __arg_arena *btn_old)
 		}
 
 		btn_old = btn_old->parent;
-
-	/* Loop around while the node is full. */
-	} while (btn_old->numkeys >= BT_LEAFSZ - 1 && can_loop);
+		if (btn_old->numkeys < BT_LEAFSZ - 1)
+			break;
+	}
 
 	if (btn_old->numkeys >= BT_LEAFSZ - 1) {
 		bpf_printk("POST SPLIT NODE IS FULL");
