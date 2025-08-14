@@ -41,6 +41,8 @@ enum ScxMessage {
     SwitchSched((SupportedSched, SchedMode)),
     /// Switch to another scheduler with the given scx arguments
     SwitchSchedArgs((SupportedSched, Vec<String>)),
+    /// Restart the currently running scheduler with original configuration
+    RestartSched((SupportedSched, Option<Vec<String>>, SchedMode)),
 }
 
 #[derive(Debug, PartialEq)]
@@ -51,11 +53,14 @@ enum RunnerMessage {
     Start((SupportedSched, Vec<String>)),
     /// Stop the scheduler, if any
     Stop,
+    /// Restart the currently running scheduler with same arguments
+    Restart((SupportedSched, Vec<String>)),
 }
 
 struct ScxLoader {
     current_scx: Option<SupportedSched>,
     current_mode: SchedMode,
+    current_args: Option<Vec<String>>,
     channel: UnboundedSender<ScxMessage>,
 }
 
@@ -85,6 +90,12 @@ impl ScxLoader {
         self.current_mode.clone()
     }
 
+    /// Get arguments used for currently running scheduler
+    #[zbus(property)]
+    async fn current_scheduler_args(&self) -> Vec<String> {
+        self.current_args.clone().unwrap_or_default()
+    }
+
     /// Get list of supported schedulers
     #[zbus(property)]
     async fn supported_schedulers(&self) -> Vec<&str> {
@@ -99,7 +110,6 @@ impl ScxLoader {
             "scx_rusty",
         ]
     }
-
     async fn start_scheduler(
         &mut self,
         scx_name: SupportedSched,
@@ -113,6 +123,7 @@ impl ScxLoader {
         )));
         self.current_scx = Some(scx_name);
         self.current_mode = sched_mode;
+        self.current_args = None;
 
         Ok(())
     }
@@ -124,12 +135,14 @@ impl ScxLoader {
     ) -> zbus::fdo::Result<()> {
         log::info!("starting {scx_name:?} with args {scx_args:?}..");
 
-        let _ = self
-            .channel
-            .send(ScxMessage::StartSchedArgs((scx_name.clone(), scx_args)));
+        let _ = self.channel.send(ScxMessage::StartSchedArgs((
+            scx_name.clone(),
+            scx_args.clone(),
+        )));
         self.current_scx = Some(scx_name);
         // reset mode to auto
         self.current_mode = SchedMode::Auto;
+        self.current_args = Some(scx_args);
 
         Ok(())
     }
@@ -147,6 +160,7 @@ impl ScxLoader {
         )));
         self.current_scx = Some(scx_name);
         self.current_mode = sched_mode;
+        self.current_args = None;
 
         Ok(())
     }
@@ -158,12 +172,14 @@ impl ScxLoader {
     ) -> zbus::fdo::Result<()> {
         log::info!("switching {scx_name:?} with args {scx_args:?}..");
 
-        let _ = self
-            .channel
-            .send(ScxMessage::SwitchSchedArgs((scx_name.clone(), scx_args)));
+        let _ = self.channel.send(ScxMessage::SwitchSchedArgs((
+            scx_name.clone(),
+            scx_args.clone(),
+        )));
         self.current_scx = Some(scx_name);
         // reset mode to auto
         self.current_mode = SchedMode::Auto;
+        self.current_args = Some(scx_args);
 
         Ok(())
     }
@@ -175,9 +191,29 @@ impl ScxLoader {
             log::info!("stopping {scx_name:?}..");
             let _ = self.channel.send(ScxMessage::StopSched);
             self.current_scx = None;
+            self.current_args = None;
         }
 
         Ok(())
+    }
+
+    async fn restart_scheduler(&mut self) -> zbus::fdo::Result<()> {
+        if let Some(current_scx) = &self.current_scx {
+            let scx_name: &str = current_scx.clone().into();
+
+            log::info!("restarting {scx_name:?}..");
+            let _ = self.channel.send(ScxMessage::RestartSched((
+                current_scx.clone(),
+                self.current_args.clone(),
+                self.current_mode.clone(),
+            )));
+
+            Ok(())
+        } else {
+            Err(zbus::fdo::Error::Failed(
+                "No scheduler is currently running to restart".to_string(),
+            ))
+        }
     }
 }
 
@@ -287,6 +323,7 @@ async fn main() -> Result<()> {
             ScxLoader {
                 current_scx: None,
                 current_mode: SchedMode::Auto,
+                current_args: None,
                 channel: channel.clone(),
             },
         )
@@ -387,6 +424,23 @@ async fn worker_loop(
                     .send(RunnerMessage::Switch((scx_sched, sched_args)))
                     .await?;
             }
+            ScxMessage::RestartSched((scx_sched, current_args, current_mode)) => {
+                log::info!("Got event to restart scheduler!");
+
+                // Determine the arguments to use for restart
+                let args = if let Some(args) = current_args {
+                    // Use custom arguments if they were set
+                    args
+                } else {
+                    // Use mode-based arguments
+                    config::get_scx_flags_for_mode(&config, &scx_sched, current_mode)
+                };
+
+                // send restart message to the runner
+                runner_tx
+                    .send(RunnerMessage::Restart((scx_sched, args)))
+                    .await?;
+            }
         }
     }
 }
@@ -431,6 +485,23 @@ async fn handle_child_process(mut rx: tokio::sync::mpsc::Receiver<RunnerMessage>
             }
             RunnerMessage::Stop => {
                 stop_scheduler(&mut task, &mut cancel_token).await;
+            }
+            RunnerMessage::Restart((scx_sched, sched_args)) => {
+                log::info!("Got event to restart scheduler!");
+
+                // stop the sched if its running
+                stop_scheduler(&mut task, &mut cancel_token).await;
+
+                // restart scheduler with the same configuration
+                match start_scheduler(scx_sched, sched_args, cancel_token.clone()).await {
+                    Ok(handle) => {
+                        task = Some(handle);
+                        log::debug!("Scheduler restarted");
+                    }
+                    Err(err) => {
+                        log::error!("Failed to restart scheduler: {err}");
+                    }
+                }
             }
         }
     }

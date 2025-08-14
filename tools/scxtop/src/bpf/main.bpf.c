@@ -41,7 +41,7 @@ u32 last_sample_rate;
 
 const int zero_int = 0;
 
-struct timer_wrapper{
+struct timer_wrapper {
 	struct bpf_timer	timer;
 	int			key;
 };
@@ -85,7 +85,6 @@ static __always_inline struct bpf_event* try_reserve_event()
 		stat_inc(STAT_DROPPED_EVENTS);
 
 	return event;
-
 }
 
 static __always_inline u32 get_random_sample(u32 n)
@@ -142,7 +141,6 @@ struct {
 	__type(value, struct __softirq_event);
 	__uint(max_entries, 1);
 } softirq_events SEC(".maps");
-
 
 static __always_inline u64 t_to_tptr(struct task_struct *p)
 {
@@ -308,7 +306,6 @@ static int on_insert(struct task_struct *p, u64 dsq)
 	return 0;
 }
 
-
 SEC("kprobe/scx_bpf_dsq_insert")
 int BPF_KPROBE(scx_insert, struct task_struct *p, u64 dsq)
 {
@@ -340,14 +337,14 @@ static int on_dsq_move(struct task_struct *p, u64 dsq)
 
 SEC("kprobe/scx_bpf_dsq_move")
 int BPF_KPROBE(scx_dsq_move, struct bpf_iter_scx_dsq *it__iter,
-	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+               struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
 	return on_dsq_move(p, dsq_id);
 }
 
 SEC("kprobe/scx_bpf_dispatch_from_dsq")
 int BPF_KPROBE(scx_dispatch_from_dsq, struct bpf_iter_scx_dsq *it__iter,
-	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+               struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
 	return on_dsq_move(p, dsq_id);
 }
@@ -371,14 +368,14 @@ static int on_dsq_move_vtime(struct task_struct *p, u64 dsq)
 
 SEC("kprobe/scx_bpf_dsq_move_vtime")
 int BPF_KPROBE(scx_dsq_move_vtime, struct bpf_iter_scx_dsq *it__iter,
-	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+               struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
 	return on_dsq_move_vtime(p, dsq_id);
 }
 
 SEC("kprobe/scx_bpf_dispatch_vtime_from_dsq")
 int BPF_KPROBE(scx_dispatch_vtime_from_dsq, struct bpf_iter_scx_dsq *it__iter,
-	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+               struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
 	return on_dsq_move_vtime(p, dsq_id);
 }
@@ -406,8 +403,8 @@ int BPF_KPROBE(scx_dsq_move_set_slice, struct bpf_iter_scx_dsq *it__iter, u64 sl
 }
 
 SEC("kprobe/scx_bpf_dispatch_from_dsq_set_slice")
-int BPF_KPROBE(scx_dispatch_from_dsq_set_slice, struct bpf_iter_scx_dsq *it__iter,
-	       u64 slice)
+int BPF_KPROBE(scx_dispatch_from_dsq_set_slice,
+               struct bpf_iter_scx_dsq *it__iter, u64 slice)
 {
 	// TODO: figure out how to return task from iterator without consuming.
 	return on_move_set_slice(NULL, slice);
@@ -429,14 +426,16 @@ static int on_move_set_vtime(struct task_struct *p, u64 vtime)
 }
 
 SEC("kprobe/scx_bpf_dsq_move_set_vtime")
-int BPF_KPROBE(scx_dsq_move_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vtime)
+int BPF_KPROBE(scx_dsq_move_set_vtime, struct bpf_iter_scx_dsq *it__iter,
+               u64 vtime)
 {
 	// TODO: figure out how to return task from iterator without consuming.
 	return on_move_set_vtime(NULL, vtime);
 }
 
 SEC("kprobe/scx_bpf_dispatch_from_dsq_set_vtime")
-int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vtime)
+int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime,
+               struct bpf_iter_scx_dsq *it__iter, u64 vtime)
 {
 	// TODO: figure out how to return task from iterator without consuming.
 	return on_move_set_vtime(NULL, vtime);
@@ -450,8 +449,7 @@ static void record_real_comm(u8 *comm, struct task_struct *task)
 		 * stick with the measly 16 characters of the comm field to
 		 * keep things simple.
 		 */
-		struct kthread *k = bpf_core_cast(task->worker_private,
-						  struct kthread);
+		struct kthread *k = bpf_core_cast(task->worker_private, struct kthread);
 		struct worker *worker = bpf_core_cast(k->data, struct worker);
 		bpf_probe_read_kernel_str(comm, MAX_COMM, worker->desc);
 	} else {
@@ -507,11 +505,11 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 {
 	struct bpf_event *event;
 
-        if (!enable_bpf_events || !should_sample())
-                return 0;
+	if (!enable_bpf_events || !should_sample())
+		return 0;
 
-        if (!(event = try_reserve_event()))
-                return -ENOMEM;
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
 
 	event->type = SCHED_WAKING;
 	event->ts = bpf_ktime_get_ns();
@@ -525,10 +523,9 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 	return 0;
 }
 
-
 SEC("tp_btf/sched_switch")
 int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
-	     struct task_struct *next, u64 prev_state)
+             struct task_struct *next, u64 prev_state)
 {
 	struct task_ctx *next_tctx, *prev_tctx;
 	struct bpf_event *event;
@@ -537,7 +534,6 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 
 	// We need to check if this is the tail end of a sample
 	if (prev && prev_tctx && prev_tctx->last_run_ns > 0) {
-
 		u32 *lctx;
 
 		if (!(event = try_reserve_event()))
@@ -570,13 +566,13 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		prev_tctx->last_run_ns = 0;
 
 		/*
-		* Tracking vtime **and** the dsq a task was inserted to is kind of
-		* tricky. We could read dsq_vtime directly of the sched_ext_entity on
-		* the task_struct, but the dsq field will not be available on
-		* sched_switch as the task is not on any dsq. The current hacky
-		* solution is to record the dsq that the task was inserted to and
-		* store it in a map for the task. There still needs to be handling for
-		* when tasks are moved from iterators.
+		 * Tracking vtime **and** the dsq a task was inserted to is kind of
+		 * tricky. We could read dsq_vtime directly of the sched_ext_entity on
+		 * the task_struct, but the dsq field will not be available on
+		 * sched_switch as the task is not on any dsq. The current hacky
+		 * solution is to record the dsq that the task was inserted to and
+		 * store it in a map for the task. There still needs to be handling for
+		 * when tasks are moved from iterators.
 		*/
 		if (next) {
 			if (layered && (lctx = try_lookup_layered_task_ctx(next)))
@@ -597,10 +593,10 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 				event->event.sched_switch.next_dsq_nr =
 					scx_bpf_dsq_nr_queued(next_tctx->dsq_id);
 				/*
-				* XXX: if a task gets moved to another dsq and the vtime is updated
-				* then vtime should be read off the sched_ext_entity. To properly
-				* handle vtime any time a task is inserted to a dsq or the vtime is
-				* updated the tctx needs to be updated.
+				 * XXX: if a task gets moved to another dsq and the vtime is updated
+				 * then vtime should be read off the sched_ext_entity. To properly
+				 * handle vtime any time a task is inserted to a dsq or the vtime is
+				 * updated the tctx needs to be updated.
 				*/
 				// bpf_core_read(&event->dsq_vtime, sizeof(u64), &p->scx.dsq_vtime);
 				event->event.sched_switch.next_dsq_vtime = next_tctx->dsq_vtime;
@@ -636,24 +632,24 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 SEC("tp_btf/sched_migrate_task")
 int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
 {
-    struct bpf_event *event;
+	struct bpf_event *event;
 
-    if (!enable_bpf_events || !should_sample())
-        return 0;
+	if (!enable_bpf_events || !should_sample())
+		return 0;
 
-    if (!(event = try_reserve_event()))
-        return -ENOMEM;
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
 
-    event->type = SCHED_MIGRATE;
-    event->ts = bpf_ktime_get_ns();
-    event->cpu = bpf_get_smp_processor_id();
-    event->event.migrate.pid = p->pid;
-    event->event.migrate.dest_cpu = dest_cpu;
-    event->event.migrate.prio = (int)p->prio;
+	event->type = SCHED_MIGRATE;
+	event->ts = bpf_ktime_get_ns();
+	event->cpu = bpf_get_smp_processor_id();
+	event->event.migrate.pid = p->pid;
+	event->event.migrate.dest_cpu = dest_cpu;
+	event->event.migrate.prio = (int)p->prio;
 
-    bpf_ringbuf_submit(event, 0);
+	bpf_ringbuf_submit(event, 0);
 
-    return 0;
+	return 0;
 }
 
 SEC("?tp_btf/sched_process_hang")
@@ -667,15 +663,15 @@ int BPF_PROG(on_sched_hang, struct task_struct *p)
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
 
-    event->type = SCHED_HANG;
-    event->ts = bpf_ktime_get_ns();
-    event->cpu = bpf_get_smp_processor_id();
-    record_real_comm(event->event.hang.comm, p);
-    event->event.hang.pid = p->pid;
+	event->type = SCHED_HANG;
+	event->ts = bpf_ktime_get_ns();
+	event->cpu = bpf_get_smp_processor_id();
+	record_real_comm(event->event.hang.comm, p);
+	event->event.hang.pid = p->pid;
 
-    bpf_ringbuf_submit(event, 0);
+	bpf_ringbuf_submit(event, 0);
 
-    return 0;
+	return 0;
 }
 
 SEC("tp_btf/softirq_entry")
@@ -733,7 +729,8 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 	return 0;
 }
 
-static int stop_trace_timer_callback(void *map, int key, struct timer_wrapper *timerw)
+static int stop_trace_timer_callback(void *map, int key,
+                                     struct timer_wrapper *timerw)
 {
 	struct bpf_event *event;
 	u64 end = mode == MODE_TRACING ? bpf_ktime_get_ns() : last_trace_end_time;
@@ -760,7 +757,8 @@ static int stop_trace_timer_callback(void *map, int key, struct timer_wrapper *t
 	return 0;
 }
 
-static __always_inline int start_trace_real(bool schedule_stop, bool start_immediately)
+static __always_inline int start_trace_real(bool schedule_stop,
+                                            bool start_immediately)
 {
 	static const enum scxtop_timer_callbacks stop_trace_key = TIMER_STOP_TRACE;
 
@@ -815,7 +813,8 @@ error_no_event:
 }
 
 /*
- * Begin a trace and schedule stopping it. This is called via BPF_PROG_RUN from userspace.
+ * Begin a trace and schedule stopping it. This is called via BPF_PROG_RUN from
+ * userspace.
  */
 SEC("syscall")
 int BPF_PROG(start_trace)
@@ -846,13 +845,13 @@ int BPF_URETPROBE(long_tail_tracker_exit)
 	if (now - *entry_time < long_tail_tracing_min_latency_ns)
 		return 0;
 
-	// we can't start the trace fully from the bpf side directly here because
-	// we need to schedule the timer that terminates the trace, and:
-	//     tracing progs cannot use bpf_timer yet
+	// we can't start the trace fully from the bpf side directly here
+	// because we need to schedule the timer that terminates the trace, and:
+	//	tracing progs cannot use bpf_timer yet 
 	// instead start the trace but include in the message to userspace the
-	// fact we haven't scheduled the stop, and have userspace call back into
-	// a "syscall" type program which can schedule the stop. userspace can
-	// compute the absolute stop time to make this less racy.
+	// fact we haven't scheduled the stop, and have userspace call back
+	// into a "syscall" type program which can schedule the stop. userspace
+	// can compute the absolute stop time to make this less racy.
 	return start_trace_real(false /* schedule_stop */, true /* start_immediately */);
 }
 
@@ -923,13 +922,14 @@ int BPF_PROG(on_sched_exit, struct task_struct *task)
 }
 
 SEC("tp_btf/sched_process_fork")
-int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *child)
+int BPF_PROG(on_sched_fork, struct task_struct *parent,
+             struct task_struct *child)
 {
 	struct bpf_event *event;
 	u32 *lctx;
 
 	if (!enable_bpf_events)
-		return 0;
+	return 0;
 
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
@@ -960,7 +960,8 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 }
 
 SEC("tp_btf/sched_process_exec")
-int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_binprm *prm)
+int BPF_PROG(on_sched_exec,struct task_struct *p, u32 old_pid,
+	     struct linux_binprm *prm)
 {
 	struct bpf_event *event;
 	u32 *lctx;
@@ -1004,7 +1005,9 @@ int BPF_PROG(on_sched_wait, struct pid *pid)
 	event->ts = bpf_ktime_get_ns();
 	p = (struct task_struct *)bpf_get_current_task();
 	if (p) {
-		bpf_core_read_str(&event->event.wait.comm, sizeof(event->event.wait.comm), &p->comm);
+		bpf_core_read_str(&event->event.wait.comm,
+				  sizeof(event->event.wait.comm),
+				  &p->comm);
 		event->event.wait.pid = BPF_CORE_READ(p, pid);
 		event->event.wait.prio = BPF_CORE_READ(p, prio);
 	} else {
@@ -1116,6 +1119,73 @@ int BPF_PROG(on_hw_pressure_update, u32 cpu, u64 hw_pressure)
 	event->ts = bpf_ktime_get_ns();
 	event->event.hwp.hw_pressure = hw_pressure;
 	event->event.hwp.cpu = cpu;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("perf_event")
+int perf_sample_handler(struct bpf_perf_event_data *ctx)
+{
+	struct bpf_event *event;
+	struct task_struct *task;
+	u32 *lctx;
+	int ret;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = PERF_SAMPLE;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.perf_sample.pid = bpf_get_current_pid_tgid() & 0xffffffff;
+	event->event.perf_sample.instruction_pointer = ctx->regs.ip;
+	event->event.perf_sample.cpu_id = bpf_get_smp_processor_id();
+
+	// Get current task for layer ID lookup
+	task = (struct task_struct *)bpf_get_current_task_btf();
+
+	// Get layer ID if layered mode is enabled
+	if (layered && task && (lctx = try_lookup_layered_task_ctx(task)))
+		event->event.perf_sample.layer_id = lctx[LAYER_ID_INDEX];
+	else
+		event->event.perf_sample.layer_id = -1;
+
+	// Capture kernel stack trace
+	ret = bpf_get_stack(ctx, event->event.perf_sample.kernel_stack,
+			    sizeof(event->event.perf_sample.kernel_stack),
+			    0); // No flags for kernel stack
+	if (ret > 0) {
+		event->event.perf_sample.kernel_stack_size = ret / sizeof(u64);
+	} else {
+		event->event.perf_sample.kernel_stack_size = 0;
+		// Try fallback method for kernel stack - get current IP
+		if (event->event.perf_sample.is_kernel) {
+			event->event.perf_sample.kernel_stack[0] = ctx->regs.ip;
+			event->event.perf_sample.kernel_stack_size = 1;
+		}
+	}
+
+	// Capture user stack trace
+	ret = bpf_get_stack(ctx,
+			    event->event.perf_sample.user_stack,
+			    sizeof(event->event.perf_sample.user_stack),
+			    BPF_F_USER_STACK); // Only user stack flag
+	if (ret > 0) {
+		event->event.perf_sample.user_stack_size = ret / sizeof(u64);
+	} else {
+		event->event.perf_sample.user_stack_size = 0;
+		// Try fallback method for user stack - get current IP if userspace
+		if (!event->event.perf_sample.is_kernel) {
+			event->event.perf_sample.user_stack[0] = ctx->regs.ip;
+			event->event.perf_sample.user_stack_size = 1;
+		}
+	}
+	event->event.perf_sample.is_kernel = event->event.perf_sample.user_stack_size <= 1;
 
 	bpf_ringbuf_submit(event, 0);
 

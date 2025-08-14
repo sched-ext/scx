@@ -30,6 +30,8 @@ volatile bool		no_freq_scaling;
 
 const volatile bool	no_wake_sync;
 const volatile bool	no_slice_boost;
+const volatile bool	per_cpu_dsq;
+const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
 
 /*
@@ -197,14 +199,7 @@ bool have_scheduled(struct task_ctx *taskc)
 
 bool can_boost_slice(void)
 {
-	return slice_max_ns <= sys_stat.slice;
-}
-
-__hidden
-bool have_pending_tasks(struct cpu_ctx *cpuc)
-{
-	return scx_bpf_dsq_nr_queued(cpuc->cpdom_id) ||
-	       scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
+	return sys_stat.nr_queued_task <= sys_stat.nr_active;
 }
 
 static u16 get_nice_prio(struct task_struct *p)
@@ -268,13 +263,18 @@ static void set_on_core_type(struct task_ctx *taskc,
 		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
 }
 
-static bool prob_x_out_of_y(u32 x, u32 y)
+bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 {
+	u32 r;
+
+	if (x >= y)
+		return true;
+
 	/*
 	 * [0, r, y)
 	 *  ---- x?
 	 */
-	u32 r = bpf_get_prandom_u32() % y;
+	r = bpf_get_prandom_u32() % y;
 	return r < x;
 }
 

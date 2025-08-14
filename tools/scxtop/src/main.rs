@@ -62,21 +62,47 @@ fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
             Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms))
         }
         Event::Key(key) => handle_key_event(app, keymap, key),
-        Event::Paste(paste) => match app.state() {
-            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(paste),
-            _ => Action::None,
-        },
+        Event::Paste(paste) => handle_input_entry(app, paste).unwrap_or(Action::None),
         _ => Action::None,
     }
 }
 
 fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
     match key.code {
-        Char(c) => match app.state() {
-            AppState::PerfEvent | AppState::KprobeEvent => Action::InputEntry(c.to_string()),
-            _ => keymap.action(&Key::Char(c)),
-        },
+        Char(c) => {
+            // Check if we should handle this character as input for filtering
+            if let Some(action) = handle_input_entry(app, c.to_string()) {
+                action
+            } else {
+                keymap.action(&Key::Char(c))
+            }
+        }
         _ => keymap.action(&Key::Code(key.code)),
+    }
+}
+
+fn handle_input_entry(app: &App, s: String) -> Option<Action> {
+    match app.state() {
+        AppState::PerfEvent | AppState::KprobeEvent => Some(Action::InputEntry(s)),
+        AppState::Default
+        | AppState::Llc
+        | AppState::Node
+        | AppState::Process
+        | AppState::Memory => {
+            if app.filtering() {
+                Some(Action::InputEntry(s))
+            } else {
+                None
+            }
+        }
+        AppState::PerfTop => {
+            if app.filtering() {
+                Some(Action::InputEntry(s))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -359,6 +385,11 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                     col: "Layer ID".to_string(),
                     visible: true,
                 }))?;
+                action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
+                    table: "Thread".to_string(),
+                    col: "Layer ID".to_string(),
+                    visible: true,
+                }))?;
                 Some(layered_util::attach_to_existing_map("task_ctxs", &mut skel.maps.task_ctxs)?)
             } else {
                 None
@@ -409,7 +440,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                 ]);
             };
 
-            let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms())?;
+            let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms(), config.frame_rate_ms())?;
             let mut event_rbb = RingBufferBuilder::new();
             let event_handler = move |data: &[u8]| {
                 let mut event = bpf_event::default();
@@ -426,6 +457,7 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                 scheduler,
                 100,
                 tui_args.process_id,
+                tui_args.layered,
                 action_tx.clone(),
                 skel,
             )?;
@@ -457,7 +489,6 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                     .await
                 });
             }
-
 
             loop {
                 tokio::select! {

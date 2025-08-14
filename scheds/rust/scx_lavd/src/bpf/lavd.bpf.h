@@ -19,6 +19,12 @@
 #define p2s(percent)			(((percent) << LAVD_SHIFT) / 100)
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
+#define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
+#define cpu_to_dsq(cpu_id)		((cpu_id) | LAVD_DSQ_TYPE_CPU << LAVD_DSQ_TYPE_SHFT)
+#define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
+#define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
+#define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
+
 /*
  * common constants
  */
@@ -32,13 +38,13 @@ enum consts_internal {
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
 	LAVD_MAX_RETRY			= 3,
 
-	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
+	LAVD_TARGETED_LATENCY_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS_DFL		= (500ULL * NSEC_PER_USEC), /* min time slice */
 	LAVD_SLICE_MAX_NS_DFL		= (5ULL * NSEC_PER_MSEC), /* max time slice */
 	LAVD_SLICE_BOOST_BONUS		= LAVD_SLICE_MIN_NS_DFL,
-	LAVD_SLICE_BOOST_MAX		= LAVD_TIME_ONE_SEC,
+	LAVD_SLICE_BOOST_MAX		= (500ULL * NSEC_PER_MSEC),
 	LAVD_ACC_RUNTIME_MAX		= LAVD_SLICE_MAX_NS_DFL,
-	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 14), /* assuming task's latency
+	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 16), /* assuming task's latency
 									    criticality is around 1000. */
 
 	LAVD_LC_FREQ_MAX                = 400000,
@@ -68,7 +74,7 @@ enum consts_internal {
 	LAVD_CPDOM_MIG_SHIFT_UL		= 2, /* when under-loaded:  1/2**2 = [-25.0%, +25.0%] */
 	LAVD_CPDOM_MIG_SHIFT		= 3, /* when midely loaded: 1/2**3 = [-12.5%, +12.5%] */
 	LAVD_CPDOM_MIG_SHIFT_OL		= 4, /* when over-loaded:   1/2**4 = [-6.25%, +6.25%] */
-	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / (2 * LAVD_SLICE_MAX_NS_DFL)), /* roughly twice per interval */
+	LAVD_CPDOM_MIG_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS / LAVD_SLICE_MAX_NS_DFL), /* roughly twice per interval */
 
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
@@ -91,8 +97,8 @@ enum consts_flags {
  * - system > numa node > llc domain > compute domain per core type (P or E)
  */
 struct cpdom_ctx {
-	u64	id;				    /* id of this compute domain (== dsq_id) */
-	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
+	u64	id;				    /* id of this compute domain */
+	u64	alt_id;				    /* id of the closest compute domain of alternative type */
 	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_valid;			    /* is this a valid compute domain? */
@@ -179,8 +185,8 @@ struct cpu_ctx {
 	u16		capacity;	/* CPU capacity based on 1024 */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
-	u8		cpdom_id;	/* compute domain id (== dsq_id) */
-	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
+	u8		cpdom_id;	/* compute domain id */
+	u8		cpdom_alt_id;	/* compute domain id of anternative type */
 	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
 
 	/*

@@ -11,6 +11,7 @@ fn main() {
         .add_source("../../lib/atq.bpf.c")
         .add_source("../../lib/bitmap.bpf.c")
         .add_source("../../lib/btree.bpf.c")
+        .add_source("../../lib/lvqueue.bpf.c")
         .add_source("../../lib/minheap.bpf.c")
         .add_source("../../lib/sdt_alloc.bpf.c")
         .add_source("../../lib/sdt_task.bpf.c")
@@ -18,9 +19,10 @@ fn main() {
         .add_source("../../lib/selftests/selftest.bpf.c")
         .add_source("../../lib/selftests/st_atq.bpf.c")
         .add_source("../../lib/selftests/st_bitmap.bpf.c")
+        .add_source("../../lib/selftests/st_btree.bpf.c")
+        .add_source("../../lib/selftests/st_lvqueue.bpf.c")
         .add_source("../../lib/selftests/st_minheap.bpf.c")
         .add_source("../../lib/selftests/st_topology.bpf.c")
-        .add_source("../../lib/selftests/st_btree.bpf.c")
         .compile_link_gen()
         .unwrap();
 }

@@ -26,6 +26,7 @@ extern struct kernel_stat kernel_stat __ksym __weak;
 extern struct kernel_cpustat kernel_cpustat __ksym __weak;
 extern struct cpufreq_policy* cpufreq_cpu_data __ksym __weak;
 extern struct sched_domain* sd_llc __ksym __weak;
+extern struct vm_event_state vm_event_states __ksym __weak;
 
 
 #define DEFINE_PER_CPU_PTR_FUNC(func_name, type, var_name)	\
@@ -85,6 +86,7 @@ DEFINE_PER_CPU_PTR_FUNC(cpu_kernel_cpustat, struct kernel_cpustat, kernel_cpusta
 DEFINE_PER_CPU_PTR_FUNC(cpu_kernel_stat, struct kernel_stat, kernel_stat)
 DEFINE_PER_CPU_PTR_FUNC(cpu_psi_group, struct psi_group_cpu, psi_group_cpu)
 DEFINE_PER_CPU_PTR_FUNC(cpu_sugov, struct sugov_cpu, sugov_cpu)
+DEFINE_PER_CPU_PTR_FUNC(cpu_vm_event_state, struct vm_event_state, vm_event_states)
 
 DEFINE_THIS_CPU_VAL_FUNC(cpu_llc_id)
 DEFINE_THIS_CPU_VAL_FUNC(cpu_llc_size)
@@ -96,5 +98,6 @@ DEFINE_THIS_CPU_PTR_FUNC(cpu_kernel_stat)
 DEFINE_THIS_CPU_PTR_FUNC(cpu_psi_group)
 DEFINE_THIS_CPU_PTR_FUNC(cpu_llc_dom)
 DEFINE_THIS_CPU_PTR_FUNC(cpu_sugov)
+DEFINE_THIS_CPU_PTR_FUNC(cpu_vm_event_state)
 
 #endif /* BPF_PERCPU_H */

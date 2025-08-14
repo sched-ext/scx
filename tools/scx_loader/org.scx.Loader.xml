@@ -31,6 +31,14 @@
     <property name="SchedulerMode" type="u" access="read"/>
 
     <!--
+        CurrentSchedulerArgs:
+
+        The arguments used for the currently running scheduler. If no scheduler
+        is active or the scheduler was started with a predefined mode (not custom
+        arguments), this property will return an empty array.
+    -->
+    <property name="CurrentSchedulerArgs" type="as" access="read"/>
+    <!--
         SupportedSchedulers:
 
         A list of the schedulers currently supported by the Scheduler Loader.
@@ -105,6 +113,17 @@
         Stops the currently running scheduler.
     -->
     <method name="StopScheduler">
+    </method>
+
+    <!--
+        RestartScheduler:
+
+        Restarts the currently running scheduler with its original configuration.
+        This method will stop the currently running scheduler and then restart 
+        it with the same scheduler and arguments/mode that were used originally.
+        Returns an error if no scheduler is currently running.
+    -->
+    <method name="RestartScheduler">
     </method>
   </interface>
 </node>

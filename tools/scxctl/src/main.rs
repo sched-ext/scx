@@ -8,13 +8,23 @@ use std::process::exit;
 use zbus::blocking::Connection;
 
 fn cmd_get(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
-    let current_scheduler: String = scx_loader.current_scheduler().unwrap();
-    let sched_mode: SchedMode = scx_loader.scheduler_mode().unwrap();
+    let current_scheduler: String = scx_loader.current_scheduler()?;
+
     match current_scheduler.as_str() {
         "unknown" => println!("no scx scheduler running"),
         _ => {
-            let sched = SupportedSched::try_from(current_scheduler.as_str()).unwrap();
-            println!("running {sched:?} in {sched_mode:?} mode");
+            let sched = SupportedSched::try_from(current_scheduler.as_str())?;
+            let current_args: Vec<String> = scx_loader.current_scheduler_args()?;
+
+            if current_args.is_empty() {
+                let sched_mode: SchedMode = scx_loader.scheduler_mode()?;
+                println!("running {sched:?} in {sched_mode:?} mode");
+            } else {
+                println!(
+                    "running {sched:?} with arguments \"{}\"",
+                    current_args.join(" ")
+                );
+            }
         }
     }
     Ok(())
@@ -118,6 +128,12 @@ fn cmd_stop(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+fn cmd_restart(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
+    scx_loader.restart_scheduler()?;
+    println!("restarted");
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let conn = Connection::system()?;
@@ -129,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Start { args } => cmd_start(scx_loader, args.sched, args.mode, args.args)?,
         Commands::Switch { args } => cmd_switch(scx_loader, args.sched, args.mode, args.args)?,
         Commands::Stop => cmd_stop(scx_loader)?,
+        Commands::Restart => cmd_restart(scx_loader)?,
     }
 
     Ok(())

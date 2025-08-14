@@ -12,6 +12,7 @@
 - Start a scheduler in a given mode, or with given arguments
 - Switch between schedulers and modes
 - Stop the running scheduler
+- Restart the running scheduler
 
 ## Installation
 
@@ -33,6 +34,7 @@ Commands:
   start   Start a scheduler in a mode or with arguments
   switch  Switch schedulers or modes, optionally with arguments
   stop    Stop the current scheduler
+  restart Restart the current scheduler with original configuration
   help    Print this message or the help of the given subcommand(s)
 
 Options:

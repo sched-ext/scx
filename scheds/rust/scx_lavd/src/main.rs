@@ -12,6 +12,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod cpu_order;
+use scx_utils::init_libbpf_logging;
 mod stats;
 use std::ffi::c_int;
 use std::ffi::CStr;
@@ -36,6 +37,7 @@ use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
 use libbpf_rs::OpenObject;
+use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
 use libc::c_char;
 use log::debug;
@@ -148,6 +150,14 @@ struct Opts {
     /// Disable dynamic slice boost for long-running tasks.
     #[clap(long = "no-slice-boost", action = clap::ArgAction::SetTrue)]
     no_slice_boost: bool,
+
+    /// Enables DSQs per CPU, this enables task queuing and dispatching
+    /// from CPU specific DSQs. This generally increases L1/L2 cache
+    /// locality for tasks and lowers lock contention compared to shared DSQs,
+    /// but at the cost of higher load balancing complexity. This is a
+    /// highly experimental feature.
+    #[clap(long = "per-cpu-dsq", action = clap::ArgAction::SetTrue)]
+    per_cpu_dsq: bool,
 
     ///
     /// Disable core compaction so the scheduler uses all the online CPUs.
@@ -335,6 +345,8 @@ impl<'a> Scheduler<'a> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
+        init_libbpf_logging(Some(PrintLevel::Debug));
+
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
 
         // Enable futex tracing using ftrace if available. If the ftrace is not
@@ -520,6 +532,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
+        rodata.per_cpu_dsq = opts.per_cpu_dsq;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST

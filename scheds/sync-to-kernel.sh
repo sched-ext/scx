@@ -11,7 +11,12 @@ fi
 rust_scheds=()
 c_scheds=(scx_simple scx_qmap scx_central scx_flatcg)
 
-headers=($(git ls-files include | grep -v include/vmlinux))
+headers=($(
+    git ls-files include |
+    grep -v include/vmlinux |
+    grep -v include/arch |
+    grep -v '\.gitignore$'
+))
 
 scheds=()
 for rust_sched in ${rust_scheds[@]}; do
@@ -39,13 +44,13 @@ done
 for file in ${scheds[@]}; do
     dsts+=("$kernel/${file#*/}")
 done
-	    
+
 ## debug
 # for ((i=0;i<${#srcs[@]};i++)); do
 #    echo "${srcs[i]} -> ${dsts[i]}"
 # done
 
-nr_missing=0
+nr_created=0
 nr_skipped=0
 for ((i=0;i<${#srcs[@]};i++)); do
     src="${srcs[i]}"
@@ -53,9 +58,8 @@ for ((i=0;i<${#srcs[@]};i++)); do
     orig="$src"
 
     if [ ! -f "$dst" ]; then
-	echo "WARNING: $dst does not exist" 1>&2
-	nr_missing=$((nr_missing+1))
-	continue
+        echo "Creating missing file: $dst"
+        nr_created=$((nr_created+1))
     fi
 
     #
@@ -64,21 +68,24 @@ for ((i=0;i<${#srcs[@]};i++)); do
     # before syncing Cargo.toml files.
     #
     if [[ "$src" == */Cargo.toml ]]; then
-	tmp=$(mktemp)
-	sed -r 's/^scx_utils =.*version\s*=\s*"([^"]*)".*$/scx_utils = \"\1"/' < "$src" > "$tmp"
-	src="$tmp"
+        tmp=$(mktemp)
+        sed -r 's/^scx_utils =.*version\s*=\s*"([^"]*)".*$/scx_utils = \"\1"/' < "$src" > "$tmp"
+        src="$tmp"
     fi
 
     if cmp -s "$src" "$dst"; then
-	nr_skipped=$((nr_skipped+1))
-	continue
+        nr_skipped=$((nr_skipped+1))
+        continue
     fi
+
     if [[ "$orig" == */Cargo.toml ]]; then
-	echo "Syncing $orig (dropped path from scx_utils dependency)"
+        echo "Syncing $orig (dropped path from scx_utils dependency)"
     else
-	echo "Syncing $orig"
+        echo "Syncing $orig"
     fi
+
+    mkdir -p "$(dirname "$dst")"
     cp -f "$src" "$dst"
 done
 
-echo "Skipped $nr_skipped unchanged and $nr_missing new files"
+echo "Skipped $nr_skipped unchanged and created $nr_created new files"

@@ -42,6 +42,11 @@ pub trait LoaderClient {
         scx_args: &[String],
     ) -> zbus::Result<()>;
 
+    /// Restarts the currently running scheduler with its original configuration.
+    /// This method will stop the currently running scheduler and then restart
+    /// it with the same scheduler and arguments/mode that were used originally.
+    fn restart_scheduler(&self) -> zbus::Result<()>;
+
     /// The name of the currently running scheduler. If no scheduler is active,
     /// this property will be set to "unknown".
     #[zbus(property)]
@@ -53,6 +58,12 @@ pub trait LoaderClient {
     /// this property will be set to 0 (Auto).
     #[zbus(property)]
     fn scheduler_mode(&self) -> zbus::Result<SchedMode>;
+
+    /// The arguments used for the currently running scheduler. If no scheduler
+    /// is active or the scheduler was started with a predefined mode (not custom
+    /// arguments), this property will return an empty array.
+    #[zbus(property)]
+    fn current_scheduler_args(&self) -> zbus::Result<Vec<String>>;
 
     /// A list of the schedulers currently supported by the Scheduler Loader.
     /// The names of the supported schedulers will be listed as strings in

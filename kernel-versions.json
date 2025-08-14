@@ -2,33 +2,41 @@
   "sched_ext/for-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git",
     "branch": "for-next",
-    "commitHash": "9f0744a0e87e4e74725d495bba2aa540dec4a77a",
-    "lastModified": 1752811839,
-    "narHash": "sha256-z3kn2Kc51d3IVmurn8sf/LpRyTeSDMSSEV7utDc5hhE=",
-    "kernelVersion": "6.16.0-rc1"
+    "commitHash": "4b3570b49067f9bc896157163beaca3503637847",
+    "lastModified": 1754971146,
+    "narHash": "sha256-BxUfwjqvzxnNhZz3Plo533ZxeiPsEhsKDRZQSIoZfvc=",
+    "kernelVersion": "6.17.0-rc1"
   },
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
     "branch": "master",
-    "commitHash": "cd7c97f4584a93578f87ea6ff427f74e9a943cdf",
-    "lastModified": 1753763277,
-    "narHash": "sha256-VSYaLsr9iFr7e/d3ieYU+eaylt+8yyERzK+47HqjlRw=",
-    "kernelVersion": "6.16.0-rc6"
+    "commitHash": "07866544e410e4c895a729971e4164861b41fad5",
+    "lastModified": 1755144090,
+    "narHash": "sha256-tpWQzmaoth+i1l14tVYli49nRA+vMaRHY3kVEl5Y+lU=",
+    "kernelVersion": "6.17.0-rc1"
   },
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "d90ecb2b1308b3e362ec4c21ff7cf0a051b445df",
-    "lastModified": 1753416581,
-    "narHash": "sha256-I0WY+eFS7+XqaKIjFOMaWr26C2ftCh83uKb7NXnmHwM=",
-    "kernelVersion": "6.12.40"
+    "commitHash": "8f5ff9784f3262e6e85c68d86f8b7931827f2983",
+    "lastModified": 1754282193,
+    "narHash": "sha256-KIUrzpGMDSsYjFlWaluZ5LA1MpunLiF+KHEq/4W9y3s=",
+    "kernelVersion": "6.12.41"
+  },
+  "arighi/6_12": {
+    "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/arighi/linux.git",
+    "branch": "scx-6.12",
+    "commitHash": "b51409746fbc4d9269bba1eef415b93596a82763",
+    "lastModified": 1754560679,
+    "narHash": "sha256-XlWDG/Qb/kUuaGtyrz3AbVIlvQg9V/mgOlyjn6pds/8=",
+    "kernelVersion": "6.12.41"
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "46c7ff71b4b4638b172c9747c4e556bd8f98bad2",
-    "lastModified": 1753416581,
-    "narHash": "sha256-jHI56K42XFpJu9lZTNbw4+qV5Q2PCrhNOpCK1m5g+b0=",
-    "kernelVersion": "6.15.8"
+    "commitHash": "ebbbf3c8df3ab52219c2b21e0d37e02acea2510d",
+    "lastModified": 1754107616,
+    "narHash": "sha256-JtJ0RcRaVCIre5FQ/uFbGIJo8mElSoTg/taY20cf3bo=",
+    "kernelVersion": "6.15.9"
   }
 }

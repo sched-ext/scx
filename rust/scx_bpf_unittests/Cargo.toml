@@ -1,18 +1,18 @@
 [package]
 name = "scx_bpf_unittests"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 publish = false
 
 [dependencies]
-libbpf-sys = "=1.5.1"  # has to be in `dependencies` to provide the include path
+libbpf-sys = "=1.6.1"  # has to be in `dependencies` to provide the include path
 
 [dev-dependencies]
-libbpf-sys = "=1.5.1"
+libbpf-sys = "=1.6.1"
 
 [build-dependencies]
 cc = "1.2.29"
 indoc = "2.0.5"
-libbpf-sys = "=1.5.1"
+libbpf-sys = "=1.6.1"
 object = "0.36.7"

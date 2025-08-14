@@ -25,6 +25,7 @@ use xdg;
 /// ```text
 /// theme = "IAmBlue"
 /// tick_rate_ms = 250
+/// frame_rate_ms = 20
 /// debug = false
 /// exclude_bpf = false
 /// worker_threads = 4
@@ -74,6 +75,8 @@ pub struct Config {
     theme: Option<AppTheme>,
     /// App tick rate in milliseconds.
     tick_rate_ms: Option<usize>,
+    /// App render rate in milliseconds.
+    frame_rate_ms: Option<usize>,
     /// Extra verbose output.
     debug: Option<bool>,
     /// Exclude bpf event tracking.
@@ -108,6 +111,7 @@ impl From<TuiArgs> for Config {
             stats_socket_path: args.stats_socket_path,
             theme: None,
             tick_rate_ms: args.tick_rate_ms,
+            frame_rate_ms: args.frame_rate_ms,
             trace_file_prefix: args.trace_file_prefix,
             trace_tick_warmup: args.trace_tick_warmup,
             trace_warmup_ms: args.trace_warmup_ms,
@@ -142,6 +146,7 @@ impl Config {
             active_keymap,
             theme: self.theme.or(rhs.theme),
             tick_rate_ms: self.tick_rate_ms.or(rhs.tick_rate_ms),
+            frame_rate_ms: self.frame_rate_ms.or(rhs.frame_rate_ms),
             debug: self.debug.or(rhs.debug),
             exclude_bpf: self.exclude_bpf.or(rhs.exclude_bpf),
             perf_events: if !self.perf_events.is_empty() {
@@ -176,6 +181,11 @@ impl Config {
     /// App tick rate in milliseconds.
     pub fn tick_rate_ms(&self) -> usize {
         self.tick_rate_ms.unwrap_or(250)
+    }
+
+    /// App render rate in milliseconds.
+    pub fn frame_rate_ms(&self) -> usize {
+        self.frame_rate_ms.unwrap_or(250)
     }
 
     /// Set app tick rate in milliseconds.
@@ -238,6 +248,7 @@ impl Config {
             active_keymap: KeyMap::empty(),
             theme: None,
             tick_rate_ms: None,
+            frame_rate_ms: None,
             debug: None,
             perf_events: vec![],
             exclude_bpf: None,
@@ -259,6 +270,7 @@ impl Config {
             active_keymap: KeyMap::default(),
             theme: None,
             tick_rate_ms: None,
+            frame_rate_ms: None,
             debug: None,
             exclude_bpf: None,
             perf_events: vec![],
@@ -272,6 +284,7 @@ impl Config {
             default_profiling_event: None,
         };
         config.tick_rate_ms = Some(config.tick_rate_ms());
+        config.frame_rate_ms = Some(config.frame_rate_ms());
         config.debug = Some(config.debug());
         config.exclude_bpf = Some(config.exclude_bpf());
 
@@ -366,6 +379,8 @@ mod tests {
             "/tmp/my_socket",
             "--tick-rate-ms",
             "100",
+            "--frame-rate-ms",
+            "10",
             "--trace-file-prefix",
             "/var/log/trace",
             "--trace-warmup-ms",
@@ -392,6 +407,7 @@ mod tests {
             "/tmp/my_socket".to_string()
         );
         assert_eq!(config.tick_rate_ms.unwrap(), 100);
+        assert_eq!(config.frame_rate_ms.unwrap(), 10);
         assert_eq!(
             config.trace_file_prefix.unwrap(),
             "/var/log/trace".to_string()
@@ -418,6 +434,7 @@ mod tests {
         assert!(config.perf_events.is_empty());
         assert!(config.stats_socket_path.is_none());
         assert!(config.tick_rate_ms.is_none());
+        assert!(config.tick_rate_ms.is_none());
         assert!(config.trace_file_prefix.is_none());
         assert!(config.trace_warmup_ms.is_none());
         assert!(config.trace_ticks.is_none());
@@ -432,7 +449,7 @@ mod tests {
     #[test]
     fn test_merge_configs_no_overwrite() {
         let mut a = Config::empty_config();
-        a.theme = Some(AppTheme::MidnightGreen);
+        a.theme = Some(AppTheme::SolarizedDark);
         a.tick_rate_ms = Some(100);
         a.debug = Some(true);
         a.exclude_bpf = Some(true);
@@ -462,7 +479,7 @@ mod tests {
         // Test `or` method
         let merged_or = a.clone().or(b.clone());
 
-        assert_eq!(merged_or.theme(), &AppTheme::MidnightGreen);
+        assert_eq!(merged_or.theme(), &AppTheme::SolarizedDark);
         assert_eq!(merged_or.tick_rate_ms(), 100);
         assert!(merged_or.debug());
         assert!(merged_or.exclude_bpf());
@@ -478,7 +495,7 @@ mod tests {
         // Test `merge` method
         let merged = Config::merge([a, b]);
 
-        assert_eq!(merged.theme(), &AppTheme::MidnightGreen);
+        assert_eq!(merged.theme(), &AppTheme::SolarizedDark);
         assert_eq!(merged.tick_rate_ms(), 100);
         assert!(merged.debug());
         assert!(merged.exclude_bpf());
@@ -584,6 +601,7 @@ mod tests {
         assert!(config.active_keymap.is_empty());
         assert!(config.theme.is_none());
         assert!(config.tick_rate_ms.is_none());
+        assert!(config.frame_rate_ms.is_none());
         assert!(config.debug.is_none());
         assert!(config.perf_events.is_empty());
         assert!(config.exclude_bpf.is_none());
@@ -599,6 +617,7 @@ mod tests {
         // Check getters return defaults
         assert_eq!(config.theme(), &AppTheme::Default);
         assert_eq!(config.tick_rate_ms(), 250);
+        assert_eq!(config.frame_rate_ms(), 250);
         assert!(!config.debug());
         assert!(!config.exclude_bpf());
         assert_eq!(config.stats_socket_path(), STATS_SOCKET_PATH);
@@ -619,6 +638,7 @@ mod tests {
         // Check that optional fields that have defaults are Some(default_value)
         assert!(config.tick_rate_ms.is_some());
         assert_eq!(config.tick_rate_ms.unwrap(), 250);
+        assert!(config.frame_rate_ms.is_some());
         assert!(config.debug.is_some());
         assert!(!config.debug.unwrap());
         assert!(config.exclude_bpf.is_some());

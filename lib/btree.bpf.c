@@ -38,9 +38,17 @@ __weak int arrcpy(u64 __arg_arena __arena *dst, u64 __arg_arena __arena *src, si
 	return 0;
 }
 
-static bt_node *btnode_alloc(bt_node __arg_arena *parent, u64 flags)
+static bt_node *btnode_alloc(btree_t *btree, bt_node __arg_arena *parent, u64 flags)
 {
 	bt_node *btn;
+	bt_node *freelist;
+
+	do  {
+		freelist = btree->freelist;
+		if (!freelist)
+			break;
+
+	} while (cmpxchg(&btree->freelist, freelist, freelist->parent) && can_loop);
 
 	btn = scx_static_alloc(sizeof(*btn), 1);
 	if (!btn)
@@ -52,6 +60,16 @@ static bt_node *btnode_alloc(bt_node __arg_arena *parent, u64 flags)
 	btn->parent = parent;
 
 	return btn;
+}
+
+static inline void btnode_free(btree_t *btree, bt_node *btn)
+{
+	bt_node *old;
+
+	do {
+		old = btree->freelist;
+		btn->parent = old;
+	} while (cmpxchg(&btree->freelist, old, btn) && can_loop);
 }
 
 static inline bool btnode_isroot(bt_node *btn)
@@ -73,7 +91,7 @@ u64 bt_create_internal(void)
 	if (!btree)
 		return (u64)NULL;
 
-	btree->root = btnode_alloc(NULL, BT_F_ROOT | BT_F_LEAF);
+	btree->root = btnode_alloc(btree, NULL, BT_F_ROOT | BT_F_LEAF);
 	if (!btree->root) {
 		/* XXX Fix once we use the buddy allocator. */
 		//scx_buddy_free(buddy, btree);
@@ -296,7 +314,9 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 	do {
 
 		btn_parent = btn_old->parent;
-		btn_new = btnode_alloc(btn_parent, btn_old->flags);
+		btn_new = btnode_alloc(btree, btn_parent, btn_old->flags);
+		if (!btn_new)
+			return -ENOMEM;
 
 		if (btn_old->flags & BT_F_LEAF)
 			key = btnode_split_leaf(btn_new, btn_old);
@@ -307,7 +327,12 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 			btn_old->flags &= ~BT_F_ROOT;
 			btn_new->flags &= ~BT_F_ROOT;
 
-			btn_root = btnode_alloc(NULL, BT_F_ROOT);
+			btn_root = btnode_alloc(btree, NULL, BT_F_ROOT);
+			if (!btn_root) {
+				btnode_free(btree, btn_new);
+				return -ENOMEM;
+			}
+
 			btn_root->keys[0] = key;
 			btn_root->values[0] = (u64)btn_old;
 			btn_root->values[1] = (u64)btn_new;
@@ -324,8 +349,10 @@ int bt_split(btree_t __arg_arena *btree, bt_node *btn_old)
 		ind = btn_node_index(btn_parent, key);
 
 		ret = btnode_add_internal(btn_parent, ind, key, btn_new);
-		if (ret)
+		if (ret) {
+			btnode_free(btree, btn_new);
 			return ret;
+		}
 
 		btn_old = btn_old->parent;
 

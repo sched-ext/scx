@@ -41,15 +41,20 @@ impl Default for KeyMap {
         bindings.insert(Key::Char(' '), Action::SetState(AppState::Pause));
         bindings.insert(Key::Char('e'), Action::SetState(AppState::PerfEvent));
         bindings.insert(Key::Char('K'), Action::SetState(AppState::KprobeEvent));
-        bindings.insert(Key::Char('f'), Action::ToggleCpuFreq);
+        bindings.insert(Key::Char('p'), Action::SetState(AppState::Process));
+        bindings.insert(Key::Char('T'), Action::SetState(AppState::PerfTop));
+        bindings.insert(Key::Char('f'), Action::Filter);
         bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
         bindings.insert(Key::Char('L'), Action::ToggleLocalization);
         bindings.insert(Key::Char('P'), Action::ToggleHwPressure);
         bindings.insert(Key::Char('h'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('m'), Action::SetState(AppState::MangoApp));
+        bindings.insert(Key::Char('M'), Action::SetState(AppState::Memory));
         bindings.insert(Key::Char('?'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
+        bindings.insert(Key::Char('N'), Action::SetState(AppState::Network));
+        bindings.insert(Key::Char('w'), Action::SetState(AppState::Power));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
         bindings.insert(Key::Char('S'), Action::SaveConfig);
         bindings.insert(Key::Char('a'), Action::RequestTrace);
@@ -354,19 +359,26 @@ pub fn parse_key(key_str: &str) -> Result<Key> {
 /// Parses an Action from a string.
 pub fn parse_action(action_str: &str) -> Result<Action> {
     match action_str {
-        "AppStateDefault" => Ok(Action::SetState(AppState::Default)),
-        "AppStatePause" => Ok(Action::SetState(AppState::Pause)),
-        "AppStatePerfEvent" => Ok(Action::SetState(AppState::PerfEvent)),
-        "AppStateKprobeEvent" => Ok(Action::SetState(AppState::KprobeEvent)),
+        "AppStateDefault" | "SetState(Default)" => Ok(Action::SetState(AppState::Default)),
+        "AppStatePause" | "SetState(Pause)" => Ok(Action::SetState(AppState::Pause)),
+        "AppStatePerfEvent" | "SetState(PerfEvent)" => Ok(Action::SetState(AppState::PerfEvent)),
+        "AppStateProcess" | "SetState(Process)" => Ok(Action::SetState(AppState::Process)),
+        "AppStatePerfTop" | "SetState(PerfTop)" => Ok(Action::SetState(AppState::PerfTop)),
+        "AppStateKprobeEvent" | "SetState(KprobeEvent)" => {
+            Ok(Action::SetState(AppState::KprobeEvent))
+        }
+        "Filter" => Ok(Action::Filter),
         "ToggleCpuFreq" => Ok(Action::ToggleCpuFreq),
         "ToggleUncoreFreq" => Ok(Action::ToggleUncoreFreq),
         "ToggleLocalization" => Ok(Action::ToggleLocalization),
         "ToggleHwPressure" => Ok(Action::ToggleHwPressure),
-        "AppStateHelp" => Ok(Action::SetState(AppState::Help)),
-        "AppStateLlc" => Ok(Action::SetState(AppState::Llc)),
-        "AppStateMangoApp" => Ok(Action::SetState(AppState::MangoApp)),
-        "AppStateNode" => Ok(Action::SetState(AppState::Node)),
-        "AppStateScheduler" => Ok(Action::SetState(AppState::Scheduler)),
+        "AppStateHelp" | "SetState(Help)" => Ok(Action::SetState(AppState::Help)),
+        "AppStateLlc" | "SetState(Llc)" => Ok(Action::SetState(AppState::Llc)),
+        "AppStateMangoApp" | "SetState(MangoApp)" => Ok(Action::SetState(AppState::MangoApp)),
+        "AppStateMemory" | "SetState(Memory)" => Ok(Action::SetState(AppState::Memory)),
+        "AppStateNode" | "SetState(Node)" => Ok(Action::SetState(AppState::Node)),
+        "AppStateScheduler" | "SetState(Scheduler)" => Ok(Action::SetState(AppState::Scheduler)),
+        "AppStateNetwork" | "SetState(Network)" => Ok(Action::SetState(AppState::Network)),
         "SaveConfig" => Ok(Action::SaveConfig),
         "RequestTrace" => Ok(Action::RequestTrace),
         "ClearEvent" => Ok(Action::ClearEvent),
@@ -378,6 +390,8 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "IncTickRate" => Ok(Action::IncTickRate),
         "DecBpfSampleRate" => Ok(Action::DecBpfSampleRate),
         "IncBpfSampleRate" => Ok(Action::IncBpfSampleRate),
+        "PerfSampleRateIncrease" => Ok(Action::PerfSampleRateIncrease),
+        "PerfSampleRateDecrease" => Ok(Action::PerfSampleRateDecrease),
         "NextViewState" => Ok(Action::NextViewState),
         "Down" => Ok(Action::Down),
         "Up" => Ok(Action::Up),

@@ -19,12 +19,15 @@ pub mod layered_util;
 mod llc_data;
 pub mod mangoapp;
 mod mem_stats;
+mod network_stats;
 mod node_data;
 mod perfetto_trace;
+mod power_data;
 mod proc_data;
 pub mod profiling_events;
 pub mod search;
 mod stats;
+mod symbol_data;
 mod theme;
 mod thread_data;
 pub mod tracer;
@@ -34,7 +37,7 @@ pub mod util;
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
 pub use bpf_skel::*;
-pub use columns::{get_process_columns, Columns};
+pub use columns::Columns;
 pub use cpu_data::CpuData;
 pub use cpu_stats::{CpuStatSnapshot, CpuStatTracker};
 pub use event_data::EventData;
@@ -42,8 +45,12 @@ pub use keymap::Key;
 pub use keymap::KeyMap;
 pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
+pub use network_stats::NetworkStatSnapshot;
 pub use node_data::NodeData;
 pub use perfetto_trace::PerfettoTraceManager;
+pub use power_data::{
+    CStateInfo, CorePowerData, PowerDataCollector, PowerSnapshot, SystemPowerData,
+};
 pub use proc_data::ProcData;
 pub use profiling_events::{
     available_kprobe_events, available_perf_events, get_default_events, KprobeEvent, PerfEvent,
@@ -86,12 +93,22 @@ pub enum AppState {
     Llc,
     /// Application is in the mangoapp state.
     MangoApp,
+    /// Application is in the Memory state.
+    Memory,
+    /// Application is in the network state.
+    Network,
     /// Application is in the NUMA node state.
     Node,
     /// Application is in the paused state.
     Pause,
     /// Application is in the PerfEvent list state.
     PerfEvent,
+    /// Application is in the perf top view state.
+    PerfTop,
+    /// Application is in the Power state.
+    Power,
+    /// Application is in the Process state.
+    Process,
     /// Application is in the scheduler state.
     Scheduler,
     /// Application is in the tracing  state.
@@ -123,15 +140,67 @@ impl std::fmt::Display for ViewState {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ComponentViewState {
+    /// Component view is hidden in the default view
+    Hidden,
+    /// Component view is shown in the default view (current behavior)
+    Default,
+    /// Switch to detailed component view
+    Detail,
+}
+
+impl ComponentViewState {
+    /// Returns the next ComponentViewState, cycling through the values.
+    pub fn next(&self) -> Self {
+        match self {
+            ComponentViewState::Hidden => ComponentViewState::Default,
+            ComponentViewState::Default => ComponentViewState::Detail,
+            ComponentViewState::Detail => ComponentViewState::Hidden,
+        }
+    }
+}
+
+impl std::fmt::Display for ComponentViewState {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ComponentViewState::Hidden => write!(f, "hidden"),
+            ComponentViewState::Default => write!(f, "default"),
+            ComponentViewState::Detail => write!(f, "detail"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterItem {
+    String(String),
+    Int(i32),
+}
+impl FilterItem {
+    pub fn as_string(&self) -> String {
+        match self {
+            FilterItem::String(s) => s.clone(),
+            FilterItem::Int(int) => int.to_string(),
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            FilterItem::Int(int) => Some(*int),
+            FilterItem::String(_) => None,
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone)]
-pub struct FilteredEventState {
-    pub list: Vec<String>,
+pub struct FilteredState {
+    pub list: Vec<FilterItem>,
     pub count: u16,
     pub scroll: u16,
     pub selected: usize,
 }
 
-impl FilteredEventState {
+impl FilteredState {
     pub fn reset(&mut self) {
         self.list.clear();
         self.count = 0;
@@ -346,6 +415,20 @@ pub struct MangoAppAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PerfSampleAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub instruction_pointer: u64,
+    pub cpu_id: u32,
+    pub is_kernel: bool,
+    pub kernel_stack: Vec<u64>,
+    pub user_stack: Vec<u64>,
+    pub layer_id: i32,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Backspace,
     ChangeTheme,
@@ -361,6 +444,7 @@ pub enum Action {
     Esc,
     Exec(ExecAction),
     Exit(ExitAction),
+    Filter,
     Fork(ForkAction),
     Kprobe(KprobeAction),
     GpuMem(GpuMemAction),
@@ -375,6 +459,9 @@ pub enum Action {
     NextViewState,
     PageDown,
     PageUp,
+    PerfSample(PerfSampleAction),
+    PerfSampleRateIncrease,
+    PerfSampleRateDecrease,
     PrevEvent,
     Quit,
     RequestTrace,
@@ -592,6 +679,36 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_PERF_SAMPLE => {
+                let perf_sample = unsafe { &event.event.perf_sample };
+
+                // Extract kernel stack trace
+                let kernel_stack: Vec<u64> = if perf_sample.kernel_stack_size > 0 {
+                    perf_sample.kernel_stack[0..perf_sample.kernel_stack_size as usize].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                // Extract user stack trace
+                let user_stack: Vec<u64> = if perf_sample.user_stack_size > 0 {
+                    perf_sample.user_stack[0..perf_sample.user_stack_size as usize].to_vec()
+                } else {
+                    Vec::new()
+                };
+
+                Ok(Action::PerfSample(PerfSampleAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: perf_sample.pid,
+                    instruction_pointer: perf_sample.instruction_pointer,
+                    cpu_id: perf_sample.cpu_id,
+                    is_kernel: unsafe { perf_sample.is_kernel.assume_init() },
+                    kernel_stack,
+                    user_stack,
+                    layer_id: perf_sample.layer_id,
+                }))
+            }
+            #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_SWITCH => {
                 let sched_switch = unsafe { &event.event.sched_switch };
                 let prev_comm = String::from_utf8_lossy(&sched_switch.prev_comm);
@@ -659,8 +776,10 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
             Action::SetState(AppState::Pause) => write!(f, "AppStatePause"),
             Action::SetState(AppState::PerfEvent) => write!(f, "AppStatePerfEvent"),
+            Action::SetState(AppState::Process) => write!(f, "AppStateProcess"),
             Action::SetState(AppState::KprobeEvent) => write!(f, "AppStateKprobeEvent"),
             Action::SetState(AppState::MangoApp) => write!(f, "AppStateMangoApp"),
+            Action::Filter => write!(f, "Filter"),
             Action::UpdateColVisibility(_) => write!(f, "UpdateColVisibility"),
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
@@ -668,15 +787,17 @@ impl std::fmt::Display for Action {
             Action::ToggleHwPressure => write!(f, "ToggleHwPressure"),
             Action::SetState(AppState::Help) => write!(f, "AppStateHelp"),
             Action::SetState(AppState::Llc) => write!(f, "AppStateLlc"),
+            Action::SetState(AppState::Network) => write!(f, "AppStateNetwork"),
             Action::SetState(AppState::Node) => write!(f, "AppStateNode"),
             Action::SetState(AppState::Scheduler) => write!(f, "AppStateScheduler"),
             Action::SaveConfig => write!(f, "SaveConfig"),
             Action::RequestTrace => write!(f, "RequestTrace"),
             Action::TraceStarted(_) => write!(f, "TraceStarted"),
-            Action::TraceStopped(_) => write!(f, "TraceStopped"),
-            Action::ClearEvent => write!(f, "ClearEvent"),
+            Action::PerfSampleRateIncrease => write!(f, "PerfSampleRateIncrease"),
+            Action::PerfSampleRateDecrease => write!(f, "PerfSampleRateDecrease"),
+            Action::PageUp => write!(f, "PageUp"),
+            Action::PageDown => write!(f, "PageDown"),
             Action::PrevEvent => write!(f, "PrevEvent"),
-            Action::NextEvent => write!(f, "NextEvent"),
             Action::Quit => write!(f, "Quit"),
             Action::ChangeTheme => write!(f, "ChangeTheme"),
             Action::DecTickRate => write!(f, "DecTickRate"),
@@ -686,8 +807,6 @@ impl std::fmt::Display for Action {
             Action::NextViewState => write!(f, "NextViewState"),
             Action::Down => write!(f, "Down"),
             Action::Up => write!(f, "Up"),
-            Action::PageDown => write!(f, "PageDown"),
-            Action::PageUp => write!(f, "PageUp"),
             Action::Enter => write!(f, "Enter"),
             _ => write!(f, "{self:?}"),
         }

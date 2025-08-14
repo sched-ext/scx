@@ -29,7 +29,7 @@ fi
 
 # enable running tests on individual schedulers
 if [ $# -ge 2 ] ; then
-    SCHEDS[$2]="-v"
+    SCHEDS[$2]=""
 else
     SCHEDS["scx_simple"]="-v"
     SCHEDS["scx_central"]="-v"
@@ -37,7 +37,7 @@ else
     SCHEDS["scx_flatcg"]="-v"
     SCHEDS["scx_pair"]="-v"
     SCHEDS["scx_rusty"]="-v"
-    SCHEDS["scx_p2dq"]="-v"
+    SCHEDS["scx_p2dq"]=""
     SCHEDS["scx_rustland"]="-v"
     SCHEDS["scx_bpfland"]="-v"
     SCHEDS["scx_layered"]="-v --run-example"
