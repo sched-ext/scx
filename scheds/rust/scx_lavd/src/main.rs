@@ -42,6 +42,8 @@ use libbpf_rs::ProgramInput;
 use libc::c_char;
 use log::debug;
 use log::info;
+use log::warn;
+use nix::sys::resource::{getrlimit, Resource};
 use plain::Plain;
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
@@ -340,7 +342,12 @@ impl<'a> Scheduler<'a> {
 
         // Increase MEMLOCK size since the BPF scheduler might use
         // more than the current limit
-        set_rlimit_infinity();
+        if let Err(_) = set_rlimit_infinity() {
+            // If there is an error in expanding rlimit to infinity,
+            // show the current rlimits then proceed.
+            let (soft, hard) = getrlimit(Resource::RLIMIT_MEMLOCK)?;
+            warn!("Current MEMLOCK limit: soft={soft}, hard={hard}");
+        }
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
