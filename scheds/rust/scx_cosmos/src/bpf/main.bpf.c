@@ -308,7 +308,14 @@ static inline const struct cpumask *get_idle_smtmask(s32 cpu)
  */
 static inline bool is_cpu_idle(s32 cpu)
 {
-	return scx_bpf_cpu_rq(cpu)->curr->flags & PF_IDLE;
+	struct task_struct *p = scx_bpf_task_acquire_remote_curr(cpu);
+	bool is_idle;
+
+	if (!p)
+		return false;
+	is_idle = p->flags & PF_IDLE;
+	bpf_task_release(p);
+	return is_idle;
 }
 
 /*
