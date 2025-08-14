@@ -264,7 +264,7 @@ async def run_tests():
     )
 
     # Get CPU count
-    cpu_count = min(os.cpu_count(), 16)
+    cpu_count = min(os.cpu_count() or 16, 16)
 
     await run_command_in_vm(
         "sched_ext/for-next",
@@ -273,7 +273,7 @@ async def run_tests():
             "test-in-vm",
         ],
         memory=10 * 1024 * 1024 * 1024,
-        cpus=min(os.cpu_count(), 16),
+        cpus=cpu_count,
         no_capture=True,
     )
 
