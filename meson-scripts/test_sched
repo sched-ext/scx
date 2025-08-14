@@ -29,7 +29,7 @@ fi
 
 # enable running tests on individual schedulers
 if [ $# -ge 2 ] ; then
-    SCHEDS[$2]=""
+    SCHEDS[$2]="-v"
 else
     SCHEDS["scx_simple"]="-v"
     SCHEDS["scx_central"]="-v"
