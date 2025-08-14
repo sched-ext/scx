@@ -249,6 +249,9 @@ async def run_tests():
     """Run the test suite."""
     print("Running tests...", flush=True)
 
+    # Make sure the selftest is built in case the build was not already run.
+    await run_command(["cargo", "build", "-p", "scx_lib_selftests"], no_capture=True)
+
     await run_command(
         [
             "cargo",
