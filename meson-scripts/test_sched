@@ -38,6 +38,7 @@ else
     SCHEDS["scx_pair"]="-v"
     SCHEDS["scx_rusty"]="-v"
     SCHEDS["scx_p2dq"]=""
+    SCHEDS["scx_wd40"]="-v"
     SCHEDS["scx_rustland"]="-v"
     SCHEDS["scx_bpfland"]="-v"
     SCHEDS["scx_layered"]="-v --run-example"
