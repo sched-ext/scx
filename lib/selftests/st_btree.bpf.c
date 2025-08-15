@@ -259,7 +259,7 @@ __weak int scx_selftest_btree_remove_many(btree_t __arg_arena *btree)
 	if (!btree)
 		return 1;
 
-	for (i = 0; i < numkeys && can_loop; i++) {
+	bpf_for(i, 0, numkeys) {
 		key = morekeys[i];
 		ret = bt_insert(btree, key, 2 * key, true);
 		if (ret)
@@ -281,7 +281,7 @@ __weak int scx_selftest_btree_remove_many(btree_t __arg_arena *btree)
 	}
 
 	/* Go find all inserted pairs. */
-	for (i = 0; i < numkeys && can_loop; i++) {
+	bpf_for(i, 0, numkeys) {
 		key = morekeys[i];
 
 		ret = bt_find(btree, key, &value);
@@ -344,6 +344,184 @@ __weak int scx_selftest_btree_remove_many(btree_t __arg_arena *btree)
 
 	}
 
+	/* Odd keys should still be present. */
+	for (i = 1; i < numkeys && can_loop; i += 2) {
+		key = morekeys[i];
+		ret = bt_find(btree, key, &value);
+		if (ret)
+			return errval;
+
+		if (value != 2 * key)
+			return errval;
+	}
+
+	return 0;
+}
+
+__weak int scx_selftest_btree_add_remove_circular(btree_t __arg_arena *btree)
+{
+	const size_t iters = 60;
+	const size_t prefill = 10;
+	const size_t numkeys = 50;
+	const size_t prefix = 400000;
+	u64 value, rmval;
+	int errval = 1;
+	u64 key;
+	int ret;
+	int i;
+
+	if (!btree)
+		return 1;
+
+	bpf_for(i, 0, prefill) {
+		ret = bt_insert(btree, prefix + (i % numkeys), i, true);
+		if (ret)
+			return errval;
+
+		errval += 1;
+	}
+
+	errval = 2 * 1000 * 1000;
+
+	bpf_for(i, 0, prefill) {
+		/* Read it back. */
+		ret = bt_find(btree, prefix + (i % numkeys), &value);
+		if (ret)
+			return errval;
+
+		if (value != i)
+			return errval;
+	}
+
+	errval = 3 * 1000 * 1000;
+
+	bpf_for(i, prefill, iters) {
+		key = prefix + (i % numkeys);
+
+		ret = bt_find(btree, key, &value);
+		if (!ret) {
+			bpf_printk("Key %d already present", key);
+			return errval;
+		}
+
+		errval += 1;
+
+		ret = bt_insert(btree, key, i, true);
+		if (ret) {
+			bt_print(btree);
+			return errval;
+		}
+
+		rmval = i - prefill;
+
+		errval += 1;
+
+		ret = bt_find(btree, prefix + (rmval % numkeys), &value);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		if (value != rmval)
+			return errval;
+
+		errval += 1;
+
+		ret = bt_remove(btree, prefix + (rmval % numkeys));
+		if (ret)
+			return errval;
+
+		errval += 1;
+	}
+
+	bpf_for(i, 0, numkeys) {
+		bt_remove(btree, prefix + i);
+	}
+
+	return 0;
+}
+
+__weak int scx_selftest_btree_add_remove_circular_reverse(btree_t __arg_arena *btree)
+{
+	const size_t iters = 60;
+	const size_t prefill = 10;
+	const size_t numkeys = 50;
+	const size_t prefix = 500000;
+	u64 value, rmval;
+	int errval = 1;
+	u64 key;
+	int ret;
+	int i;
+
+	if (!btree)
+		return 1;
+
+	bpf_for(i, 0, prefill) {
+		ret = bt_insert(btree, prefix - (i % numkeys), i, true);
+		if (ret)
+			return errval;
+
+		errval += 1;
+	}
+
+	errval = 2 * 1000 * 1000;
+
+	bpf_for(i, 0, prefill) {
+		/* Read it back. */
+		ret = bt_find(btree, prefix - (i % numkeys), &value);
+		if (ret)
+			return errval;
+
+		if (value != i)
+			return errval;
+	}
+
+	errval = 3 * 1000 * 1000;
+
+	bpf_for(i, prefill, iters) {
+		key = prefix - (i % numkeys);
+
+		ret = bt_find(btree, key, &value);
+		if (!ret) {
+			bpf_printk("Key %d already present", key);
+			return errval;
+		}
+
+		errval += 1;
+
+		ret = bt_insert(btree, key, i, true);
+		if (ret) {
+			bpf_printk("error %d on insert", ret);
+			bt_print(btree);
+			return errval;
+		}
+
+		rmval = i - prefill;
+
+		errval += 1;
+
+		ret = bt_find(btree, prefix - (rmval % numkeys), &value);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		if (value != rmval)
+			return errval;
+
+		errval += 1;
+
+		ret = bt_remove(btree, prefix - (rmval % numkeys));
+		if (ret)
+			return errval;
+
+		errval += 1;
+	}
+
+	bpf_for(i, 0, numkeys) {
+		bt_remove(btree, prefix - i);
+	}
+
 	return 0;
 }
 
@@ -367,10 +545,11 @@ int scx_selftest_btree(void)
 	SCX_BTREE_SELFTEST(insert_existing);
 	SCX_BTREE_SELFTEST(update_existing);
 	SCX_BTREE_SELFTEST(insert_ten);
-	SCX_BTREE_SELFTEST(insert_ten);
 	SCX_BTREE_SELFTEST(insert_many);
 	SCX_BTREE_SELFTEST(remove_one);
 	SCX_BTREE_SELFTEST(remove_many);
+	SCX_BTREE_SELFTEST(add_remove_circular_reverse);
+	SCX_BTREE_SELFTEST(add_remove_circular);
 
 	return 0;
 }

@@ -40,9 +40,8 @@ pub fn full_version(semver: &str) -> String {
     ver
 }
 
-pub fn ops_version(sched_name: &str, semver: &str) -> String {
-    let mut ver = sched_name.to_string();
-    ver.push('_');
+pub fn ops_version_suffix(semver: &str) -> String {
+    let mut ver = String::from("_");
     ver.push_str(semver);
     if !GIT_VERSION.is_empty() {
         write!(ver, "_{}", &*GIT_VERSION).unwrap();
