@@ -243,36 +243,6 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tid SEC(".maps");
 
-int save_gpu_tgid_pid() {
-	if (!enable_gpu_support)
-		return 0;
-	u64 pid_tgid;
-	u32 pid, tid, zero;
-	zero = 0;
-
-	pid_tgid = bpf_get_current_pid_tgid();
-	pid = pid_tgid >> 32;
-	tid = pid_tgid;
-	bpf_map_update_elem(&gpu_tid, &tid, &zero, BPF_ANY);
-	bpf_map_update_elem(&gpu_tgid, &pid, &zero, BPF_ANY);
-	return 0;
-}
-
-SEC("?kprobe/nvidia_poll")
-int kprobe_nvidia_poll() {
-	return save_gpu_tgid_pid();
-}
-
-SEC("?kprobe/nvidia_open")
-int kprobe_nvidia_open() {
-	return save_gpu_tgid_pid();
-}
-
-SEC("?kprobe/nvidia_mmap")
-int kprobe_nvidia_mmap() {
-	return save_gpu_tgid_pid();
-}
-
 // XXX - Converting this to bss array triggers verifier bugs. See
 // BpfStats::read(). Should also be cacheline aligned which doesn't work with
 // the array map.
@@ -628,6 +598,48 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 
 	return taskc;
+}
+
+int save_gpu_tgid_pid() {
+	if (!enable_gpu_support)
+		return 0;
+	struct task_struct *p = NULL;
+	struct task_ctx *taskc;
+	u64 pid_tgid;
+	u32 pid, tid, zero;
+	zero = 0;
+
+	pid_tgid = bpf_get_current_pid_tgid();
+	pid = pid_tgid >> 32;
+	tid = pid_tgid;
+	// To avoid race condition where the GPU process is discovered before kprobe is called
+	// If we discover new GPU tid, force task refresh_layer to match_layer again
+	if ((p = (struct task_struct*)bpf_get_current_task_btf()) && p) {
+		if ((taskc = lookup_task_ctx_may_fail(p)) && taskc) {
+			if(!bpf_map_lookup_elem(&gpu_tid, &tid)) {
+				trace("New GPU tid: %d, force to refresh layer", tid);
+				taskc->refresh_layer = true;
+			}
+		}
+	}
+	bpf_map_update_elem(&gpu_tid, &tid, &zero, BPF_ANY);
+	bpf_map_update_elem(&gpu_tgid, &pid, &zero, BPF_ANY);
+	return 0;
+}
+
+SEC("?kprobe/nvidia_poll")
+int kprobe_nvidia_poll() {
+	return save_gpu_tgid_pid();
+}
+
+SEC("?kprobe/nvidia_open")
+int kprobe_nvidia_open() {
+	return save_gpu_tgid_pid();
+}
+
+SEC("?kprobe/nvidia_mmap")
+int kprobe_nvidia_mmap() {
+	return save_gpu_tgid_pid();
 }
 
 /*
