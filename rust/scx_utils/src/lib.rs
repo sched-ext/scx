@@ -92,7 +92,7 @@ pub mod mangoapp;
 pub mod misc;
 pub use misc::monitor_stats;
 pub use misc::normalize_load_metric;
-pub use misc::set_rlimit_infinity;
+pub use misc::try_set_rlimit_infinity;
 
 mod netdev;
 pub use netdev::read_netdevs;

@@ -35,7 +35,7 @@ use scx_utils::compat;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
-use scx_utils::set_rlimit_infinity;
+use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
@@ -114,7 +114,7 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
-        set_rlimit_infinity();
+        try_set_rlimit_infinity();
 
         // Initialize CPU topology.
         let topo = Topology::new().unwrap();
