@@ -385,7 +385,7 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
-        set_rlimit_infinity();
+        let _ = set_rlimit_infinity();
 
         // Validate command line arguments.
         assert!(opts.slice_us >= opts.slice_us_min);
