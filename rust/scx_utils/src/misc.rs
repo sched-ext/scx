@@ -1,7 +1,7 @@
 use anyhow::Result;
 use anyhow::{anyhow, bail};
-use libc;
 use log::{info, warn};
+use nix::sys::resource::{getrlimit, setrlimit, Resource, RLIM_INFINITY};
 use scx_stats::prelude::*;
 use serde::Deserialize;
 use std::path::Path;
@@ -65,18 +65,18 @@ where
     Ok(())
 }
 
-pub fn set_rlimit_infinity() {
-    unsafe {
-        // Call setrlimit to set the locked-in-memory limit to unlimited.
-        let new_rlimit = libc::rlimit {
-            rlim_cur: libc::RLIM_INFINITY,
-            rlim_max: libc::RLIM_INFINITY,
-        };
-        let res = libc::setrlimit(libc::RLIMIT_MEMLOCK, &new_rlimit);
-        if res != 0 {
-            panic!("setrlimit failed with error code: {res}");
+pub fn try_set_rlimit_infinity() {
+    // Increase MEMLOCK size since the BPF scheduler might use
+    // more than the current limit
+    if let Err(_) = setrlimit(Resource::RLIMIT_MEMLOCK, RLIM_INFINITY, RLIM_INFINITY) {
+        // If there is an error in expanding rlimit to infinity,
+        // show the current rlimits then proceed.
+        if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_MEMLOCK) {
+            warn!("Current MEMLOCK limit: soft={soft}, hard={hard}");
+        } else {
+            warn!("Cannot change or query MEMLOCK limit");
         }
-    };
+    }
 }
 
 /// Read a file and parse its content into the specified type.

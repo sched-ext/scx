@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 #
 # Run a scheduler for TIMEOUT seconds inside virtme-ng and catch potential
 # errors, then unload the scheduler and return the exit status.
@@ -29,7 +30,7 @@ fi
 
 # enable running tests on individual schedulers
 if [ $# -ge 2 ] ; then
-    SCHEDS[$2]=""
+    SCHEDS[$2]="-v"
 else
     SCHEDS["scx_simple"]="-v"
     SCHEDS["scx_central"]="-v"

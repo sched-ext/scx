@@ -44,6 +44,8 @@ static u64 node_dom_mask(u32 node_id)
 	return mask;
 }
 
+#ifndef __TARGET_ARCH_arm64
+
 /*
  * Sets the preferred domain mask according to the mempolicy. See man(2)
  * set_mempolicy for more details on mempolicy.
@@ -89,6 +91,14 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 
 	return;
 }
+
+#else
+
+static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
+                                                 task_ptr taskc)
+{}
+
+#endif
 
 static u32 task_pick_domain(task_ptr taskc, struct task_struct *p,
 			    const struct cpumask *cpumask)

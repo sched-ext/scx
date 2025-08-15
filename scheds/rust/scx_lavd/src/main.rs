@@ -50,7 +50,7 @@ use scx_utils::compat;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
-use scx_utils::set_rlimit_infinity;
+use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::EnergyModel;
@@ -338,9 +338,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        // Increase MEMLOCK size since the BPF scheduler might use
-        // more than the current limit
-        set_rlimit_infinity();
+        try_set_rlimit_infinity();
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();

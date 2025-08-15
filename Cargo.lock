@@ -1626,9 +1626,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.174"
+version = "0.2.175"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
+checksum = "6a82ae493e598baaea5209805c49bbf2ea7de956d50d7da0da1164f9c6d28543"
 
 [[package]]
 name = "libloading"
@@ -2568,6 +2568,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
+name = "rlimit"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2772,8 +2781,10 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
+ "nix 0.30.1",
  "ordered-float",
  "plain",
+ "rlimit",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3032,6 +3043,7 @@ dependencies = [
  "libbpf-sys",
  "libc",
  "log",
+ "nix 0.30.1",
  "num",
  "nvml-wrapper",
  "nvml-wrapper-sys",
