@@ -777,8 +777,8 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Generates a CPU bar chart.
-    fn cpu_bar(&self, cpu: usize, event: &str) -> Bar {
+    /// Generates a CPU bar chart with gradient coloring based on relative value.
+    fn cpu_bar_with_gradient(&self, cpu: usize, event: &str, min: u64, max: u64) -> Bar {
         let cpu_data = self
             .cpu_data
             .get(&cpu)
@@ -788,13 +788,34 @@ impl<'a> App<'a> {
             .last()
             .copied()
             .unwrap_or(0_u64);
-        let hw_pressure = cpu_data
-            .event_data_immut("hw_pressure")
-            .last()
-            .copied()
-            .unwrap_or(0);
+
+        // Calculate gradient color based on relative position between min and max
+        let gradient_color = if max > min {
+            let range = max - min;
+            let very_low_threshold = min as f64 + (range as f64 * 0.2);
+            let low_threshold = min as f64 + (range as f64 * 0.4);
+            let high_threshold = min as f64 + (range as f64 * 0.6);
+            let very_high_threshold = min as f64 + (range as f64 * 0.8);
+
+            self.theme().gradient_5(
+                value as f64,
+                very_low_threshold,
+                low_threshold,
+                high_threshold,
+                very_high_threshold,
+                false,
+            )
+        } else {
+            // If all values are the same, use the default color
+            self.theme()
+                .sparkline_style()
+                .fg
+                .unwrap_or(Color::default())
+        };
+
         Bar::default()
             .value(value)
+            .style(Style::default().fg(gradient_color))
             .label(Line::from(format!(
                 "{}{}{}",
                 cpu,
@@ -812,8 +833,17 @@ impl<'a> App<'a> {
                 } else {
                     "".to_string()
                 },
-                if self.hw_pressure && hw_pressure > 0 {
-                    format!("{hw_pressure}")
+                if self.hw_pressure {
+                    let hw_pressure = cpu_data
+                        .event_data_immut("hw_pressure")
+                        .last()
+                        .copied()
+                        .unwrap_or(0);
+                    if hw_pressure > 0 {
+                        format!("{hw_pressure}")
+                    } else {
+                        "".to_string()
+                    }
                 } else {
                     "".to_string()
                 }
@@ -825,8 +855,15 @@ impl<'a> App<'a> {
             })
     }
 
-    /// Creates a sparkline for a cpu.
-    fn cpu_sparkline(&self, cpu: usize, max: u64, borders: Borders, small: bool) -> Sparkline {
+    /// Creates a sparkline for a CPU with gradient coloring based on current value relative to min/max.
+    fn cpu_sparkline_with_gradient(
+        &self,
+        cpu: usize,
+        max: u64,
+        min: u64,
+        borders: Borders,
+        small: bool,
+    ) -> Sparkline {
         let mut cpu_freq: u64 = 0;
         let mut hw_pressure: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
@@ -852,11 +889,39 @@ impl<'a> App<'a> {
         } else {
             Vec::new()
         };
+
+        // Get current CPU value for gradient calculation
+        let current_value = data.last().copied().unwrap_or(0);
+
+        // Calculate gradient color based on relative position between min and max
+        let gradient_color = if max > min {
+            let range = max - min;
+            let very_low_threshold = min as f64 + (range as f64 * 0.2);
+            let low_threshold = min as f64 + (range as f64 * 0.4);
+            let high_threshold = min as f64 + (range as f64 * 0.6);
+            let very_high_threshold = min as f64 + (range as f64 * 0.8);
+
+            self.theme().gradient_5(
+                current_value as f64,
+                very_low_threshold,
+                low_threshold,
+                high_threshold,
+                very_high_threshold,
+                false,
+            )
+        } else {
+            // If all values are the same, use the default color
+            self.theme()
+                .sparkline_style()
+                .fg
+                .unwrap_or(Color::default())
+        };
+
         Sparkline::default()
             .data(&data)
             .max(max)
             .direction(RenderDirection::RightToLeft)
-            .style(self.theme().sparkline_style())
+            .style(Style::default().fg(gradient_color))
             .bar_set(if small { THREE_LEVELS } else { NINE_LEVELS })
             .block(
                 Block::new()
@@ -1121,7 +1186,6 @@ impl<'a> App<'a> {
                     .block(llc_block)
                     .max(stats.max)
                     .direction(Direction::Horizontal)
-                    .bar_style(self.theme().sparkline_style())
                     .bar_gap(0)
                     .bar_width(1);
 
@@ -1254,7 +1318,6 @@ impl<'a> App<'a> {
                     .block(node_block)
                     .max(stats.max)
                     .direction(Direction::Horizontal)
-                    .bar_style(self.theme().sparkline_style())
                     .bar_gap(0)
                     .bar_width(1);
 
@@ -1355,8 +1418,33 @@ impl<'a> App<'a> {
 
     /// Generates a DSQ bar chart.
     fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+        // Calculate gradient color based on relative position between min and max
+        let gradient_color = if max > min {
+            let range = max - min;
+            let very_low_threshold = min as f64 + (range as f64 * 0.2);
+            let low_threshold = min as f64 + (range as f64 * 0.4);
+            let high_threshold = min as f64 + (range as f64 * 0.6);
+            let very_high_threshold = min as f64 + (range as f64 * 0.8);
+
+            self.theme().gradient_5(
+                value as f64,
+                very_low_threshold,
+                low_threshold,
+                high_threshold,
+                very_high_threshold,
+                false,
+            )
+        } else {
+            // If all values are the same, use the default color
+            self.theme()
+                .sparkline_style()
+                .fg
+                .unwrap_or(Color::default())
+        };
+
         Bar::default()
             .value(value)
+            .style(Style::default().fg(gradient_color))
             .label(Line::from(if self.localize {
                 format!(
                     "{:#X} avg {} max {} min {}",
@@ -1391,8 +1479,33 @@ impl<'a> App<'a> {
 
     /// Generates a LLC bar chart.
     fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+        // Calculate gradient color based on relative position between min and max
+        let gradient_color = if max > min {
+            let range = max - min;
+            let very_low_threshold = min as f64 + (range as f64 * 0.2);
+            let low_threshold = min as f64 + (range as f64 * 0.4);
+            let high_threshold = min as f64 + (range as f64 * 0.6);
+            let very_high_threshold = min as f64 + (range as f64 * 0.8);
+
+            self.theme().gradient_5(
+                value as f64,
+                very_low_threshold,
+                low_threshold,
+                high_threshold,
+                very_high_threshold,
+                false,
+            )
+        } else {
+            // If all values are the same, use the default color
+            self.theme()
+                .sparkline_style()
+                .fg
+                .unwrap_or(Color::default())
+        };
+
         Bar::default()
             .value(value)
+            .style(Style::default().fg(gradient_color))
             .label(Line::from(if self.localize {
                 format!(
                     "{} avg {} max {} min {}",
@@ -1601,7 +1714,6 @@ impl<'a> App<'a> {
             .block(bar_block)
             .max(stats.max)
             .direction(Direction::Horizontal)
-            .bar_style(self.theme().sparkline_style())
             .bar_gap(0)
             .bar_width(1);
 
@@ -1781,9 +1893,10 @@ impl<'a> App<'a> {
                         .filter(|cpu| cpu.node_id == node.id)
                         .enumerate()
                         .map(|(j, cpu)| {
-                            self.cpu_sparkline(
+                            self.cpu_sparkline_with_gradient(
                                 cpu.id,
                                 stats.max,
+                                stats.min,
                                 if j > col_scale && j == node_cpus - col_scale {
                                     Borders::LEFT | Borders::BOTTOM
                                 } else if j > col_scale && j == node_cpus - 1 {
@@ -1897,7 +2010,12 @@ impl<'a> App<'a> {
                         .keys()
                         .enumerate()
                         .map(|(j, cpu)| {
-                            let cpu_bar = self.cpu_bar(*cpu, self.active_event.event_name());
+                            let cpu_bar = self.cpu_bar_with_gradient(
+                                *cpu,
+                                self.active_event.event_name(),
+                                stats.min,
+                                stats.max,
+                            );
                             bar_col_data[j % col_scale as usize].push(cpu_bar);
                         })
                         .collect();
@@ -1907,7 +2025,6 @@ impl<'a> App<'a> {
                             .data(BarGroup::default().bars(col_data))
                             .max(stats.max)
                             .direction(Direction::Horizontal)
-                            .bar_style(self.theme().sparkline_style())
                             .bar_gap(0)
                             .bar_width(1);
                         frame.render_widget(bar_chart, cpus_areas[j % col_scale as usize]);
@@ -3508,6 +3625,17 @@ impl<'a> App<'a> {
         let mem_used_percent =
             100.0 - (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
         let mem_used_kb = mem_stats.total_kb - mem_stats.available_kb;
+
+        // Calculate gradient color based on memory usage percentage
+        let mem_gradient_color = self.theme().gradient_5(
+            mem_used_percent,
+            20.0, // very low threshold (0-20%)
+            40.0, // low threshold (20-40%)
+            60.0, // high threshold (40-60%)
+            80.0, // very high threshold (60-80%)
+            false,
+        );
+
         let mem_gauge = LineGauge::default()
             .block(
                 Block::bordered()
@@ -3519,7 +3647,7 @@ impl<'a> App<'a> {
                     .border_type(BorderType::Rounded)
                     .style(self.theme().border_style()),
             )
-            .filled_style(self.theme().text_important_color())
+            .filled_style(mem_gradient_color)
             .ratio(mem_used_percent / 100.0)
             .label(format!(
                 "{}/{}",
@@ -3536,6 +3664,17 @@ impl<'a> App<'a> {
             0.0
         };
         let swap_used_kb = mem_stats.swap_total_kb - mem_stats.swap_free_kb;
+
+        // Calculate gradient color based on swap usage percentage
+        let swap_gradient_color = self.theme().gradient_5(
+            swap_used_percent,
+            5.0,  // very low threshold (0-5%) - any swap usage is concerning
+            15.0, // low threshold (5-15%)
+            35.0, // high threshold (15-35%)
+            60.0, // very high threshold (35-60%)
+            false,
+        );
+
         let swap_gauge = LineGauge::default()
             .block(
                 Block::bordered()
@@ -3547,7 +3686,7 @@ impl<'a> App<'a> {
                     .border_type(BorderType::Rounded)
                     .style(self.theme().border_style()),
             )
-            .filled_style(self.theme().text_important_color())
+            .filled_style(swap_gradient_color)
             .ratio(swap_used_percent / 100.0)
             .label(format!(
                 "{}/{}",
