@@ -264,6 +264,7 @@ extern volatile u64		balanced_mode_ns;
 extern volatile u64		powersave_mode_ns;
 
 /* Helpers from util.bpf.c for querying CPU/task state. */
+extern const volatile bool	per_cpu_dsq;
 
 bool is_lock_holder_running(struct cpu_ctx *cpuc);
 bool have_scheduled(struct task_ctx *taskc);
