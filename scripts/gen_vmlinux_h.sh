@@ -11,6 +11,7 @@ set -euo pipefail
 #
 # ./scripts/gen_vmlinux_h.sh /path/to/linux "$PWD/scheds/include/arch/"
 
+BASEDIR=$(cd "$(dirname "$0")" && pwd)
 LINUX_REPO="$1" # where the linux repo is located
 pushd ${LINUX_REPO}
 INCLUDE_TARGET=$2 # target directory, e.g., /path/to/scx/sched/include/arch/
@@ -111,6 +112,7 @@ generate_vmlinux_for_arch() {
     if [ -f ./vmlinux ]; then
         echo "Generating ${OUTPUT_FILE}..."
         bpftool btf dump file ./vmlinux format c > "${OUTPUT_FILE}"
+        "${BASEDIR}/fixup_vmlinux_h.py" "${OUTPUT_FILE}"
         ln -fsT "${OUTPUT_BASENAME}" "${TARGET_DIR}/vmlinux.h"
         echo "${OUTPUT_FILE} generated successfully."
     else
