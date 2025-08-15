@@ -249,6 +249,9 @@ async def run_tests():
     """Run the test suite."""
     print("Running tests...", flush=True)
 
+    # Make sure the selftest is built in case the build was not already run.
+    await run_command(["cargo", "build", "-p", "scx_lib_selftests"], no_capture=True)
+
     await run_command(
         [
             "cargo",
@@ -261,7 +264,7 @@ async def run_tests():
     )
 
     # Get CPU count
-    cpu_count = min(os.cpu_count(), 16)
+    cpu_count = min(os.cpu_count() or 16, 16)
 
     await run_command_in_vm(
         "sched_ext/for-next",
@@ -270,7 +273,7 @@ async def run_tests():
             "test-in-vm",
         ],
         memory=10 * 1024 * 1024 * 1024,
-        cpus=min(os.cpu_count(), 16),
+        cpus=cpu_count,
         no_capture=True,
     )
 
@@ -739,7 +742,7 @@ async def main():
         else:
             await run_veristat()
     elif args.command == "test-in-vm":
-        run_tests_in_vm()
+        await run_tests_in_vm()
     elif args.command == "all":
         await run_all()
 
