@@ -291,6 +291,8 @@ pub struct SchedWakeActionCtx {
     pub tgid: u32,
     pub prio: i32,
     pub comm: SsoString,
+    pub waker_pid: u32,
+    pub waker_comm: SsoString,
 }
 
 pub type SchedWakeupNewAction = SchedWakeActionCtx;
@@ -571,6 +573,7 @@ impl TryFrom<&bpf_event> for Action {
                 let wakeup = unsafe { event.event.wakeup };
 
                 let comm = String::from_utf8_lossy(&wakeup.comm);
+                let waker_comm = String::from_utf8_lossy(&wakeup.waker_comm);
 
                 Ok(Action::SchedWakeup(SchedWakeupAction {
                     ts: event.ts,
@@ -579,6 +582,8 @@ impl TryFrom<&bpf_event> for Action {
                     tgid: wakeup.tgid,
                     prio: wakeup.prio,
                     comm: comm.into(),
+                    waker_pid: wakeup.waker_pid,
+                    waker_comm: waker_comm.into(),
                 }))
             }
             #[allow(non_upper_case_globals)]
@@ -586,6 +591,7 @@ impl TryFrom<&bpf_event> for Action {
                 let waking = unsafe { &event.event.waking };
 
                 let comm = String::from_utf8_lossy(&waking.comm);
+                let waker_comm = String::from_utf8_lossy(&waking.waker_comm);
 
                 Ok(Action::SchedWaking(SchedWakingAction {
                     ts: event.ts,
@@ -594,6 +600,8 @@ impl TryFrom<&bpf_event> for Action {
                     tgid: waking.tgid,
                     prio: waking.prio,
                     comm: comm.into(),
+                    waker_pid: waking.waker_pid,
+                    waker_comm: waker_comm.into(),
                 }))
             }
             #[allow(non_upper_case_globals)]
