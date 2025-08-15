@@ -380,20 +380,26 @@ macro_rules! scx_ops_open {
                 let ops = skel.struct_ops.[<$ops _mut>]();
 
                 let name_field = &mut ops.name;
-                let existing_name = unsafe {
-                    ::std::ffi::CStr::from_ptr(name_field.as_ptr())
-                        .to_str()
-                        .expect("name is not utf-8")
-                };
 
-                let version = ::scx_utils::build_id::ops_version(existing_name, env!("CARGO_PKG_VERSION"));
-                let bytes = version.as_bytes();
+                let version_suffix = ::scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
+                let bytes = version_suffix.as_bytes();
                 let mut i = 0;
-                while i < bytes.len()
-                    && i < name_field.len() - 1
-                    && bytes[i] != 0
-                {
-                    name_field[i] = bytes[i] as i8;
+                let mut bytes_idx = 0;
+                let mut found_null = false;
+
+                while i < name_field.len() - 1 {
+                    found_null |= name_field[i] == 0;
+                    if !found_null {
+                        i += 1;
+                        continue;
+                    }
+
+                    if bytes_idx < bytes.len() {
+                        name_field[i] = bytes[bytes_idx] as i8;
+                        bytes_idx += 1;
+                    } else {
+                        break;
+                    }
                     i += 1;
                 }
                 name_field[i] = 0;
