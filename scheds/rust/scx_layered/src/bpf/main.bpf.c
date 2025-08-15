@@ -600,7 +600,7 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
-int save_gpu_tgid_pid() {
+int save_gpu_tgid_pid(void) {
 	if (!enable_gpu_support)
 		return 0;
 	struct task_struct *p = NULL;
@@ -628,17 +628,17 @@ int save_gpu_tgid_pid() {
 }
 
 SEC("?kprobe/nvidia_poll")
-int kprobe_nvidia_poll() {
+int kprobe_nvidia_poll(void) {
 	return save_gpu_tgid_pid();
 }
 
 SEC("?kprobe/nvidia_open")
-int kprobe_nvidia_open() {
+int kprobe_nvidia_open(void) {
 	return save_gpu_tgid_pid();
 }
 
 SEC("?kprobe/nvidia_mmap")
-int kprobe_nvidia_mmap() {
+int kprobe_nvidia_mmap(void) {
 	return save_gpu_tgid_pid();
 }
 
