@@ -258,91 +258,6 @@ static inline const struct cpumask *lookup_cell_cpumask(int idx)
 }
 
 /*
- * This is an RCU-like implementation to keep track of scheduling events so we
- * can establish when cell assignments have propagated completely.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, 1);
-} percpu_critical_sections SEC(".maps");
-
-/* Same implementation for enter/exit */
-static __always_inline int critical_section()
-{
-	u32 zero = 0;
-	u32 *data;
-
-	if (!(data = bpf_map_lookup_elem(&percpu_critical_sections, &zero))) {
-		scx_bpf_error("no percpu_critical_sections");
-		return -1;
-	}
-
-	/*
-	 * Bump the counter, the LSB indicates we are in a critical section and the
-	 * rest of the bits keep track of how many critical sections.
-	 */
-	WRITE_ONCE(*data, *data + 1);
-	return 0;
-}
-
-#define critical_section_enter() critical_section()
-#define critical_section_exit() critical_section()
-
-u32 critical_section_state[MAX_CPUS];
-/*
- * Write side will record the current state and then poll to check that the
- * generation has advanced (somewhat like call_rcu)
- */
-static __always_inline __maybe_unused int critical_section_record()
-{
-	u32 zero = 0;
-	u32 *data;
-	int nr_cpus = nr_possible_cpus;
-	if (nr_cpus > MAX_CPUS)
-		nr_cpus = MAX_CPUS;
-
-	for (int i = 0; i < nr_cpus; ++i) {
-		if (!(data = bpf_map_lookup_percpu_elem(
-			      &percpu_critical_sections, &zero, i))) {
-			scx_bpf_error("no percpu_critical_sections");
-			return -1;
-		}
-
-		critical_section_state[i] = READ_ONCE(*data);
-	}
-	return 0;
-}
-
-static __always_inline __maybe_unused int critical_section_poll()
-{
-	u32 zero = 0;
-	u32 *data;
-
-	int nr_cpus = nr_possible_cpus;
-	if (nr_cpus > MAX_CPUS)
-		nr_cpus = MAX_CPUS;
-
-	for (int i = 0; i < nr_cpus; ++i) {
-		/* If not in a critical section at the time of record, then it passes */
-		if (!(critical_section_state[i] & 1))
-			continue;
-
-		if (!(data = bpf_map_lookup_percpu_elem(
-			      &percpu_critical_sections, &zero, i))) {
-			scx_bpf_error("no percpu_critical_sections");
-			return -1;
-		}
-
-		if (READ_ONCE(*data) == critical_section_state[i])
-			return 1;
-	}
-
-	return 0;
-}
-
-/*
  * Helper functions for bumping per-cell stats
  */
 static void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx,
@@ -520,36 +435,26 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
 
-	/*
-	 * This is a lightweight (RCU-like) critical section covering from when we
-	 * refresh cell information to when we enqueue onto the task's assigned
-	 * cell's DSQ. This allows us to publish new cell assignments and establish
-	 * a point at which all future enqueues will be on the new assignments.
-	 */
-	critical_section_enter();
-	if (maybe_refresh_cell(p, tctx) < 0) {
-		cpu = prev_cpu;
-		goto out;
-	}
+	if (maybe_refresh_cell(p, tctx) < 0)
+		return prev_cpu;
 
 	if (!tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
 		cpu = dsq_to_cpu(tctx->dsq);
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
-		goto out;
+		return cpu;
 	}
 
 	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
-		goto out;
+		return cpu;
 	}
 
 	if (!tctx->cpumask) {
 		scx_bpf_error("tctx->cpumask should never be NULL");
-		cpu = prev_cpu;
-		goto out;
+		return prev_cpu;
 	}
 	/*
 	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
@@ -561,8 +466,6 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	else
 		cpu = prev_cpu;
 
-out:
-	critical_section_exit();
 	return cpu;
 }
 
@@ -579,17 +482,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
 
-	/*
-	 * This is a lightweight (RCU-like) critical section covering from when we
-	 * refresh cell information to when we enqueue onto the task's assigned
-	 * cell's DSQ. This allows us to publish new cell assignments and establish
-	 * a point at which all future enqueues will be on the new assignments.
-	 */
-	if (critical_section_enter())
-		return;
-
 	if (maybe_refresh_cell(p, tctx) < 0)
-		goto out;
+		return;
 
 	if (!tctx->all_cell_cpus_allowed) {
 		cpu = dsq_to_cpu(tctx->dsq);
@@ -599,10 +493,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 * idle CPU. Let's do the lookup now and kick at the end.
 		 */
 		if (!(cctx = lookup_cpu_ctx(-1)))
-			goto out;
+			return;
 		cpu = pick_idle_cpu(p, task_cpu, cctx, tctx);
 		if (cpu == -1)
-			goto out;
+			return;
 		if (cpu == -EBUSY) {
 			/*
 			 * Verifier gets unhappy claiming two different pointer types for
@@ -619,7 +513,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
 		/* Task can use any CPU in its cell, so use the cell DSQ */
 		if (!(cell = lookup_cell(tctx->cell)))
-			goto out;
+			return;
 		basis_vtime = READ_ONCE(cell->vtime_now);
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
@@ -629,7 +523,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 * the task belongs to. Fetch the right cctx
 		 */
 		if (!(cctx = lookup_cpu_ctx(cpu)))
-			goto out;
+			return;
 		/* Task is pinned to specific CPUs, use per-CPU DSQ */
 		basis_vtime = READ_ONCE(cctx->vtime_now);
 	}
@@ -638,7 +532,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
 		scx_bpf_error("vtime is too far in the future for %d", p->pid);
-		goto out;
+		return;
 	}
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
@@ -652,10 +546,6 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-out:
-	if (critical_section_exit())
-		return;
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
