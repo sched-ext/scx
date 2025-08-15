@@ -4692,12 +4692,59 @@ impl<'a> App<'a> {
 
     /// Updates the app when a task wakes.
     fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
+        let SchedWakeupAction {
+            pid,
+            tgid,
+            waker_pid,
+            waker_comm,
+            ..
+        } = action;
+
+        let tid = u32_to_i32(*pid);
+        let tgid = u32_to_i32(*tgid);
+
+        // Update waker information for the thread
+        if let Some(proc_data) = self.proc_data.get_mut(&tgid) {
+            if self.in_thread_view {
+                if let Some(thread_data) = proc_data.threads.get_mut(&tid) {
+                    if *waker_pid != 0 {
+                        thread_data.last_waker_pid = Some(*waker_pid);
+                        thread_data.last_waker_comm = Some(waker_comm.to_string());
+                    }
+                }
+            }
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_wakeup(action);
         }
     }
 
+    /// Updates the app when a task is about to wake.
     fn on_sched_waking(&mut self, action: &SchedWakingAction) {
+        let SchedWakingAction {
+            pid,
+            tgid,
+            waker_pid,
+            waker_comm,
+            ..
+        } = action;
+
+        let tid = u32_to_i32(*pid);
+        let tgid = u32_to_i32(*tgid);
+
+        // Update waker information for the thread
+        if let Some(proc_data) = self.proc_data.get_mut(&tgid) {
+            if self.in_thread_view {
+                if let Some(thread_data) = proc_data.threads.get_mut(&tid) {
+                    if *waker_pid != 0 {
+                        thread_data.last_waker_pid = Some(*waker_pid);
+                        thread_data.last_waker_comm = Some(waker_comm.to_string());
+                    }
+                }
+            }
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_waking(action);
         }
