@@ -20,7 +20,8 @@ u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_sc_load, int nz_qlen)
 	return avg_sc_load >> LAVD_CPDOM_MIG_SHIFT;
 }
 
-static void plan_x_cpdom_migration(void)
+__weak
+int plan_x_cpdom_migration(void)
 {
 	struct cpdom_ctx *cpdomc;
 	u64 cpdom_id;
@@ -96,7 +97,7 @@ static void plan_x_cpdom_migration(void)
 		 * [stealer_threshold ... avg_sc_load ... max_sc_load ... stealee_threshold]
 		 *            -------------------------------------->
 		 */
-		return;
+		return 0;
 	}
 	if ((stealee_threshold <= max_sc_load || overflow_running) &&
 	    (stealer_threshold < min_sc_load)) {
@@ -147,6 +148,8 @@ static void plan_x_cpdom_migration(void)
 	}
 
 	sys_stat.nr_stealee = nr_stealee;
+
+	return 0;
 }
 
 /*
