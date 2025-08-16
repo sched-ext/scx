@@ -806,48 +806,48 @@ impl<'a> App<'a> {
                 false,
             )
         } else {
-            // If all values are the same, use the default color
-            self.theme()
-                .sparkline_style()
-                .fg
-                .unwrap_or(Color::default())
+            self.theme().sparkline_style().fg.unwrap_or_default()
         };
 
         Bar::default()
             .value(value)
             .style(Style::default().fg(gradient_color))
-            .label(Line::from(format!(
-                "{}{}{}",
-                cpu,
-                if self.collect_cpu_freq {
-                    format!(
-                        " {}",
-                        format_hz(
-                            cpu_data
-                                .event_data_immut("cpu_freq")
-                                .last()
-                                .copied()
-                                .unwrap_or(0)
+            .value_style(self.theme().text_color())
+            .label(
+                Line::from(format!(
+                    "{}{}{}",
+                    cpu,
+                    if self.collect_cpu_freq {
+                        format!(
+                            " {}",
+                            format_hz(
+                                cpu_data
+                                    .event_data_immut("cpu_freq")
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0)
+                            )
                         )
-                    )
-                } else {
-                    "".to_string()
-                },
-                if self.hw_pressure {
-                    let hw_pressure = cpu_data
-                        .event_data_immut("hw_pressure")
-                        .last()
-                        .copied()
-                        .unwrap_or(0);
-                    if hw_pressure > 0 {
-                        format!("{hw_pressure}")
+                    } else {
+                        "".to_string()
+                    },
+                    if self.hw_pressure {
+                        let hw_pressure = cpu_data
+                            .event_data_immut("hw_pressure")
+                            .last()
+                            .copied()
+                            .unwrap_or(0);
+                        if hw_pressure > 0 {
+                            format!("{hw_pressure}")
+                        } else {
+                            "".to_string()
+                        }
                     } else {
                         "".to_string()
                     }
-                } else {
-                    "".to_string()
-                }
-            )))
+                ))
+                .style(self.theme().text_color()),
+            )
             .text_value(if self.localize {
                 sanitize_nbsp(value.to_formatted_string(&self.locale))
             } else {
@@ -890,7 +890,6 @@ impl<'a> App<'a> {
             Vec::new()
         };
 
-        // Get current CPU value for gradient calculation
         let current_value = data.last().copied().unwrap_or(0);
 
         // Calculate gradient color based on relative position between min and max
@@ -910,11 +909,7 @@ impl<'a> App<'a> {
                 false,
             )
         } else {
-            // If all values are the same, use the default color
-            self.theme()
-                .sparkline_style()
-                .fg
-                .unwrap_or(Color::default())
+            self.theme().sparkline_style().fg.unwrap_or_default()
         };
 
         Sparkline::default()
@@ -1435,11 +1430,7 @@ impl<'a> App<'a> {
                 false,
             )
         } else {
-            // If all values are the same, use the default color
-            self.theme()
-                .sparkline_style()
-                .fg
-                .unwrap_or(Color::default())
+            self.theme().sparkline_style().fg.unwrap_or_default()
         };
 
         Bar::default()
@@ -1496,11 +1487,7 @@ impl<'a> App<'a> {
                 false,
             )
         } else {
-            // If all values are the same, use the default color
-            self.theme()
-                .sparkline_style()
-                .fg
-                .unwrap_or(Color::default())
+            self.theme().sparkline_style().fg.unwrap_or_default()
         };
 
         Bar::default()
@@ -1953,7 +1940,7 @@ impl<'a> App<'a> {
                             stats.min,
                         )
                     })
-                    .style(self.theme().title_style())
+                    .style(self.theme().text_important_color())
                     .centered(),
                 )
                 .title_top(if i == 0 {
@@ -1983,7 +1970,7 @@ impl<'a> App<'a> {
                     .left_aligned(),
                 )
                 .border_type(BorderType::Rounded)
-                .style(self.theme().border_style());
+                .border_style(self.theme().border_style());
 
             let node_area = node_areas[i];
             let node_cpus = node.all_cpus.len();
