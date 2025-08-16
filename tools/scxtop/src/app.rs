@@ -1783,255 +1783,252 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn render_event_sparkline(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let num_nodes = self.topo.nodes.len();
+        let constraints = vec![Constraint::Ratio(1, num_nodes.try_into().unwrap()); num_nodes];
+        let node_areas = Layout::vertical(constraints).split(area);
+
+        let area = frame.area();
+        let area_events = if !self.large_core_count {
+            (area.width / 4) as usize
+        } else {
+            (area.width / 8) as usize
+        };
+        if self.max_cpu_events != area_events {
+            self.resize_events(area_events);
+        }
+
+        for (i, node) in self.topo.nodes.values().enumerate() {
+            let node_constraints = vec![Constraint::Percentage(2), Constraint::Percentage(98)];
+            let node_cpus = node.all_cpus.len();
+            let [top, center] = Layout::vertical(node_constraints).areas(node_areas[i]);
+            let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+            let mut cpus_constraints = Vec::with_capacity(node_cpus / col_scale);
+            for _ in 0..node_cpus / col_scale {
+                cpus_constraints.push(Constraint::Ratio(1, (node_cpus / col_scale) as u32));
+            }
+            let cpus_areas = Layout::vertical(cpus_constraints).split(center);
+            let mut spark_areas = vec![];
+            for j in 0..node_cpus / col_scale {
+                let spark_constraints = vec![Constraint::Ratio(1, col_scale as u32); col_scale];
+                spark_areas.push(Layout::horizontal(spark_constraints).split(cpus_areas[j]));
+            }
+
+            let node_iter = self
+                .cpu_data
+                .values()
+                .filter(|cpu_data| cpu_data.node == node.id)
+                .flat_map(|cpu_data| cpu_data.event_data_immut(self.active_event.event_name()))
+                .collect::<Vec<u64>>();
+            let stats = VecStats::new(&node_iter, None);
+
+            let node_block = Block::bordered()
+                .title_top(
+                    Line::from(if self.localize {
+                        format!(
+                            "Node{} ({}) avg {} max {} min {}",
+                            node.id,
+                            self.active_event.event_name(),
+                            sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                            sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                            sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
+                        )
+                    } else {
+                        format!(
+                            "Node{} ({}) avg {} max {} min {}",
+                            node.id,
+                            self.active_event.event_name(),
+                            stats.avg,
+                            stats.max,
+                            stats.min,
+                        )
+                    })
+                    .style(self.theme().title_style())
+                    .centered(),
+                )
+                .title_top(if i == 0 {
+                    Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                        .style(self.theme().text_important_color())
+                        .right_aligned()
+                } else {
+                    Line::from("")
+                })
+                .title_top(
+                    Line::from(if self.collect_uncore_freq {
+                        "uncore ".to_string()
+                            + format_hz(
+                                self.node_data
+                                    .get(&node.id)
+                                    .expect("NodeData should have been present")
+                                    .event_data_immut("uncore_freq")
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0_u64),
+                            )
+                            .as_str()
+                    } else {
+                        "".to_string()
+                    })
+                    .style(self.theme().text_important_color())
+                    .left_aligned(),
+                )
+                .border_type(BorderType::Rounded)
+                .style(self.theme().border_style());
+
+            frame.render_widget(node_block, top);
+
+            let cpu_sparklines: Vec<Sparkline> = self
+                .topo
+                .all_cpus
+                .values()
+                .filter(|cpu| cpu.node_id == node.id)
+                .enumerate()
+                .map(|(j, cpu)| {
+                    self.cpu_sparkline_with_gradient(
+                        cpu.id,
+                        stats.max,
+                        stats.min,
+                        if j > col_scale && j == node_cpus - col_scale {
+                            Borders::LEFT | Borders::BOTTOM
+                        } else if j > col_scale && j == node_cpus - 1 {
+                            Borders::RIGHT | Borders::BOTTOM
+                        } else if j > col_scale && j > node_cpus - col_scale {
+                            Borders::BOTTOM
+                        } else if j == 0 || j % col_scale == 0 {
+                            Borders::LEFT
+                        } else if j == col_scale - 1 || j % col_scale == col_scale - 1 {
+                            Borders::RIGHT
+                        } else {
+                            Borders::NONE
+                        },
+                        node_cpus > 32,
+                    )
+                })
+                .collect();
+
+            cpu_sparklines
+                .iter()
+                .enumerate()
+                .for_each(|(j, cpu_sparkline)| {
+                    let area_id = (j as f64 / col_scale as f64).floor() as usize;
+                    let spark_id = j % col_scale;
+                    frame.render_widget(cpu_sparkline, spark_areas[area_id][spark_id]);
+                });
+        }
+        Ok(())
+    }
+
+    fn render_event_barchart(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let num_nodes = self.topo.nodes.len();
+        let constraints = vec![Constraint::Ratio(1, num_nodes.try_into().unwrap()); num_nodes];
+        let node_areas = Layout::vertical(constraints).split(area);
+
+        for (i, node) in self.topo.nodes.values().enumerate() {
+            let node_iter = self
+                .cpu_data
+                .values()
+                .filter(|cpu_data| cpu_data.node == node.id)
+                .flat_map(|cpu_data| cpu_data.event_data_immut(self.active_event.event_name()))
+                .collect::<Vec<u64>>();
+            let stats = VecStats::new(&node_iter, None);
+
+            let node_block = Block::bordered()
+                .title_top(
+                    Line::from(if self.localize {
+                        format!(
+                            "Node{} ({}) avg {} max {} min {}",
+                            node.id,
+                            self.active_event.event_name(),
+                            sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                            sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                            sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
+                        )
+                    } else {
+                        format!(
+                            "Node{} ({}) avg {} max {} min {}",
+                            node.id,
+                            self.active_event.event_name(),
+                            stats.avg,
+                            stats.max,
+                            stats.min,
+                        )
+                    })
+                    .style(self.theme().title_style())
+                    .centered(),
+                )
+                .title_top(if i == 0 {
+                    Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                        .style(self.theme().text_important_color())
+                        .right_aligned()
+                } else {
+                    Line::from("")
+                })
+                .title_top(
+                    Line::from(if self.collect_uncore_freq {
+                        "uncore ".to_string()
+                            + format_hz(
+                                self.node_data
+                                    .get(&node.id)
+                                    .expect("NodeData should have been present")
+                                    .event_data_immut("uncore_freq")
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0_u64),
+                            )
+                            .as_str()
+                    } else {
+                        "".to_string()
+                    })
+                    .style(self.theme().text_important_color())
+                    .left_aligned(),
+                )
+                .border_type(BorderType::Rounded)
+                .style(self.theme().border_style());
+
+            let node_area = node_areas[i];
+            let node_cpus = node.all_cpus.len();
+            let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+
+            let cpus_constraints =
+                vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
+            let cpus_areas =
+                Layout::horizontal(cpus_constraints).split(node_block.inner(node_area));
+
+            let mut bar_col_data: Vec<Vec<Bar>> = vec![Vec::new(); 4];
+            let _: Vec<_> = node
+                .all_cpus
+                .keys()
+                .enumerate()
+                .map(|(j, cpu)| {
+                    let cpu_bar = self.cpu_bar_with_gradient(
+                        *cpu,
+                        self.active_event.event_name(),
+                        stats.min,
+                        stats.max,
+                    );
+                    bar_col_data[j % col_scale as usize].push(cpu_bar);
+                })
+                .collect();
+
+            for (j, col_data) in bar_col_data.iter().enumerate() {
+                let bar_chart = BarChart::default()
+                    .data(BarGroup::default().bars(col_data))
+                    .max(stats.max)
+                    .direction(Direction::Horizontal)
+                    .bar_gap(0)
+                    .bar_width(1);
+                frame.render_widget(bar_chart, cpus_areas[j % col_scale as usize]);
+            }
+            frame.render_widget(node_block, node_area);
+        }
+        Ok(())
+    }
+
     /// Renders the event state.
     fn render_event(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         match self.view_state {
-            ViewState::Sparkline => {
-                let num_nodes = self.topo.nodes.len();
-                let constraints =
-                    vec![Constraint::Ratio(1, num_nodes.try_into().unwrap()); num_nodes];
-                let node_areas = Layout::vertical(constraints).split(area);
-
-                let area = frame.area();
-                let area_events = if !self.large_core_count {
-                    (area.width / 4) as usize
-                } else {
-                    (area.width / 8) as usize
-                };
-                if self.max_cpu_events != area_events {
-                    self.resize_events(area_events);
-                }
-
-                for (i, node) in self.topo.nodes.values().enumerate() {
-                    let node_constraints =
-                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
-                    let node_cpus = node.all_cpus.len();
-                    let [top, center] = Layout::vertical(node_constraints).areas(node_areas[i]);
-                    let col_scale = if node_cpus <= 128 { 2 } else { 4 };
-                    let mut cpus_constraints = Vec::with_capacity(node_cpus / col_scale);
-                    for _ in 0..node_cpus / col_scale {
-                        cpus_constraints.push(Constraint::Ratio(1, (node_cpus / col_scale) as u32));
-                    }
-                    let cpus_areas = Layout::vertical(cpus_constraints).split(center);
-                    let mut spark_areas = vec![];
-                    for j in 0..node_cpus / col_scale {
-                        let spark_constraints =
-                            vec![Constraint::Ratio(1, col_scale as u32); col_scale];
-                        spark_areas
-                            .push(Layout::horizontal(spark_constraints).split(cpus_areas[j]));
-                    }
-
-                    let node_iter = self
-                        .cpu_data
-                        .values()
-                        .filter(|cpu_data| cpu_data.node == node.id)
-                        .flat_map(|cpu_data| {
-                            cpu_data.event_data_immut(self.active_event.event_name())
-                        })
-                        .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, None);
-
-                    let node_block = Block::bordered()
-                        .title_top(
-                            Line::from(if self.localize {
-                                format!(
-                                    "Node{} ({}) avg {} max {} min {}",
-                                    node.id,
-                                    self.active_event.event_name(),
-                                    sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
-                                    sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
-                                    sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
-                                )
-                            } else {
-                                format!(
-                                    "Node{} ({}) avg {} max {} min {}",
-                                    node.id,
-                                    self.active_event.event_name(),
-                                    stats.avg,
-                                    stats.max,
-                                    stats.min,
-                                )
-                            })
-                            .style(self.theme().title_style())
-                            .centered(),
-                        )
-                        .title_top(if i == 0 {
-                            Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                                .style(self.theme().text_important_color())
-                                .right_aligned()
-                        } else {
-                            Line::from("")
-                        })
-                        .title_top(
-                            Line::from(if self.collect_uncore_freq {
-                                "uncore ".to_string()
-                                    + format_hz(
-                                        self.node_data
-                                            .get(&node.id)
-                                            .expect("NodeData should have been present")
-                                            .event_data_immut("uncore_freq")
-                                            .last()
-                                            .copied()
-                                            .unwrap_or(0_u64),
-                                    )
-                                    .as_str()
-                            } else {
-                                "".to_string()
-                            })
-                            .style(self.theme().text_important_color())
-                            .left_aligned(),
-                        )
-                        .border_type(BorderType::Rounded)
-                        .style(self.theme().border_style());
-
-                    frame.render_widget(node_block, top);
-
-                    let cpu_sparklines: Vec<Sparkline> = self
-                        .topo
-                        .all_cpus
-                        .values()
-                        .filter(|cpu| cpu.node_id == node.id)
-                        .enumerate()
-                        .map(|(j, cpu)| {
-                            self.cpu_sparkline_with_gradient(
-                                cpu.id,
-                                stats.max,
-                                stats.min,
-                                if j > col_scale && j == node_cpus - col_scale {
-                                    Borders::LEFT | Borders::BOTTOM
-                                } else if j > col_scale && j == node_cpus - 1 {
-                                    Borders::RIGHT | Borders::BOTTOM
-                                } else if j > col_scale && j > node_cpus - col_scale {
-                                    Borders::BOTTOM
-                                } else if j == 0 || j % col_scale == 0 {
-                                    Borders::LEFT
-                                } else if j == col_scale - 1 || j % col_scale == col_scale - 1 {
-                                    Borders::RIGHT
-                                } else {
-                                    Borders::NONE
-                                },
-                                node_cpus > 32,
-                            )
-                        })
-                        .collect();
-
-                    cpu_sparklines
-                        .iter()
-                        .enumerate()
-                        .for_each(|(j, cpu_sparkline)| {
-                            let area_id = (j as f64 / col_scale as f64).floor() as usize;
-                            let spark_id = j % col_scale;
-                            frame.render_widget(cpu_sparkline, spark_areas[area_id][spark_id]);
-                        });
-                }
-            }
-            ViewState::BarChart => {
-                let num_nodes = self.topo.nodes.len();
-                let constraints =
-                    vec![Constraint::Ratio(1, num_nodes.try_into().unwrap()); num_nodes];
-                let node_areas = Layout::vertical(constraints).split(area);
-
-                for (i, node) in self.topo.nodes.values().enumerate() {
-                    let node_iter = self
-                        .cpu_data
-                        .values()
-                        .filter(|cpu_data| cpu_data.node == node.id)
-                        .flat_map(|cpu_data| {
-                            cpu_data.event_data_immut(self.active_event.event_name())
-                        })
-                        .collect::<Vec<u64>>();
-                    let stats = VecStats::new(&node_iter, None);
-
-                    let node_block = Block::bordered()
-                        .title_top(
-                            Line::from(if self.localize {
-                                format!(
-                                    "Node{} ({}) avg {} max {} min {}",
-                                    node.id,
-                                    self.active_event.event_name(),
-                                    sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
-                                    sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
-                                    sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
-                                )
-                            } else {
-                                format!(
-                                    "Node{} ({}) avg {} max {} min {}",
-                                    node.id,
-                                    self.active_event.event_name(),
-                                    stats.avg,
-                                    stats.max,
-                                    stats.min,
-                                )
-                            })
-                            .style(self.theme().title_style())
-                            .centered(),
-                        )
-                        .title_top(if i == 0 {
-                            Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                                .style(self.theme().text_important_color())
-                                .right_aligned()
-                        } else {
-                            Line::from("")
-                        })
-                        .title_top(
-                            Line::from(if self.collect_uncore_freq {
-                                "uncore ".to_string()
-                                    + format_hz(
-                                        self.node_data
-                                            .get(&node.id)
-                                            .expect("NodeData should have been present")
-                                            .event_data_immut("uncore_freq")
-                                            .last()
-                                            .copied()
-                                            .unwrap_or(0_u64),
-                                    )
-                                    .as_str()
-                            } else {
-                                "".to_string()
-                            })
-                            .style(self.theme().text_important_color())
-                            .left_aligned(),
-                        )
-                        .border_type(BorderType::Rounded)
-                        .style(self.theme().border_style());
-
-                    let node_area = node_areas[i];
-                    let node_cpus = node.all_cpus.len();
-                    let col_scale = if node_cpus <= 128 { 2 } else { 4 };
-
-                    let cpus_constraints =
-                        vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
-                    let cpus_areas =
-                        Layout::horizontal(cpus_constraints).split(node_block.inner(node_area));
-
-                    let mut bar_col_data: Vec<Vec<Bar>> = vec![Vec::new(); 4];
-                    let _: Vec<_> = node
-                        .all_cpus
-                        .keys()
-                        .enumerate()
-                        .map(|(j, cpu)| {
-                            let cpu_bar = self.cpu_bar_with_gradient(
-                                *cpu,
-                                self.active_event.event_name(),
-                                stats.min,
-                                stats.max,
-                            );
-                            bar_col_data[j % col_scale as usize].push(cpu_bar);
-                        })
-                        .collect();
-
-                    for (j, col_data) in bar_col_data.iter().enumerate() {
-                        let bar_chart = BarChart::default()
-                            .data(BarGroup::default().bars(col_data))
-                            .max(stats.max)
-                            .direction(Direction::Horizontal)
-                            .bar_gap(0)
-                            .bar_width(1);
-                        frame.render_widget(bar_chart, cpus_areas[j % col_scale as usize]);
-                    }
-                    frame.render_widget(node_block, node_area);
-                }
-            }
+            ViewState::Sparkline => self.render_event_sparkline(frame, area)?,
+            ViewState::BarChart => self.render_event_barchart(frame, area)?,
         }
         Ok(())
     }
