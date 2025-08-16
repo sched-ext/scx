@@ -26,6 +26,8 @@
 
 const volatile bool mempolicy_affinity;
 
+#ifndef __TARGET_ARCH_arm64
+
 /*
  * Returns the dom mask for a node.
  */
@@ -43,8 +45,6 @@ static u64 node_dom_mask(u32 node_id)
 
 	return mask;
 }
-
-#ifndef __TARGET_ARCH_arm64
 
 /*
  * Sets the preferred domain mask according to the mempolicy. See man(2)
