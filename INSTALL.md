@@ -38,7 +38,7 @@ $ sudo reboot
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential meson cmake cargo rustc clang llvm pkg-config libelf-dev
+$ sudo apt install -y build-essential meson cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev
 ```
 
 #### Build the scx schedulers from source
