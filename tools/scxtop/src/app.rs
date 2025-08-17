@@ -778,7 +778,7 @@ impl<'a> App<'a> {
     }
 
     /// Generates a CPU bar chart with gradient coloring based on relative value.
-    fn cpu_bar_with_gradient(&self, cpu: usize, event: &str, min: u64, max: u64) -> Bar {
+    fn cpu_bar_with_gradient(&self, cpu: usize, event: &str, min: u64, max: u64) -> Bar<'_> {
         let cpu_data = self
             .cpu_data
             .get(&cpu)
@@ -845,7 +845,7 @@ impl<'a> App<'a> {
         min: u64,
         borders: Borders,
         small: bool,
-    ) -> Sparkline {
+    ) -> Sparkline<'_> {
         let mut cpu_freq: u64 = 0;
         let mut hw_pressure: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
@@ -904,7 +904,7 @@ impl<'a> App<'a> {
     }
 
     /// creates as sparkline for a llc.
-    fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
+    fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline<'_> {
         let llc_data = self
             .llc_data
             .get(&llc)
@@ -957,7 +957,7 @@ impl<'a> App<'a> {
     }
 
     /// creates as sparkline for a node.
-    fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
+    fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline<'_> {
         let node_data = self
             .node_data
             .get(&node)
@@ -1294,7 +1294,7 @@ impl<'a> App<'a> {
         borders: Borders,
         render_title: bool,
         render_sample_rate: bool,
-    ) -> Sparkline {
+    ) -> Sparkline<'_> {
         let data = if self.dsq_data.contains_key(&dsq_id) {
             let dsq_data = self.dsq_data.get(&dsq_id).unwrap();
             dsq_data.event_data_immut(event)
@@ -1357,7 +1357,7 @@ impl<'a> App<'a> {
         event: &str,
         render_title: bool,
         render_sample_rate: bool,
-    ) -> Vec<Sparkline> {
+    ) -> Vec<Sparkline<'_>> {
         self.dsq_data
             .iter()
             .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
@@ -1375,7 +1375,7 @@ impl<'a> App<'a> {
     }
 
     /// Generates a DSQ bar chart.
-    fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+    fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar<'_> {
         let gradient_color = self.gradient5_color(value, max, min);
 
         Bar::default()
@@ -1400,7 +1400,7 @@ impl<'a> App<'a> {
     }
 
     /// Generates DSQ bar charts.
-    fn dsq_bars(&self, event: &str) -> Vec<Bar> {
+    fn dsq_bars(&self, event: &str) -> Vec<Bar<'_>> {
         self.dsq_data
             .iter()
             .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
@@ -1436,7 +1436,7 @@ impl<'a> App<'a> {
     }
 
     /// Generates a LLC bar chart.
-    fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+    fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar<'_> {
         let gradient_color = self.gradient5_color(value, max, min);
 
         Bar::default()
@@ -1461,7 +1461,7 @@ impl<'a> App<'a> {
     }
 
     /// Generates LLC bar charts.
-    fn llc_bars(&self, event: &str) -> Vec<Bar> {
+    fn llc_bars(&self, event: &str) -> Vec<Bar<'_>> {
         self.llc_data
             .iter()
             .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(event))
@@ -1483,7 +1483,7 @@ impl<'a> App<'a> {
     }
 
     /// Generates Node bar charts.
-    fn node_bars(&self, event: &str) -> Vec<Bar> {
+    fn node_bars(&self, event: &str) -> Vec<Bar<'_>> {
         self.node_data
             .iter()
             .filter(|(_node_id, node_data)| node_data.data.data.contains_key(event))
@@ -2764,7 +2764,7 @@ impl<'a> App<'a> {
     fn create_table_header_and_constraints<T, D>(
         &self,
         visible_columns: &[&crate::columns::Column<T, D>],
-    ) -> (Row, Vec<Constraint>) {
+    ) -> (Row<'_>, Vec<Constraint>) {
         let header = visible_columns
             .iter()
             .map(|col| Cell::from(col.header))
