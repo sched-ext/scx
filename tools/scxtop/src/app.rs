@@ -789,25 +789,7 @@ impl<'a> App<'a> {
             .copied()
             .unwrap_or(0_u64);
 
-        // Calculate gradient color based on relative position between min and max
-        let gradient_color = if max > min {
-            let range = max - min;
-            let very_low_threshold = min as f64 + (range as f64 * 0.2);
-            let low_threshold = min as f64 + (range as f64 * 0.4);
-            let high_threshold = min as f64 + (range as f64 * 0.6);
-            let very_high_threshold = min as f64 + (range as f64 * 0.8);
-
-            self.theme().gradient_5(
-                value as f64,
-                very_low_threshold,
-                low_threshold,
-                high_threshold,
-                very_high_threshold,
-                false,
-            )
-        } else {
-            self.theme().sparkline_style().fg.unwrap_or_default()
-        };
+        let gradient_color = self.gradient5_color(value, max, min);
 
         Bar::default()
             .value(value)
@@ -891,26 +873,7 @@ impl<'a> App<'a> {
         };
 
         let current_value = data.last().copied().unwrap_or(0);
-
-        // Calculate gradient color based on relative position between min and max
-        let gradient_color = if max > min {
-            let range = max - min;
-            let very_low_threshold = min as f64 + (range as f64 * 0.2);
-            let low_threshold = min as f64 + (range as f64 * 0.4);
-            let high_threshold = min as f64 + (range as f64 * 0.6);
-            let very_high_threshold = min as f64 + (range as f64 * 0.8);
-
-            self.theme().gradient_5(
-                current_value as f64,
-                very_low_threshold,
-                low_threshold,
-                high_threshold,
-                very_high_threshold,
-                false,
-            )
-        } else {
-            self.theme().sparkline_style().fg.unwrap_or_default()
-        };
+        let gradient_color = self.gradient5_color(current_value, max, min);
 
         Sparkline::default()
             .data(&data)
@@ -1413,25 +1376,7 @@ impl<'a> App<'a> {
 
     /// Generates a DSQ bar chart.
     fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar {
-        // Calculate gradient color based on relative position between min and max
-        let gradient_color = if max > min {
-            let range = max - min;
-            let very_low_threshold = min as f64 + (range as f64 * 0.2);
-            let low_threshold = min as f64 + (range as f64 * 0.4);
-            let high_threshold = min as f64 + (range as f64 * 0.6);
-            let very_high_threshold = min as f64 + (range as f64 * 0.8);
-
-            self.theme().gradient_5(
-                value as f64,
-                very_low_threshold,
-                low_threshold,
-                high_threshold,
-                very_high_threshold,
-                false,
-            )
-        } else {
-            self.theme().sparkline_style().fg.unwrap_or_default()
-        };
+        let gradient_color = self.gradient5_color(value, max, min);
 
         Bar::default()
             .value(value)
@@ -1468,10 +1413,9 @@ impl<'a> App<'a> {
             .collect()
     }
 
-    /// Generates a LLC bar chart.
-    fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
-        // Calculate gradient color based on relative position between min and max
-        let gradient_color = if max > min {
+    /// Returns the gradient color.
+    fn gradient5_color(&self, value: u64, max: u64, min: u64) -> Color {
+        if max > min {
             let range = max - min;
             let very_low_threshold = min as f64 + (range as f64 * 0.2);
             let low_threshold = min as f64 + (range as f64 * 0.4);
@@ -1488,7 +1432,12 @@ impl<'a> App<'a> {
             )
         } else {
             self.theme().sparkline_style().fg.unwrap_or_default()
-        };
+        }
+    }
+
+    /// Generates a LLC bar chart.
+    fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+        let gradient_color = self.gradient5_color(value, max, min);
 
         Bar::default()
             .value(value)
