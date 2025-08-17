@@ -175,6 +175,8 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 		new_tctx.last_run_ns = 0;
 		new_tctx.dsq_insert_time = 0;
 		new_tctx.wakeup_ts = 0;
+		new_tctx.last_waker_pid = 0;
+		__builtin_memset(new_tctx.last_waker_comm, 0, MAX_COMM);
 
 		if (!bpf_map_update_elem(&task_data, &tptr, &new_tctx, BPF_ANY))
 			return NULL;
@@ -461,6 +463,7 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 	struct bpf_event *event;
+	struct task_struct *waker;
 
 	if (!enable_bpf_events || !p || !should_sample())
 		return 0;
@@ -468,20 +471,37 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	u64 now = bpf_ktime_get_ns();
 	tctx = try_lookup_task_ctx(p);
 
+	// Get the current task (the waker)
+	waker = (struct task_struct *)bpf_get_current_task_btf();
+
+	// Record waker information in the target task's context
+	if (tctx && waker) {
+		tctx->wakeup_ts = now;
+		tctx->last_waker_pid = waker->pid;
+		record_real_comm(tctx->last_waker_comm, waker);
+	} else if (tctx) {
+		tctx->wakeup_ts = now;
+	}
+
 	if (!(event = try_reserve_event()))
 		return 0;
 
 	event->type = SCHED_WAKEUP;
-
-	if (tctx)
-		tctx->wakeup_ts = now;
-
 	event->ts = now;
 	event->cpu = bpf_get_smp_processor_id();
 	event->event.wakeup.pid = p->pid;
 	event->event.wakeup.tgid = p->tgid;
 	event->event.wakeup.prio = (int)p->prio;
 	record_real_comm(event->event.wakeup.comm, p);
+
+	// Include waker information in the event
+	if (waker) {
+		event->event.wakeup.waker_pid = waker->pid;
+		record_real_comm(event->event.wakeup.waker_comm, waker);
+	} else {
+		event->event.wakeup.waker_pid = 0;
+		__builtin_memset(event->event.wakeup.waker_comm, 0, MAX_COMM);
+	}
 
 	bpf_ringbuf_submit(event, 0);
 
@@ -503,21 +523,44 @@ int BPF_PROG(on_sched_wakeup_new, struct task_struct *p)
 SEC("tp_btf/sched_waking")
 int BPF_PROG(on_sched_waking, struct task_struct *p)
 {
+	struct task_ctx *tctx;
 	struct bpf_event *event;
+	struct task_struct *waker;
 
 	if (!enable_bpf_events || !should_sample())
 		return 0;
+
+	u64 now = bpf_ktime_get_ns();
+	tctx = try_lookup_task_ctx(p);
+
+	// Get the current task (the waker)
+	waker = (struct task_struct *)bpf_get_current_task_btf();
+
+	// Record waker information in the target task's context
+	if (tctx && waker) {
+		tctx->last_waker_pid = waker->pid;
+		record_real_comm(tctx->last_waker_comm, waker);
+	}
 
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
 
 	event->type = SCHED_WAKING;
-	event->ts = bpf_ktime_get_ns();
+	event->ts = now;
 	event->cpu = bpf_get_smp_processor_id();
 	event->event.wakeup.pid = p->pid;
 	event->event.wakeup.tgid = p->tgid;
 	event->event.wakeup.prio = (int)p->prio;
 	record_real_comm(event->event.wakeup.comm, p);
+
+	// Include waker information in the event
+	if (waker) {
+		event->event.wakeup.waker_pid = waker->pid;
+		record_real_comm(event->event.wakeup.waker_comm, waker);
+	} else {
+		event->event.wakeup.waker_pid = 0;
+		__builtin_memset(event->event.wakeup.waker_comm, 0, MAX_COMM);
+	}
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;
@@ -847,7 +890,7 @@ int BPF_URETPROBE(long_tail_tracker_exit)
 
 	// we can't start the trace fully from the bpf side directly here
 	// because we need to schedule the timer that terminates the trace, and:
-	//	tracing progs cannot use bpf_timer yet 
+	//	tracing progs cannot use bpf_timer yet
 	// instead start the trace but include in the message to userspace the
 	// fact we haven't scheduled the stop, and have userspace call back
 	// into a "syscall" type program which can schedule the stop. userspace

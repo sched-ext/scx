@@ -50,7 +50,7 @@ extern void bpf_iter_task_destroy(struct bpf_iter_task *it) __weak __ksym;
 enum {
 	LAVD_CPU_ID_MAX			= 512,
 
-	LAVD_CPDOM_MAX_NR		= 16, /* maximum number of compute domain */
+	LAVD_CPDOM_MAX_NR		= 24, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 3,  /* maximum distance from one compute domain to another */
 
 	LAVD_PCO_STATE_MAX		= 11, /* maximum number of performance vs. CPU order states */

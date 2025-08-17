@@ -25,6 +25,8 @@ pub struct ThreadData {
     pub state: ProcState,
     pub data: EventData,
     pub max_data_size: usize,
+    pub last_waker_pid: Option<u32>,
+    pub last_waker_comm: Option<String>,
 }
 
 impl ThreadData {
@@ -52,6 +54,8 @@ impl ThreadData {
             state: thread_stats.state()?,
             data: EventData::new(max_data_size),
             max_data_size,
+            last_waker_pid: None,
+            last_waker_comm: None,
         };
 
         Ok(thread_data)

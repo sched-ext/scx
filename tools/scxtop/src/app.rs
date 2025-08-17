@@ -1501,11 +1501,13 @@ impl<'a> App<'a> {
 
         if num_dsqs == 0 {
             let block = Block::default()
-                .title_top(
+                .title_top(if render_title {
                     Line::from(self.scheduler.clone())
                         .style(self.theme().title_style())
-                        .centered(),
-                )
+                        .centered()
+                } else {
+                    Line::from("".to_string())
+                })
                 .style(self.theme().border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
@@ -1518,7 +1520,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        self.dsq_sparklines(event, render_title, render_sample_rate)
+        self.dsq_sparklines(event, true, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1534,16 +1536,19 @@ impl<'a> App<'a> {
         event: &str,
         frame: &mut Frame,
         area: Rect,
+        render_title: bool,
         render_sample_rate: bool,
     ) -> Result<()> {
         let num_dsqs = self.dsq_data.len();
         if num_dsqs == 0 {
             let block = Block::default()
-                .title_top(
+                .title_top(if render_title {
                     Line::from(self.scheduler.clone())
                         .style(self.theme().title_style())
-                        .centered(),
-                )
+                        .centered()
+                } else {
+                    Line::from("".to_string())
+                })
                 .style(self.theme().border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
@@ -1563,8 +1568,7 @@ impl<'a> App<'a> {
             .title_top(
                 Line::from(if self.localize {
                     format!(
-                        "{} {} avg {} max {} min {}",
-                        self.scheduler,
+                        "{} avg {} max {} min {}",
                         event,
                         sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
                         sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
@@ -1572,8 +1576,8 @@ impl<'a> App<'a> {
                     )
                 } else {
                     format!(
-                        "{} {} avg {} max {} min {}",
-                        self.scheduler, event, stats.avg, stats.max, stats.min,
+                        "{} avg {} max {} min {}",
+                        event, stats.avg, stats.max, stats.min,
                     )
                 })
                 .style(self.theme().title_style())
@@ -1655,9 +1659,13 @@ impl<'a> App<'a> {
                 render_title,
                 render_sample_rate,
             )?,
-            ViewState::BarChart => {
-                self.render_scheduler_barchart(event, frame, area, render_sample_rate)?
-            }
+            ViewState::BarChart => self.render_scheduler_barchart(
+                event,
+                frame,
+                area,
+                render_title,
+                render_sample_rate,
+            )?,
         }
 
         Ok(())
@@ -2696,8 +2704,8 @@ impl<'a> App<'a> {
 
         self.render_event(frame, right)?;
         frame.render_widget(block, left_areas[0]);
-        self.render_scheduler("dsq_lat_us", frame, left_areas[1], true, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, left_areas[2], true, false)?;
+        self.render_scheduler("dsq_lat_us", frame, left_areas[1], false, true)?;
+        self.render_scheduler("dsq_slice_consumed", frame, left_areas[2], false, false)?;
 
         Ok(())
     }
@@ -4215,10 +4223,10 @@ impl<'a> App<'a> {
                 let [right_top, right_bottom] =
                     Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
                         .areas(right);
-                self.render_scheduler("dsq_lat_us", frame, left_top, true, true)?;
-                self.render_scheduler("dsq_slice_consumed", frame, left_center, true, false)?;
-                self.render_scheduler("dsq_vtime", frame, left_bottom, true, false)?;
-                self.render_scheduler("dsq_nr_queued", frame, right_bottom, true, false)?;
+                self.render_scheduler("dsq_lat_us", frame, left_top, false, true)?;
+                self.render_scheduler("dsq_slice_consumed", frame, left_center, false, false)?;
+                self.render_scheduler("dsq_vtime", frame, left_bottom, false, false)?;
+                self.render_scheduler("dsq_nr_queued", frame, right_bottom, false, false)?;
                 self.render_scheduler_stats(frame, right_top)
             }
             AppState::Tracing => self.render_tracing(frame),
@@ -4692,12 +4700,59 @@ impl<'a> App<'a> {
 
     /// Updates the app when a task wakes.
     fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
+        let SchedWakeupAction {
+            pid,
+            tgid,
+            waker_pid,
+            waker_comm,
+            ..
+        } = action;
+
+        let tid = u32_to_i32(*pid);
+        let tgid = u32_to_i32(*tgid);
+
+        // Update waker information for the thread
+        if let Some(proc_data) = self.proc_data.get_mut(&tgid) {
+            if self.in_thread_view {
+                if let Some(thread_data) = proc_data.threads.get_mut(&tid) {
+                    if *waker_pid != 0 {
+                        thread_data.last_waker_pid = Some(*waker_pid);
+                        thread_data.last_waker_comm = Some(waker_comm.to_string());
+                    }
+                }
+            }
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_wakeup(action);
         }
     }
 
+    /// Updates the app when a task is about to wake.
     fn on_sched_waking(&mut self, action: &SchedWakingAction) {
+        let SchedWakingAction {
+            pid,
+            tgid,
+            waker_pid,
+            waker_comm,
+            ..
+        } = action;
+
+        let tid = u32_to_i32(*pid);
+        let tgid = u32_to_i32(*tgid);
+
+        // Update waker information for the thread
+        if let Some(proc_data) = self.proc_data.get_mut(&tgid) {
+            if self.in_thread_view {
+                if let Some(thread_data) = proc_data.threads.get_mut(&tid) {
+                    if *waker_pid != 0 {
+                        thread_data.last_waker_pid = Some(*waker_pid);
+                        thread_data.last_waker_comm = Some(waker_comm.to_string());
+                    }
+                }
+            }
+        }
+
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_sched_waking(action);
         }

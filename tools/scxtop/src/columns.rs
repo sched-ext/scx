@@ -303,14 +303,32 @@ pub fn get_thread_columns() -> Vec<Column<i32, ThreadData>> {
     vec![
         id_column!("TID"),
         name_column!(ThreadData, thread_name),
-        state_column!(ThreadData),
-        layer_id_column!(ThreadData),
-        last_dsq_column!(ThreadData),
-        slice_ns_column!(ThreadData),
-        avg_max_lat_column!(ThreadData),
         cpu_column!(ThreadData),
         llc_column!(ThreadData),
         numa_column!(ThreadData),
+        state_column!(ThreadData),
+        layer_id_column!(ThreadData),
+        last_dsq_column!(ThreadData),
+        Column {
+            header: "Waker PID",
+            constraint: Constraint::Length(9),
+            visible: true,
+            value_fn: Box::new(|_, data: &ThreadData| {
+                data.last_waker_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_default()
+            }),
+        },
+        Column {
+            header: "Waker Comm",
+            constraint: Constraint::Length(15),
+            visible: true,
+            value_fn: Box::new(|_, data: &ThreadData| {
+                data.last_waker_comm.clone().unwrap_or_default()
+            }),
+        },
+        slice_ns_column!(ThreadData),
+        avg_max_lat_column!(ThreadData),
         cpu_util_column!(ThreadData),
     ]
 }
