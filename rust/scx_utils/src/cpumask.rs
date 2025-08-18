@@ -269,7 +269,7 @@ impl Cpumask {
     ///     info!("cpu {} was set", cpu);
     /// }
     /// ```
-    pub fn iter(&self) -> CpumaskIterator {
+    pub fn iter(&self) -> CpumaskIterator<'_> {
         CpumaskIterator {
             mask: self,
             index: 0,

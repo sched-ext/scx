@@ -30,7 +30,7 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, fenix, nix-develop-gha, libbpf-src, veristat-src, ... }:
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ]
+    flake-utils.lib.eachSystem [ "x86_64-linux" ]
       (system:
         let
           pkgs = import nixpkgs {
