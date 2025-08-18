@@ -70,6 +70,7 @@ use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+const SCHEDULER_NAME: &str = "scx_layered";
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
 const MAX_LAYER_WEIGHT: u32 = bpf_intf::consts_MAX_LAYER_WEIGHT;
@@ -3076,6 +3077,8 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
+        info!("Unregister {} scheduler", SCHEDULER_NAME);
+
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
         }
