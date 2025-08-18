@@ -261,6 +261,11 @@ static u64 task_dsq_slice_ns(struct task_struct *p, int dsq_index)
 	return task_slice_ns(p, dsq_time_slice(dsq_index));
 }
 
+static void task_refresh_llc_runs(task_ctx *taskc)
+{
+	taskc->llc_runs = min_llc_runs_pick2;
+}
+
 static u64 llc_nr_queued(struct llc_ctx *llcx)
 {
 	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
@@ -456,7 +461,7 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 	    taskc->dsq_index != p2dq_config.nr_dsqs_per_llc - 1)
 		return false;
 
-	if (taskc->llc_runs < min_llc_runs_pick2)
+	if (taskc->llc_runs > 0)
 		return false;
 
 	return llcx->saturated;
@@ -743,7 +748,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	if (llcx->lb_llc_id < MAX_LLCS &&
-	    taskc->llc_runs > min_llc_runs_pick2) {
+	    taskc->llc_runs == 0) {
 		u32 target_llc_id = llcx->lb_llc_id;
 		llcx->lb_llc_id = MAX_LLCS;
 		if (!(llcx = lookup_llc_ctx(target_llc_id)))
@@ -1144,13 +1149,16 @@ static int p2dq_running_impl(struct task_struct *p)
 		return -EINVAL;
 
 	if (taskc->llc_id != cpuc->llc_id) {
-		taskc->llc_runs = 0;
+		task_refresh_llc_runs(taskc);
 		stat_inc(P2DQ_STAT_LLC_MIGRATION);
 		trace("RUNNING %d cpu %d->%d llc %d->%d",
 		      p->pid, cpuc->id, task_cpu,
 		      taskc->llc_id, llcx->id);
 	} else {
-		taskc->llc_runs += 1;
+		if (taskc->llc_runs == 0)
+			task_refresh_llc_runs(taskc);
+		else
+			taskc->llc_runs -= 1;
 	}
 	if (taskc->node_id != cpuc->node_id) {
 		stat_inc(P2DQ_STAT_NODE_MIGRATION);
