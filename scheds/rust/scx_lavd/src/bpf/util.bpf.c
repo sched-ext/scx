@@ -143,46 +143,55 @@ static bool is_pinned(const struct task_struct *p)
 	return p->nr_cpus_allowed == 1;
 }
 
-static inline bool test_task_flag(struct task_ctx *taskc, u64 flag)
+__hidden
+bool test_task_flag(struct task_ctx *taskc, u64 flag)
 {
 	return (taskc->flags & flag) == flag;
 }
 
-static inline void set_task_flag(struct task_ctx *taskc, u64 flag)
+__hidden
+void set_task_flag(struct task_ctx *taskc, u64 flag)
 {
 	taskc->flags |= flag;
 }
 
-static inline void reset_task_flag(struct task_ctx *taskc, u64 flag)
+__hidden
+void reset_task_flag(struct task_ctx *taskc, u64 flag)
 {
 	taskc->flags &= ~flag;
 }
 
-static inline bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+__hidden
+inline bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 {
 	return (cpuc->flags & flag) == flag;
 }
 
-static inline void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+__hidden
+inline void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 {
 	cpuc->flags |= flag;
 }
 
-static inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
+__hidden
+inline void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag)
 {
 	cpuc->flags &= ~flag;
 }
 
+__hidden
 bool is_lat_cri(struct task_ctx *taskc)
 {
 	return taskc->lat_cri >= sys_stat.avg_lat_cri;
 }
 
+__hidden
 bool is_lock_holder(struct task_ctx *taskc)
 {
 	return test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST);
 }
 
+__hidden
 bool is_lock_holder_running(struct cpu_ctx *cpuc)
 {
 	return test_cpu_flag(cpuc, LAVD_FLAG_FUTEX_BOOST);
@@ -202,7 +211,7 @@ bool can_boost_slice(void)
 	return sys_stat.nr_queued_task <= sys_stat.nr_active;
 }
 
-static u16 get_nice_prio(struct task_struct *p)
+u16 get_nice_prio(struct task_struct __arg_trusted *p)
 {
 	u16 prio = p->static_prio - MAX_RT_PRIO; /* [0, 40) */
 	return prio;

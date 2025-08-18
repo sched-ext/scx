@@ -4,14 +4,19 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 
 /*
  * System-wide properties of CPUs
  */
-static bool		have_turbo_core;
+bool			have_turbo_core;
 bool			have_little_core;
 const volatile bool	is_smt_active;
 
@@ -67,16 +72,16 @@ volatile static int	pco_idx;
  * Big & LITTLE core's capacities
  */
 /* Total compute capacity of online CPUs. */
-static u64		total_capacity;
+u64		total_capacity;
 
 /* Capacity of one LITTLEst CPU. */
-static u64		one_little_capacity;
+u64		one_little_capacity;
 
 /* Big core's compute ratio among currently active cores scaled by 1024. */
-static u32		cur_big_core_scale;
+u32		cur_big_core_scale;
 
 /* Big core's compute ratio when all cores are active scaled by 1024. */
-static u32		default_big_core_scale;
+u32		default_big_core_scale;
 
 
 /*
@@ -88,13 +93,17 @@ volatile int		power_mode;
 volatile u64		last_power_mode_clk;
 volatile bool		is_powersave_mode;
 
-static void reset_suspended_duration(struct cpu_ctx *cpuc)
+__hidden
+int reset_suspended_duration(struct cpu_ctx *cpuc)
 {
 	if (cpuc->online_clk > cpuc->offline_clk)
 		cpuc->offline_clk = cpuc->online_clk;
+
+	return 0;
 }
 
-static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
+__hidden
+u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 {
 	/*
 	 * When a system is suspended, a task is also suspended in a running
@@ -114,8 +123,11 @@ static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 	return duration;
 }
 
-static bool is_perf_cri(struct task_ctx *taskc)
+bool is_perf_cri(struct task_ctx *taskc)
 {
+	if (unlikely(!taskc))
+		return false;
+
 	if (!have_little_core)
 		return true;
 
@@ -125,7 +137,24 @@ static bool is_perf_cri(struct task_ctx *taskc)
 	return test_task_flag(taskc, LAVD_FLAG_ON_BIG);
 }
 
-static const volatile u16 *get_cpu_order(void)
+static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
+{
+	u32 clear;
+
+	/*
+	 * If the CPU is on, we clear the bit once every four times
+	 * (LAVD_CC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
+	 * probabilistically cleared once every 100 msec (4 * 25 msec).
+	 */
+	clear = !(bpf_get_prandom_u32() % LAVD_CC_CPU_PIN_INTERVAL_DIV);
+	if (clear)
+		bpf_cpumask_clear_cpu(cpu, cpumask);
+
+	return clear;
+}
+
+__hidden
+const volatile u16 *get_cpu_order(void)
 {
 	int i = READ_ONCE(pco_idx);
 
@@ -681,7 +710,8 @@ unlock_out:
 	return err;
 }
 
-static void update_cpuperf_target(struct cpu_ctx *cpuc)
+__hidden
+int update_cpuperf_target(struct cpu_ctx *cpuc)
 {
 	u32 util, max_util, cpuperf_target;
 
@@ -706,16 +736,21 @@ static void update_cpuperf_target(struct cpu_ctx *cpuc)
 		scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
 		cpuc->cpuperf_cur = cpuperf_target;
 	}
+
+	return 0;
 }
 
-static void reset_cpuperf_target(struct cpu_ctx *cpuc)
+__hidden
+int reset_cpuperf_target(struct cpu_ctx *cpuc)
 {
 	if (!no_freq_scaling) {
 		cpuc->cpuperf_cur = 0;
 	}
+
+	return 0;
 }
 
-static u16 get_cpuperf_cap(s32 cpu)
+u16 get_cpuperf_cap(s32 cpu)
 {
 	const volatile u16 *cap;
 
@@ -727,7 +762,7 @@ static u16 get_cpuperf_cap(s32 cpu)
 	return 0;
 }
 
-static u64 scale_cap_freq(u64 dur, s32 cpu)
+u64 scale_cap_freq(u64 dur, s32 cpu)
 {
 	u64 cap, freq, scaled_dur;
 
@@ -754,13 +789,15 @@ static void do_update_autopilot_high_cap(void)
 	LAVD_AP_HIGH_CAP = c >> LAVD_SHIFT;
 }
 
-static void update_autopilot_high_cap(void)
+int update_autopilot_high_cap(void)
 {
 	if (no_use_em)
 		do_update_autopilot_high_cap();
+
+	return 0;
 }
 
-static void init_autopilot_caps(void)
+int init_autopilot_caps(void)
 {
 	if (no_use_em) {
 		/*
@@ -782,6 +819,8 @@ static void init_autopilot_caps(void)
 		LAVD_AP_LOW_CAP = pco_bounds[0];
 		LAVD_AP_HIGH_CAP = pco_bounds[i];
 	}
+
+	return 0;
 }
 
 SEC("syscall")
