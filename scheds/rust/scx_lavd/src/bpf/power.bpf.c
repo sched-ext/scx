@@ -12,7 +12,7 @@
  * System-wide properties of CPUs
  */
 static bool		have_turbo_core;
-static bool		have_little_core;
+bool			have_little_core;
 const volatile bool	is_smt_active;
 
 
@@ -33,7 +33,7 @@ const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
  * Compute domain properties
  */
 /* number of compute domains */
-static int		nr_cpdoms;
+int			nr_cpdoms;
 
 /* contexts for compute domains */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR];
@@ -86,9 +86,7 @@ static u64		LAVD_AP_LOW_CAP;
 static u64		LAVD_AP_HIGH_CAP;
 volatile int		power_mode;
 volatile u64		last_power_mode_clk;
-volatile u64		performance_mode_ns;
-volatile u64		balanced_mode_ns;
-volatile u64		powersave_mode_ns;
+volatile bool		is_powersave_mode;
 
 static void reset_suspended_duration(struct cpu_ctx *cpuc)
 {
@@ -232,7 +230,8 @@ static int calc_nr_active_cpus(void)
 	return nr_cpu_ids;
 }
 
-static void do_core_compaction(void)
+__weak
+int do_core_compaction(void)
 {
 	const volatile u16 *cpu_order;
 	struct cpu_ctx *cpuc;
@@ -372,9 +371,11 @@ static void do_core_compaction(void)
 
 unlock_out:
 	bpf_rcu_read_unlock();
+
+	return 0;
 }
 
-static void update_power_mode_time(void)
+int update_power_mode_time(void)
 {
 	u64 now = scx_bpf_now();
 	u64 delta;
@@ -396,6 +397,8 @@ static void update_power_mode_time(void)
 		__sync_fetch_and_add(&powersave_mode_ns, delta);
 		break;
 	}
+	
+	return 0;
 }
 
 static int do_set_power_profile(s32 pm)
@@ -457,7 +460,8 @@ static int do_set_power_profile(s32 pm)
 	return 0;
 }
 
-static int do_autopilot(void)
+__weak
+int do_autopilot(void)
 {
 	/*
 	 * Calculate the required compute capacity from the scaled utilization.
@@ -490,7 +494,8 @@ static int do_autopilot(void)
 	return do_set_power_profile(LAVD_PM_PERFORMANCE);
 }
 
-static void update_thr_perf_cri(void)
+__weak
+int update_thr_perf_cri(void)
 {
 	u32 little_core_scale, delta, diff, thr;
 
@@ -502,7 +507,7 @@ static void update_thr_perf_cri(void)
 	 */
 	if (cur_big_core_scale == LAVD_SCALE) {
 		sys_stat.thr_perf_cri = 0;
-		return;
+		return 0;
 	}
 
 	/*
@@ -564,9 +569,12 @@ static void update_thr_perf_cri(void)
 	}
 
 	sys_stat.thr_perf_cri = thr;
+
+	return 0;
 }
 
-static int reinit_active_cpumask_for_performance(void)
+__weak
+int reinit_active_cpumask_for_performance(void)
 {
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
