@@ -247,17 +247,27 @@ impl MsrReader {
     fn read_msr(&self, cpu_id: u32, msr: u32) -> Result<u64> {
         let mut files = self.msr_files.lock().unwrap();
 
-        // Get or create MSR file handle
-        let file = files.entry(cpu_id).or_insert_with(|| {
-            File::open(format!("/dev/cpu/{cpu_id}/msr")).unwrap_or_else(|_| {
-                // Fallback: try to access via msr module
-                std::process::Command::new("modprobe")
-                    .arg("msr")
-                    .output()
-                    .ok();
-                File::open(format!("/dev/cpu/{cpu_id}/msr")).unwrap()
-            })
-        });
+        // Check if we already have a file handle for this CPU
+        if let std::collections::hash_map::Entry::Vacant(e) = files.entry(cpu_id) {
+            // Try to open MSR device with graceful error handling
+            let file = match File::open(format!("/dev/cpu/{cpu_id}/msr")) {
+                Ok(file) => file,
+                Err(_) => {
+                    // Second attempt: try to load msr module and open again
+                    let _ = std::process::Command::new("modprobe").arg("msr").output();
+
+                    match File::open(format!("/dev/cpu/{cpu_id}/msr")) {
+                        Ok(file) => file,
+                        Err(e) => {
+                            return Err(anyhow!("Cannot access MSR device /dev/cpu/{cpu_id}/msr: {e}. MSR access requires elevated privileges or proper kernel module configuration."));
+                        }
+                    }
+                }
+            };
+            e.insert(file);
+        }
+
+        let file = files.get_mut(&cpu_id).unwrap();
 
         // Seek to MSR address
         file.seek(SeekFrom::Start(msr as u64))?;
