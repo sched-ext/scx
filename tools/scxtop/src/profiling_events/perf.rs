@@ -312,29 +312,43 @@ impl PerfEvent {
 }
 
 /// Returns the available perf events on the system from tracefs.
+/// For non-root users, returns an empty map to allow graceful degradation.
 pub fn available_perf_events() -> Result<BTreeMap<String, HashSet<String>>> {
-    let path = tracefs_mount()?;
-    let file = File::open(path.join("available_events"))?;
-    let reader = BufReader::new(file);
+    match tracefs_mount() {
+        Ok(path) => {
+            match File::open(path.join("available_events")) {
+                Ok(file) => {
+                    let reader = BufReader::new(file);
+                    let mut events = BTreeMap::new();
 
-    let mut events = BTreeMap::new();
+                    for line in reader.lines() {
+                        let line = line?;
 
-    for line in reader.lines() {
-        let line = line?;
+                        // perf events are formatted in <subsystem>:<event> format
+                        let mut words = line.split(":");
+                        let subsystem = words
+                            .next()
+                            .context("failed to parse perf event subsystem")?;
+                        let event = words.next().context("failed to parse perf event")?;
+                        events
+                            .entry(subsystem.to_string())
+                            .or_insert(HashSet::new())
+                            .insert(event.to_string());
+                    }
 
-        // perf events are formatted in <subsystem>:<event> format
-        let mut words = line.split(":");
-        let subsystem = words
-            .next()
-            .context("failed to parse perf event subsystem")?;
-        let event = words.next().context("failed to parse perf event")?;
-        events
-            .entry(subsystem.to_string())
-            .or_insert(HashSet::new())
-            .insert(event.to_string());
+                    Ok(events)
+                }
+                Err(_) => {
+                    // Permission denied or file not accessible - return empty map for graceful degradation
+                    Ok(BTreeMap::new())
+                }
+            }
+        }
+        Err(_) => {
+            // Cannot access tracefs - return empty map for graceful degradation
+            Ok(BTreeMap::new())
+        }
     }
-
-    Ok(events)
 }
 
 #[cfg(test)]

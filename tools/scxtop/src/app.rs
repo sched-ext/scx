@@ -11,8 +11,8 @@ use crate::bpf_stats::BpfStats;
 use crate::columns::{
     get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
     get_memory_summary_columns, get_pagefault_summary_columns, get_perf_top_columns,
-    get_process_columns, get_slab_columns, get_swap_summary_columns, get_thread_columns, Column,
-    Columns,
+    get_perf_top_columns_no_bpf, get_process_columns, get_process_columns_no_bpf, get_slab_columns,
+    get_swap_summary_columns, get_thread_columns, get_thread_columns_no_bpf, Column, Columns,
 };
 use crate::config::get_config_path;
 use crate::config::Config;
@@ -20,7 +20,8 @@ use crate::get_default_events;
 use crate::network_stats::InterfaceStats;
 use crate::search;
 use crate::util::{
-    format_bits, format_bytes, format_hz, read_file_string, sanitize_nbsp, u32_to_i32,
+    check_perf_capability, format_bits, format_bytes, format_hz, read_file_string, sanitize_nbsp,
+    u32_to_i32,
 };
 use crate::AppState;
 use crate::AppTheme;
@@ -114,7 +115,7 @@ pub struct App<'a> {
     view_state: ViewState,
     pub should_quit: Arc<AtomicBool>,
     pub action_tx: UnboundedSender<Action>,
-    pub skel: BpfSkel<'a>,
+    pub skel: Option<BpfSkel<'a>>,
     topo: Topology,
     large_core_count: bool,
     collect_cpu_freq: bool,
@@ -178,6 +179,10 @@ pub struct App<'a> {
     current_sampling_event: Option<ProfilingEvent>,
     perf_top_table_state: TableState,
     perf_top_filtered_symbols: Vec<(String, crate::symbol_data::SymbolSample)>,
+    has_perf_cap: bool,
+
+    // capability warnings for non-root users
+    capability_warnings: Vec<String>,
 }
 
 impl<'a> App<'a> {
@@ -305,7 +310,7 @@ impl<'a> App<'a> {
             prev_state: AppState::Default,
             should_quit: Arc::new(AtomicBool::new(false)),
             action_tx,
-            skel,
+            skel: Some(skel),
             large_core_count: topo.all_cpus.len() >= 128,
             topo,
             collect_cpu_freq: true,
@@ -314,6 +319,7 @@ impl<'a> App<'a> {
             process_columns: Columns::new(get_process_columns()),
             thread_columns: Columns::new(get_thread_columns()),
             perf_top_columns: Columns::new(get_perf_top_columns(layered_enabled)),
+            has_perf_cap: check_perf_capability(),
             selected_process: None,
             in_thread_view: false,
             cpu_data,
@@ -355,6 +361,203 @@ impl<'a> App<'a> {
             current_sampling_event: None,
             perf_top_table_state: TableState::default(),
             perf_top_filtered_symbols: Vec::new(),
+            capability_warnings: Vec::new(),
+        };
+
+        // Set the initial filter state
+        app.filtering = true;
+        app.event_input_buffer.clear();
+        app.filter_events();
+        app.filtering = false;
+
+        Ok(app)
+    }
+
+    /// Creates a new application without BPF functionality for non-root users.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_without_bpf(
+        config: Config,
+        scheduler: String,
+        max_cpu_events: usize,
+        process_id: i32,
+        layered_enabled: bool,
+        action_tx: UnboundedSender<Action>,
+    ) -> Result<Self> {
+        let topo = Topology::new()?;
+        let mut cpu_data = BTreeMap::new();
+        let mut llc_data = BTreeMap::new();
+        let mut node_data = BTreeMap::new();
+        let mut proc_data = BTreeMap::new();
+        let cpu_stat_tracker = Arc::new(RwLock::new(CpuStatTracker::default()));
+        let mut mem_info = MemStatSnapshot::default();
+        mem_info.update()?;
+
+        // For non-BPF mode, use a basic profiling event that doesn't require BPF
+        let active_event = ProfilingEvent::from_str_args(
+            &config.default_profiling_event(),
+            Some(cpu_stat_tracker.clone()),
+        )?;
+
+        let mut active_prof_events = BTreeMap::new();
+        let mut default_events = get_default_events(cpu_stat_tracker.clone());
+
+        let config_perf_events = PerfEvent::from_config(&config)?;
+
+        default_events.extend(
+            config_perf_events
+                .iter()
+                .cloned()
+                .map(ProfilingEvent::Perf)
+                .collect::<Vec<_>>(),
+        );
+
+        let default_events_str: Vec<&str> = default_events
+            .iter()
+            .map(|event| event.event_name())
+            .collect();
+
+        for cpu in topo.all_cpus.values() {
+            // In non-BPF mode, we may not be able to initialize events for all CPUs
+            let event = active_event
+                .initialize_for_cpu(cpu.id, process_id)
+                .unwrap_or_else(|_| {
+                    // Create a fallback event if initialization fails
+                    active_event.clone()
+                });
+            active_prof_events.insert(cpu.id, event);
+            let mut data =
+                CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
+            data.initialize_events(&default_events_str);
+            cpu_data.insert(cpu.id, data);
+        }
+        for llc in topo.all_llcs.values() {
+            let mut data = LlcData::new(llc.id, llc.node_id, llc.all_cpus.len(), max_cpu_events);
+            data.initialize_events(&default_events_str);
+            llc_data.insert(llc.id, data);
+        }
+        for node in topo.nodes.values() {
+            let mut data = NodeData::new(node.id, node.all_cpus.len(), max_cpu_events);
+            data.initialize_events(&default_events_str);
+            node_data.insert(node.id, data);
+        }
+
+        for process in all_processes()?.flatten() {
+            if let Ok(data) = ProcData::new(&process, max_cpu_events) {
+                proc_data.insert(process.pid, data);
+            }
+        }
+
+        let mut initial_perf_events_list: Vec<String> = available_perf_events()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|(subsystem, events)| {
+                events
+                    .iter()
+                    .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
+            })
+            .collect();
+        initial_perf_events_list.sort();
+
+        let mut initial_kprobe_events_list = available_kprobe_events().unwrap_or_default();
+        initial_kprobe_events_list.sort();
+
+        let filtered_state = Arc::new(StdMutex::new(FilteredState::default()));
+
+        let mut stats_client = StatsClient::new();
+        let stats_socket_path = config.stats_socket_path();
+        if !stats_socket_path.is_empty() {
+            stats_client = stats_client.set_path(stats_socket_path);
+        }
+        // In non-BPF mode, stats client connection may fail, so we handle it gracefully
+        stats_client = stats_client.connect().unwrap_or_else(|_| {
+            let mut client = StatsClient::new();
+            if !stats_socket_path.is_empty() {
+                client = client.set_path(stats_socket_path);
+            }
+            client
+        });
+        let stats_client = Some(Arc::new(TokioMutex::new(stats_client)));
+
+        // Default sample rate for non-BPF mode
+        let sample_rate = 1000; // Default value when BPF is not available
+        let trace_file_prefix = config.trace_file_prefix().to_string();
+        let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
+
+        // No hardware pressure monitoring without BPF
+        let hw_pressure = false;
+
+        let mut app = Self {
+            config,
+            localize: true,
+            hw_pressure,
+            locale: SystemLocale::default()?,
+            stats_client,
+            cpu_stat_tracker,
+            sched_stats_raw: "".to_string(),
+            sys: Arc::new(StdMutex::new(System::new_all())),
+            mem_info,
+            memory_view_state: ComponentViewState::Default,
+            network_view_state: ComponentViewState::Default,
+            scheduler,
+            max_cpu_events,
+            max_sched_events: max_cpu_events,
+            state: AppState::Default,
+            view_state: ViewState::BarChart,
+            prev_state: AppState::Default,
+            should_quit: Arc::new(AtomicBool::new(false)),
+            action_tx,
+            skel: None, // No BPF skeleton in non-BPF mode
+            large_core_count: topo.all_cpus.len() >= 128,
+            topo,
+            collect_cpu_freq: true,
+            collect_uncore_freq: true,
+            layered_enabled,
+            process_columns: Columns::new(get_process_columns_no_bpf()),
+            thread_columns: Columns::new(get_thread_columns_no_bpf()),
+            perf_top_columns: Columns::new(get_perf_top_columns_no_bpf()),
+            selected_process: None,
+            in_thread_view: false,
+            cpu_data,
+            llc_data,
+            node_data,
+            dsq_data: BTreeMap::new(),
+            proc_data,
+            network_stats: NetworkStatSnapshot::new(100),
+            active_hw_event_id: 0,
+            active_event,
+            active_prof_events,
+            available_events: default_events,
+            event_input_buffer: String::new(),
+            perf_events: initial_perf_events_list,
+            kprobe_events: initial_kprobe_events_list,
+            kprobe_links: Vec::new(),
+            filtered_state,
+            filtering: false,
+            events_list_size: 1,
+            prev_bpf_sample_rate: sample_rate,
+            trace_start: 0,
+            trace_manager,
+            bpf_stats: Default::default(),
+            power_snapshot: crate::PowerSnapshot::new(),
+            power_collector: crate::PowerDataCollector::new().unwrap_or_else(|e| {
+                log::warn!("Failed to initialize power collector with MSR support: {e}");
+                crate::PowerDataCollector::default()
+            }),
+            has_perf_cap: check_perf_capability(),
+            process_id,
+            prev_process_id: -1,
+            trace_links: vec![],
+            last_mangoapp_action: None,
+            frames_since_update: 0,
+            max_fps: 1,
+            perf_sample_rate: 1_000_000, // Default perf sample rate
+            symbol_data: crate::symbol_data::SymbolData::new(),
+            perf_links: Vec::new(),
+            selected_symbol_index: 0,
+            current_sampling_event: None,
+            perf_top_table_state: TableState::default(),
+            perf_top_filtered_symbols: Vec::new(),
+            capability_warnings: Vec::new(),
         };
 
         // Set the initial filter state
@@ -393,15 +596,19 @@ impl<'a> App<'a> {
         // Handle perf sampling attachment/detachment for PerfTop view
         match (self.prev_state.clone(), self.state.clone()) {
             (prev, AppState::PerfTop) if prev != AppState::PerfTop => {
-                // Entering PerfTop view - attach perf sampling and reset selection
-                self.selected_symbol_index = 0;
-                if let Err(e) = self.attach_perf_sampling() {
-                    eprintln!("Failed to attach perf sampling: {e}");
+                if self.has_perf_cap {
+                    // Entering PerfTop view - attach perf sampling and reset selection
+                    self.selected_symbol_index = 0;
+                    if let Err(e) = self.attach_perf_sampling() {
+                        eprintln!("Failed to attach perf sampling: {e}");
+                    }
                 }
             }
             (AppState::PerfTop, new) if new != AppState::PerfTop => {
                 // Leaving PerfTop view - detach perf sampling
-                self.detach_perf_sampling();
+                if self.has_perf_cap {
+                    self.detach_perf_sampling();
+                }
             }
             _ => {}
         }
@@ -424,10 +631,12 @@ impl<'a> App<'a> {
         if self.prev_state == AppState::MangoApp {
             self.process_id = self.prev_process_id;
             // reactivate the prev profiling event with the previous pid
-            let prof_event = &self.available_events[self.active_hw_event_id].clone();
-            let _ = self.activate_prof_event(prof_event);
-            self.max_fps = 1;
-            self.frames_since_update = 0;
+            if self.has_perf_cap {
+                let prof_event = &self.available_events[self.active_hw_event_id].clone();
+                let _ = self.activate_prof_event(prof_event);
+                self.max_fps = 1;
+                self.frames_since_update = 0;
+            }
         }
     }
 
@@ -449,6 +658,55 @@ impl<'a> App<'a> {
     /// Returns whether layered mode is enabled
     pub fn layered_enabled(&self) -> bool {
         self.layered_enabled
+    }
+
+    /// Sets capability warnings for non-root users
+    pub fn set_capability_warnings(&mut self, warnings: Vec<String>) {
+        self.capability_warnings = warnings;
+    }
+
+    /// Returns capability warnings
+    pub fn get_capability_warnings(&self) -> &Vec<String> {
+        &self.capability_warnings
+    }
+
+    /// Returns whether there are capability warnings
+    pub fn has_capability_warnings(&self) -> bool {
+        !self.capability_warnings.is_empty()
+    }
+
+    /// Renders capability warnings at the top of the screen
+    fn render_capability_warnings(&self, frame: &mut Frame, area: Rect) -> Result<()> {
+        if self.capability_warnings.is_empty() {
+            return Ok(());
+        }
+
+        let warning_lines: Vec<Line> = self
+            .capability_warnings
+            .iter()
+            .map(|warning| {
+                Line::from(vec![Span::styled(
+                    warning.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )])
+            })
+            .collect();
+
+        let warning_paragraph = Paragraph::new(warning_lines)
+            .block(
+                Block::bordered()
+                    .title("⚠️  Capability Warnings")
+                    .title_alignment(Alignment::Center)
+                    .border_type(BorderType::Rounded)
+                    .style(Style::default().fg(Color::Yellow)),
+            )
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::Yellow));
+
+        frame.render_widget(warning_paragraph, area);
+        Ok(())
     }
 
     fn selected_proc_data(&mut self) -> Option<&mut ProcData> {
@@ -1403,7 +1661,10 @@ impl<'a> App<'a> {
                     .title_top(if render_sample_rate {
                         Line::from(format!(
                             "sample rate {}",
-                            self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                            self.skel
+                                .as_ref()
+                                .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+                                .unwrap_or(0)
                         ))
                         .style(self.theme().text_important_color())
                         .right_aligned()
@@ -1691,7 +1952,15 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .unwrap()
+            .maps
+            .data_data
+            .as_ref()
+            .unwrap()
+            .sample_rate;
 
         let dsq_global_iter = self
             .dsq_data
@@ -2815,7 +3084,11 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::DecBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    if let Some(ref skel) = self.skel {
+                        skel.maps.data_data.as_ref().unwrap().sample_rate
+                    } else {
+                        0
+                    }
                 ),
                 Style::default(),
             )),
@@ -2825,7 +3098,11 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::IncBpfSampleRate),
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate
+                    if let Some(ref skel) = self.skel {
+                        skel.maps.data_data.as_ref().unwrap().sample_rate
+                    } else {
+                        0
+                    }
                 ),
                 Style::default(),
             )),
@@ -2985,8 +3262,10 @@ impl<'a> App<'a> {
             self.prev_process_id = self.process_id;
             self.process_id = action.pid as i32;
             // reactivate the active profiling event with the pid from mangoapp
-            let prof_event = &self.available_events[self.active_hw_event_id].clone();
-            let _ = self.activate_prof_event(prof_event);
+            if self.has_perf_cap {
+                let prof_event = &self.available_events[self.active_hw_event_id].clone();
+                let _ = self.activate_prof_event(prof_event);
+            }
         }
         Ok(())
     }
@@ -3109,7 +3388,10 @@ impl<'a> App<'a> {
             .title_top(
                 Line::from(format!(
                     "sample rate {}{}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
+                    self.skel
+                        .as_ref()
+                        .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+                        .unwrap_or(0),
                     if render_tick_rate {
                         format!(" --- tick rate {}", self.config.tick_rate_ms())
                     } else {
@@ -3232,15 +3514,21 @@ impl<'a> App<'a> {
                 .left_aligned(),
             )
             .title_top(
-                Line::from(format!(
-                    "sample rate {}{}",
-                    self.skel.maps.data_data.as_ref().unwrap().sample_rate,
-                    if render_tick_rate {
-                        format!(" --- tick rate {}", self.config.tick_rate_ms())
-                    } else {
-                        "".to_string()
-                    }
-                ))
+                Line::from(if let Some(ref skel) = self.skel {
+                    format!(
+                        "sample rate {}{}",
+                        skel.maps.data_data.as_ref().unwrap().sample_rate,
+                        if render_tick_rate {
+                            format!(" --- tick rate {}", self.config.tick_rate_ms())
+                        } else {
+                            "".to_string()
+                        }
+                    )
+                } else if render_tick_rate {
+                    format!("tick rate {}", self.config.tick_rate_ms())
+                } else {
+                    "".to_string()
+                })
                 .style(self.theme().text_important_color())
                 .right_aligned(),
             );
@@ -3312,6 +3600,10 @@ impl<'a> App<'a> {
     /// Renders the perf top view with symbolized samples.
     fn render_perf_top(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
+        if self.has_capability_warnings() {
+            self.render_capability_warnings(frame, area)?;
+            return Ok(());
+        }
 
         // Split the area into left (table) and right (details) sections
         let [left_area, right_area] = Layout::horizontal([
@@ -3398,7 +3690,7 @@ impl<'a> App<'a> {
                         "[U] ",
                         Style::default().fg(self.theme().userspace_symbol_color()),
                     ),
-                    Span::styled("Userspace", Style::default().fg(self.theme().text_color())),
+                    Span::styled("Userspace ", Style::default().fg(self.theme().text_color())),
                 ])
                 .left_aligned(),
             )
@@ -3420,11 +3712,11 @@ impl<'a> App<'a> {
                     let down_key = self.config.active_keymap.action_keys_string(Action::Down);
 
                     format!(
-                        "{clear_key} clear • {dec_key}/{inc_key} adjust rate • {up_key}/{down_key} navigate"
+                        "clear [{clear_key}]  • {dec_key}/{inc_key} adjust rate • {up_key}/{down_key} navigate"
                     )
                 })
                 .style(self.theme().text_color())
-                .centered(),
+                .right_aligned(),
             )
             .border_type(BorderType::Rounded)
             .style(self.theme().border_style());
@@ -4554,10 +4846,11 @@ impl<'a> App<'a> {
 
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
-            AppState::Process => self.render_table(frame, frame.area(), true),
+            AppState::Process => self.render_table(frame, area, true),
             AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Memory => self.render_memory(frame),
             AppState::Network => self.render_network(frame),
@@ -4566,8 +4859,11 @@ impl<'a> App<'a> {
             AppState::PerfTop => self.render_perf_top(frame),
             AppState::Power => self.render_power(frame),
             AppState::Scheduler => {
-                let [left, right] =
-                    Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+                if self.has_capability_warnings() {
+                    self.render_capability_warnings(frame, area)?;
+                    return Ok(());
+                }
+                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
                 let [left_top, left_center, left_bottom] = Layout::vertical([
                     Constraint::Ratio(1, 3),
                     Constraint::Ratio(1, 3),
@@ -4741,6 +5037,8 @@ impl<'a> App<'a> {
                         if !already_exists {
                             self.kprobe_links.push(
                                 self.skel
+                                    .as_mut()
+                                    .unwrap()
                                     .progs
                                     .generic_kprobe
                                     .attach_kprobe(false, &k.event_name)?,
@@ -4823,22 +5121,25 @@ impl<'a> App<'a> {
 
     /// Attaches any BPF programs required for perfetto traces.
     fn attach_trace_progs(&mut self) -> Result<()> {
-        self.trace_links = vec![
-            self.skel.progs.on_softirq_entry.attach()?,
-            self.skel.progs.on_softirq_exit.attach()?,
-            self.skel.progs.on_ipi_send_cpu.attach()?,
-            self.skel.progs.on_sched_fork.attach()?,
-            self.skel.progs.on_sched_exec.attach()?,
-            self.skel.progs.on_sched_exit.attach()?,
-            self.skel.progs.on_sched_wait.attach()?,
-        ];
+        if let Some(ref mut skel) = self.skel {
+            self.trace_links = vec![
+                skel.progs.on_softirq_entry.attach()?,
+                skel.progs.on_softirq_exit.attach()?,
+                skel.progs.on_ipi_send_cpu.attach()?,
+                skel.progs.on_sched_fork.attach()?,
+                skel.progs.on_sched_exec.attach()?,
+                skel.progs.on_sched_exit.attach()?,
+            ];
+        }
 
         Ok(())
     }
 
     /// Records the trace to perfetto output.
     fn stop_recording_trace(&mut self, ts: u64) -> Result<()> {
-        self.skel.maps.data_data.as_mut().unwrap().sample_rate = self.prev_bpf_sample_rate;
+        if let Some(ref mut skel) = self.skel {
+            skel.maps.data_data.as_mut().unwrap().sample_rate = self.prev_bpf_sample_rate;
+        }
         self.state = self.prev_state.clone();
         self.trace_manager.stop(None, Some(ts))?;
         self.trace_links.clear();
@@ -4848,20 +5149,24 @@ impl<'a> App<'a> {
 
     /// Request the BPF side start a trace.
     fn request_start_trace(&mut self) -> Result<()> {
-        if self.state == AppState::Tracing {
+        if self.state == AppState::Tracing || self.skel.is_none() {
             return Ok(());
         };
 
-        self.skel.maps.data_data.as_mut().unwrap().trace_duration_ns =
-            self.config.trace_duration_ns();
-        self.skel.maps.data_data.as_mut().unwrap().trace_warmup_ns = self.config.trace_warmup_ns();
+        if let Some(ref mut skel) = self.skel {
+            skel.maps.data_data.as_mut().unwrap().trace_duration_ns =
+                self.config.trace_duration_ns();
+            skel.maps.data_data.as_mut().unwrap().trace_warmup_ns = self.config.trace_warmup_ns();
 
-        if self.trace_links.is_empty() {
-            self.attach_trace_progs()?;
+            if self.trace_links.is_empty() {
+                self.attach_trace_progs()?;
+            }
         }
 
         let ret = self
             .skel
+            .as_mut()
+            .unwrap()
             .progs
             .start_trace
             .test_run(ProgramInput::default())?
@@ -4883,6 +5188,9 @@ impl<'a> App<'a> {
         start_time: u64,
         stop_scheduled: bool,
     ) -> Result<()> {
+        if self.skel.is_none() {
+            return Ok(());
+        }
         self.prev_state = self.state.clone();
         self.state = AppState::Tracing;
         self.trace_start = if immediate {
@@ -4908,6 +5216,8 @@ impl<'a> App<'a> {
 
             let ret = self
                 .skel
+                .as_mut()
+                .unwrap()
                 .progs
                 .schedule_stop_trace
                 .test_run(input)?
@@ -5357,7 +5667,19 @@ impl<'a> App<'a> {
     /// Handles kprobe events.
     pub fn on_kprobe(&mut self, action: &KprobeAction) {
         let cpu = action.cpu as usize;
-        let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate as u64;
+        // can't happen
+        if self.skel.is_none() {
+            return;
+        }
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .unwrap()
+            .maps
+            .data_data
+            .as_ref()
+            .unwrap()
+            .sample_rate as u64;
 
         if let Some(ProfilingEvent::Kprobe(kprobe)) = self.active_prof_events.get_mut(&cpu) {
             if kprobe.instruction_pointer == Some(action.instruction_pointer) {
@@ -5466,6 +5788,9 @@ impl<'a> App<'a> {
     /// Attaches perf event sampling for perf top view
     #[allow(clippy::unnecessary_cast)]
     fn attach_perf_sampling(&mut self) -> Result<()> {
+        if !self.has_perf_cap {
+            return Ok(());
+        }
         // Clear any existing links
         self.detach_perf_sampling();
 
@@ -5571,29 +5896,26 @@ impl<'a> App<'a> {
             }
 
             // Attach BPF program to the perf event
-            match self
-                .skel
-                .progs
-                .perf_sample_handler
-                .attach_perf_event(perf_fd)
-            {
-                Ok(link) => {
-                    // Enable the perf event using scx_utils ioctl helper
-                    if unsafe { perf::ioctls::enable(perf_fd, 0) } < 0 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!("Failed to enable perf event for CPU {cpu_id}: {err}");
-                        unsafe {
-                            libc::close(perf_fd);
+            if let Some(ref mut skel) = self.skel {
+                match skel.progs.perf_sample_handler.attach_perf_event(perf_fd) {
+                    Ok(link) => {
+                        // Enable the perf event using scx_utils ioctl helper
+                        if unsafe { perf::ioctls::enable(perf_fd, 0) } < 0 {
+                            let err = std::io::Error::last_os_error();
+                            eprintln!("Failed to enable perf event for CPU {cpu_id}: {err}");
+                            unsafe {
+                                libc::close(perf_fd);
+                            }
+                            continue;
                         }
-                        continue;
-                    }
 
-                    self.perf_links.push(link);
-                    attached_count += 1;
+                        self.perf_links.push(link);
+                        attached_count += 1;
+                    }
+                    Err(_e) => unsafe {
+                        libc::close(perf_fd);
+                    },
                 }
-                Err(_e) => unsafe {
-                    libc::close(perf_fd);
-                },
             }
         }
 
@@ -5753,7 +6075,9 @@ impl<'a> App<'a> {
 
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
-        self.skel.maps.data_data.as_mut().unwrap().sample_rate = sample_rate;
+        if let Some(ref mut skel) = self.skel {
+            skel.maps.data_data.as_mut().unwrap().sample_rate = sample_rate;
+        }
     }
 
     /// Handles the action and updates application states.
@@ -5844,8 +6168,7 @@ impl<'a> App<'a> {
             }
             Action::ReloadStatsClient => {
                 tokio::task::block_in_place(|| {
-                    self.reload_stats_client()
-                        .expect("Failed to reload stats client");
+                    let _ = self.reload_stats_client();
                 });
             }
             Action::SaveConfig => {
@@ -5935,9 +6258,9 @@ impl<'a> App<'a> {
                 if self.state == AppState::PerfTop {
                     // In PerfTop view, control perf sample rate
                     self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
-                } else {
+                } else if let Some(ref skel) = self.skel {
                     // Normal BPF sample rate control
-                    let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+                    let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
                     if sample_rate == 0 {
                         self.update_bpf_sample_rate(8_u32);
                     } else {
@@ -5949,9 +6272,9 @@ impl<'a> App<'a> {
                 if self.state == AppState::PerfTop {
                     // In PerfTop view, control perf sample rate
                     self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
-                } else {
+                } else if let Some(ref skel) = self.skel {
                     // Normal BPF sample rate control
-                    let sample_rate = self.skel.maps.data_data.as_ref().unwrap().sample_rate;
+                    let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
                     if sample_rate > 0 {
                         // prevent overly aggressive bpf sampling, but allow disabling sampling
                         let new_rate = sample_rate >> 2;
@@ -5975,7 +6298,11 @@ impl<'a> App<'a> {
                 }
             },
             Action::Filter => match self.state {
-                AppState::Default | AppState::Llc | AppState::Node | AppState::Memory => {
+                AppState::Default
+                | AppState::Llc
+                | AppState::Node
+                | AppState::Process
+                | AppState::Memory => {
                     self.filtering = true;
                     self.filter_events();
                 }
@@ -6025,6 +6352,10 @@ impl<'a> App<'a> {
 
     /// Renders the power monitoring view
     fn render_power(&mut self, frame: &mut Frame) -> Result<()> {
+        if self.has_capability_warnings() {
+            self.render_capability_warnings(frame, frame.area())?;
+            return Ok(());
+        }
         let power_data = self.power_snapshot.current.clone();
 
         // Main layout: vertical split into three sections
@@ -7417,7 +7748,9 @@ impl<'a> App<'a> {
     /// Default view: basic system overview
     fn on_tick_default(&mut self) -> Result<()> {
         self.update_cpu_stats()?;
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
+        }
 
         match self.memory_view_state {
             ComponentViewState::Default | ComponentViewState::Detail => self.mem_info.update()?,
@@ -7489,7 +7822,9 @@ impl<'a> App<'a> {
 
     /// Process view: focus on process/thread data
     fn on_tick_process(&mut self) -> Result<()> {
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
+        }
         self.update_all_process_data()?;
 
         if self.in_thread_view {
@@ -7522,12 +7857,14 @@ impl<'a> App<'a> {
     /// LLC view: topology and LLC-specific data
     fn on_tick_llc(&mut self) -> Result<()> {
         self.update_cpu_stats()?;
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
         self.update_all_process_data()?;
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
         let num_cpus = self.topo.all_cpus.len();
         if let Some(proc_data) = self.selected_proc_data() {
             proc_data.update_threads(system_util, num_cpus);
+        }
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
         }
 
         for llc in self.topo.all_llcs.keys() {
@@ -7551,6 +7888,7 @@ impl<'a> App<'a> {
                 .expect("LlcData should have been present");
             llc_data.add_cpu_event_data(event.event_name(), val);
         }
+
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
         }
@@ -7567,12 +7905,14 @@ impl<'a> App<'a> {
     /// Node view: NUMA topology and node-specific data
     fn on_tick_node(&mut self) -> Result<()> {
         self.update_cpu_stats()?;
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
         self.update_all_process_data()?;
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
         let num_cpus = self.topo.all_cpus.len();
         if let Some(proc_data) = self.selected_proc_data() {
             proc_data.update_threads(system_util, num_cpus);
+        }
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
         }
 
         for node in self.topo.nodes.keys() {
@@ -7596,6 +7936,7 @@ impl<'a> App<'a> {
                 .expect("NodeData should have been present");
             node_data.add_cpu_event_data(event.event_name(), val);
         }
+
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
         }
@@ -7611,6 +7952,9 @@ impl<'a> App<'a> {
 
     /// Power view: power-specific data collection
     fn on_tick_power(&mut self) -> Result<()> {
+        if self.has_capability_warnings() {
+            return Ok(());
+        }
         self.update_power_data()?;
 
         if self.collect_cpu_freq {
@@ -7625,7 +7969,12 @@ impl<'a> App<'a> {
 
     /// Scheduler view: scheduler stats and basic system data
     fn on_tick_scheduler(&mut self) -> Result<()> {
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        if self.has_capability_warnings() {
+            return Ok(());
+        }
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
+        }
 
         if self.scheduler.is_empty() {
             self.sched_stats_raw.clear();
@@ -7660,7 +8009,12 @@ impl<'a> App<'a> {
 
     /// PerfTop view: profiling events and symbol data
     fn on_tick_perf_top(&mut self) -> Result<()> {
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        if !self.has_perf_cap {
+            return Ok(());
+        }
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
+        }
 
         for (cpu, event) in &mut self.active_prof_events {
             let val = event.value(true)?;
@@ -7680,7 +8034,9 @@ impl<'a> App<'a> {
 
     /// MangoApp view: minimal system data
     fn on_tick_mango_app(&mut self) -> Result<()> {
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        if let Some(ref mut skel) = self.skel {
+            self.bpf_stats = BpfStats::get_from_skel(skel)?;
+        }
         Ok(())
     }
 
