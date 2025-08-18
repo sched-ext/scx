@@ -1,6 +1,6 @@
 [package]
 name = "scx_layered"
-version = "1.0.16"
+version = "1.0.17"
 authors = ["Tejun Heo <htejun@meta.com>", "Meta"]
 edition = "2021"
 description = "A highly configurable multi-layer BPF / user space hybrid scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
