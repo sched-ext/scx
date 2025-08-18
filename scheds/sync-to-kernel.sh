@@ -13,6 +13,7 @@ c_scheds=(scx_simple scx_qmap scx_central scx_flatcg)
 
 headers=($(
     git ls-files include |
+    grep -v include/lib |
     grep -v include/vmlinux |
     grep -v include/arch |
     grep -v '\.gitignore$'
@@ -50,16 +51,18 @@ done
 #    echo "${srcs[i]} -> ${dsts[i]}"
 # done
 
-nr_created=0
+nr_missing=0
 nr_skipped=0
+nr_synced=0
 for ((i=0;i<${#srcs[@]};i++)); do
     src="${srcs[i]}"
     dst="${dsts[i]}"
     orig="$src"
 
     if [ ! -f "$dst" ]; then
-        echo "Creating missing file: $dst"
-        nr_created=$((nr_created+1))
+        echo "WARNING: $dst does not exist" 1>&2
+        nr_missing=$((nr_missing+1))
+        continue
     fi
 
     #
@@ -86,6 +89,9 @@ for ((i=0;i<${#srcs[@]};i++)); do
 
     mkdir -p "$(dirname "$dst")"
     cp -f "$src" "$dst"
+    nr_synced=$((nr_synced+1))
 done
 
-echo "Skipped $nr_skipped unchanged and created $nr_created new files"
+echo
+echo "Synced $nr_synced updated files"
+echo "Skipped $nr_skipped unchanged and created $nr_missing new files"
