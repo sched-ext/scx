@@ -4,9 +4,15 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
 static void __inc_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
@@ -55,7 +61,8 @@ static void dec_futex_boost(void)
 	__dec_futex_boost(NULL);
 }
 
-static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
+__hidden
+void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
 	if (is_lock_holder(taskc))
 		set_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);

@@ -118,6 +118,15 @@ struct cpdom_ctx {
 	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
+extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
+extern int			nr_cpdoms;
+
+struct task_ctx *get_task_ctx(struct task_struct *p);
+struct cpu_ctx *get_cpu_ctx(void);
+struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id);
+struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
+
 /*
  * CPU context
  */
@@ -207,5 +216,144 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_t3_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+extern const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
+extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
+
+extern const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
+extern const volatile u8	cpu_big[LAVD_CPU_ID_MAX];
+extern const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX];
+
+/* Logging helpers. */
+
+extern const volatile bool	no_wake_sync;
+extern const volatile bool	no_slice_boost;
+extern const volatile u8	verbose;
+
+#define debugln(fmt, ...)						\
+({									\
+	if (verbose > 0)						\
+		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+					##__VA_ARGS__);			\
+})
+
+#define traceln(fmt, ...)						\
+({									\
+	if (verbose > 1)						\
+		bpf_printk("[%s:%d] " fmt, __func__, __LINE__,		\
+					##__VA_ARGS__);			\
+})
+
+/* Arithmetic helpers. */
+
+#ifndef min
+#define min(X, Y) (((X) < (Y)) ? (X) : (Y))
+#endif
+
+#ifndef max
+#define max(X, Y) (((X) < (Y)) ? (Y) : (X))
+#endif
+
+#ifndef clamp
+#define clamp(val, lo, hi) min(max(val, lo), hi)
+#endif
+
+u64 calc_avg(u64 old_val, u64 new_val);
+u64 calc_asym_avg(u64 old_val, u64 new_val);
+
+/* System statistics module .*/
+extern struct sys_stat		sys_stat;
+
+s32 init_sys_stat(u64 now);
+int update_sys_stat(void);
+
+extern volatile u64		performance_mode_ns;
+extern volatile u64		balanced_mode_ns;
+extern volatile u64		powersave_mode_ns;
+
+/* Helpers from util.bpf.c for querying CPU/task state. */
+extern const volatile bool	per_cpu_dsq;
+
+extern volatile bool		reinit_cpumask_for_performance;
+extern volatile bool		no_preemption;
+extern volatile bool		no_core_compaction;
+extern volatile bool		no_freq_scaling;
+
+bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
+void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
+void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
+
+bool is_lock_holder(struct task_ctx *taskc);
+bool is_lock_holder_running(struct cpu_ctx *cpuc);
+bool have_scheduled(struct task_ctx *taskc);
+bool have_pending_tasks(struct cpu_ctx *cpuc);
+bool can_boost_slice(void);
+bool is_lat_cri(struct task_ctx *taskc);
+u16 get_nice_prio(struct task_struct *p);
+
+void set_task_flag(struct task_ctx *taskc, u64 flag);
+void reset_task_flag(struct task_ctx *taskc, u64 flag);
+bool test_task_flag(struct task_ctx *taskc, u64 flag);
+void reset_task_flag(struct task_ctx *taskc, u64 flag);
+
+extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
+extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
+extern struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
+extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
+extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+
+/* Power management helpers. */
+int do_core_compaction(void);
+int update_thr_perf_cri(void);
+int reinit_active_cpumask_for_performance(void);
+bool is_perf_cri(struct task_ctx *taskc);
+
+extern bool			have_little_core;
+extern bool			have_turbo_core;
+extern const volatile bool	is_smt_active;
+
+extern u64			total_capacity;
+extern u64			one_little_capacity;
+extern u32			cur_big_core_scale;
+extern u32			default_big_core_scale;
+
+int init_autopilot_caps(void);
+int update_autopilot_high_cap(void);
+u64 scale_cap_freq(u64 dur, s32 cpu);
+
+int reset_cpuperf_target(struct cpu_ctx *cpuc);
+int update_cpuperf_target(struct cpu_ctx *cpuc);
+u16 get_cpuperf_cap(s32 cpu);
+
+int reset_suspended_duration(struct cpu_ctx *cpuc);
+u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc);
+
+const volatile u16 *get_cpu_order(void);
+
+/* Load balancer helpers. */
+
+int plan_x_cpdom_migration(void);
+
+/* Preemption management helpers. */
+
+int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+
+/* Futex lock-related helpers. */
+
+void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc);
+
+/* Scheduler introspection-related helpers. */
+
+u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now);
+void try_proc_introspec_cmd(struct task_struct *p, struct task_ctx *taskc);
+void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released);
+int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+void shrink_boosted_slice_at_tick(struct task_struct *p,
+					 struct cpu_ctx *cpuc, u64 now);
+void try_find_and_kick_victim_cpu(struct task_struct *p,
+					 struct task_ctx *taskc,
+					 s32 preferred_cpu,
+					 u64 dsq_id);
+
+extern volatile bool is_monitored;
 
 #endif /* __LAVD_H */

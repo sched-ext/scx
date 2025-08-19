@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2829,6 +2829,7 @@ version = "1.0.2"
 dependencies = [
  "anyhow",
  "libbpf-rs",
+ "libbpf-sys",
  "scx_utils",
  "simplelog",
 ]

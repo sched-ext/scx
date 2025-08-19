@@ -4,9 +4,30 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+struct sys_stat		__weak	sys_stat;
+const volatile u8	__weak preempt_shift;
+volatile u64		__weak performance_mode_ns;
+volatile u64		__weak balanced_mode_ns;
+volatile u64		__weak powersave_mode_ns;
+extern const volatile u64	slice_min_ns;
+extern const volatile u64	slice_max_ns;
+extern volatile bool		__weak no_core_compaction;
+extern volatile bool		__weak reinit_cpumask_for_performance;
+const volatile bool	__weak is_autopilot_on;
+
+int do_autopilot(void);
+u32 calc_avg32(u32 old_val, u32 new_val);
+u64 calc_avg(u64 old_val, u64 new_val);
+int update_power_mode_time(void);
 
 /*
  * Timer for updating system-wide status periorically
@@ -20,7 +41,7 @@ struct {
 	__uint(max_entries, 1);
 	__type(key, u32);
 	__type(value, struct update_timer);
-} update_timer SEC(".maps");
+} update_timer SEC(".maps") __weak;
 
 struct sys_stat_ctx {
 	u64		now;
@@ -97,7 +118,12 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 
 	/*
-	 * Collect statistics for each CPU.
+	 * Collect statistics for each CPU (phase 1).
+	 *
+	 * Note that we divide the loop into phases 1 and 2 to lower the
+	 * verification burden and to avoid a verification error. Someday,
+	 * when the verifier gets smarter, we can merge phases 1 and 2
+	 * into one.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -174,6 +200,18 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
+
+	}
+
+	/*
+	 * Collect statistics for each CPU (phase 2).
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			c->compute_total = 0;
+			break;
+		}
 
 		/*
 		 * Accumulate task's performance criticlity information.
@@ -376,16 +414,19 @@ static void calc_sys_time_slice(void)
 	sys_stat.slice = calc_avg(sys_stat.slice, slice);
 }
 
-static void do_update_sys_stat(void)
+static int do_update_sys_stat(void)
 {
 	struct sys_stat_ctx c;
 
 	init_sys_stat_ctx(&c);
 	collect_sys_stat(&c);
 	calc_sys_stat(&c);
+
+	return 0;
 }
 
-static void update_sys_stat(void)
+__weak
+int update_sys_stat(void)
 {
 	/*
 	 * Update system statistics.
@@ -421,6 +462,8 @@ static void update_sys_stat(void)
 	 */
 	if (nr_cpdoms > 1)
 		plan_x_cpdom_migration();
+
+	return 0;
 }
 
 static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
@@ -436,7 +479,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
-static s32 init_sys_stat(u64 now)
+__weak
+s32 init_sys_stat(u64 now)
 {
 	struct cpdom_ctx *cpdomc;
 	struct bpf_timer *timer;

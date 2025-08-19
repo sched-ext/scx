@@ -8,6 +8,11 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .build()
+        .add_source("src/bpf/introspec.bpf.c")
+        .add_source("src/bpf/lock.bpf.c")
+        .add_source("src/bpf/power.bpf.c")
+        .add_source("src/bpf/preempt.bpf.c")
+        .add_source("src/bpf/sys_stat.bpf.c")
+        .compile_link_gen()
         .unwrap();
 }

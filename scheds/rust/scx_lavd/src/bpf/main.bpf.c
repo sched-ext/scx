@@ -208,17 +208,14 @@ static u64		cur_svc_time;
 const volatile u64	slice_min_ns = LAVD_SLICE_MIN_NS_DFL;
 const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
 
+static volatile u64	nr_cpus_big;
+
 /*
  * Include sub-modules
  */
 #include "util.bpf.c"
-#include "power.bpf.c"
-#include "introspec.bpf.c"
-#include "preempt.bpf.c"
-#include "lock.bpf.c"
 #include "idle.bpf.c"
 #include "balance.bpf.c"
-#include "sys_stat.bpf.c"
 #include "lat_cri.bpf.c"
 
 static void advance_cur_logical_clk(struct task_struct *p)

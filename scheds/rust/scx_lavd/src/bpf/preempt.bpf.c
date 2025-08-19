@@ -1,7 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
 
 /*
  * Preemption related ones
@@ -12,7 +18,8 @@ struct preemption_info {
 	struct cpu_ctx	*cpuc;
 };
 
-static u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
+__hidden
+u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
 {
 	return now + min(taskc->avg_runtime, taskc->slice);
 }
@@ -235,7 +242,8 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 	}
 }
 
-static void shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
+__hidden
+int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
 	u64 dur, new_slice = 0;
 
@@ -257,9 +265,12 @@ static void shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 		ask_cpu_yield_after(cpuc, new_slice);
 
 	cpuc->nr_preempt++;
+
+	return 0;
 }
 
-static void shrink_boosted_slice_at_tick(struct task_struct *p,
+__hidden
+void shrink_boosted_slice_at_tick(struct task_struct *p,
 					 struct cpu_ctx *cpuc, u64 now)
 {
 	u64 dur, new_slice = 0;
@@ -283,7 +294,8 @@ static void shrink_boosted_slice_at_tick(struct task_struct *p,
 	cpuc->nr_preempt++;
 }
 
-static void try_find_and_kick_victim_cpu(struct task_struct *p,
+__hidden
+void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 struct task_ctx *taskc,
 					 s32 preferred_cpu,
 					 u64 dsq_id)
@@ -375,7 +387,8 @@ kick_out:
 	}
 }
 
-static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
+__hidden
+void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 {
 	if (released) {
 		/*
