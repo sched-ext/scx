@@ -10,12 +10,12 @@ use std::mem::MaybeUninit;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use std::os::fd::AsRawFd;
-
-use std::ffi::c_void;
 
 use std::ffi::c_ulong;
+use std::ffi::c_void;
+
 use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use scx_utils::init_libbpf_logging;
@@ -32,6 +32,9 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
+
+const BPF_STDOUT: u32 = 1;
+const BPF_STDERR: u32 = 2;
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 512;
@@ -160,8 +163,9 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
 
 fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
     let mut buf = vec![0u8; 4096];
+    let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
 
-    println!("===BEGIN STREAM {}===", stream_id);
+    println!("===BEGIN STREAM {}===", name);
     loop {
         let ret = unsafe {
             libbpf_sys::bpf_prog_stream_read(
@@ -181,10 +185,10 @@ fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
             break;
         }
 
-        println!("{}", String::from_utf8_lossy(&buf[..ret as usize]));
+        print!("{}", String::from_utf8_lossy(&buf[..ret as usize]));
     }
 
-    println!("====END STREAM {}====", stream_id);
+    println!("\n====END STREAM  {}====", name);
 }
 
 fn main() {
@@ -225,9 +229,6 @@ fn main() {
             output.return_value as i32
         );
     }
-
-    const BPF_STDOUT: u32 = 1;
-    const BPF_STDERR: u32 = 2;
 
     print_stream(&mut skel, BPF_STDOUT);
     print_stream(&mut skel, BPF_STDERR);
