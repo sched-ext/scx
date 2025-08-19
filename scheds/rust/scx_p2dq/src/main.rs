@@ -341,7 +341,7 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
-        info!("Unregister {} scheduler", SCHEDULER_NAME);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
 
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
@@ -394,10 +394,7 @@ fn main() -> Result<()> {
                     debug!("stats monitor thread finished successfully")
                 }
                 Err(error_object) => {
-                    warn!(
-                        "stats monitor thread finished because of an error {}",
-                        error_object
-                    )
+                    warn!("stats monitor thread finished because of an error {error_object}")
                 }
             }
         });
@@ -410,12 +407,10 @@ fn main() -> Result<()> {
     if let Some(idle_resume_us) = opts.sched.idle_resume_us {
         if !cpu_idle_resume_latency_supported() {
             warn!("idle resume latency not supported");
-        } else {
-            if idle_resume_us > 0 {
-                info!("Setting idle QoS to {}us", idle_resume_us);
-                for cpu in TOPO.all_cpus.values() {
-                    update_cpu_idle_resume_latency(cpu.id, idle_resume_us.try_into().unwrap())?;
-                }
+        } else if idle_resume_us > 0 {
+            info!("Setting idle QoS to {idle_resume_us}us");
+            for cpu in TOPO.all_cpus.values() {
+                update_cpu_idle_resume_latency(cpu.id, idle_resume_us.try_into().unwrap())?;
             }
         }
     }
