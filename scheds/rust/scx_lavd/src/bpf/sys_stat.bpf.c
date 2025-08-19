@@ -118,7 +118,12 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 
 	/*
-	 * Collect statistics for each CPU.
+	 * Collect statistics for each CPU (phase 1).
+	 *
+	 * Note that we divide the loop into phases 1 and 2 to lower the
+	 * verification burden and to avoid a verification error. Someday,
+	 * when the verifier gets smarter, we can merge phases 1 and 2
+	 * into one.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -195,6 +200,18 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
+
+	}
+
+	/*
+	 * Collect statistics for each CPU (phase 2).
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			c->compute_total = 0;
+			break;
+		}
 
 		/*
 		 * Accumulate task's performance criticlity information.
