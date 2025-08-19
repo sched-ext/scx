@@ -349,6 +349,9 @@ lazy_static! {
 /// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
 ///   is within the provided values [min, max).
 ///
+/// - HintEquals: u64. Match tasks whose hint value equals this value.
+///   The value must be in the range [0, 1024].
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -1637,6 +1640,10 @@ impl<'a> Scheduler<'a> {
                             mt.min_avg_runtime_us = *min;
                             mt.max_avg_runtime_us = *max;
                         }
+                        LayerMatch::HintEquals(hint) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_HINT_EQUALS as i32;
+                            mt.hint = *hint;
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;
@@ -2296,9 +2303,6 @@ impl<'a> Scheduler<'a> {
         }
         skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids = nr_layers as u32;
 
-        Self::init_layers(&mut skel, &layer_specs, &topo)?;
-        Self::init_nodes(&mut skel, opts, &topo);
-
         // We set the pin path before loading the skeleton. This will ensure
         // libbpf creates and pins the map, or reuses the pinned map fd for us,
         // so that we can keep reusing the older map already pinned on scheduler
@@ -2308,7 +2312,11 @@ impl<'a> Scheduler<'a> {
         // Only set pin path if a path is provided.
         if layered_task_hint_map_path.is_empty() == false {
             hint_map.set_pin_path(layered_task_hint_map_path).unwrap();
+            rodata.task_hint_map_enabled = true;
         }
+
+        Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
@@ -3155,6 +3163,14 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                     LayerMatch::PcommPrefix(prefix) => {
                         if prefix.len() > MAX_COMM {
                             bail!("Spec {:?} has too long a process name prefix", spec.name);
+                        }
+                    }
+                    LayerMatch::HintEquals(hint) => {
+                        if *hint > 1024 {
+                            bail!(
+                                "Spec {:?} has hint value outside the range [0, 1024]",
+                                spec.name
+                            );
                         }
                     }
                     _ => {}

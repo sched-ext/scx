@@ -100,6 +100,8 @@ struct {
 	__type(value, struct task_hint);
 } scx_layered_task_hint_map SEC(".maps");
 
+const volatile bool task_hint_map_enabled;
+
 static inline s32 prio_to_nice(s32 static_prio)
 {
 	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
@@ -598,6 +600,19 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 
 	return taskc;
+}
+
+static struct task_hint *lookup_task_hint(struct task_struct *p)
+{
+	struct task_hint *hint;
+
+	if (!task_hint_map_enabled)
+		return NULL;
+	hint = bpf_task_storage_get(&scx_layered_task_hint_map, p, NULL, 0);
+	/* Only values in the range [0, 1024] are valid hints. */
+	if (hint && hint->hint > 1024)
+		hint = NULL;
+	return hint;
 }
 
 int save_gpu_tgid_pid(void) {
@@ -2380,6 +2395,13 @@ static __noinline bool match_one(struct layer_match *match,
 			return match->min_avg_runtime_us <= avg_runtime_us &&
 				avg_runtime_us < match->max_avg_runtime_us;
 	}
+	case MATCH_HINT_EQUALS: {
+		struct task_hint *hint = lookup_task_hint(p);
+
+		if (!hint)
+			return false;
+		return match->hint == hint->hint;
+	}
 
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
@@ -3520,6 +3542,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_CGROUP_CONTAINS:
 				dbg("%s CGROUP_CONTAINS \"%s\"", header, match->cgroup_substr);
+				break;
+			case MATCH_HINT_EQUALS:
+				dbg("%s HINT_EQUALS %d", header, match->hint);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
