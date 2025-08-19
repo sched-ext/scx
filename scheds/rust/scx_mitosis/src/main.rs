@@ -29,6 +29,7 @@ use log::info;
 use log::trace;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -162,6 +163,11 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
             skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
+        }
+
+        match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
+            0 => info!("Kernel does not support queued wakeup optimization."),
+            v => skel.struct_ops.mitosis_mut().flags |= v,
         }
 
         let skel = scx_ops_load!(skel, mitosis, uei)?;

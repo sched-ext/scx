@@ -581,11 +581,18 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
+	 * If we failed to find an eligible task, scx will keep running prev if
+	 * prev->scx.flags & SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and
+	 * otherwise go idle.
+	 */
+	if (!found)
+		return;
+	/*
 	 * The move_to_local can fail if we raced with some other cpu in the cell
 	 * and now the cell is empty. We have to ensure to try the cpu_dsq or else
 	 * we might never wakeup.
 	 */
-	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq))
+	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq) && min_vtime_dsq != dsq)
 		scx_bpf_dsq_move_to_local(dsq);
 }
 
