@@ -2775,7 +2775,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *task_layer;
-	struct task_hint *task_hint;
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
 	s32 task_lid;
@@ -2850,16 +2849,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (cpuc->yielding && runtime < task_layer->slice_ns)
 		runtime = task_layer->slice_ns;
 
-	runtime = runtime * 100 / p->scx.weight;
-
-	task_hint = bpf_task_storage_get(&scx_layered_task_hint_map, p, NULL, 0);
-	if (task_hint) {
-		u64 hint = task_hint->hint ?: 1;
-		hint = hint < 1024 ? hint : 1024;
-		runtime = (runtime * hint) / 1024;
-	}
-
-	p->scx.dsq_vtime += runtime;
+	p->scx.dsq_vtime += runtime * 100 / p->scx.weight;
 }
 
 bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
