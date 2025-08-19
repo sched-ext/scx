@@ -2085,6 +2085,7 @@ impl<'a> Scheduler<'a> {
         opts: &'a Opts,
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
+        hint_to_layer_map: &HashMap<u64, usize>,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let mut disable_topology = opts.disable_topology.unwrap_or(false);
@@ -2319,6 +2320,19 @@ impl<'a> Scheduler<'a> {
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
+
+        // Populate the mapping of hints to layer IDs for faster lookups
+        if hint_to_layer_map.len() != 0 {
+            for (k, v) in hint_to_layer_map.iter() {
+                let key: u32 = *k as u32;
+                let value: u32 = *v as u32;
+                skel.maps.hint_to_layer_id_map.update(
+                    &key.to_ne_bytes(),
+                    &value.to_ne_bytes(),
+                    libbpf_rs::MapFlags::ANY,
+                )?;
+            }
+        }
 
         let mut layers = vec![];
         let layer_growth_orders =
@@ -3101,7 +3115,9 @@ fn write_example_file(path: &str) -> Result<()> {
     Ok(f.write_all(serde_json::to_string_pretty(&*EXAMPLE_CONFIG)?.as_bytes())?)
 }
 
-fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
+fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
+    let mut hint_to_layer_map = HashMap::<u64, (usize, String)>::new();
+
     let nr_specs = specs.len();
     if nr_specs == 0 {
         bail!("No layer spec");
@@ -3172,6 +3188,19 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                                 spec.name
                             );
                         }
+
+                        if let Some((layer_id, name)) = hint_to_layer_map.get(hint) {
+                            if *layer_id != idx {
+                                bail!(
+                                    "Spec {:?} has hint value ({}) that is already mapped to Spec {:?}",
+                                    spec.name,
+                                    hint,
+                                    name
+                                );
+                            }
+                        } else {
+                            hint_to_layer_map.insert(*hint, (idx, spec.name.clone()));
+                        }
                     }
                     _ => {}
                 }
@@ -3212,7 +3241,10 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(hint_to_layer_map
+        .into_iter()
+        .map(|(k, v)| (k, v.0))
+        .collect())
 }
 
 fn name_suffix(cgroup: &str, len: usize) -> String {
@@ -3449,11 +3481,16 @@ fn main() -> Result<()> {
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
-    verify_layer_specs(&layer_config.specs)?;
+    let hint_to_layer_map = verify_layer_specs(&layer_config.specs)?;
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &layer_config.specs, &mut open_object)?;
+        let mut sched = Scheduler::init(
+            &opts,
+            &layer_config.specs,
+            &mut open_object,
+            &hint_to_layer_map,
+        )?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }

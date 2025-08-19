@@ -100,6 +100,14 @@ struct {
 	__type(value, struct task_hint);
 } scx_layered_task_hint_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(map_flags, 0);
+	__uint(max_entries, 1025);
+} hint_to_layer_id_map SEC(".maps");
+
 const volatile bool task_hint_map_enabled;
 
 static inline s32 prio_to_nice(s32 static_prio)
@@ -613,6 +621,59 @@ static struct task_hint *lookup_task_hint(struct task_struct *p)
 	if (hint && hint->hint > 1024)
 		hint = NULL;
 	return hint;
+}
+
+static int lookup_task_hint_layer_id(struct task_struct *p) {
+	struct task_hint *hint;
+	u32 *layer_idp;
+	u32 hint_val;
+
+	hint = lookup_task_hint(p);
+	if (!hint)
+		return -ENOENT;
+
+	hint_val = hint->hint;
+	layer_idp = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
+	if (!layer_idp)
+		return -EFAULT;
+	return *layer_idp;
+}
+
+static void switch_to_layer(struct task_struct *, struct task_ctx *, u64 layer_id);
+
+static int lookup_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
+{
+	u64 layer_id;
+	int ret;
+
+	ret = lookup_task_hint_layer_id(p);
+	if (ret < 0)
+		return ret;
+	layer_id = ret;
+
+        if (taskc->layer_id == layer_id)
+		return -EAGAIN;
+        /*
+	 * If the existing layer does not match the one corresponding to the
+         * hint, we must switch the layers, return the new layer_id.
+	 */
+	return layer_id;
+}
+
+static void maybe_refresh_task_layer_from_hint(struct task_struct *p)
+{
+	struct task_ctx *taskc;
+	u64 layer_id;
+	int ret;
+
+	if (!(taskc = lookup_task_ctx_may_fail(p)))
+		return;
+
+	ret = lookup_task_layer_from_hint(p, taskc);
+	if (ret < 0)
+		return;
+	layer_id = ret;
+	switch_to_layer(p, taskc, layer_id);
 }
 
 int save_gpu_tgid_pid(void) {
@@ -1234,6 +1295,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	s32 cpu;
 
 	maybe_refresh_layer_cpumasks();
+	maybe_refresh_task_layer_from_hint(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
@@ -1435,6 +1497,9 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 *lstats;
 
 	maybe_refresh_layer_cpumasks();
+	/* Only invoke if we never went through select_cpu path. */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+		maybe_refresh_task_layer_from_hint(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
@@ -2095,6 +2160,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * kernels, so let's make do with this for now.
 	 */
 	if (prev_taskc && keep_running(cpuc, prev, prev_taskc, prev_layer)) {
+		/*
+		 * Do not refresh the slice in case we need the task to be reenqueued
+		 * for layer membership change and subsequent CPU selection.
+		 */
+		if (lookup_task_layer_from_hint(prev, prev_taskc) >= 0)
+			return;
 		prev->scx.slice = prev_layer->slice_ns;
 		return;
 	}
@@ -2232,8 +2303,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 replenish:
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
-	/* !NULL prev_taskc indicates runnable prev */
-	if (prev_taskc && prev_layer)
+        /*
+         * !NULL prev_taskc indicates runnable prev.
+         * Do not refresh the slice in case we need the task to be reenqueued
+         * for layer membership change and subsequent CPU selection.
+         */
+        if (prev_taskc && prev_layer && lookup_task_layer_from_hint(prev, prev_taskc) < 0)
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
@@ -2463,6 +2538,46 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 	return -ENOENT;
 }
 
+static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 layer_id)
+{
+	struct cpu_ctx *cpuc;
+	struct llc_ctx *llcc;
+	struct layer *layer;
+
+	/* Drop membership from older layer. */
+	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
+		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+
+	if (layer_id >= nr_layers)
+		return;
+	layer = &layers[layer_id];
+
+	if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
+	    !(llcc = lookup_llc_ctx(cpuc->llc_id)))
+		return;
+
+	taskc->layer_id = layer_id;
+	taskc->llc_id = cpuc->llc_id;
+	taskc->layered_cpus.seq = -1;
+	taskc->layered_cpus_llc.seq = -1;
+	taskc->layered_cpus_node.seq = -1;
+	__sync_fetch_and_add(&layer->nr_tasks, 1);
+
+	refresh_cpus_flags(taskc, p->cpus_ptr);
+
+	/*
+	 * XXX - To be correct, we'd need to calculate the vtime
+	 * delta in the previous layer, scale it by the load
+	 * fraction difference and then offset from the new
+	 * layer's vtime_now. For now, just do the simple thing
+	 * and assume the offset to be zero.
+	 *
+	 * Revisit if high frequency dynamic layer switching
+	 * needs to be supported.
+	 */
+	p->scx.dsq_vtime = llcc->vtime_now[layer_id];
+}
+
 static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
 {
 	const char *cgrp_path;
@@ -2477,9 +2592,6 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
 		return;
 
-	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
-		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
-
 	bpf_for(layer_id, 0, nr_layers) {
 		if (match_layer(layer_id, p, cgrp_path) == 0) {
 			matched = true;
@@ -2488,34 +2600,7 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 	}
 
 	if (matched) {
-		struct layer *layer = &layers[layer_id];
-		struct cpu_ctx *cpuc;
-		struct llc_ctx *llcc;
-
-		if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
-		    !(llcc = lookup_llc_ctx(cpuc->llc_id)))
-			return;
-
-		taskc->layer_id = layer_id;
-		taskc->llc_id = cpuc->llc_id;
-		taskc->layered_cpus.seq = -1;
-		taskc->layered_cpus_llc.seq = -1;
-		taskc->layered_cpus_node.seq = -1;
-		__sync_fetch_and_add(&layer->nr_tasks, 1);
-
-		refresh_cpus_flags(taskc, p->cpus_ptr);
-
-		/*
-		 * XXX - To be correct, we'd need to calculate the vtime
-		 * delta in the previous layer, scale it by the load
-		 * fraction difference and then offset from the new
-		 * layer's vtime_now. For now, just do the simple thing
-		 * and assume the offset to be zero.
-		 *
-		 * Revisit if high frequency dynamic layer switching
-		 * needs to be supported.
-		 */
-		p->scx.dsq_vtime = llcc->vtime_now[layer_id];
+		switch_to_layer(p, taskc, layer_id);
 	} else {
 		scx_bpf_error("[%s]%d didn't match any layer", p->comm, p->pid);
 	}
