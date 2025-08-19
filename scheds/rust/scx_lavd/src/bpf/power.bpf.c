@@ -137,22 +137,6 @@ bool is_perf_cri(struct task_ctx *taskc)
 	return test_task_flag(taskc, LAVD_FLAG_ON_BIG);
 }
 
-static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
-{
-	u32 clear;
-
-	/*
-	 * If the CPU is on, we clear the bit once every four times
-	 * (LAVD_CC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
-	 * probabilistically cleared once every 100 msec (4 * 25 msec).
-	 */
-	clear = !(bpf_get_prandom_u32() % LAVD_CC_CPU_PIN_INTERVAL_DIV);
-	if (clear)
-		bpf_cpumask_clear_cpu(cpu, cpumask);
-
-	return clear;
-}
-
 __hidden
 const volatile u16 *get_cpu_order(void)
 {
