@@ -12,6 +12,10 @@ use anyhow::Context;
 use anyhow::Result;
 
 use std::ffi::c_ulong;
+use std::ffi::c_void;
+
+use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use scx_utils::init_libbpf_logging;
@@ -22,10 +26,15 @@ use scx_utils::NR_CPU_IDS;
 
 use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
 
+use libbpf_sys;
+
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
+
+const BPF_STDOUT: u32 = 1;
+const BPF_STDERR: u32 = 2;
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 512;
@@ -152,6 +161,36 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
+fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
+    let mut buf = vec![0u8; 4096];
+    let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
+
+    println!("===BEGIN STREAM {}===", name);
+    loop {
+        let ret = unsafe {
+            libbpf_sys::bpf_prog_stream_read(
+                skel.progs.arena_selftest.as_fd().as_raw_fd(),
+                stream_id,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ret < 0 {
+            println!("Error {} reading stream {}", ret, stream_id);
+            break;
+        }
+
+        if ret == 0 {
+            break;
+        }
+
+        print!("{}", String::from_utf8_lossy(&buf[..ret as usize]));
+    }
+
+    println!("\n====END STREAM  {}====", name);
+}
+
 fn main() {
     TermLogger::init(
         simplelog::LevelFilter::Info,
@@ -190,4 +229,7 @@ fn main() {
             output.return_value as i32
         );
     }
+
+    print_stream(&mut skel, BPF_STDOUT);
+    print_stream(&mut skel, BPF_STDERR);
 }
