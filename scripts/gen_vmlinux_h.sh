@@ -9,14 +9,15 @@ set -euo pipefail
 #
 # Example
 #
-# ./scripts/gen_vmlinux_h.sh /path/to/linux ./sched/include/arch/
+# ./scripts/gen_vmlinux_h.sh /path/to/linux "$PWD/scheds/include/arch/"
 
+BASEDIR=$(cd "$(dirname "$0")" && pwd)
 LINUX_REPO="$1" # where the linux repo is located
 pushd ${LINUX_REPO}
 INCLUDE_TARGET=$2 # target directory, e.g., /path/to/scx/sched/include/arch/
 HASH=$(git rev-parse HEAD)
 SHORT_SHA=${HASH:0:12} # full SHA of the commit truncated to 12 chars
-LINUX_VER=$(git describe --tags --abbrev=0)
+LINUX_VER=$(git describe --tags --abbrev=0 --match="v*")
 
 # List of architectures and their corresponding cross-compilers
 declare -A ARCHS
@@ -27,7 +28,11 @@ ARCHS=(
     [powerpc]="powerpc64le-linux-gnu-"
     [riscv]="riscv64-linux-gnu-"
     [s390]="s390x-linux-gnu-"
+    [x86]="x86_64-linux-gnu-"
 )
+if grep ^ID=fedora /etc/os-release &> /dev/null; then
+    ARCHS[arm]=arm-linux-gnu-
+fi
 
 # Detect and install cross-compile toolchains based on the package manager
 install_toolchains() {
@@ -38,25 +43,25 @@ install_toolchains() {
             gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu \
             gcc-arm-linux-gnueabi gcc-mips64-linux-gnuabi64 \
             gcc-powerpc64le-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu
+            gcc-s390x-linux-gnu gcc-x86-64-linux-gnu
     elif command -v dnf &> /dev/null; then
         sudo dnf install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
-            gcc-arm-linux-gnu gcc-mips64-linux-gnuabi64 \
+            gcc-arm-linux-gnu gcc-mips64-linux-gnu \
             gcc-powerpc64-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu
+            gcc-s390x-linux-gnu gcc-x86_64-linux-gnu
     elif command -v yum &> /dev/null; then
         sudo yum install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
             gcc-arm-linux-gnu gcc-mips64-linux-gnuabi64 \
             gcc-powerpc64-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu
+            gcc-s390x-linux-gnu gcc-x86_64-linux-gnu
     elif command -v pacman &> /dev/null; then
         sudo pacman -Sy --noconfirm \
             aarch64-linux-gnu-gcc x86_64-linux-gnu-gcc \
             arm-linux-gnueabi-gcc mips64-linux-gnu-gcc \
             powerpc64le-linux-gnu-gcc riscv64-linux-gnu-gcc \
-            s390x-linux-gnu-gcc
+            s390x-linux-gnu-gcc gcc
     elif command -v zypper &> /dev/null; then
         sudo zypper install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
@@ -74,19 +79,41 @@ generate_vmlinux_for_arch() {
     ARCH=$1
     CROSS_COMPILE=${ARCHS[$ARCH]}
     TARGET_DIR=${INCLUDE_TARGET}/${ARCH}
-    OUTPUT_FILE="${TARGET_DIR}/vmlinux-${LINUX_VER}-g${SHORT_SHA}.h"
+    OUTPUT_BASENAME="vmlinux-${LINUX_VER}-g${SHORT_SHA}.h"
+    OUTPUT_FILE="${TARGET_DIR}/${OUTPUT_BASENAME}"
     mkdir -p ${TARGET_DIR}
 
     LOG="/tmp/${ARCH}.log"
     echo "" > ${LOG}
     echo "Writing compile logs to ${LOG}"
 
-    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} olddefconfig 2>&1 >> ${LOG}
-    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} -j$(nproc) vmlinux 2>&1 >> ${LOG}
+    rm -f .config.orig vmlinux
+    if [ -e .config ]; then
+        cp .config .config.orig
+    else
+        make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error defconfig &>> ${LOG}
+        echo CONFIG_DEBUG_INFO_REDUCED=n >>.config
+        echo CONFIG_DEBUG_INFO_DWARF4=y >>.config
+        echo CONFIG_BPF_SYSCALL=y >>.config
+        echo CONFIG_DEBUG_INFO_BTF=y >>.config
+        echo CONFIG_BPF_JIT=y >>.config
+        echo CONFIG_SCHED_CLASS_EXT=y >>.config
+        echo CONFIG_CGROUP_SCHED=y >>.config
+        echo CONFIG_FTRACE=y >>.config
+    fi
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error olddefconfig &>> ${LOG}
+    make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error -j$(nproc) vmlinux &>> ${LOG}
+    if [ -e .config.orig ]; then
+        mv .config.orig .config
+    else
+        rm .config
+    fi
 
     if [ -f ./vmlinux ]; then
         echo "Generating ${OUTPUT_FILE}..."
         bpftool btf dump file ./vmlinux format c > "${OUTPUT_FILE}"
+        "${BASEDIR}/fixup_vmlinux_h.py" "${OUTPUT_FILE}"
+        ln -fsT "${OUTPUT_BASENAME}" "${TARGET_DIR}/vmlinux.h"
         echo "${OUTPUT_FILE} generated successfully."
     else
         echo "Failed to generate vmlinux for ${ARCH}. Please check the compilation process."
