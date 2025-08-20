@@ -58,7 +58,6 @@ SCX_TEST(test_pick_idle_cpu)
 	struct task_struct p = { 0 };
 	task_ctx my_taskc = { 0 };
 	struct cpumask llc_cpumask = { 0 };
-	u64 index = 0;
 	s32 idle_cpu;
 	bool is_idle = false;
 
