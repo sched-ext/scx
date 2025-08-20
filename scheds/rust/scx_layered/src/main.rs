@@ -349,6 +349,9 @@ lazy_static! {
 /// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
 ///   is within the provided values [min, max).
 ///
+/// - HintEquals: u64. Match tasks whose hint value equals this value.
+///   The value must be in the range [0, 1024].
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -1637,6 +1640,10 @@ impl<'a> Scheduler<'a> {
                             mt.min_avg_runtime_us = *min;
                             mt.max_avg_runtime_us = *max;
                         }
+                        LayerMatch::HintEquals(hint) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_HINT_EQUALS as i32;
+                            mt.hint = *hint;
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;
@@ -2078,6 +2085,7 @@ impl<'a> Scheduler<'a> {
         opts: &'a Opts,
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
+        hint_to_layer_map: &HashMap<u64, usize>,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let mut disable_topology = opts.disable_topology.unwrap_or(false);
@@ -2296,9 +2304,6 @@ impl<'a> Scheduler<'a> {
         }
         skel.maps.bss_data.as_mut().unwrap().nr_empty_layer_ids = nr_layers as u32;
 
-        Self::init_layers(&mut skel, &layer_specs, &topo)?;
-        Self::init_nodes(&mut skel, opts, &topo);
-
         // We set the pin path before loading the skeleton. This will ensure
         // libbpf creates and pins the map, or reuses the pinned map fd for us,
         // so that we can keep reusing the older map already pinned on scheduler
@@ -2308,9 +2313,26 @@ impl<'a> Scheduler<'a> {
         // Only set pin path if a path is provided.
         if layered_task_hint_map_path.is_empty() == false {
             hint_map.set_pin_path(layered_task_hint_map_path).unwrap();
+            rodata.task_hint_map_enabled = true;
         }
 
+        Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        Self::init_nodes(&mut skel, opts, &topo);
+
         let mut skel = scx_ops_load!(skel, layered, uei)?;
+
+        // Populate the mapping of hints to layer IDs for faster lookups
+        if hint_to_layer_map.len() != 0 {
+            for (k, v) in hint_to_layer_map.iter() {
+                let key: u32 = *k as u32;
+                let value: u32 = *v as u32;
+                skel.maps.hint_to_layer_id_map.update(
+                    &key.to_ne_bytes(),
+                    &value.to_ne_bytes(),
+                    libbpf_rs::MapFlags::ANY,
+                )?;
+            }
+        }
 
         let mut layers = vec![];
         let layer_growth_orders =
@@ -3093,7 +3115,9 @@ fn write_example_file(path: &str) -> Result<()> {
     Ok(f.write_all(serde_json::to_string_pretty(&*EXAMPLE_CONFIG)?.as_bytes())?)
 }
 
-fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
+fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
+    let mut hint_to_layer_map = HashMap::<u64, (usize, String)>::new();
+
     let nr_specs = specs.len();
     if nr_specs == 0 {
         bail!("No layer spec");
@@ -3130,6 +3154,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                     ands.len()
                 );
             }
+            let mut hint_equals_cnt = 0;
             for one in ands.iter() {
                 match one {
                     LayerMatch::CgroupPrefix(prefix) => {
@@ -3157,8 +3182,36 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                             bail!("Spec {:?} has too long a process name prefix", spec.name);
                         }
                     }
+                    LayerMatch::HintEquals(hint) => {
+                        if *hint > 1024 {
+                            bail!(
+                                "Spec {:?} has hint value outside the range [0, 1024]",
+                                spec.name
+                            );
+                        }
+
+                        if let Some((layer_id, name)) = hint_to_layer_map.get(hint) {
+                            if *layer_id != idx {
+                                bail!(
+                                    "Spec {:?} has hint value ({}) that is already mapped to Spec {:?}",
+                                    spec.name,
+                                    hint,
+                                    name
+                                );
+                            }
+                        } else {
+                            hint_to_layer_map.insert(*hint, (idx, spec.name.clone()));
+                        }
+                        hint_equals_cnt += 1;
+                    }
                     _ => {}
                 }
+            }
+            if hint_equals_cnt > 1 {
+                bail!("Only 1 HintEquals match permitted per AND block");
+            }
+            if hint_equals_cnt == 1 && ands.len() != 1 {
+                bail!("HintEquals match cannot be in conjunction with other matches");
             }
         }
 
@@ -3196,7 +3249,10 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(hint_to_layer_map
+        .into_iter()
+        .map(|(k, v)| (k, v.0))
+        .collect())
 }
 
 fn name_suffix(cgroup: &str, len: usize) -> String {
@@ -3433,11 +3489,16 @@ fn main() -> Result<()> {
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
-    verify_layer_specs(&layer_config.specs)?;
+    let hint_to_layer_map = verify_layer_specs(&layer_config.specs)?;
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &layer_config.specs, &mut open_object)?;
+        let mut sched = Scheduler::init(
+            &opts,
+            &layer_config.specs,
+            &mut open_object,
+            &hint_to_layer_map,
+        )?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }

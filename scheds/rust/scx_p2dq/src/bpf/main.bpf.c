@@ -116,6 +116,7 @@ const volatile struct {
 
 	bool atq_enabled;
 	bool cpu_priority;
+	bool task_slice;
 	bool freq_control;
 	bool interactive_sticky;
 	bool keep_running_enabled;
@@ -130,6 +131,7 @@ const volatile struct {
 
 	.atq_enabled = false,
 	.cpu_priority = false,
+	.task_slice = true,
 	.freq_control = false,
 	.interactive_sticky = false,
 	.keep_running_enabled = true,
@@ -454,15 +456,15 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 	    (!lb_config.dispatch_lb_interactive && taskc->interactive))
 		return false;
 
-	if (saturated)
-		return true;
-
 	if (lb_config.max_dsq_pick2 &&
 	    taskc->dsq_index != p2dq_config.nr_dsqs_per_llc - 1)
 		return false;
 
 	if (taskc->llc_runs > 0)
 		return false;
+
+	if (saturated)
+		return true;
 
 	return llcx->saturated;
 }
@@ -801,6 +803,14 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	    (cpu = __pick_idle_cpu(llcx->cpumask, 0)) >= 0) {
 		*is_idle = true;
 		goto found_cpu;
+	}
+
+	if (saturated && taskc->llc_runs == 0) {
+		cpu = scx_bpf_pick_idle_cpu(&p->cpus_mask, 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
 	}
 
 	// Couldn't find anything idle just return something in the local LLC
@@ -1281,7 +1291,15 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		if (p->scx.weight < 100 && taskc->dsq_index > 1)
 			taskc->dsq_index = 1;
 
-		taskc->slice_ns = task_dsq_slice_ns(p, taskc->dsq_index);
+		if (p2dq_config.task_slice) {
+			if (used >= ((7 * last_dsq_slice_ns) / 8)) {
+				taskc->slice_ns = clamp_slice((5 * taskc->slice_ns) >> 2);
+			} else if (used < last_dsq_slice_ns / 2) {
+				taskc->slice_ns = clamp_slice((7 * taskc->slice_ns) >> 3);
+			}
+		} else {
+			taskc->slice_ns = task_dsq_slice_ns(p, taskc->dsq_index);
+		}
 		taskc->last_run_started = 0;
 		taskc->interactive = is_interactive(taskc);
 	}
@@ -1410,6 +1428,12 @@ static int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *
 			return 0;
 
 		if (consume_llc(second))
+			return 0;
+
+		// If the system is saturated then be aggressive in trying to load balance.
+		if (topo_config.nr_llcs > 2 &&
+		    (first = rand_llc_ctx()) &&
+		    consume_llc(first))
 			return 0;
 	}
 
@@ -1608,7 +1632,7 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 	saturated = percent_idle < p2dq_config.saturated_percent;
 
 	if (saturated)
-		min_llc_runs_pick2 = 0;
+		min_llc_runs_pick2 = 2;
 	else {
 		u32 llc_scaler = log2_u32(topo_config.nr_llcs);
 		min_llc_runs_pick2 = log2_u32(percent_idle) + llc_scaler;
@@ -1716,6 +1740,7 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 			  p->nr_cpus_allowed == topo_config.nr_cpus;
 	taskc->interactive = is_interactive(taskc);
 	p->scx.dsq_vtime = llcx->vtime;
+	task_refresh_llc_runs(taskc);
 
 	// When a task is initialized set the DSQ id to invalid. This causes
 	// the task to be randomized on a LLC.

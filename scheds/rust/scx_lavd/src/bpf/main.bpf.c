@@ -1290,7 +1290,7 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+	if (bpf_cpumask_weight(p->cpus_ptr) != __nr_cpu_ids)
 		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
@@ -1386,7 +1386,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
-	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+	if (bpf_cpumask_weight(p->cpus_ptr) != __nr_cpu_ids)
 		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
@@ -1454,10 +1454,10 @@ static s32 init_cpdoms(u64 now)
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
 		 */
-		err = scx_bpf_create_dsq(cpdom_to_dsq(cpdomc->id), cpdomc->node_id);
+		err = scx_bpf_create_dsq(cpdom_to_dsq(cpdomc->id), cpdomc->numa_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpdom %llu on NUMA node %d",
-				      cpdomc->id, cpdomc->node_id);
+				      cpdomc->id, cpdomc->numa_id);
 			return err;
 		}
 
@@ -1558,7 +1558,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	 * Initilize CPU info
 	 */
 	one_little_capacity = LAVD_SCALE;
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		if (cpu >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -1664,6 +1664,7 @@ static s32 init_per_cpu_ctx(u64 now)
 						err = -ESRCH;
 						goto unlock_out;
 					}
+					cpuc->llc_id = cpdomc->llc_id;
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
 
@@ -1681,7 +1682,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Print some useful informatin for debugging.
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
@@ -1707,7 +1708,7 @@ static int init_per_cpu_dsqs(void)
 	struct cpu_ctx *cpuc;
 	int cpu, err = 0;
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		/*
 		 * Create Per-CPU DSQs on its associated NUMA domain.
 		 */
@@ -1723,10 +1724,10 @@ static int init_per_cpu_dsqs(void)
 			return -ESRCH;
 		}
 
-		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->node_id);
+		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->numa_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpu %d on NUMA node %d",
-				      cpu, cpdomc->node_id);
+				      cpu, cpdomc->numa_id);
 			return err;
 		}
 	}

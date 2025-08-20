@@ -99,7 +99,8 @@ enum consts_flags {
 struct cpdom_ctx {
 	u64	id;				    /* id of this compute domain */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type */
-	u8	node_id;			    /* numa domain id */
+	u8	numa_id;			    /* numa domain id */
+	u8	llc_id;				    /* llc domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_valid;			    /* is this a valid compute domain? */
 	u8	is_stealer;			    /* this domain should steal tasks from others */
@@ -186,6 +187,7 @@ struct cpu_ctx {
 	u16		capacity;	/* CPU capacity based on 1024 */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
+	u8		llc_id;		/* llc domain id */
 	u8		cpdom_id;	/* compute domain id */
 	u8		cpdom_alt_id;	/* compute domain id of anternative type */
 	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
@@ -216,7 +218,8 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_t3_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
-extern const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
+extern const volatile u64	nr_llcs;	/* number of LLC domains */
+extern const volatile u64	__nr_cpu_ids;	/* maximum CPU IDs */
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
 extern const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];

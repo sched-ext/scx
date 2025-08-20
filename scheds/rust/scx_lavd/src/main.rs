@@ -485,7 +485,8 @@ impl<'a> Scheduler<'a> {
             skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
             skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].alt_id =
                 v.cpdom_alt_id.get() as u64;
-            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].node_id = k.node_adx as u8;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].numa_id = k.numa_adx as u8;
+            skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].llc_id = k.llc_adx as u8;
             skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
             skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].is_valid = 1;
             for cpu_id in v.cpu_ids.iter() {
@@ -521,7 +522,8 @@ impl<'a> Scheduler<'a> {
         bss_data.no_freq_scaling = opts.no_freq_scaling;
         bss_data.is_powersave_mode = opts.powersave;
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
-        rodata.nr_cpu_ids = *NR_CPU_IDS as u64;
+        rodata.nr_llcs = order.nr_llcs as u64;
+        rodata.__nr_cpu_ids = *NR_CPU_IDS as u64;
         rodata.is_smt_active = order.smt_enabled;
         rodata.is_autopilot_on = opts.autopilot;
         rodata.verbose = opts.verbose;

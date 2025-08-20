@@ -191,7 +191,7 @@ static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
 			if (cpumask & 0x1LLU << j) {
 				u64 queued;
 				cpu = (i * 64) + j;
-				if (cpu >= nr_cpu_ids)
+				if (cpu >= __nr_cpu_ids)
 					break;
 				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 				if (queued > highest_queued) {

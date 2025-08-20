@@ -137,6 +137,11 @@ pub struct SchedulerOpts {
     #[clap(long, default_value="false", action = clap::ArgAction::Set)]
     pub max_dsq_pick2: bool,
 
+    /// Task slice tracking, slices are automatically scaled based on utilization rather than the
+    /// predetermined slice index.
+    #[clap(long, default_value="false", action = clap::ArgAction::Set)]
+    pub task_slice: bool,
+
     /// Scheduling min slice duration in microseconds.
     #[clap(short = 's', long, default_value = "100")]
     pub min_slice_us: u64,
@@ -183,12 +188,11 @@ pub struct SchedulerOpts {
 }
 
 pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
-    let result = if dsq_index == 0 {
+    if dsq_index == 0 {
         1000 * min_slice_us
     } else {
         1000 * (min_slice_us << (dsq_index as u32) << dsq_shift)
-    };
-    result
+    }
 }
 
 #[macro_export]
@@ -271,6 +275,7 @@ macro_rules! init_open_skel {
             // p2dq config
             rodata.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
             rodata.p2dq_config.dsq_shift = opts.dsq_shift as u64;
+            rodata.p2dq_config.task_slice = MaybeUninit::new(opts.task_slice);
             rodata.p2dq_config.kthreads_local = MaybeUninit::new(!opts.disable_kthreads_local);
             rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
@@ -316,21 +321,21 @@ macro_rules! init_skel {
 pub mod bpf_srcs {
 
     pub fn intf_h() -> &'static [u8] {
-        const INTF_H: &'static [u8] =
+        const INTF_H: &[u8] =
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/intf.h"));
 
         INTF_H
     }
 
     pub fn main_bpf_c() -> &'static [u8] {
-        const MAIN_BPF_C: &'static [u8] =
+        const MAIN_BPF_C: &[u8] =
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/main.bpf.c"));
 
         MAIN_BPF_C
     }
 
     pub fn types_h() -> &'static [u8] {
-        const TYPES_H: &'static [u8] =
+        const TYPES_H: &[u8] =
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/types.h"));
 
         TYPES_H
