@@ -99,7 +99,7 @@ enum consts_flags {
 struct cpdom_ctx {
 	u64	id;				    /* id of this compute domain */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type */
-	u8	node_id;			    /* numa domain id */
+	u8	numa_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_valid;			    /* is this a valid compute domain? */
 	u8	is_stealer;			    /* this domain should steal tasks from others */

@@ -30,12 +30,12 @@ pub struct CpuId {
     // - *_adx: an absolute index within a system scope
     // - *_rdx: a relative index under a parent
     //
-    // - node_adx: a NUMA domain within a system
+    // - numa_adx: a NUMA domain within a system
     // - pd_adx: a performance domain (CPU frequency domain) within a system
     //   - llc_rdx: an LLC domain (CCX) under a NUMA domain
     //     - core_rdx: a core under a LLC domain
     //       - cpu_rdx: a CPU under a core
-    pub node_adx: usize,
+    pub numa_adx: usize,
     pub pd_adx: usize,
     pub llc_rdx: usize,
     pub core_rdx: usize,
@@ -50,7 +50,7 @@ pub struct CpuId {
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
 pub struct ComputeDomainId {
-    pub node_adx: usize,
+    pub numa_adx: usize,
     pub llc_rdx: usize,
     pub is_big: bool,
 }
@@ -144,14 +144,14 @@ impl CpuOrderCtx {
         let mut cpu_ids = Vec::new();
 
         // Build a vector of cpu ids.
-        for (&node_adx, node) in self.topo.nodes.iter() {
+        for (&numa_adx, node) in self.topo.nodes.iter() {
             for (llc_rdx, (&llc_adx, llc)) in node.llcs.iter().enumerate() {
                 for (core_rdx, (_core_adx, core)) in llc.cores.iter().enumerate() {
                     for (cpu_rdx, (cpu_adx, cpu)) in core.cpus.iter().enumerate() {
                         let cpu_adx = *cpu_adx;
                         let pd_adx = Self::get_pd_id(&self.em, cpu_adx, llc_adx);
                         let cpu_id = CpuId {
-                            node_adx,
+                            numa_adx,
                             pd_adx,
                             llc_rdx,
                             core_rdx,
@@ -180,7 +180,7 @@ impl CpuOrderCtx {
         match (prefer_powersave, self.has_biglittle) {
             // 1. powersave,      no  big/little
             //     * within the same LLC domain
-            //         - node_adx, llc_rdx,
+            //         - numa_adx, llc_rdx,
             //     * prefer more capable CPU with higher capacity
             //       and larger cache
             //         - ^cpu_cap (chip binning), ^cache_size,
@@ -188,8 +188,8 @@ impl CpuOrderCtx {
             //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
             (true, false) => {
                 cpu_ids.sort_by(|a, b| {
-                    a.node_adx
-                        .cmp(&b.node_adx)
+                    a.numa_adx
+                        .cmp(&b.numa_adx)
                         .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
                         .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
@@ -202,15 +202,15 @@ impl CpuOrderCtx {
             }
             // 2. powersave,      yes big/little
             //     * within the same LLC domain
-            //         - node_adx, llc_rdx,
+            //         - numa_adx, llc_rdx,
             //     * prefer energy-efficient LITTLE CPU with a larger cache
             //         - cpu_cap (big/little), ^cache_size,
             //     * prefere the SMT core within the same performance domain
             //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
             (true, true) => {
                 cpu_ids.sort_by(|a, b| {
-                    a.node_adx
-                        .cmp(&b.node_adx)
+                    a.numa_adx
+                        .cmp(&b.numa_adx)
                         .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
                         .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
@@ -226,7 +226,7 @@ impl CpuOrderCtx {
             //     * prefer the non-SMT core
             //         - cpu_rdx,
             //     * fill the same LLC domain first
-            //         - node_adx, llc_rdx,
+            //         - numa_adx, llc_rdx,
             //     * prefer more capable CPU with higher capacity
             //       (chip binning or big/little) and larger cache
             //         - ^cpu_cap, ^cache_size, smt_level
@@ -236,7 +236,7 @@ impl CpuOrderCtx {
                 cpu_ids.sort_by(|a, b| {
                     a.cpu_rdx
                         .cmp(&b.cpu_rdx)
-                        .then_with(|| a.node_adx.cmp(&b.node_adx))
+                        .then_with(|| a.numa_adx.cmp(&b.numa_adx))
                         .then_with(|| a.llc_rdx.cmp(&b.llc_rdx))
                         .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
@@ -263,7 +263,7 @@ impl CpuOrderCtx {
         let mut cpdom_types: BTreeMap<usize, bool> = BTreeMap::new();
         for cpu_id in cpu_ids.iter() {
             let key = ComputeDomainId {
-                node_adx: cpu_id.node_adx,
+                numa_adx: cpu_id.numa_adx,
                 llc_rdx: cpu_id.llc_rdx,
                 is_big: cpu_id.big_core,
             };
@@ -349,7 +349,7 @@ impl CpuOrderCtx {
         if from.is_big != to.is_big {
             d += 3;
         }
-        if from.node_adx != to.node_adx {
+        if from.numa_adx != to.numa_adx {
             d += 2;
         } else {
             if from.llc_rdx != to.llc_rdx {

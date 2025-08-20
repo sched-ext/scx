@@ -1454,10 +1454,10 @@ static s32 init_cpdoms(u64 now)
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
 		 */
-		err = scx_bpf_create_dsq(cpdom_to_dsq(cpdomc->id), cpdomc->node_id);
+		err = scx_bpf_create_dsq(cpdom_to_dsq(cpdomc->id), cpdomc->numa_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpdom %llu on NUMA node %d",
-				      cpdomc->id, cpdomc->node_id);
+				      cpdomc->id, cpdomc->numa_id);
 			return err;
 		}
 
@@ -1723,10 +1723,10 @@ static int init_per_cpu_dsqs(void)
 			return -ESRCH;
 		}
 
-		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->node_id);
+		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->numa_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpu %d on NUMA node %d",
-				      cpu, cpdomc->node_id);
+				      cpu, cpdomc->numa_id);
 			return err;
 		}
 	}
