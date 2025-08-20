@@ -2,6 +2,7 @@
 /* Copyright (c) 2024-2025 Meta Platforms, Inc. and affiliates. */
 #pragma once
 #include <scx/bpf_arena_common.bpf.h>
+#include <lib/arena_map.h>
 
 #ifndef __round_mask
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
@@ -12,18 +13,6 @@
 
 static void __arena * __arena page_frag_cur_page[NR_CPUS];
 static int __arena page_frag_cur_offset[NR_CPUS];
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARENA);
-	__uint(map_flags, BPF_F_MMAPABLE);
-#if defined(__TARGET_ARCH_arm64) || defined(__aarch64__)
-	__uint(max_entries, 1 << 16); /* number of pages */
-        __ulong(map_extra, (1ull << 32)); /* start of mmap() region */
-#else
-	__uint(max_entries, 1 << 20); /* number of pages */
-        __ulong(map_extra, (1ull << 44)); /* start of mmap() region */
-#endif
-} arena __weak SEC(".maps");
 
 /* Simple page_frag allocator */
 static inline void __arena* pagefrag_alloc(unsigned int size)
