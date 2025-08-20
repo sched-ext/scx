@@ -17,7 +17,8 @@ private(LAVD) struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little 
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
 
-const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
+const volatile u64	nr_llcs;	/* number of LLC domains */
+const volatile u64	__nr_cpu_ids;	/* maximum CPU IDs */
 volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
 /*
@@ -242,7 +243,7 @@ static void set_on_core_type(struct task_ctx *taskc,
 	struct cpu_ctx *cpuc;
 	int cpu;
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(cpu, cpumask))
 			continue;
 

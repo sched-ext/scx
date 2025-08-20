@@ -181,7 +181,7 @@ static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	/*
 	 * Find a proper CPU in the preferred CPU order.
 	 */
-	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
+	bpf_for(i, sys_stat.nr_active, __nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -246,11 +246,11 @@ s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
 	s32 cpu;
 
 	mask = cast_mask(ctx->a_mask);
-	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < nr_cpu_ids))
+	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < __nr_cpu_ids))
 		return cpu;
 
 	mask = cast_mask(ctx->o_mask);
-	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < nr_cpu_ids))
+	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < __nr_cpu_ids))
 		return cpu;
 
 	return -ENOENT;
@@ -294,14 +294,14 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 		if (ctx->a_mask) {
 			cpu = bpf_cpumask_any_and_distribute(
 				cast_mask(cpd_mask), cast_mask(ctx->a_mask));
-			if (cpu < nr_cpu_ids)
+			if (cpu < __nr_cpu_ids)
 					return cpu;
 		}
 
 		if (ctx->o_mask) {
 			cpu = bpf_cpumask_any_and_distribute(
 				cast_mask(cpd_mask), cast_mask(ctx->o_mask));
-			if (cpu < nr_cpu_ids)
+			if (cpu < __nr_cpu_ids)
 				return cpu;
 		}
 
