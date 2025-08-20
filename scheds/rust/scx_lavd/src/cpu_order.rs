@@ -37,6 +37,7 @@ pub struct CpuId {
     //       - cpu_rdx: a CPU under a core
     pub numa_adx: usize,
     pub pd_adx: usize,
+    pub llc_adx: usize,
     pub llc_rdx: usize,
     pub core_rdx: usize,
     pub cpu_rdx: usize,
@@ -51,6 +52,7 @@ pub struct CpuId {
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
 pub struct ComputeDomainId {
     pub numa_adx: usize,
+    pub llc_adx: usize,
     pub llc_rdx: usize,
     pub is_big: bool,
 }
@@ -153,6 +155,7 @@ impl CpuOrderCtx {
                         let cpu_id = CpuId {
                             numa_adx,
                             pd_adx,
+                            llc_adx,
                             llc_rdx,
                             core_rdx,
                             cpu_rdx,
@@ -264,6 +267,7 @@ impl CpuOrderCtx {
         for cpu_id in cpu_ids.iter() {
             let key = ComputeDomainId {
                 numa_adx: cpu_id.numa_adx,
+                llc_adx: cpu_id.llc_adx,
                 llc_rdx: cpu_id.llc_rdx,
                 is_big: cpu_id.big_core,
             };

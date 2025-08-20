@@ -1664,6 +1664,7 @@ static s32 init_per_cpu_ctx(u64 now)
 						err = -ESRCH;
 						goto unlock_out;
 					}
+					cpuc->llc_id = cpdomc->llc_id;
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
 
