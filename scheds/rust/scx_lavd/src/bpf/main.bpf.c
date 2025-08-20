@@ -1290,7 +1290,7 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
-	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+	if (bpf_cpumask_weight(p->cpus_ptr) != __nr_cpu_ids)
 		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
@@ -1386,7 +1386,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
-	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
+	if (bpf_cpumask_weight(p->cpus_ptr) != __nr_cpu_ids)
 		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
@@ -1558,7 +1558,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	 * Initilize CPU info
 	 */
 	one_little_capacity = LAVD_SCALE;
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		if (cpu >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -1682,7 +1682,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Print some useful informatin for debugging.
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
@@ -1708,7 +1708,7 @@ static int init_per_cpu_dsqs(void)
 	struct cpu_ctx *cpuc;
 	int cpu, err = 0;
 
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(cpu, 0, __nr_cpu_ids) {
 		/*
 		 * Create Per-CPU DSQs on its associated NUMA domain.
 		 */
