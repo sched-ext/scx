@@ -10,6 +10,7 @@
 , commitHash
 , narHash
 , version
+, patches ? [ ]
 }:
 
 let
@@ -22,7 +23,7 @@ let
   };
 
   configfile = stdenv.mkDerivation {
-    inherit src;
+    inherit src patches;
     name = name + "-configfile";
 
     buildInputs = linuxPackages_latest.kernel.buildInputs;
@@ -38,7 +39,7 @@ let
 
   headers = stdenv.mkDerivation {
     name = "linux-headers-${version}";
-    inherit src version;
+    inherit src version patches;
 
     buildInputs = linuxPackages_latest.kernel.buildInputs;
     nativeBuildInputs = linuxPackages_latest.kernel.nativeBuildInputs;
@@ -57,6 +58,12 @@ let
 in
 (linuxManualConfig {
   inherit src version configfile;
+  kernelPatches = map
+    (patch: {
+      inherit patch;
+      name = builtins.baseNameOf patch;
+    })
+    patches;
 }).overrideAttrs {
   passthru = {
     inherit headers;

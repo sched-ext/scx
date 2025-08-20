@@ -235,6 +235,7 @@
               inherit name;
               inherit (details) repo branch commitHash narHash;
               version = details.kernelVersion;
+              patches = map (patchName: ./kernel-patches + ("/" + patchName)) (details.patches or [ ]);
             }))
             (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json)));
         }) // flake-utils.lib.eachDefaultSystem (system:
