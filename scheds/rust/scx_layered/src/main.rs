@@ -3154,6 +3154,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
                     ands.len()
                 );
             }
+            let mut hint_equals_cnt = 0;
             for one in ands.iter() {
                 match one {
                     LayerMatch::CgroupPrefix(prefix) => {
@@ -3201,9 +3202,16 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
                         } else {
                             hint_to_layer_map.insert(*hint, (idx, spec.name.clone()));
                         }
+                        hint_equals_cnt += 1;
                     }
                     _ => {}
                 }
+            }
+            if hint_equals_cnt > 1 {
+                bail!("Only 1 HintEquals match permitted per AND block");
+            }
+            if hint_equals_cnt == 1 && ands.len() != 1 {
+                bail!("HintEquals match cannot be in conjunction with other matches");
             }
         }
 
