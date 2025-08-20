@@ -81,6 +81,11 @@ pub struct CpuOrder {
     pub cpuids: Vec<CpuId>,
     pub perf_cpu_order: BTreeMap<usize, PerfCpuOrder>,
     pub cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain>,
+    pub nr_cpus: usize,
+    pub nr_cores: usize,
+    pub nr_cpdoms: usize,
+    pub nr_llcs: usize,
+    pub nr_numa: usize,
     pub smt_enabled: bool,
     pub has_biglittle: bool,
     pub has_energy_model: bool,
@@ -100,11 +105,17 @@ impl CpuOrder {
             EnergyModelOptimizer::get_fake_perf_cpu_order_table(&cpus_pf, &cpus_ps)
         };
 
+        let nr_cpdoms = cpdom_map.len();
         Ok(CpuOrder {
             all_cpus_mask: ctx.topo.span,
             cpuids: cpus_pf,
             perf_cpu_order,
             cpdom_map,
+            nr_cpus: ctx.topo.all_cpus.len(),
+            nr_cores: ctx.topo.all_cores.len(),
+            nr_cpdoms,
+            nr_llcs: ctx.topo.all_llcs.len(),
+            nr_numa: ctx.topo.nodes.len(),
             smt_enabled: ctx.smt_enabled,
             has_biglittle: ctx.has_biglittle,
             has_energy_model: ctx.has_energy_model,

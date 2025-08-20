@@ -522,6 +522,7 @@ impl<'a> Scheduler<'a> {
         bss_data.no_freq_scaling = opts.no_freq_scaling;
         bss_data.is_powersave_mode = opts.powersave;
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
+        rodata.nr_llcs = order.nr_llcs as u64;
         rodata.nr_cpu_ids = *NR_CPU_IDS as u64;
         rodata.is_smt_active = order.smt_enabled;
         rodata.is_autopilot_on = opts.autopilot;

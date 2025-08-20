@@ -218,6 +218,7 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_t3_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+extern const volatile u64	nr_llcs;	/* number of LLC domains */
 extern const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
