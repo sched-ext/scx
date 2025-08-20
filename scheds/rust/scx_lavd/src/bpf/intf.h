@@ -152,6 +152,11 @@ struct task_ctx {
 	u64	slice;			/* time slice */
 
 	/*
+	 * Task cgroup
+	 */
+	u64	cgrp_id;		/* cgroup id of this task */
+
+	/*
 	 * Task status
 	 */
 	volatile u64	flags;		/* LAVD_FLAG_* */

@@ -109,7 +109,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 					if (j < 0)
 						break;
 					cpu = (i * 64) + j;
-					if (cpu >= __nr_cpu_ids)
+					if (cpu >= nr_cpu_ids)
 						break;
 					cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 				}
@@ -127,7 +127,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	 * when the verifier gets smarter, we can merge phases 1 and 2
 	 * into one.
 	 */
-	bpf_for(cpu, 0, __nr_cpu_ids) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;
@@ -208,7 +208,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Collect statistics for each CPU (phase 2).
 	 */
-	bpf_for(cpu, 0, __nr_cpu_ids) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;

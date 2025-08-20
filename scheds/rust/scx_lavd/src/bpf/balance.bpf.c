@@ -209,7 +209,7 @@ int __attribute__((noinline)) pick_most_loaded_cpu(struct cpdom_ctx *cpdomc)
 			if (j < 0)
 				break;
 			cpu = (i * 64) + j;
-			if (cpu >= __nr_cpu_ids)
+			if (cpu >= nr_cpu_ids)
 				break;
 			queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 			if (queued > highest_queued) {

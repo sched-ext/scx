@@ -133,7 +133,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
-		if (cpu >= __nr_cpu_ids || cpu == preferred_cpu)
+		if (cpu >= nr_cpu_ids || cpu == preferred_cpu)
 			continue;
 
 		/*
