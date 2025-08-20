@@ -21,6 +21,8 @@ const volatile u64	nr_llcs;	/* number of LLC domains */
 const volatile u64	__nr_cpu_ids;	/* maximum CPU IDs */
 volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
+const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT is active */
+
 /*
  * Options
  */
@@ -287,4 +289,25 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 	r = bpf_get_prandom_u32() % y;
 	return r < x;
 }
+/*
+ * We define the primary cpu in the physical core as the lowest logical cpu id.
+ */
+u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
+	const volatile u32 *sibling;
 
+	if (!is_smt_active)
+		return true;
+
+	sibling = MEMBER_VPTR(cpu_sibling, [cpu]);
+	if (!sibling) {
+		debugln("Infeasible CPU id: %d", cpu);
+		return true;
+	}
+
+	return ((cpu < *sibling) ? cpu : *sibling);
+}
+
+u32 cpu_to_dsq(u32 cpu)
+{
+	return (get_primary_cpu(cpu)) | LAVD_DSQ_TYPE_CPU << LAVD_DSQ_TYPE_SHFT;
+}
