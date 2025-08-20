@@ -78,7 +78,7 @@ static __u64 chunk_find_empty(sdt_desc_t *desc)
 	__u64 freeslots;
 	__u64 i;
 
-	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
+	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S && can_loop; i++) {
 		freeslots = ~desc->allocated[i];
 		if (freeslots == (__u64)0)
 			continue;
