@@ -317,27 +317,3 @@ macro_rules! init_skel {
         }
     };
 }
-
-pub mod bpf_srcs {
-
-    pub fn intf_h() -> &'static [u8] {
-        const INTF_H: &[u8] =
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/intf.h"));
-
-        INTF_H
-    }
-
-    pub fn main_bpf_c() -> &'static [u8] {
-        const MAIN_BPF_C: &[u8] =
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/main.bpf.c"));
-
-        MAIN_BPF_C
-    }
-
-    pub fn types_h() -> &'static [u8] {
-        const TYPES_H: &[u8] =
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/types.h"));
-
-        TYPES_H
-    }
-}
