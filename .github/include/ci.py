@@ -227,7 +227,11 @@ async def run_build():
     """Build all targets."""
     print("Running build...", flush=True)
 
+    print("Building C schedulers...", flush=True)
+    await run_command(["make", "all"], no_capture=True)
+    print("Building Rust schedulers...", flush=True)
     await run_command(["cargo", "build", "--all-targets", "--locked"], no_capture=True)
+
     print("✓ Build completed successfully", flush=True)
 
 

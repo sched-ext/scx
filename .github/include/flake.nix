@@ -94,6 +94,7 @@
               buildInputs = with pkgs; [
                 bash
                 binutils
+                bpftools
                 clang
                 coreutils
                 elfutils
@@ -102,6 +103,7 @@
                 glibc
                 gnumake
                 jq
+                libbpf-git
                 libseccomp
                 pkg-config
                 protobuf
@@ -170,6 +172,7 @@
                 bash
                 binutils
                 black
+                bpftools
                 clang
                 coreutils
                 gcc
@@ -179,6 +182,7 @@
                 gnused
                 isort
                 jq
+                libbpf-git
                 libseccomp.lib
                 llvmPackages.libclang
                 llvmPackages.libllvm

@@ -38,7 +38,7 @@ $ sudo reboot
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential meson cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev
+$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev
 ```
 
 #### Build the scx schedulers from source
@@ -46,14 +46,15 @@ $ sudo apt install -y build-essential meson cmake cargo rustc clang llvm pkg-con
 ```
 $ git clone https://github.com/sched-ext/scx.git
 $ cd scx
-$ meson setup build
-$ meson compile -C build
+$ make all                    # Build C schedulers
+$ cargo build --release       # Build Rust schedulers
 ```
 
 #### Install the scx schedulers from source
 
 ```
-$ meson install -C build
+$ make install INSTALL_DIR=~/bin                                        # Install C schedulers
+$ ls -d scheds/rust/scx_* | xargs -I{} cargo install --path {}          # Install Rust schedulers
 ```
 
 ## Arch Linux
@@ -67,7 +68,7 @@ sudo pacman -S scx-scheds
 In addition to the packages from the previous step, install the following.
 
 ```
-$ sudo pacman -Sy meson cargo bpf pahole
+$ sudo pacman -Sy cargo bpf pahole
 ```
 
 ## Gentoo Linux
