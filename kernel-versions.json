@@ -22,14 +22,16 @@
     "lastModified": 1755403529,
     "narHash": "sha256-erVU8SHoCxsDk3OuaS5TzWNvL71k1aN7k6vECTGmAgY=",
     "kernelVersion": "6.12.42",
-    "patches": ["stable-6.12-sched_ext-idle-init.patch"]
+    "patches": [
+      "stable-6.12-sched_ext-idle-init.patch"
+    ]
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "7eb40d6ea67dbc1178c1fd964e8a76de2e1a3e7c",
-    "lastModified": 1755403480,
-    "narHash": "sha256-hzCE3F176xUuxZANrvUv3ECGq/w6nE1ZS4s7yR6F8ow=",
-    "kernelVersion": "6.15.10"
+    "commitHash": "5c40cd7db64a2949f268d7467b9be551a565d14b",
+    "lastModified": 1755748163,
+    "narHash": "sha256-O5uOLPTmMKuXkjZGFZ5VufmpYPGl0pOditfBoM9aGM8=",
+    "kernelVersion": "6.16.2"
   }
 }
