@@ -70,7 +70,10 @@ fn cmd_start(
         }
     }
 
-    println!("{}", format_scheduler_message("started", &sched, Some(&mode), args.as_ref()));
+    println!(
+        "{}",
+        format_scheduler_message("started", &sched, Some(&mode), args.as_ref())
+    );
     Ok(())
 }
 
@@ -91,7 +94,8 @@ fn cmd_switch(
 
     let mode = match mode_name {
         Some(mode) => mode,
-        None => scx_loader.scheduler_mode()
+        None => scx_loader
+            .scheduler_mode()
             .context("Failed to get current scheduler mode")?,
     };
 
@@ -104,7 +108,10 @@ fn cmd_switch(
         }
     }
 
-    println!("{}", format_scheduler_message("switched to", &sched, Some(&mode), args.as_ref()));
+    println!(
+        "{}",
+        format_scheduler_message("switched to", &sched, Some(&mode), args.as_ref())
+    );
     Ok(())
 }
 
@@ -145,9 +152,10 @@ const SCHED_PREFIX: &str = "scx_";
 
 fn check_scheduler_state(
     scx_loader: &LoaderClientProxyBlocking,
-    expecting_running: bool
+    expecting_running: bool,
 ) -> anyhow::Result<String> {
-    let current_scheduler = scx_loader.current_scheduler()
+    let current_scheduler = scx_loader
+        .current_scheduler()
         .context("Failed to get current scheduler status")?;
 
     let is_running = current_scheduler != "unknown";
@@ -181,7 +189,7 @@ fn format_scheduler_message(
     action: &str,
     sched: &SupportedSched,
     mode: Option<&SchedMode>,
-    args: Option<&Vec<String>>
+    args: Option<&Vec<String>>,
 ) -> String {
     match args {
         Some(args) => format!("{} {sched:?} with arguments \"{}\"", action, args.join(" ")),
@@ -201,13 +209,18 @@ fn ensure_scx_prefix(input: &str) -> String {
 }
 
 fn remove_scx_prefix(input: &str) -> String {
-    input.strip_prefix(SCHED_PREFIX)
+    input
+        .strip_prefix(SCHED_PREFIX)
         .unwrap_or(input)
         .to_string()
 }
 
-fn validate_sched(scx_loader: LoaderClientProxyBlocking, sched: String) -> anyhow::Result<SupportedSched> {
-    let raw_supported_scheds = scx_loader.supported_schedulers()
+fn validate_sched(
+    scx_loader: LoaderClientProxyBlocking,
+    sched: String,
+) -> anyhow::Result<SupportedSched> {
+    let raw_supported_scheds = scx_loader
+        .supported_schedulers()
         .context("Failed to get supported schedulers list")?;
     let supported_scheds: Vec<String> = raw_supported_scheds
         .iter()
