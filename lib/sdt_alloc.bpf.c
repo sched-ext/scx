@@ -999,7 +999,7 @@ int header_set_order(scx_buddy_chunk_t *chunk, u64 offset, u8 order)
 
 	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
 		bpf_printk("setting order of invalid offset");
-		return EINVAL;
+		return -EINVAL;
 	}
 
 	if (offset & 0x1)
