@@ -3031,6 +3031,9 @@ impl<'a> App<'a> {
 
     /// Renders the perf top view with symbolized samples.
     fn render_perf_top(&mut self, frame: &mut Frame) -> Result<()> {
+        // Process async symbolization responses to update symbol names
+        self.symbol_data.process_async_responses();
+
         let area = frame.area();
 
         // Split the area into left (table) and right (details) sections
@@ -5100,6 +5103,9 @@ impl<'a> App<'a> {
     pub fn on_perf_sample(&mut self, action: &crate::PerfSampleAction) {
         // Only process perf samples when in PerfTop state
         if self.state == AppState::PerfTop {
+            // Process any pending async symbolization responses first
+            self.symbol_data.process_async_responses();
+
             // Get layer ID from BPF sample (negative if not present)
             let layer_id = if action.layer_id >= 0 {
                 Some(action.layer_id)
