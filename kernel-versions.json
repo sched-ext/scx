@@ -10,9 +10,9 @@
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
     "branch": "master",
-    "commitHash": "bf7a6a67050f5d59a674ecc3ecd06d6b09cfec49",
-    "lastModified": 1755661774,
-    "narHash": "sha256-X6djtkG/WrGV5cH1G8yBQyy5ghYGAtCO11vT1BwINnU=",
+    "commitHash": "78e097fbca719ce3dbca8f81a6c339a8e0e41d1c",
+    "lastModified": 1755748166,
+    "narHash": "sha256-I1not1izsPZZPROxO0dB5n3d0r3y8zBkWie1wu8XB9Q=",
     "kernelVersion": "6.17.0-rc1"
   },
   "stable/6_12": {
@@ -22,7 +22,9 @@
     "lastModified": 1755403529,
     "narHash": "sha256-erVU8SHoCxsDk3OuaS5TzWNvL71k1aN7k6vECTGmAgY=",
     "kernelVersion": "6.12.42",
-    "patches": ["stable-6.12-sched_ext-idle-init.patch"]
+    "patches": [
+      "stable-6.12-sched_ext-idle-init.patch"
+    ]
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
