@@ -96,6 +96,9 @@ generate_vmlinux_for_arch() {
         echo CONFIG_DEBUG_INFO_DWARF4=y >>.config
         echo CONFIG_BPF_SYSCALL=y >>.config
         echo CONFIG_DEBUG_INFO_BTF=y >>.config
+        echo CONFIG_GROUP_SCHED_BANDWIDTH=y >> .config
+        echo CONFIG_GROUP_SCHED_WEIGHT=y >> .config
+        echo CONFIG_CFS_BANDWIDTH=y >> .config
         echo CONFIG_BPF_JIT=y >>.config
         echo CONFIG_SCHED_CLASS_EXT=y >>.config
         echo CONFIG_CGROUP_SCHED=y >>.config
