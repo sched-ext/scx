@@ -550,7 +550,10 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 
-		dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
+		if (per_cpu_dsq)
+			dsq_id = cpu_to_dsq(cpu_id);
+		else
+			dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
