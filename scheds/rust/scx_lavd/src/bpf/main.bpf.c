@@ -550,7 +550,10 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 
-		dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
+		if (per_cpu_dsq)
+			dsq_id = cpu_to_dsq(cpu_id);
+		else
+			dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
@@ -1723,6 +1726,9 @@ static int init_per_cpu_dsqs(void)
 			scx_bpf_error("Failed to lookup cpdom_ctx for %hhu", cpuc->cpdom_id);
 			return -ESRCH;
 		}
+
+		if (is_smt_active && (cpu != get_primary_cpu(cpu)))
+			continue;
 
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->numa_id);
 		if (err) {

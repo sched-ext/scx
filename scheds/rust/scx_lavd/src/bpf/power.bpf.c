@@ -20,7 +20,6 @@ bool			have_turbo_core;
 bool			have_little_core;
 const volatile bool	is_smt_active;
 
-
 /*
  * CPU properties
  */

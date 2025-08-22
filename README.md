@@ -110,23 +110,19 @@ scx
 
 ## Build & Install
 
-`meson` is the main build system but each `Rust` sub-project is its own
-self-contained cargo project and can be built and published separately. The
-following are the dependencies and version requirements.
+This repository provides two build systems:
 
-**Note**: Many distros only have earlier versions of `meson`, in that case just [clone the meson
-repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
-`meson.py` e.g. `/path/to/meson/repo/meson.py compile -C build`. Alternatively, use `pip` e.g.
-`pip install meson` or `pip install meson --break-system-packages` (if needed).
+- **C schedulers**: Use `make`
+- **Rust schedulers**: Use `cargo`
 
-- `meson`: >=1.2, build scripts under `meson-scripts/` use `bash` and
-  standard utilities including `awk`.
+**Dependencies:**
 - `clang`: >=16 required, >=17 recommended
-- `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
-  new in 1.3). It's preferred to link statically against the source from the libbpf git repo, which is cloned during setup.
+- `libbpf`: >=1.2.2 required, >=1.3 recommended
+- `bpftool`: Usually available in `linux-tools-common` or similar packages
+- `libelf`, `libz`, `libzstd`: For linking against libbpf
+- `pkg-config`: For finding system libraries
 - `Rust` toolchain: >=1.82
-- `libelf`, `libz`, `libzstd` if linking against static `libbpf.a`
-- `bpftool` By default this is cloned and built as part of the default build process. Alternatively it's usually available in `linux-tools-common`.
+
 
 The kernel has to be built with the following configuration:
 
@@ -141,219 +137,61 @@ The kernel has to be built with the following configuration:
 The [`scx/kernel.config`](./kernel.config) file includes all required and other recommended options for using `sched_ext`.
 You can append its contents to your kernel `.config` file to enable the necessary features.
 
-### Setting Up and Building
+### Building and Installing
 
-`meson` always uses a separate build directory. Running the following
-commands in the root of the tree builds and installs all schedulers under
-`~/bin`.
-
-#### Static linking against libbpf (preferred)
+#### C Schedulers
 
 ```shell
 $ cd $SCX
-$ meson setup build --prefix ~
-$ meson compile -C build
-$ meson install -C build
+$ make all                          # Build all C schedulers
+$ make install INSTALL_DIR=~/bin    # Install to custom directory
 ```
 
-Notes: `meson setup` will also clone both libbpf and bpftool repos and `meson compile` will build them both.
-
-Make sure you have dependencies installed that allow you to compile from source!
-
-##### Ubuntu/Debian
-
-```shell
-apt install build-essential libssl-dev llvm lld libelf-dev meson cargo rustc clang llvm cmake pkg-config protobuf-compiler
-```
-
-##### Arch Linux
-
-```shell
-pacman -S base-devel
-```
-
-### Static linking against system libbpf
-
-Note, depending on your system configuration `libbpf_a` and `libbpf_h` may be
-in different directories. The system libbpf version needs to match the minimum
-libbpf version for scx.
+#### Rust Schedulers
 
 ```shell
 $ cd $SCX
-$ meson setup build --prefix ~ -D libbpf_a=/usr/lib64/libbpf.a -D libbpf_h=/usr/include/bpf/
-$ meson compile -C build
-$ meson install -C build
+$ cargo build --release                 # Build all Rust schedulers
+$ cargo build --release -p scx_rusty    # Build specific scheduler
 ```
 
-#### Dynamic linking against libbpf
+Rust schedulers are also published on `crates.io`:
 
 ```shell
-$ cd $SCX
-$ meson setup build --prefix ~ -D libbpf_a=disabled
-$ meson compile -C build
-$ meson install -C build
+$ cargo install scx_rusty
 ```
 
-#### Using a different bpftool
+### Binary Locations
 
-This will check the system for an installed bpftool
+- **C schedulers**: `build/scheds/c/scx_simple`
+- **Rust schedulers**: `target/release/scx_rusty`
 
+### Environment Variables
+
+Both `make` and `cargo` support these environment variables for BPF compilation:
+
+- `BPF_CLANG`: The clang command to use. (Default: `clang`)
+- `BPF_CFLAGS`: Override all compiler flags for BPF compilation
+- `BPF_BASE_CFLAGS`: Override base compiler flags (non-include)
+- `BPF_EXTRA_CFLAGS_PRE_INCL`: Extra flags before include paths
+- `BPF_EXTRA_CFLAGS_POST_INCL`: Extra flags after include paths
+
+C schedulers only:
+- `BPFTOOL`: The bpftool command to use. (Default: `bpftool`)
+- `CC`: The C compiler to use. (Default: `cc`)
+
+**Examples:**
 ```shell
-$ meson setup build --prefix ~ -D bpftool=disabled
+# Use specific clang version for C schedulers
+$ BPF_CLANG=clang-17 make all
+
+# Use specific clang version for Rust schedulers  
+$ BPF_CLANG=clang-17 cargo build --release
+
+# Use clang for C compilation and system bpftool
+$ CC=clang BPFTOOL=/usr/bin/bpftool make all
 ```
 
-Using a custom built bpftool
-
-```shell
-$ meson setup build --prefix ~ -D bpftool=/path/to/bpftool
-```
-
-Note that `meson compile` step is not strictly necessary as `install`
-implies `compile`. The above also will build debug binaries with
-optimizations turned off, which is useful for development but they aren't
-optimized and big. For actual use you want to build release binaries.
-`meson` uses `-D` argument to specify build options. The configuration
-options can be specified at `setup` time but can also be changed afterwards
-and `meson` will do the right thing. To switch to release builds, run the
-following in the build directory and then compile and install again.
-
-```shell
-$ meson configure -Dbuildtype=release
-```
-
-Running `meson configure` without any argument shows all current build
-options. For more information on `meson` arguments and built-in options,
-please refer to `meson --help` and its
-[documentation](https://mesonbuild.com/Builtin-options.html).
-
-### Building Specific Schedulers and Binary Locations
-
-If you just want to build a subset of schedulers, you can specify the
-scheduler names as arguments to `meson compile`. For example, if we just
-want to build the simple example scheduler
-`scheds/c/scx_simple` and the `Rust` userspace scheduler
-`scheds/rust/scx_rusty`:
-
-```shell
-$ cd $SCX
-$ meson setup build -Dbuildtype=release
-$ meson compile -C build scx_simple scx_rusty
-```
-
-:warning: **If your system has `sccache` installed**: `meson` automatically
-uses `sccache` if available. However, `sccache` fails in one of the build
-steps. If you encounter this issue, disable `sccache` by specifying `CC`
-directly - `$ CC=clang meson setup build -Dbuildtype=release`.
-
-You can also specify `-v` if you want to see the commands being used:
-
-```shell
-$ meson compile -C build -v scx_pair
-```
-
-For `C` userspace schedulers such as the ones under `scheds/c`,
-the built binaries are located in the same directory under the build root.
-For example, here, the `scx_simple` binary can be found at
-`$SCX/build/scheds/c/scx_simple`.
-
-For `Rust` userspace schedulers such as the ones under `scheds/rust`, the
-`scx_rusty` binary can be found at `$SCX/build/scheds/rust/release`.
-
-### SCX specific build options
-
-While the default options should work in most cases, it may be desirable to
-override some of the toolchains and dependencies - e.g. to directly use
-`libbpf` built from the kernel source tree. The following `meson` build
-options can be used in such cases.
-
-- `bpf_clang`: `clang` to use when compiling `.bpf.c`
-- `bpftool`: `bpftool` to use when generating `.bpf.skel.h`. Set this to "disabled" to check the system for an already installed bpftool
-- `libbpf_a`: Static `libbpf.a` to use. Set this to "disabled" to link libbpf dynamically
-- `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
-- `cargo`: `cargo` to use when building `Rust` sub-projects
-- `cargo_home`: `CARGO_HOME` env to use when invoking `cargo`
-- `offline`: Compilation step should not access the internet
-- `enable_rust`: Enable the build of `Rust` sub-projects
-
-For example, let's say you want to use `bpftool` and `libbpf` shipped in the
-kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel
-tree first, set up SCX build with the related options and then build &
-install.
-
-```shell
-$ cd $KERNEL
-$ make -C tools/bpf/bpftool
-$ cd $SCX
-$ BPFTOOL=$KERNEL/tools/bpf/bpftool
-$ meson setup build -Dbuildtype=release -Dprefix=~/bin \
-    -Dbpftool=$BPFTOOL/bpftool \
-    -Dlibbpf_a=$BPFTOOL/libbpf/libbpf.a \
-    -Dlibbpf_h=$BPFTOOL/libbpf/include
-$ meson install -C build
-```
-
-Note that we use `libbpf` which was produced as a part of `bpftool` build
-process rather than building `libbpf` directly. This is necessary because
-`libbpf` header files need to be installed for them to be in the expected
-relative locations.
-
-### Offline Compilation
-
-`Rust` builds automatically download dependencies from `crates.io`; however,
-some build environments might not allow internet access requiring all
-dependencies to be available offline. The `fetch` target and `offline`
-option are provided for such cases.
-
-The following downloads all `Rust` dependencies into `$HOME/cargo-deps`.
-
-```shell
-$ cd $SCX
-$ meson setup build -Dcargo_home=$HOME/cargo-deps
-$ meson compile -C build fetch
-```
-
-The following builds the schedulers without accessing the internet. The
-`build` directory doesn't have to be the same one. The only requirement is
-that the `cargo_home` option points to a directory which contains the
-content generated from the previous step.
-
-```shell
-$ cd $SCX
-$ meson setup build -Dcargo_home=$HOME/cargo-deps -Doffline=true -Dbuildtype=release
-$ meson compile -C build
-```
-
-### Working with Rust Sub-projects
-
-Each `Rust` sub-project is its own self-contained cargo project. When building
-as a part of this repository, `meson` invokes `cargo` with the appropriate
-options and environment variables to sync the build environment. When
-building separately by running `cargo build` directly in a sub-project
-directory, it will automatically figure out build environment. Please take a
-look at the
-[`scx_utils::BpfBuilder`](https://docs.rs/scx_utils/latest/scx_utils/struct.BpfBuilder.html)
-documentation for details.
-
-For example, the following builds and runs the `scx_rusty` scheduler:
-
-```shell
-$ cd $SCX/scheds/rust/scx_rusty
-$ cargo build --release
-$ cargo run --release
-```
-
-Here too, the `build` step is not strictly necessary as it's implied by
-`run`.
-
-Note that `Rust` userspace schedulers are published on `crates.io` and can be
-built and installed without cloning this repository as long as the necessary
-toolchains are available. Simply run:
-
-```shell
-$ cargo install --locked scx_rusty
-```
-
-and `scx_rusty` will be built and installed as `~/.cargo/bin/scx_rusty`.
 
 ## Checking scx_stats
 

@@ -2,6 +2,7 @@ libbpf/
 *.gitignore
 PKGBUILD
 target
+build/
 *.swp
 .cache/
 .vscode/

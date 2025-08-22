@@ -20,7 +20,6 @@
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
 #define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
-#define cpu_to_dsq(cpu_id)		((cpu_id) | LAVD_DSQ_TYPE_CPU << LAVD_DSQ_TYPE_SHFT)
 #define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
@@ -292,6 +291,7 @@ bool have_pending_tasks(struct cpu_ctx *cpuc);
 bool can_boost_slice(void);
 bool is_lat_cri(struct task_ctx *taskc);
 u16 get_nice_prio(struct task_struct *p);
+u32 cpu_to_dsq(u32 cpu);
 
 void set_task_flag(struct task_ctx *taskc, u64 flag);
 void reset_task_flag(struct task_ctx *taskc, u64 flag);

@@ -436,11 +436,13 @@ impl<'a> Scheduler<'a> {
     fn init_cpus(skel: &mut OpenBpfSkel, order: &CpuOrder) {
         debug!("{:#?}", order);
 
-        // Initialize CPU capacity.
+        // Initialize CPU capacity and sibling
         for cpu in order.cpuids.iter() {
             skel.maps.rodata_data.as_mut().unwrap().cpu_capacity[cpu.cpu_adx] = cpu.cpu_cap as u16;
             skel.maps.rodata_data.as_mut().unwrap().cpu_big[cpu.cpu_adx] = cpu.big_core as u8;
             skel.maps.rodata_data.as_mut().unwrap().cpu_turbo[cpu.cpu_adx] = cpu.turbo_core as u8;
+            skel.maps.rodata_data.as_mut().unwrap().cpu_sibling[cpu.cpu_adx] =
+                cpu.cpu_sibling as u32;
         }
 
         // Initialize performance vs. CPU order table.
