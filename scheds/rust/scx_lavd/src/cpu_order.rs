@@ -47,6 +47,7 @@ pub struct CpuId {
     pub cpu_cap: usize,
     pub big_core: bool,
     pub turbo_core: bool,
+    pub cpu_sibling: usize,
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
@@ -155,6 +156,7 @@ impl CpuOrderCtx {
     /// Build a CPU preference order based on its optimization target
     fn build_topo_order(&self, prefer_powersave: bool) -> Option<Vec<CpuId>> {
         let mut cpu_ids = Vec::new();
+        let smt_siblings = self.topo.sibling_cpus();
 
         // Build a vector of cpu ids.
         for (&numa_adx, node) in self.topo.nodes.iter() {
@@ -176,6 +178,7 @@ impl CpuOrderCtx {
                             cpu_cap: cpu.cpu_capacity,
                             big_core: cpu.core_type != CoreType::Little,
                             turbo_core: cpu.core_type == CoreType::Big { turbo: true },
+                            cpu_sibling: smt_siblings[cpu_adx] as usize,
                         };
                         cpu_ids.push(RefCell::new(cpu_id));
                     }

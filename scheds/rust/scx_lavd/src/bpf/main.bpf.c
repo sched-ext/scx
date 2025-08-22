@@ -1727,6 +1727,9 @@ static int init_per_cpu_dsqs(void)
 			return -ESRCH;
 		}
 
+		if (is_smt_active && (cpu != get_primary_cpu(cpu)))
+			continue;
+
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), cpdomc->numa_id);
 		if (err) {
 			scx_bpf_error("Failed to create a DSQ for cpu %d on NUMA node %d",
