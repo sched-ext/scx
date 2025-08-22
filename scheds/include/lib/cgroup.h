@@ -16,10 +16,13 @@ struct scx_cgroup_bw_config {
 };
 
 /**
- * scx_cgroup_bw_lib_init - 
- * @config:
+ * scx_cgroup_bw_lib_init - Initialize the library with a configuration.
+ * @config: tunnables, see the struct definition.
  *
- * Returns
+ * It should be called for the library initialization before calling any
+ * other API.
+ *
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config);
 
