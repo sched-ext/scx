@@ -46,16 +46,16 @@ __weak int arrcpy(u64 __arg_arena __arena *dst, u64 __arg_arena __arena *src, si
 static bt_node *btnode_alloc(btree_t *btree, bt_node __arg_arena *parent, u64 flags)
 {
 	bt_node *btn;
-	bt_node *freelist;
 
 	do  {
-		freelist = btree->freelist;
-		if (!freelist)
+		btn = btree->freelist;
+		if (!btn)
 			break;
 
-	} while (cmpxchg(&btree->freelist, freelist, freelist->parent) && can_loop);
+	} while (cmpxchg(&btree->freelist, btn, btn->parent) != btn && can_loop);
 
-	btn = scx_static_alloc(sizeof(*btn), 1);
+	if (!btn)
+		btn = scx_static_alloc(sizeof(*btn), 1);
 	if (!btn)
 		return NULL;
 
@@ -74,7 +74,7 @@ static inline void btnode_free(btree_t *btree, bt_node *btn)
 	do {
 		old = btree->freelist;
 		btn->parent = old;
-	} while (cmpxchg(&btree->freelist, old, btn) && can_loop);
+	} while (cmpxchg(&btree->freelist, old, btn) != old && can_loop);
 }
 
 static inline bool btnode_isroot(bt_node *btn)
