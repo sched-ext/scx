@@ -7034,14 +7034,52 @@ impl<'a> App<'a> {
 
         self.update_basic_process_data()?;
 
-        if self.filtering() {
-            self.filter_events();
+        for node in self.topo.nodes.keys() {
+            let node_data = self
+                .node_data
+                .get_mut(node)
+                .expect("NodeData should have been present");
+            node_data.add_event_data(self.active_event.event_name(), 0);
         }
+
+        for llc in self.topo.all_llcs.keys() {
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
+            llc_data.add_event_data(self.active_event.event_name(), 0);
+        }
+
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = event.value(true)?;
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
+            cpu_data.add_event_data(event.event_name(), val);
+            let llc_data = self
+                .llc_data
+                .get_mut(&cpu_data.llc)
+                .expect("LlcData should have been present");
+            llc_data.add_cpu_event_data(event.event_name(), val);
+            let node_data = self
+                .node_data
+                .get_mut(&cpu_data.node)
+                .expect("NodeData should have been present");
+            node_data.add_cpu_event_data(event.event_name(), val);
+        }
+
+        // CPU frequency data if enabled
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
         }
         if self.collect_uncore_freq {
             self.record_uncore_freq()?;
+        }
+
+        // Only filter if actively filtering
+        if self.filtering() {
+            self.filter_events();
         }
 
         Ok(())
