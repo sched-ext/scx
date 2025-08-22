@@ -164,8 +164,8 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
 fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
     let mut buf = vec![0u8; 4096];
     let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
+    let mut started = false;
 
-    println!("===BEGIN STREAM {}===", name);
     loop {
         let ret = unsafe {
             libbpf_sys::bpf_prog_stream_read(
@@ -177,8 +177,13 @@ fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
             )
         };
         if ret < 0 {
-            println!("Error {} reading stream {}", ret, stream_id);
-            break;
+            eprintln!("STREAM {} UNAVAILABLE (REQUIRES >= v6.17)", name);
+            return;
+        }
+
+        if !started {
+            println!("===BEGIN STREAM {}===", name);
+            started = true;
         }
 
         if ret == 0 {
@@ -224,10 +229,12 @@ fn main() {
 
     let output = skel.progs.arena_selftest.test_run(input).unwrap();
     if output.return_value != 0 {
-        println!(
+        eprintln!(
             "Selftest returned {}, please check bpf tracelog for more details.",
             output.return_value as i32
         );
+    } else {
+        println!("Selftest successful.");
     }
 
     print_stream(&mut skel, BPF_STDOUT);
