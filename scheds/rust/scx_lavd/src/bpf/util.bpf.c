@@ -296,12 +296,12 @@ u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
 	const volatile u32 *sibling;
 
 	if (!is_smt_active)
-		return true;
+		return cpu;
 
 	sibling = MEMBER_VPTR(cpu_sibling, [cpu]);
 	if (!sibling) {
 		debugln("Infeasible CPU id: %d", cpu);
-		return true;
+		return cpu;
 	}
 
 	return ((cpu < *sibling) ? cpu : *sibling);
