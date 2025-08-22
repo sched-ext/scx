@@ -5257,16 +5257,21 @@ impl<'a> App<'a> {
                             .threads
                             .iter()
                             .filter(|(_, thread_data)| {
-                                search::contains_spread(
-                                    &thread_data.thread_name,
-                                    &self.event_input_buffer,
-                                )
-                                .is_some()
-                                    || search::contains_spread(
-                                        &thread_data.tid.to_string(),
+                                // When event_input_buffer is empty, include all threads
+                                if self.event_input_buffer.is_empty() {
+                                    true
+                                } else {
+                                    search::contains_spread(
+                                        &thread_data.thread_name,
                                         &self.event_input_buffer,
                                     )
                                     .is_some()
+                                        || search::contains_spread(
+                                            &thread_data.tid.to_string(),
+                                            &self.event_input_buffer,
+                                        )
+                                        .is_some()
+                                }
                             })
                             .map(|(tid, _)| FilterItem::Int(*tid))
                             .collect()
@@ -5274,22 +5279,30 @@ impl<'a> App<'a> {
                         vec![]
                     }
                 } else {
-                    self.proc_data
-                        .iter()
-                        .filter(|(_, proc_data)| {
-                            search::contains_spread(
-                                &proc_data.process_name,
-                                &self.event_input_buffer,
-                            )
-                            .is_some()
-                                || search::contains_spread(
-                                    &proc_data.tgid.to_string(),
+                    // When event_input_buffer is empty, include all processes
+                    if self.event_input_buffer.is_empty() {
+                        self.proc_data
+                            .keys()
+                            .map(|tgid| FilterItem::Int(*tgid))
+                            .collect()
+                    } else {
+                        self.proc_data
+                            .iter()
+                            .filter(|(_, proc_data)| {
+                                search::contains_spread(
+                                    &proc_data.process_name,
                                     &self.event_input_buffer,
                                 )
                                 .is_some()
-                        })
-                        .map(|(tgid, _)| FilterItem::Int(*tgid))
-                        .collect()
+                                    || search::contains_spread(
+                                        &proc_data.tgid.to_string(),
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                            })
+                            .map(|(tgid, _)| FilterItem::Int(*tgid))
+                            .collect()
+                    }
                 }
             }
             _ => vec![],
@@ -6965,23 +6978,19 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Updates basic process data for overview displays (lighter update)
-    fn update_basic_process_data(&mut self) -> Result<()> {
-        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
-        let mut to_remove = vec![];
+    /// Discovers new processes that have started since initialization
+    fn discover_new_processes(&mut self) -> Result<()> {
+        // Get all current processes
+        let all_procs = procfs::process::all_processes()?;
 
-        for (count, (&i, proc_data)) in self.proc_data.iter_mut().enumerate() {
-            if count >= 50 {
-                // Limit to 50 processes for basic view
-                break;
+        // Add any new processes that aren't already in our proc_data
+        for proc in all_procs.flatten() {
+            let tgid = proc.pid();
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.proc_data.entry(tgid) {
+                if let Ok(proc_data) = ProcData::from_tgid(tgid, 10) {
+                    entry.insert(proc_data);
+                }
             }
-            if proc_data.update(system_util).is_err() {
-                to_remove.push(i);
-            }
-        }
-
-        for key in to_remove {
-            self.proc_data.remove(&key);
         }
 
         Ok(())
@@ -6989,11 +6998,15 @@ impl<'a> App<'a> {
 
     /// Updates all process data for detailed process view
     fn update_all_process_data(&mut self) -> Result<()> {
+        // First discover any new processes
+        self.discover_new_processes()?;
+
         let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let num_cpus = self.topo.all_cpus.len();
         let mut to_remove = vec![];
 
         for (&i, proc_data) in self.proc_data.iter_mut() {
-            if proc_data.update(system_util).is_err() {
+            if proc_data.update(system_util, num_cpus).is_err() {
                 to_remove.push(i);
             }
         }
@@ -7032,7 +7045,12 @@ impl<'a> App<'a> {
             _ => {}
         }
 
-        self.update_basic_process_data()?;
+        self.update_all_process_data()?;
+        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let num_cpus = self.topo.all_cpus.len();
+        if let Some(proc_data) = self.selected_proc_data() {
+            proc_data.update_threads(system_util, num_cpus);
+        }
 
         for node in self.topo.nodes.keys() {
             let node_data = self
@@ -7069,7 +7087,6 @@ impl<'a> App<'a> {
             node_data.add_cpu_event_data(event.event_name(), val);
         }
 
-        // CPU frequency data if enabled
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
         }
@@ -7077,10 +7094,9 @@ impl<'a> App<'a> {
             self.record_uncore_freq()?;
         }
 
-        // Only filter if actively filtering
-        if self.filtering() {
-            self.filter_events();
-        }
+        // Always call filter_events to update the filtered state with all processes
+        // even when not actively filtering (when filtering is false, it includes all processes)
+        self.filter_events();
 
         Ok(())
     }
@@ -7092,8 +7108,9 @@ impl<'a> App<'a> {
 
         if self.in_thread_view {
             let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+            let num_cpus = self.topo.all_cpus.len();
             if let Some(proc_data) = self.selected_proc_data() {
-                proc_data.update_threads(system_util);
+                proc_data.update_threads(system_util, num_cpus);
             }
         }
 

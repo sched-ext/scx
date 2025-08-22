@@ -67,26 +67,27 @@ impl ThreadData {
         Self::new(thread, max_data_size)
     }
 
-    pub fn update(&mut self, system_util: u64) -> Result<()> {
+    pub fn update(&mut self, system_util: u64, num_cpus: usize) -> Result<()> {
         let process = Process::new(self.tgid)?;
         let thread = process.task_from_tid(self.tid)?;
         let stats = thread.stat()?;
 
         self.prev_cpu_time = std::mem::take(&mut self.current_cpu_time);
         self.current_cpu_time = stats.stime + stats.utime;
-        self.set_cpu_util(system_util);
+        self.set_cpu_util(system_util, num_cpus);
         self.cpu = stats.processor.expect("thread_stats should have processor");
         self.state = stats.state()?;
 
         Ok(())
     }
 
-    fn set_cpu_util(&mut self, system_util: u64) {
-        self.cpu_util_perc = if system_util == 0 {
+    fn set_cpu_util(&mut self, system_util: u64, num_cpus: usize) {
+        self.cpu_util_perc = if system_util == 0 || num_cpus == 0 {
             0.0
         } else {
             let delta = self.current_cpu_time.saturating_sub(self.prev_cpu_time);
-            (delta as f64 / system_util as f64) * 100.0
+            // system_util is total across all CPUs, so we multiply by num_cpus to get proper percentage
+            (delta as f64 / system_util as f64) * 100.0 * num_cpus as f64
         };
     }
 
@@ -172,8 +173,8 @@ mod tests {
             let _ = 2 + 2;
         }
 
-        // Update with a non-zero system util
-        thread_data.update(100).unwrap();
+        // Update with a non-zero system util and 4 CPUs
+        thread_data.update(100, 4).unwrap();
 
         // Verify update effects
         assert_eq!(thread_data.prev_cpu_time, initial_cpu_time);
@@ -192,7 +193,7 @@ mod tests {
         thread_data.tid = -1;
 
         // Update should fail
-        let result = thread_data.update(100);
+        let result = thread_data.update(100, 4);
         assert!(result.is_err());
     }
 
@@ -207,17 +208,17 @@ mod tests {
         thread_data.current_cpu_time = 150;
 
         // Test with zero system_util
-        thread_data.set_cpu_util(0);
+        thread_data.set_cpu_util(0, 4);
         assert_eq!(thread_data.cpu_util_perc, 0.0);
 
-        // Test with non-zero system_util
-        thread_data.set_cpu_util(100);
-        assert_eq!(thread_data.cpu_util_perc, 50.0); // (150-100)/100 * 100 = 50%
+        // Test with non-zero system_util and 4 CPUs
+        thread_data.set_cpu_util(100, 4);
+        assert_eq!(thread_data.cpu_util_perc, 200.0); // (150-100)/100 * 100 * 4 = 200%
 
         // Test with system_util smaller than delta (should not panic)
         thread_data.prev_cpu_time = 200;
         thread_data.current_cpu_time = 150; // Less than prev (edge case)
-        thread_data.set_cpu_util(50);
+        thread_data.set_cpu_util(50, 4);
         assert_eq!(thread_data.cpu_util_perc, 0.0); // saturating_sub should make delta 0
     }
 
@@ -337,19 +338,19 @@ mod tests {
         // Test with same prev and current times
         thread_data.prev_cpu_time = 100;
         thread_data.current_cpu_time = 100;
-        thread_data.set_cpu_util(50);
+        thread_data.set_cpu_util(50, 4);
         assert_eq!(thread_data.cpu_util_perc, 0.0);
 
         // Test with very large numbers
         thread_data.prev_cpu_time = u64::MAX - 100;
         thread_data.current_cpu_time = u64::MAX;
-        thread_data.set_cpu_util(200);
-        assert_eq!(thread_data.cpu_util_perc, 50.0); // 100/200 * 100 = 50%
+        thread_data.set_cpu_util(200, 4);
+        assert_eq!(thread_data.cpu_util_perc, 200.0); // 100/200 * 100 * 4 = 200%
 
         // Test with current time less than previous (overflow scenario)
         thread_data.prev_cpu_time = 200;
         thread_data.current_cpu_time = 100;
-        thread_data.set_cpu_util(100);
+        thread_data.set_cpu_util(100, 4);
         assert_eq!(thread_data.cpu_util_perc, 0.0); // saturating_sub should handle this
     }
 }
