@@ -70,13 +70,13 @@ impl ProcData {
         Self::new(&process, max_data_size)
     }
 
-    pub fn update(&mut self, system_util: u64) -> Result<()> {
+    pub fn update(&mut self, system_util: u64, num_cpus: usize) -> Result<()> {
         let process = Process::new(self.tgid)?;
         let stats = process.stat()?;
 
         self.prev_cpu_time = std::mem::take(&mut self.current_cpu_time);
         self.current_cpu_time = stats.stime + stats.utime;
-        self.set_cpu_util(system_util);
+        self.set_cpu_util(system_util, num_cpus);
         self.num_threads = stats.num_threads;
         self.cpu = stats.processor.expect("proc_stats should have processor");
         self.state = stats.state()?;
@@ -113,11 +113,11 @@ impl ProcData {
         Ok(())
     }
 
-    pub fn update_threads(&mut self, system_active_util: u64) {
+    pub fn update_threads(&mut self, system_active_util: u64, num_cpus: usize) {
         let mut to_remove = Vec::new();
 
         for (&i, thread_data) in self.threads.iter_mut() {
-            if thread_data.update(system_active_util).is_err() {
+            if thread_data.update(system_active_util, num_cpus).is_err() {
                 to_remove.push(i);
             }
         }
@@ -127,12 +127,13 @@ impl ProcData {
         }
     }
 
-    fn set_cpu_util(&mut self, system_util: u64) {
-        self.cpu_util_perc = if system_util == 0 {
+    fn set_cpu_util(&mut self, system_util: u64, num_cpus: usize) {
+        self.cpu_util_perc = if system_util == 0 || num_cpus == 0 {
             0.0
         } else {
             let delta = self.current_cpu_time.saturating_sub(self.prev_cpu_time);
-            (delta as f64 / system_util as f64) * 100.0
+            // system_util is total across all CPUs, so we multiply by num_cpus to get proper percentage
+            (delta as f64 / system_util as f64) * 100.0 * num_cpus as f64
         };
     }
 
@@ -202,8 +203,8 @@ mod tests {
             let _ = 2 + 2;
         }
 
-        // Update with a non-zero system util
-        proc_data.update(100).unwrap();
+        // Update with a non-zero system util and 4 CPUs
+        proc_data.update(100, 4).unwrap();
 
         // Verify update effects
         assert_eq!(proc_data.prev_cpu_time, initial_cpu_time);
@@ -223,12 +224,12 @@ mod tests {
         proc_data.current_cpu_time = 150;
 
         // Test with zero system_util
-        proc_data.set_cpu_util(0);
+        proc_data.set_cpu_util(0, 4);
         assert_eq!(proc_data.cpu_util_perc, 0.0);
 
-        // Test with non-zero system_util
-        proc_data.set_cpu_util(100);
-        assert_eq!(proc_data.cpu_util_perc, 50.0); // (150-100)/100 * 100 = 50%
+        // Test with non-zero system_util and 4 CPUs
+        proc_data.set_cpu_util(100, 4);
+        assert_eq!(proc_data.cpu_util_perc, 200.0); // (150-100)/100 * 100 * 4 = 200%
     }
 
     #[test]
@@ -265,8 +266,8 @@ mod tests {
         assert!(!proc_data.threads.is_empty());
         assert!(proc_data.threads.contains_key(&current_pid));
 
-        // Test thread update
-        proc_data.update_threads(100);
+        // Test thread update with 4 CPUs
+        proc_data.update_threads(100, 4);
         // The thread count might change during the test as threads are created or destroyed
         // So we don't assert exact equality
 
