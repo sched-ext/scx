@@ -655,126 +655,22 @@ impl<'a> App<'a> {
     }
 
     /// Runs callbacks to update application state on tick.
+    /// Uses view-specific data collection to optimize performance.
     fn on_tick(&mut self) -> Result<()> {
-        // always grab updated stats
-        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
-        {
-            let mut system_guard = self.sys.lock().unwrap();
-            self.cpu_stat_tracker
-                .write()
-                .unwrap()
-                .update(&mut system_guard)?;
+        match self.state {
+            AppState::Default => self.on_tick_default(),
+            AppState::Process => self.on_tick_process(),
+            AppState::Memory => self.on_tick_memory(),
+            AppState::Network => self.on_tick_network(),
+            AppState::Llc => self.on_tick_llc(),
+            AppState::Node => self.on_tick_node(),
+            AppState::Power => self.on_tick_power(),
+            AppState::Scheduler => self.on_tick_scheduler(),
+            AppState::PerfEvent | AppState::KprobeEvent => self.on_tick_events(),
+            AppState::PerfTop => self.on_tick_perf_top(),
+            AppState::MangoApp => self.on_tick_mango_app(),
+            AppState::Help | AppState::Pause | AppState::Tracing => self.on_tick_static(),
         }
-
-        // Update memory information
-        match self.memory_view_state {
-            ComponentViewState::Default | ComponentViewState::Detail => self.mem_info.update()?,
-            _ => {}
-        }
-
-        // Update network information
-        match self.network_view_state {
-            ComponentViewState::Default | ComponentViewState::Detail => {
-                self.network_stats.update()?;
-            }
-            _ => {}
-        }
-
-        // Update power information - collect power data regularly to keep data fresh
-        self.update_power_data()?;
-
-        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
-        let mut to_remove = vec![];
-
-        for (&i, proc_data) in self.proc_data.iter_mut() {
-            if proc_data.update(system_util).is_err() {
-                to_remove.push(i);
-            }
-        }
-
-        // If we weren't able to update the stats, it is because the process is no longer alive
-        for key in to_remove {
-            self.proc_data.remove(&key);
-        }
-
-        if self.in_thread_view {
-            if let Some(proc_data) = self.selected_proc_data() {
-                proc_data.update_threads(system_util);
-            }
-        }
-
-        // Update network stats
-        if let Err(e) = self.network_stats.update() {
-            eprintln!("Failed to update network stats: {e}");
-        }
-
-        // Now that we updated the process data, we need to also update the filtered data
-        self.filter_events();
-
-        if self.state == AppState::Scheduler {
-            if self.scheduler.is_empty() {
-                self.sched_stats_raw.clear();
-            } else if let Some(stats_client_read) = self.stats_client.clone() {
-                let tx = self.action_tx.clone();
-                tokio::spawn(async move {
-                    let mut client = stats_client_read.lock().await;
-
-                    let result = client.request::<JsonValue>("stats", vec![]);
-                    let action = match result {
-                        Ok(stats) => Action::SchedStats(
-                            serde_json::to_string_pretty(&stats)
-                                .expect("Unable to parse scheduler stats JSON."),
-                        ),
-                        Err(_) => Action::ReloadStatsClient,
-                    };
-                    tx.send(action)?;
-                    Ok::<(), anyhow::Error>(())
-                });
-            };
-        };
-        // Add entry for nodes
-        for node in self.topo.nodes.keys() {
-            let node_data = self
-                .node_data
-                .get_mut(node)
-                .expect("NodeData should have been present");
-            node_data.add_event_data(self.active_event.event_name(), 0);
-        }
-        // Add entry for llcs
-        for llc in self.topo.all_llcs.keys() {
-            let llc_data = self
-                .llc_data
-                .get_mut(llc)
-                .expect("LlcData should have been present");
-            llc_data.add_event_data(self.active_event.event_name(), 0);
-        }
-
-        for (cpu, event) in &mut self.active_prof_events {
-            let val = event.value(true)?;
-            let cpu_data = self
-                .cpu_data
-                .get_mut(cpu)
-                .expect("CpuData should have been present");
-            cpu_data.add_event_data(event.event_name(), val);
-            let llc_data = self
-                .llc_data
-                .get_mut(&cpu_data.llc)
-                .expect("LlcData should have been present");
-            llc_data.add_cpu_event_data(event.event_name(), val);
-            let node_data = self
-                .node_data
-                .get_mut(&cpu_data.node)
-                .expect("NodeData should have been present");
-            node_data.add_cpu_event_data(event.event_name(), val);
-        }
-
-        if self.collect_cpu_freq {
-            self.record_cpu_freq()?;
-        }
-        if self.collect_uncore_freq {
-            self.record_uncore_freq()?;
-        }
-        Ok(())
     }
 
     /// Generates a CPU bar chart with gradient coloring based on relative value.
@@ -5361,16 +5257,21 @@ impl<'a> App<'a> {
                             .threads
                             .iter()
                             .filter(|(_, thread_data)| {
-                                search::contains_spread(
-                                    &thread_data.thread_name,
-                                    &self.event_input_buffer,
-                                )
-                                .is_some()
-                                    || search::contains_spread(
-                                        &thread_data.tid.to_string(),
+                                // When event_input_buffer is empty, include all threads
+                                if self.event_input_buffer.is_empty() {
+                                    true
+                                } else {
+                                    search::contains_spread(
+                                        &thread_data.thread_name,
                                         &self.event_input_buffer,
                                     )
                                     .is_some()
+                                        || search::contains_spread(
+                                            &thread_data.tid.to_string(),
+                                            &self.event_input_buffer,
+                                        )
+                                        .is_some()
+                                }
                             })
                             .map(|(tid, _)| FilterItem::Int(*tid))
                             .collect()
@@ -5378,22 +5279,30 @@ impl<'a> App<'a> {
                         vec![]
                     }
                 } else {
-                    self.proc_data
-                        .iter()
-                        .filter(|(_, proc_data)| {
-                            search::contains_spread(
-                                &proc_data.process_name,
-                                &self.event_input_buffer,
-                            )
-                            .is_some()
-                                || search::contains_spread(
-                                    &proc_data.tgid.to_string(),
+                    // When event_input_buffer is empty, include all processes
+                    if self.event_input_buffer.is_empty() {
+                        self.proc_data
+                            .keys()
+                            .map(|tgid| FilterItem::Int(*tgid))
+                            .collect()
+                    } else {
+                        self.proc_data
+                            .iter()
+                            .filter(|(_, proc_data)| {
+                                search::contains_spread(
+                                    &proc_data.process_name,
                                     &self.event_input_buffer,
                                 )
                                 .is_some()
-                        })
-                        .map(|(tgid, _)| FilterItem::Int(*tgid))
-                        .collect()
+                                    || search::contains_spread(
+                                        &proc_data.tgid.to_string(),
+                                        &self.event_input_buffer,
+                                    )
+                                    .is_some()
+                            })
+                            .map(|(tgid, _)| FilterItem::Int(*tgid))
+                            .collect()
+                    }
                 }
             }
             _ => vec![],
@@ -7066,6 +6975,313 @@ impl<'a> App<'a> {
         );
 
         frame.render_widget(table, area);
+        Ok(())
+    }
+
+    /// Discovers new processes that have started since initialization
+    fn discover_new_processes(&mut self) -> Result<()> {
+        // Get all current processes
+        let all_procs = procfs::process::all_processes()?;
+
+        // Add any new processes that aren't already in our proc_data
+        for proc in all_procs.flatten() {
+            let tgid = proc.pid();
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.proc_data.entry(tgid) {
+                if let Ok(proc_data) = ProcData::from_tgid(tgid, 10) {
+                    entry.insert(proc_data);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Updates all process data for detailed process view
+    fn update_all_process_data(&mut self) -> Result<()> {
+        // First discover any new processes
+        self.discover_new_processes()?;
+
+        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let num_cpus = self.topo.all_cpus.len();
+        let mut to_remove = vec![];
+
+        for (&i, proc_data) in self.proc_data.iter_mut() {
+            if proc_data.update(system_util, num_cpus).is_err() {
+                to_remove.push(i);
+            }
+        }
+
+        for key in to_remove {
+            self.proc_data.remove(&key);
+        }
+
+        Ok(())
+    }
+
+    /// Updates CPU stats - common helper for views that need it
+    fn update_cpu_stats(&mut self) -> Result<()> {
+        let mut system_guard = self.sys.lock().unwrap();
+        self.cpu_stat_tracker
+            .write()
+            .unwrap()
+            .update(&mut system_guard)?;
+        Ok(())
+    }
+
+    /// Default view: basic system overview
+    fn on_tick_default(&mut self) -> Result<()> {
+        self.update_cpu_stats()?;
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+
+        match self.memory_view_state {
+            ComponentViewState::Default | ComponentViewState::Detail => self.mem_info.update()?,
+            _ => {}
+        }
+
+        match self.network_view_state {
+            ComponentViewState::Default | ComponentViewState::Detail => {
+                self.network_stats.update()?;
+            }
+            _ => {}
+        }
+
+        self.update_all_process_data()?;
+        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let num_cpus = self.topo.all_cpus.len();
+        if let Some(proc_data) = self.selected_proc_data() {
+            proc_data.update_threads(system_util, num_cpus);
+        }
+
+        for node in self.topo.nodes.keys() {
+            let node_data = self
+                .node_data
+                .get_mut(node)
+                .expect("NodeData should have been present");
+            node_data.add_event_data(self.active_event.event_name(), 0);
+        }
+
+        for llc in self.topo.all_llcs.keys() {
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
+            llc_data.add_event_data(self.active_event.event_name(), 0);
+        }
+
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = event.value(true)?;
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
+            cpu_data.add_event_data(event.event_name(), val);
+            let llc_data = self
+                .llc_data
+                .get_mut(&cpu_data.llc)
+                .expect("LlcData should have been present");
+            llc_data.add_cpu_event_data(event.event_name(), val);
+            let node_data = self
+                .node_data
+                .get_mut(&cpu_data.node)
+                .expect("NodeData should have been present");
+            node_data.add_cpu_event_data(event.event_name(), val);
+        }
+
+        if self.collect_cpu_freq {
+            self.record_cpu_freq()?;
+        }
+        if self.collect_uncore_freq {
+            self.record_uncore_freq()?;
+        }
+
+        // Always call filter_events to update the filtered state with all processes
+        // even when not actively filtering (when filtering is false, it includes all processes)
+        self.filter_events();
+
+        Ok(())
+    }
+
+    /// Process view: focus on process/thread data
+    fn on_tick_process(&mut self) -> Result<()> {
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        self.update_all_process_data()?;
+
+        if self.in_thread_view {
+            let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+            let num_cpus = self.topo.all_cpus.len();
+            if let Some(proc_data) = self.selected_proc_data() {
+                proc_data.update_threads(system_util, num_cpus);
+            }
+        }
+
+        if self.filtering() {
+            self.filter_events();
+        }
+
+        Ok(())
+    }
+
+    /// Memory view: focus on memory stats
+    fn on_tick_memory(&mut self) -> Result<()> {
+        self.mem_info.update()?;
+        Ok(())
+    }
+
+    /// Network view: focus on network stats
+    fn on_tick_network(&mut self) -> Result<()> {
+        self.network_stats.update()?;
+        Ok(())
+    }
+
+    /// LLC view: topology and LLC-specific data
+    fn on_tick_llc(&mut self) -> Result<()> {
+        self.update_cpu_stats()?;
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+
+        for llc in self.topo.all_llcs.keys() {
+            let llc_data = self
+                .llc_data
+                .get_mut(llc)
+                .expect("LlcData should have been present");
+            llc_data.add_event_data(self.active_event.event_name(), 0);
+        }
+
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = event.value(true)?;
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
+            cpu_data.add_event_data(event.event_name(), val);
+            let llc_data = self
+                .llc_data
+                .get_mut(&cpu_data.llc)
+                .expect("LlcData should have been present");
+            llc_data.add_cpu_event_data(event.event_name(), val);
+        }
+        if self.collect_cpu_freq {
+            self.record_cpu_freq()?;
+        }
+        if self.collect_uncore_freq {
+            self.record_uncore_freq()?;
+        }
+
+        Ok(())
+    }
+
+    /// Node view: NUMA topology and node-specific data
+    fn on_tick_node(&mut self) -> Result<()> {
+        self.update_cpu_stats()?;
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+
+        for node in self.topo.nodes.keys() {
+            let node_data = self
+                .node_data
+                .get_mut(node)
+                .expect("NodeData should have been present");
+            node_data.add_event_data(self.active_event.event_name(), 0);
+        }
+
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = event.value(true)?;
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
+            cpu_data.add_event_data(event.event_name(), val);
+            let node_data = self
+                .node_data
+                .get_mut(&cpu_data.node)
+                .expect("NodeData should have been present");
+            node_data.add_cpu_event_data(event.event_name(), val);
+        }
+        if self.collect_cpu_freq {
+            self.record_cpu_freq()?;
+        }
+        if self.collect_uncore_freq {
+            self.record_uncore_freq()?;
+        }
+
+        Ok(())
+    }
+
+    /// Power view: power-specific data collection
+    fn on_tick_power(&mut self) -> Result<()> {
+        self.update_power_data()?;
+
+        if self.collect_cpu_freq {
+            self.record_cpu_freq()?;
+        }
+        if self.collect_uncore_freq {
+            self.record_uncore_freq()?;
+        }
+
+        Ok(())
+    }
+
+    /// Scheduler view: scheduler stats and basic system data
+    fn on_tick_scheduler(&mut self) -> Result<()> {
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+
+        if self.scheduler.is_empty() {
+            self.sched_stats_raw.clear();
+        } else if let Some(stats_client_read) = self.stats_client.clone() {
+            let tx = self.action_tx.clone();
+            tokio::spawn(async move {
+                let mut client = stats_client_read.lock().await;
+
+                let result = client.request::<JsonValue>("stats", vec![]);
+                let action = match result {
+                    Ok(stats) => Action::SchedStats(
+                        serde_json::to_string_pretty(&stats)
+                            .expect("Unable to parse scheduler stats JSON."),
+                    ),
+                    Err(_) => Action::ReloadStatsClient,
+                };
+                tx.send(action)?;
+                Ok::<(), anyhow::Error>(())
+            });
+        };
+
+        Ok(())
+    }
+
+    /// Event list views: only update event filtering
+    fn on_tick_events(&mut self) -> Result<()> {
+        if self.filtering() {
+            self.filter_events();
+        }
+        Ok(())
+    }
+
+    /// PerfTop view: profiling events and symbol data
+    fn on_tick_perf_top(&mut self) -> Result<()> {
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+
+        for (cpu, event) in &mut self.active_prof_events {
+            let val = event.value(true)?;
+            let cpu_data = self
+                .cpu_data
+                .get_mut(cpu)
+                .expect("CpuData should have been present");
+            cpu_data.add_event_data(event.event_name(), val);
+        }
+
+        if self.filtering() {
+            self.filter_events();
+        }
+
+        Ok(())
+    }
+
+    /// MangoApp view: minimal system data
+    fn on_tick_mango_app(&mut self) -> Result<()> {
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        Ok(())
+    }
+
+    /// Static views: minimal or no updates needed
+    fn on_tick_static(&mut self) -> Result<()> {
         Ok(())
     }
 }

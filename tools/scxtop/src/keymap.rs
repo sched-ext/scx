@@ -45,6 +45,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('T'), Action::SetState(AppState::PerfTop));
         bindings.insert(Key::Char('f'), Action::Filter);
         bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
+        bindings.insert(Key::Char('F'), Action::ToggleCpuFreq);
         bindings.insert(Key::Char('L'), Action::ToggleLocalization);
         bindings.insert(Key::Char('P'), Action::ToggleHwPressure);
         bindings.insert(Key::Char('h'), Action::SetState(AppState::Help));
