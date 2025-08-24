@@ -198,7 +198,7 @@ static int vruntime_enqueue(const struct scx_userland_enqueued_task *bpf_task)
 
 	curr = get_enqueued_task(bpf_task->pid);
 	if (!curr)
-		return ENOENT;
+		return -ENOENT;
 
 	update_enqueued(curr, bpf_task);
 	nr_vruntime_enqueues++;
