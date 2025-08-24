@@ -27,11 +27,15 @@ struct scx_cgroup_bw_config {
 int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config);
 
 /**
- * scx_cgroup_bw_init - 
- * @cgrp:
- * @args:
+ * scx_cgroup_bw_init - Initialize a cgroup for CPU bandwidth control.
+ * @cgrp: cgroup being initialized.
+ * @args: init arguments, see the struct definition.
  *
- * Returns
+ * Either the BPF scheduler is being loaded or @cgrp created, initialize
+ * @cgrp for CPU bandwidth control. When being loaded, cgroups are initialized
+ * in a pre-order from the root. This operation may block.
+ *
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted);
 
