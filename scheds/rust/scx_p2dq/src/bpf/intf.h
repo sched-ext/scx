@@ -82,7 +82,9 @@ enum stat_idx {
 };
 
 enum scheduler_mode {
-	MODE_PERFORMANCE,
+	MODE_DEFAULT,
+	MODE_GAMING,
+	MODE_EFFICIENCY,
 };
 
 #endif /* __P2DQ_INTF_H */

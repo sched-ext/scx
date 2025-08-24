@@ -15,8 +15,6 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Scheduler mode")]
-    pub sched_mode: u32,
     #[stat(desc = "Number of times a task was enqueued to a ATQ")]
     pub atq_enq: u64,
     #[stat(desc = "Number of times a task was re-enqueued to a ATQ")]
@@ -106,7 +104,6 @@ impl Metrics {
             wake_prev: self.wake_prev - rhs.wake_prev,
             wake_llc: self.wake_llc - rhs.wake_llc,
             wake_mig: self.wake_mig - rhs.wake_mig,
-            ..self.clone()
         }
     }
 }

@@ -113,6 +113,7 @@ const volatile struct {
 	u64 dsq_shift;
 	u32 interactive_ratio;
 	u32 saturated_percent;
+	u32 sched_mode;
 
 	bool atq_enabled;
 	bool cpu_priority;
@@ -123,6 +124,7 @@ const volatile struct {
 	bool kthreads_local;
 	bool select_idle_in_enqueue;
 } p2dq_config = {
+	.sched_mode = MODE_DEFAULT,
 	.nr_dsqs_per_llc = 3,
 	.init_dsq_index = 0,
 	.dsq_shift = 2,
@@ -156,7 +158,6 @@ u64 big_core_ids[MAX_CPUS];
 u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 
 u64 min_slice_ns = 500;
-u32 sched_mode = MODE_PERFORMANCE;
 
 private(A) struct bpf_cpumask __kptr *big_cpumask;
 
@@ -748,6 +749,42 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		stat_inc(P2DQ_STAT_WAKE_MIG);
 		goto found_cpu;
 	}
+
+	if (p2dq_config.sched_mode == MODE_GAMING &&
+	    topo_config.has_little_cores &&
+	    llcx->big_cpumask) {
+		cpu = __pick_idle_cpu(llcx->big_cpumask,
+				      SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
+		if (llcx->big_cpumask) {
+			cpu = __pick_idle_cpu(llcx->big_cpumask, 0);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		}
+	}
+
+	if (p2dq_config.sched_mode == MODE_EFFICIENCY &&
+	    topo_config.has_little_cores &&
+	    llcx->little_cpumask) {
+		cpu = __pick_idle_cpu(llcx->little_cpumask, SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
+		if (llcx->little_cpumask) {
+			cpu = __pick_idle_cpu(llcx->little_cpumask, 0);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		}
+	}
+
 
 	if (llcx->lb_llc_id < MAX_LLCS &&
 	    taskc->llc_runs == 0) {
