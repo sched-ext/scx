@@ -1,5 +1,5 @@
 use anyhow::Result;
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, Context};
 use log::{info, warn};
 use nix::sys::resource::{getrlimit, setrlimit, Resource, RLIM_INFINITY};
 use scx_stats::prelude::*;
@@ -44,18 +44,15 @@ where
         while !should_exit() {
             let stats = match client.request::<T>("stats", stats_args.to_owned()) {
                 Ok(v) => v,
-                Err(e) => match e.downcast_ref::<std::io::Error>() {
-                    Some(ioe) => {
+                Err(e) => {
+                    if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
                         info!("Connection to stats_server failed ({ioe})");
-                        sleep(Duration::from_secs(1));
-                        break;
+                    } else {
+                        warn!("Error handling stats_server result: {e}");
                     }
-                    None => {
-                        warn!("error on handling stats_server result {e}");
-                        sleep(Duration::from_secs(1));
-                        break;
-                    }
-                },
+                    sleep(Duration::from_secs(1));
+                    break;
+                }
             };
             output(stats)?;
             sleep(intv);
@@ -90,20 +87,13 @@ where
     T: std::str::FromStr,
     T::Err: std::error::Error + Send + Sync + 'static,
 {
-    let val = match std::fs::read_to_string(path) {
-        Ok(val) => val,
-        Err(_) => {
-            bail!("Failed to open or read file {:?}", path);
-        }
-    };
-    let val = val.trim_end_matches('\0');
+    let val = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to open or read file: {}", path.display()))?;
 
-    match val.trim().parse::<T>() {
-        Ok(parsed) => Ok(parsed),
-        Err(_) => {
-            bail!("Failed to parse content '{}' from {:?}", val.trim(), path);
-        }
-    }
+    let val = val.trim_end_matches('\0').trim();
+
+    val.parse::<T>()
+        .with_context(|| format!("Failed to parse content '{}' from {}", val, path.display()))
 }
 
 pub fn read_file_usize_vec(path: &Path, separator: char) -> Result<Vec<usize>> {
