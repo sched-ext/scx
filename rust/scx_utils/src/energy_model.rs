@@ -73,12 +73,10 @@ impl EnergyModel {
     }
 
     pub fn get_pd_by_cpu_id(&self, cpu_id: usize) -> Option<&PerfDomain> {
-        for (_, pd) in self.perf_doms.iter() {
-            if pd.span.test_cpu(cpu_id) {
-                return Some(pd);
-            }
-        }
-        None
+        self.perf_doms
+            .values()
+            .find(|&pd| pd.span.test_cpu(cpu_id))
+            .map(|c| c as _)
     }
 
     pub fn perf_total(&self) -> usize {

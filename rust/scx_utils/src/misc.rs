@@ -68,7 +68,7 @@ where
 pub fn try_set_rlimit_infinity() {
     // Increase MEMLOCK size since the BPF scheduler might use
     // more than the current limit
-    if let Err(_) = setrlimit(Resource::RLIMIT_MEMLOCK, RLIM_INFINITY, RLIM_INFINITY) {
+    if setrlimit(Resource::RLIMIT_MEMLOCK, RLIM_INFINITY, RLIM_INFINITY).is_err() {
         // If there is an error in expanding rlimit to infinity,
         // show the current rlimits then proceed.
         if let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_MEMLOCK) {
