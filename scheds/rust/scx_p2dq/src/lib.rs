@@ -46,11 +46,11 @@ impl LbMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum SchedMode {
-    /// default mode
+    /// Default mode for most workloads.
     Default,
-    /// Gaming mode tries to schedule on Big cores.
-    Gaming,
-    /// Efficiency mode tries to schedule on little cores.
+    /// Performance mode prioritizes scheduling on Big cores.
+    Performance,
+    /// Efficiency mode prioritizes scheduling on little cores.
     Efficiency,
 }
 
@@ -58,7 +58,7 @@ impl SchedMode {
     pub fn as_i32(&self) -> i32 {
         match self {
             SchedMode::Default => bpf_intf::scheduler_mode_MODE_DEFAULT as i32,
-            SchedMode::Gaming => bpf_intf::scheduler_mode_MODE_GAMING as i32,
+            SchedMode::Performance => bpf_intf::scheduler_mode_MODE_PERF as i32,
             SchedMode::Efficiency => bpf_intf::scheduler_mode_MODE_EFFICIENCY as i32,
         }
     }

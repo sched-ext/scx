@@ -83,7 +83,7 @@ enum stat_idx {
 
 enum scheduler_mode {
 	MODE_DEFAULT,
-	MODE_GAMING,
+	MODE_PERF,
 	MODE_EFFICIENCY,
 };
 

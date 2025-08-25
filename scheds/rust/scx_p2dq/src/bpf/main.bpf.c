@@ -750,7 +750,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (p2dq_config.sched_mode == MODE_GAMING &&
+	if (p2dq_config.sched_mode == MODE_PERF &&
 	    topo_config.has_little_cores &&
 	    llcx->big_cpumask) {
 		cpu = __pick_idle_cpu(llcx->big_cpumask,
