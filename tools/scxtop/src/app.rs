@@ -66,6 +66,7 @@ use ratatui::{
     prelude::{Direction, Stylize},
     style::{Color, Modifier, Style},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
+    symbols::line::THICK,
     text::{Line, Span},
     widgets::{
         Axis, Bar, BarChart, BarGroup, Block, BorderType, Borders, Cell, Chart, Clear, Dataset,
@@ -1045,6 +1046,101 @@ impl<'a> App<'a> {
 
                 frame.render_widget(barchart, right);
             }
+            ViewState::LineGauge => {
+                let llc_block = Block::bordered()
+                    .title_top(
+                        Line::from(if self.localize {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event_name(),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
+                            )
+                        } else {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event_name(),
+                                stats.avg,
+                                stats.max,
+                                stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.theme().text_important_color())
+                            .right_aligned(),
+                    )
+                    .border_type(BorderType::Rounded);
+
+                let inner_area = llc_block.inner(right);
+                let num_llcs = self.topo.all_llcs.len();
+
+                // Create constraints for LLCs layout
+                let constraints =
+                    vec![Constraint::Length(1); num_llcs.min(inner_area.height as usize)];
+                let llc_areas = Layout::vertical(constraints).split(inner_area);
+
+                // Render LineGauge for each LLC
+                for (i, llc_id) in self.topo.all_llcs.keys().enumerate() {
+                    if i >= llc_areas.len() {
+                        break; // Don't exceed available area
+                    }
+
+                    let llc_data = self.llc_data.get(llc_id);
+                    let current_value = if let Some(data) = llc_data {
+                        let divisor = match self.active_event {
+                            ProfilingEvent::CpuUtil(_) => data.num_cpus,
+                            _ => 1,
+                        };
+                        data.event_data_immut(self.active_event.event_name())
+                            .last()
+                            .copied()
+                            .unwrap_or(0)
+                            / divisor as u64
+                    } else {
+                        0
+                    };
+
+                    // Calculate utilization ratio (0.0 to 1.0) based on max value
+                    let ratio = if stats.max > 0 {
+                        (current_value as f64 / stats.max as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+
+                    // Get colorization based on actual value like sparklines/bar charts do
+                    let gradient_color = self.gradient5_color(current_value, stats.max, stats.min);
+
+                    let label = format!(
+                        "LLC{} {}",
+                        llc_id,
+                        if self.localize {
+                            sanitize_nbsp(current_value.to_formatted_string(&self.locale))
+                        } else {
+                            format!("{current_value}")
+                        }
+                    );
+
+                    let line_gauge = LineGauge::default()
+                        .ratio(ratio)
+                        .line_set(THICK)
+                        .label(Line::from(label).style(self.theme().text_color()))
+                        .filled_style(Style::default().fg(gradient_color).bg(Color::Reset))
+                        .unfilled_style(
+                            Style::default()
+                                .fg(self.theme().border_style().fg.unwrap_or(Color::Gray))
+                                .bg(Color::Reset),
+                        );
+
+                    frame.render_widget(line_gauge, llc_areas[i]);
+                }
+
+                frame.render_widget(llc_block, right);
+            }
         }
 
         self.render_table(frame, left, false)
@@ -1176,6 +1272,101 @@ impl<'a> App<'a> {
                     .bar_width(1);
 
                 frame.render_widget(barchart, right);
+            }
+            ViewState::LineGauge => {
+                let node_block = Block::bordered()
+                    .title_top(
+                        Line::from(if self.localize {
+                            format!(
+                                "NUMA Nodes ({}) avg {} max {} min {}",
+                                self.active_event.event_name(),
+                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
+                            )
+                        } else {
+                            format!(
+                                "NUMA Nodes ({}) avg {} max {} min {}",
+                                self.active_event.event_name(),
+                                stats.avg,
+                                stats.max,
+                                stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.theme().text_important_color())
+                            .right_aligned(),
+                    )
+                    .border_type(BorderType::Rounded);
+
+                let inner_area = node_block.inner(right);
+                let num_nodes = self.topo.nodes.len();
+
+                // Create constraints for NUMA nodes layout
+                let constraints =
+                    vec![Constraint::Length(1); num_nodes.min(inner_area.height as usize)];
+                let node_areas = Layout::vertical(constraints).split(inner_area);
+
+                // Render LineGauge for each NUMA node
+                for (i, node_id) in self.topo.nodes.keys().enumerate() {
+                    if i >= node_areas.len() {
+                        break; // Don't exceed available area
+                    }
+
+                    let node_data = self.node_data.get(node_id);
+                    let current_value = if let Some(data) = node_data {
+                        let divisor = match self.active_event {
+                            ProfilingEvent::CpuUtil(_) => data.num_cpus,
+                            _ => 1,
+                        };
+                        data.event_data_immut(self.active_event.event_name())
+                            .last()
+                            .copied()
+                            .unwrap_or(0)
+                            / divisor as u64
+                    } else {
+                        0
+                    };
+
+                    // Calculate utilization ratio (0.0 to 1.0) based on max value
+                    let ratio = if stats.max > 0 {
+                        (current_value as f64 / stats.max as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+
+                    // Get colorization based on actual value like sparklines/bar charts do
+                    let gradient_color = self.gradient5_color(current_value, stats.max, stats.min);
+
+                    let label = format!(
+                        "Node{} {}",
+                        node_id,
+                        if self.localize {
+                            sanitize_nbsp(current_value.to_formatted_string(&self.locale))
+                        } else {
+                            format!("{current_value}")
+                        }
+                    );
+
+                    let line_gauge = LineGauge::default()
+                        .ratio(ratio)
+                        .label(Line::from(label).style(self.theme().text_color()))
+                        .line_set(THICK)
+                        .filled_style(Style::default().fg(gradient_color).bg(Color::Reset))
+                        .unfilled_style(
+                            Style::default()
+                                .fg(self.theme().border_style().fg.unwrap_or(Color::Gray))
+                                .bg(Color::Reset),
+                        );
+
+                    frame.render_widget(line_gauge, node_areas[i]);
+                }
+
+                frame.render_widget(node_block, right);
             }
         }
 
@@ -1610,6 +1801,13 @@ impl<'a> App<'a> {
                 render_title,
                 render_sample_rate,
             )?,
+            ViewState::LineGauge => self.render_scheduler_sparklines(
+                event,
+                frame,
+                area,
+                render_title,
+                render_sample_rate,
+            )?,
         }
 
         Ok(())
@@ -1856,11 +2054,197 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn render_event_linegauge(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let num_nodes = self.topo.nodes.len();
+        let constraints = vec![Constraint::Ratio(1, num_nodes.try_into().unwrap()); num_nodes];
+        let node_areas = Layout::vertical(constraints).split(area);
+
+        for (i, node) in self.topo.nodes.values().enumerate() {
+            let node_iter = self
+                .cpu_data
+                .values()
+                .filter(|cpu_data| cpu_data.node == node.id)
+                .flat_map(|cpu_data| cpu_data.event_data_immut(self.active_event.event_name()))
+                .collect::<Vec<u64>>();
+            let stats = VecStats::new(&node_iter, None);
+
+            let node_block = Block::bordered()
+                .title_top(
+                    Line::from(if self.localize {
+                        format!(
+                            "Node{} ({}) avg {} max {} min {}",
+                            node.id,
+                            self.active_event.event_name(),
+                            sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
+                            sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
+                            sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
+                        )
+                    } else {
+                        format!(
+                            "Node{} ({}) avg {} max {} min {}",
+                            node.id,
+                            self.active_event.event_name(),
+                            stats.avg,
+                            stats.max,
+                            stats.min,
+                        )
+                    })
+                    .style(self.theme().title_style())
+                    .centered(),
+                )
+                .title_top(if i == 0 {
+                    Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                        .style(self.theme().text_important_color())
+                        .right_aligned()
+                } else {
+                    Line::from("")
+                })
+                .title_top(
+                    Line::from(if self.collect_uncore_freq {
+                        "uncore ".to_string()
+                            + format_hz(
+                                self.node_data
+                                    .get(&node.id)
+                                    .expect("NodeData should have been present")
+                                    .event_data_immut("uncore_freq")
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0_u64),
+                            )
+                            .as_str()
+                    } else {
+                        "".to_string()
+                    })
+                    .style(self.theme().text_important_color())
+                    .left_aligned(),
+                )
+                .border_type(BorderType::Rounded);
+
+            let node_area = node_areas[i];
+            let node_cpus = node.all_cpus.len();
+            let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+
+            // Create horizontal layout for columns
+            let cpus_constraints =
+                vec![Constraint::Ratio(1, col_scale); col_scale.try_into().unwrap()];
+            let cpus_areas =
+                Layout::horizontal(cpus_constraints).split(node_block.inner(node_area));
+
+            // Distribute CPUs into columns
+            let mut cpu_col_data: Vec<Vec<usize>> = vec![Vec::new(); col_scale as usize];
+            for (j, cpu) in node.all_cpus.keys().enumerate() {
+                cpu_col_data[j % col_scale as usize].push(*cpu);
+            }
+
+            // Render each column
+            for (col_idx, col_cpus) in cpu_col_data.iter().enumerate() {
+                if col_cpus.is_empty() {
+                    continue;
+                }
+
+                let col_area = cpus_areas[col_idx];
+                let available_height = col_area.height as usize;
+                let num_cpus_in_col = col_cpus.len().min(available_height);
+
+                if num_cpus_in_col == 0 {
+                    continue;
+                }
+
+                // Create vertical layout for CPUs in this column
+                let cpu_constraints = vec![Constraint::Length(1); num_cpus_in_col];
+                let cpu_areas = Layout::vertical(cpu_constraints).split(col_area);
+
+                // Render LineGauge for each CPU in this column
+                for (cpu_idx, &cpu) in col_cpus.iter().take(num_cpus_in_col).enumerate() {
+                    let cpu_data = self.cpu_data.get(&cpu);
+                    let current_value = if let Some(data) = cpu_data {
+                        data.event_data_immut(self.active_event.event_name())
+                            .last()
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    // Calculate utilization ratio (0.0 to 1.0) based on max value
+                    let ratio = if stats.max > 0 {
+                        (current_value as f64 / stats.max as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+
+                    // Get colorization based on the ratio (0-100 scale for gradient function)
+                    let ratio_scaled = (ratio * 100.0) as u64;
+                    let gradient_color = self.gradient5_color(ratio_scaled, 100, 0);
+
+                    // Get CPU frequency and HW pressure info for label
+                    let mut cpu_freq: u64 = 0;
+                    let mut hw_pressure: u64 = 0;
+                    if let Some(data) = cpu_data {
+                        if self.collect_cpu_freq {
+                            cpu_freq = data
+                                .event_data_immut("cpu_freq")
+                                .last()
+                                .copied()
+                                .unwrap_or(0);
+                        }
+                        if self.hw_pressure {
+                            hw_pressure = data
+                                .event_data_immut("hw_pressure")
+                                .last()
+                                .copied()
+                                .unwrap_or(0);
+                        }
+                    }
+
+                    let label = format!(
+                        "CPU{}{}{} {}",
+                        cpu,
+                        if self.collect_cpu_freq {
+                            format!(" {}", format_hz(cpu_freq))
+                        } else {
+                            "".to_string()
+                        },
+                        if self.hw_pressure && hw_pressure > 0 {
+                            format!(" hw_pressure({hw_pressure})")
+                        } else {
+                            "".to_string()
+                        },
+                        if self.localize {
+                            sanitize_nbsp(current_value.to_formatted_string(&self.locale))
+                        } else {
+                            format!("{current_value}")
+                        }
+                    );
+
+                    let line_gauge = LineGauge::default()
+                        .ratio(ratio)
+                        .label(Line::from(label).style(self.theme().text_color()))
+                        .line_set(THICK)
+                        .filled_style(Style::default().fg(gradient_color))
+                        .unfilled_style(
+                            Style::default().fg(self
+                                .theme()
+                                .border_style()
+                                .fg
+                                .unwrap_or(Color::Gray)),
+                        );
+
+                    frame.render_widget(line_gauge, cpu_areas[cpu_idx]);
+                }
+            }
+
+            frame.render_widget(node_block, node_area);
+        }
+        Ok(())
+    }
+
     /// Renders the event state.
     fn render_event(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         match self.view_state {
             ViewState::Sparkline => self.render_event_sparkline(frame, area)?,
             ViewState::BarChart => self.render_event_barchart(frame, area)?,
+            ViewState::LineGauge => self.render_event_linegauge(frame, area)?,
         }
         Ok(())
     }
@@ -3476,6 +3860,7 @@ impl<'a> App<'a> {
                     .border_type(BorderType::Rounded)
                     .style(self.theme().border_style()),
             )
+            .line_set(THICK)
             .filled_style(mem_gradient_color)
             .ratio(mem_used_percent / 100.0)
             .label(format!(
@@ -3515,6 +3900,7 @@ impl<'a> App<'a> {
                     .border_type(BorderType::Rounded)
                     .style(self.theme().border_style()),
             )
+            .line_set(THICK)
             .filled_style(swap_gradient_color)
             .ratio(swap_used_percent / 100.0)
             .label(format!(
@@ -7137,6 +7523,12 @@ impl<'a> App<'a> {
     fn on_tick_llc(&mut self) -> Result<()> {
         self.update_cpu_stats()?;
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        self.update_all_process_data()?;
+        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let num_cpus = self.topo.all_cpus.len();
+        if let Some(proc_data) = self.selected_proc_data() {
+            proc_data.update_threads(system_util, num_cpus);
+        }
 
         for llc in self.topo.all_llcs.keys() {
             let llc_data = self
@@ -7165,6 +7557,9 @@ impl<'a> App<'a> {
         if self.collect_uncore_freq {
             self.record_uncore_freq()?;
         }
+        if self.filtering() {
+            self.filter_events();
+        }
 
         Ok(())
     }
@@ -7173,6 +7568,12 @@ impl<'a> App<'a> {
     fn on_tick_node(&mut self) -> Result<()> {
         self.update_cpu_stats()?;
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+        self.update_all_process_data()?;
+        let system_util = self.cpu_stat_tracker.read().unwrap().system_total_util();
+        let num_cpus = self.topo.all_cpus.len();
+        if let Some(proc_data) = self.selected_proc_data() {
+            proc_data.update_threads(system_util, num_cpus);
+        }
 
         for node in self.topo.nodes.keys() {
             let node_data = self
@@ -7200,6 +7601,9 @@ impl<'a> App<'a> {
         }
         if self.collect_uncore_freq {
             self.record_uncore_freq()?;
+        }
+        if self.filtering() {
+            self.filter_events();
         }
 
         Ok(())
