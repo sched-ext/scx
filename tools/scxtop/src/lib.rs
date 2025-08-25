@@ -5,6 +5,7 @@
 
 mod app;
 pub mod bpf_intf;
+mod bpf_prog_data;
 pub mod bpf_skel;
 mod bpf_stats;
 pub mod cli;
@@ -83,6 +84,10 @@ pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AppState {
+    /// Application is in the BPF programs state.
+    BpfPrograms,
+    /// Application is in the BPF program detail state.
+    BpfProgramDetail,
     /// Application is in the default state.
     Default,
     /// Application is in the help state.
@@ -488,6 +493,7 @@ pub enum Action {
     SoftIRQ(SoftIRQAction),
     Tick,
     TickRateChange(std::time::Duration),
+    ToggleBpfPerfSampling,
     ToggleCpuFreq,
     ToggleLocalization,
     ToggleHwPressure,

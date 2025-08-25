@@ -253,7 +253,12 @@ impl SymbolData {
                 .unwrap_or("unknown")
                 .to_string()
         } else if is_kernel {
-            "kernel".to_string()
+            // Check if this is a BPF program by looking at the symbol name
+            if symbol_name.starts_with("bpf_prog_") {
+                "bpf".to_string()
+            } else {
+                "kernel".to_string()
+            }
         } else {
             "unknown".to_string()
         };
