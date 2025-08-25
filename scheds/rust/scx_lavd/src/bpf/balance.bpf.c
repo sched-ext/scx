@@ -174,11 +174,19 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 }
 
 /*
- * For simplicity, try to just steal from the CPU with
- * the highest number of queued_tasks in this domain.
+ * Attempts to peek the vtime of the task at the head of the DSQ, or returns U64_MAX if the DSQ is empty.
  */
-static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
-	u64 highest_queued = 0;
+static int peek_vtime(u64 dsq_id) {
+	struct task_struct *task;
+    task = scx_bpf_dsq_peek(dsq_id);
+    return task ? task->scx.dsq_vtime : U64_MAX;
+}
+
+/*
+ * Racy operation that returns the cpu that which appears to have the lowest vtime at its head.
+ */
+static int pick_cpu_with_lowest_vtime(struct cpdom_ctx *cpdomc) {
+	u64 lowest_vtime = U64_MAX;
 	int pick_cpu = -ENOENT;
 	int cpu, i, j;
 
@@ -189,13 +197,13 @@ static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
 		u64 cpumask = cpdomc->__cpumask[i];
 		bpf_for(j, 0, 64) {
 			if (cpumask & 0x1LLU << j) {
-				u64 queued;
+				u64 vtime;
 				cpu = (i * 64) + j;
 				if (cpu >= __nr_cpu_ids)
 					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-				if (queued > highest_queued) {
-					highest_queued = queued;
+				vtime = peek_vtime(cpu_to_dsq(cpu));
+				if (vtime < lowest_vtime) {
+					lowest_vtime = vtime;
 					pick_cpu = cpu;
 				}
 			}
@@ -256,7 +264,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
+			pick_cpu = pick_cpu_with_lowest_vtime(cpdomc_pick);
 			if (pick_cpu >= 0)
 				dsq_id = cpu_to_dsq(pick_cpu);
 			else
@@ -333,7 +341,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
+			pick_cpu = pick_cpu_with_lowest_vtime(cpdomc_pick);
 			if (pick_cpu >= 0)
 				dsq_id = cpu_to_dsq(pick_cpu);
 			else
@@ -350,7 +358,6 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
-	struct task_struct *p;
 	u64 vtime = U64_MAX, dsq_id = cpu_dsq_id;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
@@ -368,16 +375,9 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		goto x_domain_migration_out;
 
 	if (per_cpu_dsq) {
-		bpf_for_each(scx_dsq, p, cpu_dsq_id, 0) {
-			vtime = p->scx.dsq_vtime;
-			break;
-		}
-
-		bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
-			if (p->scx.dsq_vtime < vtime)
-				dsq_id = cpdom_dsq_id;
-			break;
-		}
+		vtime = peek_vtime(cpu_dsq_id);
+		if (peek_vtime(cpdom_dsq_id) < vtime)
+			dsq_id = cpdom_dsq_id;
 	} else {
 		dsq_id = cpdom_dsq_id;
 	}
