@@ -48,10 +48,24 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted);
 
 /**
- * scx_cgroup_bw_set - 
- * @cgrp:
+ * scx_cgroup_bw_set - A cgroup's bandwidth is being changed.
+ * @cgrp: cgroup whose bandwidth is being updated
+ * @period_us: bandwidth control period
+ * @quota_us: bandwidth control quota
+ * @burst_us: bandwidth control burst
  *
- * Returns
+ * Update @cgrp's bandwidth control parameters. This is from the cpu.max
+ * cgroup interface.
+ *
+ * @quota_us / @period_us determines the CPU bandwidth @cgrp is entitled
+ * to. For example, if @period_us is 1_000_000 and @quota_us is
+ * 2_500_000. @cgrp is entitled to 2.5 CPUs. @burst_us can be
+ * interpreted in the same fashion and specifies how much @cgrp can
+ * burst temporarily. The specific control mechanism and thus the
+ * interpretation of @period_us and burstiness is upto to the BPF
+ * scheduler.
+ *
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quota_us, u64 burst_us);
 

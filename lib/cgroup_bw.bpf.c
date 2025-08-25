@@ -732,15 +732,69 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 }
 
 /**
- * scx_cgroup_bw_set - 
- * @cgrp:
+ * scx_cgroup_bw_set - A cgroup's bandwidth is being changed.
+ * @cgrp: cgroup whose bandwidth is being updated
+ * @period_us: bandwidth control period
+ * @quota_us: bandwidth control quota
+ * @burst_us: bandwidth control burst
  *
- * Returns
+ * Update @cgrp's bandwidth control parameters. This is from the cpu.max
+ * cgroup interface.
+ *
+ * @quota_us / @period_us determines the CPU bandwidth @cgrp is entitled
+ * to. For example, if @period_us is 1_000_000 and @quota_us is
+ * 2_500_000. @cgrp is entitled to 2.5 CPUs. @burst_us can be
+ * interpreted in the same fashion and specifies how much @cgrp can
+ * burst temporarily. The specific control mechanism and thus the
+ * interpretation of @period_us and burstiness is upto to the BPF
+ * scheduler.
+ *
+ * Return 0 for success, -errno for failure.
  */
 __hidden
 int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quota_us, u64 burst_us)
 {
-	return -ENOTSUP;
+	struct cgroup *cur_cgrp;
+	struct scx_cgroup_ctx *cgx, *cur_cgx;
+	struct cgroup_subsys_state *subroot_css, *pos;
+	int ret = 0;
+
+	cbw_dbg_cgrp();
+
+	/* Update the cgroup's bandwidth. */
+	cgx = cbw_get_cgroup_ctx(cgrp);
+	if (!cgx) {
+		cbw_err("Failed to lookup a cgroup ctx: %llu",
+			cgroup_get_id(cgrp));
+		return -ESRCH;
+	}
+
+	cbw_set_bandwidth(cgrp, cgx, period_us, quota_us, burst_us);
+
+	/*
+	 * Update nquota_ub of the cgroup and all its descendents in a
+	 * top-down-like manner (pre-order traversal: self -> left -> right).
+	 */
+	bpf_rcu_read_lock();
+	subroot_css = &cgrp->self;
+	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+		cur_cgrp = pos->cgroup;
+		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
+		if (!cur_cgx) {
+			/*
+			 * The CPU controller is not enabled for this cgroup.
+			 * Let's move on.
+			 */
+			continue;
+		}
+
+		ret = cbw_update_nquota_ub(cur_cgrp, cur_cgx);
+		if (ret)
+			goto unlock_out;
+	}
+unlock_out:
+	bpf_rcu_read_unlock();
+	return ret;
 }
 
 __hidden
