@@ -15,9 +15,34 @@
 
 struct scx_stk_seg;
 typedef struct scx_stk_seg __arena scx_stk_seg_t;
-struct scx_stk;
 
 #define SCX_STK_SEG_MAX (SDT_TASK_ENTS_PER_CHUNK - 2)
+
+struct scx_stk_seg {
+	void __arena	*elems[SCX_STK_SEG_MAX];
+	scx_stk_seg_t	*prev;
+	scx_stk_seg_t	*next;
+};
+
+/*
+ * Extensible stack struct.
+ */
+struct scx_stk {
+	arena_spinlock_t __arena *lock;
+
+	scx_stk_seg_t *first;	/* First stack segment. */
+	scx_stk_seg_t *last;
+
+	scx_stk_seg_t *current;	/* Current stack segment. */
+	__u64 cind;
+
+	__u64 capacity;		/* Free slots in the stack. */
+	__u64 available;	/* Available items in the stack. */
+	__u64 data_size;
+	__u64 nr_pages_per_alloc;
+
+	scx_stk_seg_t *reserve;
+};
 
 #ifdef __BPF__
 
@@ -130,30 +155,3 @@ int scx_ffs(__u64 word)
 }
 
 #endif /* __BPF__ */
-
-struct scx_stk_seg {
-	void __arena	*elems[SCX_STK_SEG_MAX];
-	scx_stk_seg_t	*prev;
-	scx_stk_seg_t	*next;
-};
-
-/*
- * Extensible stack struct.
- */
-struct scx_stk {
-	arena_spinlock_t __arena *lock;
-
-	scx_stk_seg_t *first;	/* First stack segment. */
-	scx_stk_seg_t *last;
-
-	scx_stk_seg_t *current;	/* Current stack segment. */
-	__u64 cind;
-
-	__u64 capacity;		/* Free slots in the stack. */
-	__u64 available;	/* Available items in the stack. */
-	__u64 data_size;
-	__u64 nr_pages_per_alloc;
-
-	scx_stk_seg_t *reserve;
-};
-

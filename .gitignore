@@ -9,3 +9,4 @@ build/
 tags
 *.o
 *.skel.h
+selftest
