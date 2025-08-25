@@ -15,3 +15,4 @@ int scx_selftest_lvqueue(void);
 int scx_selftest_minheap(void);
 int scx_selftest_topology(void);
 int scx_selftest_btree(void);
+int scx_selftest_rbtree(void);

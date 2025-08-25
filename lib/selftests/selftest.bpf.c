@@ -35,6 +35,13 @@ int arena_selftest(void)
 		return ret;
 	}
 
+	ret = scx_selftest_rbtree();
+	if (ret) {
+		bpf_printk("scx_selftest_rbtree failed with %d", ret);
+		return ret;
+	}
+
+
 	ret = scx_selftest_topology();
 	if (ret) {
 		bpf_printk("scx_selftest_topology failed with %d", ret);
