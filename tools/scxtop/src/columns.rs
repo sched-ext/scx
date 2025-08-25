@@ -299,6 +299,30 @@ pub fn get_process_columns() -> Vec<Column<i32, ProcData>> {
     ]
 }
 
+/// Returns process columns suitable for non-BPF mode (without BPF-dependent columns)
+pub fn get_process_columns_no_bpf() -> Vec<Column<i32, ProcData>> {
+    vec![
+        id_column!("TGID"),
+        name_column!(ProcData, process_name),
+        Column {
+            header: "Command Line",
+            constraint: Constraint::Fill(1),
+            visible: true,
+            value_fn: Box::new(|_, data| data.cmdline.join(" ")),
+        },
+        cpu_column!(ProcData),
+        llc_column!(ProcData),
+        numa_column!(ProcData),
+        Column {
+            header: "Threads",
+            constraint: Constraint::Length(7),
+            visible: true,
+            value_fn: Box::new(|_, data| data.num_threads.to_string()),
+        },
+        cpu_util_column!(ProcData),
+    ]
+}
+
 pub fn get_thread_columns() -> Vec<Column<i32, ThreadData>> {
     vec![
         id_column!("TID"),
@@ -329,6 +353,18 @@ pub fn get_thread_columns() -> Vec<Column<i32, ThreadData>> {
         },
         slice_ns_column!(ThreadData),
         avg_max_lat_column!(ThreadData),
+        cpu_util_column!(ThreadData),
+    ]
+}
+
+/// Returns thread columns suitable for non-BPF mode (without BPF-dependent columns)
+pub fn get_thread_columns_no_bpf() -> Vec<Column<i32, ThreadData>> {
+    vec![
+        id_column!("TID"),
+        name_column!(ThreadData, thread_name),
+        cpu_column!(ThreadData),
+        llc_column!(ThreadData),
+        numa_column!(ThreadData),
         cpu_util_column!(ThreadData),
     ]
 }
@@ -538,6 +574,39 @@ pub fn get_perf_top_columns(layered_enabled: bool) -> Vec<Column<String, SymbolS
                     .map(|v| v.to_string())
                     .unwrap_or_default()
             }),
+        },
+        Column {
+            header: "Samples",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| data.count.to_string()),
+        },
+        Column {
+            header: "Percentage",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| format!("{:.2}%", data.percentage)),
+        },
+    ]
+}
+
+/// Returns perf top columns suitable for non-BPF mode (without BPF-dependent features like Layer ID)
+pub fn get_perf_top_columns_no_bpf() -> Vec<Column<String, SymbolSample>> {
+    vec![
+        Column {
+            header: "Symbol",
+            constraint: Constraint::Fill(1),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                let prefix = if data.is_kernel { "[K] " } else { "[U] " };
+                format!("{}{}", prefix, data.symbol_info.symbol_name)
+            }),
+        },
+        Column {
+            header: "Module",
+            constraint: Constraint::Length(20),
+            visible: true,
+            value_fn: Box::new(|_, data| data.symbol_info.module_name.clone()),
         },
         Column {
             header: "Samples",
