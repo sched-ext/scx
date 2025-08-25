@@ -842,8 +842,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (saturated && taskc->llc_runs == 0) {
-		cpu = scx_bpf_pick_idle_cpu(&p->cpus_mask, 0);
+	if (saturated && taskc->llc_runs == 0 && llcx->node_cpumask) {
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->node_cpumask), 0);
 		if (cpu >= 0) {
 			*is_idle = true;
 			goto found_cpu;
