@@ -44,6 +44,26 @@ impl LbMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum SchedMode {
+    /// Default mode for most workloads.
+    Default,
+    /// Performance mode prioritizes scheduling on Big cores.
+    Performance,
+    /// Efficiency mode prioritizes scheduling on little cores.
+    Efficiency,
+}
+
+impl SchedMode {
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            SchedMode::Default => bpf_intf::scheduler_mode_MODE_DEFAULT as i32,
+            SchedMode::Performance => bpf_intf::scheduler_mode_MODE_PERF as i32,
+            SchedMode::Efficiency => bpf_intf::scheduler_mode_MODE_EFFICIENCY as i32,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct SchedulerOpts {
     /// Disables per-cpu kthreads directly dispatched into local dsqs.
@@ -149,6 +169,10 @@ pub struct SchedulerOpts {
     /// ***DEPRECATED*** Load balance mode
     #[arg(value_enum, long, default_value_t = LbMode::Load)]
     pub lb_mode: LbMode,
+
+    /// Scheduler mode
+    #[arg(value_enum, long, default_value_t = SchedMode::Default)]
+    pub sched_mode: SchedMode,
 
     /// Slack factor for load balancing, load balancing is not performed if load is within slack
     /// factor percent.
@@ -280,6 +304,7 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.nr_dsqs_per_llc = opts.dumb_queues as u32;
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
             rodata.p2dq_config.saturated_percent = opts.saturated_percent;
+            rodata.p2dq_config.sched_mode = opts.sched_mode.clone() as u32;
 
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),

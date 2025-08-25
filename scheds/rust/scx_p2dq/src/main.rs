@@ -154,7 +154,6 @@ impl<'a> Scheduler<'a> {
             atq_reenq: stats[stat_idx_P2DQ_STAT_ATQ_REENQ as usize],
             direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
             idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
-            sched_mode: self.skel.maps.bss_data.as_ref().unwrap().sched_mode,
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
             keep: stats[stat_idx_P2DQ_STAT_KEEP as usize],
