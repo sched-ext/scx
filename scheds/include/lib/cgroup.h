@@ -40,10 +40,13 @@ int scx_cgroup_bw_lib_init(struct scx_cgroup_bw_config *config);
 int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init_args *args __arg_trusted);
 
 /**
- * scx_cgroup_bw_exit - 
- * @cgrp:
+ * scx_cgroup_bw_exit - Exit a cgroup.
+ * @cgrp: cgroup being exited
  *
- * Returns
+ * Either the BPF scheduler is being unloaded or @cgrp destroyed, exit
+ * @cgrp for sched_ext. This operation my block.
+ *
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted);
 
