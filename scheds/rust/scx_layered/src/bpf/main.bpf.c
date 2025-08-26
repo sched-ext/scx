@@ -1691,8 +1691,9 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 					hi_fb_thread_name, p->pid);
 			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 		}
-		else
+		else {
 			taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
+		}
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
 		 * While the following is racy, all that's needed is at least

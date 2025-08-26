@@ -2320,7 +2320,7 @@ impl<'a> Scheduler<'a> {
             rodata.task_hint_map_enabled = true;
         }
 
-        if opts.hi_fb_thread_name.is_empty() == false {
+        if !opts.hi_fb_thread_name.is_empty() {
             // let bpf_hi_fb_thread_name = &mut skel.maps.bss_data.as_mut().unwrap().hi_fb_thread_name;
             let bpf_hi_fb_thread_name = &mut rodata.hi_fb_thread_name;
             copy_into_cstr(bpf_hi_fb_thread_name, opts.hi_fb_thread_name.as_str());
