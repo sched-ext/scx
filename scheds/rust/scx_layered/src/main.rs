@@ -1442,7 +1442,7 @@ impl GpuTaskAffinitizer {
                         self.tasks_affinitized += 1;
                     }
                     Err(_) => {
-                        warn!(
+                        debug!(
                             "Error affinitizing gpu pid {} to node {:#?}",
                             child.as_u32(),
                             node_info
