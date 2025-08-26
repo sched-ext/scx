@@ -16,4 +16,11 @@ struct soft_dirty_fault_event {
     u64 address;
 };
 
+struct perf_sample_event {
+    u32 pid;
+    u32 tid;
+    u32 cpu;
+    u64 address; /* placeholder */
+};
+
 #endif /* __INTF_H */

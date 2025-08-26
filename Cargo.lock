@@ -3096,6 +3096,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
+ "num_cpus",
  "scx_utils",
  "serde",
  "serde_json",
