@@ -12,11 +12,15 @@ typedef unsigned long long u64;
 #endif
 
 struct soft_dirty_fault_event {
+    u64 timestamp;
+    u32 pid;
     u32 tid;
-    u64 address;
+    u32 cpu;
+    u64 address; /* faulting address */
 };
 
 struct perf_sample_event {
+    u64 timestamp;
     u32 pid;
     u32 tid;
     u32 cpu;

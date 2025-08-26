@@ -21,10 +21,17 @@ use std::time::Duration;
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CacheMonitorValue {
-    /// A soft-dirty page fault event (tid and faulting address).
-    SoftDirtyFault { tid: u32, address: u64 },
-    /// A perf sampling event (placeholder address / metadata).
+    /// A soft-dirty page fault event.
+    SoftDirtyFault {
+        timestamp: u64,
+        pid: u32,
+        tid: u32,
+        cpu: u32,
+        address: u64,
+    },
+    /// A perf sampling event.
     PerfSample {
+        timestamp: u64,
         pid: u32,
         tid: u32,
         cpu: u32,
@@ -79,11 +86,17 @@ impl<'a> SoftDirtyCacheMonitor<'a> {
             if data.len() == std::mem::size_of::<crate::bpf_intf::soft_dirty_fault_event>() {
                 let ev: &crate::bpf_intf::soft_dirty_fault_event =
                     unsafe { &*(data.as_ptr() as *const _) };
-                trace!("soft-dirty fault tid={} addr=0x{:x}", ev.tid, ev.address);
+                trace!(
+                    "soft-dirty fault timestamp={} pid={} tid={} cpu={} addr=0x{:x}",
+                    ev.timestamp, ev.pid, ev.tid, ev.cpu, ev.address
+                );
                 events_cb
                     .borrow_mut()
                     .push_back(CacheMonitorValue::SoftDirtyFault {
+                        timestamp: ev.timestamp,
+                        pid: ev.pid,
                         tid: ev.tid,
+                        cpu: ev.cpu,
                         address: ev.address,
                     });
             }
@@ -255,12 +268,13 @@ impl<'a> PerfSampleMonitor<'a> {
                     let ev: &crate::bpf_intf::perf_sample_event =
                         unsafe { &*(data.as_ptr() as *const _) };
                     trace!(
-                        "perf sample pid={} tid={} cpu={} addr=0x{:x}",
-                        ev.pid, ev.tid, ev.cpu, ev.address
+                        "perf sample timestamp={} pid={} tid={} cpu={} addr=0x{:x}",
+                        ev.timestamp, ev.pid, ev.tid, ev.cpu, ev.address
                     );
                     events_cb
                         .borrow_mut()
                         .push_back(CacheMonitorValue::PerfSample {
+                            timestamp: ev.timestamp,
                             pid: ev.pid,
                             tid: ev.tid,
                             cpu: ev.cpu,

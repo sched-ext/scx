@@ -23,6 +23,7 @@ int handle_perf(struct bpf_perf_event_data *ctx)
 	if (!current->pid || !ctx->addr)
 		return 0;
 
+	ev.timestamp = bpf_ktime_get_ns();
 	ev.pid = current->tgid;
 	ev.tid = current->pid;
 	ev.cpu = bpf_get_smp_processor_id();
