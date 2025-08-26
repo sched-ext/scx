@@ -716,7 +716,6 @@ struct Opts {
     /// Enable affinitized task to use hi fallback queue to get more CPU time.
     #[clap(long, default_value = "")]
     hi_fb_thread_name: String,
-
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
