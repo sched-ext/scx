@@ -215,38 +215,6 @@ static int pick_cpu_with_lowest_vtime(struct cpdom_ctx *cpdomc)
 	return pick_cpu;
 }
 
-/*
- * For simplicity, try to just steal from the CPU with
- * the highest number of queued_tasks in this domain.
- */
-static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
-	u64 highest_queued = 0;
-	int pick_cpu = -ENOENT;
-	int cpu, i, j;
-
-	if (!per_cpu_dsq)
-		return -ENOENT;
-
-	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-		u64 cpumask = cpdomc->__cpumask[i];
-		bpf_for(j, 0, 64) {
-			if (cpumask & 0x1LLU << j) {
-				u64 queued;
-				cpu = (i * 64) + j;
-				if (cpu >= __nr_cpu_ids)
-					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-				if (queued > highest_queued) {
-					highest_queued = queued;
-					pick_cpu = cpu;
-				}
-			}
-		}
-	}
-
-	return pick_cpu;
-}
-
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
