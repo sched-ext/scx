@@ -29,7 +29,10 @@ int BPF_PROG(handle_do_fault, struct vm_fault *vmf)
 	e = bpf_ringbuf_reserve(&soft_dirty_events, sizeof(*e), 0);
 	if (!e)
 		return 0;
+	e->timestamp = bpf_ktime_get_ns();
+	e->pid = current->tgid;
 	e->tid = current->pid;
+	e->cpu = bpf_get_smp_processor_id();
 	e->address = (unsigned long)vmf->address;
 	bpf_ringbuf_submit(e, 0);
 	return 0;
