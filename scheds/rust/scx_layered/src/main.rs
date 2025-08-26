@@ -2321,7 +2321,6 @@ impl<'a> Scheduler<'a> {
         }
 
         if !opts.hi_fb_thread_name.is_empty() {
-            // let bpf_hi_fb_thread_name = &mut skel.maps.bss_data.as_mut().unwrap().hi_fb_thread_name;
             let bpf_hi_fb_thread_name = &mut rodata.hi_fb_thread_name;
             copy_into_cstr(bpf_hi_fb_thread_name, opts.hi_fb_thread_name.as_str());
             rodata.enable_hi_fb_thread_name_match = true;
