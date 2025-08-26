@@ -18,19 +18,16 @@ subsystems such as power management.
 `p2dq` has a number of task queues for different purposes (and subject to
 change). For a high level on how tasks are enqueued see the following diagram
 for a system that has two LLCs and four CPUs with two CPUs per LLC. For each
-LLC there are generally three DSQs; the main DSQ (`dsq`), interactive
-(`intr_dsq`: optional), and migration (`mig_dsq`). Tasks that are considered
-migration eligible are placed in the migration dsq.
+LLC there are generally three DSQs; the LLC DSQ (`dsq`), per CPU DSQ, and
+migration (`mig_dsq`). Tasks that are considered migration eligible are placed
+in the migration dsq.
 
 ```mermaid
 graph TD;
     LLC0[LLC 0]-->id1[(dsq)];
-    LLC0[LLC 0]-->id2[(intr_dsq)];
     LLC0[LLC 0]-->id3[(mig_dsq)];
     id1-->cpu0;
     id1-->cpu1;
-    id2-->cpu0;
-    id2-->cpu1;
     id3-->cpu0;
     id3-->cpu1;
 
@@ -39,13 +36,10 @@ graph TD;
 
     LLC1[LLC 1]-->id4[(mig_dsq)];
     LLC1[LLC 1]-->id5[(dsq)];
-    LLC1[LLC 1]-->id6[(intr_dsq)];
     id4-->cpu2;
     id4-->cpu3;
     id5-->cpu2;
     id5-->cpu3;
-    id6-->cpu2;
-    id6-->cpu3;
 
     id4-..->cpu0;
     id4-..->cpu1;
@@ -54,17 +48,14 @@ graph TD;
 When a CPU is ready to run a task it will look at all the DSQs and try to find
 the DSQ with the most eligible task based on virtual runtime (`vtime`) for the
 LLC to ensure fairness across the DSQs. If no task is found then the CPU will
-try to enqueue tasks from the DSQs in the following order: interactive (if
-enabled), LLC, and migration.
+try to enqueue tasks from the DSQs in the following order: CPU, LLC, and
+migration.
 
 If no tasks are found then `p2dq` does pick two load balancing. In the pick two
 process the load balancer randomly selects two LLCs and compares the relative
 load. The LLC with the most load is chosen and the migration DSQ is attempted
 to be consumed. If that fails then the second migraiton DSQ is attempted.
 
-Tasks run duration (time slice) is based on utilization. Tasks with short
-utilization are considered "interactive" and thus eligible to be placed into
-the interactive DSQ.
 
 ## Use Cases
 
@@ -78,6 +69,29 @@ which is a scheduler that can introduce entropy into a system via scheduling.
 `p2dq` makes use of [BPF arenas](https://lwn.net/Articles/1019885/) for many
 parts of the scheduler including topology awareness, task state tracking, and
 task queueing.
+
+### Gaming
+
+`p2dq` can work well as a gaming scheduler with some tuning. A list of relevant
+options for gaming:
+ - `--deadline` adds deadline scaling of timeslices.
+ - `--task-slice` creates more stable slice durations for better consistency.
+   Overrides other slice scaling methods.
+ - `--autoslice` auto scaling of interactive slice duration based on
+   utilization of interactive tasks.
+ - `--freq-control` for controling CPU frequency with certain drivers.
+ - `--cpu-priority` uses a min-heap to schedule on CPUs based on a score of
+   most recently used and preferred core value.
+ - `--sched-mode` can use the performance mode to schedule on Big cores.
+ - `--idle-resume-us` how long a CPU stays idle before dropping to a lower C-state.
+
+### Big/Little Support
+
+`p2dq` has support for Big/Little architectures and the scheduling can be set
+with `--sched-mode`. The performance mode biases to scheduling on big cores.
+The efficiency mode biases to scheduling on little cores and the default mode
+schedules interactive tasks on efficiency cores and high throughput tasks on
+big cores.
 
 ### Configuration
 
