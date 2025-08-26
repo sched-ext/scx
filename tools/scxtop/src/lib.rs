@@ -119,6 +119,7 @@ pub enum AppState {
 pub enum ViewState {
     Sparkline,
     BarChart,
+    LineGauge,
 }
 
 impl ViewState {
@@ -126,7 +127,8 @@ impl ViewState {
     pub fn next(&self) -> Self {
         match self {
             ViewState::Sparkline => ViewState::BarChart,
-            ViewState::BarChart => ViewState::Sparkline,
+            ViewState::BarChart => ViewState::LineGauge,
+            ViewState::LineGauge => ViewState::Sparkline,
         }
     }
 }
@@ -136,6 +138,7 @@ impl std::fmt::Display for ViewState {
         match self {
             ViewState::Sparkline => write!(f, "sparkline"),
             ViewState::BarChart => write!(f, "barchart"),
+            ViewState::LineGauge => write!(f, "linegauge"),
         }
     }
 }
