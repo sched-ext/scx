@@ -20,13 +20,13 @@ int handle_perf(struct bpf_perf_event_data *ctx)
 	struct task_struct *current;
 
 	current = bpf_get_current_task_btf();
-	if (!current->pid)
+	if (!current->pid || !ctx->addr)
 		return 0;
 
 	ev.pid = current->tgid;
 	ev.tid = current->pid;
 	ev.cpu = bpf_get_smp_processor_id();
-	ev.address = 0; /* placeholder */
+	ev.address = (unsigned long)ctx->addr;
 	bpf_perf_event_output(ctx, &perf_sample_events, BPF_F_CURRENT_CPU, &ev, sizeof(ev));
 	return 0;
 }

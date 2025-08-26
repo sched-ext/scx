@@ -177,17 +177,18 @@ impl<'a> PerfSampleMonitor<'a> {
         let mut failures = 0u32;
         let mut attr = perf::bindings::perf_event_attr::default();
         attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
-        attr.type_ = perf::bindings::PERF_TYPE_HARDWARE;
-        attr.config = perf::bindings::PERF_COUNT_HW_CPU_CYCLES as u64;
+        attr.type_ = perf::bindings::PERF_TYPE_RAW;
+        attr.config = 0x076;
         attr.__bindgen_anon_1.sample_freq = period as u64;
         attr.set_freq(1); // frequency mode
-        attr.sample_type = perf::bindings::PERF_SAMPLE_RAW as u64;
-        attr.read_format = (perf::bindings::PERF_FORMAT_TOTAL_TIME_ENABLED
-            | perf::bindings::PERF_FORMAT_TOTAL_TIME_RUNNING) as u64;
+        attr.sample_type = perf::bindings::PERF_SAMPLE_ADDR as u64
+            | perf::bindings::PERF_SAMPLE_PHYS_ADDR as u64
+            | perf::bindings::PERF_SAMPLE_DATA_SRC as u64;
         attr.set_inherit(if pid.is_some() { 1 } else { 0 });
         attr.set_disabled(1);
         attr.set_enable_on_exec(1);
         attr.__bindgen_anon_2.wakeup_events = 1;
+        attr.set_precise_ip(1);
 
         let events = Rc::new(RefCell::new(VecDeque::new()));
         let events_cb = Rc::clone(&events);
@@ -253,6 +254,10 @@ impl<'a> PerfSampleMonitor<'a> {
                 if data.len() == expect + 4 {
                     let ev: &crate::bpf_intf::perf_sample_event =
                         unsafe { &*(data.as_ptr() as *const _) };
+                    trace!(
+                        "perf sample pid={} tid={} cpu={} addr=0x{:x}",
+                        ev.pid, ev.tid, ev.cpu, ev.address
+                    );
                     events_cb
                         .borrow_mut()
                         .push_back(CacheMonitorValue::PerfSample {
