@@ -8,7 +8,7 @@ use clap::Parser;
 use log::*;
 
 mod monitors;
-use monitors::{CacheMonitor, CacheMonitorValue, SoftDirtyCacheMonitor};
+use monitors::{CacheMonitor, CacheMonitorValue, PerfSampleMonitor, SoftDirtyCacheMonitor};
 use std::mem::MaybeUninit;
 pub mod bpf_intf;
 pub mod bpf_skel; // generated at build time
@@ -31,6 +31,14 @@ struct Opts {
     /// provided, this monitor is enabled by default.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     soft_dirty: bool,
+
+    /// Enable perf sampling monitor (prototype: samples HW cycles for now).
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    perf_sample: bool,
+
+    /// Perf sampling frequency (samples per second).
+    #[clap(long = "perf-freq", default_value_t = 1000)]
+    perf_freq: u64,
 
     /// Output consumed monitor values as JSON (one per line). When not set,
     /// values are printed using Debug formatting.
@@ -74,24 +82,22 @@ fn main() -> Result<()> {
 
     let pid_opt = opts.pid;
 
-    let any_monitor_flag = opts.soft_dirty;
-    // Determine how many monitors are needed up front (currently only soft-dirty)
-    let mut needed = 0usize;
-    if !any_monitor_flag || opts.soft_dirty {
-        needed += 1;
-    }
-
-    let mut open_storages: Vec<MaybeUninit<libbpf_rs::OpenObject>> =
-        (0..needed).map(|_| MaybeUninit::uninit()).collect();
-    let mut monitors: Vec<Box<dyn CacheMonitor<'_>>> = Vec::with_capacity(needed);
+    let any_monitor_flag = opts.soft_dirty || opts.perf_sample;
+    // For now support at most two monitors; use separate storages to simplify lifetimes.
+    let mut soft_dirty_open: MaybeUninit<libbpf_rs::OpenObject> = MaybeUninit::uninit();
+    let mut perf_open: MaybeUninit<libbpf_rs::OpenObject> = MaybeUninit::uninit();
+    let mut monitors: Vec<Box<dyn CacheMonitor<'_>>> = Vec::new();
 
     let ring_size_bytes = (opts.ring_mb as u64)
         .saturating_mul(1024 * 1024)
         .max(4 * 1024);
 
     if !any_monitor_flag || opts.soft_dirty {
-        let storage_ref = &mut open_storages[0];
-        let monitor = SoftDirtyCacheMonitor::new(storage_ref, pid_opt, ring_size_bytes)?;
+        let monitor = SoftDirtyCacheMonitor::new(&mut soft_dirty_open, pid_opt, ring_size_bytes)?;
+        monitors.push(Box::new(monitor));
+    }
+    if !any_monitor_flag || opts.perf_sample {
+        let monitor = PerfSampleMonitor::new(&mut perf_open, pid_opt, opts.perf_freq)?;
         monitors.push(Box::new(monitor));
     }
 
