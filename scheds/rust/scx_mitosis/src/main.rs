@@ -29,6 +29,7 @@ use log::info;
 use log::trace;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_enums;
@@ -83,6 +84,10 @@ struct Opts {
     /// is not launched.
     #[clap(long)]
     monitor: Option<f64>,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 }
 
 // The subset of cstats we care about.
@@ -155,6 +160,11 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
+        info!(
+            "Running scx_mitosis (build ID: {})",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+
         let mut skel = scx_ops_open!(skel_builder, open_object, mitosis)?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
@@ -474,6 +484,14 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.version {
+        println!(
+            "scx_mitosis {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
 
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,
