@@ -122,6 +122,27 @@ rbnode_t *rbnode_find(rbnode_t *subtree, uint64_t key)
 	return node;
 }
 
+static
+rbnode_t *rbnode_least_upper_bound(rbnode_t *subtree, uint64_t key)
+{
+	rbnode_t *node = subtree;
+	int dir;
+
+	if (!subtree)
+		return NULL;
+
+	while (can_loop) {
+		dir = (key <= node->key) ? 0 : 1;
+
+		if (!node->child[dir])
+			break;
+
+		node = node->child[dir];
+	}
+
+	return node;
+}
+
 __weak
 int rb_find(rbtree_t __arg_arena *rbtree, u64 key, u64 *value)
 {
@@ -191,7 +212,7 @@ int rb_node_free(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *rbnode)
 }
 
 __weak
-int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, bool update)
+int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enum rbtree_insert_mode mode)
 {
 	rbnode_t *grandparent, *parent = rbtree->root;
 	u64 key = node->key;
@@ -206,17 +227,24 @@ int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, boo
 		return 0;
 	}
 
-	parent = rbnode_find(parent, key);
+	if (mode != RB_DUPLICATE)
+		parent = rbnode_find(parent, key);
+	else
+		parent = rbnode_least_upper_bound(parent, key);
 
-	if (key == parent->key) {
-		if (!update)
-			return -EALREADY;
-		parent->value = node->value;
-		return 0;
+	if (key == parent->key && mode != RB_DUPLICATE) {
+		if (mode == RB_UPDATE) {
+			parent->value = node->value;
+			return 0;
+		}
+
+		/* Otherwise it's RB_DEFAULT. */
+		return -EALREADY;
 	}
 
 	node->parent = parent;
-	if (key < parent->key)
+	/* Also works if key == parent->key. */
+	if (key <= parent->key)
 		parent->left = node;
 	else
 		parent->right = node;
@@ -265,7 +293,7 @@ int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, boo
 }
 
 __weak
-int rb_insert(rbtree_t __arg_arena *rbtree, uint64_t key, uint64_t value, bool update)
+int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value, enum rbtree_insert_mode mode)
 {
 	rbnode_t *node;
 
@@ -273,7 +301,7 @@ int rb_insert(rbtree_t __arg_arena *rbtree, uint64_t key, uint64_t value, bool u
 	if (!node)
 		return -ENOMEM;
 
-	return rb_insert_node(rbtree, node, update);
+	return rb_insert_node(rbtree, node, mode);
 }
 
 static rbnode_t *rbnode_least(rbnode_t *subtree)

@@ -63,12 +63,12 @@ __weak int scx_selftest_rbtree_insert_existing(rbtree_t __arg_arena *rbtree)
 		return 1;
 
 	/* Should return -EINVAL. */
-	ret = rb_insert(rbtree, key, value, false);
+	ret = rb_insert(rbtree, key, value, RB_DEFAULT);
 	if (ret)
 		return 2;
 
 	/* Should return -EALREADY. */
-	ret = rb_insert(rbtree, key, value, false);
+	ret = rb_insert(rbtree, key, value, RB_DEFAULT);
 	if (ret != -EALREADY) {
 		return 3;
 	}
@@ -87,7 +87,7 @@ __weak int scx_selftest_rbtree_update_existing(rbtree_t __arg_arena *rbtree)
 
 	/* Should return -EINVAL. */
 	value = 52;
-	ret = rb_insert(rbtree, key, value, true);
+	ret = rb_insert(rbtree, key, value, RB_UPDATE);
 	if (ret)
 		return 2;
 
@@ -101,7 +101,7 @@ __weak int scx_selftest_rbtree_update_existing(rbtree_t __arg_arena *rbtree)
 	value = 65;
 
 	/* Should succeed. */
-	ret = rb_insert(rbtree, key, value, true);
+	ret = rb_insert(rbtree, key, value, RB_UPDATE);
 	if (ret)
 		return 5;
 
@@ -123,7 +123,7 @@ __weak int scx_selftest_rbtree_insert_one(rbtree_t __arg_arena *rbtree)
 	u64 value = 0xbadcafe;
 	int ret;
 
-	ret = rb_insert(rbtree, key, value, true);
+	ret = rb_insert(rbtree, key, value, RB_UPDATE);
 	if (ret)
 		return 1;
 
@@ -147,7 +147,7 @@ __weak int scx_selftest_rbtree_insert_ten(rbtree_t __arg_arena *rbtree)
 
 	for (i = 0; i < 10 && can_loop; i++) {
 		key = keys[i];
-		ret = rb_insert(rbtree, key, 2 * key, true);
+		ret = rb_insert(rbtree, key, 2 * key, RB_UPDATE);
 		if (ret)
 			return 2 + 3 * i;
 
@@ -175,6 +175,49 @@ __weak int scx_selftest_rbtree_insert_ten(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
+__weak int scx_selftest_rbtree_duplicate(rbtree_t __arg_arena *rbtree)
+{
+	u64 key = 0x121212;
+	u64 value;
+	int ret, i;
+
+	if (!rbtree)
+		return 1;
+
+	for (i = 0; i < 10 && can_loop; i++) {
+		ret = rb_insert(rbtree, key, 2 * key, RB_DUPLICATE);
+		if (ret)
+			return 2 + 3 * i;
+
+		/* Read it back. */
+		ret = rb_find(rbtree, key, &value);
+		if (ret)
+			return 2 + 3 * i + 1;
+
+		if (value != 2 * key)
+			return 2 + 3 * i + 2;
+	}
+	rb_print(rbtree);
+
+	/* Go find all inserted copies and remove them. */
+	for (i = 0; i < 10 && can_loop; i++) {
+		ret = rb_find(rbtree, key, &value);
+		if (ret) {
+			rb_print(rbtree);
+			return 35 + 3 * i;
+		}
+
+		if (value != 2 * key)
+			return 35 + 3 * i + 1;
+
+		ret = rb_remove(rbtree, key);
+		if (ret)
+			return 35 + 3 * i + 2;
+	}
+
+	return 0;
+}
+
 __weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
 {
 	const size_t numkeys = sizeof(keys) / sizeof(keys[0]);
@@ -187,7 +230,7 @@ __weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
 
 	for (i = 0; i < numkeys && can_loop; i++) {
 		key = keys[i];
-		ret = rb_insert(rbtree, key, 2 * key, true);
+		ret = rb_insert(rbtree, key, 2 * key, RB_UPDATE);
 		if (ret)
 			return 2 + 3 * i;
 
@@ -227,7 +270,7 @@ __weak int scx_selftest_rbtree_remove_one(rbtree_t __arg_arena *rbtree)
 	if (!ret)
 		return 2;
 
-	ret = rb_insert(rbtree, key, value, false);
+	ret = rb_insert(rbtree, key, value, RB_DEFAULT);
 	if (ret)
 		return 3;
 
@@ -261,7 +304,7 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 
 	bpf_for(i, 0, numkeys) {
 		key = morekeys[i];
-		ret = rb_insert(rbtree, key, 2 * key, true);
+		ret = rb_insert(rbtree, key, 2 * key, RB_UPDATE);
 		if (ret)
 			return errval;
 
@@ -374,7 +417,7 @@ __weak int scx_selftest_rbtree_add_remove_circular(rbtree_t __arg_arena *rbtree)
 		return 1;
 
 	bpf_for(i, 0, prefill) {
-		ret = rb_insert(rbtree, prefix + (i % numkeys), i, true);
+		ret = rb_insert(rbtree, prefix + (i % numkeys), i, RB_UPDATE);
 		if (ret)
 			return errval;
 
@@ -406,7 +449,7 @@ __weak int scx_selftest_rbtree_add_remove_circular(rbtree_t __arg_arena *rbtree)
 
 		errval += 1;
 
-		ret = rb_insert(rbtree, key, i, true);
+		ret = rb_insert(rbtree, key, i, RB_UPDATE);
 		if (ret) {
 			bpf_printk("ITERATION %d", i);
 			rb_print(rbtree);
@@ -460,7 +503,7 @@ __weak int scx_selftest_rbtree_add_remove_circular_reverse(rbtree_t __arg_arena 
 		return 1;
 
 	bpf_for(i, 0, prefill) {
-		ret = rb_insert(rbtree, prefix - (i % numkeys), i, true);
+		ret = rb_insert(rbtree, prefix - (i % numkeys), i, RB_UPDATE);
 		if (ret)
 			return errval;
 
@@ -492,7 +535,7 @@ __weak int scx_selftest_rbtree_add_remove_circular_reverse(rbtree_t __arg_arena 
 
 		errval += 1;
 
-		ret = rb_insert(rbtree, key, i, true);
+		ret = rb_insert(rbtree, key, i, RB_UPDATE);
 		if (ret) {
 			bpf_printk("error %d on insert", ret);
 			rb_print(rbtree);
@@ -542,13 +585,13 @@ __weak int scx_selftest_rbtree_least_pop(rbtree_t __arg_arena *rbtree)
 	int ret, i;
 
 	bpf_for(i, 0, keys / 2) {
-		ret = rb_insert(rbtree, i, i, true);
+		ret = rb_insert(rbtree, i, i, RB_UPDATE);
 		if (ret)
 			return errval;
 
 		errval += 1;
 
-		ret = rb_insert(rbtree, keys - 1 - i, keys - 1 - i, true);
+		ret = rb_insert(rbtree, keys - 1 - i, keys - 1 - i, RB_UPDATE);
 		if (ret)
 			return errval;
 
@@ -613,6 +656,7 @@ int scx_selftest_rbtree(void)
 	SCX_RBTREE_SELFTEST(print);
 	SCX_RBTREE_SELFTEST(insert_existing);
 	SCX_RBTREE_SELFTEST(update_existing);
+	SCX_RBTREE_SELFTEST(duplicate);
 	SCX_RBTREE_SELFTEST(insert_ten);
 	SCX_RBTREE_SELFTEST(insert_many);
 	SCX_RBTREE_SELFTEST(remove_one);
