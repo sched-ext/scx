@@ -1,8 +1,10 @@
 #pragma once
 
+#ifdef __BPF__
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.bpf.h>
 #include <scx/bpf_arena_spin_lock.h>
+#endif /* __BPF__ */
 
 #define RB_MAXLVL_PRINT (16)
 
@@ -36,6 +38,7 @@ struct rbtree {
 
 typedef struct rbtree __arena rbtree_t;
 
+#ifdef __BPF__
 u64 rb_create_internal(void);
 #define rb_create() ((rbtree_t *)(rb_create_internal()))
 
@@ -44,3 +47,6 @@ int rb_insert(rbtree_t *rbtree, u64 key, u64 value, bool update);
 int rb_remove(rbtree_t *rbtree, u64 key);
 int rb_find(rbtree_t *rbtree, u64 key, u64 *value);
 int rb_print(rbtree_t *rbtree);
+int rb_least(rbtree_t *rbtree, u64 *key, u64 *value);
+int rb_pop(rbtree_t *rbtree, u64 *key, u64 *value);
+#endif /* __BPF__ */

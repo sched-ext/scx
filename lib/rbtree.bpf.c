@@ -22,7 +22,7 @@ void rbnode_print(size_t depth, rbnode_t *rbn);
 } while (0)
 
 __weak
-u64 rb_create_internal()
+u64 rb_create_internal(void)
 {
 	rbtree_t *rbtree;
 
@@ -272,6 +272,21 @@ static rbnode_t *rbnode_least(rbnode_t *subtree)
 	return subtree;
 }
 
+__weak int rb_least(rbtree_t __arg_arena *rbtree, u64 __arg_trusted *key, u64 __arg_trusted *value)
+{
+	rbnode_t *least;
+	if (!rbtree->root)
+		return -ENOENT;
+
+	least = rbnode_least(rbtree->root);
+	if (key)
+		*key = least->key;
+	if (value)
+		*value = least->value;
+
+	return 0;
+}
+
 
 /* 
  * If we are referencing ourselves, a and b have a parent-child relation,
@@ -394,20 +409,13 @@ static inline bool rbnode_has_red_children(rbnode_t *node)
 	return node->right && node->right->is_red;
 }
 
-__weak
-int rb_remove(rbtree_t __arg_arena *rbtree, u64 key)
+static
+int rb_remove_rbnode(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 {
-	rbnode_t *parent, *sibling, *close_nephew, *distant_nephew, *node;
+	rbnode_t *parent, *sibling, *close_nephew, *distant_nephew;
 	rbnode_t *replace, *initial;
 	bool is_red;
 	int dir;
-
-	if (unlikely(!rbtree))
-		return -EINVAL;
-
-	node = rbnode_find(rbtree->root, key);
-	if (!node || node->key != key)
-		return -ENOENT;
 
 	/* Both children present, replace with next largest key. */
 	if (node->left && node->right) {
@@ -578,6 +586,47 @@ int rb_remove(rbtree_t __arg_arena *rbtree, u64 key)
 	distant_nephew->is_red = false;
 
 	return 0;
+}
+
+__weak
+int rb_remove(rbtree_t __arg_arena *rbtree, u64 key)
+{
+	rbnode_t *node;
+
+	if (unlikely(!rbtree))
+		return -EINVAL;
+
+	if (!rbtree->root)
+		return -ENOENT;
+
+	node = rbnode_find(rbtree->root, key);
+	if (!node || node->key != key)
+		return -ENOENT;
+
+	return rb_remove_rbnode(rbtree, node);
+}
+
+__weak
+int rb_pop(rbtree_t __arg_arena *rbtree, u64 __arg_trusted *key, u64 __arg_trusted *value)
+{
+	rbnode_t *node;
+
+	if (unlikely(!rbtree))
+		return -EINVAL;
+
+	if (!rbtree->root)
+		return -ENOENT;
+
+	node = rbnode_least(rbtree->root);
+	if (unlikely(!node))
+		return -ENOENT;
+
+	if (key)
+		*key = node->key;
+	if (value)
+		*value = node->value;
+
+	return rb_remove_rbnode(rbtree, node);
 }
 
 inline void rbnode_print(size_t depth, rbnode_t *rbn)

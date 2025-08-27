@@ -534,6 +534,63 @@ __weak int scx_selftest_rbtree_add_remove_circular_reverse(rbtree_t __arg_arena 
 	return 0;
 }
 
+__weak int scx_selftest_rbtree_least_pop(rbtree_t __arg_arena *rbtree)
+{
+	const size_t keys = 10;
+	u64 key, value;
+	int errval = 1;
+	int ret, i;
+
+	bpf_for(i, 0, keys / 2) {
+		ret = rb_insert(rbtree, i, i, true);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		ret = rb_insert(rbtree, keys - 1 - i, keys - 1 - i, true);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		ret = rb_least(rbtree, &key, &value);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		if (key != 0 || value != 0)
+			return errval;
+
+		errval += 1;
+	}
+
+	errval = 1000;
+
+	bpf_for(i, 0, keys) {
+		ret = rb_least(rbtree, &key, &value);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		if (key != i || value != i)
+			return errval;
+
+		ret = rb_pop(rbtree, &key, &value);
+		if (ret)
+			return errval;
+
+		errval += 1;
+
+		if (key != i || value != i)
+			return errval;
+	}
+
+	return 0;
+}
+
 __weak int scx_selftest_rbtree_print(rbtree_t __arg_arena *rbtree)
 {
 	rb_print(rbtree);
