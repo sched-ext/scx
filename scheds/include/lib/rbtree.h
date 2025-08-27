@@ -49,4 +49,10 @@ int rb_find(rbtree_t *rbtree, u64 key, u64 *value);
 int rb_print(rbtree_t *rbtree);
 int rb_least(rbtree_t *rbtree, u64 *key, u64 *value);
 int rb_pop(rbtree_t *rbtree, u64 *key, u64 *value);
+
+int rb_insert_node(rbtree_t *rbtree, rbnode_t *node, bool update);
+u64 rb_node_alloc_internal(rbtree_t *rbtree, u64 key, u64 value);
+#define rb_node_alloc(rbtree, key, value) ((rbnode_t *)rb_node_alloc_internal((rbtree), (key), (value)))
+int rb_node_free(rbtree_t *rbtree, rbnode_t *rbnode);
+
 #endif /* __BPF__ */
