@@ -101,10 +101,8 @@ int scx_selftest_atq_common(bool isfifo)
 		taskc = (task_ctx *)scx_atq_pop(atq);
 		if (isfifo && taskc->pid != i) {
 			bpf_printk("Popped out unexpected element from FIFO atq (pid %ld, vtime %ld), expected %d", taskc->pid, taskc->vtime, i);
-			scx_minheap_dump(atq->heap);
 			return -EINVAL;
 		} else if (!isfifo && taskc->vtime < vtime) {
-			scx_minheap_dump(atq->heap);
 			bpf_printk("Popped out unexpected element from PRIO atq (pid %ld, vtime %ld)", taskc->pid, taskc->vtime);
 			return -EINVAL;
 		}
@@ -159,6 +157,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	const int TEST_CYCLES = 32;
 	scx_atq_t *atq;
 	int expected, found;
+	u64 taskc;
 	int i, j;
 	int ret;
 
@@ -167,6 +166,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	for (i = 0; i < TEST_CYCLES && can_loop; i++ ) {
 
 		for (j = 0; j < PUSHES_PER_TEST && can_loop; j++ ) {
+			/* Also a nice way to check if we handle identical keys. */
 			ret = scx_atq_insert_vtime(atq, i, i);
 			if (ret) {
 				bpf_printk("atq insert failed with %d", ret);
@@ -176,7 +176,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 			expected = (PUSHES_PER_TEST - POPS_PER_TEST) * i  + j + 1;
 			found = scx_atq_nr_queued(atq);
 			if (expected != found) {
-				bpf_printk("scx_arnea_atq_nr_queued expected %d, found %d", expected, found);
+				bpf_printk("scx_arena_atq_nr_queued expected %d, found %d", expected, found);
 				return -EINVAL;
 			}
 		}
@@ -195,11 +195,16 @@ int scx_selftest_atq_nr_queued(u64 unused)
 
 
 	found = scx_atq_nr_queued(atq);
-	for (i = 0; i < found && can_loop; i++)
-		scx_atq_pop(atq);
+	for (i = 0; i < found && can_loop; i++) {
+		taskc = scx_atq_pop(atq);
+		if (!taskc) {
+			bpf_printk("scx_atq_pop retrieved (%d)", taskc);
+			return -EINVAL;
+		}
+	}
 
 	if (scx_atq_nr_queued(atq) > 0) {
-		bpf_printk("atq unexpectedly not empty");
+		bpf_printk("atq unexpectedly not empty (%d)", scx_atq_nr_queued(atq));
 		return -EINVAL;
 	}
 

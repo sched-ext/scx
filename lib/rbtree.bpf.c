@@ -99,7 +99,7 @@ int rbnode_rotate(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, int 
 }
 
 static
-rbnode_t *rbnode_find(rbnode_t *subtree, uint64_t key)
+rbnode_t *rbnode_find(rbnode_t *subtree, u64 key)
 {
 	rbnode_t *node = subtree;
 	int dir;
@@ -312,7 +312,7 @@ static rbnode_t *rbnode_least(rbnode_t *subtree)
 	return subtree;
 }
 
-__weak int rb_least(rbtree_t __arg_arena *rbtree, u64 __arg_trusted *key, u64 __arg_trusted *value)
+__weak int rb_least(rbtree_t __arg_arena *rbtree, u64 *key, u64 *value)
 {
 	rbnode_t *least;
 	if (!rbtree->root)
@@ -647,7 +647,7 @@ int rb_remove(rbtree_t __arg_arena *rbtree, u64 key)
 }
 
 __weak
-int rb_pop(rbtree_t __arg_arena *rbtree, u64 __arg_trusted *key, u64 __arg_trusted *value)
+int rb_pop(rbtree_t __arg_arena *rbtree, u64 *key, u64 *value)
 {
 	rbnode_t *node;
 
