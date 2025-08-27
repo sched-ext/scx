@@ -187,7 +187,7 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
 
-        info!("Layered Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
+        info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 
         let (res_ch, req_ch) = self.stats_server.channels();
 
