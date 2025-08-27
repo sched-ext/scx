@@ -107,7 +107,7 @@ struct Opts {
 
     /// Enable preferred idle CPU scanning.
     ///
-    /// With this opition enabled, the scheduler will prioritize assigning tasks to higher-ranked
+    /// With this option enabled, the scheduler will prioritize assigning tasks to higher-ranked
     /// cores before considering lower-ranked ones.
     #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
     preferred_idle_scan: bool,
