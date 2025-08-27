@@ -45,6 +45,7 @@ use scx_utils::NR_CPUS_POSSIBLE;
 use stats::CellMetrics;
 use stats::Metrics;
 
+const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 
@@ -202,6 +203,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         drop(struct_ops);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
         uei_report!(&self.skel, uei)
     }
 

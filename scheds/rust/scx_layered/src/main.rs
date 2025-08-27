@@ -3109,7 +3109,7 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
-        info!("Unregister {} scheduler", SCHEDULER_NAME);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
 
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);

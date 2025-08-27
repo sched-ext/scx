@@ -277,7 +277,7 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
-        info!("Unregister {} scheduler", SCHEDULER_NAME);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
     }
 }
 
