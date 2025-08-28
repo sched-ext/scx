@@ -44,7 +44,7 @@
 #define	NUMA_NO_NODE	(-1)
 #endif
 
-extern int LINUX_KERNEL_VERSION __kconfig;
+extern int LINUX_KERNEL_VERSION __kconfig __weak;
 extern const char CONFIG_CC_VERSION_TEXT[64] __kconfig __weak;
 extern const char CONFIG_LOCALVERSION[64] __kconfig __weak;
 

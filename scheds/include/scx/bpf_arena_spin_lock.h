@@ -16,7 +16,7 @@
 #define EOPNOTSUPP 95
 #define ETIMEDOUT 110
 
-extern unsigned long CONFIG_NR_CPUS __kconfig;
+extern unsigned long CONFIG_NR_CPUS __kconfig __weak;
 
 /*
  * Typically, we'd just rely on the definition in vmlinux.h for qspinlock, but
