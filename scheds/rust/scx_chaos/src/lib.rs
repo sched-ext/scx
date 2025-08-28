@@ -66,6 +66,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+const SCHEDULER_NAME: &str = "scx_chaos";
 struct ArenaAllocator(Pin<Rc<SkelWithObject>>);
 
 unsafe impl Allocator for ArenaAllocator {
@@ -243,6 +244,12 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for Scheduler {
+    fn drop(&mut self) {
+        info!("Unregister {SCHEDULER_NAME} scheduler");
     }
 }
 
