@@ -38,6 +38,21 @@ struct rbtree {
 
 typedef struct rbtree __arena rbtree_t;
 
+/*
+ * Specify the behavior of rbtree insertions when the key is
+ * already present in the tree.
+ *
+ * RB_DEFAULT: Default behavior, reject the new insert.
+ *
+ * RB_UPDATE: Update the existing value in the rbtree.
+ * This updates the node itself, not just the value in
+ * the existing node.
+ *
+ * RB_DUPLICATE: Allow nodes with identical keys in the rbtree.
+ * Finding/popping/removing a key acts on any of the nodes
+ * with the appropriate key - there is no ordering by time
+ * of insertion.
+ */
 enum rbtree_insert_mode {
 	RB_DEFAULT,
 	RB_UPDATE,
