@@ -129,6 +129,8 @@ static u64 vtime_now;
 struct task_ctx {
 	u64 last_run_at;
 	u64 exec_runtime;
+	u64 wakeup_freq;
+	u64 last_woke_at;
 };
 
 struct {
@@ -181,6 +183,21 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 static u64 calc_avg(u64 old_val, u64 new_val)
 {
 	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+/*
+ * Update the average frequency of an event.
+ *
+ * The frequency is computed from the given interval since the last event
+ * and combined with the previous frequency using an exponential weighted
+ * moving average.
+ */
+static u64 update_freq(u64 freq, u64 interval)
+{
+        u64 new_freq;
+
+        new_freq = (100 * NSEC_PER_MSEC) / interval;
+        return calc_avg(freq, new_freq);
 }
 
 /*
@@ -504,10 +521,17 @@ static u64 task_slice(const struct task_struct *p)
  * periods of time, the vruntime credit they can accumulate while sleeping
  * is limited by @slice_lag, which is also scaled based on the task's
  * weight.
+ *
+ * To prioritize tasks that sleep frequently over those with long sleep
+ * intervals, @slice_lag is also adjusted in function of the task's wakeup
+ * frequency: tasks that sleep often have a bigger slice lag, allowing them
+ * to accumulate more time-slice credit than tasks with infrequent, long
+ * sleeps.
  */
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag);
+	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
+	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
 	u64 vtime_min = vtime_now - vsleep_max;
 
 	if (time_before(p->scx.dsq_vtime, vtime_min))
@@ -746,6 +770,7 @@ void BPF_STRUCT_OPS(cosmos_cpu_release, s32 cpu, struct scx_cpu_release_args *ar
 
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 {
+	u64 now = scx_bpf_now(), delta_t;
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
@@ -757,6 +782,16 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 	 * sleep).
 	 */
 	tctx->exec_runtime = 0;
+
+	/*
+	 * Update the task's wakeup frequency based on the time since
+	 * the last wakeup, then cap the result at 1024 to avoid large
+	 * spikes.
+	 */
+	delta_t = now - tctx->last_woke_at;
+	tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
+	tctx->wakeup_freq = MIN(tctx->wakeup_freq, 1024);
+	tctx->last_woke_at = now;
 }
 
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
