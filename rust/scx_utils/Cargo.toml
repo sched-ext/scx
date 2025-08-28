@@ -11,6 +11,7 @@ description = "Utilities for sched_ext schedulers"
 anyhow = "1.0.65"
 bitvec = { version = "1.0", features = ["serde"] }
 bindgen = ">=0.69"
+clap = { version = "4.5", features = ["derive"] }
 glob = "0.3.2"
 hex = "0.4.3"
 lazy_static = "1.5.0"
