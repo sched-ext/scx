@@ -15,6 +15,9 @@ use tuner::Tuner;
 pub mod load_balance;
 use load_balance::LoadBalancer;
 
+pub mod perf;
+use perf::init_perf_counters;
+
 mod stats;
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
@@ -228,6 +231,10 @@ struct Opts {
     /// prioritize energy efficiency. When in doubt, use 0 or 1024.
     #[clap(long, default_value = "0")]
     perf: u32,
+
+    /// Use L3 traffic sampling for load balancing instead of CPU load.
+    #[clap(long, default_value="false")]
+    l3_balancing: bool,
 }
 
 fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
@@ -349,6 +356,8 @@ struct Scheduler<'a> {
 
     tuner: Tuner,
     stats_server: StatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
+    _pefds: Vec<(i32, libbpf_rs::Link)>,
+    l3_balancing: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -446,7 +455,14 @@ impl<'a> Scheduler<'a> {
 
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
+
+        let mut pefds: Vec<(i32, libbpf_rs::Link)> = vec![];
+        for i in 0..32 {
+            pefds.push(init_perf_counters(&mut skel, &i)?);
+        }
+
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
+
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         for (id, dom) in domains.doms().iter() {
@@ -468,6 +484,7 @@ impl<'a> Scheduler<'a> {
             tune_interval: Duration::from_secs_f64(opts.tune_interval),
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
+            l3_balancing: opts.l3_balancing,
 
             dom_group: domains.clone(),
             proc_reader,
@@ -484,6 +501,7 @@ impl<'a> Scheduler<'a> {
                 opts.slice_us_overutil * 1000,
             )?,
             stats_server,
+            _pefds: pefds,
         })
     }
 
@@ -562,6 +580,7 @@ impl<'a> Scheduler<'a> {
             self.balanced_kworkers,
             self.tuner.fully_utilized,
             self.balance_load,
+            self.l3_balancing,
         );
 
         lb.load_balance()?;
