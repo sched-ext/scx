@@ -3087,6 +3087,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "scxcash"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs",
+ "libc",
+ "log",
+ "num_cpus",
+ "scx_utils",
+ "serde",
+ "serde_json",
+ "simplelog",
+]
+
+[[package]]
 name = "scxctl"
 version = "1.0.15"
 dependencies = [

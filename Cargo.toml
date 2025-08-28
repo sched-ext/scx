@@ -21,6 +21,7 @@ members = [
     "scheds/rust/scx_tickless",
     "scheds/rust/scx_wd40",
     "tools/scx_loader",
+    "tools/scxcash",
     "tools/scxctl",
     "tools/scxtop",
     "tools/vmlinux_docify",

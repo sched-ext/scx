@@ -898,7 +898,7 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
-        info!("Unregister {} scheduler", SCHEDULER_NAME);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
 
         // Restore default CPU idle QoS resume latency.
         if self.opts.idle_resume_us >= 0 {

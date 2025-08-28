@@ -66,6 +66,9 @@ const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
+/* Move matching thread name to hi_fb */
+const volatile bool enable_hi_fb_thread_name_match = false;
+const volatile char hi_fb_thread_name[16];
 
 /*
  * XXX sched classes should be exported kernel
@@ -1679,7 +1682,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if ((!taskc->all_cpuset_allowed &&
 	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
 	    !layer->nr_cpus) {
-		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
+		// Special handle for thread that has affinity set, but need more CPU time.
+		// XXX: If we need to support more than one thread (which is probably bad from
+		// deterministic performance perspective), we can change this to a map later.
+		if (enable_hi_fb_thread_name_match &&
+				bpf_strncmp(p->comm, sizeof(p->comm), (const char *)hi_fb_thread_name) == 0) {
+			trace("Put %s[%d] in hi_fb_dsq",
+					hi_fb_thread_name, p->pid);
+			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+		}
+		else {
+			taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
+		}
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
 		 * While the following is racy, all that's needed is at least

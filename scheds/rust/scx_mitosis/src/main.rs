@@ -29,6 +29,7 @@ use log::info;
 use log::trace;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_enums;
@@ -45,6 +46,7 @@ use scx_utils::NR_CPUS_POSSIBLE;
 use stats::CellMetrics;
 use stats::Metrics;
 
+const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 
@@ -82,6 +84,10 @@ struct Opts {
     /// is not launched.
     #[clap(long)]
     monitor: Option<f64>,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 }
 
 // The subset of cstats we care about.
@@ -154,6 +160,11 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
+        info!(
+            "Running scx_mitosis (build ID: {})",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+
         let mut skel = scx_ops_open!(skel_builder, open_object, mitosis)?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
@@ -187,7 +198,7 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
 
-        info!("Layered Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
+        info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 
         let (res_ch, req_ch) = self.stats_server.channels();
 
@@ -202,6 +213,7 @@ impl<'a> Scheduler<'a> {
             }
         }
         drop(struct_ops);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
         uei_report!(&self.skel, uei)
     }
 
@@ -472,6 +484,14 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.version {
+        println!(
+            "scx_mitosis {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
 
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,

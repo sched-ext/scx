@@ -170,10 +170,6 @@ struct AlignedBuffer([u8; BUFSIZE]);
 
 static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 
-// Special negative error code for libbpf to stop after consuming just one item from a BPF
-// ring buffer.
-const LIBBPF_STOP: i32 = -255;
-
 static SET_HANDLER: Once = Once::new();
 
 fn set_ctrlc_handler(shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
@@ -225,18 +221,8 @@ impl<'cb> BpfScheduler<'cb> {
                 BUF.0.copy_from_slice(data);
             }
 
-            // Return an unsupported error to stop early and consume only one item.
-            //
-            // NOTE: this is quite a hack. I wish libbpf would honor stopping after the first item
-            // is consumed, upon returning a non-zero positive value here, but it doesn't seem to
-            // be the case:
-            //
-            // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/lib/bpf/ringbuf.c?h=v6.8-rc5#n260
-            //
-            // Maybe we should fix this to stop processing items from the ring buffer also when a
-            // value > 0 is returned.
-            //
-            LIBBPF_STOP
+            // Return 0 to indicate successful completion of the copy.
+            0
         }
 
         // Check host topology to determine if we need to enable SMT capabilities.
@@ -535,12 +521,14 @@ impl<'cb> BpfScheduler<'cb> {
     // Receive a task to be scheduled from the BPF dispatcher.
     #[allow(static_mut_refs)]
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
-        match self.queued.consume_raw() {
+        // Try to consume the first task from the ring buffer.
+        match self.queued.consume_raw_n(1) {
             0 => {
+                // Ring buffer is empty.
                 self.skel.maps.bss_data.as_mut().unwrap().nr_queued = 0;
                 Ok(None)
             }
-            LIBBPF_STOP => {
+            1 => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
                 self.skel.maps.bss_data.as_mut().unwrap().nr_queued =

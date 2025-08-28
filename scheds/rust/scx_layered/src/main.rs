@@ -712,6 +712,10 @@ struct Opts {
     /// Print the config (after template expansion) and exit.
     #[clap(long, default_value = "false")]
     print_and_exit: bool,
+
+    /// Enable affinitized task to use hi fallback queue to get more CPU time.
+    #[clap(long, default_value = "")]
+    hi_fb_thread_name: String,
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -1437,7 +1441,7 @@ impl GpuTaskAffinitizer {
                         self.tasks_affinitized += 1;
                     }
                     Err(_) => {
-                        warn!(
+                        debug!(
                             "Error affinitizing gpu pid {} to node {:#?}",
                             child.as_u32(),
                             node_info
@@ -2316,6 +2320,12 @@ impl<'a> Scheduler<'a> {
             rodata.task_hint_map_enabled = true;
         }
 
+        if !opts.hi_fb_thread_name.is_empty() {
+            let bpf_hi_fb_thread_name = &mut rodata.hi_fb_thread_name;
+            copy_into_cstr(bpf_hi_fb_thread_name, opts.hi_fb_thread_name.as_str());
+            rodata.enable_hi_fb_thread_name_match = true;
+        }
+
         Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
@@ -3099,7 +3109,7 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
-        info!("Unregister {} scheduler", SCHEDULER_NAME);
+        info!("Unregister {SCHEDULER_NAME} scheduler");
 
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
