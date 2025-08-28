@@ -116,7 +116,7 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
     let output = skel.progs.arena_topology_node_init.test_run(input)?;
     if output.return_value != 0 {
         bail!(
-            "p2dq_topology_node_init returned {}",
+            "arena_topology_node_init returned {}",
             output.return_value as i32
         );
     }

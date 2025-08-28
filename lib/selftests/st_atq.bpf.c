@@ -21,12 +21,6 @@ scx_atq_t *prio;
 scx_atq_t *fifo;
 
 #define NTASKS 64
-struct task_ctx_nonarena {
-	u64 pid;
-	u64 vtime;
-};
-
-typedef struct task_ctx_nonarena __arena task_ctx;
 
 task_ctx *tasks[NTASKS];
 
