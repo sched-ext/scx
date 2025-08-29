@@ -11,7 +11,7 @@ ci.use_clippy = true
 
 [dependencies]
 scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.15" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.19" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.20" }
 scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.20" }
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.15" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.15" }
@@ -28,4 +28,4 @@ serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.19" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.20" }
