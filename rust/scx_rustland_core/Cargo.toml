@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustland_core"
-version = "2.3.4"
+version = "2.3.5"
 edition = "2021"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 license = "GPL-2.0-only"

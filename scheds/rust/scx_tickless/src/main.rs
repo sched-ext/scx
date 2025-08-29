@@ -32,6 +32,7 @@ use log::{debug, info};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -96,6 +97,9 @@ struct Opts {
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
+
+    #[clap(flatten, next_help_heading = "Libbpf Options")]
+    pub libbpf: LibbpfOpts,
 }
 
 pub fn is_nohz_enabled() -> bool {
@@ -147,7 +151,8 @@ impl<'a> Scheduler<'a> {
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
-        let mut skel = scx_ops_open!(skel_builder, open_object, tickless_ops)?;
+        let open_opts = opts.libbpf.clone().into_bpf_open_opts();
+        let mut skel = scx_ops_open!(skel_builder, open_object, tickless_ops, open_opts)?;
         skel.struct_ops.tickless_ops_mut().exit_dump_len = opts.exit_dump_len;
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();

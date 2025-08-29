@@ -25,6 +25,7 @@ use log::warn;
 use procfs::process::Process;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::UserExitInfo;
 use stats::Metrics;
 
@@ -113,6 +114,9 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    #[clap(flatten, next_help_heading = "Libbpf Options")]
+    pub libbpf: LibbpfOpts,
 }
 
 // Time constants.
@@ -156,6 +160,7 @@ impl<'a> Scheduler<'a> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             open_object,
+            opts.libbpf.clone().into_bpf_open_opts(),
             opts.exit_dump_len,
             opts.partial,
             opts.verbose,

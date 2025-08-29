@@ -2909,6 +2909,7 @@ dependencies = [
  "anyhow",
  "ctrlc",
  "libbpf-rs",
+ "libbpf-sys",
  "libc",
  "plain",
  "procfs 0.17.0",
@@ -2924,6 +2925,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "libbpf-rs",
+ "libbpf-sys",
  "libc",
  "log",
  "ordered-float",
@@ -2939,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.3.4"
+version = "2.3.5"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -3030,11 +3032,12 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "bindgen 0.72.0",
  "bitvec",
+ "clap",
  "const_format",
  "glob",
  "hex",

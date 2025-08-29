@@ -47,6 +47,7 @@ use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
@@ -716,6 +717,9 @@ struct Opts {
     /// Enable affinitized task to use hi fallback queue to get more CPU time.
     #[clap(long, default_value = "")]
     hi_fb_thread_name: String,
+
+    #[clap(flatten, next_help_heading = "Libbpf Options")]
+    pub libbpf: LibbpfOpts,
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -2172,7 +2176,8 @@ impl<'a> Scheduler<'a> {
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
-        let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
+        let open_opts = opts.libbpf.clone().into_bpf_open_opts();
+        let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
