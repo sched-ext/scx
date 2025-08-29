@@ -346,7 +346,7 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(Some(PrintLevel::Debug));
 
-        let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops, None)?;
 
         // Enable futex tracing using ftrace if available. If the ftrace is not
         // available, use tracepoint, which is known to be slower than ftrace.

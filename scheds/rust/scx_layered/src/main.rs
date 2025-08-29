@@ -2172,7 +2172,7 @@ impl<'a> Scheduler<'a> {
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
-        let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, layered, None)?;
 
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)

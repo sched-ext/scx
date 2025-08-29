@@ -3030,11 +3030,12 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "bindgen 0.72.0",
  "bitvec",
+ "clap",
  "const_format",
  "glob",
  "hex",

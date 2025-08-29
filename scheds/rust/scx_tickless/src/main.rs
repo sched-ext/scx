@@ -147,7 +147,7 @@ impl<'a> Scheduler<'a> {
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
-        let mut skel = scx_ops_open!(skel_builder, open_object, tickless_ops)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, tickless_ops, None)?;
         skel.struct_ops.tickless_ops_mut().exit_dump_len = opts.exit_dump_len;
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();

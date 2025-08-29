@@ -59,6 +59,7 @@ pub use compat::ROOT_PREFIX;
 
 mod libbpf_logger;
 pub use libbpf_logger::init_libbpf_logging;
+pub mod libbpf_clap_opts;
 
 pub mod ravg;
 

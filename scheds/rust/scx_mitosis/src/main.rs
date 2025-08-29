@@ -166,7 +166,7 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
 
-        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis, None)?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
