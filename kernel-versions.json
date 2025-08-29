@@ -18,10 +18,10 @@
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "9becd7c25c61ae7e5b6fbfc3c226b1f23af7638c",
-    "lastModified": 1755834578,
-    "narHash": "sha256-CJc3yv85rUeSs7MOiCeIso5OUbcvKI+HisGmvN/AcXA=",
-    "kernelVersion": "6.12.43",
+    "commitHash": "11a24528d080a6ac23f07d6031da9e271728d62d",
+    "lastModified": 1756439113,
+    "narHash": "sha256-Trk7mB4fZKoppOIzaS7NqKOnwtPqd/ZtC3Y3fSccTRU=",
+    "kernelVersion": "6.12.44",
     "patches": [
       "stable-6.12-sched_ext-idle-init.patch"
     ]
