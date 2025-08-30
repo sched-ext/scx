@@ -16,6 +16,7 @@ use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -424,7 +425,8 @@ impl Builder<'_> {
         skel_builder.obj_builder.debug(self.verbose > 1);
         init_libbpf_logging(None);
 
-        let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos)?;
+        let open_opts = LibbpfOpts::default().into_bpf_open_opts();
+        let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos, open_opts)?;
         scx_p2dq::init_open_skel!(&mut open_skel, self.p2dq_opts, self.verbose)?;
 
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
