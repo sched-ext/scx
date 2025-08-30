@@ -1148,6 +1148,39 @@ s64 cbw_transfer_budget_p2l(struct scx_cgroup_ctx *subroot_cgx,
 	return READ_ONCE(tgt_llcx->budget_remaining);
 }
 
+static 
+void cbw_consume_budget(struct scx_cgroup_ctx *cgx,
+			struct scx_cgroup_llc_ctx *llcx, u64 consumed_ns)
+{
+	s64 period_duration;
+
+	/*
+	 * If the runtime is infinite, we don't need to update runtime_total
+	 * and budget_remaining, which saves cache coherence traffic.
+	 */
+	if (llcx->budget_remaining == CBW_RUNTUME_INF)
+		return;
+
+	/*
+	 * When budget consumption occurs across two periods,
+	 * account only for the time of this period.
+	 *
+	 *  <-- period 1 --><-- period 2 -->
+	 *       \== consumed_ns ==/
+	 */
+	period_duration = time_delta(scx_bpf_now(),
+				     READ_ONCE(cgx->period_start_clk));
+	if (consumed_ns > period_duration) {
+		consumed_ns = period_duration;
+	}
+
+	/* Decrease the budget budget_remaining */
+	__sync_fetch_and_sub(&llcx->budget_remaining, consumed_ns);
+
+	/* Increase the total runtime */
+	__sync_fetch_and_add(&llcx->runtime_total, consumed_ns);
+}
+
 static
 int cbw_get_current_llc_id(void)
 {
@@ -1299,10 +1332,55 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted)
 	return cbw_cgroup_bw_throttled(cgrp, llc_id);
 }
 
+/**
+ * scx_cgroup_bw_consume - Consume the time actually used after the task execution.
+ * @cgrp: cgroup where a task belongs to.
+ * @consumed_ns: amount of time actually used.
+ *
+ * Return 0 for success, -errno for failure.
+ */
 __hidden
 int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 {
-	return -ENOTSUP;
+	struct scx_cgroup_llc_ctx *llcx;
+	struct scx_cgroup_ctx *cgx;
+	int llc_id;
+
+	/* Always go ahead with the root cgroup. */
+	if (cgrp->level == 0)
+		return 0;
+
+	/* Get the current LLC ID. */
+	if ((llc_id = cbw_get_current_llc_id()) < 0) {
+		cbw_err("Invalid LLC id: %d", llc_id);
+		return -EINVAL;
+	}
+
+	/*
+	 * Update the budget usage.
+	 *
+	 * Note that the budget can be reserved in an LLC domain and then
+	 * actually used in another LLC domain. However, that is not a problem
+	 * because LLC's runtime_total will be aggregated to the cgroup level
+	 * at reservation.
+	 */
+	cgx = cbw_get_cgroup_ctx(cgrp);
+	llcx = cbw_get_llc_ctx(cgrp, llc_id);
+	if (!cgx || !llcx) {
+		/*
+		 * When exiting a scx scheduler, the sched_ext kernel shuts
+		 * down cgroup support before tasks. Hence, failing to look
+		 * up an LLC context is quite normal in this case.
+		 */
+		return 0;
+	}
+
+	cbw_consume_budget(cgx, llcx, consumed_ns);
+
+	cbw_dbg_cgrp("  llc_id: %d -- reserved_ns: %llu -- consumed_ns: %llu -- llcx:budget_remaining: %lld -- llcx:runtime_total: %lld",
+		     llc_id, consumed_ns, READ_ONCE(llcx->budget_remaining),
+		     READ_ONCE(llcx->runtime_total));
+	return 0;
 }
 
 __hidden
