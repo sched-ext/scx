@@ -48,6 +48,7 @@ pub struct CpuId {
     pub big_core: bool,
     pub turbo_core: bool,
     pub cpu_sibling: usize,
+    pub partition_rec_id: usize,
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
@@ -56,6 +57,7 @@ pub struct ComputeDomainId {
     pub llc_adx: usize,
     pub llc_rdx: usize,
     pub is_big: bool,
+    pub partition_adx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -93,12 +95,12 @@ pub struct CpuOrder {
 }
 
 impl CpuOrder {
-    /// Build a cpu preference order
-    pub fn new() -> Result<CpuOrder> {
+    /// Build a cpu preference order with optional automatic partition awareness
+    pub fn new(use_auto_partitions: bool) -> Result<CpuOrder> {
         let ctx = CpuOrderCtx::new();
         let cpus_pf = ctx.build_topo_order(false).unwrap();
         let cpus_ps = ctx.build_topo_order(true).unwrap();
-        let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf).unwrap();
+        let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf, use_auto_partitions).unwrap();
         let perf_cpu_order = if ctx.em.is_ok() {
             let em = ctx.em.unwrap();
             EnergyModelOptimizer::get_perf_cpu_order_table(&em, &cpus_pf)
@@ -179,6 +181,7 @@ impl CpuOrderCtx {
                             big_core: cpu.core_type != CoreType::Little,
                             turbo_core: cpu.core_type == CoreType::Big { turbo: true },
                             cpu_sibling: smt_siblings[cpu_adx] as usize,
+                            partition_rec_id: cpu.partition_rec_id,
                         };
                         cpu_ids.push(RefCell::new(cpu_id));
                     }
@@ -269,7 +272,10 @@ impl CpuOrderCtx {
     }
 
     /// Build a list of compute domains
-    fn build_cpdom(cpu_ids: &Vec<CpuId>) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
+    fn build_cpdom(
+        cpu_ids: &Vec<CpuId>,
+        use_llc_partitions: bool,
+    ) -> Option<BTreeMap<ComputeDomainId, ComputeDomain>> {
         // Note that building compute domain is independent to CPU orer
         // so it is okay to use any cpus_*.
 
@@ -284,6 +290,11 @@ impl CpuOrderCtx {
                 llc_adx: cpu_id.llc_adx,
                 llc_rdx: cpu_id.llc_rdx,
                 is_big: cpu_id.big_core,
+                partition_adx: if use_llc_partitions {
+                    cpu_id.partition_rec_id
+                } else {
+                    0
+                },
             };
             let value = cpdom_map.entry(key.clone()).or_insert_with(|| {
                 let val = ComputeDomain {

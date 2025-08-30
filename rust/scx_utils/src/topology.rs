@@ -71,6 +71,7 @@
 
 use crate::compat::ROOT_PREFIX;
 use crate::cpumask::read_cpulist;
+use crate::misc::find_best_split_size;
 use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
 use crate::misc::read_from_file;
@@ -80,6 +81,7 @@ use anyhow::Result;
 use glob::glob;
 use log::warn;
 use sscanf::sscanf;
+use std::cmp::min;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -103,6 +105,14 @@ lazy_static::lazy_static! {
     /// disabled CPUs that may not be onlined, whose IDs are lower than the
     /// IDs of other CPUs that may be onlined.
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
+
+    /// The range to search for when finding the number of physical cores
+    /// assigned to a partition to split a large number of cores that share
+    /// an LLC domain. The suggested split for the cores isn't a function of
+    /// the underlying hardware's capability, but rather some sane number
+    /// to help determine the number of CPUs that share the same DSQ.
+    pub static ref NR_PARTITION_MIN_CORES: usize = 4;
+    pub static ref NR_PARTITION_MAX_CORES: usize = 8;
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -137,6 +147,9 @@ pub struct Cpu {
     pub node_id: usize,
     pub package_id: usize,
     pub cluster_id: isize,
+
+    /// Recommended partition ID
+    pub partition_rec_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -154,6 +167,9 @@ pub struct Core {
     /// Ancestor IDs.
     pub llc_id: usize,
     pub node_id: usize,
+
+    /// Recommended partition ID
+    pub partition_rec_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -526,6 +542,7 @@ fn create_insert_cpu(
         node_id: node.id,
         kernel_id: core_kernel_id,
         cluster_id,
+        partition_rec_id: 0,
     }));
     let core_mut = Arc::get_mut(core).unwrap();
 
@@ -550,6 +567,7 @@ fn create_insert_cpu(
             node_id: node.id,
             package_id,
             cluster_id,
+            partition_rec_id: 0,
         }),
     );
 
@@ -692,6 +710,53 @@ fn is_smt_active() -> Option<bool> {
     Some(smt_on == 1)
 }
 
+fn assign_llc_partitions(node: &mut Node) -> Result<()> {
+    let mut partition_id = 0;
+
+    for (_llc_id, llc) in node.llcs.iter_mut() {
+        let llc_mut = Arc::get_mut(llc).unwrap();
+        let mut cores_by_type: BTreeMap<CoreType, Vec<usize>> = BTreeMap::new();
+
+        for (core_id, core) in llc_mut.cores.iter() {
+            let core_type = core.core_type.clone();
+            cores_by_type
+                .entry(core_type)
+                .or_insert(Vec::new())
+                .push(*core_id);
+        }
+
+        for (_core_type, core_ids) in cores_by_type.iter() {
+            let num_cores_in_bucket = core_ids.len();
+
+            let best_split = find_best_split_size(
+                num_cores_in_bucket,
+                *NR_PARTITION_MIN_CORES,
+                *NR_PARTITION_MAX_CORES,
+            );
+            let num_partitions = num_cores_in_bucket / best_split;
+
+            for (bucket_idx, &core_id) in core_ids.iter().enumerate() {
+                let partition_idx = min(bucket_idx / best_split, num_partitions - 1);
+                let current_partition_id = partition_id + partition_idx;
+
+                if let Some(core) = llc_mut.cores.get_mut(&core_id) {
+                    let core_mut = Arc::get_mut(core).unwrap();
+                    core_mut.partition_rec_id = current_partition_id;
+
+                    for (_cpu_id, cpu) in core_mut.cpus.iter_mut() {
+                        let cpu_mut = Arc::get_mut(cpu).unwrap();
+                        cpu_mut.partition_rec_id = current_partition_id;
+                    }
+                }
+            }
+
+            partition_id += num_partitions;
+        }
+    }
+
+    Ok(())
+}
+
 fn create_default_node(
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
@@ -730,6 +795,8 @@ fn create_default_node(
     for cpu_id in cpu_ids.iter() {
         create_insert_cpu(*cpu_id, &mut node, online_mask, topo_ctx, &cs, flatten_llc)?;
     }
+
+    assign_llc_partitions(&mut node)?;
 
     nodes.insert(node.id, node);
 
@@ -825,6 +892,8 @@ fn create_numa_nodes(
         for cpu_id in cpu_ids {
             create_insert_cpu(cpu_id, &mut node, online_mask, topo_ctx, &cs, false)?;
         }
+
+        assign_llc_partitions(&mut node)?;
 
         nodes.insert(node.id, node);
     }

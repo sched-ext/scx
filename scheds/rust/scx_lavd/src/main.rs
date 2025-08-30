@@ -201,6 +201,13 @@ struct Opts {
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
+
+    /// Enable automatic partitioning of compute domains. When enabled, CPUs are
+    /// grouped into compute domains based on their recommended partition IDs
+    /// by trying to find some sane split between CPUs within an LLC domain that
+    /// takes into account Big/Little cores.
+    #[clap(long = "auto-partition", action = clap::ArgAction::SetTrue)]
+    auto_partition: bool,
 }
 
 impl Opts {
@@ -360,7 +367,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize CPU topology
-        let order = CpuOrder::new().unwrap();
+        let order = CpuOrder::new(opts.auto_partition).unwrap();
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 
