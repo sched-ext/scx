@@ -336,15 +336,25 @@ pub fn check_min_requirements() -> Result<()> {
 #[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_open {
-    ($builder: expr, $obj_ref: expr, $ops: ident) => { 'block: {
+    ($builder: expr, $obj_ref: expr, $ops: ident, $open_opts: expr) => { 'block: {
         scx_utils::paste! {
-	    scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements(), 'block);
+        scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements(), 'block);
             use ::anyhow::Context;
             use ::libbpf_rs::skel::SkelBuilder;
 
-            let mut skel = match $builder.open($obj_ref).context("Failed to open BPF program") {
-                Ok(val) => val,
-                Err(e) => break 'block Err(e),
+            let mut skel = match $open_opts {
+                Some(opts_ref) => { // Match a reference directly
+                    match $builder.open_opts(opts_ref, $obj_ref).context("Failed to open BPF program with options") {
+                        Ok(val) => val,
+                        Err(e) => break 'block Err(e),
+                    }
+                }
+                None => {
+                    match $builder.open($obj_ref).context("Failed to open BPF program") {
+                        Ok(val) => val,
+                        Err(e) => break 'block Err(e),
+                    }
+                }
             };
 
             let ops = skel.struct_ops.[<$ops _mut>]();

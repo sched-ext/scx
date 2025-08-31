@@ -46,6 +46,7 @@ use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -228,6 +229,9 @@ struct Opts {
     /// prioritize energy efficiency. When in doubt, use 0 or 1024.
     #[clap(long, default_value = "0")]
     perf: u32,
+
+    #[clap(flatten, next_help_heading = "Libbpf Options")]
+    pub libbpf: LibbpfOpts,
 }
 
 fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
@@ -361,7 +365,8 @@ impl<'a> Scheduler<'a> {
             "Running scx_rusty (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
-        let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
+        let open_opts = opts.libbpf.clone().into_bpf_open_opts();
+        let mut skel = scx_ops_open!(skel_builder, open_object, rusty, open_opts).unwrap();
 
         // Initialize skel according to @opts.
         let domains = Arc::new(DomainGroup::new(&Topology::new()?, &opts.cpumasks)?);
