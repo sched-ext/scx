@@ -110,9 +110,15 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns);
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime, struct cgroup *cgrp __arg_trusted);
 
 /**
- * scx_cgroup_bw_reenqueue -
+ * scx_cgroup_bw_reenqueue - Reenqueue backlogged tasks.
  *
- * Returns
+ * When a cgroup is throttled, a task should be put aside at the ops.enqueue()
+ * path. Once the cgroup becomes unthrottled again, such backlogged tasks
+ * should be requeued for execution. To this end, a BPF scheduler should call
+ * this at the beginning of its ops.dispatch() method, so that backlogged tasks
+ * can be reenqueued if necessary.
+ *
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_reenqueue(void);
 
