@@ -118,3 +118,68 @@ int scx_minheap_pop(void *heap_ptr __attribute__((unused)),
 {
 	return 0;
 }
+
+__weak
+void *scx_minheap_alloc(u32 nr_elems __attribute__((unused)))
+{
+	return NULL;
+}
+
+__weak
+int scx_minheap_insert(void *heap_ptr __attribute__((unused)),
+		       u64 key __attribute__((unused)),
+		       u64 value __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+u64 scx_atq_create_internal(int fifo __attribute__((unused)),
+			    unsigned long capacity __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+int scx_atq_insert(void *atq_ptr __attribute__((unused)),
+		   u64 taskc_ptr __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+int scx_atq_insert_vtime(void *atq __attribute__((unused)),
+			 u64 taskc_ptr __attribute__((unused)),
+			 u64 vtime __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+int scx_atq_nr_queued(void *atq __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+u64 scx_atq_pop(void *atq __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+u64 scx_atq_peek(void *atq __attribute__((unused)))
+{
+	return 0;
+}
+
+__weak
+void *scx_task_alloc(struct task_struct *p __attribute__((unused)))
+{
+	return NULL;
+}
+
+__weak
+void scx_task_free(struct task_struct *p __attribute__((unused)))
+{
+}
