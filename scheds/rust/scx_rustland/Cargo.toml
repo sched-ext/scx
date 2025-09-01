@@ -12,7 +12,6 @@ plain = "0.2.3"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
 ctrlc = { version = "3.1", features = ["termination"] }
 libbpf-rs = "=0.26.0-beta.1"
-libbpf-sys = "=1.6.1"
 libc = "0.2.137"
 log = "0.4.17"
 ordered-float = "3.4.0"

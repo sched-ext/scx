@@ -26,7 +26,7 @@ use scx_utils::NR_CPU_IDS;
 
 use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
 
-use libbpf_sys;
+use libbpf_rs::libbpf_sys;
 
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
