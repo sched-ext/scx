@@ -29,7 +29,7 @@ use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::UserExitInfo;
 use stats::Metrics;
 
-const SCHEDULER_NAME: &'static str = "RustLand";
+const SCHEDULER_NAME: &str = "RustLand";
 
 /// scx_rustland: user-space scheduler written in Rust
 ///
