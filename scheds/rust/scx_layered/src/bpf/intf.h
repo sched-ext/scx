@@ -182,6 +182,7 @@ struct cpu_ctx {
 	bool			is_protected;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
+	u64			layer_membw_agg[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;

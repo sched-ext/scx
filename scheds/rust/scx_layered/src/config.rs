@@ -156,13 +156,13 @@ pub enum LayerKind {
         cpus_range_frac: Option<(f64, f64)>,
 
         #[serde(default)]
+        membw_gb: Option<u64>,
+
+        #[serde(default)]
         protected: bool,
 
         #[serde(flatten)]
         common: LayerCommon,
-
-        #[serde(default)]
-        membw_gb: Option<u64>,
     },
     Grouped {
         util_range: (f64, f64),
