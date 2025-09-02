@@ -419,31 +419,61 @@ impl<'cb> BpfScheduler<'cb> {
     // Counter of the online CPUs.
     #[allow(dead_code)]
     pub fn nr_online_cpus_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_online_cpus
+        &mut self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .nr_online_cpus
     }
 
     // Counter of currently running tasks.
     #[allow(dead_code)]
     pub fn nr_running_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_running
+        &mut self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .nr_running
     }
 
     // Counter of queued tasks.
     #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_queued
+        &mut self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .nr_queued
     }
 
     // Counter of scheduled tasks.
     #[allow(dead_code)]
     pub fn nr_scheduled_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_scheduled
+        &mut self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .nr_scheduled
     }
 
     // Counter of user dispatch events.
     #[allow(dead_code)]
     pub fn nr_user_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_user_dispatches
+        &mut self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .nr_user_dispatches
     }
 
     // Counter of user kernel events.
@@ -497,7 +527,13 @@ impl<'cb> BpfScheduler<'cb> {
     // Counter of scheduler congestion events.
     #[allow(dead_code)]
     pub fn nr_sched_congested_mut(&mut self) -> &mut u64 {
-        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_sched_congested
+        &mut self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .nr_sched_congested
     }
 
     // Set scheduling class for the scheduler itself to SCHED_EXT
