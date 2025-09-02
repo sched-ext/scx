@@ -1383,10 +1383,78 @@ int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns)
 	return 0;
 }
 
+/**
+ * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
+ * unthrottled later.
+ * @p: a task to be put aside since the cgroup is throttled.
+ * @taskc: a task-embedded pointer to scx_task_common.
+ * @vtime: vtime of a task @p.
+ * @cgrp: cgroup where a task belongs to.
+ *
+ * When a cgroup is throttled (i.e., scx_cgroup_bw_reserve() returns -EAGAIN),
+ * a task that is in the ops.enqueue() path should be put aside to the BTQ of
+ * its associated LLC context. When the cgroup becomes unthrottled again,
+ * the registered enqueue_cb() will be called to re-enqueue the task for
+ * execution.
+ *
+ * Return 0 for success, -errno for failure.
+ */
 __hidden
-int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime, struct cgroup *cgrp __arg_trusted)
+int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 ctx, u64 vtime, struct cgroup *cgrp __arg_trusted)
 {
-	return -ENOTSUP;
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	struct scx_cgroup_llc_ctx *llcx;
+	int llc_id, ret;
+
+	cbw_dbg_cgrp(" [%s/%d]", p->comm, p->pid);
+
+	/* Get the current LLC ID. */
+	if ((llc_id = cbw_get_current_llc_id()) < 0) {
+		cbw_err("Invalid LLC id: %d", llc_id);
+		return -EINVAL;
+	}
+
+	/*
+	 * Put aside the task to the BTQ of the LLC context.
+	 */
+	llcx = cbw_get_llc_ctx(cgrp, llc_id);
+	if (!llcx) {
+		cbw_err("Failed to lookup an LLC ctx: [%llu/%d]",
+			cgroup_get_id(cgrp), llc_id);
+		return -ESRCH;
+	}
+
+	if (!llcx->btq) {
+		cbw_err("BTQ of an LLC ctx is not properly initialized.");
+		return -ESRCH;
+	}
+
+	ret = scx_atq_lock(llcx->btq);
+	if (ret) {
+		cbw_err("Failed to lock ATQ.");
+		return -EBUSY;
+	}
+
+	if (taskc->atq != NULL) {
+		/* 
+		 * Not really a bug: The initial .enqueue() may race with
+		 * a pair of .dequeue()/.enqueue() calls, and cause two
+		 * instances of this function to happen simultaneously
+		 * for the task. This should be rare, but possible.
+		 * The spinlock turns the race into a benign one.
+		 */
+		cbw_dbg("Possible double enqueue detected.");
+		scx_atq_unlock(llcx->btq);
+		return 0;
+	}
+
+	ret = scx_atq_insert_vtime_unlocked(llcx->btq, taskc, vtime);
+	if (ret)
+		cbw_err("Failed to insert a task to BTQ: %d", ret);
+
+	scx_atq_unlock(llcx->btq);
+
+	return ret;
 }
 
 __hidden

@@ -92,13 +92,20 @@ int scx_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted);
 int scx_cgroup_bw_consume(struct cgroup *cgrp __arg_trusted, u64 consumed_ns);
 
 /**
- * scx_cgroup_bw_put_aside - 
- * @p:
- * @taskc:
- * @vtime:
- * @cgrp:
+ * scx_cgroup_bw_put_aside - Put aside a task to execute it when the cgroup is
+ * unthrottled later.
+ * @p: a task to be put aside since the cgroup is throttled.
+ * @taskc: a task-embedded pointer to scx_task_common.
+ * @vtime: vtime of a task @p.
+ * @cgrp: cgroup where a task belongs to.
  *
- * Returns
+ * When a cgroup is throttled (i.e., scx_cgroup_bw_reserve() returns -EAGAIN),
+ * a task that is in the ops.enqueue() path should be put aside to the BTQ of
+ * its associated LLC context. When the cgroup becomes unthrottled again,
+ * the registered enqueue_cb() will be called to re-enqueue the task for
+ * execution.
+ *
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 vtime, struct cgroup *cgrp __arg_trusted);
 
