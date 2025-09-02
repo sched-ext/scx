@@ -303,6 +303,15 @@ void shrink_boosted_slice_at_tick(struct task_struct *p,
 }
 
 __hidden
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc)
+{
+	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
+	p->scx.slice = 0;
+
+	cpuc->nr_preempt++;
+}
+
+__hidden
 void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 task_ctx *taskc,
 					 s32 preferred_cpu,

@@ -181,6 +181,7 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 #include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include <errno.h>
@@ -224,6 +225,11 @@ const volatile u8	mig_delta_pct = 0;
 const volatile u64	pinned_slice_ns = 0;
 
 static volatile u64	nr_cpus_big;
+
+/*
+ * Scheduler's PID
+ */
+static pid_t		lavd_pid;
 
 /*
  * Include sub-modules
@@ -470,6 +476,18 @@ static void account_task_runtime(struct task_struct *p,
 	taskc->acc_runtime += runtime;
 	taskc->svc_time += svc_time;
 	taskc->last_measured_clk = now;
+
+	/*
+	 * Under CPU bandwidth control using cpu.max, we also need to report
+	 * how much time was actually consumed compared to the reserved time.
+	 */
+	if (enable_cpu_bw && (p->pid != lavd_pid)) {
+		struct cgroup *cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
+		if (cgrp) {
+			scx_cgroup_bw_consume(cgrp, runtime);
+			bpf_cgroup_release(cgrp);
+		}
+	}
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
@@ -489,9 +507,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 	/*
 	 * Account for how much of the slice was used for this instance.
 	 */
-	if (is_monitored) {
-		taskc->last_slice_used = time_delta(now, taskc->last_running_clk);
-	}
+	taskc->last_slice_used = time_delta(now, taskc->last_running_clk);
 
 	/*
 	 * Reset waker's latency criticality here to limit the latency boost of
@@ -602,6 +618,39 @@ static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
 	return is_idle && cpu >= 0 && !scx_bpf_dsq_nr_queued(dsq_id);
 }
 
+static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
+{
+	struct cgroup *cgrp;
+	int ret, ret2;
+
+	/*
+	 * Under CPU bandwidth control using cpu.max, we should first check
+	 * if the cgroup is throttled or not. If not, we will go ahead.
+	 * Otherwise, we should put the task aside for later execution.
+	 * In the forced mode, we should enqueue the task even if the cgroup
+	 * is throttled (-EAGAIN).
+	 *
+	 * Note that we cannot use scx_bpf_task_cgroup() here because this can
+	 * be called only from ops.enqueue() and ops.dispatch().
+	 */
+	cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
+	if (!cgrp) {
+		debugln("Failed to lookup a cgroup: %llu", taskc->cgrp_id);
+		return -ESRCH;
+	}
+
+	ret = scx_cgroup_bw_throttled(cgrp);
+	if ((ret == -EAGAIN) && put_aside) {
+		ret2 = scx_cgroup_bw_put_aside(p, (u64)taskc, p->scx.dsq_vtime, cgrp);
+		if (ret2) {
+			bpf_cgroup_release(cgrp);
+			return ret2;
+		}
+	}
+	bpf_cgroup_release(cgrp);
+	return ret;
+}
+
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	task_ctx *taskc;
@@ -632,7 +681,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 	}
-	p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
+	p->scx.slice = LAVD_SLICE_MIN_NS_DFL;
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
@@ -662,6 +711,25 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		cpdom_id = cpuc->cpdom_id;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+	}
+	taskc->cpdom_id = cpdom_id;
+
+	/*
+	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
+	 * is throttled before executing the task.
+	 *
+	 * Note that we calculate the task's deadline before checking the 
+	 * cgroup, as we need the deadline to put aside the task when the
+	 * cgroup is throttled.
+	 *
+	 * Also, we do not throttle the scheduler process itself to
+	 * guarantee forward progress.
+	 */
+	if (enable_cpu_bw && (p->pid != lavd_pid) &&
+	    (cgroup_throttled(p, taskc, true) == -EAGAIN)) {
+		debugln("Task %s[pid%d/cgid%llu] is throttled.",
+			p->comm, p->pid, taskc->cgrp_id);
+		return;
 	}
 
 	/*
@@ -706,10 +774,65 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If there is no idle CPU for an eligible task, try to preempt a task.
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
+	 *
+	 * In the case of the forced enqueue mode, we don't try preemption
+	 * since it is a batch of bulk enqueues.
 	 */
 	if (!no_preemption)
 		try_find_and_kick_victim_cpu(p, taskc, cpu, cpdom_to_dsq(cpdom_id));
 }
+
+static
+int enqueue_cb(struct task_struct __arg_trusted *p)
+{
+	task_ctx *taskc;
+	struct cpu_ctx *cpuc, *cpuc_cur;
+	s32 cpu;
+	u64 cpdom_id;
+
+	taskc = get_task_ctx(p);
+	cpuc_cur = get_cpu_ctx();
+	if (!taskc || !cpuc_cur) {
+		scx_bpf_error("Failed to lookup a task context: %d", p->pid);
+		return 0;
+	}
+
+	/*
+	 * Calculate when a task can be scheduled.
+	 */
+	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+
+	/*
+	 * Fetch the chosen CPU and DSQ for the task.
+	 */
+	cpu = taskc->suggested_cpu_id;
+	cpdom_id = taskc->cpdom_id;
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		return 0;
+	}
+
+	/*
+	 * Increase the number of pinned tasks waiting for execution.
+	 */
+	if (is_pinned(p))
+		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+
+	/*
+	 * Enqueue the task to a DSQ.
+	 */
+	if (per_cpu_dsq) {
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
+					 p->scx.dsq_vtime, 0);
+	} else {
+		scx_bpf_dsq_insert_vtime(p, cpdom_to_dsq(cpdom_id), p->scx.slice,
+					 p->scx.dsq_vtime, 0);
+	}
+
+	return 0;
+}
+
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
@@ -722,6 +845,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	bool try_consume;
 	u64 dsq_ids[LAVD_DSQ_NR_TYPES];
 	int dsq_start = LAVD_DSQ_TYPE_CPDOM;
+	int ret;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -737,8 +861,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * tasks backlogged when their cgroups are throttled, and requeue
 	 * those tasks to the proper DSQs.
 	 */
-	if (enable_cpu_bw && scx_cgroup_bw_reenqueue()) {
-		scx_bpf_error("Failed to reenqueue backlogged tasks.");
+	if (enable_cpu_bw && (ret = scx_cgroup_bw_reenqueue())) {
+		scx_bpf_error("Failed to reenqueue backlogged tasks: %d", ret);
 	}
 
 	/*
@@ -933,6 +1057,15 @@ consume_prev:
 			update_stat_for_refill(prev, taskc_prev, cpuc);
 
 			/*
+			 * Under the CPU bandwidth control with cpu.max,
+			 * check if the cgroup is throttled before executing
+			 * the task.
+			 */
+			if (enable_cpu_bw && (prev->pid != lavd_pid) &&
+			    (cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
+				return;
+
+			/*
 			 * Refill the time slice.
 			 */
 			prev->scx.slice = calc_time_slice(taskc_prev, cpuc);
@@ -1106,6 +1239,15 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 
 	now = scx_bpf_now();
 	account_task_runtime(p, taskc, cpuc, now);
+
+	/*
+	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
+	 * is throttled before executing the task.
+	 */
+	if (enable_cpu_bw && (cgroup_throttled(p, taskc, false) == -EAGAIN)) {
+		preempt_at_tick(p, cpuc);
+		return;
+	}
 
 	/*
 	 * If pinned_slice_ns is enabled and there are pinned tasks waiting
@@ -1858,9 +2000,23 @@ void BPF_STRUCT_OPS(lavd_cgroup_set_bandwidth, struct cgroup *cgrp,
 	       scx_bpf_error("Failed to set bandwidth of a cgroup: %d", ret);
 }
 
-int lavd_enqueue_cb(u64 taskc)
+int lavd_enqueue_cb(u64 ctx)
 {
-	/* TODO: to be implemnted */
+	task_ctx *taskc = (task_ctx *)ctx;
+	struct task_struct *p;
+
+	if (!enable_cpu_bw)
+		return 0;
+
+	/*
+	 * Enqueue a task with @pid. As long as the task is under scx,
+	 * it must be enqueued regardless of whether its cgroup is throttled
+	 * or not.
+	 */
+	if ((p = bpf_task_from_pid(taskc->pid))) {
+		enqueue_cb(p);
+		bpf_task_release(p);
+	}
 	return 0;
 }
 REGISTER_SCX_CGROUP_BW_ENQUEUE_CB(lavd_enqueue_cb);
@@ -1937,6 +2093,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 		};
 		err = scx_cgroup_bw_lib_init(&bw_config);
 	}
+
+	/*
+	 * Keep track of scheduler process's PID.
+	 */
+	lavd_pid = (u32)bpf_get_current_pid_tgid();
 
 	return err;
 }

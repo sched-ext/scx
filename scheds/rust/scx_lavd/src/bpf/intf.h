@@ -176,6 +176,7 @@ struct task_ctx {
 	 * Task status
 	 */
 	volatile u64	flags;		/* LAVD_FLAG_* */
+	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 
 	/*
