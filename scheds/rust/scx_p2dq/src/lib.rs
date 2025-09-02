@@ -179,7 +179,7 @@ pub struct SchedulerOpts {
     #[clap(long, default_value = "5", value_parser = clap::value_parser!(u64).range(0..99))]
     pub lb_slack_factor: u64,
 
-    /// ***DEPRECATED** Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
+    /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
     /// path.
     #[clap(short = 'l', long, default_value_t = get_default_llc_runs())]
     pub min_llc_runs_pick2: u64,
@@ -287,6 +287,7 @@ macro_rules! init_open_skel {
             // load balance config
             rodata.lb_config.slack_factor = opts.lb_slack_factor;
             rodata.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
+            rodata.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
             rodata.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
             rodata.lb_config.eager_load_balance = MaybeUninit::new(!opts.eager_load_balance);
             rodata.lb_config.dispatch_pick2_disable = MaybeUninit::new(opts.dispatch_pick2_disable);
