@@ -111,10 +111,11 @@ impl<'a> Scheduler<'a> {
         let bpf = BpfScheduler::init(
             open_object,
             open_opts.clone().into_bpf_open_opts(),
-            0,     // exit_dump_len (buffer size of exit info, 0 = default)
-            false, // partial (false = include all tasks)
-            false, // debug (false = debug mode off)
-            true,  // builtin_idle (true = allow BPF to use idle CPUs if available)
+            0,        // exit_dump_len (buffer size of exit info, 0 = default)
+            false,    // partial (false = include all tasks)
+            false,    // debug (false = debug mode off)
+            true,     // builtin_idle (true = allow BPF to use idle CPUs if available)
+            "rlfifo", // name of the scx ops
         )?;
         Ok(Self { bpf })
     }

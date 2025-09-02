@@ -14,6 +14,7 @@ use std::ffi::c_int;
 use std::ffi::c_ulong;
 
 use std::collections::HashMap;
+use std::os::raw::c_char;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -192,6 +193,7 @@ impl<'cb> BpfScheduler<'cb> {
         partial: bool,
         debug: bool,
         builtin_idle: bool,
+        name: &str,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         set_ctrlc_handler(shutdown.clone()).context("Error setting Ctrl-C handler")?;
@@ -243,6 +245,7 @@ impl<'cb> BpfScheduler<'cb> {
         skel.maps.rodata_data.as_mut().unwrap().khugepaged_pid = Self::khugepaged_pid();
         skel.maps.rodata_data.as_mut().unwrap().builtin_idle = builtin_idle;
         skel.maps.rodata_data.as_mut().unwrap().debug = debug;
+        Self::set_scx_ops_name(&mut skel.struct_ops.rustland_mut().name, name);
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
@@ -288,6 +291,15 @@ impl<'cb> BpfScheduler<'cb> {
             dispatched,
             struct_ops,
         })
+    }
+
+    // Set the name of the scx ops.
+    fn set_scx_ops_name(dst: &mut [c_char], s: &str) {
+        dst.fill(0);
+        let n = s.len().min(dst.len().saturating_sub(1));
+        for (d, b) in dst.iter_mut().take(n).zip(s.bytes()) {
+            *d = b as c_char;
+        }
     }
 
     // Return the PID of khugepaged, if present, otherwise return 0.
