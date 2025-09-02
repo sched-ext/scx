@@ -5,6 +5,7 @@ import asyncio
 import csv
 import glob
 import io
+import itertools
 import json
 import os
 import random
@@ -218,6 +219,15 @@ async def run_format():
             cwd=".github/include",
             no_capture=True,
         )
+
+    c_files = files = list(
+        itertools.chain.from_iterable(
+            glob.glob(p, recursive=True)
+            for p in ["tools/scxtop/**/*.h", "tools/scxtop/**/*.c"]
+        )
+    )
+    if c_files:
+        await run_command(["clang-format", "-i"] + c_files, no_capture=True)
 
     await run_command(["git", "diff", "--exit-code"], no_capture=True)
     print("✓ Format completed successfully", flush=True)
