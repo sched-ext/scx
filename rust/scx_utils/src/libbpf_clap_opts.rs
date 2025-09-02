@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use clap::Parser;
-use libbpf_sys::bpf_object_open_opts;
-use libbpf_sys::size_t;
+use libbpf_rs::libbpf_sys::bpf_object_open_opts;
+use libbpf_rs::libbpf_sys::size_t;
 
 use std::ffi::c_char;
 use std::ffi::CString;

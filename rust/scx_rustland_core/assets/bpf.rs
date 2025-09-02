@@ -27,7 +27,7 @@ use procfs::process::all_processes;
 
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libbpf_sys::bpf_object_open_opts;
+use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 
 use libc::{pthread_self, pthread_setschedparam, sched_param};
 

@@ -2829,7 +2829,6 @@ version = "1.0.2"
 dependencies = [
  "anyhow",
  "libbpf-rs",
- "libbpf-sys",
  "scx_utils",
  "simplelog",
 ]
@@ -2909,7 +2908,6 @@ dependencies = [
  "anyhow",
  "ctrlc",
  "libbpf-rs",
- "libbpf-sys",
  "libc",
  "plain",
  "procfs 0.17.0",
@@ -2925,7 +2923,6 @@ dependencies = [
  "clap",
  "ctrlc",
  "libbpf-rs",
- "libbpf-sys",
  "libc",
  "log",
  "ordered-float",
@@ -3044,7 +3041,6 @@ dependencies = [
  "lazy_static",
  "libbpf-cargo",
  "libbpf-rs",
- "libbpf-sys",
  "libc",
  "log",
  "nix 0.30.1",
