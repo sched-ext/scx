@@ -929,6 +929,9 @@ struct Stats {
     layer_utils: Vec<Vec<f64>>,
     prev_layer_usages: Vec<Vec<u64>>,
 
+    layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
+    prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
+
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
 
@@ -959,6 +962,21 @@ impl Stats {
         layer_usages
     }
 
+    // Same as above, but for aggregate memory bandwidth consumption.
+    fn read_layer_membw_agg(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
+        let mut layer_membw_agg = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            for layer in 0..nr_layers {
+                for usage in 0..NR_LAYER_USAGES {
+                    layer_membw_agg[layer][usage] += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
+                }
+            }
+        }
+
+        layer_membw_agg
+    }
+
     fn new(
         skel: &mut BpfSkel,
         proc_reader: &fb_procfs::ProcReader,
@@ -978,7 +996,9 @@ impl Stats {
 
             total_util: 0.0,
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
+            layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
+            prev_layer_membw_agg: Self::read_layer_membw_agg(&cpu_ctxs, nr_layers),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
@@ -1029,29 +1049,44 @@ impl Stats {
             .collect();
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
-        let cur_layer_utils: Vec<Vec<f64>> = cur_layer_usages
-            .iter()
-            .zip(self.prev_layer_usages.iter())
-            .map(|(cur, prev)| {
-                cur.iter()
-                    .zip(prev.iter())
-                    .map(|(c, p)| (c - p) as f64 / 1_000_000_000.0 / elapsed_f64)
-                    .collect()
-            })
-            .collect();
-        let layer_utils: Vec<Vec<f64>> = cur_layer_utils
-            .iter()
-            .zip(self.layer_utils.iter())
-            .map(|(cur, prev)| {
-                cur.iter()
-                    .zip(prev.iter())
-                    .map(|(c, p)| {
-                        let decay = USAGE_DECAY.powf(elapsed_f64);
-                        p * decay + c * (1.0 - decay)
-                    })
-                    .collect()
-            })
-            .collect();
+        let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
+
+        let compute_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
+            cur_agg
+                .iter()
+                .zip(prev_agg.iter())
+                .map(|(cur, prev)| {
+                    cur.iter()
+                        .zip(prev.iter())
+                        .map(|(c, p)| (c - p) as f64 / 1_000_000_000.0 / elapsed_f64)
+                        .collect()
+                })
+                .collect()
+        };
+
+        let cur_layer_utils: Vec<Vec<f64>> =
+            compute_diff(&cur_layer_usages, &self.prev_layer_usages);
+        let cur_layer_membw: Vec<Vec<f64>> =
+            compute_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
+
+        let metric_decay = |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>| {
+            cur_metric
+                .iter()
+                .zip(prev_metric.iter())
+                .map(|(cur, prev)| {
+                    cur.iter()
+                        .zip(prev.iter())
+                        .map(|(c, p)| {
+                            let decay = USAGE_DECAY.powf(elapsed_f64);
+                            p * decay + c * (1.0 - decay)
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+        let layer_utils: Vec<Vec<f64>> = metric_decay(cur_layer_utils, &self.layer_utils);
+        let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws);
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
@@ -1075,7 +1110,9 @@ impl Stats {
                 .map(|x| x.iter().take(LAYER_USAGE_SUM_UPTO + 1).sum::<f64>())
                 .sum(),
             layer_utils,
+            layer_membws,
             prev_layer_usages: cur_layer_usages,
+            prev_layer_membw_agg: cur_layer_membw_agg,
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
@@ -2492,6 +2529,33 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn clamp_target_by_membw(
+        &self,
+        layer: &Layer,
+        membw_limit: usize,
+        last_membw: usize,
+        low: usize,
+        high: usize,
+    ) -> usize {
+        let ncpu = layer.cpus.weight();
+        let last_membw_percpu = if ncpu > 0 { last_membw / ncpu } else { 0 };
+
+        // If there's no way we're hitting the limit, we're good.
+        if last_membw_percpu * high < membw_limit {
+            return high;
+        }
+
+        // If there's no way to drop our memory usage down enough,
+        // pin the target CPUs to low and drop a warning.
+        if last_membw_percpu * low > membw_limit {
+            warn!("cannot satisfy memory bw limit for layer {}", layer.name);
+            return low;
+        }
+
+        // Clamped membw is between low and high, clamp high.
+        return membw_limit / last_membw_percpu;
+    }
+
     /// Calculate how many CPUs each layer would like to have if there were
     /// no competition. The CPU range is determined by applying the inverse
     /// of util_range and then capping by cpus_range. If the current
@@ -2510,12 +2574,14 @@ impl<'a> Scheduler<'a> {
                     util_range,
                     cpus_range,
                     cpus_range_frac,
+                    membw_gb,
                     ..
                 }
                 | LayerKind::Grouped {
                     util_range,
                     cpus_range,
                     cpus_range_frac,
+                    membw_gb,
                     ..
                 } => {
                     // A grouped layer can choose to include open cputime
@@ -2532,7 +2598,20 @@ impl<'a> Scheduler<'a> {
 
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
-                    let high = ((util / util_range.0).floor() as usize).max(low);
+                    let mut high = ((util / util_range.0).floor() as usize).max(low);
+
+                    if let Some(membw_limit) = membw_gb {
+                        let membw_cpus = &self.sched_stats.layer_membws[idx];
+                        let last_membw = membw_cpus.into_iter().map(|x: &f64| *x as usize).sum();
+                        high = self.clamp_target_by_membw(
+                            &layer,
+                            (*membw_limit * (1024_u64.pow(3) as f64)) as usize,
+                            last_membw,
+                            low,
+                            high,
+                        );
+                    }
+
                     let target = layer.cpus.weight().clamp(low, high);
                     let cpus_range =
                         resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();

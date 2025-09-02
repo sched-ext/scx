@@ -24,6 +24,7 @@ use serde::Serialize;
 use crate::bpf_intf;
 use crate::BpfStats;
 use crate::Layer;
+use crate::LayerKind;
 use crate::Stats;
 use crate::LAYER_USAGE_OPEN;
 use crate::LAYER_USAGE_PROTECTED;
@@ -209,6 +210,8 @@ pub struct LayerStats {
     pub llc_fracs: Vec<f64>,
     #[stat(desc = "Per-LLC average latency")]
     pub llc_lats: Vec<f64>,
+    #[stat(desc = "Layer memory bandwidth as a % of total allowed (0 for \"no limit\"")]
+    pub membw_pct: f64,
 }
 
 impl LayerStats {
@@ -238,6 +241,23 @@ impl LayerStats {
             .iter()
             .take(LAYER_USAGE_SUM_UPTO + 1)
             .sum::<f64>();
+
+        let membw_frac = match &layer.kind {
+            // Open layer's can't have a memory BW limit.
+            LayerKind::Open { .. } => 0.0,
+            LayerKind::Confined { membw_gb, .. } | LayerKind::Grouped { membw_gb, .. } => {
+                // Check if we have set a memory BW limit.
+                if let Some(membw_limit_gb) = membw_gb {
+                    stats.layer_membws[lidx]
+                        .iter()
+                        .take(LAYER_USAGE_SUM_UPTO + 1)
+                        .sum::<f64>()
+                        / ((*membw_limit_gb * (1024_u64.pow(3) as f64)) as f64)
+                } else {
+                    0.0
+                }
+            }
+        };
 
         Self {
             index: lidx,
@@ -308,6 +328,7 @@ impl LayerStats {
                 .iter()
                 .map(|lstats| lstats[LLC_LSTAT_LAT] as f64 / 1_000_000_000.0)
                 .collect(),
+            membw_pct: membw_frac * 100.0,
         }
     }
 
