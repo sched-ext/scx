@@ -2678,6 +2678,7 @@ dependencies = [
  "libbpf-rs",
  "log",
  "once_cell",
+ "scx_cargo",
  "scx_utils",
 ]
 
@@ -2701,11 +2702,19 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
  "serde",
  "simplelog",
+]
+
+[[package]]
+name = "scx_cargo"
+version = "1.0.20"
+dependencies = [
+ "scx_utils",
 ]
 
 [[package]]
@@ -2720,6 +2729,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.29.0",
+ "scx_cargo",
  "scx_p2dq",
  "scx_stats",
  "scx_stats_derive",
@@ -2739,6 +2749,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2756,6 +2767,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2785,6 +2797,7 @@ dependencies = [
  "ordered-float",
  "plain",
  "rlimit",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2813,6 +2826,7 @@ dependencies = [
  "nvml-wrapper",
  "once_cell",
  "scx_bpf_compat",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2829,6 +2843,7 @@ version = "1.0.2"
 dependencies = [
  "anyhow",
  "libbpf-rs",
+ "scx_cargo",
  "scx_utils",
  "simplelog",
 ]
@@ -2869,6 +2884,7 @@ dependencies = [
  "libc",
  "log",
  "maplit",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2892,6 +2908,7 @@ dependencies = [
  "libc",
  "log",
  "ordered-float",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2911,6 +2928,7 @@ dependencies = [
  "libc",
  "plain",
  "procfs 0.17.0",
+ "scx_cargo",
  "scx_rustland_core",
  "scx_utils",
 ]
@@ -2928,6 +2946,7 @@ dependencies = [
  "ordered-float",
  "plain",
  "procfs 0.17.0",
+ "scx_cargo",
  "scx_rustland_core",
  "scx_stats",
  "scx_stats_derive",
@@ -2962,6 +2981,7 @@ dependencies = [
  "libc",
  "log",
  "ordered-float",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3010,6 +3030,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3024,6 +3045,7 @@ dependencies = [
  "anyhow",
  "buddy_system_allocator",
  "libbpf-rs",
+ "scx_cargo",
  "scx_utils",
 ]
 
@@ -3076,6 +3098,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "ordered-float",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3096,6 +3119,7 @@ dependencies = [
  "libc",
  "log",
  "num_cpus",
+ "scx_cargo",
  "scx_utils",
  "serde",
  "serde_json",
@@ -3138,6 +3162,7 @@ dependencies = [
  "rand",
  "ratatui",
  "regex",
+ "scx_cargo",
  "scx_stats",
  "scx_utils",
  "serde",

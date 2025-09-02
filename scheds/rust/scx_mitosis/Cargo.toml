@@ -30,7 +30,7 @@ serde_json = "1.0.133"
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.20" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.20" }
 
 [features]
 enable_backtrace = []
