@@ -1799,7 +1799,7 @@ static int init_llc(u32 llc_index)
 {
 	struct llc_ctx *llcx;
 	u32 llc_id = llc_ids[llc_index];
-	int ret;
+	int i, ret;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
 	if (!llcx) {
@@ -1812,6 +1812,14 @@ static int init_llc(u32 llc_index)
 	llcx->index = llc_index;
 	llcx->nr_cpus = 0;
 	llcx->vtime = 0;
+	llcx->load = 0;
+	llcx->affn_load = 0;
+	llcx->intr_load = 0;
+	llcx->saturated = false;
+
+	bpf_for(i, 0, p2dq_config.nr_dsqs_per_llc) {
+		llcx->dsq_load[i] = 0;
+	}
 
 	ret = llc_create_atqs(llcx);
 	if (ret) {
