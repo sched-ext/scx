@@ -4,6 +4,10 @@ project('sched_ext schedulers', 'c',
         license: 'GPL-2.0',
         meson_version : '>= 1.2.0',)
 
+warning('Meson builds are deprecated. Please switch to `cargo build` for Rust'
+        + ' schedulers and `make` for C schedulers. Meson will be removed in an'
+        + ' upcoming release.')
+
 fs = import('fs')
 
 cc = meson.get_compiler('c')
