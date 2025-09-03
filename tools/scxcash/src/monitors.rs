@@ -1,10 +1,10 @@
 // Cache monitor trait definitions and implementations.
 
 use anyhow::{Context, Result};
-use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::libbpf_sys;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::{PerfBuffer, PerfBufferBuilder};
 use libbpf_rs::{RingBuffer, RingBufferBuilder};
 use log::trace;
@@ -88,7 +88,11 @@ impl<'a> SoftDirtyCacheMonitor<'a> {
                     unsafe { &*(data.as_ptr() as *const _) };
                 trace!(
                     "soft-dirty fault timestamp={} pid={} tid={} cpu={} addr=0x{:x}",
-                    ev.timestamp, ev.pid, ev.tid, ev.cpu, ev.address
+                    ev.timestamp,
+                    ev.pid,
+                    ev.tid,
+                    ev.cpu,
+                    ev.address
                 );
                 events_cb
                     .borrow_mut()
@@ -269,7 +273,11 @@ impl<'a> PerfSampleMonitor<'a> {
                         unsafe { &*(data.as_ptr() as *const _) };
                     trace!(
                         "perf sample timestamp={} pid={} tid={} cpu={} addr=0x{:x}",
-                        ev.timestamp, ev.pid, ev.tid, ev.cpu, ev.address
+                        ev.timestamp,
+                        ev.pid,
+                        ev.tid,
+                        ev.cpu,
+                        ev.address
                     );
                     events_cb
                         .borrow_mut()
