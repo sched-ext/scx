@@ -68,10 +68,33 @@ struct Opts {
     slice_lag_us: u64,
 
     /// CPU busy threshold.
+    ///
+    /// Specifies the CPU utilization percentage (0-100%) at which the scheduler considers the
+    /// system to be busy.
+    ///
+    /// When the average CPU utilization reaches this threshold, the scheduler switches from using
+    /// multiple per-CPU round-robin dispatch queues (which favor locality and reduced locking
+    /// contention) to a global deadline-based dispatch queue (which improves load balancing).
+    ///
+    /// The global dispatch queue can increase task migrations and improve responsiveness for
+    /// interactive tasks under heavy load. Lower values make the scheduler switch to deadline
+    /// mode sooner, improving overall responsiveness at the cost of reducing single-task
+    /// performance due to the additional migrations. Higher values makes task more "sticky" to
+    /// their CPU, improving workloads that benefit from cache locality.
+    ///
+    /// A higher value is recommended for server-type workloads, while a lower value is recommended
+    /// for interactive-type workloads.
     #[clap(short = 'c', long, default_value = "75")]
     cpu_busy_thresh: u64,
 
-    /// Polling time (ms). Value is clamped to the range [10 .. 1000].
+    /// Polling time (ms) to refresh the CPU utilization.
+    ///
+    /// This interval determines how often the scheduler refreshes the CPU utilization that is
+    /// compared with the CPU busy threshold (option -c) to decide if the system is busy or not
+    /// and trigger the switch between using multiple per-CPU dispatch queues or a single global
+    /// deadline-based dispatch queue.
+    ///
+    /// Value is clamped to the range [10 .. 1000].
     ///
     /// 0 = disabled.
     #[clap(short = 'p', long, default_value = "250")]
