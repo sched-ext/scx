@@ -62,4 +62,4 @@ harness = false
 
 [build-dependencies]
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.15" }
-scx_utils = { path = "../../rust/scx_utils", version = "1.0.19" }
+scx_cargo = { path = "../../rust/scx_cargo", version = "1.0.20" }

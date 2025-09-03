@@ -33,7 +33,7 @@ nix = { version = "0.29", features = ["sched"] }
 sysinfo = "0.33.1"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.20" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.20" }
 
 [features]
 enable_backtrace = []

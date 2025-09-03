@@ -22,4 +22,4 @@ ctrlc = "3.4"
 num_cpus = "1.16"
 
 [build-dependencies]
-scx_utils = { path = "../../rust/scx_utils", version = "1.0.19" }
+scx_cargo = { path = "../../rust/scx_cargo", version = "1.0.20" }
