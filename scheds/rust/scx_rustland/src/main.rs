@@ -165,6 +165,7 @@ impl<'a> Scheduler<'a> {
             opts.partial,
             opts.verbose,
             true, // Enable built-in idle CPU selection policy
+            "rustland",
         )?;
 
         info!(
