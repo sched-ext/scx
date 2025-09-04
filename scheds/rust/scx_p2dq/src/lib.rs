@@ -27,6 +27,14 @@ fn get_default_llc_runs() -> u64 {
     llc_runs as u64
 }
 
+fn get_default_llc_shards() -> u32 {
+    let max_cpus_per_llc = TOPO.all_llcs.values().map(|l| l.all_cpus.len() as u32).max().unwrap_or(1);
+    if max_cpus_per_llc <= 4 {
+        return 0;
+    }
+    max_cpus_per_llc / 4
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum LbMode {
     /// load of the LLC
@@ -198,6 +206,10 @@ pub struct SchedulerOpts {
     #[clap(short = 'x', long, default_value = "4")]
     pub dsq_shift: u64,
 
+    /// Number of shards for LLC DSQ sharding. Default 0 means use single DSQ per LLC.
+    #[clap(long, default_value_t = get_default_llc_shards())]
+    pub llc_shards: u32,
+
     /// Minimum number of queued tasks to use pick2 balancing, 0 to always enabled.
     #[clap(short = 'm', long, default_value = "0")]
     pub min_nr_queued_pick2: u64,
@@ -306,6 +318,7 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
             rodata.p2dq_config.saturated_percent = opts.saturated_percent;
             rodata.p2dq_config.sched_mode = opts.sched_mode.clone() as u32;
+            rodata.p2dq_config.llc_shards = opts.llc_shards.max(1);
 
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
@@ -333,6 +346,7 @@ macro_rules! init_skel {
                 } else {
                     0
                 };
+            $skel.maps.bss_data.as_mut().unwrap().cpu_core_ids[cpu.id] = cpu.core_id as u32;
             $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
         }
