@@ -141,7 +141,7 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub wakeup_llc_migrations: bool,
 
-    /// Allow selecting idle in enqueue path.
+    /// **DEPRECATED*** Allow selecting idle in enqueue path.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub select_idle_in_enqueue: bool,
 
@@ -314,8 +314,6 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
-            rodata.p2dq_config.select_idle_in_enqueue =
-                MaybeUninit::new(opts.select_idle_in_enqueue);
 
             rodata.debug = verbose as u32;
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;

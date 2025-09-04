@@ -122,7 +122,6 @@ const volatile struct {
 	bool interactive_sticky;
 	bool keep_running_enabled;
 	bool kthreads_local;
-	bool select_idle_in_enqueue;
 } p2dq_config = {
 	.sched_mode = MODE_DEFAULT,
 	.nr_dsqs_per_llc = 3,
@@ -138,7 +137,6 @@ const volatile struct {
 	.interactive_sticky = false,
 	.keep_running_enabled = true,
 	.kthreads_local = true,
-	.select_idle_in_enqueue = true,
 };
 
 const volatile u32 debug = 2;
@@ -992,8 +990,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// If an idle CPU hasn't been found in select_cpu find one now
-	if (p2dq_config.select_idle_in_enqueue &&
-	    !__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		cpu = pick_idle_cpu(p,
 				    taskc,
 				    cpu,

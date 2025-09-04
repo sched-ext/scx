@@ -431,10 +431,6 @@ impl Builder<'_> {
 
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
 
-        // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
-        // this codepath
-        rodata.p2dq_config.select_idle_in_enqueue = MaybeUninit::new(false);
-
         if self.p2dq_opts.queued_wakeup {
             open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
