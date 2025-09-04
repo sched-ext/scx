@@ -25,6 +25,7 @@ enum consts {
 	MAX_NUMA_NODES		= 64,
 	MAX_LLCS		= 64,
 	MAX_DSQS_PER_LLC	= 8,
+	MAX_LLC_SHARDS		= 32,
 	MAX_TASK_PRIO		= 39,
 	MAX_TOPO_NODES		= 1024,
 
