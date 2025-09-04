@@ -19,6 +19,7 @@ lazy_static = "1.5.0"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.137"
 log = "0.4.17"
+regex = "1.11.2"
 scx_bpf_compat = { path = "../../../rust/scx_bpf_compat", version = "1.0.15" }
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.15" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.15" }

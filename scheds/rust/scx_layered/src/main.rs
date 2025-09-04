@@ -41,6 +41,7 @@ use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
+use regex::Regex;
 use scx_bpf_compat;
 use scx_layered::*;
 use scx_stats::prelude::*;
@@ -1559,6 +1560,9 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::CgroupSuffix(suffix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
+                        }
+                        LayerMatch::CgroupRegex(_) => {
+                            panic!("CgroupRegex match only supported in template");
                         }
                         LayerMatch::CgroupContains(substr) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
@@ -3314,6 +3318,27 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
             .filter(|cgroup| cgroup.ends_with(suffix))
             .map(|cgroup| {
                 (
+                    {
+                        let mut slashterminated = cgroup.clone();
+                        slashterminated.push('/');
+                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
+                    },
+                    find_cpumask(&cgroup),
+                )
+            })
+            .collect()),
+        LayerMatch::CgroupRegex(expr) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
+            .into_iter()
+            .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
+            .filter(|cgroup| {
+                let re = Regex::new(expr).unwrap();
+                re.is_match(cgroup)
+            })
+            .map(|cgroup| {
+                (
+                    // Here we convert the regex match into a suffix match because we still need to
+                    // do the matching on the bpf side and doing a regex match in bpf isn't
+                    // easily done.
                     {
                         let mut slashterminated = cgroup.clone();
                         slashterminated.push('/');
