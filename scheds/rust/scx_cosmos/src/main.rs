@@ -143,6 +143,14 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
+    /// SMT contention avoidance.
+    ///
+    /// When enabled, the scheduler aggressively avoids placing tasks on sibling SMT threads.
+    /// This may increase task migrations and lower overall throughput, but can lead to more
+    /// consistent performance by reducing contention on shared SMT cores.
+    #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
+    avoid_smt: bool,
+
     /// Disable direct dispatch during synchronous wakeups.
     ///
     /// Enabling this option can lead to a more uniform load distribution across available cores,
@@ -352,6 +360,7 @@ impl<'a> Scheduler<'a> {
         rodata.smt_enabled = smt_enabled;
         rodata.numa_enabled = opts.enable_numa;
         rodata.no_wake_sync = opts.no_wake_sync;
+        rodata.avoid_smt = opts.avoid_smt;
         rodata.mm_affinity = opts.mm_affinity;
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
