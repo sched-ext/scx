@@ -1341,7 +1341,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 			    struct layer *layer, u64 flags)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
-	struct rq *rq;
 	struct task_struct *curr;
 	const struct cpumask *idle_cpumask;
 	bool cand_idle;
@@ -1368,10 +1367,9 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cand))
 		return false;
 
-	rq = scx_bpf_cpu_rq(cand);
-	if (!rq)
+	curr = __COMPAT_scx_bpf_cpu_curr(cand);
+	if (!curr)
 		return false;
-	curr = rq->curr;
 
 	if (ext_sched_class_addr && idle_sched_class_addr &&
 	    ((u64)curr->sched_class != ext_sched_class_addr) &&
