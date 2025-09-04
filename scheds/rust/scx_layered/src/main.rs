@@ -3323,6 +3323,21 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
                 )
             })
             .collect()),
+        LayerMatch::CgroupContains(suffix) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
+            .into_iter()
+            .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
+            .filter(|cgroup| cgroup.contains(suffix))
+            .map(|cgroup| {
+                (
+                    {
+                        let mut slashterminated = cgroup.clone();
+                        slashterminated.push('/');
+                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
+                    },
+                    find_cpumask(&cgroup),
+                )
+            })
+            .collect()),
         _ => panic!("Unimplemented template enum {:?}", rule),
     }
 }
@@ -3440,6 +3455,7 @@ fn main() -> Result<()> {
 
                             match &mt {
                                 LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
+                                LayerMatch::CgroupContains(cgroup) => genspec.name.push_str(cgroup),
                                 _ => bail!("Template match has unexpected type"),
                             }
 
