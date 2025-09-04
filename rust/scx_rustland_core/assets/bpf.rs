@@ -14,7 +14,6 @@ use std::ffi::c_int;
 use std::ffi::c_ulong;
 
 use std::collections::HashMap;
-use std::os::raw::c_char;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,6 +21,7 @@ use std::sync::Once;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 
 use plain::Plain;
 use procfs::process::all_processes;
@@ -245,7 +245,7 @@ impl<'cb> BpfScheduler<'cb> {
         skel.maps.rodata_data.as_mut().unwrap().khugepaged_pid = Self::khugepaged_pid();
         skel.maps.rodata_data.as_mut().unwrap().builtin_idle = builtin_idle;
         skel.maps.rodata_data.as_mut().unwrap().debug = debug;
-        Self::set_scx_ops_name(&mut skel.struct_ops.rustland_mut().name, name);
+        let _ = Self::set_scx_ops_name(&mut skel.struct_ops.rustland_mut().name, name);
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
@@ -294,12 +294,20 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Set the name of the scx ops.
-    fn set_scx_ops_name(dst: &mut [c_char], s: &str) {
-        dst.fill(0);
-        let n = s.len().min(dst.len().saturating_sub(1));
-        for (d, b) in dst.iter_mut().take(n).zip(s.bytes()) {
-            *d = b as c_char;
+    fn set_scx_ops_name(dst: &mut [i8], s: &str) -> Result<()> {
+        if !s.is_ascii() {
+            bail!("name must be an ASCII string");
         }
+
+        let bytes = s.as_bytes();
+        let n = bytes.len().min(dst.len().saturating_sub(1));
+
+        dst.fill(0);
+        for i in 0..n {
+            dst[i] = bytes[i] as i8;
+        }
+
+        Ok(())
     }
 
     // Return the PID of khugepaged, if present, otherwise return 0.
