@@ -3055,7 +3055,6 @@ dependencies = [
  "bindgen 0.72.0",
  "bitvec",
  "clap",
- "const_format",
  "glob",
  "hex",
  "lazy_static",
