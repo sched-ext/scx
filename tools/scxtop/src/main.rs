@@ -12,7 +12,10 @@ use scxtop::layered_util;
 use scxtop::mangoapp::poll_mangoapp;
 use scxtop::search;
 use scxtop::tracer::Tracer;
-use scxtop::util::{get_clock_value, read_file_string};
+use scxtop::util::{
+    check_bpf_capability, get_capability_warning_message, get_clock_value, is_root,
+    read_file_string,
+};
 use scxtop::Action;
 use scxtop::App;
 use scxtop::CpuStatTracker;
@@ -98,68 +101,98 @@ fn handle_input_entry(app: &App, s: String) -> Option<Action> {
     }
 }
 
-/// Attaches BPF programs to the skel.
-fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
-    // Attach probes
-    let mut links = vec![
-        skel.progs.on_sched_cpu_perf.attach()?,
-        skel.progs.scx_sched_reg.attach()?,
-        skel.progs.scx_sched_unreg.attach()?,
-        skel.progs.on_sched_switch.attach()?,
-        skel.progs.on_sched_wakeup.attach()?,
-        skel.progs.on_sched_wakeup_new.attach()?,
-        skel.progs.on_sched_waking.attach()?,
-        skel.progs.on_sched_migrate_task.attach()?,
-        skel.progs.on_sched_fork.attach()?,
-        skel.progs.on_sched_exec.attach()?,
-        skel.progs.on_sched_exit.attach()?,
-    ];
+/// Attaches BPF programs to the skel, handling non-root scenarios gracefully
+fn attach_progs(skel: &mut BpfSkel) -> Result<(Vec<Link>, Vec<String>)> {
+    let mut links = Vec::new();
+    let mut warnings = Vec::new();
 
-    // 6.13 compatibility
+    // Check capabilities before attempting to attach
+    let has_bpf_cap = check_bpf_capability();
+
+    if !has_bpf_cap {
+        warnings
+            .push("BPF programs cannot be attached - scheduler monitoring disabled".to_string());
+        warnings.push("Try running as root or configure BPF permissions".to_string());
+        return Ok((links, warnings));
+    }
+
+    // Helper macro to safely attach programs and collect warnings
+    macro_rules! safe_attach {
+        ($prog:expr, $name:literal) => {
+            match $prog.attach() {
+                Ok(link) => {
+                    links.push(link);
+                }
+                Err(e) => {
+                    if is_root() {
+                        // If running as root and still failing, it's a real error
+                        return Err(anyhow!(
+                            "Failed to attach {} (running as root): {}",
+                            $name,
+                            e
+                        ));
+                    } else {
+                        warnings.push(format!("Failed to attach {}: {}", $name, e));
+                    }
+                }
+            }
+        };
+    }
+
+    // Try to attach core scheduler probes
+    safe_attach!(skel.progs.on_sched_cpu_perf, "sched_cpu_perf");
+    safe_attach!(skel.progs.scx_sched_reg, "scx_sched_reg");
+    safe_attach!(skel.progs.scx_sched_unreg, "scx_sched_unreg");
+    safe_attach!(skel.progs.on_sched_switch, "sched_switch");
+    safe_attach!(skel.progs.on_sched_wakeup, "sched_wakeup");
+    safe_attach!(skel.progs.on_sched_wakeup_new, "sched_wakeup_new");
+    safe_attach!(skel.progs.on_sched_waking, "sched_waking");
+    safe_attach!(skel.progs.on_sched_migrate_task, "sched_migrate_task");
+    safe_attach!(skel.progs.on_sched_fork, "sched_fork");
+    safe_attach!(skel.progs.on_sched_exec, "sched_exec");
+    safe_attach!(skel.progs.on_sched_exit, "sched_exit");
+
+    // 6.13 compatibility probes
     if compat::ksym_exists("scx_bpf_dsq_insert_vtime")? {
-        if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_insert.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dsq_move.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dsq_move_set_vtime.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dsq_move_set_slice.attach() {
-            links.push(link);
-        }
+        safe_attach!(skel.progs.scx_insert_vtime, "scx_insert_vtime");
+        safe_attach!(skel.progs.scx_insert, "scx_insert");
+        safe_attach!(skel.progs.scx_dsq_move, "scx_dsq_move");
+        safe_attach!(skel.progs.scx_dsq_move_set_vtime, "scx_dsq_move_set_vtime");
+        safe_attach!(skel.progs.scx_dsq_move_set_slice, "scx_dsq_move_set_slice");
     } else {
-        if let Ok(link) = skel.progs.scx_dispatch.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dispatch_vtime.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_vtime.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_slice.attach() {
-            links.push(link);
-        }
-        if let Ok(link) = skel.progs.scx_dispatch_from_dsq.attach() {
-            links.push(link);
-        }
-    }
-    if let Ok(link) = skel.progs.on_cpuhp_enter.attach() {
-        links.push(link);
-    }
-    if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
-        links.push(link);
+        safe_attach!(skel.progs.scx_dispatch, "scx_dispatch");
+        safe_attach!(skel.progs.scx_dispatch_vtime, "scx_dispatch_vtime");
+        safe_attach!(
+            skel.progs.scx_dispatch_from_dsq_set_vtime,
+            "scx_dispatch_from_dsq_set_vtime"
+        );
+        safe_attach!(
+            skel.progs.scx_dispatch_from_dsq_set_slice,
+            "scx_dispatch_from_dsq_set_slice"
+        );
+        safe_attach!(skel.progs.scx_dispatch_from_dsq, "scx_dispatch_from_dsq");
     }
 
-    Ok(links)
+    // Optional probes
+    safe_attach!(skel.progs.on_cpuhp_enter, "cpuhp_enter");
+    safe_attach!(skel.progs.on_cpuhp_exit, "cpuhp_exit");
+
+    // If no links were successfully attached and we're not root, provide helpful guidance
+    if links.is_empty() && !is_root() {
+        warnings.extend(get_capability_warning_message());
+    }
+
+    Ok((links, warnings))
 }
 
 fn run_trace(trace_args: &TraceArgs) -> Result<()> {
+    // Trace function always requires root privileges
+    if !is_root() {
+        return Err(anyhow!(
+            "Trace functionality requires root privileges. Please run as root"
+        ));
+    }
+
     TermLogger::init(
         match trace_args.verbose {
             0 => simplelog::LevelFilter::Info,
@@ -204,9 +237,65 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             compat::cond_tracepoint_enable("sched:sched_process_wait", &skel.progs.on_sched_wait)?;
             compat::cond_tracepoint_enable("sched:sched_process_hang", &skel.progs.on_sched_hang)?;
 
+            // Load the BPF skeleton (no graceful handling for trace mode - requires root)
             let mut skel = skel.load()?;
             skel.maps.data_data.as_mut().unwrap().enable_bpf_events = false;
-            let links = attach_progs(&mut skel)?;
+
+            // Attach programs (no graceful handling for trace mode - requires root)
+            let mut links = vec![
+                skel.progs.on_sched_cpu_perf.attach()?,
+                skel.progs.scx_sched_reg.attach()?,
+                skel.progs.scx_sched_unreg.attach()?,
+                skel.progs.on_sched_switch.attach()?,
+                skel.progs.on_sched_wakeup.attach()?,
+                skel.progs.on_sched_wakeup_new.attach()?,
+                skel.progs.on_sched_waking.attach()?,
+                skel.progs.on_sched_migrate_task.attach()?,
+                skel.progs.on_sched_fork.attach()?,
+                skel.progs.on_sched_exec.attach()?,
+                skel.progs.on_sched_exit.attach()?,
+            ];
+
+            // 6.13 compatibility
+            if compat::ksym_exists("scx_bpf_dsq_insert_vtime")? {
+                if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_insert.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dsq_move.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dsq_move_set_vtime.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dsq_move_set_slice.attach() {
+                    links.push(link);
+                }
+            } else {
+                if let Ok(link) = skel.progs.scx_dispatch.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dispatch_vtime.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_vtime.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_slice.attach() {
+                    links.push(link);
+                }
+                if let Ok(link) = skel.progs.scx_dispatch_from_dsq.attach() {
+                    links.push(link);
+                }
+            }
+            if let Ok(link) = skel.progs.on_cpuhp_enter.attach() {
+                links.push(link);
+            }
+            if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
+                links.push(link);
+            }
 
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
 
@@ -355,61 +444,151 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
         .build()
         .unwrap()
         .block_on(async {
+            // Declare open_object at the very beginning so it lives for the entire async block
+            let mut open_object = MaybeUninit::uninit();
+
             let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
-            let mut open_object = MaybeUninit::uninit();
-            let mut builder = BpfSkelBuilder::default();
-            if config.debug() {
-                builder.obj_builder.debug(true);
-            }
-            let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
-            let mut edm = EventDispatchManager::new(None, None);
-            edm.register_bpf_handler(Box::new(bpf_publisher));
+            // Check capabilities early to determine if we can run with BPF functionality
+            let has_bpf_cap = check_bpf_capability();
+            let mut capability_warnings = Vec::new();
+            let mut _bpf_enabled = false;
+            let mut links = Vec::new();
+            let mut event_rb_opt = None;
+            let mut skel_opt = None;
 
-            let mut skel = builder.open(&mut open_object)?;
-            skel.maps.rodata_data.as_mut().unwrap().long_tail_tracing_min_latency_ns =
-                tui_args.experimental_long_tail_tracing_min_latency_ns;
+            if has_bpf_cap {
+                // Try to initialize BPF components
+                let mut builder = BpfSkelBuilder::default();
+                if config.debug() {
+                    builder.obj_builder.debug(true);
+                }
+                let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
+                let mut edm = EventDispatchManager::new(None, None);
+                edm.register_bpf_handler(Box::new(bpf_publisher));
 
-            let map_handle = if tui_args.layered {
-                skel.maps.rodata_data.as_mut().unwrap().layered = true;
-                action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
-                    table: "Process".to_string(),
-                    col: "Layer ID".to_string(),
-                    visible: true,
-                }))?;
-                action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
-                    table: "Thread".to_string(),
-                    col: "Layer ID".to_string(),
-                    visible: true,
-                }))?;
-                Some(layered_util::attach_to_existing_map("task_ctxs", &mut skel.maps.task_ctxs)?)
+                // Try to open the BPF skeleton with graceful error handling
+                match builder.open(&mut open_object) {
+                    Ok(mut skel) => {
+                        skel.maps.rodata_data.as_mut().unwrap().long_tail_tracing_min_latency_ns =
+                            tui_args.experimental_long_tail_tracing_min_latency_ns;
+
+                        let _map_handle = if tui_args.layered {
+                            skel.maps.rodata_data.as_mut().unwrap().layered = true;
+                            action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
+                                table: "Process".to_string(),
+                                col: "Layer ID".to_string(),
+                                visible: true,
+                            }))?;
+                            action_tx.send(Action::UpdateColVisibility(UpdateColVisibilityAction {
+                                table: "Thread".to_string(),
+                                col: "Layer ID".to_string(),
+                                visible: true,
+                            }))?;
+                            match layered_util::attach_to_existing_map("task_ctxs", &mut skel.maps.task_ctxs) {
+                                Ok(handle) => Some(handle),
+                                Err(e) => {
+                                    capability_warnings.push(format!("Failed to attach to layered map: {e}"));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Err(e) = compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total) {
+                            capability_warnings.push(format!("Failed to enable gpu_memory_total kprobe: {e}"));
+                        }
+                        if let Err(e) = compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update) {
+                            capability_warnings.push(format!("Failed to enable hw_pressure_update kprobe: {e}"));
+                        }
+                        if let Err(e) = compat::cond_tracepoint_enable("sched:sched_process_wait", &skel.progs.on_sched_wait) {
+                            capability_warnings.push(format!("Failed to enable sched_process_wait tracepoint: {e}"));
+                        }
+                        if let Err(e) = compat::cond_tracepoint_enable("sched:sched_process_hang", &skel.progs.on_sched_hang) {
+                            capability_warnings.push(format!("Failed to enable sched_process_hang tracepoint: {e}"));
+                        }
+
+                        // Try to load the BPF skeleton
+                        match skel.load() {
+                            Ok(mut loaded_skel) => {
+                                let (skel_links, attach_warnings) = attach_progs(&mut loaded_skel)?;
+                                links = skel_links;
+                                capability_warnings.extend(attach_warnings);
+
+                                if !links.is_empty() || is_root() {
+                                    // Only run scxtop_init if we have some BPF functionality
+                                    if let Err(e) = loaded_skel.progs.scxtop_init.test_run(ProgramInput::default()) {
+                                        capability_warnings.push(format!("Failed to initialize scxtop BPF program: {e}"));
+                                    }
+                                }
+
+                                // Set up event ring buffer if we have any attached programs
+                                if !links.is_empty() {
+                                    let mut event_rbb = RingBufferBuilder::new();
+                                    let event_handler = move |data: &[u8]| {
+                                        let mut event = bpf_event::default();
+                                        plain::copy_from_bytes(&mut event, data).expect("Event data buffer was too short");
+                                        let _ = edm.on_event(&event);
+                                        0
+                                    };
+                                    if let Err(e) = event_rbb.add(&loaded_skel.maps.events, event_handler) {
+                                        capability_warnings.push(format!("Failed to add event handler: {e}"));
+                                    } else {
+                                        match event_rbb.build() {
+                                            Ok(event_rb) => {
+                                                event_rb_opt = Some(event_rb);
+                                                _bpf_enabled = true;
+                                            }
+                                            Err(e) => {
+                                                capability_warnings.push(format!("Failed to build event ring buffer: {e}"));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                skel_opt = Some(loaded_skel);
+                            }
+                            Err(e) => {
+                                if is_root() {
+                                    return Err(anyhow!("Failed to load BPF skeleton (running as root): {e}"));
+                                } else {
+                                    capability_warnings.push(format!("Failed to load BPF skeleton: {e}"));
+                                    capability_warnings.extend(get_capability_warning_message());
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if is_root() {
+                            return Err(anyhow!("Failed to open BPF skeleton (running as root): {e}"));
+                        } else {
+                            capability_warnings.push(format!("Failed to open BPF skeleton: {e}"));
+                            capability_warnings.extend(get_capability_warning_message());
+                        }
+                    }
+                }
             } else {
-                None
-            };
+                // No BPF capabilities detected
+                capability_warnings.extend(get_capability_warning_message());
+            }
 
-            compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
-            compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
-            compat::cond_tracepoint_enable("sched:sched_process_wait", &skel.progs.on_sched_wait)?;
-            compat::cond_tracepoint_enable("sched:sched_process_hang", &skel.progs.on_sched_hang)?;
-            let mut skel = skel.load()?;
-            let mut links = attach_progs(&mut skel)?;
-            skel.progs.scxtop_init.test_run(ProgramInput::default())?;
-
+            // Handle experimental long tail tracing if enabled and we have a skeleton
             if tui_args.experimental_long_tail_tracing {
-                skel.maps.data_data.as_mut().unwrap().trace_duration_ns = config.trace_duration_ns();
-                skel.maps.data_data.as_mut().unwrap().trace_warmup_ns = config.trace_warmup_ns();
+                if let Some(ref mut skel) = skel_opt {
+                    skel.maps.data_data.as_mut().unwrap().trace_duration_ns = config.trace_duration_ns();
+                    skel.maps.data_data.as_mut().unwrap().trace_warmup_ns = config.trace_warmup_ns();
 
-                let binary = tui_args
-                    .experimental_long_tail_tracing_binary
-                    .clone()
-                    .unwrap();
-                let symbol = tui_args
-                    .experimental_long_tail_tracing_symbol
-                    .clone()
-                    .unwrap();
+                    let binary = tui_args
+                        .experimental_long_tail_tracing_binary
+                        .clone()
+                        .unwrap();
+                    let symbol = tui_args
+                        .experimental_long_tail_tracing_symbol
+                        .clone()
+                        .unwrap();
 
-                links.extend([
-                    skel.progs.long_tail_tracker_exit.attach_uprobe_with_opts(
+                    match skel.progs.long_tail_tracker_exit.attach_uprobe_with_opts(
                         -1, /* pid, -1 == all */
                         binary.clone(),
                         0,
@@ -418,8 +597,12 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                             func_name: Some(symbol.clone()),
                             ..Default::default()
                         },
-                    )?,
-                    skel.progs.long_tail_tracker_entry.attach_uprobe_with_opts(
+                    ) {
+                        Ok(link) => links.push(link),
+                        Err(e) => capability_warnings.push(format!("Failed to attach long tail tracker exit: {e}"))
+                    }
+
+                    match skel.progs.long_tail_tracker_entry.attach_uprobe_with_opts(
                         -1, /* pid, -1 == all */
                         binary.clone(),
                         0,
@@ -428,43 +611,60 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                             func_name: Some(symbol.clone()),
                             ..Default::default()
                         },
-                    )?,
-                ]);
-            };
+                    ) {
+                        Ok(link) => links.push(link),
+                        Err(e) => capability_warnings.push(format!("Failed to attach long tail tracker entry: {e}"))
+                    }
+                } else {
+                    capability_warnings.push("Long tail tracing requested but BPF skeleton not available".to_string());
+                }
+            }
 
             let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms(), config.frame_rate_ms())?;
-            let mut event_rbb = RingBufferBuilder::new();
-            let event_handler = move |data: &[u8]| {
-                let mut event = bpf_event::default();
-                plain::copy_from_bytes(&mut event, data).expect("Event data buffer was too short");
-                let _ = edm.on_event(&event);
-                0
-            };
-            event_rbb.add(&skel.maps.events, event_handler)?;
-            let event_rb = event_rbb.build()?;
             let scheduler = read_file_string(SCHED_NAME_PATH).unwrap_or("".to_string());
 
-            let mut app = App::new(
-                config,
-                scheduler,
-                100,
-                tui_args.process_id,
-                tui_args.layered,
-                action_tx.clone(),
-                skel,
-            )?;
+            // Create app with or without BPF skeleton
+            let mut app = if let Some(skel) = skel_opt {
+                App::new(
+                    config,
+                    scheduler,
+                    100,
+                    tui_args.process_id,
+                    tui_args.layered,
+                    action_tx.clone(),
+                    skel,
+                )?
+            } else {
+                // Create app without BPF functionality
+                App::new_without_bpf(
+                    config,
+                    scheduler,
+                    100,
+                    tui_args.process_id,
+                    tui_args.layered,
+                    action_tx.clone(),
+                )?
+            };
+
+            // Pass warnings to the app if any exist
+            if !capability_warnings.is_empty() {
+                app.set_capability_warnings(capability_warnings);
+            }
 
             tui.enter()?;
 
+            // Start BPF event polling only if we have an event ring buffer
             let shutdown = app.should_quit.clone();
-            tokio::spawn(async move {
-                loop {
-                    let _ = event_rb.poll(Duration::from_millis(1));
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
+            if let Some(event_rb) = event_rb_opt {
+                tokio::spawn(async move {
+                    loop {
+                        let _ = event_rb.poll(Duration::from_millis(1));
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
                     }
-                }
-            });
+                });
+            }
 
             if tui_args.mangoapp_tracing {
                 let stop_mangoapp = app.should_quit.clone();
@@ -515,7 +715,6 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             }
             tui.exit()?;
             drop(links);
-            drop(map_handle);
 
             Ok(())
         })

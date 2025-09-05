@@ -5,8 +5,10 @@
 
 use anyhow::Result;
 use nix::time::{clock_gettime, ClockId};
+use nix::unistd::{getuid, Uid};
 use std::fs;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 
 /// Formats a byte value to human readable.
 /// The input value must be in bytes, not KB or other units.
@@ -117,6 +119,97 @@ pub fn u32_to_i32(x: u32) -> i32 {
 /// Formats a percentage value (0.0 to 1.0) to a string with % suffix
 pub fn format_percentage(value: f64) -> String {
     format!("{:.1}%", value * 100.0)
+}
+
+/// Check if the current user is running as root
+pub fn is_root() -> bool {
+    getuid() == Uid::from_raw(0)
+}
+
+/// Check if BPF programs can be loaded and attached
+/// This is a simple test that tries to create a basic BPF program
+pub fn check_bpf_capability() -> bool {
+    // For now, we'll use a heuristic approach:
+    // 1. Check if we're root (most BPF programs require root)
+    // 2. Check if /sys/kernel/debug/tracing exists (required for many tracepoints)
+    // 3. Check if /proc/sys/kernel/perf_event_paranoid allows BPF
+
+    if is_root() {
+        return true;
+    }
+
+    // Check if BPF is likely to work based on system configuration
+    check_bpf_permissions()
+}
+
+/// Check if perf events can be attached for non-root users
+pub fn check_perf_capability() -> bool {
+    if is_root() {
+        return true;
+    }
+
+    // Check perf_event_paranoid setting
+    // 0 = allow all events for all users
+    // 1 = allow kernel profiling for non-root users
+    // 2 = allow only userspace sampling for non-root users
+    // 3 = no access for non-root users
+    match read_file_string("/proc/sys/kernel/perf_event_paranoid") {
+        Ok(content) => {
+            if let Ok(level) = content.trim().parse::<i32>() {
+                // Level 2 or lower allows some perf events for non-root
+                level <= 2
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check BPF permissions for non-root users
+fn check_bpf_permissions() -> bool {
+    // Check if tracing directory is accessible
+    let tracing_dir = "/sys/kernel/debug/tracing";
+    if let Ok(metadata) = fs::metadata(tracing_dir) {
+        let permissions = metadata.permissions();
+        // Check if directory is readable/writable by others or group
+        (permissions.mode() & 0o044) != 0 || (permissions.mode() & 0o022) != 0
+    } else {
+        false
+    }
+}
+
+/// Get a user-friendly message explaining missing capabilities
+pub fn get_capability_warning_message() -> Vec<String> {
+    let mut messages = Vec::new();
+
+    if !is_root() {
+        messages
+            .push("⚠️  Running as non-root user - some functionality may be limited".to_string());
+
+        if !check_bpf_capability() {
+            messages.push(
+                "❌ BPF programs cannot be attached - scheduler monitoring disabled".to_string(),
+            );
+            messages.push("   Try running as root or configure BPF permissions".to_string());
+        }
+
+        if !check_perf_capability() {
+            messages.push(
+                "❌ Perf events cannot be attached - performance profiling disabled".to_string(),
+            );
+            messages
+                .push("   Try: echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid".to_string());
+        }
+
+        if check_bpf_capability() && check_perf_capability() {
+            messages.push(
+                "✅ BPF and perf capabilities detected - limited monitoring available".to_string(),
+            );
+        }
+    }
+
+    messages
 }
 
 #[cfg(test)]

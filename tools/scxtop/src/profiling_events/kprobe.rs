@@ -57,19 +57,33 @@ fn resolve_kfunc_address(name: &str) -> Option<u64> {
 }
 
 /// Returns the available kprobe events on the system from tracefs.
+/// For non-root users, returns an empty list to allow graceful degradation.
 pub fn available_kprobe_events() -> Result<Vec<String>> {
-    let path = tracefs_mount()?;
-    let file = File::open(path.join("available_filter_functions"))?;
-    let reader = BufReader::new(file);
+    match tracefs_mount() {
+        Ok(path) => {
+            match File::open(path.join("available_filter_functions")) {
+                Ok(file) => {
+                    let reader = BufReader::new(file);
+                    let mut events = Vec::new();
 
-    let mut events = Vec::new();
+                    for line in reader.lines() {
+                        let line = line?;
+                        if let Some(func) = line.split_whitespace().next() {
+                            events.push(func.to_string());
+                        }
+                    }
 
-    for line in reader.lines() {
-        let line = line?;
-        if let Some(func) = line.split_whitespace().next() {
-            events.push(func.to_string());
+                    Ok(events)
+                }
+                Err(_) => {
+                    // Permission denied or file not accessible - return empty list for graceful degradation
+                    Ok(Vec::new())
+                }
+            }
+        }
+        Err(_) => {
+            // Cannot access tracefs - return empty list for graceful degradation
+            Ok(Vec::new())
         }
     }
-
-    Ok(events)
 }
