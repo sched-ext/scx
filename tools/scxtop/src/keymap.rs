@@ -63,6 +63,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('j'), Action::PrevEvent);
         bindings.insert(Key::Char('k'), Action::NextEvent);
         bindings.insert(Key::Char('q'), Action::Quit);
+        bindings.insert(Key::Char('Q'), Action::Quit);
         bindings.insert(Key::Char('t'), Action::ChangeTheme);
         bindings.insert(Key::Char('-'), Action::DecTickRate);
         bindings.insert(Key::Char('+'), Action::IncTickRate);

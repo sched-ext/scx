@@ -95,6 +95,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use bpf::*;
 use libbpf_rs::OpenObject;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::UserExitInfo;
 
 // Maximum time slice (in nanoseconds) that a task can use before it is re-enqueued.
@@ -106,12 +107,15 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        let open_opts = LibbpfOpts::default();
         let bpf = BpfScheduler::init(
             open_object,
-            0,     // exit_dump_len (buffer size of exit info, 0 = default)
-            false, // partial (false = include all tasks)
-            false, // debug (false = debug mode off)
-            true,  // builtin_idle (true = allow BPF to use idle CPUs if available)
+            open_opts.clone().into_bpf_open_opts(),
+            0,        // exit_dump_len (buffer size of exit info, 0 = default)
+            false,    // partial (false = include all tasks)
+            false,    // debug (false = debug mode off)
+            true,     // builtin_idle (true = allow BPF to use idle CPUs if available)
+            "rlfifo", // name of the scx ops
         )?;
         Ok(Self { bpf })
     }

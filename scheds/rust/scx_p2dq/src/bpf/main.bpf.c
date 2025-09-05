@@ -80,30 +80,30 @@ const volatile struct {
 };
 
 const volatile struct {
-	u64 slack_factor;
 	u64 backoff_ns;
-	u64 min_nr_queued_pick2;
-	bool max_dsq_pick2;
-	bool eager_load_balance;
-
 	u64 dispatch_lb_busy;
-	bool dispatch_pick2_disable;
-	bool dispatch_lb_interactive;
-
+	u64 min_llc_runs_pick2;
+	u64 min_nr_queued_pick2;
+	u64 slack_factor;
 	u64 wakeup_lb_busy;
+
+	bool dispatch_lb_interactive;
+	bool dispatch_pick2_disable;
+	bool eager_load_balance;
+	bool max_dsq_pick2;
 	bool wakeup_llc_migrations;
 } lb_config = {
-	.slack_factor = LOAD_BALANCE_SLACK,
 	.backoff_ns = 5LLU * NSEC_PER_MSEC,
-	.min_nr_queued_pick2 = 10,
-	.max_dsq_pick2 = false,
-	.eager_load_balance = true,
-
 	.dispatch_lb_busy = 75,
-	.dispatch_pick2_disable = false,
-	.dispatch_lb_interactive = false,
-
+	.min_llc_runs_pick2 = 4,
+	.min_nr_queued_pick2 = 10,
+	.slack_factor = LOAD_BALANCE_SLACK,
 	.wakeup_lb_busy = 90,
+
+	.dispatch_lb_interactive = false,
+	.dispatch_pick2_disable = false,
+	.eager_load_balance = true,
+	.max_dsq_pick2 = false,
 	.wakeup_llc_migrations = false,
 };
 
@@ -122,7 +122,6 @@ const volatile struct {
 	bool interactive_sticky;
 	bool keep_running_enabled;
 	bool kthreads_local;
-	bool select_idle_in_enqueue;
 } p2dq_config = {
 	.sched_mode = MODE_DEFAULT,
 	.nr_dsqs_per_llc = 3,
@@ -138,7 +137,6 @@ const volatile struct {
 	.interactive_sticky = false,
 	.keep_running_enabled = true,
 	.kthreads_local = true,
-	.select_idle_in_enqueue = true,
 };
 
 const volatile u32 debug = 2;
@@ -148,7 +146,7 @@ extern const volatile u32 nr_cpu_ids;
 const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
 
 static u32 llc_lb_offset = 1;
-static u32 min_llc_runs_pick2 = 1;
+static u64 min_llc_runs_pick2 = 1;
 static bool saturated = false;
 
 u64 llc_ids[MAX_LLCS];
@@ -992,8 +990,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// If an idle CPU hasn't been found in select_cpu find one now
-	if (p2dq_config.select_idle_in_enqueue &&
-	    !__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		cpu = pick_idle_cpu(p,
 				    taskc,
 				    cpu,
@@ -1668,11 +1665,11 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 	percent_idle = idle_cpu_percent(idle_cpumask);
 	saturated = percent_idle < p2dq_config.saturated_percent;
 
-	if (saturated)
-		min_llc_runs_pick2 = 2;
-	else {
+	if (saturated) {
+		min_llc_runs_pick2 = min(2, lb_config.min_llc_runs_pick2);
+	} else {
 		u32 llc_scaler = log2_u32(topo_config.nr_llcs);
-		min_llc_runs_pick2 = log2_u32(percent_idle) + llc_scaler;
+		min_llc_runs_pick2 = min(log2_u32(percent_idle) + llc_scaler, lb_config.min_llc_runs_pick2);
 	}
 
 	if (!(llcx = lookup_cpu_llc_ctx(cpu))) {

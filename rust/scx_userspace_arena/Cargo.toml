@@ -18,4 +18,4 @@ buddy_system_allocator = { version = "0.11.0", default-features = false }
 libbpf-rs = "=0.26.0-beta.1"
 
 [build-dependencies]
-scx_utils = { path = "../scx_utils", version = "1.0.19" }
+scx_cargo = { path = "../scx_cargo", version = "1.0.20" }

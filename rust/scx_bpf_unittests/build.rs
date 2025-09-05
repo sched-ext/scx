@@ -25,7 +25,9 @@ fn main() {
         root_dir.join("scheds/include/lib"),
         root_dir.join("scheds/include/arch/x86/"),
         root_dir.join("scheds/include/bpf-compat/"),
-        env::var("DEP_BPF_INCLUDE").unwrap().into(),
+        env::var("DEP_BPF_INCLUDE")
+            .expect("libbpf-sys include must be avaiable")
+            .into(),
     ];
 
     // Build the C tests
@@ -58,7 +60,7 @@ fn main() {
         .compile("scxtest");
 
     // Extract test names
-    let mut tests = vec![];
+    let mut tests: Vec<String> = vec![];
 
     let archive_data = fs::read(&out_dir.join("libp2dq_tests.a")).unwrap();
     let archive = ArchiveFile::parse(&*archive_data).unwrap();

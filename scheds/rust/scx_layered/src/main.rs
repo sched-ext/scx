@@ -41,12 +41,14 @@ use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::OnceCell;
+use regex::Regex;
 use scx_bpf_compat;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
@@ -716,6 +718,9 @@ struct Opts {
     /// Enable affinitized task to use hi fallback queue to get more CPU time.
     #[clap(long, default_value = "")]
     hi_fb_thread_name: String,
+
+    #[clap(flatten, next_help_heading = "Libbpf Options")]
+    pub libbpf: LibbpfOpts,
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -1556,6 +1561,9 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
                         }
+                        LayerMatch::CgroupRegex(_) => {
+                            panic!("CgroupRegex match only supported in template");
+                        }
                         LayerMatch::CgroupContains(substr) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
                             copy_into_cstr(&mut mt.cgroup_substr, substr.as_str());
@@ -2172,7 +2180,8 @@ impl<'a> Scheduler<'a> {
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
-        let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
+        let open_opts = opts.libbpf.clone().into_bpf_open_opts();
+        let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
@@ -3309,6 +3318,27 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
             .filter(|cgroup| cgroup.ends_with(suffix))
             .map(|cgroup| {
                 (
+                    {
+                        let mut slashterminated = cgroup.clone();
+                        slashterminated.push('/');
+                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
+                    },
+                    find_cpumask(&cgroup),
+                )
+            })
+            .collect()),
+        LayerMatch::CgroupRegex(expr) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
+            .into_iter()
+            .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
+            .filter(|cgroup| {
+                let re = Regex::new(expr).unwrap();
+                re.is_match(cgroup)
+            })
+            .map(|cgroup| {
+                (
+                    // Here we convert the regex match into a suffix match because we still need to
+                    // do the matching on the bpf side and doing a regex match in bpf isn't
+                    // easily done.
                     {
                         let mut slashterminated = cgroup.clone();
                         slashterminated.push('/');

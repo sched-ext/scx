@@ -1,6 +1,6 @@
 // Build script to compile and generate BPF skeleton and interface for scxcash.
 fn main() {
-    scx_utils::BpfBuilder::new()
+    scx_cargo::BpfBuilder::new()
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/soft_dirty.bpf.c", "bpf")

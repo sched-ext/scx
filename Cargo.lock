@@ -2534,9 +2534,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.11.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b544ef1b4eac5dc2db33ea63606ae9ffcfac26c1416a2806ae0bf5f56b201191"
+checksum = "23d7fd106d8c02486a8d64e778353d1cffe08ce79ac2e82f540c86d0facf6912"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -2678,6 +2678,7 @@ dependencies = [
  "libbpf-rs",
  "log",
  "once_cell",
+ "scx_cargo",
  "scx_utils",
 ]
 
@@ -2701,11 +2702,19 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
  "serde",
  "simplelog",
+]
+
+[[package]]
+name = "scx_cargo"
+version = "1.0.20"
+dependencies = [
+ "scx_utils",
 ]
 
 [[package]]
@@ -2720,6 +2729,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.29.0",
+ "scx_cargo",
  "scx_p2dq",
  "scx_stats",
  "scx_stats_derive",
@@ -2739,6 +2749,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2756,6 +2767,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2774,7 +2786,6 @@ dependencies = [
  "combinations",
  "crossbeam",
  "ctrlc",
- "fb_procfs",
  "gpoint",
  "hex",
  "itertools 0.13.0",
@@ -2785,6 +2796,7 @@ dependencies = [
  "ordered-float",
  "plain",
  "rlimit",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2812,7 +2824,9 @@ dependencies = [
  "nix 0.29.0",
  "nvml-wrapper",
  "once_cell",
+ "regex",
  "scx_bpf_compat",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2829,7 +2843,7 @@ version = "1.0.2"
 dependencies = [
  "anyhow",
  "libbpf-rs",
- "libbpf-sys",
+ "scx_cargo",
  "scx_utils",
  "simplelog",
 ]
@@ -2863,13 +2877,13 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "fb_procfs",
  "itertools 0.13.0",
  "lazy_static",
  "libbpf-rs",
  "libc",
  "log",
  "maplit",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2887,12 +2901,12 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "fb_procfs",
  "lazy_static",
  "libbpf-rs",
  "libc",
  "log",
  "ordered-float",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -2912,6 +2926,7 @@ dependencies = [
  "libc",
  "plain",
  "procfs 0.17.0",
+ "scx_cargo",
  "scx_rustland_core",
  "scx_utils",
 ]
@@ -2929,6 +2944,7 @@ dependencies = [
  "ordered-float",
  "plain",
  "procfs 0.17.0",
+ "scx_cargo",
  "scx_rustland_core",
  "scx_stats",
  "scx_stats_derive",
@@ -2939,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.3.4"
+version = "2.3.5"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2963,6 +2979,7 @@ dependencies = [
  "libc",
  "log",
  "ordered-float",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3011,6 +3028,7 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3025,23 +3043,24 @@ dependencies = [
  "anyhow",
  "buddy_system_allocator",
  "libbpf-rs",
+ "scx_cargo",
  "scx_utils",
 ]
 
 [[package]]
 name = "scx_utils"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "bindgen 0.72.0",
  "bitvec",
+ "clap",
  "const_format",
  "glob",
  "hex",
  "lazy_static",
  "libbpf-cargo",
  "libbpf-rs",
- "libbpf-sys",
  "libc",
  "log",
  "nix 0.30.1",
@@ -3077,6 +3096,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "ordered-float",
+ "scx_cargo",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -3097,6 +3117,7 @@ dependencies = [
  "libc",
  "log",
  "num_cpus",
+ "scx_cargo",
  "scx_utils",
  "serde",
  "serde_json",
@@ -3139,6 +3160,7 @@ dependencies = [
  "rand",
  "ratatui",
  "regex",
+ "scx_cargo",
  "scx_stats",
  "scx_utils",
  "serde",
@@ -3311,9 +3333,9 @@ dependencies = [
 
 [[package]]
 name = "slab"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04dc19736151f35336d325007ac991178d504a119863a2fcb3758cdb5e52c50d"
+checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
 
 [[package]]
 name = "slog"

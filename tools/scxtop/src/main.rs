@@ -88,19 +88,11 @@ fn handle_input_entry(app: &App, s: String) -> Option<Action> {
         | AppState::Llc
         | AppState::Node
         | AppState::Process
-        | AppState::Memory => {
-            if app.filtering() {
-                Some(Action::InputEntry(s))
-            } else {
-                None
-            }
-        }
-        AppState::PerfTop => {
-            if app.filtering() {
-                Some(Action::InputEntry(s))
-            } else {
-                None
-            }
+        | AppState::Memory
+        | AppState::PerfTop
+            if app.filtering() =>
+        {
+            Some(Action::InputEntry(s))
         }
         _ => None,
     }

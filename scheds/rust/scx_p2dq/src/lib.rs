@@ -141,7 +141,7 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub wakeup_llc_migrations: bool,
 
-    /// Allow selecting idle in enqueue path.
+    /// **DEPRECATED*** Allow selecting idle in enqueue path.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub select_idle_in_enqueue: bool,
 
@@ -179,7 +179,7 @@ pub struct SchedulerOpts {
     #[clap(long, default_value = "5", value_parser = clap::value_parser!(u64).range(0..99))]
     pub lb_slack_factor: u64,
 
-    /// ***DEPRECATED** Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
+    /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
     /// path.
     #[clap(short = 'l', long, default_value_t = get_default_llc_runs())]
     pub min_llc_runs_pick2: u64,
@@ -287,6 +287,7 @@ macro_rules! init_open_skel {
             // load balance config
             rodata.lb_config.slack_factor = opts.lb_slack_factor;
             rodata.lb_config.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
+            rodata.lb_config.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
             rodata.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
             rodata.lb_config.eager_load_balance = MaybeUninit::new(!opts.eager_load_balance);
             rodata.lb_config.dispatch_pick2_disable = MaybeUninit::new(opts.dispatch_pick2_disable);
@@ -313,8 +314,6 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
-            rodata.p2dq_config.select_idle_in_enqueue =
-                MaybeUninit::new(opts.select_idle_in_enqueue);
 
             rodata.debug = verbose as u32;
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;

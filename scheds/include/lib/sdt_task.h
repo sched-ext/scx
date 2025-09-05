@@ -6,9 +6,12 @@
  */
 #pragma once
 
+#ifdef __BPF__
+
 #include <scx/bpf_arena_common.bpf.h>
 #include <scx/bpf_arena_spin_lock.h>
 #include "sdt_task_defs.h"
+#endif
 
 struct scx_stk_seg;
 typedef struct scx_stk_seg __arena scx_stk_seg_t;
@@ -40,6 +43,8 @@ struct scx_stk {
 
 	scx_stk_seg_t *reserve;
 };
+
+#ifdef __BPF__
 
 void __arena *scx_task_data(struct task_struct *p);
 int scx_task_init(__u64 data_size);
@@ -148,3 +153,5 @@ int scx_ffs(__u64 word)
 
 	return num;
 }
+
+#endif /* __BPF__ */

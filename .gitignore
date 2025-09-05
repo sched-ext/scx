@@ -7,3 +7,6 @@ build/
 .cache/
 .vscode/
 tags
+*.o
+*.skel.h
+selftest

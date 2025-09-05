@@ -4,6 +4,9 @@
 
 #include <string.h>
 
+#include <scx/common.bpf.h>
+#include <lib/sdt_task_defs.h>
+
 #include "main.bpf.c"
 
 // per thread globals because the Rust test driver has multiple threads

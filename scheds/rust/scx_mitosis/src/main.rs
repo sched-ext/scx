@@ -32,6 +32,7 @@ use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -88,6 +89,9 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    #[clap(flatten, next_help_heading = "Libbpf Options")]
+    pub libbpf: LibbpfOpts,
 }
 
 // The subset of cstats we care about.
@@ -115,6 +119,7 @@ struct Scheduler<'a> {
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
     metrics: Metrics,
     stats_server: StatsServer<(), Metrics>,
+    last_configuration_seq: Option<u32>,
 }
 
 struct DistributionStats {
@@ -165,7 +170,8 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
 
-        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis)?;
+        let open_opts = opts.libbpf.clone().into_bpf_open_opts();
+        let mut skel = scx_ops_open!(skel_builder, open_object, mitosis, open_opts)?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
@@ -192,6 +198,7 @@ impl<'a> Scheduler<'a> {
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
             metrics: Metrics::default(),
             stats_server,
+            last_configuration_seq: None,
         })
     }
 
@@ -427,18 +434,32 @@ impl<'a> Scheduler<'a> {
     }
 
     fn refresh_bpf_cells(&mut self) -> Result<()> {
+        let applied_configuration = unsafe {
+            std::ptr::read_volatile(
+                &self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
+                    .unwrap()
+                    .applied_configuration_seq as *const u32,
+            )
+        };
+        if self
+            .last_configuration_seq
+            .is_some_and(|seq| applied_configuration == seq)
+        {
+            return Ok(());
+        }
         // collect all cpus per cell.
         let mut cell_to_cpus: HashMap<u32, Cpumask> = HashMap::new();
         let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
         for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
             cell_to_cpus
                 .entry(cpu_ctx.cell)
-                .and_modify(|mask| mask.set_cpu(i).expect("set cpu in existing mask"))
-                .or_insert_with(|| {
-                    let mut mask = Cpumask::new();
-                    mask.set_cpu(i).expect("set cpu in new mask");
-                    mask
-                });
+                .or_insert_with(|| Cpumask::new())
+                .set_cpu(i)
+                .expect("set cpu in existing mask");
         }
 
         // Create cells we don't have yet, drop cells that are no longer in use.
@@ -448,19 +469,25 @@ impl<'a> Scheduler<'a> {
         for i in 0..MAX_CELLS {
             let cell_idx = i as u32;
             let bpf_cell = cells[i];
-            if bpf_cell.in_use > 0 {
-                self.cells.entry(cell_idx).or_insert(Cell {
-                    cpus: cell_to_cpus
-                        .get(&cell_idx)
-                        .expect("missing cell in cpu map")
-                        .clone(),
-                });
+            let in_use = unsafe { std::ptr::read_volatile(&bpf_cell.in_use as *const u32) };
+            if in_use > 0 {
+                self.cells
+                    .entry(cell_idx)
+                    .or_insert_with(|| Cell {
+                        cpus: Cpumask::new(),
+                    })
+                    .cpus = cell_to_cpus
+                    .get(&cell_idx)
+                    .expect("missing cell in cpu map")
+                    .clone();
                 self.metrics.cells.insert(cell_idx, CellMetrics::default());
             } else {
                 self.cells.remove(&cell_idx);
                 self.metrics.cells.remove(&cell_idx);
             }
         }
+
+        self.last_configuration_seq = Some(applied_configuration);
 
         Ok(())
     }

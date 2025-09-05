@@ -92,7 +92,6 @@ CachyOS kernels which has sched-ext support.
 ```sh
 $ sudo dnf copr enable bieszczaders/kernel-cachyos
 $ sudo dnf install kernel-cachyos kernel-cachyos-devel-matched
-$ sudo setsebool -P domain_kernel_load_modules on # Necessary for loading kernel modules
 $ sudo reboot
 ```
 
@@ -107,6 +106,14 @@ $ sudo dnf install scx-scheds
 ```
 
 Alternatively, we also provide a `-git` package that is synced daily to match the upstream repository.
+
+#### Debugging/Security Note
+
+In past documentation it was reccomended to set the SELinux boolean domain_kernel_load_modules on in order to facilitate loading kernel modules by confined domains (e.g. scx_rusty). However recently, this has proven unnecessary in most cases in which the CachyOS kernel is present on the machine. If you expirience issues running your desired scheduler on a Fedora system, you may try running the following command:
+```sh
+$ sudo setsebool -P domain_kernel_load_modules on
+```
+NOTE: Running the above command inherently decreases the effectiveness of SELinux in containing malware IF it is present on the machine, by way of allowing a confined domain to load kernel modules, which in theory could allow an attacker to insert malicious code into the kernel.
 
 #### Setting up Dev Environment
 

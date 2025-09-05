@@ -1,7 +1,7 @@
 [package]
 name = "scxcash"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["Kumar Kartikeya Dwivedi <memxor@gmail.com>"]
 license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
@@ -22,4 +22,4 @@ ctrlc = "3.4"
 num_cpus = "1.16"
 
 [build-dependencies]
-scx_utils = { path = "../../rust/scx_utils", version = "1.0.19" }
+scx_cargo = { path = "../../rust/scx_cargo", version = "1.0.20" }

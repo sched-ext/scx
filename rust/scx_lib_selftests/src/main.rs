@@ -26,7 +26,7 @@ use scx_utils::NR_CPU_IDS;
 
 use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
 
-use libbpf_sys;
+use libbpf_rs::libbpf_sys;
 
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
@@ -116,7 +116,7 @@ fn setup_topology_node(skel: &mut BpfSkel<'_>, mask: &[u64]) -> Result<()> {
     let output = skel.progs.arena_topology_node_init.test_run(input)?;
     if output.return_value != 0 {
         bail!(
-            "p2dq_topology_node_init returned {}",
+            "arena_topology_node_init returned {}",
             output.return_value as i32
         );
     }

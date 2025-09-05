@@ -3,6 +3,7 @@
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
 #include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
 
 #include "selftest.h"
 
@@ -41,7 +42,6 @@ int arena_selftest(void)
 		return ret;
 	}
 
-
 	ret = scx_selftest_topology();
 	if (ret) {
 		bpf_printk("scx_selftest_topology failed with %d", ret);
@@ -52,3 +52,5 @@ int arena_selftest(void)
 
 	return 0;
 }
+
+char _license[] SEC("license") = "GPL";

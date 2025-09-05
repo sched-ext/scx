@@ -16,6 +16,7 @@ use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
+use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -66,6 +67,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+const SCHEDULER_NAME: &str = "scx_chaos";
 struct ArenaAllocator(Pin<Rc<SkelWithObject>>);
 
 unsafe impl Allocator for ArenaAllocator {
@@ -246,6 +248,12 @@ impl Scheduler {
     }
 }
 
+impl Drop for Scheduler {
+    fn drop(&mut self) {
+        info!("Unregister {SCHEDULER_NAME} scheduler");
+    }
+}
+
 impl Builder<'_> {
     fn setup_arenas(&self, skel: &mut BpfSkel) -> Result<()> {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
@@ -417,14 +425,11 @@ impl Builder<'_> {
         skel_builder.obj_builder.debug(self.verbose > 1);
         init_libbpf_logging(None);
 
-        let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos)?;
+        let open_opts = LibbpfOpts::default().into_bpf_open_opts();
+        let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos, open_opts)?;
         scx_p2dq::init_open_skel!(&mut open_skel, self.p2dq_opts, self.verbose)?;
 
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
-
-        // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
-        // this codepath
-        rodata.p2dq_config.select_idle_in_enqueue = MaybeUninit::new(false);
 
         if self.p2dq_opts.queued_wakeup {
             open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;

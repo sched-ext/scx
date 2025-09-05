@@ -44,9 +44,9 @@ server_mode = ["-m", "all", "-s", "20000", "-S", "1000", "-I", "-1", "-D", "-L"]
 
 [scheds.scx_p2dq]
 auto_mode = []
-gaming_mode = []
-lowlatency_mode = ["-y"]
-powersave_mode = []
+gaming_mode = ["--task-slice", "true", "-f", "--sched-mode", "performance"]
+lowlatency_mode = ["-y", "-f", "--task-slice", "true"]
+powersave_mode = ["--sched-mode", "efficiency"]
 server_mode = ["--keep-running"]
 
 [scheds.scx_rusty]
@@ -126,7 +126,9 @@ The example configuration above shows how to set custom flags for different sche
     * Power Save mode: `-f 50 -p`
     * Server mode: `-f 100`
 * For `scx_p2dq`:
-    * Low Latency mode: `-y`
+    * Gaming mode: `--task-slice true -f --sched-mode performance`
+    * Low Latency mode: `-y -f --task-slice true`
+    * Power Save mode: `--sched-mode efficiency`
     * Server mode: `--keep-running`
 * For `scx_rustland`:
     * No custom flags are defined, so the default flags for each mode will be used.
