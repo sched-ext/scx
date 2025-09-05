@@ -60,12 +60,13 @@ export BPF_CFLAGS := -g -O2 -Wall -Wno-compare-distinct-pointer-types \
 # ROOT_SRC_DIR is set by the top-level make call for out-of-source builds
 export ROOT_SRC_DIR ?= $(CURDIR)
 export BPF_INCLUDES := -I$(ROOT_SRC_DIR)/scheds/include \
-	-I$(ROOT_SRC_DIR)/scheds/include/arch/$(TARGET_ARCH) \
 	-I$(ROOT_SRC_DIR)/scheds/include/bpf-compat \
 	-I$(ROOT_SRC_DIR)/scheds/include/lib \
+	-I$(ROOT_SRC_DIR)/scheds/vmlinux \
+	-I$(ROOT_SRC_DIR)/scheds/vmlinux/arch/$(TARGET_ARCH) \
 	$(LIBBPF_CFLAGS)
 
-export CFLAGS := -std=gnu11 -I$(ROOT_SRC_DIR)/scheds/include -I$(SCHED_OBJ_DIR) $(LIBBPF_CFLAGS)
+export CFLAGS := -std=gnu11 -I$(ROOT_SRC_DIR)/scheds/include -I$(ROOT_SRC_DIR)/scheds/vmlinux -I$(SCHED_OBJ_DIR) $(LIBBPF_CFLAGS)
 
 export LIBBPF_DEPS := $(LIBBPF_LIBS) -lelf -lz -lzstd
 export THREAD_DEPS := -lpthread
