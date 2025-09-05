@@ -33,12 +33,14 @@ pub struct CpuId {
     // - numa_adx: a NUMA domain within a system
     // - pd_adx: a performance domain (CPU frequency domain) within a system
     //   - llc_rdx: an LLC domain (CCX) under a NUMA domain
+    //   - llc_kernel_id: physical LLC domain ID provided by the kernel
     //     - core_rdx: a core under a LLC domain
     //       - cpu_rdx: a CPU under a core
     pub numa_adx: usize,
     pub pd_adx: usize,
     pub llc_adx: usize,
     pub llc_rdx: usize,
+    pub llc_kernel_id: usize,
     pub core_rdx: usize,
     pub cpu_rdx: usize,
     pub cpu_adx: usize,
@@ -55,6 +57,7 @@ pub struct ComputeDomainId {
     pub numa_adx: usize,
     pub llc_adx: usize,
     pub llc_rdx: usize,
+    pub llc_kernel_id: usize,
     pub is_big: bool,
 }
 
@@ -93,9 +96,9 @@ pub struct CpuOrder {
 }
 
 impl CpuOrder {
-    /// Build a cpu preference order
-    pub fn new() -> Result<CpuOrder> {
-        let ctx = CpuOrderCtx::new();
+    /// Build a cpu preference order with optional topology configuration
+    pub fn new(topology_args: Option<&scx_utils::TopologyArgs>) -> Result<CpuOrder> {
+        let ctx = CpuOrderCtx::new(topology_args)?;
         let cpus_pf = ctx.build_topo_order(false).unwrap();
         let cpus_ps = ctx.build_topo_order(true).unwrap();
         let cpdom_map = CpuOrderCtx::build_cpdom(&cpus_pf).unwrap();
@@ -134,8 +137,12 @@ struct CpuOrderCtx {
 }
 
 impl CpuOrderCtx {
-    fn new() -> Self {
-        let topo = Topology::new().expect("Failed to build host topology");
+    fn new(topology_args: Option<&scx_utils::TopologyArgs>) -> Result<Self> {
+        let topo = match topology_args {
+            Some(args) => Topology::with_args(args)?,
+            None => Topology::new()?,
+        };
+
         let em = EnergyModel::new();
         let smt_enabled = topo.smt_enabled;
         let has_biglittle = topo.has_little_cores();
@@ -144,13 +151,13 @@ impl CpuOrderCtx {
         debug!("{:#?}", topo);
         debug!("{:#?}", em);
 
-        CpuOrderCtx {
+        Ok(CpuOrderCtx {
             topo,
             em,
             smt_enabled,
             has_biglittle,
             has_energy_model,
-        }
+        })
     }
 
     /// Build a CPU preference order based on its optimization target
@@ -179,6 +186,7 @@ impl CpuOrderCtx {
                             big_core: cpu.core_type != CoreType::Little,
                             turbo_core: cpu.core_type == CoreType::Big { turbo: true },
                             cpu_sibling: smt_siblings[cpu_adx] as usize,
+                            llc_kernel_id: llc.kernel_id,
                         };
                         cpu_ids.push(RefCell::new(cpu_id));
                     }
@@ -274,7 +282,7 @@ impl CpuOrderCtx {
         // so it is okay to use any cpus_*.
 
         // Creat a compute domain map, where a compute domain is a CPUs that
-        // are under the same node and LLC and have the same core type.
+        // are under the same node and LLC (virtual and physical) and have the same core type.
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainId, ComputeDomain> = BTreeMap::new();
         let mut cpdom_types: BTreeMap<usize, bool> = BTreeMap::new();
@@ -283,6 +291,7 @@ impl CpuOrderCtx {
                 numa_adx: cpu_id.numa_adx,
                 llc_adx: cpu_id.llc_adx,
                 llc_rdx: cpu_id.llc_rdx,
+                llc_kernel_id: cpu_id.llc_kernel_id,
                 is_big: cpu_id.big_core,
             };
             let value = cpdom_map.entry(key.clone()).or_insert_with(|| {
@@ -371,6 +380,9 @@ impl CpuOrderCtx {
             d += 2;
         } else {
             if from.llc_rdx != to.llc_rdx {
+                d += 1;
+            }
+            if from.llc_kernel_id != to.llc_kernel_id {
                 d += 1;
             }
         }
