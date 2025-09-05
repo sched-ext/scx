@@ -195,11 +195,92 @@ pub struct BpfBuilder {
 }
 
 impl BpfBuilder {
-    const BPF_H_TAR: &'static [u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bpf_h.tar"));
-
     fn install_bpf_h<P: AsRef<Path>>(dest: P) -> Result<()> {
-        let mut ar = tar::Archive::new(Self::BPF_H_TAR);
-        ar.unpack(dest)?;
+        
+        let dest_path = dest.as_ref();
+        
+        // Create architecture-specific vmlinux.h directory
+        let arch_dirs = [
+            ("aarch64", scx_vmlinux_aarch64::VMLINUX_H),
+            ("arm", scx_vmlinux_arm::VMLINUX_H),
+            ("mips", scx_vmlinux_mips::VMLINUX_H),
+            ("powerpc", scx_vmlinux_powerpc::VMLINUX_H),
+            ("riscv", scx_vmlinux_riscv::VMLINUX_H),
+            ("s390", scx_vmlinux_s390::VMLINUX_H),
+            ("x86", scx_vmlinux_x86::VMLINUX_H),
+        ];
+        
+        for (arch, vmlinux_data) in &arch_dirs {
+            let arch_dir = dest_path.join("arch").join(arch);
+            std::fs::create_dir_all(&arch_dir)?;
+            std::fs::write(arch_dir.join("vmlinux.h"), vmlinux_data)?;
+        }
+        
+        // Copy other headers from the repository
+        Self::copy_other_headers(dest_path)?;
+        
+        Ok(())
+    }
+    
+    fn copy_other_headers<P: AsRef<Path>>(dest: P) -> Result<()> {
+        
+        let dest_path = dest.as_ref();
+        
+        // Find the repository root
+        let repo_root = Self::find_repo_root()?;
+        let scheds_include = repo_root.join("scheds").join("include");
+        
+        if !scheds_include.exists() {
+            return Err(anyhow!("scheds/include directory not found at {:?}", scheds_include));
+        }
+        
+        // Copy scx/, lib/, and bpf-compat/ directories
+        for subdir in &["scx", "lib", "bpf-compat"] {
+            let src_dir = scheds_include.join(subdir);
+            if src_dir.exists() {
+                let dest_dir = dest_path.join(subdir);
+                Self::copy_dir_all(&src_dir, &dest_dir)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn find_repo_root() -> Result<PathBuf> {
+        let mut current = std::env::current_dir()?;
+        loop {
+            let cargo_toml = current.join("Cargo.toml");
+            if cargo_toml.exists() {
+                let content = std::fs::read_to_string(&cargo_toml)?;
+                if content.contains("[workspace]") {
+                    return Ok(current);
+                }
+            }
+            
+            match current.parent() {
+                Some(parent) => current = parent.to_path_buf(),
+                None => return Err(anyhow!("Could not find repository root")),
+            }
+        }
+    }
+    
+    fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {        
+        std::fs::create_dir_all(dst)?;
+        for entry in walkdir::WalkDir::new(src) {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(src)?;
+            let dest_path = dst.join(relative);
+            
+            if path.is_dir() {
+                std::fs::create_dir_all(&dest_path)?;
+            } else {
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(path, &dest_path)?;
+            }
+        }
         Ok(())
     }
 
@@ -482,10 +563,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use regex::Regex;
-    use sscanf::sscanf;
-
-    use crate::builder::ClangInfo;
 
     #[test]
     fn test_bpf_builder_new() {
@@ -496,43 +573,4 @@ mod tests {
         assert!(res.is_ok(), "Failed to create BpfBuilder ({res:?})");
     }
 
-    #[test]
-    fn test_vmlinux_h_ver_sha1() {
-        let clang_info = ClangInfo::new().unwrap();
-
-        let mut ar = tar::Archive::new(super::BpfBuilder::BPF_H_TAR);
-        let mut found = false;
-
-        let pattern = Regex::new(r"arch\/.*\/vmlinux-.*.h").unwrap();
-
-        for entry in ar.entries().unwrap() {
-            let entry = entry.unwrap();
-            let file_name = entry.header().path().unwrap();
-            let file_name_str = file_name.to_string_lossy().to_owned();
-            if file_name_str.contains(&clang_info.kernel_target().unwrap()) {
-                found = true;
-            }
-            if !pattern.find(&file_name_str).is_some() {
-                continue;
-            }
-
-            println!("checking {file_name_str}");
-
-            let (arch, ver, sha1) =
-                sscanf!(file_name_str, "arch/{String}/vmlinux-v{String}-g{String}.h").unwrap();
-            println!(
-                "vmlinux.h: arch={:?} ver={:?} sha1={:?}",
-                &arch, &ver, &sha1,
-            );
-
-            assert!(regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
-                .unwrap()
-                .is_match(&ver));
-            assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
-                .unwrap()
-                .is_match(&sha1));
-        }
-
-        assert!(found);
-    }
 }

@@ -3070,6 +3070,13 @@ dependencies = [
  "paste",
  "regex",
  "scx_stats",
+ "scx_vmlinux_aarch64",
+ "scx_vmlinux_arm",
+ "scx_vmlinux_mips",
+ "scx_vmlinux_powerpc",
+ "scx_vmlinux_riscv",
+ "scx_vmlinux_s390",
+ "scx_vmlinux_x86",
  "serde",
  "sscanf",
  "tar",
@@ -3081,6 +3088,34 @@ dependencies = [
  "walkdir",
  "zbus",
 ]
+
+[[package]]
+name = "scx_vmlinux_aarch64"
+version = "0.1.0"
+
+[[package]]
+name = "scx_vmlinux_arm"
+version = "0.1.0"
+
+[[package]]
+name = "scx_vmlinux_mips"
+version = "0.1.0"
+
+[[package]]
+name = "scx_vmlinux_powerpc"
+version = "0.1.0"
+
+[[package]]
+name = "scx_vmlinux_riscv"
+version = "0.1.0"
+
+[[package]]
+name = "scx_vmlinux_s390"
+version = "0.1.0"
+
+[[package]]
+name = "scx_vmlinux_x86"
+version = "0.1.0"
 
 [[package]]
 name = "scx_wd40"

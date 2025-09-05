@@ -35,6 +35,13 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 libc = "0.2.175"
 nix = { version = "0.30.1", features = ["resource"] }
+scx_vmlinux_aarch64 = { path = "../vmlinux/scx_vmlinux_aarch64", version = "0.1.0" }
+scx_vmlinux_arm = { path = "../vmlinux/scx_vmlinux_arm", version = "0.1.0" }
+scx_vmlinux_mips = { path = "../vmlinux/scx_vmlinux_mips", version = "0.1.0" }
+scx_vmlinux_powerpc = { path = "../vmlinux/scx_vmlinux_powerpc", version = "0.1.0" }
+scx_vmlinux_riscv = { path = "../vmlinux/scx_vmlinux_riscv", version = "0.1.0" }
+scx_vmlinux_s390 = { path = "../vmlinux/scx_vmlinux_s390", version = "0.1.0" }
+scx_vmlinux_x86 = { path = "../vmlinux/scx_vmlinux_x86", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3.19.1"
@@ -50,6 +57,13 @@ tar = "0.4"
 vergen = { version = "8.0.0", features = ["cargo", "git", "gitcl"] }
 version-compare = "0.1"
 walkdir = "2.5"
+scx_vmlinux_aarch64 = { path = "../vmlinux/scx_vmlinux_aarch64", version = "0.1.0" }
+scx_vmlinux_arm = { path = "../vmlinux/scx_vmlinux_arm", version = "0.1.0" }
+scx_vmlinux_mips = { path = "../vmlinux/scx_vmlinux_mips", version = "0.1.0" }
+scx_vmlinux_powerpc = { path = "../vmlinux/scx_vmlinux_powerpc", version = "0.1.0" }
+scx_vmlinux_riscv = { path = "../vmlinux/scx_vmlinux_riscv", version = "0.1.0" }
+scx_vmlinux_s390 = { path = "../vmlinux/scx_vmlinux_s390", version = "0.1.0" }
+scx_vmlinux_x86 = { path = "../vmlinux/scx_vmlinux_x86", version = "0.1.0" }
 
 [features]
 default = []
