@@ -261,6 +261,24 @@ async def run_clippy():
 
 async def run_tests():
     """Run the test suite."""
+    print("Checking that vmlinux.tar.zst is in sync...", flush=True)
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        await run_command(
+            ["tar", "-xf", "rust/scx_utils/vmlinux.tar.zst", "-C", tempdir],
+            no_capture=True,
+        )
+        await run_command(
+            [
+                "diff",
+                "--no-dereference",
+                "-qr",
+                "scheds/vmlinux/",
+                f"{tempdir}/vmlinux/",
+            ],
+            no_capture=True,
+        )
+
     print("Running tests...", flush=True)
 
     # Make sure the selftest is built in case the build was not already run.

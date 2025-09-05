@@ -277,12 +277,13 @@ endif
 # BPF compilation uses the gen_bpf_o generator. The following should be
 # passed in as extra_args.
 bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
-                '-I', join_paths(meson.current_source_dir(), 'scheds/include/arch/' + arch_dict[cpu]),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/bpf-compat'),
-                '-I', join_paths(meson.current_source_dir(), 'scheds/include/lib'),]
+                '-I', join_paths(meson.current_source_dir(), 'scheds/include/lib'),
+                '-I', join_paths(meson.current_source_dir(), 'scheds/vmlinux'),
+                '-I', join_paths(meson.current_source_dir(), 'scheds/vmlinux/arch/' + arch_dict[cpu]),]
 
 user_c_dep = [declare_dependency(
-  include_directories: include_directories('scheds/include'),
+  include_directories: [include_directories('scheds/include'), include_directories('scheds/vmlinux')],
 )]
 
 lib_objs = []
