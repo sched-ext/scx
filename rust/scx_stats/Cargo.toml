@@ -1,6 +1,6 @@
 [package]
 name = "scx_stats"
-version = "1.0.15"
+version = "1.0.16"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -10,7 +10,7 @@ description = "Statistics transport library for sched_ext schedulers"
 [dependencies]
 anyhow = "1.0.65"
 crossbeam = "0.8.4"
-libc = "0.2.137"
+libc = "0.2.175"
 log = "0.4.17"
 proc-macro2 = "1.0"
 quote = "1.0"
