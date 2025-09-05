@@ -140,3 +140,11 @@ done
 echo "All architectures processed."
 
 popd
+
+tar \
+    --use-compress-program 'zstd -19' \
+    --owner=0 --group=0 --numeric-owner \
+    --format=ustar \
+    --mtime='1970-01-01 00:00:00 UTC' \
+    -cf "$BASEDIR/rust/scx_utils/vmlinux.tar.zst" \
+    -C "$BASEDIR/scheds" vmlinux

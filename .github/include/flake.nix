@@ -175,11 +175,13 @@
                 bpftools
                 clang
                 coreutils
+                diffutils
                 gcc
                 git
                 gnugrep
                 gnumake
                 gnused
+                gnutar
                 isort
                 jq
                 libbpf-git

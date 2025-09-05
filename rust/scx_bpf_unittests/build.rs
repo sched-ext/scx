@@ -23,7 +23,8 @@ fn main() {
         root_dir.join("lib/scxtest/"),
         root_dir.join("scheds/include/"),
         root_dir.join("scheds/include/lib"),
-        root_dir.join("scheds/include/arch/x86/"),
+        root_dir.join("scheds/vmlinux/"),
+        root_dir.join("scheds/vmlinux/arch/x86/"),
         root_dir.join("scheds/include/bpf-compat/"),
         env::var("DEP_BPF_INCLUDE")
             .expect("libbpf-sys include must be avaiable")
