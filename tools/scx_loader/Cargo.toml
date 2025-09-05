@@ -1,6 +1,6 @@
 [package]
 name = "scx_loader"
-version = "1.0.15"
+version = "1.0.16"
 authors = ["Vladislav Nepogodin <vnepogodin@cachyos.org>"]
 edition = "2021"
 description = "DBUS on-demand loader of sched-ext schedulers"
@@ -12,9 +12,9 @@ clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"
 colored = "3.0.0"
 ctrlc = { version = "3.1", features = ["termination"] }
 log = "0.4.17"
-nix = { features = ["process", "signal"], default-features = false, version = "0.29" }
+nix = { features = ["process", "signal"], default-features = false, version = "0.30.1" }
 serde = { version = "1.0.215", features = ["derive"] }
-sysinfo = "0.33.1"
+sysinfo = "0.35.2"
 tokio = { version = "1.42.0", features = ["macros", "sync", "rt-multi-thread", "process"] }
 tokio-util = "0.7.13"
 toml = "0.8.19"
