@@ -72,6 +72,13 @@ const volatile bool cpufreq_enabled = true;
 const volatile bool numa_enabled;
 
 /*
+ * Aggressively try to avoid SMT contention.
+ *
+ * Default to true here, so veristat takes the more complicated path.
+ */
+const volatile bool avoid_smt = true;
+
+/*
  * Enable address space affinity.
  */
 const volatile bool mm_affinity;
@@ -488,7 +495,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * there first.
 	 */
 	if (!primary_all && mask) {
-		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask, 0);
+		cpu = scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, mask,
+					     avoid_smt ? SCX_PICK_IDLE_CORE : 0);
 		if (cpu >= 0)
 			return cpu;
 	}
@@ -624,16 +632,44 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
+ * Return true if the CPU is part of a fully busy SMT core, false
+ * otherwise.
+ *
+ * If SMT is disabled or SMT contention avoidance is disabled, always
+ * return false (since there's no SMT contention or it's ignored).
+ */
+static bool is_smt_contended(s32 cpu)
+{
+	const struct cpumask *smt;
+	bool is_contended;
+
+	if (!smt_enabled || !avoid_smt)
+		return false;
+
+	smt = get_idle_smtmask(cpu);
+	is_contended = bpf_cpumask_empty(smt);
+	scx_bpf_put_cpumask(smt);
+
+	return is_contended;
+}
+
+/*
  * Return true if we should attempt a task migration to an idle CPU, false
  * otherwise.
  */
-static bool need_migrate(const struct task_struct *p, u64 enq_flags)
+static bool need_migrate(const struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 {
 	/*
 	 * Per-CPU tasks are not allowed to migrate.
 	 */
 	if (is_pcpu_task(p))
 		return false;
+
+	/*
+	 * Always attempt to migrate if we're contending an SMT core.
+	 */
+	if (is_smt_contended(prev_cpu))
+		return true;
 
 	/*
 	 * Attempt a migration on wakeup (if ops.select_cpu() was skipped)
@@ -715,7 +751,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
 	 */
-	if (need_migrate(p, enq_flags)) {
+	if (need_migrate(p, prev_cpu, enq_flags)) {
 		cpu = pick_idle_cpu(p, prev_cpu, 0, true);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
@@ -757,10 +793,10 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 
 	/*
 	 * If the previous task expired its time slice, but no other task
-	 * wants to run on this CPU, allow the previous task to run for
-	 * another time slot.
+	 * wants to run on this SMT core, allow the previous task to run
+	 * for another time slot.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && !is_smt_contended(cpu))
 		prev->scx.slice = task_slice(prev);
 }
 
