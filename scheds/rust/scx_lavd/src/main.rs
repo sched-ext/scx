@@ -55,6 +55,7 @@ use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::EnergyModel;
+use scx_utils::TopologyArgs;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
@@ -205,6 +206,10 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+
+    /// Topology configuration options
+    #[clap(flatten)]
+    topology: Option<TopologyArgs>,
 }
 
 impl Opts {
@@ -364,8 +369,8 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Initialize CPU topology
-        let order = CpuOrder::new().unwrap();
+        // Initialize CPU topology with CLI arguments
+        let order = CpuOrder::new(opts.topology.as_ref()).unwrap();
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 

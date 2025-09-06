@@ -104,6 +104,9 @@ pub mod pm;
 pub mod enums;
 pub use enums::scx_enums;
 
+pub mod cli;
+pub use cli::TopologyArgs;
+
 #[cfg(feature = "autopower")]
 pub mod autopower;
 
