@@ -332,13 +332,13 @@ static inline const struct cpumask *get_idle_smtmask(s32 cpu)
  */
 static inline bool is_cpu_idle(s32 cpu)
 {
-	struct rq *rq = scx_bpf_cpu_rq(cpu);
+	struct task_struct *p = __COMPAT_scx_bpf_cpu_curr(cpu);
 
-	if (!rq) {
-		scx_bpf_error("Failed to access rq %d", cpu);
+	if (!p) {
+		scx_bpf_error("Failed to access rq->curr %d", cpu);
 		return false;
 	}
-	return rq->curr->flags & PF_IDLE;
+	return !!(p->flags & PF_IDLE);
 }
 
 /*
