@@ -1362,7 +1362,7 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 
 	/*
 	 * Keep track of when the higher-priority scheduler class takes
-	 * the CPUto calculate capacity-invariant and frequency-invariant
+	 * the CPU to calculate capacity-invariant and frequency-invariant
 	 * CPU utilization.
 	 */
 	cpuc->cpu_release_clk = scx_bpf_now();

@@ -1400,21 +1400,19 @@ void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops mitosis = {
-	.select_cpu = (void *)mitosis_select_cpu,
-	.enqueue = (void *)mitosis_enqueue,
-	.dispatch = (void *)mitosis_dispatch,
-	.running = (void *)mitosis_running,
-	.stopping = (void *)mitosis_stopping,
-	.set_cpumask = (void *)mitosis_set_cpumask,
-	.init_task = (void *)mitosis_init_task,
-	.cgroup_init = (void *)mitosis_cgroup_init,
-	.cgroup_exit = (void *)mitosis_cgroup_exit,
-	.cgroup_move = (void *)mitosis_cgroup_move,
-	.dump = (void *)mitosis_dump,
-	.dump_task = (void *)mitosis_dump_task,
-	.init = (void *)mitosis_init,
-	.exit = (void *)mitosis_exit,
-	.name = "mitosis",
-};
+SCX_OPS_DEFINE(mitosis,
+	       .select_cpu		= (void *)mitosis_select_cpu,
+	       .enqueue			= (void *)mitosis_enqueue,
+	       .dispatch		= (void *)mitosis_dispatch,
+	       .running			= (void *)mitosis_running,
+	       .stopping		= (void *)mitosis_stopping,
+	       .set_cpumask		= (void *)mitosis_set_cpumask,
+	       .init_task		= (void *)mitosis_init_task,
+	       .cgroup_init		= (void *)mitosis_cgroup_init,
+	       .cgroup_exit		= (void *)mitosis_cgroup_exit,
+	       .cgroup_move		= (void *)mitosis_cgroup_move,
+	       .dump 			= (void *)mitosis_dump,
+	       .dump_task		= (void *)mitosis_dump_task,
+	       .init			= (void *)mitosis_init,
+	       .exit			= (void *)mitosis_exit,
+	       .name			= "mitosis");
