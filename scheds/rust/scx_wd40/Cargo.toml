@@ -13,6 +13,7 @@ ci.disable_veristat = true  # requires some changes to vmlinux handling, see htt
 
 [dependencies]
 anyhow = "1.0.65"
+arenalib = { path = "../../../rust/arenalib/arenalib", version = "0.1.0" }
 chrono = "0.4"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8.4"
