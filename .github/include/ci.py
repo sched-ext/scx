@@ -282,7 +282,7 @@ async def run_tests():
     print("Running tests...", flush=True)
 
     # Make sure the selftest is built in case the build was not already run.
-    await run_command(["cargo", "build", "-p", "scx_lib_selftests"], no_capture=True)
+    await run_command(["cargo", "build", "-p", "arenalib_selftests"], no_capture=True)
 
     await run_command(
         [
@@ -702,7 +702,7 @@ async def run_tests_in_vm():
         check=True,
     )
 
-    subprocess.run(["target/debug/scx_lib_selftests"], check=True)
+    subprocess.run(["target/debug/arenalib_selftests"], check=True)
 
 
 async def run_all():
