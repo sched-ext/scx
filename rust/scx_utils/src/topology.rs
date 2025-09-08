@@ -71,6 +71,7 @@
 
 use crate::compat::ROOT_PREFIX;
 use crate::cpumask::read_cpulist;
+use crate::misc::find_best_split_size;
 use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
 use crate::misc::read_from_file;
@@ -80,6 +81,7 @@ use anyhow::Result;
 use glob::glob;
 use log::warn;
 use sscanf::sscanf;
+use std::cmp::min;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -103,6 +105,14 @@ lazy_static::lazy_static! {
     /// disabled CPUs that may not be onlined, whose IDs are lower than the
     /// IDs of other CPUs that may be onlined.
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
+
+    /// The range to search for when finding the number of physical cores
+    /// assigned to a partition to split a large number of cores that share
+    /// an LLC domain. The suggested split for the cores isn't a function of
+    /// the underlying hardware's capability, but rather some sane number
+    /// to help determine the number of CPUs that share the same DSQ.
+    pub static ref NR_PARTITION_MIN_CORES: usize = 2;
+    pub static ref NR_PARTITION_MAX_CORES: usize = 8;
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -268,16 +278,21 @@ impl Topology {
 
     /// Build a complete host Topology
     pub fn new() -> Result<Topology> {
+        Self::with_virt_llcs(None)
+    }
+
+    pub fn with_virt_llcs(nr_cores_per_vllc: Option<(usize, usize)>) -> Result<Topology> {
         let span = cpus_online()?;
         let mut topo_ctx = TopoCtx::new();
+
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
         // default node of ID 0 which contains all cores.
         let path = format!("{}/sys/devices/system/node", *ROOT_PREFIX);
         let nodes = if Path::new(&path).exists() {
-            create_numa_nodes(&span, &mut topo_ctx)?
+            create_numa_nodes(&span, &mut topo_ctx, nr_cores_per_vllc)?
         } else {
-            create_default_node(&span, &mut topo_ctx, false)?
+            create_default_node(&span, &mut topo_ctx, false, nr_cores_per_vllc)?
         };
 
         Self::instantiate(span, nodes)
@@ -286,8 +301,22 @@ impl Topology {
     pub fn with_flattened_llc_node() -> Result<Topology> {
         let span = cpus_online()?;
         let mut topo_ctx = TopoCtx::new();
-        let nodes = create_default_node(&span, &mut topo_ctx, true)?;
+        let nodes = create_default_node(&span, &mut topo_ctx, true, None)?;
         Self::instantiate(span, nodes)
+    }
+
+    /// Build a topology with configuration from CLI arguments.
+    /// This method integrates with the TopologyArgs from the cli module to
+    /// create a topology based on command line parameters.
+    pub fn with_args(topology_args: &crate::cli::TopologyArgs) -> Result<Topology> {
+        // Validate the CLI arguments first
+        topology_args.validate()?;
+
+        // Get the virtual LLC configuration
+        let nr_cores_per_vllc = topology_args.get_nr_cores_per_vllc();
+
+        // Build topology with the specified configuration
+        Self::with_virt_llcs(nr_cores_per_vllc)
     }
 
     /// Get a vec of all GPUs on the hosts.
@@ -692,10 +721,105 @@ fn is_smt_active() -> Option<bool> {
     Some(smt_on == 1)
 }
 
+fn replace_with_virt_llcs(node: &mut Node, min_cores: usize, max_cores: usize) -> Result<()> {
+    let mut partition_id = 0;
+    let mut core_to_partition: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut partition_to_kernel_id: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut total_partitions = 0;
+
+    // First pass: determine core to partition mapping, partition to kernel_id mapping, and total partitions needed
+    for (_llc_id, llc) in node.llcs.iter() {
+        // Group cores by type (big/little) to partition separately
+        let mut cores_by_type: BTreeMap<bool, Vec<usize>> = BTreeMap::new();
+
+        for (core_id, core) in llc.cores.iter() {
+            let core_type = core.core_type == CoreType::Little;
+            cores_by_type
+                .entry(core_type)
+                .or_insert(Vec::new())
+                .push(*core_id);
+        }
+
+        for (_core_type, core_ids) in cores_by_type.iter() {
+            let num_cores_in_bucket = core_ids.len();
+
+            // Find optimal partition size within specified range
+            let best_split = find_best_split_size(num_cores_in_bucket, min_cores, max_cores);
+            let num_partitions = num_cores_in_bucket / best_split;
+
+            // Assign cores to partitions within a group type
+            for (bucket_idx, &core_id) in core_ids.iter().enumerate() {
+                let partition_idx = min(bucket_idx / best_split, num_partitions - 1);
+                let current_partition_id = partition_id + partition_idx;
+                core_to_partition.insert(core_id, current_partition_id);
+                partition_to_kernel_id.insert(current_partition_id, llc.kernel_id);
+            }
+
+            partition_id += num_partitions;
+            total_partitions = partition_id;
+        }
+    }
+
+    // Create new virtual LLC structures based on partitioning found above
+    let mut virt_llcs: BTreeMap<usize, Arc<Llc>> = BTreeMap::new();
+
+    for partition_id in 0..total_partitions {
+        let kernel_id = partition_to_kernel_id.get(&partition_id).copied().unwrap();
+        virt_llcs.insert(
+            partition_id,
+            Arc::new(Llc {
+                id: partition_id,
+                kernel_id,
+                cores: BTreeMap::new(),
+                span: Cpumask::new(),
+                node_id: node.id,
+                all_cpus: BTreeMap::new(),
+            }),
+        );
+    }
+
+    // Second pass: move cores to the appropriate new LLC based on partition
+    for (_llc_id, llc) in node.llcs.iter_mut() {
+        for (core_id, core) in llc.cores.iter() {
+            if let Some(&target_partition_id) = core_to_partition.get(core_id) {
+                if let Some(target_llc) = virt_llcs.get_mut(&target_partition_id) {
+                    let target_llc_mut = Arc::get_mut(target_llc).unwrap();
+
+                    // Clone core and update its LLC ID to match new partition
+                    let mut new_core = (**core).clone();
+                    new_core.llc_id = target_partition_id;
+
+                    // Update all CPUs within this core to reference new LLC ID
+                    let mut updated_cpus = BTreeMap::new();
+                    for (cpu_id, cpu) in new_core.cpus.iter() {
+                        let mut new_cpu = (**cpu).clone();
+                        new_cpu.llc_id = target_partition_id;
+
+                        // Add CPU to the virtual LLC's span
+                        target_llc_mut.span.set_cpu(*cpu_id)?;
+
+                        updated_cpus.insert(*cpu_id, Arc::new(new_cpu));
+                    }
+                    new_core.cpus = updated_cpus;
+
+                    // Add the updated core to the virtual LLC
+                    target_llc_mut.cores.insert(*core_id, Arc::new(new_core));
+                }
+            }
+        }
+    }
+
+    // Replace original LLCs with virtual LLCs
+    node.llcs = virt_llcs;
+
+    Ok(())
+}
+
 fn create_default_node(
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
     flatten_llc: bool,
+    nr_cores_per_vllc: Option<(usize, usize)>,
 ) -> Result<BTreeMap<usize, Node>> {
     let mut nodes = BTreeMap::<usize, Node>::new();
 
@@ -731,6 +855,10 @@ fn create_default_node(
         create_insert_cpu(*cpu_id, &mut node, online_mask, topo_ctx, &cs, flatten_llc)?;
     }
 
+    if let Some((min_cores_val, max_cores_val)) = nr_cores_per_vllc {
+        replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val)?;
+    }
+
     nodes.insert(node.id, node);
 
     Ok(nodes)
@@ -739,6 +867,7 @@ fn create_default_node(
 fn create_numa_nodes(
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
+    nr_cores_per_vllc: Option<(usize, usize)>,
 ) -> Result<BTreeMap<usize, Node>> {
     let mut nodes = BTreeMap::<usize, Node>::new();
 
@@ -824,6 +953,10 @@ fn create_numa_nodes(
 
         for cpu_id in cpu_ids {
             create_insert_cpu(cpu_id, &mut node, online_mask, topo_ctx, &cs, false)?;
+        }
+
+        if let Some((min_cores_val, max_cores_val)) = nr_cores_per_vllc {
+            replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val)?;
         }
 
         nodes.insert(node.id, node);

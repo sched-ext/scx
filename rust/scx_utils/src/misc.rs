@@ -153,3 +153,38 @@ pub fn read_file_byte(path: &Path) -> Result<usize> {
 pub fn normalize_load_metric(metric: f64) -> f64 {
     metric / 100.0
 }
+
+/// Find the best split size for dividing a total number of items
+/// given a range of sizes.
+///
+/// Searches from starting with min to max to ideally find an even
+/// split with no remainders. Otherwise, choose a size that minimizes
+/// the remainder favoring smaller sizes.
+///
+/// # Arguments
+/// * `total_items` - Total number of items to split
+/// * `min_size` - Minimum size per split
+/// * `max_size` - Maximum size per split
+///
+/// # Returns
+/// The optimal partition size
+pub fn find_best_split_size(total_items: usize, min_size: usize, max_size: usize) -> usize {
+    if total_items <= min_size {
+        return total_items;
+    }
+
+    let mut optimal_size = min_size;
+
+    for size in min_size..=max_size {
+        if total_items % size == 0 {
+            optimal_size = size;
+            break;
+        }
+        // If no perfect division, use the one that minimizes remainder
+        if total_items % size < total_items % optimal_size {
+            optimal_size = size;
+        }
+    }
+
+    optimal_size
+}
