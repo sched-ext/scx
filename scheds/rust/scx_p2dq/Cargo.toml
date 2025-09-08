@@ -10,6 +10,7 @@ license = "GPL-2.0-only"
 ci.use_clippy = true
 
 [dependencies]
+arenalib = { path = "../../../rust/arenalib/arenalib", version = "0.1.0" }
 anyhow = "1.0.65"
 chrono = "0.4"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
