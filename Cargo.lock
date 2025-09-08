@@ -135,6 +135,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
+name = "arenalib"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libbpf-rs",
+ "libbpf-sys",
+ "scx_utils",
+ "simplelog",
+]
+
+[[package]]
+name = "arenalib_selftests"
+version = "1.0.3"
+dependencies = [
+ "anyhow",
+ "libbpf-rs",
+ "scx_cargo",
+ "scx_utils",
+ "simplelog",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2731,6 +2753,7 @@ name = "scx_chaos"
 version = "1.0.19"
 dependencies = [
  "anyhow",
+ "arenalib",
  "clap",
  "crossbeam",
  "ctrlc",
@@ -2847,17 +2870,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scx_lib_selftests"
-version = "1.0.3"
-dependencies = [
- "anyhow",
- "libbpf-rs",
- "scx_cargo",
- "scx_utils",
- "simplelog",
-]
-
-[[package]]
 name = "scx_loader"
 version = "1.0.16"
 dependencies = [
@@ -2906,6 +2918,7 @@ name = "scx_p2dq"
 version = "1.0.21"
 dependencies = [
  "anyhow",
+ "arenalib",
  "chrono",
  "clap",
  "crossbeam",
@@ -3096,6 +3109,7 @@ name = "scx_wd40"
 version = "1.0.16"
 dependencies = [
  "anyhow",
+ "arenalib",
  "chrono",
  "clap",
  "crossbeam",

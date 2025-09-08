@@ -29,8 +29,6 @@ use std::time::UNIX_EPOCH;
 use stats::ClusterStats;
 use stats::NodeStats;
 
-use std::ffi::c_ulong;
-
 #[macro_use]
 extern crate static_assertions;
 
@@ -39,8 +37,10 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use arenalib::ArenaLib;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::skel::Skel;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -56,9 +56,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Core;
 use scx_utils::Cpumask;
-use scx_utils::Llc;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -366,143 +364,6 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn setup_allocators(skel: &mut BpfSkel<'a>) -> Result<()> {
-        // Allocate the arena memory from the BPF side so userspace initializes it before starting
-        // the scheduler. Despite the function call's name this is neither a test nor a test run,
-        // it's the recommended way of executing SEC("syscall") probes.
-        let mut args = types::arena_init_args {
-            static_pages: bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
-            task_ctx_size: std::mem::size_of::<types::task_ctx>() as c_ulong,
-        };
-
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-
-        let output = skel.progs.arena_init.test_run(input)?;
-        if output.return_value != 0 {
-            bail!(
-                "Could not initialize arenas, p2dq_setup returned {}",
-                output.return_value as i32
-            );
-        }
-
-        Ok(())
-    }
-
-    fn setup_topology_node(
-        skel: &mut BpfSkel<'a>,
-        mask: &[u64],
-        data_size: usize,
-        id: usize,
-    ) -> Result<()> {
-        let mut args = types::arena_alloc_mask_args {
-            bitmap: 0 as c_ulong,
-        };
-
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-
-        let output = skel.progs.arena_alloc_mask.test_run(input)?;
-        if output.return_value != 0 {
-            bail!(
-                "Could not initialize arenas, setup_topology_node returned {}",
-                output.return_value as i32
-            );
-        }
-
-        let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap) };
-
-        let (valid_mask, _) = ptr.split_at_mut(mask.len());
-        valid_mask.clone_from_slice(mask);
-
-        let mut args = types::arena_topology_node_init_args {
-            bitmap: args.bitmap as c_ulong,
-            data_size: data_size as c_ulong,
-            id: id as c_ulong,
-        };
-
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let output = skel.progs.arena_topology_node_init.test_run(input)?;
-        if output.return_value != 0 {
-            bail!(
-                "p2dq_topology_node_init returned {}",
-                output.return_value as i32
-            );
-        }
-
-        Ok(())
-    }
-
-    fn setup_topology(skel: &mut BpfSkel<'a>) -> Result<()> {
-        let topo = Topology::new().expect("Failed to build host topology");
-
-        // We never use the topology-provided IDs, because we do not need them anymore now that
-        // we have a proper topology struct. We instead only use sequential IDs we create
-        // ourselves to attach to the topology nodes. This is because the Topology-provided IDs
-        // are used to determine relations between topology nodes, e.g., LLCs belonging to a
-        // node, while sequential IDs are useful for linearly scanning the topology, e.g.,
-        // iterating over domains. This is why we LLC IDs and domain IDs in scx_wd40 are different.
-        // For now we only need the sequential IDs, so use those. Eventually we will be able
-        // to remove those, too, once we remove the hardcoded arrays from the code.
-        Self::setup_topology_node(skel, topo.span.as_raw_slice(), 0, 0)?;
-
-        for (id, (_, node)) in topo.nodes.into_iter().enumerate() {
-            Self::setup_topology_node(skel, node.span.as_raw_slice(), 0, id)?;
-        }
-
-        for (id, (_, llc)) in topo.all_llcs.into_iter().into_iter().enumerate() {
-            Self::setup_topology_node(
-                skel,
-                Arc::<Llc>::into_inner(llc)
-                    .expect("missing llc")
-                    .span
-                    .as_raw_slice(),
-                0,
-                id,
-            )?;
-        }
-        for (id, (_, core)) in topo.all_cores.into_iter().into_iter().enumerate() {
-            Self::setup_topology_node(
-                skel,
-                Arc::<Core>::into_inner(core)
-                    .expect("missing core")
-                    .span
-                    .as_raw_slice(),
-                0,
-                id,
-            )?;
-        }
-        for (id, (_, cpu)) in topo.all_cpus.into_iter().into_iter().enumerate() {
-            let mut mask = [0; 9];
-            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
-            Self::setup_topology_node(skel, &mask, 0, id)?;
-        }
-
-        Ok(())
-    }
-
     fn setup_wd40(skel: &mut BpfSkel<'a>) -> Result<()> {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
@@ -522,8 +383,10 @@ impl<'a> Scheduler<'a> {
     }
 
     fn setup_arenas(skel: &mut BpfSkel<'a>) -> Result<()> {
-        Self::setup_allocators(skel)?;
-        Self::setup_topology(skel)?;
+        let task_size = std::mem::size_of::<types::task_ctx>();
+        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
+        arenalib.setup()?;
+
         Self::setup_wd40(skel)?;
 
         Ok(())
