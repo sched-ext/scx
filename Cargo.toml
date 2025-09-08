@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = [ "rust/arenalib/arenalib",
     "rust/arenalib/selftests",
     "rust/scx_bpf_unittests",
     "rust/scx_cargo",
