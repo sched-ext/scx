@@ -2939,6 +2939,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_raw_pmu"
+version = "0.1.0"
+
+[[package]]
 name = "scx_rlfifo"
 version = "1.0.16"
 dependencies = [
