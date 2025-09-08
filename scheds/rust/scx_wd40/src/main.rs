@@ -40,10 +40,10 @@ use anyhow::Result;
 use arenalib::ArenaLib;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::skel::Skel;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libbpf_rs::skel::Skel;
 use log::info;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -57,9 +57,9 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
-use scx_utils::Topology;
 
 const SCHEDULER_NAME: &str = "scx_wd40";
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -381,7 +381,6 @@ impl<'a> Scheduler<'a> {
 
         Ok(())
     }
-
 
     fn setup_arenas(skel: &mut BpfSkel<'a>) -> Result<()> {
         let task_size = std::mem::size_of::<types::task_ctx>();
