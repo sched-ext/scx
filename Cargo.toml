@@ -1,8 +1,8 @@
 [workspace]
 members = [
+    "rust/arenalib/selftests",
     "rust/scx_bpf_unittests",
     "rust/scx_cargo",
-    "rust/scx_lib_selftests",
     "rust/scx_rustland_core",
     "rust/scx_stats",
     "rust/scx_stats/scx_stats_derive",
