@@ -758,17 +758,18 @@ static inline int get_cgroup_cpumask(struct cgroup *cgrp,
 u32 level_cells[MAX_CG_DEPTH];
 int running;
 
+/* The guard is a stack variable. When it falls out of scope,
+ * we drop the running lock. */
+static inline void __running_unlock(int *guard) {
+	(void)guard; /* unused */
+	WRITE_ONCE(running, 0);
+}
+
 /*
  * On tick, we identify new cells and apply CPU assignment
  */
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
-	/*
-	 * We serialize tick() on core 0 and ensure only one tick running at a time
-	 * to ensure this can only happen once.
-	 */
-	if (bpf_get_smp_processor_id())
-		return;
 
 	u32 local_configuration_seq = READ_ONCE(configuration_seq);
 	if (local_configuration_seq == READ_ONCE(applied_configuration_seq))
@@ -778,6 +779,8 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	if (!__atomic_compare_exchange_n(&running, &zero, 1, false,
 					 __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
 		return;
+
+	int __attribute__((cleanup(__running_unlock), unused)) __running_guard;
 
 	DECLARE_CPUMASK_ENTRY(entry) = allocate_cpumask_entry();
 	if (!entry)
@@ -967,13 +970,11 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	int cpu_idx;
 	bpf_for(cpu_idx, 0, nr_possible_cpus)
 	{
-		if (bpf_cpumask_test_cpu(
-			    cpu_idx, (const struct cpumask *)&entry->cpumask)) {
+		if (bpf_cpumask_test_cpu( cpu_idx, (const struct cpumask *)root_bpf_cpumask)) {
 			struct cpu_ctx *cpu_ctx;
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx)))
 				goto out_root_cgrp;
 			cpu_ctx->cell = 0;
-			bpf_cpumask_clear_cpu(cpu_idx, root_bpf_cpumask);
 		}
 	}
 
@@ -994,7 +995,6 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 
 	barrier();
 	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
-	WRITE_ONCE(running, 0);
 
 	bpf_cgroup_release(root_cgrp_ref);
 	return;
