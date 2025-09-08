@@ -159,6 +159,13 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
+    fn is_cell_in_use(&self, cell_id: u32) -> bool {
+        let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
+        let bpf_cell = cells[cell_id as usize];
+        let in_use = unsafe { std::ptr::read_volatile(&bpf_cell.in_use as *const u32) };
+        in_use != 0
+    }
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let topology = Topology::new()?;
 
@@ -327,8 +334,8 @@ impl<'a> Scheduler<'a> {
                 .map(|&stat| cell_stats_delta[cell][stat as usize])
                 .sum::<u64>();
 
-            // FIXME: This should really query if the cell is enabled or not.
-            if cell_queue_decisions == 0 {
+            // Only print stats for cells that are in use and have decisions
+            if cell_queue_decisions == 0 || !self.is_cell_in_use(cell as u32) {
                 continue;
             }
 
@@ -418,7 +425,29 @@ impl<'a> Scheduler<'a> {
         self.log_all_queue_stats(&cell_stats_delta)?;
 
         for (cell_id, cell) in &self.cells {
+            // Check if cell is actually in use from BPF before printing
+            if !self.is_cell_in_use(*cell_id) {
+                continue;
+            }
+            
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
+            
+            // Read current CPU assignments directly from BPF for comparison
+            let mut bpf_cpus = Cpumask::new();
+            let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
+            for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
+                if cpu_ctx.cell == *cell_id {
+                    bpf_cpus.set_cpu(i).expect("set cpu in bpf mask");
+                }
+            }
+
+            trace!("CELL[{}]: BPF={}", cell_id, bpf_cpus);
+            
+            // Flag potential staleness
+            if cell.cpus != bpf_cpus {
+                warn!("STALENESS DETECTED: CELL[{}] userspace={} != bpf={}", 
+                      cell_id, cell.cpus, bpf_cpus);
+            }
         }
 
         for (cell_id, cell) in self.cells.iter() {
