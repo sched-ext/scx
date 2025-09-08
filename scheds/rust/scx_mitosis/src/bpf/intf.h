@@ -18,6 +18,12 @@ typedef _Bool bool;
 #include <scx/ravg.bpf.h>
 #endif
 
+/* ---- Work stealing config (compile-time) ------------------------------- */
+#ifndef MITOSIS_ENABLE_STEALING
+#define MITOSIS_ENABLE_STEALING 0
+#endif
+/* ----------------------------------------------------------------------- */
+
 enum consts {
 	CACHELINE_SIZE = 64,
 	MAX_CPUS_SHIFT = 9,
@@ -28,6 +34,7 @@ enum consts {
 
 	PCPU_BASE = 0x80000000,
 	MAX_CG_DEPTH = 256,
+
 };
 
 /* Statistics */
@@ -49,16 +56,6 @@ struct cpu_ctx {
 struct cgrp_ctx {
 	u32 cell;
 	bool cell_owner;
-};
-
-/*
- * cell is the per-cell book-keeping
-*/
-struct cell {
-	// current vtime of the cell
-	u64 vtime_now;
-	// Whether or not the cell is used or not
-	u32 in_use;
 };
 
 #endif /* __INTF_H */

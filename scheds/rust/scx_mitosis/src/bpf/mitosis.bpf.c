@@ -14,14 +14,9 @@
 
 #include "intf.h"
 
-#ifdef LSP
-#define __bpf__
-#include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
-#else
-#include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
-#endif
+#include "mitosis.bpf.h"
+#include "dsq.bpf.h"
+#include "l3_aware.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -35,6 +30,7 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u64 slice_ns;
 const volatile u64 root_cgid = 1;
 
+const volatile u32 nr_l3 = 1;
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
  * configuration_seq is bumped on each assignment change
@@ -47,6 +43,13 @@ private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
+
+/*
+ * Maps used for L3-aware scheduling
+*/
+struct cpu_to_l3_map cpu_to_l3 SEC(".maps");
+struct l3_to_cpus_map l3_to_cpus SEC(".maps");
+struct steal_stats_map steal_stats SEC(".maps");
 
 /*
  * We store per-cpu values along with per-cell values. Helper functions to
@@ -119,27 +122,6 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 	return cgrp;
 }
 
-/*
- * task_ctx is the per-task information kept by scx_mitosis
- */
-struct task_ctx {
-	/* cpumask is the set of valid cpus this task can schedule on */
-	/* (tasks cpumask anded with its cell cpumask) */
-	struct bpf_cpumask __kptr *cpumask;
-	/* started_running_at for recording runtime */
-	u64 started_running_at;
-	u64 basis_vtime;
-	/* For the sake of monitoring, each task is owned by a cell */
-	u32 cell;
-	/* For the sake of scheduling, a task is exclusively owned by either a cell
-	 * or a cpu */
-	u32 dsq;
-	/* latest configuration that was applied for this task */
-	/* (to know if it has to be re-applied) */
-	u32 configuration_seq;
-	/* Is this task allowed on all cores of its cell? */
-	bool all_cell_cpus_allowed;
-};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -607,26 +589,6 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_dsq_move_to_local(dsq);
 }
 
-/*
- * A couple of tricky things about checking a cgroup's cpumask:
- *
- * First, we need an RCU pointer to pass to cpumask kfuncs. The only way to get
- * this right now is to copy the cpumask to a map entry. Given that cgroup init
- * could be re-entrant we have a few per-cpu entries in a map to make this
- * doable.
- *
- * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
- * and with different lengths. Some bpf_core_type_matches finagling can make
- * this all work.
- */
-#define MAX_CPUMASK_ENTRIES (4)
-
-/*
- * We don't know how big struct cpumask is at compile time, so just allocate a
- * large space and check that it is big enough at runtime
- */
-#define CPUMASK_LONG_ENTRIES (128)
-#define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
 
 struct cpumask_entry {
 	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
