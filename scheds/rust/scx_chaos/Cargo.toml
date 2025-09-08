@@ -10,6 +10,7 @@ license = "GPL-2.0-only"
 ci.use_clippy = true
 
 [dependencies]
+arenalib = { path = "../../../rust/arenalib/arenalib", version = "0.1.0" }
 scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.16" }
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.21" }
 scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.21" }
