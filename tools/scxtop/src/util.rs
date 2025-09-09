@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::bpf_intf;
 use anyhow::Result;
 use nix::time::{clock_gettime, ClockId};
 use nix::unistd::{getuid, Uid};
@@ -210,6 +211,17 @@ pub fn get_capability_warning_message() -> Vec<String> {
     }
 
     messages
+}
+
+pub fn default_scxtop_sched_ext_stats() -> bpf_intf::scxtop_sched_ext_stats {
+    bpf_intf::scxtop_sched_ext_stats {
+        select_cpu_fallback: 0,
+        dispatch_local_dsq_offline: 0,
+        dispatch_keep_last: 0,
+        enq_skip_exiting: 0,
+        enq_skip_migration_disabled: 0,
+        timestamp_ns: 0,
+    }
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@
 typedef unsigned char	   u8;
 typedef unsigned int	   u32;
 typedef unsigned long long u64;
+typedef long long	   s64;
+struct scx_event_stats;
 #endif
 #include <stdbool.h>
 
@@ -244,6 +246,21 @@ struct task_ctx {
 
 struct schedule_stop_trace_args {
 	u64 stop_timestamp;
+};
+
+// Simplified sched_ext stats
+struct scxtop_sched_ext_stats {
+	s64 select_cpu_fallback;
+	s64 dispatch_local_dsq_offline;
+	s64 dispatch_keep_last;
+	s64 enq_skip_exiting;
+	s64 enq_skip_migration_disabled;
+	s64 timestamp_ns; // When these stats were collected
+};
+
+// Syscall args for collecting sched_ext stats
+struct collect_scx_stats_args {
+	struct scxtop_sched_ext_stats stats;
 };
 
 struct layered_task_ctx {
