@@ -49,6 +49,11 @@ UEI_DEFINE(uei);
 */
 struct cpu_to_l3_map cpu_to_l3 SEC(".maps");
 struct l3_to_cpus_map l3_to_cpus SEC(".maps");
+
+/*
+ * Maps for statistics
+*/
+struct function_counters_map function_counters SEC(".maps");
 struct steal_stats_map steal_stats SEC(".maps");
 
 /*

@@ -6,6 +6,7 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 mod stats;
+mod mitosis_topology_utils;
 
 use std::cmp::max;
 use std::collections::HashMap;
@@ -16,14 +17,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::sync::Mutex;
 
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
+use libbpf_rs::{MapCore, OpenObject};
 use log::debug;
 use log::info;
 use log::trace;
@@ -46,10 +47,41 @@ use scx_utils::NR_CPUS_POSSIBLE;
 
 use stats::CellMetrics;
 use stats::Metrics;
+use crate::mitosis_topology_utils::{populate_topology_maps, MapKind};
 
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
+
+// Can we deduplicate this with mitosis.bpf.h?
+const CPUMASK_LONG_ENTRIES: usize = 128;
+
+// Global debug flags
+// TODO: These will be runtime adjustable via a CLI option.
+static DEBUG_FLAGS: std::sync::LazyLock<Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(|| {
+    let mut flags = HashMap::new();
+    flags.insert("cpu_to_l3".to_string(),  false);
+    flags.insert("l3_to_cpus".to_string(), false);
+    flags.insert("cells".to_string(),      true );
+    flags.insert("counters".to_string(),   true );
+    flags.insert("steals".to_string(),     true );
+    flags.insert("metrics".to_string(),    true );
+    Mutex::new(flags)
+});
+
+/// Debug Printers
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// Check if a debug flag is enabled
+fn is_debug_flag_enabled(flag: &str) -> bool {
+    if let Ok(flags) = DEBUG_FLAGS.lock() {
+        flags.get(flag).copied().unwrap_or(false)
+    } else {
+        false
+    }
+}
 
 /// scx_mitosis: A dynamic affinity scheduler
 ///
@@ -117,9 +149,11 @@ struct Scheduler<'a> {
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
+    prev_total_steals: u64,
     metrics: Metrics,
     stats_server: StatsServer<(), Metrics>,
     last_configuration_seq: Option<u32>,
+    iteration_count: u64,
 }
 
 struct DistributionStats {
@@ -146,7 +180,7 @@ impl Display for DistributionStats {
         );
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:5.1}% From: CPU:{:4.1}% Cell:{:5.1}% | V:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -189,12 +223,23 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
+        skel.maps.rodata_data.as_mut().unwrap().nr_l3 = topology.all_llcs.len() as u32;
+
+        // print the number of l3s we detected
+        info!("Found {} L3s", topology.all_llcs.len());
+
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
         }
 
-        let skel = scx_ops_load!(skel, mitosis, uei)?;
+        let mut skel = scx_ops_load!(skel, mitosis, uei)?;
+
+        // Set up CPU to L3 topology mapping using the common functionality
+        populate_topology_maps(&mut skel, MapKind::CpuToL3, None)?;
+
+        // Set up L3 to CPUs mapping using the common functionality
+        populate_topology_maps(&mut skel, MapKind::L3ToCpus, None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
@@ -203,9 +248,11 @@ impl<'a> Scheduler<'a> {
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
+            prev_total_steals: 0,
             metrics: Metrics::default(),
             stats_server,
             last_configuration_seq: None,
+            iteration_count: 0,
         })
     }
 
@@ -217,6 +264,7 @@ impl<'a> Scheduler<'a> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
+            self.iteration_count += 1;
             self.refresh_bpf_cells()?;
             self.collect_metrics()?;
 
@@ -299,7 +347,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        let prefix = "Total Decisions:";
+        let prefix = "  Total:  ";
 
         // Here we want to sum the affinity violations over all cells.
         let scope_affn_viols: u64 = cell_stats_delta
@@ -317,7 +365,10 @@ impl<'a> Scheduler<'a> {
 
         self.metrics.update(&stats);
 
-        trace!("{} {}", prefix, stats);
+        if is_debug_flag_enabled("metrics") {
+            trace!("{}{}{}", ANSI_GREEN, "metrics:", ANSI_RESET);
+            trace!("{} {}", prefix, stats);
+        }
 
         Ok(())
     }
@@ -335,7 +386,7 @@ impl<'a> Scheduler<'a> {
                 .sum::<u64>();
 
             // Only print stats for cells that are in use and have decisions
-            if cell_queue_decisions == 0 || !self.is_cell_in_use(cell as u32) {
+            if !self.is_cell_in_use(cell as u32) {
                 continue;
             }
 
@@ -347,7 +398,7 @@ impl<'a> Scheduler<'a> {
             const MIN_CELL_WIDTH: usize = 2;
             let cell_width: usize = max(MIN_CELL_WIDTH, (MAX_CELLS as f64).log10().ceil() as usize);
 
-            let prefix = format!("        Cell {:width$}:", cell, width = cell_width);
+            let prefix = format!("  Cell {:width$}:", cell, width = cell_width);
 
             // Sum affinity violations for this cell
             let scope_affn_viols: u64 =
@@ -366,7 +417,9 @@ impl<'a> Scheduler<'a> {
                 .or_default()
                 .update(&stats);
 
-            trace!("{} {}", prefix, stats);
+            if is_debug_flag_enabled("metrics") {
+                trace!("{} {}", prefix, stats);
+            }
         }
         Ok(())
     }
@@ -417,36 +470,67 @@ impl<'a> Scheduler<'a> {
         }
         Ok(cell_stats_delta)
     }
+    /// Print debug printer status summary
+    fn print_debug_status(&self) {
+        if let Ok(flags) = DEBUG_FLAGS.lock() {
+            let mut disabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| (!enabled).then_some(format!("{}~{}{}", ANSI_RED, flag, ANSI_RESET))).collect();
+            let mut enabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| enabled.then_some(format!("{}+{}{}", ANSI_GREEN, flag, ANSI_RESET))).collect();
+            disabled.extend(enabled);
+            trace!("Debug Flags: {}", if disabled.is_empty() { "none".to_string() } else { disabled.join(" ") });
+            // trace!("hint: sudo ./scx_mitosis cli debug ~/+<flag_name>");
+        }
+    }
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
+        trace!("");
+        trace!("Iteration #{}", self.iteration_count);
+
         let cell_stats_delta = self.calculate_cell_stat_delta()?;
 
         self.log_all_queue_stats(&cell_stats_delta)?;
 
+        // TODO: I don't really understand this.
         for (cell_id, cell) in &self.cells {
             // Check if cell is actually in use from BPF before printing
             if !self.is_cell_in_use(*cell_id) {
                 continue;
             }
-            
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
-            
-            // Read current CPU assignments directly from BPF for comparison
-            let mut bpf_cpus = Cpumask::new();
-            let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
-            for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
-                if cpu_ctx.cell == *cell_id {
-                    bpf_cpus.set_cpu(i).expect("set cpu in bpf mask");
+        }
+
+        // Read total steals from BPF and update metrics
+        self.update_steal_metrics()?;
+
+        // Read and print function counters
+        self.print_and_reset_function_counters()?;
+        if is_debug_flag_enabled("cells") {
+            trace!("{}cells:{}", ANSI_GREEN, ANSI_RESET);
+            for i in 0..self.cells.len() {
+                if let Some(cell) = self.cells.get(&(i as u32)) {
+                    trace!("  CELL[{}]: {} ({:3} CPUs)", i, cell.cpus, cell.cpus.weight());
                 }
             }
+        }
 
-            trace!("CELL[{}]: BPF={}", cell_id, bpf_cpus);
-            
-            // Flag potential staleness
-            if cell.cpus != bpf_cpus {
-                warn!("STALENESS DETECTED: CELL[{}] userspace={} != bpf={}", 
-                      cell_id, cell.cpus, bpf_cpus);
+        if is_debug_flag_enabled("cpu_to_l3") {
+            let cpu_to_l3 = read_cpu_to_l3(&self.skel)?;
+            let cpu_l3_pairs: Vec<String> = cpu_to_l3.iter().enumerate()
+                .map(|(cpu, l3)| format!("{:3}:{:2}", cpu, l3))
+                .collect();
+            let chunked_output = cpu_l3_pairs
+                .chunks(16)
+                .map(|chunk| chunk.join(" "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            trace!("{}cpu_to_l3:{}\n{}", ANSI_GREEN, ANSI_RESET, chunked_output);
+        }
+
+        if is_debug_flag_enabled("l3_to_cpus") {
+            trace!("{}l3_to_cpus:{}", ANSI_GREEN, ANSI_RESET);
+            let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
+            for (l3_id, mask) in l3_to_cpus.iter() {
+                trace!("l3_to_cpus: [{:2}] = {}", l3_id, mask);
             }
         }
 
@@ -459,8 +543,166 @@ impl<'a> Scheduler<'a> {
         }
         self.metrics.num_cells = self.cells.len() as u32;
 
+        // Print debug printer status at the end of each cycle
+        self.print_debug_status();
+
         Ok(())
     }
+
+    fn print_and_reset_function_counters(&mut self) -> Result<()> {
+        if !is_debug_flag_enabled("counters") {
+            return Ok(());
+        }
+        trace!("{}counters:{}", ANSI_GREEN, ANSI_RESET);
+
+        let counter_names = ["select", "enqueue", "dispatch"];
+        let max_name_len = counter_names.iter().map(|name| name.len()).max().unwrap_or(0);
+        let mut all_counters = Vec::new();
+
+        // Read counters for each function
+        for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
+            let key = (counter_idx as u32).to_ne_bytes();
+
+            // Read per-CPU values
+            let percpu_values = self.skel
+                .maps
+                .function_counters
+                .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+                .context("Failed to lookup function counter")?
+                .unwrap_or_default();
+
+            let mut cpu_values = Vec::new();
+            for cpu in 0..*NR_CPUS_POSSIBLE {
+                if cpu < percpu_values.len() {
+                    let value = u64::from_ne_bytes(
+                        percpu_values[cpu].as_slice().try_into()
+                            .context("Failed to convert counter bytes")?
+                    );
+                    cpu_values.push(value);
+                }
+            }
+
+            all_counters.push(cpu_values);
+        }
+
+        // Calculate and print statistics for each counter
+        for (idx, counter_values) in all_counters.iter().enumerate() {
+            if idx >= counter_names.len() {
+                break;
+            }
+
+            let name = counter_names[idx];
+            let non_zero_values: Vec<u64> = counter_values.iter().filter(|&&v| v > 0).copied().collect();
+
+            if non_zero_values.is_empty() {
+                trace!("  Fn[{:<width$}]: no activity", name, width = max_name_len);
+                continue;
+            }
+
+            let total: u64 = non_zero_values.iter().sum();
+            let min = *non_zero_values.iter().min().unwrap();
+            let max = *non_zero_values.iter().max().unwrap();
+
+            // Calculate median
+            let mut sorted_values = non_zero_values.clone();
+            sorted_values.sort();
+            let median = if sorted_values.len() % 2 == 0 {
+                let mid = sorted_values.len() / 2;
+                (sorted_values[mid - 1] + sorted_values[mid]) / 2
+            } else {
+                sorted_values[sorted_values.len() / 2]
+            };
+
+            trace!(
+                "  Fn[{:<width$}]: tot={:>6} min={:>4} med={:>4} max={:>5} ({:3} CPUs)",
+                name, total, min, median, max, non_zero_values.len(), width = max_name_len
+            );
+        }
+
+        // Zero out all counters after printing
+        for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
+            let key = (counter_idx as u32).to_ne_bytes();
+            let zero_value = 0u64.to_ne_bytes().to_vec();
+
+            // Create per-CPU values array (all zeros)
+            let percpu_values: Vec<Vec<u8>> = (0..*NR_CPUS_POSSIBLE)
+                .map(|_| zero_value.clone())
+                .collect();
+
+            self.skel
+                .maps
+                .function_counters
+                .update_percpu(&key, &percpu_values, libbpf_rs::MapFlags::ANY)
+                .context("Failed to reset function counter")?;
+        }
+
+        Ok(())
+    }
+
+fn update_steal_metrics(&mut self) -> Result<()> {
+    let steals_debug = is_debug_flag_enabled("steals");
+
+    // Early out if stealing is compiled out.
+    if bpf_intf::MITOSIS_ENABLE_STEALING == 0 {
+        self.metrics.total_steals = 0;
+        if steals_debug {
+            trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
+            trace!("  Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
+        }
+        return Ok(());
+    }
+
+    let key = 0u32.to_ne_bytes();
+
+    // Read the count; lazily initialize the slot to 0 if it doesn't exist.
+    let steal_count = match self.skel.maps.steal_stats.lookup(&key, libbpf_rs::MapFlags::ANY) {
+        Ok(Some(data)) if data.len() >= 8 => {
+            u64::from_ne_bytes(data[..8].try_into().unwrap())
+        }
+        Ok(Some(_)) => {
+            if steals_debug {
+                debug!("steal_stats map data too small");
+            }
+            0
+        }
+        Ok(None) => {
+            let zero = 0u64.to_ne_bytes();
+            if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero, libbpf_rs::MapFlags::ANY) {
+                if steals_debug {
+                    debug!("Failed to initialize steal_stats map: {e}");
+                }
+            }
+            0
+        }
+        Err(e) => {
+            if steals_debug {
+                debug!("Failed to read steal_stats map: {e}");
+            }
+            0
+        }
+    };
+
+    // Calculate steals since last update (delta)
+    let steals_delta = steal_count - self.prev_total_steals;
+    self.prev_total_steals = steal_count;
+    self.metrics.total_steals = steals_delta;
+
+    // Early out if we aren't logging.
+    if !steals_debug {
+        return Ok(());
+    }
+
+    if steals_delta > 0 {
+        trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
+        trace!("  Work stealing active: steals_since_last={}", steals_delta);
+    } else {
+        trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
+        trace!("  Work stealing enabled but no new steals: steals_since_last={}", steals_delta);
+    }
+
+    Ok(())
+}
+
 
     fn refresh_bpf_cells(&mut self) -> Result<()> {
         let applied_configuration = unsafe {
@@ -538,7 +780,52 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
+fn read_cpu_to_l3(skel: &BpfSkel) -> Result<Vec<u32>> {
+    let mut cpu_to_l3 = vec![];
+    for cpu in 0..*NR_CPUS_POSSIBLE {
+        let key = (cpu as u32).to_ne_bytes();
+        let val = skel
+            .maps
+            .cpu_to_l3
+            .lookup(&key, libbpf_rs::MapFlags::ANY)?
+            .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
+            .unwrap_or(0);
+        cpu_to_l3.push(val);
+    }
+    Ok(cpu_to_l3)
+}
+
+fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<(u32, Cpumask)>> {
+    let mut l3_to_cpus = vec![];
+
+    // Get the number of L3 caches from the BPF rodata
+    let nr_l3 = skel.maps.rodata_data.as_ref().unwrap().nr_l3;
+
+    for l3 in 0..nr_l3 {
+        let key = (l3 as u32).to_ne_bytes();
+        let mask = if let Some(v) = skel
+            .maps
+            .l3_to_cpus
+            .lookup(&key, libbpf_rs::MapFlags::ANY)?
+        {
+            let bytes = v.as_slice();
+            let mut longs = [0u64; CPUMASK_LONG_ENTRIES];
+            let mut i = 0;
+            while i < CPUMASK_LONG_ENTRIES && i * 8 + 8 <= bytes.len() {
+                longs[i] = u64::from_ne_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+                i += 1;
+            }
+            Cpumask::from_vec(longs.to_vec())
+        } else {
+            Cpumask::new()
+        };
+        l3_to_cpus.push((l3, mask));
+    }
+    Ok(l3_to_cpus)
+}
+
 fn main() -> Result<()> {
+
     let opts = Opts::parse();
 
     if opts.version {

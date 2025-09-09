@@ -46,6 +46,14 @@ enum cell_stat_idx {
 	NR_CSTATS,
 };
 
+/* Function invocation counters */
+enum counter_idx {
+	COUNTER_SELECT_CPU,
+	COUNTER_ENQUEUE,
+	COUNTER_DISPATCH,
+	NR_COUNTERS,
+};
+
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];

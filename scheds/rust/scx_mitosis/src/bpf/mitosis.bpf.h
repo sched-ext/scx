@@ -37,14 +37,15 @@
  */
 #define MAX_CPUMASK_ENTRIES (4)
 
-extern const volatile u32 nr_l3;
-
 /*
  * We don't know how big struct cpumask is at compile time, so just allocate a
  * large space and check that it is big enough at runtime
+ * TODO: This should be deduplicated with the rust code and put in intf.h
  */
 #define CPUMASK_LONG_ENTRIES (128)
 #define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
+
+extern const volatile u32 nr_l3;
 
 enum mitosis_constants {
 	/* Invalid/unset L3 value */
@@ -102,3 +103,11 @@ struct task_ctx {
 // These could go in mitosis.bpf.h, but we'll cross that bridge when we get
 static inline struct cell *lookup_cell(int idx);
 static inline const struct cpumask *lookup_cell_cpumask(int idx);
+
+/* MAP TYPES */
+struct function_counters_map {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, NR_COUNTERS);
+};
