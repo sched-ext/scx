@@ -25,11 +25,13 @@ const char help_fmt[] =
 "\n"
 "  -s SLICE_US   Override slice duration\n"
 "  -c CPU        Override the central CPU (default: 0)\n"
+"  -i INTERVAL   Override the sleep interval (default: 1)\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
 static bool verbose;
 static volatile int exit_req;
+static u32 sleep_time = 1;
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
@@ -64,7 +66,7 @@ restart:
 	assert(skel->rodata->nr_cpu_ids > 0);
 	assert(skel->rodata->nr_cpu_ids <= INT32_MAX);
 
-	while ((opt = getopt(argc, argv, "s:c:pvh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:c:i:pvh")) != -1) {
 		switch (opt) {
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
@@ -77,6 +79,14 @@ restart:
 			}
 			skel->rodata->central_cpu = (s32)central_cpu;
 			break;
+		}
+		case 'i': {
+			u32 time = strtoul(optarg, NULL, 0);
+			if (time < 1) {
+				fprintf(stderr, "invalid number of seconds for sleep (1 min)\n");
+				return -1;
+			}
+			sleep_time = time;
 		}
 		case 'v':
 			verbose = true;
@@ -133,7 +143,7 @@ restart:
 		printf("overflow:%10" PRIu64 "\n",
 		       skel->bss->nr_overflows);
 		fflush(stdout);
-		sleep(1);
+		sleep(sleep_time);
 	}
 
 	bpf_link__destroy(link);
