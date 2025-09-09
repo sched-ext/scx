@@ -936,6 +936,26 @@ int schedule_stop_trace(struct schedule_stop_trace_args *args)
 	return 0;
 }
 
+SEC("syscall")
+int collect_scx_stats(struct collect_scx_stats_args *args)
+{
+	struct scx_event_stats kernel_stats = {};
+
+	scx_bpf_events(&kernel_stats, sizeof(kernel_stats));
+
+	args->stats.select_cpu_fallback =
+		kernel_stats.SCX_EV_SELECT_CPU_FALLBACK;
+	args->stats.dispatch_local_dsq_offline =
+		kernel_stats.SCX_EV_DISPATCH_LOCAL_DSQ_OFFLINE;
+	args->stats.dispatch_keep_last = kernel_stats.SCX_EV_DISPATCH_KEEP_LAST;
+	args->stats.enq_skip_exiting   = kernel_stats.SCX_EV_ENQ_SKIP_EXITING;
+	args->stats.enq_skip_migration_disabled =
+		kernel_stats.SCX_EV_ENQ_SKIP_MIGRATION_DISABLED;
+	args->stats.timestamp_ns = bpf_ktime_get_ns();
+
+	return 0;
+}
+
 SEC("tp_btf/ipi_send_cpu")
 int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 {

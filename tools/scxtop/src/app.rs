@@ -20,8 +20,8 @@ use crate::get_default_events;
 use crate::network_stats::InterfaceStats;
 use crate::search;
 use crate::util::{
-    check_perf_capability, format_bits, format_bytes, format_hz, read_file_string, sanitize_nbsp,
-    u32_to_i32,
+    check_perf_capability, default_scxtop_sched_ext_stats, format_bits, format_bytes, format_hz,
+    read_file_string, sanitize_nbsp, u32_to_i32,
 };
 use crate::AppState;
 use crate::AppTheme;
@@ -150,6 +150,7 @@ pub struct App<'a> {
 
     // stats from scxtop's bpf side
     bpf_stats: BpfStats,
+    scx_stats: bpf_intf::scxtop_sched_ext_stats,
 
     // power monitoring
     power_snapshot: crate::PowerSnapshot,
@@ -343,6 +344,7 @@ impl<'a> App<'a> {
             trace_start: 0,
             trace_manager,
             bpf_stats: Default::default(),
+            scx_stats: default_scxtop_sched_ext_stats(),
             power_snapshot: crate::PowerSnapshot::new(),
             power_collector: crate::PowerDataCollector::new().unwrap_or_else(|e| {
                 log::warn!("Failed to initialize power collector with MSR support: {e}");
@@ -538,6 +540,7 @@ impl<'a> App<'a> {
             trace_start: 0,
             trace_manager,
             bpf_stats: Default::default(),
+            scx_stats: default_scxtop_sched_ext_stats(),
             power_snapshot: crate::PowerSnapshot::new(),
             power_collector: crate::PowerDataCollector::new().unwrap_or_else(|e| {
                 log::warn!("Failed to initialize power collector with MSR support: {e}");
@@ -1865,6 +1868,19 @@ impl<'a> App<'a> {
                 Line::from(format!("{}ms", self.config.tick_rate_ms()))
                     .style(self.theme().text_important_color())
                     .right_aligned(),
+            )
+            .title_bottom(
+                Line::from(format!("keep_last {}", self.scx_stats.dispatch_keep_last))
+                    .style(self.theme().text_important_color())
+                    .right_aligned(),
+            )
+            .title_bottom(
+                Line::from(format!(
+                    "select_fall {}",
+                    self.scx_stats.select_cpu_fallback
+                ))
+                .style(self.theme().text_important_color())
+                .left_aligned(),
             )
             .style(self.theme().border_style())
             .border_type(BorderType::Rounded);
@@ -7975,6 +7991,33 @@ impl<'a> App<'a> {
         if let Some(ref mut skel) = self.skel {
             self.bpf_stats = BpfStats::get_from_skel(skel)?;
         }
+
+        // libbpf_rs doesn't generate defaults
+        let mut args = default_scxtop_sched_ext_stats();
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let ret = self
+            .skel
+            .as_mut()
+            .unwrap()
+            .progs
+            .collect_scx_stats
+            .test_run(input)?
+            .return_value;
+        if ret != 0 {
+            return Err(anyhow::anyhow!(
+                "collect_scx_stats failed with exit code: {}",
+                ret
+            ));
+        }
+        self.scx_stats = args;
 
         if self.scheduler.is_empty() {
             self.sched_stats_raw.clear();
