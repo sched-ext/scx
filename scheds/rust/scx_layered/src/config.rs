@@ -157,6 +157,9 @@ pub enum LayerKind {
         cpus_range_frac: Option<(f64, f64)>,
 
         #[serde(default)]
+        membw_gb: Option<f64>,
+
+        #[serde(default)]
         protected: bool,
 
         #[serde(flatten)]
@@ -171,6 +174,9 @@ pub enum LayerKind {
 
         #[serde(default)]
         cpus_range_frac: Option<(f64, f64)>,
+
+        #[serde(default)]
+        membw_gb: Option<f64>,
 
         #[serde(default)]
         protected: bool,
