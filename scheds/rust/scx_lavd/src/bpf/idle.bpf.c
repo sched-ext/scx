@@ -556,7 +556,7 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 }
 
 static
-s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
+s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
 	struct cpdom_ctx *cpdc, *mig_cpdc;
@@ -758,13 +758,14 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 
 	nuance = bpf_get_prandom_u32();
 	mig_cpdom = sticky_cpdom;
-	for (i = 0; i < LAVD_CPDOM_MAX_DIST && cpdc; i++) {
+	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
-		for (j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = mig_cpdom + 1) {
+		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
 			if (j >= nr_nbr)
 				break;
+			nuance = mig_cpdom + 1;
 			mig_cpdom  = pick_any_bit(cpdc->neighbor_bits[i], nuance);
 			if (mig_cpdom < 0)
 				continue;

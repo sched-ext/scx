@@ -229,6 +229,7 @@ s64 __attribute__ ((noinline)) pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 i, pos;
 
+	#pragma clang loop unroll(disable)
 	bpf_for(i, 0, 64) {
 		pos = (i + nuance) % 64;
 		if (bitmap & (1LLU << pos))

@@ -92,6 +92,11 @@ static u64 calc_sum_runtime_factor(struct task_struct *p, struct task_ctx *taskc
 	return (sum >> LAVD_SHIFT) * p->scx.weight;
 }
 
+u32 __attribute__ ((noinline)) log2x(u64 v)
+{
+	return log2_u64(v);
+}
+
 static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 {
 	u64 weight_ft, wait_ft, wake_ft, runtime_ft, sum_runtime_ft;
@@ -118,8 +123,8 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * task is in the middle of a task chain. The ratio tends to follow an
 	 * exponentially skewed distribution, so we linearize it using sqrt.
 	 */
-	log_wwf = log2_u64(wait_ft * wake_ft);
-	lat_cri = log_wwf + log2_u64(runtime_ft * weight_ft);
+	log_wwf = log2x(wait_ft * wake_ft);
+	lat_cri = log_wwf + log2x(runtime_ft * weight_ft);
 
 	/*
 	 * Amplify the task's latency criticality to better differentiate
@@ -161,7 +166,7 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 */
 	if (have_little_core) {
 		sum_runtime_ft = calc_sum_runtime_factor(p, taskc);
-		perf_cri = log_wwf + log2_u64(sum_runtime_ft);
+		perf_cri = log_wwf + log2x(sum_runtime_ft);
 	}
 	taskc->perf_cri = perf_cri;
 }
