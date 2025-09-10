@@ -18,11 +18,11 @@ use std::sync::Arc;
 use anyhow::bail;
 use anyhow::Result;
 
+use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::Object;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::ProgramMut;
-use libbpf_sys;
 
 // MAX_CPU_ARRSZ has to be big enough to accomodate all present CPUs.
 // Even if it's larger than the size of cpumask_t, we truncate any
