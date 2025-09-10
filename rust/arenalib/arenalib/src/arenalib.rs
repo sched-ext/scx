@@ -15,8 +15,8 @@ use std::ffi::CString;
 use std::os::raw::c_ulong;
 use std::sync::Arc;
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::Object;
