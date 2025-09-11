@@ -189,6 +189,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
+#include <lib/sdt_task.h>
+#include <lib/atq.h>
 
 char _license[] SEC("license") = "GPL";
 
@@ -266,7 +268,7 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	}
 }
 
-static u64 calc_time_slice(struct task_ctx *taskc, struct cpu_ctx *cpuc)
+static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 {
 	/*
 	 * Calculate the time slice of @taskc to run on @cpuc.
@@ -353,7 +355,7 @@ static u64 calc_time_slice(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 }
 
 static void update_stat_for_running(struct task_struct *p,
-				    struct task_ctx *taskc,
+				    task_ctx *taskc,
 				    struct cpu_ctx *cpuc, u64 now)
 {
 	u64 wait_period, interval;
@@ -444,7 +446,7 @@ static void update_stat_for_running(struct task_struct *p,
 }
 
 static void account_task_runtime(struct task_struct *p,
-				 struct task_ctx *taskc,
+				 task_ctx *taskc,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
@@ -471,7 +473,7 @@ static void account_task_runtime(struct task_struct *p,
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
-				     struct task_ctx *taskc,
+				     task_ctx *taskc,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = scx_bpf_now();
@@ -511,7 +513,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 }
 
 static void update_stat_for_refill(struct task_struct *p,
-				   struct task_ctx *taskc,
+				   task_ctx *taskc,
 				   struct cpu_ctx *cpuc)
 {
 	u64 now = scx_bpf_now();
@@ -602,7 +604,7 @@ static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
 	u64 cpdom_id, dsq_id;
@@ -712,7 +714,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc_prev = NULL;
+	task_ctx *taskc_prev = NULL;
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
 	u32 dsq_type;
@@ -828,7 +830,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_for(dsq_type, dsq_start, LAVD_DSQ_NR_TYPES) {
 		u64 dsq_id = dsq_ids[dsq_type];
 		bpf_for_each(scx_dsq, p, dsq_id, 0) {
-			struct task_ctx *taskc;
+			task_ctx *taskc;
 
 			/*
 			 * note that this is a hack to bypass the restriction of the
@@ -955,8 +957,9 @@ consume_prev:
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_struct *waker;
-	struct task_ctx *p_taskc, *waker_taskc;
+	task_ctx *p_taskc, *waker_taskc;
 	u64 now, interval;
+	int i;
 
 	/*
 	 * Clear the accumulated runtime.
@@ -1025,15 +1028,15 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_monitored) {
 		p_taskc->waker_pid = waker->pid;
-		__builtin_memcpy_inline(p_taskc->waker_comm, waker->comm,
-					TASK_COMM_LEN);
+		for (i = 0; i < TASK_COMM_LEN && can_loop; i++)
+			p_taskc->waker_comm[i] = waker->comm[i];
 	}
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	u64 now = scx_bpf_now();
 
 	cpuc = get_cpu_ctx_task(p);
@@ -1088,7 +1091,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 {
 	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	u64 now;
 
 	/*
@@ -1131,7 +1134,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 
 	/*
 	 * Update task statistics
@@ -1149,7 +1152,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	u64 now, interval;
 
 	cpuc = get_cpu_ctx_task(p);
@@ -1338,7 +1341,7 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 
 	taskc = get_task_ctx(p);
 	if (!taskc) {
@@ -1423,7 +1426,7 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 
 	/*
 	 * Set task's service time to the current, minimum service time.
@@ -1437,11 +1440,13 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 	taskc->svc_time = READ_ONCE(cur_svc_time);
 }
 
-s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
 {
-	struct task_ctx *taskc;
-	u64 now = scx_bpf_now();
+	task_ctx *taskc;
+	u64 now;
+	int i;
 
 	/*
 	 * When @p becomes under the SCX control (e.g., being forked), @p's
@@ -1457,8 +1462,7 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 		return -ESRCH;
 	}
 	
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				     BPF_LOCAL_STORAGE_GET_F_CREATE);
+	taskc = scx_task_alloc(p);
 	if (!taskc) {
 		scx_bpf_error("task_ctx_stor first lookup failed");
 		return -ENOMEM;
@@ -1468,20 +1472,34 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	/*
 	 * Initialize @p's context.
 	 */
-	__builtin_memset(taskc, 0, sizeof(*taskc));
+	for (i = 0; i < sizeof(*taskc) && can_loop; i++)
+		((char __arena *)taskc)[i] = 0;
+
+	bpf_rcu_read_lock();
 	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
 		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+	bpf_rcu_read_unlock();
+
+	now = scx_bpf_now();
 	taskc->last_runnable_clk = now;
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */
 	taskc->last_quiescent_clk = now;
 	taskc->avg_runtime = sys_stat.slice;
 	taskc->svc_time = sys_stat.avg_svc_time;
+	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
 
 	set_on_core_type(taskc, p->cpus_ptr);
+	return 0;
+}
+
+s32 BPF_STRUCT_OPS(lavd_exit_task, struct task_struct *p,
+		   struct scx_exit_task_args *args)
+{
+	scx_task_free(p);
 	return 0;
 }
 
@@ -1819,7 +1837,7 @@ void BPF_STRUCT_OPS(lavd_cgroup_exit, struct cgroup *cgrp)
 void BPF_STRUCT_OPS(lavd_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 
 	taskc = get_task_ctx(p);
 	if (!taskc)
@@ -1851,6 +1869,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
 	u64 now = scx_bpf_now();
 	int err;
+
+	_Static_assert(
+		sizeof(struct atq_ctx) >= sizeof(struct scx_task_common),
+		"atq_ctx should be equal or larger than scx_task_common");
 
 	/*
 	 * Create compute domains.
@@ -1941,6 +1963,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .cpu_release		= (void *)lavd_cpu_release,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
+	       .exit_task		= (void *)lavd_exit_task,
 	       .cgroup_init		= (void *)lavd_cgroup_init,
 	       .cgroup_exit		= (void *)lavd_cgroup_exit,
 	       .cgroup_move		= (void *)lavd_cgroup_move,

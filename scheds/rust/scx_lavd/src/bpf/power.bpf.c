@@ -122,7 +122,7 @@ u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 	return duration;
 }
 
-bool is_perf_cri(struct task_ctx *taskc)
+bool is_perf_cri(task_ctx __arg_arena *taskc)
 {
 	if (unlikely(!taskc))
 		return false;

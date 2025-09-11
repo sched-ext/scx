@@ -643,7 +643,7 @@ impl<'a> Scheduler<'a> {
 
         match intrspc_tx.try_send(SchedSample {
             mseq,
-            pid: tx.pid,
+            pid: tc.pid,
             comm: tx_comm.into(),
             stat: tx_stat.into(),
             cpu_id: tc.cpu_id,
