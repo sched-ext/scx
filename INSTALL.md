@@ -8,31 +8,11 @@ kernel, available at
 
 #### Upgrading to 25.04 (Plucky Puffin) - recommended
 
-Currently, only the 25.04 release is supported. You can upgrade to 25.04
-using the following command:
+Currently, only release 25.04 and newer are supported. If you're using an
+earlier release, upgrade using the command below:
 
 ```
 $ sudo do-release-upgrade -d
-```
-
-#### Enable ppa:canonical-kernel-team/unstable
-
-```
-$ sudo add-apt-repository -y --enable-source ppa:canonical-kernel-team/unstable
-```
-
-If you are **not** on Ubuntu 25.04, make sure to select `plucky` as the release
-for the linux-unstable ppa:
-```
-$ sudo sed -i "s/^Suites: .*/Suites: plucky/" \
-  /etc/apt/sources.list.d/canonical-kernel-team-ubuntu-unstable-plucky.sources
-```
-
-#### Installing the linux-unstable Kernel
-
-```
-$ sudo apt install -y linux-generic-wip
-$ sudo reboot
 ```
 
 #### Setting up Dev Environment

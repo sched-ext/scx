@@ -6,6 +6,7 @@ pub mod bpf_intf;
 pub mod bpf_skel;
 pub use bpf_skel::types;
 
+use scx_utils::cli::TopologyArgs;
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
@@ -25,6 +26,19 @@ fn get_default_llc_runs() -> u64 {
     let n_llcs = TOPO.all_llcs.len() as f64;
     let llc_runs = n_llcs.log2();
     llc_runs as u64
+}
+
+fn get_default_llc_shards() -> u32 {
+    let max_cpus_per_llc = TOPO
+        .all_llcs
+        .values()
+        .map(|l| l.all_cpus.len() as u32)
+        .max()
+        .unwrap_or(1);
+    if max_cpus_per_llc <= 4 {
+        return 0;
+    }
+    max_cpus_per_llc / 4
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -198,6 +212,10 @@ pub struct SchedulerOpts {
     #[clap(short = 'x', long, default_value = "4")]
     pub dsq_shift: u64,
 
+    /// Number of shards for LLC DSQ sharding. Default 0 means use single DSQ per LLC.
+    #[clap(long, default_value_t = get_default_llc_shards())]
+    pub llc_shards: u32,
+
     /// Minimum number of queued tasks to use pick2 balancing, 0 to always enabled.
     #[clap(short = 'm', long, default_value = "0")]
     pub min_nr_queued_pick2: u64,
@@ -209,6 +227,13 @@ pub struct SchedulerOpts {
     /// Initial DSQ for tasks.
     #[clap(short = 'i', long, default_value = "0")]
     pub init_dsq_index: usize,
+
+    /// Use a arena based queues (ATQ) for task queueing.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub virt_llc_enabled: bool,
+
+    #[clap(flatten, next_help_heading = "Topology Options")]
+    pub topo: TopologyArgs,
 }
 
 pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
@@ -221,7 +246,7 @@ pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
 
 #[macro_export]
 macro_rules! init_open_skel {
-    ($skel: expr, $opts: expr, $verbose: expr) => {
+    ($skel: expr, $topo: expr, $opts: expr, $verbose: expr) => {
         'block: {
             let skel = $skel;
             let opts: &$crate::SchedulerOpts = $opts;
@@ -272,10 +297,10 @@ macro_rules! init_open_skel {
             // topo config
             let rodata = skel.maps.rodata_data.as_mut().unwrap();
             rodata.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
-            rodata.topo_config.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
-            rodata.topo_config.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;
-            rodata.topo_config.smt_enabled = MaybeUninit::new($crate::TOPO.smt_enabled);
-            rodata.topo_config.has_little_cores = MaybeUninit::new($crate::TOPO.has_little_cores());
+            rodata.topo_config.nr_llcs = $topo.all_llcs.clone().keys().len() as u32;
+            rodata.topo_config.nr_nodes = $topo.nodes.clone().keys().len() as u32;
+            rodata.topo_config.smt_enabled = MaybeUninit::new($topo.smt_enabled);
+            rodata.topo_config.has_little_cores = MaybeUninit::new($topo.has_little_cores());
 
             // timeline config
             rodata.timeline_config.min_slice_us = opts.min_slice_us;
@@ -306,6 +331,7 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.init_dsq_index = opts.init_dsq_index as i32;
             rodata.p2dq_config.saturated_percent = opts.saturated_percent;
             rodata.p2dq_config.sched_mode = opts.sched_mode.clone() as u32;
+            rodata.p2dq_config.llc_shards = opts.llc_shards.max(1);
 
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
@@ -325,18 +351,19 @@ macro_rules! init_open_skel {
 
 #[macro_export]
 macro_rules! init_skel {
-    ($skel: expr) => {
-        for cpu in $crate::TOPO.all_cpus.values() {
+    ($skel: expr, $topo: expr) => {
+        for cpu in $topo.all_cpus.values() {
             $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
                     1
                 } else {
                     0
                 };
+            $skel.maps.bss_data.as_mut().unwrap().cpu_core_ids[cpu.id] = cpu.core_id as u32;
             $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
         }
-        for llc in $crate::TOPO.all_llcs.values() {
+        for llc in $topo.all_llcs.values() {
             $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
         }
     };

@@ -14,8 +14,9 @@ struct cpu_ctx {
 	int				id;
 	u32				llc_id;
 	u64				affn_dsq;
-	u32				dsq_index;
 	u64				slice_ns;
+	u32				core_id;
+	u32				dsq_index;
 	u32				perf;
 	bool				interactive;
 	bool				is_big;
@@ -44,7 +45,6 @@ struct llc_ctx {
 	u64				intr_load;
 	u64				dsq_load[MAX_DSQS_PER_LLC];
 	bool				saturated;
-	bool				all_big;
 
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
@@ -55,11 +55,14 @@ struct llc_ctx {
 	scx_atq_t			*mig_atq;
 	scx_minheap_t			*idle_cpu_heap;
 	arena_spinlock_t		idle_lock;
+
+	/* CPU sharding related fields */
+	u32				nr_shards;
+	u64				shard_dsqs[MAX_LLC_SHARDS];
 };
 
 struct node_ctx {
 	u32				id;
-	bool				all_big;
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 };
