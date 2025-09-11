@@ -33,6 +33,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
@@ -116,6 +117,11 @@ impl<'a> Scheduler<'a> {
             "Running scx_p2dq (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
+        let topo = if opts.virt_llc_enabled {
+            Topology::with_args(&opts.topo)?
+        } else {
+            Topology::new()?
+        };
         let open_opts = libbpf_ops.clone().into_bpf_open_opts();
         let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq, open_opts).context(
             "Failed to open BPF object. This can be caused by a mismatch between the kernel \
@@ -125,7 +131,7 @@ impl<'a> Scheduler<'a> {
             to this issue or file an issue on the scx repo if the problem persists. \
             https://github.com/sched-ext/scx/issues/new?labels=scx_p2dq&title=scx_p2dq:%20New%20Issue&assignees=hodgesds&body=Kernel%20version:%20(fill%20me%20out)%0ADistribution:%20(fill%20me%20out)%0AHardware:%20(fill%20me%20out)%0A%0AIssue:%20(fill%20me%20out)"
         )?;
-        scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
+        scx_p2dq::init_open_skel!(&mut open_skel, topo, opts, verbose)?;
 
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
@@ -133,7 +139,7 @@ impl<'a> Scheduler<'a> {
         open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
-        scx_p2dq::init_skel!(&mut skel);
+        scx_p2dq::init_skel!(&mut skel, topo);
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

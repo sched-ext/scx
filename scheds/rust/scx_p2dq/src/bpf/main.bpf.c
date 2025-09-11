@@ -114,6 +114,7 @@ const volatile struct {
 	u32 interactive_ratio;
 	u32 saturated_percent;
 	u32 sched_mode;
+	u32 llc_shards;
 
 	bool atq_enabled;
 	bool cpu_priority;
@@ -129,6 +130,7 @@ const volatile struct {
 	.dsq_shift = 2,
 	.interactive_ratio = 10,
 	.saturated_percent = 5,
+	.llc_shards = 0,
 
 	.atq_enabled = false,
 	.cpu_priority = false,
@@ -151,6 +153,7 @@ static bool saturated = false;
 static bool overloaded = false;
 
 u64 llc_ids[MAX_LLCS];
+u32 cpu_core_ids[MAX_CPUS];
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
@@ -197,14 +200,28 @@ static __always_inline u64 min_dsq_time_slice(void)
 
 static __always_inline u64 clamp_slice(u64 slice_ns)
 {
-
 	return min(max(min_dsq_time_slice(), slice_ns),
 		   max_dsq_time_slice());
+}
+
+static __always_inline u64 shard_dsq_id(u32 llc_id, u32 shard_id)
+{
+	return ((MAX_DSQS_PER_LLC * MAX_LLCS) << 3) + (llc_id * MAX_DSQS_PER_LLC) + shard_id;
 }
 
 static __always_inline u64 cpu_dsq_id(s32 cpu)
 {
 	return ((MAX_DSQS_PER_LLC * MAX_LLCS) << 2) + cpu;
+}
+
+static __always_inline u32 wrap_index(u32 index, u32 min, u32 max)
+{
+	if (min > max) {
+		scx_bpf_error("invalid min");
+		return min;
+	}
+	u32 range = max - min + 1;
+	return min + (index % range);
 }
 
 static __always_inline s32 __pick_idle_cpu(struct bpf_cpumask *mask, int flags)
@@ -662,7 +679,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 
 	migratable = can_migrate(taskc, llcx);
-	if ((llcx->saturated || saturated || overloaded) &&
+	if (topo_config.nr_llcs > 1 &&
+	    (llcx->saturated || saturated || overloaded) &&
 	    !migratable) {
 		cpu = prev_cpu;
 		goto found_cpu;
@@ -854,7 +872,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (llcx->saturated &&
+	if (topo_config.nr_llcs > 1 &&
+	    llcx->saturated &&
 	    migratable &&
 	    llcx->node_cpumask) {
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->node_cpumask),
@@ -1060,7 +1079,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			if (p2dq_config.atq_enabled) {
 				taskc->enq_flags = enq_flags;
 				ret->kind = P2DQ_ENQUEUE_PROMISE_ATQ_VTIME;
-				ret->vtime.dsq_id = llcx->dsq;
+				ret->vtime.dsq_id = cpuc->llc_dsq;
 				ret->vtime.atq = llcx->mig_atq;
 				ret->vtime.slice_ns = taskc->slice_ns;
 				ret->vtime.vtime = p->scx.dsq_vtime;
@@ -1073,7 +1092,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			}
 			stat_inc(P2DQ_STAT_ENQ_MIG);
 		} else {
-			taskc->dsq_id = llcx->dsq;
+			taskc->dsq_id = cpuc->llc_dsq;
 			ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 			ret->vtime.dsq_id = taskc->dsq_id;
 			ret->vtime.slice_ns = taskc->slice_ns;
@@ -1120,7 +1139,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (p2dq_config.atq_enabled) {
 			taskc->enq_flags = enq_flags;
 			ret->kind = P2DQ_ENQUEUE_PROMISE_ATQ_VTIME;
-			ret->vtime.dsq_id = llcx->dsq;
+			ret->vtime.dsq_id = cpuc->llc_dsq;
 			ret->vtime.atq = llcx->mig_atq;
 			ret->vtime.slice_ns = taskc->slice_ns;
 			ret->vtime.vtime = p->scx.dsq_vtime;
@@ -1128,7 +1147,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 	} else {
-		taskc->dsq_id = llcx->dsq;
+		taskc->dsq_id = cpuc->llc_dsq;
 		stat_inc(P2DQ_STAT_ENQ_LLC);
 	}
 
@@ -1416,11 +1435,14 @@ static bool consume_llc(struct llc_ctx *llcx)
 	return false;
 }
 
-static int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
+static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
 {
 	struct llc_ctx *first, *second, *left, *right;
 	int i;
 	u64 cur_load;
+
+	if (!cur_llcx || !cpuc)
+		return -EINVAL;
 
 	// If on a single LLC there isn't anything left to try.
 	if (topo_config.nr_llcs == 1 ||
@@ -1633,9 +1655,34 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq))
 		return;
 
-	if (dsq_id != cpuc->llc_dsq &&
-	    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
-		return;
+	// Handle sharded LLC DSQs, try to dispatch from all shards if sharding
+	// is enabled
+	if (p2dq_config.llc_shards > 1) {
+		// First try the current CPU's assigned shard
+		if (dsq_id != cpuc->llc_dsq &&
+		    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+			return;
+
+		if ((llcx = lookup_llc_ctx(cpuc->llc_id)) && llcx->nr_shards > 1) {
+			// Then try other shards in the LLC for work stealing
+			u32 shard_idx;
+			bpf_for(shard_idx, 0, llcx->nr_shards) {
+				u32 offset = cpuc->id % llcx->nr_shards;
+				shard_idx = wrap_index(offset + shard_idx, 0, llcx->nr_shards);
+				// TODO: should probably take min vtime to be fair
+				if (shard_idx < MAX_LLC_SHARDS && shard_idx < llcx->nr_shards) {
+					u64 shard_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_idx]);
+					if (shard_dsq != cpuc->llc_dsq && shard_dsq != dsq_id &&
+					    scx_bpf_dsq_move_to_local(shard_dsq))
+						return;
+				}
+			}
+		}
+	} else {
+		if (dsq_id != cpuc->llc_dsq &&
+		    scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+			return;
+	}
 
 	if (p2dq_config.atq_enabled) {
 		pid = scx_atq_pop(cpuc->mig_atq);
@@ -1653,12 +1700,13 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 			return;
 		}
 	} else {
-		if (dsq_id != cpuc->mig_dsq &&
+		if (cpuc && dsq_id != cpuc->mig_dsq &&
 		    scx_bpf_dsq_move_to_local(cpuc->mig_dsq))
 			return;
 	}
 
-	if (!(llcx = lookup_llc_ctx(cpuc->llc_id))) {
+	if (p2dq_config.llc_shards <= 1 &&
+	    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		scx_bpf_error("invalid llc id %u", cpuc->llc_id);
 		return;
 	}
@@ -1818,7 +1866,7 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 	if (taskc->all_cpus)
 		taskc->dsq_id = SCX_DSQ_INVALID;
 	else
-		taskc->dsq_id = llcx->dsq;
+		taskc->dsq_id = cpuc->llc_dsq;
 
 	return 0;
 }
@@ -1833,7 +1881,7 @@ static int init_llc(u32 llc_index)
 {
 	struct llc_ctx *llcx;
 	u32 llc_id = llc_ids[llc_index];
-	int ret;
+	int i, ret;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
 	if (!llcx) {
@@ -1895,6 +1943,26 @@ static int init_llc(u32 llc_index)
 	if (ret) {
 		scx_bpf_error("failed to create LLC node cpumask");
 		return ret;
+	}
+
+	// Initialize CPU sharding fields
+	llcx->nr_shards = p2dq_config.llc_shards;
+
+	if (p2dq_config.llc_shards > 1) {
+		llcx->nr_shards = min(min(p2dq_config.llc_shards, llcx->nr_cpus), MAX_LLC_SHARDS);
+
+		bpf_for(i, 0, llcx->nr_shards) {
+			u64 shard_dsq = shard_dsq_id(llc_id, i);
+			if (i < MAX_LLC_SHARDS) // verifier
+				llcx->shard_dsqs[i] = shard_dsq;
+
+			ret = scx_bpf_create_dsq(shard_dsq, llcx->node_id);
+			if (ret) {
+				scx_bpf_error("failed to create shard DSQ %llu for LLC %u shard %u",
+					      shard_dsq, llc_id, i);
+				return ret;
+			}
+		}
 	}
 
 	return 0;
@@ -2232,6 +2300,14 @@ static s32 p2dq_init_impl()
 
 		cpuc->llc_dsq = llcx->dsq;
 		cpuc->mig_atq = llcx->mig_atq;
+
+		if (p2dq_config.llc_shards > 1 && llcx->nr_shards > 1) {
+			int shard_id = cpuc->core_id % llcx->nr_shards;
+			if (shard_id >= 0 &&
+			    shard_id < MAX_LLC_SHARDS &&
+			    shard_id < llcx->nr_shards)
+				cpuc->llc_dsq = *MEMBER_VPTR(llcx->shard_dsqs, [shard_id]);
+		}
 
 		dsq_id = cpu_dsq_id(i);
 		dbg("CFG creating affn CPU[%d]DSQ[%llu]", i, dsq_id);
