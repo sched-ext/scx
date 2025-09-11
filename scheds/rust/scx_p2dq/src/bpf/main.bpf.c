@@ -1764,6 +1764,7 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 
 	if (idle) {
 		llcx->saturated = false;
+		overloaded = false;
 	} else if (!idle && llcx->cpumask && idle_cpumask && llcx->tmp_cpumask) {
 		bpf_cpumask_and(llcx->tmp_cpumask,
 				cast_mask(llcx->cpumask),
