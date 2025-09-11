@@ -15,7 +15,7 @@ use scx_utils::perf;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Error};
 use std::mem;
 use std::path::Path;
 use std::str::FromStr;
@@ -277,7 +277,10 @@ impl PerfEvent {
             unsafe { perf::perf_event_open(&mut attrs, process_id, self.cpu as i32, -1, 0) };
 
         if result < 0 {
-            return Err(anyhow!("failed to open perf event: {}", result));
+            return Err(anyhow!(
+                "failed to open perf event: {}",
+                Error::last_os_error()
+            ));
         }
 
         unsafe {
