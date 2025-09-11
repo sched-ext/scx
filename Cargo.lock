@@ -934,6 +934,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "csv"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acdc4883a9c96732e4733212c01447ebd805833b7275a73ca3ee080fd77afdaf"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d02f3b0da4c6504f86e9cd789d8dbafab48c2321be74e9987593de5a894d93d"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "ctrlc"
 version = "3.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2311,8 +2332,21 @@ dependencies = [
  "chrono",
  "flate2",
  "hex",
- "procfs-core",
+ "procfs-core 0.17.0",
  "rustix 0.38.44",
+]
+
+[[package]]
+name = "procfs"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25485360a54d6861439d60facef26de713b1e126bf015ec8f98239467a2b82f7"
+dependencies = [
+ "bitflags 2.9.1",
+ "chrono",
+ "flate2",
+ "procfs-core 0.18.0",
+ "rustix 1.0.8",
 ]
 
 [[package]]
@@ -2320,6 +2354,17 @@ name = "procfs-core"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "239df02d8349b06fc07398a3a1697b06418223b1c7725085e801e7c0fc6a12ec"
+dependencies = [
+ "bitflags 2.9.1",
+ "chrono",
+ "hex",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405"
 dependencies = [
  "bitflags 2.9.1",
  "chrono",
@@ -2936,6 +2981,19 @@ dependencies = [
  "simplelog",
  "sorted-vec",
  "static_assertions",
+]
+
+[[package]]
+name = "scx_raw_pmu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "csv",
+ "procfs 0.18.0",
+ "regex",
+ "scx_utils",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
