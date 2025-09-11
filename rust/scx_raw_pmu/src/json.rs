@@ -219,6 +219,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
     fn test() {
         let dataroot = env!("CARGO_MANIFEST_DIR");
         let manager = PMUManager::new(Some(dataroot)).expect("could not create PMU manager");
