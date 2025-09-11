@@ -6,6 +6,7 @@ pub mod bpf_intf;
 pub mod bpf_skel;
 pub use bpf_skel::types;
 
+use scx_utils::cli::TopologyArgs;
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
@@ -28,7 +29,12 @@ fn get_default_llc_runs() -> u64 {
 }
 
 fn get_default_llc_shards() -> u32 {
-    let max_cpus_per_llc = TOPO.all_llcs.values().map(|l| l.all_cpus.len() as u32).max().unwrap_or(1);
+    let max_cpus_per_llc = TOPO
+        .all_llcs
+        .values()
+        .map(|l| l.all_cpus.len() as u32)
+        .max()
+        .unwrap_or(1);
     if max_cpus_per_llc <= 4 {
         return 0;
     }
@@ -221,6 +227,13 @@ pub struct SchedulerOpts {
     /// Initial DSQ for tasks.
     #[clap(short = 'i', long, default_value = "0")]
     pub init_dsq_index: usize,
+
+    /// Use a arena based queues (ATQ) for task queueing.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub virt_llc_enabled: bool,
+
+    #[clap(flatten, next_help_heading = "Topology Options")]
+    pub topo: TopologyArgs,
 }
 
 pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
@@ -233,7 +246,7 @@ pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
 
 #[macro_export]
 macro_rules! init_open_skel {
-    ($skel: expr, $opts: expr, $verbose: expr) => {
+    ($skel: expr, $topo: expr, $opts: expr, $verbose: expr) => {
         'block: {
             let skel = $skel;
             let opts: &$crate::SchedulerOpts = $opts;
@@ -284,10 +297,10 @@ macro_rules! init_open_skel {
             // topo config
             let rodata = skel.maps.rodata_data.as_mut().unwrap();
             rodata.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
-            rodata.topo_config.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
-            rodata.topo_config.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;
-            rodata.topo_config.smt_enabled = MaybeUninit::new($crate::TOPO.smt_enabled);
-            rodata.topo_config.has_little_cores = MaybeUninit::new($crate::TOPO.has_little_cores());
+            rodata.topo_config.nr_llcs = $topo.all_llcs.clone().keys().len() as u32;
+            rodata.topo_config.nr_nodes = $topo.nodes.clone().keys().len() as u32;
+            rodata.topo_config.smt_enabled = MaybeUninit::new($topo.smt_enabled);
+            rodata.topo_config.has_little_cores = MaybeUninit::new($topo.has_little_cores());
 
             // timeline config
             rodata.timeline_config.min_slice_us = opts.min_slice_us;
@@ -338,8 +351,8 @@ macro_rules! init_open_skel {
 
 #[macro_export]
 macro_rules! init_skel {
-    ($skel: expr) => {
-        for cpu in $crate::TOPO.all_cpus.values() {
+    ($skel: expr, $topo: expr) => {
+        for cpu in $topo.all_cpus.values() {
             $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
                     1
@@ -350,7 +363,7 @@ macro_rules! init_skel {
             $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
         }
-        for llc in $crate::TOPO.all_llcs.values() {
+        for llc in $topo.all_llcs.values() {
             $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
         }
     };

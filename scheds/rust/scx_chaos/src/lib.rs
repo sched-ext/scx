@@ -22,6 +22,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 
 use arenalib::ArenaLib;
 use libbpf_rs::skel::Skel;
@@ -298,9 +299,14 @@ impl Builder<'_> {
         skel_builder.obj_builder.debug(self.verbose > 1);
         init_libbpf_logging(None);
 
+        let topo = if self.p2dq_opts.virt_llc_enabled {
+            Topology::with_args(&self.p2dq_opts.topo)?
+        } else {
+            Topology::new()?
+        };
         let open_opts = LibbpfOpts::default().into_bpf_open_opts();
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos, open_opts)?;
-        scx_p2dq::init_open_skel!(&mut open_skel, self.p2dq_opts, self.verbose)?;
+        scx_p2dq::init_open_skel!(&mut open_skel, &topo, self.p2dq_opts, self.verbose)?;
 
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
 
@@ -399,7 +405,7 @@ impl Builder<'_> {
         };
 
         let mut skel = scx_ops_load!(open_skel, chaos, uei)?;
-        scx_p2dq::init_skel!(&mut skel);
+        scx_p2dq::init_skel!(&mut skel, topo);
 
         let task_size = std::mem::size_of::<types::task_p2dq>();
         let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
