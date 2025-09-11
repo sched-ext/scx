@@ -679,7 +679,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 
 	migratable = can_migrate(taskc, llcx);
-	if ((llcx->saturated || saturated || overloaded) &&
+	if (topo_config.nr_llcs > 1 &&
+	    (llcx->saturated || saturated || overloaded) &&
 	    !migratable) {
 		cpu = prev_cpu;
 		goto found_cpu;
@@ -871,7 +872,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (llcx->saturated &&
+	if (topo_config.nr_llcs > 1 &&
+	    llcx->saturated &&
 	    migratable &&
 	    llcx->node_cpumask) {
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->node_cpumask),
