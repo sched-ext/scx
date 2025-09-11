@@ -76,6 +76,13 @@ gaming_mode = ["-c", "0", "-p", "0"]
 lowlatency_mode = ["-m", "performance", "-c", "0", "-p", "0", "-w"]
 powersave_mode = ["-m", "powersave", "-d", "-p", "5000"]
 server_mode = ["-a", "-s", "20000"]
+
+[scheds.scx_chaos]
+auto_mode = []
+gaming_mode = ["--task-slice", "true", "-f", "--sched-mode", "performance"]
+lowlatency_mode = ["-y", "-f", "--task-slice", "true"]
+powersave_mode = ["--sched-mode", "efficiency"]
+server_mode = ["--keep-running"]
 ```
 
 **`default_sched`:**
@@ -137,6 +144,11 @@ The example configuration above shows how to set custom flags for different sche
     * Low Latency mode: `-m performance -c 0 -p 0 -w`
     * Power Save mode: `-m powersave -d -p 5000`
     * Server mode: `-a -s 20000`
+* For `scx_chaos`:
+    * Gaming mode: `--task-slice true -f --sched-mode performance`
+    * Low Latency mode: `-y -f --task-slice true`
+    * Power Save mode: `--sched-mode efficiency`
+    * Server mode: `--keep-running`
 
 ## Fallback Behavior
 
