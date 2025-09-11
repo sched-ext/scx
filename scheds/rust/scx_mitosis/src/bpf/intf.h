@@ -20,7 +20,7 @@ typedef _Bool bool;
 
 /* ---- Work stealing config (compile-time) ------------------------------- */
 #ifndef MITOSIS_ENABLE_STEALING
-#define MITOSIS_ENABLE_STEALING 0
+#define MITOSIS_ENABLE_STEALING 1
 #endif
 /* ----------------------------------------------------------------------- */
 
@@ -34,7 +34,6 @@ enum consts {
 
 	PCPU_BASE = 0x80000000,
 	MAX_CG_DEPTH = 256,
-
 };
 
 /* Statistics */

@@ -23,6 +23,9 @@
 
 #define MAX_L3S 16
 
+#include "dsq.bpf.h"
+
+
 /*
  * A couple of tricky things about checking a cgroup's cpumask:
  *
@@ -48,8 +51,24 @@
 extern const volatile u32 nr_l3;
 
 enum mitosis_constants {
+
+	/* Root cell index */
+	ROOT_CELL_ID = 0,
+
 	/* Invalid/unset L3 value */
 	INVALID_L3_ID = -1,
+
+	/* Default weight divisor for vtime calculation */
+	DEFAULT_WEIGHT_MULTIPLIER = 100,
+
+	/* Vtime validation multiplier (slice_ns * 8192) */
+	VTIME_MAX_FUTURE_MULTIPLIER = 8192,
+
+	/* Bits per u32 for cpumask operations */
+	BITS_PER_U32 = 32,
+
+	/* No NUMA constraint for DSQ creation */
+	ANY_NUMA = -1,
 };
 
 struct cell {
@@ -83,12 +102,14 @@ struct task_ctx {
 	u32 cell;
 	/* For the sake of scheduling, a task is exclusively owned by either a cell
 	 * or a cpu */
-	u32 dsq;
+	u64 dsq;
 	/* latest configuration that was applied for this task */
 	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
+	// Which L3 this task is assigned to
+	s32 l3;
 
 #if MITOSIS_ENABLE_STEALING
 	/* When a task is stolen, dispatch() marks the destination L3 here.
