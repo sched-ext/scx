@@ -1,5 +1,7 @@
 #pragma once
 
+#include <lib/cpumask.h>
+
 struct topology;
 typedef struct topology __arena * topo_ptr;
 
@@ -76,5 +78,7 @@ static inline int topo_iter_start(struct topo_iter *iter)
 #define TOPO_FOR_EACH_LLC(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_LLC)
 #define TOPO_FOR_EACH_CORE(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_CORE)
 #define TOPO_FOR_EACH_CPU(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_CPU)
+
+s64 topo_cpu_to_llc_id(u32 cpu);
 
 extern u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];

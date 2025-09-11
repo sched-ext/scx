@@ -438,3 +438,25 @@ int topo_print_by_level(void)
 
 	return 0;
 }
+
+__maybe_unused
+s64 topo_cpu_to_llc_id(u32 cpu)
+{
+	topo_ptr topo;
+	u64 llc_id;
+
+	if (cpu >= NR_CPUS) {
+		bpf_printk("invalid CPU ID");
+		return -EINVAL;
+	}
+
+	topo = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
+	if (!topo) {
+		bpf_printk("cpu is offline");
+		return -EINVAL;
+	}
+
+	/* TOPO_CPU -> TOPO_CORE -> TOPO_LLC */
+	llc_id = topo->parent->parent->id;
+	return llc_id;
+}
