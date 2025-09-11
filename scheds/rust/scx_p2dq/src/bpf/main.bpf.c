@@ -148,6 +148,7 @@ const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
 static u32 llc_lb_offset = 1;
 static u64 min_llc_runs_pick2 = 1;
 static bool saturated = false;
+static bool overloaded = false;
 
 u64 llc_ids[MAX_LLCS];
 u64 cpu_llc_ids[MAX_CPUS];
@@ -157,6 +158,7 @@ u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 
 u64 min_slice_ns = 500;
 
+private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
 
 static u64 max(u64 a, u64 b)
@@ -188,10 +190,15 @@ static __always_inline u64 max_dsq_time_slice(void)
 	return dsq_time_slices[p2dq_config.nr_dsqs_per_llc - 1];
 }
 
+static __always_inline u64 min_dsq_time_slice(void)
+{
+	return dsq_time_slices[0];
+}
+
 static __always_inline u64 clamp_slice(u64 slice_ns)
 {
 
-	return min(max(MIN_SLICE_NSEC, slice_ns),
+	return min(max(min_dsq_time_slice(), slice_ns),
 		   max_dsq_time_slice());
 }
 
@@ -462,7 +469,7 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 	if (taskc->llc_runs > 0)
 		return false;
 
-	if (saturated)
+	if (saturated || overloaded)
 		return true;
 
 	return llcx->saturated;
@@ -628,6 +635,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	struct llc_ctx *llcx;
 	s32 pref_cpu, cpu = prev_cpu;
+	bool migratable = false;
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
@@ -652,6 +660,13 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	if (!(llcx = lookup_llc_ctx(taskc->llc_id)) ||
 	    !llcx->cpumask)
 		goto found_cpu;
+
+	migratable = can_migrate(taskc, llcx);
+	if ((llcx->saturated || saturated || overloaded) &&
+	    !migratable) {
+		cpu = prev_cpu;
+		goto found_cpu;
+	}
 
 	if (!valid_dsq(taskc->dsq_id))
 		if (!(llcx = rand_llc_ctx()))
@@ -812,16 +827,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
-	// Next try in the local LLC
-	if (!taskc->interactive &&
-	    llcx->cpumask &&
-	    (cpu = __pick_idle_cpu(llcx->cpumask,
-				   SCX_PICK_IDLE_CORE)
-	     ) >= 0) {
-		*is_idle = true;
-		goto found_cpu;
-	}
-
 	if (p2dq_config.cpu_priority) {
 		pref_cpu = pref_idle_cpu(llcx);
 		if (llcx->cpumask && pref_cpu >= 0 &&
@@ -833,6 +838,15 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
+	// Next try in the local LLC
+	if (llcx->cpumask &&
+	    (cpu = __pick_idle_cpu(llcx->cpumask,
+				   SCX_PICK_IDLE_CORE)
+	     ) >= 0) {
+		*is_idle = true;
+		goto found_cpu;
+	}
+
 	// Try a idle CPU in the llc
 	if (llcx->cpumask &&
 	    (cpu = __pick_idle_cpu(llcx->cpumask, 0)) >= 0) {
@@ -840,20 +854,40 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (saturated && taskc->llc_runs == 0 && llcx->node_cpumask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->node_cpumask), 0);
+	if (llcx->saturated &&
+	    migratable &&
+	    llcx->node_cpumask) {
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->node_cpumask),
+					    SCX_PICK_IDLE_CORE);
 		if (cpu >= 0) {
 			*is_idle = true;
 			goto found_cpu;
 		}
+		if (llcx->node_cpumask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->node_cpumask), 0);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		}
+		if (saturated && migratable && all_cpumask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(all_cpumask),
+						    SCX_PICK_IDLE_CORE);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+			if (all_cpumask) {
+				cpu = scx_bpf_pick_idle_cpu(cast_mask(all_cpumask), 0);
+				if (cpu >= 0) {
+					*is_idle = true;
+					goto found_cpu;
+				}
+			}
+		}
 	}
 
-	// Couldn't find anything idle just return something in the local LLC
-	if (taskc->interactive && llcx->cpumask)
-		cpu = bpf_cpumask_any_distribute(cast_mask(llcx->cpumask));
-	else
-		// non interactive tasks stay sticky
-		cpu = prev_cpu;
+	cpu = prev_cpu;
 
 found_cpu:
 	scx_bpf_put_cpumask(idle_cpumask);
@@ -922,7 +956,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	    p->nr_cpus_allowed == 1) {
 		stat_inc(P2DQ_STAT_DIRECT);
 		u64 slice_ns = clamp_slice(scale_by_task_weight(p,
-					   dsq_time_slices[0]));
+					   min_dsq_time_slice()));
 		scx_bpf_dsq_insert(p,
 				   SCX_DSQ_LOCAL,
 				   slice_ns,
@@ -942,7 +976,8 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if (!taskc->all_cpus ||
 	    (p->cpus_ptr == &p->cpus_mask &&
 	     p->nr_cpus_allowed != topo_config.nr_cpus)) {
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		if (!__COMPAT_is_enq_cpu_selected(enq_flags) ||
+		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			cpu = pick_idle_affinitized_cpu(p,
 							taskc,
 							cpu,
@@ -1676,10 +1711,12 @@ void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 		scx_bpf_put_cpumask(idle_cpumask);
 		return;
 	}
+	if (percent_idle == 0)
+		overloaded = true;
 
-	if (idle)
+	if (idle) {
 		llcx->saturated = false;
-	else if (!idle && llcx->cpumask && idle_cpumask && llcx->tmp_cpumask) {
+	} else if (!idle && llcx->cpumask && idle_cpumask && llcx->tmp_cpumask) {
 		bpf_cpumask_and(llcx->tmp_cpumask,
 				cast_mask(llcx->cpumask),
 				idle_cpumask);
@@ -1841,10 +1878,6 @@ static int init_llc(u32 llc_index)
 		return ret;
 	}
 
-	// Topology related setup, first we assume all CPUs are big. When CPUs
-	// initialize they will update this as needed.
-	llcx->all_big = true;
-
 	// big cpumask
 	ret = init_cpumask(&llcx->big_cpumask);
 	if (ret) {
@@ -1885,10 +1918,6 @@ static int init_node(u32 node_id)
 		scx_bpf_error("failed to create node cpumask");
 		return ret;
 	}
-
-	// Topology related setup, first we assume all CPUs are big. When CPUs
-	// initialize they will update this as needed.
-	nodec->all_big = true;
 
 	// big cpumask
 	ret = init_cpumask(&nodec->big_cpumask);
@@ -1946,11 +1975,11 @@ static s32 init_cpu(int cpu)
 		if (llcx->little_cpumask)
 			bpf_cpumask_set_cpu(cpu, llcx->little_cpumask);
 		bpf_rcu_read_unlock();
-		llcx->all_big = false;
-		nodec->all_big = false;
 	}
 
 	bpf_rcu_read_lock();
+	if (all_cpumask)
+		bpf_cpumask_set_cpu(cpu, all_cpumask);
 	if (nodec->cpumask)
 		bpf_cpumask_set_cpu(cpu, nodec->cpumask);
 	if (llcx->cpumask)
@@ -2146,26 +2175,26 @@ s32 static start_timers(void)
 
 static s32 p2dq_init_impl()
 {
-	struct bpf_cpumask *tmp_big_cpumask;
 	struct llc_ctx *llcx;
 	struct cpu_ctx *cpuc;
 	int i, ret;
 	u64 dsq_id;
 
-	tmp_big_cpumask = bpf_cpumask_create();
-	if (!tmp_big_cpumask) {
-		scx_bpf_error("failed to create big cpumask");
-		return -ENOMEM;
+	ret = init_cpumask(&all_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC cpumask");
+		return ret;
+	}
+	ret = init_cpumask(&big_cpumask);
+	if (ret) {
+		scx_bpf_error("failed to create LLC cpumask");
+		return ret;
 	}
 
 	if (p2dq_config.init_dsq_index >= p2dq_config.nr_dsqs_per_llc) {
 		scx_bpf_error("invalid init_dsq_index");
 		return -EINVAL;
 	}
-
-	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
-	if (tmp_big_cpumask)
-		bpf_cpumask_release(tmp_big_cpumask);
 
 	// First we initialize LLCs because DSQs are created at the LLC level.
 	bpf_for(i, 0, topo_config.nr_llcs) {

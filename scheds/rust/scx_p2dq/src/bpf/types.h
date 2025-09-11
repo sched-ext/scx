@@ -44,7 +44,6 @@ struct llc_ctx {
 	u64				intr_load;
 	u64				dsq_load[MAX_DSQS_PER_LLC];
 	bool				saturated;
-	bool				all_big;
 
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
@@ -59,7 +58,6 @@ struct llc_ctx {
 
 struct node_ctx {
 	u32				id;
-	bool				all_big;
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 };
