@@ -147,6 +147,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -182,6 +183,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -222,6 +224,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -260,6 +263,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        tickless: false,
                     },
                 },
             },
@@ -1724,6 +1728,7 @@ impl<'a> Scheduler<'a> {
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
                     placement,
+                    tickless,
                     ..
                 } = spec.kind.common();
 
@@ -1746,6 +1751,10 @@ impl<'a> Scheduler<'a> {
                 layer.allow_node_aligned.write(*allow_node_aligned);
                 layer.skip_remote_node.write(*skip_remote_node);
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
+                layer.tickless.write(*tickless);
+                if *tickless {
+                    skel.maps.rodata_data.enable_tickless = *tickless;
+                }
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {

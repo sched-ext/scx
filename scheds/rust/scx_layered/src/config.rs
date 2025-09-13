@@ -144,6 +144,8 @@ pub struct LayerCommon {
     pub llcs: Vec<usize>,
     #[serde(default)]
     pub placement: LayerPlacement,
+    #[serde(default)]
+    pub tickless: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
