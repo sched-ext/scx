@@ -868,7 +868,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         //              with a positive load imbalance):
         //                      For each "pull domain" (i.e. each domain in
         //                      "pull node" with a negative load imbalance):
-        //                              load = try_move_load(push_dom -> pull-dom)
+        //                              load = try_move_load(push_dom -> pull_dom)
         //                              if load > 0
         //                                      goto restart_pushext_pull
         //
