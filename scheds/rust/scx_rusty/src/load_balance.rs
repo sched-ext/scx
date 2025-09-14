@@ -853,10 +853,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn balance_between_nodes(&mut self) -> Result<()> {
-        if self.nodes.len() < 2 {
-            return Ok(());
-        }
-
         debug!("Node <-> Node LB started");
 
         // Keep track of the nodes we're pushing load from, and pulling load to,
