@@ -269,7 +269,7 @@ $ scx_rustland --monitor 5
 
 ## systemd services
 
-See: [services](services/README.md)
+See: [scx_loader](tools/scx_loader/README.md) and [scxctl](tools/scxctl/README.md)
 
 ## Kernel Feature Status
 
