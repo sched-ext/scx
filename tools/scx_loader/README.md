@@ -150,4 +150,3 @@ This will produce header and source files that you can use to interact with `scx
 `scx_loader` is under active development.  Future improvements may include:
 
 * More robust error handling.
-* Configuration file.
