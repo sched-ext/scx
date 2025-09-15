@@ -161,6 +161,8 @@ Rust schedulers are also published on `crates.io`:
 $ cargo install scx_rusty
 ```
 
+See: [CARGO BUILD](CARGO_BUILD.md)
+
 ### Binary Locations
 
 - **C schedulers**: `build/scheds/c/scx_simple`
