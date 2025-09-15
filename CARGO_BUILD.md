@@ -121,10 +121,45 @@ Besides schedulers, the workspace includes several tools:
 
 ---
 
-## 5. Summary
+## 5. Installing from crates.io
+
+Some schedulers and tools may also be available directly from [crates.io](https://crates.io). This allows you to install them without cloning the repository.
+
+### Examples
+
+| Crate name   | Install command            |
+|--------------|----------------------------|
+| `scxctl`     | `cargo install scxctl`     |
+| `scxtop`     | `cargo install scxtop`     |
+| `scx_loader` | `cargo install scx_loader` |
+| `scx_flash`  | `cargo install scx_flash`  |
+
+This will place the binary in `~/.cargo/bin`, which you should add to your `PATH` if it is not already included.
+
+> **Note**: Availability on crates.io depends on which components the maintainers publish there. Not all schedulers may be published.
+
+### Installing system-wide
+
+To make a scheduler or tool available system-wide, you can either:
+
+1. Copy the installed binary from `~/.cargo/bin` into a system directory, e.g.:
+   ```bash
+   sudo cp ~/.cargo/bin/scxctl /usr/local/bin/
+   ```
+
+2. Or add `~/.cargo/bin` to your system `PATH`, for example by adding this line to `~/.bashrc` or `~/.zshrc`:
+   ```bash
+   export PATH="$HOME/.cargo/bin:$PATH"
+   ```
+
+---
+
+## 6. Summary
 
 - **Build everything**: `cargo build --release`
 - **Build one scheduler**: `cargo build --profile=<profile> -p <name>`
+- **Install from crates.io**: `cargo install <crate_name>`
+- **Make available system-wide**: copy binary to `/usr/local/bin` or add `~/.cargo/bin` to `PATH`
 - **Profiles available**: `release`, `release-tiny`, `release-fast`
 
 This approach allows you to build and test either the whole project at once or focus on a single scheduler or tool.
