@@ -539,14 +539,15 @@ static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu)
 	if (cpu >= 0)
 		goto out_put_cpumask;
 
-	/*
-	 * If all the previous attempts have failed, dispatch the task to the
-	 * first CPU that will become available.
-	 */
-	cpu = -EBUSY;
-
 out_put_cpumask:
 	scx_bpf_put_cpumask(idle_smtmask);
+
+	/*
+	 * If we couldn't find any CPU, or in case of error, return the
+	 * previously used CPU.
+	 */
+	if(cpu < 0)
+		cpu = prev_cpu;
 
 	return cpu;
 }
