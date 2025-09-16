@@ -30,6 +30,8 @@ pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use lazy_static::lazy_static;
+use libbpf_rs::libbpf_sys;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -44,11 +46,13 @@ use once_cell::sync::OnceCell;
 use regex::Regex;
 use scx_bpf_compat;
 use scx_layered::*;
+use scx_raw_pmu::PMUManager;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
+use scx_utils::perf;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
@@ -974,7 +978,8 @@ impl Stats {
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
-                    layer_membw_agg[layer][usage] += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
+                    let delta = cpu_ctxs[cpu].layer_membw_agg[layer][usage];
+                    layer_membw_agg[layer][usage] += delta;
                 }
             }
         }
@@ -1056,6 +1061,7 @@ impl Stats {
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
 
+        // Computes the runtime deltas and converts them from ns to s.
         let compute_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
                 .iter()
@@ -1069,29 +1075,46 @@ impl Stats {
                 .collect()
         };
 
-        let cur_layer_utils: Vec<Vec<f64>> =
-            compute_diff(&cur_layer_usages, &self.prev_layer_usages);
-        let cur_layer_membw: Vec<Vec<f64>> =
-            compute_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
-
-        let metric_decay = |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>| {
-            cur_metric
+        // Computes the total memory traffic done since last computation and normalizes to bytes/s
+        // over the elapsed timescale.
+        let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
+            cur_agg
                 .iter()
-                .zip(prev_metric.iter())
+                .zip(prev_agg.iter())
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| {
-                            let decay = USAGE_DECAY.powf(elapsed_f64);
-                            p * decay + c * (1.0 - decay)
-                        })
+                        .map(|(c, p)| (c - p) as f64 / elapsed_f64)
                         .collect()
                 })
                 .collect()
         };
 
-        let layer_utils: Vec<Vec<f64>> = metric_decay(cur_layer_utils, &self.layer_utils);
-        let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws);
+        let cur_layer_utils: Vec<Vec<f64>> =
+            compute_diff(&cur_layer_usages, &self.prev_layer_usages);
+        let cur_layer_membw: Vec<Vec<f64>> =
+            compute_mem_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
+
+        let metric_decay =
+            |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>, decay_rate: f64| {
+                cur_metric
+                    .iter()
+                    .zip(prev_metric.iter())
+                    .map(|(cur, prev)| {
+                        cur.iter()
+                            .zip(prev.iter())
+                            .map(|(c, p)| {
+                                let decay = decay_rate.powf(elapsed_f64);
+                                p * decay + c * (1.0 - decay)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            };
+
+        let layer_utils: Vec<Vec<f64>> =
+            metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
+        let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
@@ -2138,6 +2161,7 @@ impl<'a> Scheduler<'a> {
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
         hint_to_layer_map: &HashMap<u64, usize>,
+        membw_tracking: bool,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let mut disable_topology = opts.disable_topology.unwrap_or(false);
@@ -2223,6 +2247,9 @@ impl<'a> Scheduler<'a> {
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
+        // No memory BW tracking by default
+        skel.progs.scx_pmu_tc.set_autoload(membw_tracking);
+
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
@@ -2243,6 +2270,12 @@ impl<'a> Scheduler<'a> {
 
         let ext_sched_class_addr = get_kallsyms_addr("ext_sched_class");
         let idle_sched_class_addr = get_kallsyms_addr("idle_sched_class");
+
+        let event = if membw_tracking {
+            setup_membw_tracking(&mut skel)?
+        } else {
+            0
+        };
 
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
@@ -2391,6 +2424,10 @@ impl<'a> Scheduler<'a> {
                     libbpf_rs::MapFlags::ANY,
                 )?;
             }
+        }
+
+        if membw_tracking {
+            create_perf_fds(&mut skel, event)?;
         }
 
         let mut layers = vec![];
@@ -2612,6 +2649,10 @@ impl<'a> Scheduler<'a> {
                     if let Some(membw_limit) = membw_gb {
                         let membw_cpus = &self.sched_stats.layer_membws[idx];
                         let last_membw = membw_cpus.into_iter().map(|x: &f64| *x as usize).sum();
+                        trace!(
+                            "(last_membw, membw_limit): ({last_membw} bytes, {membw_limit} GiB)"
+                        );
+
                         high = self.clamp_target_by_membw(
                             &layer,
                             (*membw_limit * (1024_u64.pow(3) as f64)) as usize,
@@ -3434,6 +3475,92 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
     }
 }
 
+fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
+    let mut attr = perf::bindings::perf_event_attr::default();
+    attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
+    attr.type_ = perf::bindings::PERF_TYPE_RAW;
+    attr.config = event;
+    attr.sample_type = 0u64;
+    attr.set_disabled(0);
+
+    let perf_events_map = &skel.maps.scx_pmu_map;
+    let map_fd = unsafe { libbpf_sys::bpf_map__fd(perf_events_map.as_libbpf_object().as_ptr()) };
+
+    let mut failures = 0u64;
+
+    for cpu in 0..*NR_CPUS_POSSIBLE {
+        let fd = unsafe { perf::perf_event_open(&mut attr as *mut _, -1, cpu as i32, -1, 0) };
+        if fd < 0 {
+            failures += 1;
+            trace!(
+                "perf_event_open failed cpu={cpu} errno={}",
+                std::io::Error::last_os_error()
+            );
+            continue;
+        }
+
+        let key = cpu as u32;
+        let val = fd as u32;
+        let ret = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                map_fd,
+                &key as *const _ as *const _,
+                &val as *const _ as *const _,
+                0,
+            )
+        };
+        if ret != 0 {
+            trace!("bpf_map_update_elem failed cpu={cpu} fd={fd} ret={ret}");
+        } else {
+            trace!("mapped cpu={cpu} -> fd={fd}");
+        }
+    }
+
+    if failures > 0 {
+        trace!("failed to install {failures} counters");
+        // Keep going, do not fail the scheduler for this
+    }
+
+    Ok(())
+}
+
+// Set up the counters
+fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
+    let pmumanager = PMUManager::new(None)?;
+    let codename = &pmumanager.codename as &str;
+
+    let pmuspec = match codename {
+        "amdzen1" | "amdzen2" | "amdzen3" => {
+            trace!("found AMD codename {codename}");
+            pmumanager.pmus.get("ls_any_fills_from_sys.mem_io_local")
+        }
+        "amdzen4" | "amdzen5" => {
+            trace!("found AMD codename {codename}");
+            pmumanager.pmus.get("ls_any_fills_from_sys.dram_io_all")
+        }
+
+        "haswell" | "broadwell" | "broadwellde" | "broadwellx" | "skylake" | "skylakex"
+        | "cascadelakex" | "arrowlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
+        | "graniterapids" => {
+            trace!("found Intel codename {codename}");
+            pmumanager.pmus.get("mem_load_retired.l3_miss")
+        }
+
+        _ => {
+            trace!("found unknown codename {codename}");
+            None
+        }
+    };
+
+    let spec = pmuspec.ok_or("not_found").unwrap();
+    let config = (spec.umask << 8) | spec.event;
+
+    // Install the counter in the BPF map
+    skel.maps.rodata_data.as_mut().unwrap().membw_event = config;
+
+    Ok(config)
+}
+
 fn main() -> Result<()> {
     let opts = Opts::parse();
 
@@ -3605,6 +3732,13 @@ fn main() -> Result<()> {
         }
     }
 
+    let membw_required = layer_config.specs.iter().any(|spec| match spec.kind {
+        LayerKind::Confined { membw_gb, .. } | LayerKind::Grouped { membw_gb, .. } => {
+            membw_gb.is_some()
+        }
+        LayerKind::Open { .. } => false,
+    });
+
     if opts.print_and_exit {
         println!("specs={}", serde_json::to_string_pretty(&layer_config)?);
         return Ok(());
@@ -3620,6 +3754,7 @@ fn main() -> Result<()> {
             &layer_config.specs,
             &mut open_object,
             &hint_to_layer_map,
+            membw_required,
         )?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;

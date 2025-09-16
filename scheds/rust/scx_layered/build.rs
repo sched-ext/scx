@@ -10,6 +10,7 @@ fn main() {
         .enable_skel("src/bpf/main.bpf.c", "bpf")
         .add_source("src/bpf/timer.bpf.c")
         .add_source("src/bpf/util.bpf.c")
+        .add_source("src/bpf/lib/pmu.bpf.c")
         .compile_link_gen()
         .unwrap();
 }
