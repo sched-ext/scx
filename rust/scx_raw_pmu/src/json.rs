@@ -15,6 +15,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use std::collections::HashMap;
+
 /// Exclude metric groups
 
 fn hex_to_u64<'de, D>(de: D) -> Result<u64, D::Error>
@@ -25,7 +27,6 @@ where
     let s = s.trim_start_matches("0x");
     u64::from_str_radix(s, 16).map_err(serde::de::Error::custom)
 }
-
 fn num_to_bool<'de, D>(de: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -48,14 +49,14 @@ pub struct PMUSpec {
 
     #[serde(alias = "EventCode")]
     #[serde(deserialize_with = "hex_to_u64")]
-    event: u64,
+    pub event: u64,
 
     #[serde(alias = "EventName")]
-    name: String,
+    pub name: String,
 
     #[serde(alias = "UMask")]
     #[serde(deserialize_with = "hex_to_u64")]
-    umask: u64,
+    pub umask: u64,
 
     #[serde(alias = "Unit")]
     pmu: Option<String>,
@@ -102,10 +103,11 @@ pub struct PMUSpec {
 }
 
 pub struct PMUManager {
-    dataroot: PathBuf,
-    arch: String,
-    tuple: String,
-    pmus: Vec<PMUSpec>,
+    pub dataroot: PathBuf,
+    pub arch: String,
+    pub tuple: String,
+    pub codename: String,
+    pub pmus: HashMap<String, PMUSpec>,
 }
 
 impl PMUManager {
@@ -135,6 +137,7 @@ impl PMUManager {
         println!("Dataroot {}", self.dataroot.display());
         println!("Arch: {}", self.arch);
         println!("Tuple: {}", self.tuple);
+        println!("Codename: {}", self.codename);
     }
 
     fn read_file_counters(jsonfile: PathBuf) -> Result<Vec<PMUSpec>> {
@@ -144,11 +147,14 @@ impl PMUManager {
         Ok(serde_json::from_str(&content)?)
     }
 
-    fn read_all_counters(jsondir: PathBuf) -> Result<Vec<PMUSpec>> {
-        let mut pmuspecs = vec![];
+    fn read_all_counters(jsondir: PathBuf) -> Result<HashMap<String, PMUSpec>> {
+        let mut pmuspecs = HashMap::new();
         for file in fs::read_dir(jsondir)? {
-            let path = Self::read_file_counters(file?.path().as_path().canonicalize()?)?;
-            pmuspecs.extend(path);
+            let counters = Self::read_file_counters(file?.path().as_path().canonicalize()?)?;
+
+            for counter in counters.iter() {
+                pmuspecs.insert(String::from(&counter.name), counter.clone());
+            }
         }
         Ok(pmuspecs)
     }
@@ -169,7 +175,7 @@ impl PMUManager {
         })
     }
 
-    fn spec_dir(basedir: PathBuf, arch: &str, tuple: &str) -> Result<String> {
+    fn spec_dir(basedir: PathBuf, arch: &str, tuple: &str) -> Result<(String, String)> {
         let path = basedir.clone().join("arch").join(arch).join("mapfile.csv");
 
         let csv = File::open(path)?;
@@ -181,8 +187,8 @@ impl PMUManager {
             let re = Regex::new(regex)?;
 
             if re.is_match(tuple) {
-                let path = basedir.clone().join("arch").join(arch).join(codename);
-                return Ok(path.to_string_lossy().into_owned());
+                let path = basedir.clone().join("arch").join(arch).join(&codename);
+                return Ok((path.to_string_lossy().into_owned(), String::from(codename)));
             }
         }
 
@@ -198,9 +204,9 @@ impl PMUManager {
 
         let tuple = Self::identify_architecture()?;
         let arch = Self::arch_code();
-        let codename = Self::spec_dir(dataroot.clone(), &arch, tuple.as_str())?;
+        let (path, codename) = Self::spec_dir(dataroot.clone(), &arch, tuple.as_str())?;
 
-        let jsondir = dataroot.join(&tuple).join(&arch).join(codename);
+        let jsondir = dataroot.join(&tuple).join(&arch).join(&path);
         println!("JSONDIR {:?}", &jsondir);
 
         let pmus = Self::read_all_counters(jsondir)?;
@@ -209,6 +215,7 @@ impl PMUManager {
             dataroot,
             arch,
             tuple,
+            codename,
             pmus,
         })
     }
