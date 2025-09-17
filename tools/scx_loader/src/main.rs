@@ -62,6 +62,7 @@ struct ScxLoader {
     current_mode: SchedMode,
     current_args: Option<Vec<String>>,
     channel: UnboundedSender<ScxMessage>,
+    config: config::Config,
 }
 
 #[derive(Parser, Debug)]
@@ -116,6 +117,14 @@ impl ScxLoader {
         scx_name: SupportedSched,
         sched_mode: SchedMode,
     ) -> zbus::fdo::Result<()> {
+        // Validate that the mode has arguments configured
+        if let Err(err_msg) =
+            config::validate_mode_has_args(&self.config, &scx_name, sched_mode.clone())
+        {
+            log::error!("{}", err_msg);
+            return Err(zbus::fdo::Error::InvalidArgs(err_msg));
+        }
+
         log::info!("starting {scx_name:?} with mode {sched_mode:?}..");
 
         let _ = self.channel.send(ScxMessage::StartSched((
@@ -153,6 +162,14 @@ impl ScxLoader {
         scx_name: SupportedSched,
         sched_mode: SchedMode,
     ) -> zbus::fdo::Result<()> {
+        // Validate that the mode has arguments configured
+        if let Err(err_msg) =
+            config::validate_mode_has_args(&self.config, &scx_name, sched_mode.clone())
+        {
+            log::error!("{}", err_msg);
+            return Err(zbus::fdo::Error::InvalidArgs(err_msg));
+        }
+
         log::info!("switching {scx_name:?} with mode {sched_mode:?}..");
 
         let _ = self.channel.send(ScxMessage::SwitchSched((
@@ -326,6 +343,7 @@ async fn main() -> Result<()> {
                 current_mode: SchedMode::Auto,
                 current_args: None,
                 channel: channel.clone(),
+                config: config.clone(),
             },
         )
         .await?;
@@ -433,7 +451,13 @@ async fn worker_loop(
                     // Use custom arguments if they were set
                     args
                 } else {
-                    // Use mode-based arguments
+                    // Use mode-based arguments - validate first
+                    if let Err(err_msg) =
+                        config::validate_mode_has_args(&config, &scx_sched, current_mode.clone())
+                    {
+                        log::error!("Cannot restart scheduler: {}", err_msg);
+                        continue;
+                    }
                     config::get_scx_flags_for_mode(&config, &scx_sched, current_mode)
                 };
 
