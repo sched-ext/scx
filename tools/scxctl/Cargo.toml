@@ -14,6 +14,7 @@ categories = ["command-line-utilities"]
 license = "GPL-2.0-only"
 
 [dependencies]
+anyhow = "1.0"
 clap = { version = "4.5.28", features = ["derive"] }
 colored = "3.0.0"
 zbus = "5.3.1"
