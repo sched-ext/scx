@@ -1649,7 +1649,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 {
 	u64 now = scx_bpf_now();
 	struct task_struct *p_map;
-	struct bpfmask_wrapper wrapper;
+	struct bpfmask_wrapper wrapper = {};
 	struct bpfmask_wrapper *mask_map_value;
 	struct task_ctx *taskc;
 	long ret;
