@@ -2904,6 +2904,7 @@ dependencies = [
  "regex",
  "scx_bpf_compat",
  "scx_cargo",
+ "scx_raw_pmu",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",

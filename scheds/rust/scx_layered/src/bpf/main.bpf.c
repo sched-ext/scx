@@ -17,6 +17,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include <lib/pmu.h>
+
 #include "intf.h"
 #include "timer.bpf.h"
 #include "util.bpf.h"
@@ -57,6 +59,7 @@ const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 const volatile bool percpu_kthread_preempt_all = false;
+const volatile u64 membw_event = 0;
 volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
@@ -1754,7 +1757,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
+static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, u64 bytes)
 {
 	s32 task_lid;
 	u64 used;
@@ -1779,12 +1782,14 @@ static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
 	 */
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
+		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OWNED] += bytes;
 		if (cpuc->protect_owned)
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
 		if (cpuc->protect_owned_preempt)
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
+		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
 	}
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
@@ -2334,7 +2339,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	account_used(cpuc, taskc, scx_bpf_now());
+	account_used(cpuc, taskc, scx_bpf_now(), 0);
 }
 
 static __noinline bool match_one(struct layer_match *match,
@@ -2898,6 +2903,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct layer *task_layer;
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
+	u64 cachelines;
 	s32 task_lid;
 	u64 runtime;
 
@@ -2913,7 +2919,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
 
-	account_used(cpuc, taskc, now);
+	/* Try to get the memory bandwdith, actively ignore the error if we fail. */
+	if (scx_pmu_read(p, membw_event, &cachelines, false))
+		cachelines = 0;
+
+	account_used(cpuc, taskc, now, cachelines * 64);
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
 		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
@@ -3140,6 +3150,12 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		return -ENOMEM;
 	}
 
+	if (membw_event) {
+		ret = scx_pmu_task_init(p);
+		if (ret)
+			return ret;
+	}
+
 	// Layer setup
 	ret = init_cached_cpus(&taskc->layered_cpus);
 	if (ret)
@@ -3228,6 +3244,9 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 
 	if (taskc->layer_id < nr_layers)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+
+	if (membw_event)
+		scx_pmu_task_fini(p);
 }
 
 void BPF_STRUCT_OPS(layered_disable, struct task_struct *p)
@@ -3844,11 +3863,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	if (ret < 0)
 		return ret;
 
+	if (membw_event) {
+		ret = scx_pmu_install(membw_event);
+		if (ret)
+			return ret;
+	}
+
 	return 0;
 }
 
 void BPF_STRUCT_OPS(layered_exit, struct scx_exit_info *ei)
 {
+	if (membw_event)
+		scx_pmu_uninstall(membw_event);
+
 	UEI_RECORD(uei, ei);
 }
 
