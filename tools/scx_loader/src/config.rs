@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::SchedMode;
 use crate::SupportedSched;
 
-#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub default_sched: Option<SupportedSched>,
@@ -24,7 +24,7 @@ pub struct Config {
     pub scheds: HashMap<String, Sched>,
 }
 
-#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize)]
 pub struct Sched {
     pub auto_mode: Option<Vec<String>>,
     pub gaming_mode: Option<Vec<String>>,
@@ -255,6 +255,40 @@ fn init_default_config_entry(scx_sched: SupportedSched) -> (String, Sched) {
         <SupportedSched as Into<&str>>::into(scx_sched).to_owned(),
         default_modes,
     )
+}
+
+/// Validates that a scheduler mode has arguments configured
+/// Returns an error if the mode is explicitly configured with empty arguments
+/// Auto mode is always allowed, even with empty arguments
+pub fn validate_mode_has_args(
+    config: &Config,
+    scx_sched: &SupportedSched,
+    sched_mode: SchedMode,
+) -> Result<(), String> {
+    // Always allow auto mode, even with empty args
+    if sched_mode == SchedMode::Auto {
+        return Ok(());
+    }
+
+    let scx_name: &str = scx_sched.clone().into();
+    if let Some(sched_config) = config.scheds.get(scx_name) {
+        let scx_flags = extract_scx_flags_from_config(sched_config, &sched_mode);
+
+        // If the mode is explicitly configured with empty arguments, return error
+        if let Some(flags) = scx_flags {
+            if flags.is_empty() {
+                let mode_str: &str = sched_mode.into();
+                return Err(format!(
+                    "error: no args set for mode {} with sched {}",
+                    mode_str, scx_name
+                ));
+            }
+        }
+        // If scx_flags is None, the mode is not configured and will use defaults (allowed)
+        // If scx_flags is Some(non_empty), the mode has arguments (allowed)
+    }
+    // If scheduler is not in config, it will use defaults (allowed)
+    Ok(())
 }
 
 #[cfg(test)]
