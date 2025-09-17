@@ -3543,7 +3543,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
         | "cascadelakex" | "arrowlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
         | "graniterapids" => {
             trace!("found Intel codename {codename}");
-            pmumanager.pmus.get("mem_load_retired.l3_miss")
+            pmumanager.pmus.get("MEM_LOAD_RETIRED.L3_MISS")
         }
 
         _ => {
@@ -3553,7 +3553,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     };
 
     let spec = pmuspec.ok_or("not_found").unwrap();
-    let config = (spec.umask << 8) | spec.event;
+    let config = (spec.umask << 8) | spec.event[0];
 
     // Install the counter in the BPF map
     skel.maps.rodata_data.as_mut().unwrap().membw_event = config;
