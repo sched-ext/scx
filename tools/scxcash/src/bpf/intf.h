@@ -27,4 +27,13 @@ struct perf_sample_event {
     u64 address; /* placeholder */
 };
 
+/* Emitted on task local storage map update; reports first 8 bytes of value. */
+struct hints_event {
+    u64 timestamp;
+    u32 pid;
+    u32 tid;
+    u32 cpu;
+    u64 hint_value;
+};
+
 #endif /* __INTF_H */

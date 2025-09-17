@@ -8,6 +8,7 @@ use clap::Parser;
 use log::*;
 
 mod monitors;
+use monitors::HintsTlsMonitor;
 use monitors::{CacheMonitor, CacheMonitorValue, PerfSampleMonitor, SoftDirtyCacheMonitor};
 use std::mem::MaybeUninit;
 pub mod bpf_intf;
@@ -52,6 +53,14 @@ struct Opts {
     /// Ring buffer size in megabytes (default is 4 MB).
     #[clap(long, default_value_t = 4)]
     ring_mb: u32,
+
+    /// Monitor task-local storage updates for a hint map.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    hints: bool,
+
+    /// Pin path of the task hint TLS map (mandatory with --hints).
+    #[clap(long = "hints-map")]
+    hints_map: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -82,10 +91,12 @@ fn main() -> Result<()> {
 
     let pid_opt = opts.pid;
 
-    let any_monitor_flag = opts.soft_dirty || opts.perf_sample;
+    let any_monitor_flag = opts.soft_dirty || opts.perf_sample || opts.hints;
     // For now support at most two monitors; use separate storages to simplify lifetimes.
     let mut soft_dirty_open: MaybeUninit<libbpf_rs::OpenObject> = MaybeUninit::uninit();
     let mut perf_open: MaybeUninit<libbpf_rs::OpenObject> = MaybeUninit::uninit();
+    let mut hints_open: MaybeUninit<libbpf_rs::OpenObject> = MaybeUninit::uninit();
+
     let mut monitors: Vec<Box<dyn CacheMonitor<'_>>> = Vec::new();
 
     let ring_size_bytes = (opts.ring_mb as u64)
@@ -98,6 +109,15 @@ fn main() -> Result<()> {
     }
     if !any_monitor_flag || opts.perf_sample {
         let monitor = PerfSampleMonitor::new(&mut perf_open, pid_opt, opts.perf_freq)?;
+        monitors.push(Box::new(monitor));
+    }
+
+    if !any_monitor_flag || opts.hints {
+        let pin_path = opts
+            .hints_map
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--hints-map must be provided with --hints"))?;
+        let monitor = HintsTlsMonitor::new(&mut hints_open, pin_path, ring_size_bytes)?;
         monitors.push(Box::new(monitor));
     }
 

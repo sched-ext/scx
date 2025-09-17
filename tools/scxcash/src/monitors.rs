@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -36,6 +37,14 @@ pub enum CacheMonitorValue {
         tid: u32,
         cpu: u32,
         address: u64,
+    },
+    /// A task hint TLS update event (first 8 bytes of value)
+    HintsUpdate {
+        timestamp: u64,
+        pid: u32,
+        tid: u32,
+        cpu: u32,
+        hint_value: u64,
     },
 }
 
@@ -303,6 +312,128 @@ impl<'a> PerfSampleMonitor<'a> {
 impl<'a> CacheMonitor<'a> for PerfSampleMonitor<'a> {
     fn poll(&mut self) -> Result<()> {
         let _ = self.perf_buf.poll(Duration::from_millis(0));
+        Ok(())
+    }
+    fn consume(&mut self, cb: &mut dyn FnMut(CacheMonitorValue)) -> Result<()> {
+        let mut q = self.events.borrow_mut();
+        while let Some(ev) = q.pop_front() {
+            cb(ev);
+        }
+        Ok(())
+    }
+}
+
+// TLS hints monitor.
+pub struct HintsTlsMonitor<'a> {
+    _skel: crate::bpf::BpfSkel<'a>,
+    _link: libbpf_rs::Link,
+    _ringbuf: RingBuffer<'a>,
+    _map_handle: libbpf_rs::MapHandle,
+    events: Rc<RefCell<VecDeque<CacheMonitorValue>>>,
+}
+
+impl<'a> HintsTlsMonitor<'a> {
+    pub fn new(
+        open_storage: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
+        pinned_map_path: &str,
+        ring_size: u64,
+    ) -> Result<Self> {
+        let mut open = crate::bpf::BpfSkelBuilder::default().open(open_storage)?;
+        let mut ring_capacity = ring_size.max(4096);
+        if !ring_capacity.is_power_of_two() {
+            ring_capacity = ring_capacity.next_power_of_two();
+        }
+        let max_entries = ring_capacity.min(u32::MAX as u64) as u32;
+        unsafe {
+            libbpf_sys::bpf_map__set_max_entries(
+                open.maps.hints_events.as_libbpf_object().as_ptr(),
+                max_entries,
+            );
+        }
+        // Open pinned TLS map and reuse its FD for our BPF program's task_hint_map
+        let c_path = std::ffi::CString::new(pinned_map_path).unwrap();
+        let fd = unsafe { libbpf_sys::bpf_obj_get(c_path.as_ptr()) };
+        if fd < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to open pinned map at {}: {}",
+                pinned_map_path,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut info = libbpf_sys::bpf_map_info::default();
+        let mut len = std::mem::size_of::<libbpf_sys::bpf_map_info>() as u32;
+        let ret = unsafe {
+            libbpf_sys::bpf_obj_get_info_by_fd(fd, &mut info as *mut _ as *mut _, &mut len)
+        };
+        if ret != 0 {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "bpf_obj_get_info_by_fd failed for {}: {}",
+                pinned_map_path,
+                std::io::Error::last_os_error()
+            ));
+        }
+        // Sanity checks: must be TASK_STORAGE and value large enough
+        const BPF_MAP_TYPE_TASK_STORAGE: u32 = 29;
+        if info.type_ != BPF_MAP_TYPE_TASK_STORAGE {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "--hints-map path is not a TASK_STORAGE map (type={})",
+                info.type_
+            ));
+        }
+        if info.value_size < 8 {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "--hints-map value size {} < 8 bytes",
+                info.value_size
+            ));
+        }
+        let map_handle = libbpf_rs::MapHandle::from_map_id(info.id)
+            .context("Failed to create MapHandle from map ID.")?;
+        let borrowed_fd = map_handle.as_fd();
+        open.maps
+            .scx_layered_task_hint_map
+            .reuse_fd(borrowed_fd)
+            .context("Failed to reuse_fd on task_hint_map")?;
+        unsafe { libc::close(fd) };
+        let skel = open.load()?;
+        let link = skel.progs.handle_map_update.attach()?;
+
+        let events = Rc::new(RefCell::new(VecDeque::new()));
+        let events_cb = Rc::clone(&events);
+        let mut builder = RingBufferBuilder::new();
+        let events_map = &skel.maps.hints_events;
+        builder.add(events_map, move |data: &[u8]| {
+            if data.len() == std::mem::size_of::<crate::bpf_intf::hints_event>() {
+                let ev: &crate::bpf_intf::hints_event = unsafe { &*(data.as_ptr() as *const _) };
+                events_cb
+                    .borrow_mut()
+                    .push_back(CacheMonitorValue::HintsUpdate {
+                        timestamp: ev.timestamp,
+                        pid: ev.pid,
+                        tid: ev.tid,
+                        cpu: ev.cpu,
+                        hint_value: ev.hint_value,
+                    });
+            }
+            0
+        })?;
+        let ringbuf = builder.build()?;
+
+        Ok(Self {
+            _skel: skel,
+            _link: link,
+            _ringbuf: ringbuf,
+            _map_handle: map_handle,
+            events,
+        })
+    }
+}
+
+impl<'a> CacheMonitor<'a> for HintsTlsMonitor<'a> {
+    fn poll(&mut self) -> Result<()> {
+        let _ = self._ringbuf.poll(Duration::from_millis(0));
         Ok(())
     }
     fn consume(&mut self, cb: &mut dyn FnMut(CacheMonitorValue)) -> Result<()> {
