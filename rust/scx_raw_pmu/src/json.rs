@@ -141,7 +141,6 @@ impl PMUManager {
     }
 
     fn read_file_counters(jsonfile: PathBuf) -> Result<Vec<PMUSpec>> {
-        println!("Reading {:?}", jsonfile);
         let content = fs::read_to_string(jsonfile)?;
 
         Ok(serde_json::from_str(&content)?)
