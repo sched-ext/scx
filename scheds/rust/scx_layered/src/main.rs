@@ -1075,7 +1075,7 @@ impl Stats {
                 .collect()
         };
 
-        // Computes the total memory traffic done since last computation and normalizes to bytes/s
+        // Computes the total memory traffic done since last computation and normalizes to GB/s
         // over the elapsed timescale.
         let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
@@ -1084,7 +1084,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| (c - p) as f64 / elapsed_f64)
+                        .map(|(c, p)| ((c - p) as f64 / (1024 as f64).powf(3.0)) / elapsed_f64)
                         .collect()
                 })
                 .collect()
@@ -1114,7 +1114,9 @@ impl Stats {
 
         let layer_utils: Vec<Vec<f64>> =
             metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
+        println!("Bandwidth vector {:?}", cur_layer_membw);
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
+        println!("Total {:?}", layer_membws.iter().map(|x| x.iter().map(|&y| y as f64).sum::<f64>()).collect::<Vec<f64>>());
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
@@ -2578,13 +2580,15 @@ impl<'a> Scheduler<'a> {
     fn clamp_target_by_membw(
         &self,
         layer: &Layer,
-        membw_limit: usize,
-        last_membw: usize,
-        low: usize,
-        high: usize,
-    ) -> usize {
-        let ncpu = layer.cpus.weight();
-        let last_membw_percpu = if ncpu > 0 { last_membw / ncpu } else { 0 };
+        membw_limit: f64,
+        membw: f64,
+        low: u64,
+        high: u64,
+    ) -> u64 {
+        let ncpu: u64 = layer.cpus.weight() as u64;
+        let membw = (membw * (1024 as f64).powf(3.0)).round() as u64;
+        let membw_limit = (membw_limit * (1024 as f64).powf(3.0)).round() as u64;
+        let last_membw_percpu = if ncpu > 0 { membw / ncpu } else { 0 };
 
         // If there's no way we're hitting the limit, we're good.
         if last_membw_percpu * high < membw_limit {
@@ -2595,6 +2599,7 @@ impl<'a> Scheduler<'a> {
         // pin the target CPUs to low and drop a warning.
         if last_membw_percpu * low > membw_limit {
             warn!("cannot satisfy memory bw limit for layer {}", layer.name);
+            warn!("last_membw_percpu {last_membw_percpu} membw_limit {membw_limit}");
             return low;
         }
 
@@ -2610,6 +2615,7 @@ impl<'a> Scheduler<'a> {
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.topo.all_cpus.len();
         let utils = &self.sched_stats.layer_utils;
+        let membws= &self.sched_stats.layer_membws;
 
         let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
         let mut targets: Vec<(usize, usize)> = vec![];
@@ -2637,29 +2643,39 @@ impl<'a> Scheduler<'a> {
                     let owned = utils[idx][LAYER_USAGE_OWNED];
                     let open = utils[idx][LAYER_USAGE_OPEN];
 
+                    let membw_owned = membws[idx][LAYER_USAGE_OWNED];
+                    let membw_open = membws[idx][LAYER_USAGE_OPEN];
+
                     let mut util = owned;
+                    let mut membw= membw_owned;
                     if layer.kind.util_includes_open_cputime() || layer.nr_cpus == 0 {
                         util += open;
+                        membw += membw_open;
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
                     let mut high = ((util / util_range.0).floor() as usize).max(low);
 
-                    if let Some(membw_limit) = membw_gb {
-                        let membw_cpus = &self.sched_stats.layer_membws[idx];
-                        let last_membw = membw_cpus.into_iter().map(|x: &f64| *x as usize).sum();
-                        trace!(
-                            "(last_membw, membw_limit): ({last_membw} bytes, {membw_limit} GiB)"
-                        );
+                    let membw_limit = match membw_gb {
+                        Some(membw_limit) => *membw_limit,
+                        None => 0.0
+                    };
 
+                    trace!(
+                        "(membw, membw_limit): ({membw} gi_b, {membw_limit} gi_b)"
+                    );
+
+                    println!("{} Getting {}gi_b, Limit is {}gi_b", layer.name, membw, membw_limit);
+
+                    if membw_limit > 0.0 {
                         high = self.clamp_target_by_membw(
                             &layer,
-                            (*membw_limit * (1024_u64.pow(3) as f64)) as usize,
-                            last_membw,
-                            low,
-                            high,
-                        );
+                            membw_limit as f64,
+                            membw as f64,
+                            low as u64,
+                            high as u64,
+                        ) as usize;
                     }
 
                     let target = layer.cpus.weight().clamp(low, high);
@@ -2677,7 +2693,7 @@ impl<'a> Scheduler<'a> {
 
                     (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
                 }
-                LayerKind::Open { .. } => (0, 0),
+                LayerKind::Open { .. } => { (0, 0) },
             });
         }
 
