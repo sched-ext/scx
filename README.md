@@ -271,7 +271,7 @@ $ scx_rustland --monitor 5
 
 See: [scx_loader](tools/scx_loader/README.md) and [scxctl](tools/scxctl/README.md)
 
-See also migration guide from `scx.service` to `scx_loader.service`: [guide](services/systemd/MIGRATION_GUIDE.md)
+See also migration guide from `scx.service` to `scx_loader.service`: [GUIDE](services/systemd/README.md)
 
 ## Kernel Feature Status
 
