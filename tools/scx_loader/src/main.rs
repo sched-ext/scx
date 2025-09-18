@@ -100,6 +100,7 @@ impl ScxLoader {
     #[zbus(property)]
     async fn supported_schedulers(&self) -> Vec<&str> {
         vec![
+            "scx_beerland",
             "scx_bpfland",
             "scx_cosmos",
             "scx_flash",

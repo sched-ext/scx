@@ -76,6 +76,13 @@ gaming_mode = ["-c", "0", "-p", "0"]
 lowlatency_mode = ["-m", "performance", "-c", "0", "-p", "0", "-w"]
 powersave_mode = ["-m", "powersave", "-d", "-p", "5000"]
 server_mode = ["-a", "-s", "20000"]
+
+[scheds.scx_beerland]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
 ```
 
 **`default_sched`:**
@@ -137,6 +144,8 @@ The example configuration above shows how to set custom flags for different sche
     * Low Latency mode: `-m performance -c 0 -p 0 -w`
     * Power Save mode: `-m powersave -d -p 5000`
     * Server mode: `-a -s 20000`
+* For `scx_beerland`:
+    * No custom flags are defined, so the default flags for each mode will be used.
 
 ## Fallback Behavior
 
