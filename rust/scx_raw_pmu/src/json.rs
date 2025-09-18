@@ -17,16 +17,39 @@ use anyhow::Result;
 
 use std::collections::HashMap;
 
-/// Exclude metric groups
-
 fn hex_to_u64<'de, D>(de: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s: &str = Deserialize::deserialize(de)?;
+    let s = s.to_lowercase();
     let s = s.trim_start_matches("0x");
     u64::from_str_radix(s, 16).map_err(serde::de::Error::custom)
 }
+
+// Intel offcore (OCR) events return two event codes, because
+// codes represent event slots and not the events themselves.
+fn hexlist<'de, D>(de: D) -> Result<Vec<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut result = vec![];
+    let s: &str = Deserialize::deserialize(de)?;
+    for token in s.split(',') {
+        let radix = if token.to_lowercase().starts_with("0x") {
+            16
+        } else {
+            10
+        };
+        let event = u64::from_str_radix(token.to_lowercase().trim_start_matches("0x"), radix)
+            .map_err(serde::de::Error::custom)?;
+
+        result.push(event);
+    }
+
+    Ok(result)
+}
+
 fn num_to_bool<'de, D>(de: D) -> Result<bool, D::Error>
 where
     D: Deserializer<'de>,
@@ -48,8 +71,8 @@ pub struct PMUSpec {
     desc_public: Option<String>,
 
     #[serde(alias = "EventCode")]
-    #[serde(deserialize_with = "hex_to_u64")]
-    pub event: u64,
+    #[serde(deserialize_with = "hexlist")]
+    pub event: Vec<u64>,
 
     #[serde(alias = "EventName")]
     pub name: String,
@@ -87,13 +110,15 @@ pub struct PMUSpec {
     invert: bool,
 
     #[serde(alias = "MSRIndex")]
-    msr_index: Option<Vec<String>>,
+    #[serde(deserialize_with = "hexlist", default)]
+    msr_index: Vec<u64>,
 
     #[serde(alias = "MSRValue")]
-    msr_value: Option<String>,
+    #[serde(deserialize_with = "hex_to_u64")]
+    msr_value: u64,
 
     #[serde(alias = "Counter")]
-    counter: Option<Vec<u64>>,
+    counter: Option<String>,
 
     #[serde(alias = "CounterNumFixed")]
     counters_num_fixed: Option<u64>,
@@ -119,8 +144,10 @@ impl PMUManager {
 
         let cpuinfo = CpuInfo::from_buf_read(bufreader)?;
         Ok(format!(
-            "{}-{}-{}",
-            cpuinfo.fields["vendor_id"], cpuinfo.fields["cpu family"], cpuinfo.fields["model"]
+            "{}-{}-{:X}",
+            cpuinfo.fields["vendor_id"],
+            cpuinfo.fields["cpu family"],
+            cpuinfo.fields["model"].parse::<i32>().unwrap()
         ))
     }
 
@@ -148,8 +175,18 @@ impl PMUManager {
 
     fn read_all_counters(jsondir: PathBuf) -> Result<HashMap<String, PMUSpec>> {
         let mut pmuspecs = HashMap::new();
-        for file in fs::read_dir(jsondir)? {
-            let counters = Self::read_file_counters(file?.path().as_path().canonicalize()?)?;
+        for entry in fs::read_dir(jsondir)? {
+            let filename = entry?.path().as_path().canonicalize()?;
+            // metricgroups.json isn't actually PMU definitions.
+            if filename
+                .to_str()
+                .expect("no filename")
+                .ends_with("metricgroups.json")
+            {
+                continue;
+            }
+
+            let counters = Self::read_file_counters(filename)?;
 
             for counter in counters.iter() {
                 pmuspecs.insert(String::from(&counter.name), counter.clone());
@@ -206,7 +243,6 @@ impl PMUManager {
         let (path, codename) = Self::spec_dir(dataroot.clone(), &arch, tuple.as_str())?;
 
         let jsondir = dataroot.join(&tuple).join(&arch).join(&path);
-        println!("JSONDIR {:?}", &jsondir);
 
         let pmus = Self::read_all_counters(jsondir)?;
 
