@@ -243,32 +243,25 @@ int scx_pmu_read(struct task_struct __arg_trusted *p, u64 event, u64 *value, boo
 	return 0;
 }
 
-SEC("tp/sched/sched_switch")
-int scx_pmu_tc(struct trace_event_raw_sched_switch *args)
+SEC("tp_btf/sched_switch")
+int scx_pmu_tc(u64 *ctx)
 {
 	struct task_struct *prev, *next;
 	int ret;
 
+	prev = (struct task_struct *)ctx[1];
+	next = (struct task_struct *)ctx[2];
 
-	if (!args->prev_pid)
+	if (!prev->pid)
 		goto next;
 
-	prev = bpf_task_from_pid(args->prev_pid);
-	if (!prev)
-		return -ENOENT;
-
 	ret = scx_pmu_event_stop(prev);
-	bpf_task_release(prev);
 	if (ret)
 		return ret;
 
 next:
-	next = bpf_task_from_pid(args->next_pid);
-	if (!next)
-		return -ENOENT;
+	if (!next->pid)
+		return 0;
 
-	ret = scx_pmu_event_start(next);
-	bpf_task_release(next);
-
-	return ret;
+	return scx_pmu_event_start(next);
 }
