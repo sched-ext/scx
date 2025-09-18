@@ -36,6 +36,8 @@ pub enum SupportedSched {
     Rustland,
     #[serde(rename = "scx_cosmos")]
     Cosmos,
+    #[serde(rename = "scx_beerland")]
+    Beerland,
 }
 
 impl FromStr for SupportedSched {
@@ -43,6 +45,7 @@ impl FromStr for SupportedSched {
 
     fn from_str(scx_name: &str) -> anyhow::Result<SupportedSched> {
         match scx_name {
+            "scx_beerland" => Ok(SupportedSched::Beerland),
             "scx_bpfland" => Ok(SupportedSched::Bpfland),
             "scx_cosmos" => Ok(SupportedSched::Cosmos),
             "scx_flash" => Ok(SupportedSched::Flash),
@@ -66,6 +69,7 @@ impl TryFrom<&str> for SupportedSched {
 impl From<SupportedSched> for &str {
     fn from(scx_name: SupportedSched) -> Self {
         match scx_name {
+            SupportedSched::Beerland => "scx_beerland",
             SupportedSched::Bpfland => "scx_bpfland",
             SupportedSched::Cosmos => "scx_cosmos",
             SupportedSched::Flash => "scx_flash",
