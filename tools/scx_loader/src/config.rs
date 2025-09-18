@@ -87,6 +87,7 @@ pub fn get_default_config() -> Config {
         SupportedSched::Tickless,
         SupportedSched::Rustland,
         SupportedSched::Cosmos,
+        SupportedSched::Beerland,
     ];
     let scheds_map = HashMap::from(supported_scheds.map(|x| init_default_config_entry(x)));
     Config {
@@ -234,6 +235,8 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
             SchedMode::Server => vec!["-a", "-s", "20000"],
             SchedMode::Auto => vec!["-d"],
         },
+        // scx_beerland doesn't support any of these modes
+        SupportedSched::Beerland => vec![],
     }
 }
 
@@ -310,6 +313,13 @@ gaming_mode = ["-c", "0", "-p", "0"]
 lowlatency_mode = ["-m", "performance", "-c", "0", "-p", "0", "-w"]
 powersave_mode = ["-m", "powersave", "-d", "-p", "5000"]
 server_mode = ["-a", "-s", "20000"]
+
+[scheds.scx_beerland]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
 "#;
 
         let parsed_config = parse_config_content(config_str).expect("Failed to parse config");
