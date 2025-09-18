@@ -2770,6 +2770,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_beerland"
+version = "1.0.2"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "ctrlc",
+ "libbpf-rs",
+ "log",
+ "scx_cargo",
+ "scx_stats",
+ "scx_stats_derive",
+ "scx_utils",
+ "serde",
+ "simplelog",
+]
+
+[[package]]
 name = "scx_bpf_compat"
 version = "1.0.17"
 dependencies = [
