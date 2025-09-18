@@ -294,18 +294,41 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Set the name of the scx ops.
-    fn set_scx_ops_name(dst: &mut [i8], s: &str) -> Result<()> {
-        if !s.is_ascii() {
+    fn set_scx_ops_name(name_field: &mut [i8], src: &str) -> Result<()> {
+        if !src.is_ascii() {
             bail!("name must be an ASCII string");
         }
 
-        let bytes = s.as_bytes();
-        let n = bytes.len().min(dst.len().saturating_sub(1));
+        let bytes = src.as_bytes();
+        let n = bytes.len().min(name_field.len().saturating_sub(1));
 
-        dst.fill(0);
+        name_field.fill(0);
         for i in 0..n {
-            dst[i] = bytes[i] as i8;
+            name_field[i] = bytes[i] as i8;
         }
+
+        let version_suffix = ::scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
+        let bytes = version_suffix.as_bytes();
+        let mut i = 0;
+        let mut bytes_idx = 0;
+        let mut found_null = false;
+
+        while i < name_field.len() - 1 {
+            found_null |= name_field[i] == 0;
+            if !found_null {
+                i += 1;
+                continue;
+            }
+
+            if bytes_idx < bytes.len() {
+                name_field[i] = bytes[bytes_idx] as i8;
+                bytes_idx += 1;
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        name_field[i] = 0;
 
         Ok(())
     }
