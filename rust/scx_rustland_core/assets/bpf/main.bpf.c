@@ -1168,7 +1168,7 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	if (err)
 		scx_bpf_error("Failed to arm stats timer");
 
-	return 0;
+	return err;
 }
 
 /*
