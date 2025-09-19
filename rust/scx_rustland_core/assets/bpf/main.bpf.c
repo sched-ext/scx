@@ -947,7 +947,10 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * dispatch them on the target CPU decided by the user-space
 	 * scheduler.
 	 */
-	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, BPF_RB_NO_WAKEUP);
+	s32 ret = bpf_user_ringbuf_drain(&dispatched,
+					 handle_dispatched_task, NULL, BPF_RB_NO_WAKEUP);
+	if (ret)
+		dbg_msg("User ringbuf drain error: %d", ret);
 
 	/*
 	 * Consume a task from the per-CPU DSQ.
