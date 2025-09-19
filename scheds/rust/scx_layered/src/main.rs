@@ -3526,7 +3526,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
 
 // Set up the counters
 fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
-    let pmumanager = PMUManager::new(None)?;
+    let pmumanager = PMUManager::new()?;
     let codename = &pmumanager.codename as &str;
 
     let pmuspec = match codename {
