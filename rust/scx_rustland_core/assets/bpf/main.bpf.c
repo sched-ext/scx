@@ -68,11 +68,6 @@ u64 usersched_last_run_at; /* Timestamp of the last user-space scheduler executi
 static u64 nr_cpu_ids; /* Maximum possible CPU number */
 
 /*
- * Switch all tasks or SCHED_EXT tasks.
- */
-const volatile bool switch_partial;
-
-/*
  * Number of tasks that are queued for scheduling.
  *
  * This number is incremented by the BPF component when a task is queued to the
