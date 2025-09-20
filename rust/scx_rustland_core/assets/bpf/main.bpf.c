@@ -13,7 +13,7 @@
  * to be dispatched in the proper order.
  *
  * Messages between the BPF component and the user-space scheduler are passed
- * using BPF_MAP_TYPE_RINGBUFFER / BPF_MAP_TYPE_USER_RINGBUF maps: @queued for
+ * using BPF_MAP_TYPE_RINGBUF / BPF_MAP_TYPE_USER_RINGBUF maps: @queued for
  * the messages sent by the BPF dispatcher to the user-space scheduler and
  * @dispatched for the messages sent by the user-space scheduler to the BPF
  * dispatcher.
@@ -68,11 +68,6 @@ u64 usersched_last_run_at; /* Timestamp of the last user-space scheduler executi
 static u64 nr_cpu_ids; /* Maximum possible CPU number */
 
 /*
- * Switch all tasks or SCHED_EXT tasks.
- */
-const volatile bool switch_partial;
-
-/*
  * Number of tasks that are queued for scheduling.
  *
  * This number is incremented by the BPF component when a task is queued to the
@@ -101,7 +96,7 @@ volatile u64 nr_user_dispatches, nr_kernel_dispatches,
 /* Failure statistics */
 volatile u64 nr_failed_dispatches, nr_sched_congested;
 
- /* Report additional debugging information */
+/* Report additional debugging information */
 const volatile bool debug;
 
 /* Rely on the in-kernel idle CPU selection policy */
@@ -151,9 +146,9 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 #define MAX_DISPATCH_SLOT (MAX_ENQUEUED_TASKS / 8)
 
 /*
- * The map containing tasks that are queued to user space from the kernel.
+ * The map containing tasks that are queued to user-space from the kernel.
  *
- * This map is drained by the user space scheduler.
+ * This map is drained by the user-space scheduler.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -162,7 +157,7 @@ struct {
 } queued SEC(".maps");
 
 /*
- * The user ring buffer containing pids that are dispatched from user space to
+ * The user ring buffer containing pids that are dispatched from user-space to
  * the kernel.
  *
  * Drained by the kernel in .dispatch().
