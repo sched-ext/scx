@@ -372,7 +372,7 @@ static bool usersched_has_pending_tasks(void)
 static u64 cpu_to_dsq(s32 cpu)
 {
 	if (cpu < 0 || cpu >= MAX_CPUS) {
-		scx_bpf_error("Invalid cpu: %d", cpu);
+		dbg_msg("Invalid cpu: %d", cpu);
 		return SHARED_DSQ;
 	}
 	return (u64)cpu;
