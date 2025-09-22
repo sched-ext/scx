@@ -2913,7 +2913,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct layer *task_layer;
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
-	u64 cachelines;
 	s32 task_lid;
 	u64 runtime;
 
