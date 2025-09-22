@@ -248,6 +248,24 @@ static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
 }
 
 /*
+ * v6.18: Introduce lockless peek API for user DSQs.
+ *
+ * Preserve the following macro until v6.20.
+ */
+static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (bpf_ksym_exists(scx_bpf_dsq_peek))
+		return scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+
+	return NULL;
+}
+
+/*
  * Define sched_ext_ops. This may be expanded to define multiple variants for
  * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
  */
