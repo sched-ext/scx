@@ -27,6 +27,7 @@ struct {
 struct scx_pmu_counters {
 	u64 start[SCX_MAX_PMU_COUNTERS];
 	u64 agg[SCX_MAX_PMU_COUNTERS];
+	bool switched;
 	u32 gen;
 };
 
@@ -72,6 +73,11 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 		if (ret)
 			return ret;
 
+		if (unlikely(!cntrs->switched && value.enabled != value.running)) {
+			bpf_printk("SWITCHED: %ld vs %ld", value.enabled, value.running);
+			cntrs->switched = true;
+		}
+
 		/* Add the delta for this scheduling interval. */
 		cntrs->agg[idx] += value.counter - cntrs->start[idx];
 
@@ -82,7 +88,7 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 	return 0;
 }
 
-int scx_pmu_event_start(struct task_struct __arg_trusted *p)
+int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 {
 	struct bpf_perf_event_value value;
 	struct scx_pmu_counters *cntrs;
@@ -105,6 +111,9 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p)
 		ret = bpf_perf_event_read_value(&scx_pmu_map, BPF_F_CURRENT_CPU, &value, sizeof(value));
 		if (ret)
 			return ret;
+
+		if (update)
+			cntrs->agg[idx] += value.counter - cntrs->start[idx];
 
 		/* Add the delta for this scheduling interval. */
 		cntrs->start[idx] = value.counter;
@@ -244,7 +253,7 @@ int scx_pmu_read(struct task_struct __arg_trusted *p, u64 event, u64 *value, boo
 }
 
 SEC("tp_btf/sched_switch")
-int scx_pmu_tc(u64 *ctx)
+int scx_pmu_switch_tc(u64 *ctx)
 {
 	struct task_struct *prev, *next;
 	int ret;
@@ -263,5 +272,24 @@ next:
 	if (!next->pid)
 		return 0;
 
-	return scx_pmu_event_start(next);
+	return scx_pmu_event_start(next, false);
+}
+
+SEC("fentry/scx_tick")
+int scx_pmu_tick_tc(u64 *ctx)
+{
+	struct task_struct *p;
+	int ret;
+
+	p = bpf_get_current_task_btf();
+	if (!p)
+		return 0;
+
+	if (!p->pid) {
+		return 0;
+	}
+
+	ret = scx_pmu_event_start(p, true);
+
+	return 0;
 }
