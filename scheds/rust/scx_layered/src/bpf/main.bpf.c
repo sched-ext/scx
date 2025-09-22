@@ -1757,10 +1757,16 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, u64 bytes)
+static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
 {
 	s32 task_lid;
 	u64 used;
+	u64 bytes;
+
+	/* Try to get the memory bandwdith, actively ignore the error if we fail. */
+	if (scx_pmu_read(p, membw_event, &bytes, true))
+		bytes = 0;
+	bytes *= 64;
 
 	used = now - cpuc->used_at;
 	if (!used)
@@ -1783,10 +1789,14 @@ static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, 
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OWNED] += bytes;
-		if (cpuc->protect_owned)
+		if (cpuc->protect_owned) {
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-		if (cpuc->protect_owned_preempt)
+			cpuc->layer_membw_agg[task_lid][LAYER_USAGE_PROTECTED] += bytes;
+		}
+		if (cpuc->protect_owned_preempt) {
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
+			cpuc->layer_membw_agg[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
+		}
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
@@ -2339,7 +2349,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	account_used(cpuc, taskc, scx_bpf_now(), 0);
+	account_used(p, cpuc, taskc, scx_bpf_now());
 }
 
 static __noinline bool match_one(struct layer_match *match,
@@ -2919,11 +2929,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
 
-	/* Try to get the memory bandwdith, actively ignore the error if we fail. */
-	if (scx_pmu_read(p, membw_event, &cachelines, false))
-		cachelines = 0;
-
-	account_used(cpuc, taskc, now, cachelines * 64);
+	account_used(p, cpuc, taskc, now);
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
 		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
