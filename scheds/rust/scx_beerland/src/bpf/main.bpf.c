@@ -421,9 +421,6 @@ static bool dispatch_from_remote_cpu(s32 from_cpu)
 	 *
 	 * Restricting rebalancing to the LLC improves cache locality and
 	 * also reduces lock contention on CPU runqueues.
-	 *
-	 * TODO: Rewrite this when we'll have an API to peek from a remote
-	 * DSQ in a lockless way.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct task_struct *p;
@@ -431,14 +428,14 @@ static bool dispatch_from_remote_cpu(s32 from_cpu)
 		if (cpu == from_cpu)
 			continue;
 
-		bpf_for_each(scx_dsq, p, cpu, 0) {
-			if (bpf_cpumask_test_cpu(from_cpu, p->cpus_ptr) &&
-			    p->scx.dsq_vtime < min_vtime) {
-				min_vtime = p->scx.dsq_vtime;
-				min_cpu = cpu;
-			}
-			break;
+		bpf_rcu_read_lock();
+		p = __COMPAT_scx_bpf_dsq_peek(cpu);
+		if (p && bpf_cpumask_test_cpu(from_cpu, p->cpus_ptr) &&
+		    p->scx.dsq_vtime < min_vtime) {
+			min_vtime = p->scx.dsq_vtime;
+			min_cpu = cpu;
 		}
+		bpf_rcu_read_unlock();
 	}
 
 	return min_vtime < ULLONG_MAX && scx_bpf_dsq_move_to_local(min_cpu);
