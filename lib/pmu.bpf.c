@@ -252,7 +252,7 @@ int scx_pmu_read(struct task_struct __arg_trusted *p, u64 event, u64 *value, boo
 	return 0;
 }
 
-SEC("tp_btf/sched_switch")
+SEC("?tp_btf/sched_switch")
 int scx_pmu_switch_tc(u64 *ctx)
 {
 	struct task_struct *prev, *next;
@@ -275,7 +275,7 @@ next:
 	return scx_pmu_event_start(next, false);
 }
 
-SEC("fentry/scx_tick")
+SEC("?fentry/scx_tick")
 int scx_pmu_tick_tc(u64 *ctx)
 {
 	struct task_struct *p;
