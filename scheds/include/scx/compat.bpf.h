@@ -231,6 +231,41 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	 scx_bpf_pick_any_cpu(cpus_allowed, flags))
 
 /*
+ * v6.18: Add a helper to retrieve the current task running on a CPU.
+ *
+ * Keep this helper available until v6.20 for compatibility.
+ */
+static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
+{
+	struct rq *rq;
+
+	if (bpf_ksym_exists(scx_bpf_cpu_curr))
+		return scx_bpf_cpu_curr(cpu);
+
+	rq = scx_bpf_cpu_rq(cpu);
+
+	return rq ? rq->curr : NULL;
+}
+
+/*
+ * v6.18: Introduce lockless peek API for user DSQs.
+ *
+ * Preserve the following macro until v6.19.
+ */
+static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (bpf_ksym_exists(scx_bpf_dsq_peek))
+		return scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+
+	return NULL;
+}
+
+/*
  * Define sched_ext_ops. This may be expanded to define multiple variants for
  * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
  */

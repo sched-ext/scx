@@ -67,6 +67,7 @@ void scx_bpf_dsq_insert_vtime(struct task_struct *p, u64 dsq_id, u64 slice, u64 
 u32 scx_bpf_dispatch_nr_slots(void) __ksym;
 void scx_bpf_dispatch_cancel(void) __ksym;
 bool scx_bpf_dsq_move_to_local(u64 dsq_id) __ksym __weak;
+struct task_struct *scx_bpf_dsq_peek(u64 dsq_id) __ksym __weak;
 void scx_bpf_dsq_move_set_slice(struct bpf_iter_scx_dsq *it__iter, u64 slice) __ksym __weak;
 void scx_bpf_dsq_move_set_vtime(struct bpf_iter_scx_dsq *it__iter, u64 vtime) __ksym __weak;
 bool scx_bpf_dsq_move(struct bpf_iter_scx_dsq *it__iter, struct task_struct *p, u64 dsq_id, u64 enq_flags) __ksym __weak;
@@ -103,6 +104,8 @@ s32 scx_bpf_pick_any_cpu(const cpumask_t *cpus_allowed, u64 flags) __ksym;
 bool scx_bpf_task_running(const struct task_struct *p) __ksym;
 s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
 struct rq *scx_bpf_cpu_rq(s32 cpu) __ksym;
+struct rq *scx_bpf_locked_rq(void) __ksym;
+struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym __weak;
 struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym __weak;
 u64 scx_bpf_now(void) __ksym __weak;
 void scx_bpf_events(struct scx_event_stats *events, size_t events__sz) __ksym __weak;
@@ -341,7 +344,6 @@ void bpf_task_release(struct task_struct *p) __ksym;
 
 /* cgroup */
 struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
-struct cgroup *bpf_cgroup_acquire(struct cgroup *cgrp) __ksym;
 void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
 struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
 
@@ -761,14 +763,6 @@ static inline u64 scale_by_task_weight(const struct task_struct *p, u64 value)
 static inline u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 value)
 {
 	return value * 100 / p->scx.weight;
-}
-
-/*
- * Get a random u64 from the kernel's pseudo-random generator.
- */
-static inline u64 get_prandom_u64()
-{
-	return ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
 }
 
 
