@@ -279,7 +279,6 @@ SEC("?fentry/scx_tick")
 int scx_pmu_tick_tc(u64 *ctx)
 {
 	struct task_struct *p;
-	int ret;
 
 	p = bpf_get_current_task_btf();
 	if (!p)
@@ -289,7 +288,8 @@ int scx_pmu_tick_tc(u64 *ctx)
 		return 0;
 	}
 
-	ret = scx_pmu_event_start(p, true);
+	/* Tracepoints not allowed to return errors. */
+	scx_pmu_event_start(p, true);
 
 	return 0;
 }
