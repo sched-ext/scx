@@ -560,7 +560,7 @@ impl<'a> Scheduler<'a> {
         let mut all_counters = Vec::new();
 
         // Read counters for each function
-        for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
+        for counter_idx in 0..bpf_intf::fn_counter_idx_NR_COUNTERS {
             let key = (counter_idx as u32).to_ne_bytes();
 
             // Read per-CPU values
@@ -620,7 +620,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Zero out all counters after printing
-        for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
+        for counter_idx in 0..bpf_intf::fn_counter_idx_NR_COUNTERS {
             let key = (counter_idx as u32).to_ne_bytes();
             let zero_value = 0u64.to_ne_bytes().to_vec();
 

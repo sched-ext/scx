@@ -46,7 +46,7 @@ enum cell_stat_idx {
 };
 
 /* Function invocation counters */
-enum counter_idx {
+enum fn_counter_idx {
 	COUNTER_SELECT_CPU,
 	COUNTER_ENQUEUE,
 	COUNTER_DISPATCH,

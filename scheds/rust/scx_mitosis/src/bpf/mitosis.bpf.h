@@ -56,7 +56,7 @@ enum mitosis_constants {
 	ROOT_CELL_ID = 0,
 
 	/* Invalid/unset L3 value */
-	INVALID_L3_ID = -1,
+	// INVALID_L3_ID = -1,
 
 	/* Default weight divisor for vtime calculation */
 	DEFAULT_WEIGHT_MULTIPLIER = 100,
@@ -118,12 +118,15 @@ struct task_ctx {
 	s32 pending_l3;
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
+	u32 steals_prevented; /* how many times this task has been prevented from being stolen */
 #endif
 };
 
 // These could go in mitosis.bpf.h, but we'll cross that bridge when we get
 static inline struct cell *lookup_cell(int idx);
 static inline const struct cpumask *lookup_cell_cpumask(int idx);
+
+static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 
 /* MAP TYPES */
 struct function_counters_map {
@@ -132,3 +135,44 @@ struct function_counters_map {
 	__type(value, u64);
 	__uint(max_entries, NR_COUNTERS);
 };
+
+// static __always_inline void task_release_cleanup(struct task_struct **pp)
+// {
+// 	if (*pp)
+// 		bpf_task_release(*pp);
+// }
+
+// #define SCOPED_TASK __attribute__((cleanup(task_release_cleanup)))
+
+// __always_inline struct task_struct * dsq_head_peek(u64 dsq_id, task_struct *p)
+// {
+// 	bpf_rcu_read_lock();
+// 	struct task_struct *p = NULL;
+// 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+// 		bpf_task_acquire(p); /* extend lifetime beyond loop */
+// 		break;               /* only want the head */
+// 	}
+// 	bpf_rcu_read_unlock();
+
+// 	return p;
+// }
+
+// static __always_inline struct task_struct *
+// dsq_head_peek(u64 dsq_id)
+// {
+// 	struct bpf_iter_scx_dsq it = {};
+// 	struct task_struct *p;
+
+// 	if (bpf_iter_scx_dsq_new(&it, dsq_id, 0))
+// 		return NULL;
+
+// 	/* First element in dispatch order is the head. */
+// 	p = bpf_iter_scx_dsq_next(&it);
+
+// 	/* Take a ref so the pointer remains valid after we destroy the iter. */
+// 	if (p)
+// 		bpf_task_acquire(p);
+
+// 	bpf_iter_scx_dsq_destroy(&it);
+// 	return p; /* caller must bpf_task_release(p) when done */
+// }
