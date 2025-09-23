@@ -68,7 +68,7 @@ enum consts {
 	SCXCMD_COMLEN		= 13,
 	MAX_GPU_PIDS 		= 100000,
 
-	MEMBER_NOEXPIRE		= 0,
+	MEMBER_NOEXPIRE		= (u32)-1,
 };
 
 static inline void ___consts_sanity_check___(void) {

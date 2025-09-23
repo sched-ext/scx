@@ -243,18 +243,28 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } layer_match_dbg SEC(".maps");
 
+/*
+ * Maps for storing GPU usage information. Keys are the tgid of the
+ * task group that has recently used a GPU API call. The value represents
+ * the time until which the entry is valid. Entries are checked and
+ * possibly removed at layer matching time, and updated when the GPU
+ * API is used by a task group.
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
-	__type(value, u32);
+	__type(value, u64);
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tgid SEC(".maps");
 
+/*
+ * See comment for gpu_tgid - same mechanism, except for individual tasks.
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u32);
-	__type(value, u32);
+	__type(value, u64);
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tid SEC(".maps");
@@ -589,7 +599,7 @@ struct task_ctx {
 	char 			join_layer[SCXCMD_COMLEN];
 	u64			layer_refresh_seq;
 
-	u64			member_expire;
+	u64			member_expire_at;
 };
 
 struct {
@@ -690,8 +700,8 @@ int save_gpu_tgid_pid(void) {
 	struct task_struct *p = NULL;
 	struct task_ctx *taskc;
 	u64 pid_tgid;
-	u32 pid, tid, zero;
-	zero = 0;
+	u32 pid, tid;
+	u64 timestamp = 0;
 
 	pid_tgid = bpf_get_current_pid_tgid();
 	pid = pid_tgid >> 32;
@@ -704,10 +714,12 @@ int save_gpu_tgid_pid(void) {
 				trace("New GPU tid: %d, force to refresh layer", tid);
 				taskc->refresh_layer = true;
 			}
+
+			timestamp = taskc->running_at;
 		}
 	}
-	bpf_map_update_elem(&gpu_tid, &tid, &zero, BPF_ANY);
-	bpf_map_update_elem(&gpu_tgid, &pid, &zero, BPF_ANY);
+	bpf_map_update_elem(&gpu_tid, &tid, &timestamp, BPF_ANY);
+	bpf_map_update_elem(&gpu_tgid, &pid, &timestamp, BPF_ANY);
 	return 0;
 }
 
@@ -1759,15 +1771,14 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-static inline void ttl_tick(struct task_ctx *taskc, u64 now)
+static inline void check_member_expired(struct task_ctx *taskc, u64 now)
 {
 	/* If TTL matching is on, decrement TTL and force matching refresh if applicable. */
-	if (taskc->member_expire == MEMBER_NOEXPIRE)
+	if (taskc->member_expire_at == MEMBER_NOEXPIRE)
 		return;
 
-	/* Use GiB to make the division cheap. */
-	if (now >= taskc->member_expire ) {
-		taskc->member_expire = MEMBER_NOEXPIRE;
+	if (now >= taskc->member_expire_at) {
+		taskc->member_expire_at = MEMBER_NOEXPIRE;
 		taskc->refresh_layer = true;
 	}
 }
@@ -1790,7 +1801,7 @@ static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, 
 	cpuc->used_at = now;
 	cpuc->usage += used;
 
-	ttl_tick(taskc, now);
+	check_member_expired(taskc, now);
 
 	/*
 	 * protect_owned/preempt accounting is a bit wrong in that they charge
@@ -2359,7 +2370,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	account_used(cpuc, taskc, scx_bpf_now(), 0);
 }
 
-static __noinline bool match_one(struct layer_match *match,
+static __noinline bool match_one(struct layer_match *match, struct task_ctx *taskc,
 				 struct task_struct *p, const char *cgrp_path)
 {
 	bool result = false;
@@ -2460,35 +2471,39 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_IS_KTHREAD:
 		return p->flags & PF_KTHREAD;
-			u32 tid;
-			bool pid_present = false;
 
-			if (!enable_gpu_support)
-				scx_bpf_error("UsedGpuTid requires --enable_gpu_support");
-
-			tid = p->pid;
-
-			if (bpf_map_lookup_elem(&gpu_tid, &tid))
-				pid_present = true;
-
-			return pid_present == match->used_gpu_tid;
 	case MATCH_USED_GPU_TID:
 	case MATCH_USED_GPU_PID: {
 			u32 key = (match->kind == MATCH_USED_GPU_TID) ? p->pid : p->tgid;
 			bool used = (match->kind == MATCH_USED_GPU_TID) ? match->used_gpu_tid : match->used_gpu_pid;
-			u32 *present;
+			u64 *timestamp;
 
 			if (!enable_gpu_support)
 				scx_bpf_error("UsedGpuPid requires --enable_gpu_support");
 
 			if (match->kind == MATCH_USED_GPU_TID)
-				present = bpf_map_lookup_elem(&gpu_tid, &key);
+				timestamp = bpf_map_lookup_elem(&gpu_tid, &key);
 			else
-				present = bpf_map_lookup_elem(&gpu_tgid, &key);
+				timestamp = bpf_map_lookup_elem(&gpu_tgid, &key);
 
 			/* If not found, we want the used predicate to be required false. */
+			if (!timestamp)
+				return !used;
 
-			return (present != NULL) == used;
+			if (!used)
+				return false;
+
+			/* If timestamp is stale, remove the key and fail. */
+			if (taskc->member_expire_at && (*timestamp) >= taskc->member_expire_at) {
+				if (match->kind == MATCH_USED_GPU_TID)
+					bpf_map_delete_elem(&gpu_tid, &key);
+				else
+					bpf_map_delete_elem(&gpu_tgid, &key);
+
+				return false;
+			}
+
+			return true;
 	}
 	case MATCH_AVG_RUNTIME: {
 			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
@@ -2522,7 +2537,9 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 }
 
-int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *cgrp_path)
+__hidden
+int match_layer(u32 layer_id, struct task_ctx *taskc,
+		struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
 	struct layer *layer;
 	u32 nr_match_ors, pid;
@@ -2558,7 +2575,7 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 				return -EINVAL;
 
 			match = &ands->matches[and_id];
-			if (!(match_one(match, p, cgrp_path) == !match->exclude)) {
+			if (!(match_one(match, taskc, p, cgrp_path) == !match->exclude)) {
 				matched = false;
 				break;
 			}
@@ -2599,8 +2616,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	taskc->layered_cpus.seq = -1;
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
-	/* MEMBER_NOEXPIRE = 0 so this covers the case where we have no TTL. */
-	taskc->member_expire = now + layer->member_expire_ms * 1000 * 1000;
+	taskc->member_expire_at = layer->member_expire_ms ? now + layer->member_expire_ms * 1000 * 1000 : MEMBER_NOEXPIRE;
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
@@ -2633,7 +2649,7 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 		return;
 
 	bpf_for(layer_id, 0, nr_layers) {
-		if (match_layer(layer_id, p, cgrp_path) == 0) {
+		if (match_layer(layer_id, taskc, p, cgrp_path) == 0) {
 			matched = true;
 			break;
 		}
