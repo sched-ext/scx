@@ -13,7 +13,7 @@
  * to be dispatched in the proper order.
  *
  * Messages between the BPF component and the user-space scheduler are passed
- * using BPF_MAP_TYPE_RINGBUFFER / BPF_MAP_TYPE_USER_RINGBUF maps: @queued for
+ * using BPF_MAP_TYPE_RINGBUF / BPF_MAP_TYPE_USER_RINGBUF maps: @queued for
  * the messages sent by the BPF dispatcher to the user-space scheduler and
  * @dispatched for the messages sent by the user-space scheduler to the BPF
  * dispatcher.
@@ -96,7 +96,7 @@ volatile u64 nr_user_dispatches, nr_kernel_dispatches,
 /* Failure statistics */
 volatile u64 nr_failed_dispatches, nr_sched_congested;
 
- /* Report additional debugging information */
+/* Report additional debugging information */
 const volatile bool debug;
 
 /* Rely on the in-kernel idle CPU selection policy */
@@ -148,7 +148,7 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 /*
  * The map containing tasks that are queued to user space from the kernel.
  *
- * This map is drained by the user space scheduler.
+ * This map is drained by the user-space scheduler.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);

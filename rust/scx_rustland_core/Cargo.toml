@@ -15,7 +15,6 @@ libc = "0.2.175"
 seccomp = "0.1"
 scx_utils = { path = "../scx_utils", version = "1.0.21" }
 
-
 [lib]
 name = "scx_rustland_core"
 path = "src/lib.rs"
