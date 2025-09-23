@@ -588,6 +588,8 @@ struct task_ctx {
 
 	char 			join_layer[SCXCMD_COMLEN];
 	u64			layer_refresh_seq;
+
+	u64			member_expire;
 };
 
 struct {
@@ -645,7 +647,7 @@ static int lookup_task_hint_layer_id(struct task_struct *p) {
 	return *layer_idp;
 }
 
-static void switch_to_layer(struct task_struct *, struct task_ctx *, u64 layer_id);
+static void switch_to_layer(struct task_struct *, struct task_ctx *, u64 layer_id, u64 now);
 
 static int lookup_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
 {
@@ -679,7 +681,7 @@ static void maybe_refresh_task_layer_from_hint(struct task_struct *p)
 	if (ret < 0)
 		return;
 	layer_id = ret;
-	switch_to_layer(p, taskc, layer_id);
+	switch_to_layer(p, taskc, layer_id, scx_bpf_now());
 }
 
 int save_gpu_tgid_pid(void) {
@@ -1757,6 +1759,19 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
+static inline void ttl_tick(struct task_ctx *taskc, u64 now)
+{
+	/* If TTL matching is on, decrement TTL and force matching refresh if applicable. */
+	if (taskc->member_expire == MEMBER_NOEXPIRE)
+		return;
+
+	/* Use GiB to make the division cheap. */
+	if (now >= taskc->member_expire ) {
+		taskc->member_expire = MEMBER_NOEXPIRE;
+		taskc->refresh_layer = true;
+	}
+}
+
 static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, u64 bytes)
 {
 	s32 task_lid;
@@ -1774,6 +1789,8 @@ static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, 
 
 	cpuc->used_at = now;
 	cpuc->usage += used;
+
+	ttl_tick(taskc, now);
 
 	/*
 	 * protect_owned/preempt accounting is a bit wrong in that they charge
@@ -2557,7 +2574,7 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 	return -ENOENT;
 }
 
-static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 layer_id)
+static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 layer_id, u64 now)
 {
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcc;
@@ -2580,6 +2597,8 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	taskc->layered_cpus.seq = -1;
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
+	/* MEMBER_NOEXPIRE = 0 so this covers the case where we have no TTL. */
+	taskc->member_expire = now + layer->member_expire_ms * 1000 * 1000;
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
@@ -2597,7 +2616,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	p->scx.dsq_vtime = llcc->vtime_now[layer_id];
 }
 
-static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
+static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc, u64 now)
 {
 	const char *cgrp_path;
 	bool matched = false;
@@ -2619,7 +2638,7 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 	}
 
 	if (matched) {
-		switch_to_layer(p, taskc, layer_id);
+		switch_to_layer(p, taskc, layer_id, now);
 	} else {
 		scx_bpf_error("[%s]%d didn't match any layer", p->comm, p->pid);
 	}
@@ -2799,7 +2818,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	taskc->runnable_at = now;
-	maybe_refresh_layer(p, taskc);
+	maybe_refresh_layer(p, taskc, now);
 
 	if (enq_flags & SCX_ENQ_WAKEUP)
 		on_wakeup(p, taskc);

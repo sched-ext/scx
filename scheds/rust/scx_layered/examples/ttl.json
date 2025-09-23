@@ -1,0 +1,46 @@
+[
+	{
+		"name": "first",
+		"matches": [
+			[{ "PcommPrefix": "htop" }],
+			[{ "PcommPrefix": "scxtop" }],
+			[{ "PcommPrefix": "bash" }],
+			[{ "PcommPrefix": "yes" }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range":  [5, 5],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "RandomTopo",
+				"disallow_preempt_after_us": 0,
+				"protected": true
+			}
+		}
+	},
+	{
+		"name": "second",
+		"matches": [
+			[{ "PcommPrefix": "stress-ng" }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range":  [5, 5],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "RandomTopo",
+				"protected": false,
+				"member_expire_ms": 1000
+			}
+		}
+	},
+	{
+		"name": "third",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]
