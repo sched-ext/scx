@@ -2460,7 +2460,6 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_IS_KTHREAD:
 		return p->flags & PF_KTHREAD;
-	case MATCH_USED_GPU_TID: {
 			u32 tid;
 			bool pid_present = false;
 
@@ -2473,20 +2472,23 @@ static __noinline bool match_one(struct layer_match *match,
 				pid_present = true;
 
 			return pid_present == match->used_gpu_tid;
-	}
+	case MATCH_USED_GPU_TID:
 	case MATCH_USED_GPU_PID: {
-			u32 tgid;
-			bool pid_present = false;
+			u32 key = (match->kind == MATCH_USED_GPU_TID) ? p->pid : p->tgid;
+			bool used = (match->kind == MATCH_USED_GPU_TID) ? match->used_gpu_tid : match->used_gpu_pid;
+			u32 *present;
 
 			if (!enable_gpu_support)
 				scx_bpf_error("UsedGpuPid requires --enable_gpu_support");
 
-			tgid = p->tgid;
+			if (match->kind == MATCH_USED_GPU_TID)
+				present = bpf_map_lookup_elem(&gpu_tid, &key);
+			else
+				present = bpf_map_lookup_elem(&gpu_tgid, &key);
 
-			if (bpf_map_lookup_elem(&gpu_tgid, &tgid))
-				pid_present = true;
+			/* If not found, we want the used predicate to be required false. */
 
-			return pid_present == match->used_gpu_pid;
+			return (present != NULL) == used;
 	}
 	case MATCH_AVG_RUNTIME: {
 			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
