@@ -116,13 +116,13 @@ This repository provides two build systems:
 - **Rust schedulers**: Use `cargo`
 
 **Dependencies:**
+
 - `clang`: >=16 required, >=17 recommended
 - `libbpf`: >=1.2.2 required, >=1.3 recommended
 - `bpftool`: Usually available in `linux-tools-common` or similar packages
 - `libelf`, `libz`, `libzstd`: For linking against libbpf
 - `pkg-config`: For finding system libraries
 - `Rust` toolchain: >=1.82
-
 
 The kernel has to be built with the following configuration:
 
@@ -179,10 +179,12 @@ Both `make` and `cargo` support these environment variables for BPF compilation:
 - `BPF_EXTRA_CFLAGS_POST_INCL`: Extra flags after include paths
 
 C schedulers only:
+
 - `BPFTOOL`: The bpftool command to use. (Default: `bpftool`)
 - `CC`: The C compiler to use. (Default: `cc`)
 
 **Examples:**
+
 ```shell
 # Use specific clang version for C schedulers
 $ BPF_CLANG=clang-17 make all
@@ -193,7 +195,6 @@ $ BPF_CLANG=clang-17 cargo build --release
 # Use clang for C compilation and system bpftool
 $ CC=clang BPFTOOL=/usr/bin/bpftool make all
 ```
-
 
 ## Checking scx_stats
 
