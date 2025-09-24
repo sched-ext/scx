@@ -251,7 +251,7 @@ int do_core_compaction(void)
 	struct cpdom_ctx *cpdomc;
 	int nr_active, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
-	bool need_kick;
+	bool need_kick, cpu_on;
 	u64 cpdom_id;
 
 	bpf_rcu_read_lock();
@@ -296,10 +296,12 @@ int do_core_compaction(void)
 		/*
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
+		cpu_on = false;
 		need_kick = false;
 		if (i < nr_active) {
 			bpf_cpumask_set_cpu(cpu, active);
 			bpf_cpumask_clear_cpu(cpu, ovrflw);
+			cpu_on = true;
 			need_kick = true;
 
 			/*
@@ -312,12 +314,6 @@ int do_core_compaction(void)
 				cpdomc->nr_acpus_temp++;
 			}
 
-			/*
-			 * Calculate big capacity ratio among active cores.
-			 */
-			sum_capacity += cpuc->capacity;
-			if (cpuc->big_core)
-				big_capacity += cpuc->capacity;
 		} else {
 			bpf_cpumask_clear_cpu(cpu, active);
 
@@ -328,6 +324,7 @@ int do_core_compaction(void)
 				 * add this CPU{ to the overflow set.
 				 */
 				bpf_cpumask_set_cpu(cpu, ovrflw);
+				cpu_on = true;
 				need_kick = true;
 			} else if ((bpf_get_prandom_u32() %
 				    LAVD_CC_CPU_PIN_INTERVAL_DIV)) {
@@ -347,6 +344,7 @@ int do_core_compaction(void)
 				 */
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			} else if (bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
+				cpu_on = true;
 				need_kick = true;
 			}
 		}
@@ -356,6 +354,15 @@ int do_core_compaction(void)
 		 */
 		if (need_kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+		/*
+		 * Calculate big capacity ratio if a CPU is on.
+		 */
+		if (cpu_on) {
+			sum_capacity += cpuc->capacity;
+			if (cpuc->big_core)
+				big_capacity += cpuc->capacity;
+		}
 	}
 
 	cur_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
@@ -557,7 +564,7 @@ int update_thr_perf_cri(void)
 		 *   |     little_core_scale
 		 *   0
 		 */
-		delta = sys_stat.avg_perf_cri - sys_stat.min_perf_cri;
+		delta = (sys_stat.avg_perf_cri - sys_stat.min_perf_cri) >> 1;
 		diff = (delta * little_core_scale) >> LAVD_SHIFT;
 		thr = diff + sys_stat.min_perf_cri;
 	}
@@ -574,10 +581,14 @@ int update_thr_perf_cri(void)
 		 *   |                     |           1024
 		 *   |                     little_core_scale
 		 *   0
+		 *
+		 *  Note that half of the little core capacity is taken by the
+		 *  [min_perf_cri, avg_perf_cri] range, so only another half
+		 *  can serve for the [avg_perf_cri, max_perf_cri range.
 		 */
-		delta = sys_stat.max_perf_cri - sys_stat.avg_perf_cri;
-		diff = (delta * cur_big_core_scale) >> LAVD_SHIFT;
-		thr = sys_stat.max_perf_cri - diff;
+		delta = (sys_stat.max_perf_cri - sys_stat.avg_perf_cri) >> 1;
+		diff = (delta * (little_core_scale >> 1)) >> LAVD_SHIFT;
+		thr = diff + sys_stat.avg_perf_cri;
 	}
 
 	sys_stat.thr_perf_cri = thr;
