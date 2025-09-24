@@ -293,6 +293,9 @@ static void task_refresh_llc_runs(task_ctx *taskc)
 
 static u64 llc_nr_queued(struct llc_ctx *llcx)
 {
+	if (!llcx)
+		return 0;
+
 	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
 
 	if (topo_config.nr_llcs > 1) {
@@ -555,12 +558,13 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx,
 {
 	// Only tasks in the most interactive DSQs can keep running.
 	if (!p2dq_config.keep_running_enabled ||
+	    !llcx || !cpuc ||
 	    cpuc->dsq_index == p2dq_config.nr_dsqs_per_llc - 1 ||
 	    p->scx.flags & SCX_TASK_QUEUED ||
 	    cpuc->ran_for >= timeline_config.max_exec_ns)
 		return false;
 
-	int nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
+	int nr_queued = llc_nr_queued(llcx);
 
 	if (nr_queued >= llcx->nr_cpus)
 		return false;
