@@ -247,13 +247,13 @@ impl<'a> Scheduler<'a> {
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &mut QueuedTask) -> u64 {
         // Update global minimum vruntime based on the previous task's vruntime.
-        if self.min_vruntime < task.vtime {
+        if self.min_vruntime > task.vtime {
             self.min_vruntime = task.vtime;
         }
 
         // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
-        let min_vruntime = self.min_vruntime.saturating_sub(self.slice_ns);
+        let min_vruntime = self.min_vruntime;
         if task.vtime == 0 {
             // Slightly penalize new tasks by charging an extra time slice to prevent bursts of such
             // tasks from disrupting the responsiveness of already running ones.
