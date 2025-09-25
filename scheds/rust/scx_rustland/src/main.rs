@@ -147,7 +147,7 @@ struct Scheduler<'a> {
     opts: &'a Opts,                         // scheduler options
     stats_server: StatsServer<(), Metrics>, // statistics
     tasks: BTreeSet<Task>,                  // tasks ordered by deadline
-    min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
+    vruntime_now: u64,                      // Keep track of the minimum vruntime across all tasks
     init_page_faults: u64,                  // Initial page faults counter
     slice_ns: u64,                          // Default time slice (in ns)
     slice_ns_min: u64,                      // Minimum time slice (in ns)
@@ -181,7 +181,7 @@ impl<'a> Scheduler<'a> {
             opts,
             stats_server,
             tasks: BTreeSet::new(),
-            min_vruntime: 0,
+            vruntime_now: 0,
             init_page_faults: 0,
             slice_ns: opts.slice_us * NSEC_PER_USEC,
             slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
@@ -246,20 +246,20 @@ impl<'a> Scheduler<'a> {
     //
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &mut QueuedTask) -> u64 {
-        // Update global minimum vruntime based on the previous task's vruntime.
-        if self.min_vruntime < task.vtime {
-            self.min_vruntime = task.vtime;
+        // Update vruntime_now to track the latest observed vruntime.
+        if self.vruntime_now < task.vtime {
+            self.vruntime_now = task.vtime;
         }
 
-        // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
+        // Update task's vruntime re-aligning it to vruntime_now (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
-        let min_vruntime = self.min_vruntime.saturating_sub(self.slice_ns);
+        let vruntime_now = self.vruntime_now.saturating_sub(self.slice_ns);
         if task.vtime == 0 {
             // Slightly penalize new tasks by charging an extra time slice to prevent bursts of such
             // tasks from disrupting the responsiveness of already running ones.
-            task.vtime = min_vruntime + Self::scale_by_task_weight_inverse(task, self.slice_ns);
-        } else if task.vtime < min_vruntime {
-            task.vtime = min_vruntime;
+            task.vtime = vruntime_now + Self::scale_by_task_weight_inverse(task, self.slice_ns);
+        } else if task.vtime < vruntime_now {
+            task.vtime = vruntime_now;
         }
         task.vtime += Self::scale_by_task_weight_inverse(task, task.stop_ts - task.start_ts);
 
