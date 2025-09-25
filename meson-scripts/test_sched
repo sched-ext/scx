@@ -78,7 +78,10 @@ for sched in ${!SCHEDS[@]}; do
         vng --user root -m 10G --cpu 8 $VNG_RW -v -r ${kernel} -- \
             "timeout --foreground --preserve-status ${TEST_TIMEOUT} ${sched_path} ${args}" \
                 2> >(tee /tmp/output) </dev/null
-        grep -v " Speculative Return Stack Overflow" /tmp/output | \
+        grep -v \
+            -e " Speculative Return Stack Overflow" \
+            -e " RETBleed: " \
+            /tmp/output | \
             sed -n -e '/\bBUG:/q1' \
                    -e '/\bWARNING:/q1' \
                    -e '/\berror\b/Iq1' \
