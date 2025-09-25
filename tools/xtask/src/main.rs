@@ -36,7 +36,10 @@ struct BumpTarget {
 
 #[derive(Subcommand)]
 enum Commands {
-    Versions,
+    Versions {
+        #[arg(short = 'f', long = "format", default_value = "json")]
+        format: versions::Format,
+    },
     BumpVersions {
         #[command(flatten)]
         target: BumpTarget,
@@ -61,7 +64,7 @@ fn main() {
     .unwrap();
 
     let res = match cli.command {
-        Commands::Versions => versions::version_command(),
+        Commands::Versions { format } => versions::version_command(format),
         Commands::BumpVersions { target } => {
             bump_versions::bump_versions_command(target.packages, target.all)
         }
