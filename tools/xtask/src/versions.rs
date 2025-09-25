@@ -15,7 +15,14 @@ use std::path::{Path, PathBuf};
 use crate::get_cargo_metadata;
 use crate::get_rust_paths;
 
-pub fn version_command() -> anyhow::Result<()> {
+#[derive(Default, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum Format {
+    #[default]
+    Json,
+    Starlark,
+}
+
+pub fn version_command(format: Format) -> anyhow::Result<()> {
     #[derive(Serialize)]
     struct Output {
         rust_versions: HashMap<String, String>,
@@ -57,10 +64,27 @@ pub fn version_command() -> anyhow::Result<()> {
         output.rust_dep_versions.remove(crate_name);
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).context("failed to serialize")?
-    );
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).context("failed to serialize")?
+            );
+        }
+        Format::Starlark => {
+            println!("RUST_VERSIONS = {{");
+            for (k, v) in output.rust_versions {
+                println!("  \"{k}\": \"{v}\",");
+            }
+            println!("}}  #  RUST_VERSIONS\n");
+
+            println!("RUST_DEP_VERSIONS = {{");
+            for (k, v) in output.rust_dep_versions {
+                println!("  \"{k}\": \"{v}\",");
+            }
+            println!("}}  #  RUST_DEP_VERSIONS");
+        }
+    };
 
     Ok(())
 }
