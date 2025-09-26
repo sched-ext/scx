@@ -17,7 +17,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	if (!atq)
 		return (u64)NULL;
 
-	atq->tree = rb_create(RB_ALLOC);
+	atq->tree = rb_create(RB_ALLOC, RB_DUPLICATE);
 	if (!atq->tree)
 		return (u64)NULL;
 
@@ -60,7 +60,7 @@ int scx_atq_insert_node(scx_atq_t __arg_arena *atq, rbnode_t __arg_arena *node, 
 	 */
 	node->key = (key == SCX_ATQ_FIFO) ? atq->seq++ : key;
 
-	ret = rb_insert_node(atq->tree, node, RB_DUPLICATE);
+	ret = rb_insert_node(atq->tree, node);
 	if (ret)
 		goto done;
 

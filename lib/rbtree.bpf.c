@@ -23,7 +23,7 @@ static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replac
 } while (0)
 
 __weak
-u64 rb_create_internal(enum rbtree_alloc alloc)
+u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
 	rbtree_t *rbtree;
 
@@ -33,6 +33,7 @@ u64 rb_create_internal(enum rbtree_alloc alloc)
 
 	rbtree->root = NULL;
 	rbtree->alloc = alloc;
+	rbtree->insert = insert;
 
 	return (u64)rbtree;
 }
@@ -218,7 +219,7 @@ int rb_node_free(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *rbnode)
 }
 
 static 
-int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enum rbtree_insert_mode mode)
+int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 {
 	rbnode_t *grandparent, *parent = rbtree->root;
 	u64 key = node->key;
@@ -234,13 +235,13 @@ int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enu
 		return 0;
 	}
 
-	if (mode != RB_DUPLICATE)
+	if (rbtree->insert != RB_DUPLICATE)
 		parent = rbnode_find(parent, key);
 	else
 		parent = rbnode_least_upper_bound(parent, key);
 
-	if (key == parent->key && mode != RB_DUPLICATE) {
-		if (mode == RB_UPDATE) {
+	if (key == parent->key && rbtree->insert != RB_DUPLICATE) {
+		if (rbtree->insert == RB_UPDATE) {
 			/*
 			 * Replace the old node with the new one.
 			 * Free up the old node.
@@ -312,7 +313,7 @@ int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enu
 }
 
 __weak
-int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enum rbtree_insert_mode mode)
+int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 {
 	if (unlikely(!rbtree))
 		return -EINVAL;
@@ -320,11 +321,11 @@ int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enu
 	if (unlikely(rbtree->alloc == RB_ALLOC))
 		return -EINVAL;
 
-	return rb_node_insert(rbtree, node, mode);
+	return rb_node_insert(rbtree, node);
 }
 
 __weak
-int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value, enum rbtree_insert_mode mode)
+int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 {
 	rbnode_t *node;
 	int ret;
@@ -339,7 +340,7 @@ int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value, enum rbtree_inse
 	if (!node)
 		return -ENOMEM;
 
-	ret = rb_node_insert(rbtree, node, mode);
+	ret = rb_node_insert(rbtree, node);
 	if (ret) {
 		rb_node_free(rbtree, node);
 		return ret;
