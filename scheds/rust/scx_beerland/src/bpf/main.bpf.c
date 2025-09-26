@@ -51,6 +51,29 @@ volatile u64 nr_local_dispatch, nr_remote_dispatch, nr_keep_running;
 static u64 vtime_now;
 
 /*
+ * Per-CPU context.
+ */
+struct cpu_ctx {
+	struct bpf_cpumask __kptr *smt;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpu_ctx);
+	__uint(max_entries, 1);
+} cpu_ctx_stor SEC(".maps");
+
+/*
+ * Return a CPU context.
+ */
+struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
+{
+	const u32 idx = 0;
+	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
+/*
  * Per-task context.
  */
 struct task_ctx {
@@ -146,8 +169,95 @@ static u64 task_vtime(const struct task_struct *p)
 }
 
 /*
- * Return true if we should attempt a task migration to an idle CPU, false
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false
  * otherwise.
+ */
+static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return true;
+
+	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+}
+
+/*
+ * Return true if @this_cpu is faster than @that_cpu, false otherwise.
+ */
+static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return false;
+
+	return cpu_priority(this_cpu) > cpu_priority(that_cpu);
+}
+
+/*
+ * Return true if @cpu is idle, false otherwise. If @smt is true, check if
+ * the CPU is part of a full-idle SMT core.
+ */
+static bool is_cpu_idle(s32 cpu, bool smt)
+{
+	const struct cpumask *idle_mask;
+	bool is_idle;
+
+	idle_mask = smt ? scx_bpf_get_idle_smtmask() : scx_bpf_get_idle_cpumask();
+	is_idle = bpf_cpumask_test_cpu(cpu, idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
+
+	return is_idle;
+}
+
+/*
+ * Return the SMT sibling CPU of a @cpu, or @cpu if SMT is disabled.
+ */
+static s32 smt_sibling(s32 cpu)
+{
+	const struct cpumask *smt;
+	struct cpu_ctx *cctx;
+
+	if (!smt_enabled)
+		return cpu;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return cpu;
+
+	smt = cast_mask(cctx->smt);
+	if (!smt)
+		return cpu;
+
+	return bpf_cpumask_first(smt);
+}
+
+/*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_task_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
+ * Return true if all the CPUs in the system are busy, false otherwise.
+ *
+ * If @smt is true, the system is considered "busy" when there is no
+ * full-idle SMT core available.
+ */
+static bool is_system_busy(bool smt)
+{
+	const struct cpumask *idle_mask;
+	bool is_busy;
+
+	idle_mask = smt ? scx_bpf_get_idle_smtmask() : scx_bpf_get_idle_cpumask();
+	is_busy = bpf_cpumask_empty(idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
+
+	return is_busy;
+}
+
+/*
+ * Return true if we should attempt a task migration to an idle CPU from
+ * ops.enqueue(), false otherwise.
  *
  * We want to attempt a migration on wakeup or if the CPU used by the task
  * is contended, but only if ops.select_cpu() was skipped.
@@ -157,23 +267,70 @@ static bool try_migrate(const struct task_struct *p, s32 prev_cpu, u64 enq_flags
 	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
 		return false;
 
+	/*
+	 * Migrate if ops.select_cpu() was skipped and one of the following
+	 * conditions is true:
+	 *  - task was not running (task wakeup),
+	 *  - the previously used CPU is contended by other tasks,
+	 *  - SMT is enabled, the previously used CPU is not a full-idle
+	 *    SMT core and there are other full-idle SMT cores available
+	 */
 	return !__COMPAT_is_enq_cpu_selected(enq_flags) &&
-	       (!scx_bpf_task_running(p) || scx_bpf_dsq_nr_queued(prev_cpu));
+		       (!scx_bpf_task_running(p) ||
+			scx_bpf_dsq_nr_queued(prev_cpu) ||
+			(smt_enabled && !is_system_busy(true) &&
+			 !is_cpu_idle(smt_sibling(prev_cpu), false)));
 }
 
 /*
- * Return true if all the CPUs in the system are busy, false otherwise.
+ * Return true if the task can keep running on its current CPU from
+ * ops.dispatch(), false if the task should migrate.
  */
-static bool is_system_busy(void)
+static bool keep_running(const struct task_struct *p, s32 cpu)
 {
-	const struct cpumask *idle_mask;
-	bool is_busy;
+	const struct cpumask *primary = cast_mask(primary_cpumask);
+	const struct cpumask *idle_smtmask, *idle_cpumask;
+	bool ret;
 
-	idle_mask = scx_bpf_get_idle_cpumask();
-	is_busy = bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
+	/* Do not keep running if the task doesn't need to run */
+	if (!is_task_queued(p))
+		return false;
 
-	return is_busy;
+	/*
+	 * Do not keep running if the CPU is not in the primary domain and
+	 * the task can use the primary domain).
+	 */
+	if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
+	    !bpf_cpumask_test_cpu(cpu, primary))
+		return false;
+
+	/*
+	 * Keep running only if the task is on a full-idle SMT core (or SMT
+	 * is disabled).
+	 */
+	if (!smt_enabled)
+		return true;
+
+	/*
+	 * If the task can only run on this CPU, keep it running.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
+		return true;
+
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	/*
+	 * If the task is running in a full-idle SMT core or if all the SMT
+	 * cores in the system are busy (they all have at least one busy
+	 * sibling), keep the task running on its current CPU.
+	 */
+	ret = is_cpu_idle(smt_sibling(cpu), false) || bpf_cpumask_empty(idle_smtmask);
+
+	scx_bpf_put_cpumask(idle_cpumask);
+	scx_bpf_put_cpumask(idle_smtmask);
+
+	return ret;
 }
 
 /*
@@ -197,6 +354,33 @@ static int init_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(mask);
 
 	return *p_cpumask ? 0 : -ENOMEM;
+}
+
+SEC("syscall")
+int enable_sibling_cpu(struct domain_arg *input)
+{
+	struct cpu_ctx *cctx;
+	struct bpf_cpumask *mask, **pmask;
+	int err = 0;
+
+	cctx = try_lookup_cpu_ctx(input->cpu_id);
+	if (!cctx)
+		return -ENOENT;
+
+	pmask = &cctx->smt;
+
+	/* Make sure the target CPU mask is initialized */
+	err = init_cpumask(pmask);
+	if (err)
+		return err;
+
+	bpf_rcu_read_lock();
+	mask = *pmask;
+	if (mask)
+		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
+	bpf_rcu_read_unlock();
+
+	return err;
 }
 
 /*
@@ -281,44 +465,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu, u64 
 }
 
 /*
- * Return true if @this_cpu and @that_cpu are in the same LLC, false
- * otherwise.
- */
-static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
-{
-        if (this_cpu == that_cpu)
-                return true;
-
-	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
-}
-
-/*
- * Return true if @this_cpu is faster than @that_cpu, false otherwise.
- */
-static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
-{
-        if (this_cpu == that_cpu)
-                return false;
-
-	return cpu_priority(this_cpu) > cpu_priority(that_cpu);
-}
-
-/*
- * Return true if @cpu is in a full-idle physical core, false otherwise.
- */
-static bool is_smt_idle(s32 cpu)
-{
-	const struct cpumask *idle_mask;
-	bool is_idle;
-
-	idle_mask = scx_bpf_get_idle_smtmask();
-	is_idle = bpf_cpumask_test_cpu(cpu, idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return is_idle;
-}
-
-/*
  * Called on task wakeup to give the task a chance to migrate to an idle
  * CPU.
  */
@@ -347,7 +493,7 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 		 * don't migrate.
 		 */
 		if (cpus_share_cache(this_cpu, prev_cpu) &&
-		    (!smt_enabled || is_smt_idle(prev_cpu)) &&
+		    (!smt_enabled || is_cpu_idle(prev_cpu, true)) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 
@@ -461,7 +607,7 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Do no trigger any rebalance unless the system is completely
 	 * saturated.
 	 */
-	if (is_system_busy() && dispatch_from_remote_cpu(cpu)) {
+	if (is_system_busy(false) && dispatch_from_remote_cpu(cpu)) {
 		__sync_fetch_and_add(&nr_remote_dispatch, 1);
 		return;
 	}
@@ -470,7 +616,7 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	 * If no other task is contending the CPU and the previous task
 	 * still wants to run, let it run by refilling its time slice.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+	if (prev && keep_running(prev, cpu)) {
 		prev->scx.slice = task_slice(prev, cpu);
 		__sync_fetch_and_add(&nr_keep_running, 1);
 	}
