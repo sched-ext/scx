@@ -22,6 +22,7 @@
 #include "intf.h"
 #include "timer.bpf.h"
 #include "util.bpf.h"
+#include "task_local_data.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -94,17 +95,9 @@ u32 nr_empty_layer_ids;
 
 UEI_DEFINE(uei);
 
-struct task_hint {
-	u64 hint;
-	u64 __reserved[3];
+struct tld_keys {
+	tld_key_t priority_key;
 };
-
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_hint);
-} scx_layered_task_hint_map SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -616,29 +609,37 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
-static struct task_hint *lookup_task_hint(struct task_struct *p)
+static u64 *lookup_task_hint_priority(struct task_struct *p)
 {
-	struct task_hint *hint;
+	struct tld_object tld_obj;
+	u64 *priority;
+	int err;
 
 	if (!task_hint_map_enabled)
 		return NULL;
-	hint = bpf_task_storage_get(&scx_layered_task_hint_map, p, NULL, 0);
+
+	err = tld_object_init(p, &tld_obj);
+	if (err)
+		return NULL;
+
 	/* Only values in the range [0, 1024] are valid hints. */
-	if (hint && hint->hint > 1024)
-		hint = NULL;
-	return hint;
+	priority = tld_get_data(&tld_obj, priority_key, "thread_hint_priority", sizeof(*priority));
+	if (!priority || *priority > 1024)
+		return NULL;
+
+	return priority;
 }
 
 static int lookup_task_hint_layer_id(struct task_struct *p) {
-	struct task_hint *hint;
 	u32 *layer_idp;
+	u64 *priority;
 	u32 hint_val;
 
-	hint = lookup_task_hint(p);
-	if (!hint)
+	priority = lookup_task_hint_priority(p);
+	if (!priority)
 		return -ENOENT;
 
-	hint_val = hint->hint;
+	hint_val = *priority;
 	layer_idp = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
 	if (!layer_idp)
 		return -EFAULT;
@@ -2490,11 +2491,11 @@ static __noinline bool match_one(struct layer_match *match,
 				avg_runtime_us < match->max_avg_runtime_us;
 	}
 	case MATCH_HINT_EQUALS: {
-		struct task_hint *hint = lookup_task_hint(p);
+		u64 *priority = lookup_task_hint_priority(p);
 
-		if (!hint)
+		if (!priority)
 			return false;
-		return match->hint == hint->hint;
+		return match->hint == *priority;
 	}
 
 	default:
