@@ -503,7 +503,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * Determine the task's scheduling domain.
 	 * idle CPU, re-try again with the primary scheduling domain.
 	 */
-	bpf_cpumask_and(p_mask, cpumask, cast_mask(primary));
+	if (!bpf_cpumask_and(p_mask, cpumask, cast_mask(primary)))
+		bpf_cpumask_copy(p_mask, cpumask);
 
 	/*
 	 * Determine the L2 cache domain as the intersection of the task's
@@ -1104,8 +1105,12 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	if (!is_queued(p))
 		return false;
 
-	/* Do not keep running if the CPU is not in the primary domain */
-	if (!primary || !bpf_cpumask_test_cpu(cpu, primary))
+	/*
+	 * Do not keep running if the CPU is not in the primary domain and
+	 * the task can use the primary domain).
+	 */
+	if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
+	    !bpf_cpumask_test_cpu(cpu, primary))
 		return false;
 
 	/*
