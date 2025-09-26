@@ -229,7 +229,7 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 		if (cell_ptr && cell_ptr->l3_cpu_cnt[candidate_l3] == 0)
 			continue;
 
-		u64 candidate_dsq = get_cell_l3_dsq_id(cell, candidate_l3);
+		u64 candidate_dsq = get_cell_l3_dsq_id(cell, candidate_l3).raw;
 
 		struct task_struct *task = NULL;
 		struct task_ctx *task_ctx;

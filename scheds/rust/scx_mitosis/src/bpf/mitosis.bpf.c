@@ -602,7 +602,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
 
-	scx_bpf_dsq_insert_vtime(p, tctx->dsq, slice_ns, vtime, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
@@ -622,10 +622,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	cell = READ_ONCE(cctx->cell);
 
 	/* Start from a valid DSQ */
-	u64 local_dsq = get_cpu_dsq_id(cpu);
+	dsq_id_t local_dsq = get_cpu_dsq_id(cpu);
 
 	bool found = false;
-	u64 min_vtime_dsq = local_dsq;
+	dsq_id_t min_vtime_dsq = local_dsq;
 	u64 min_vtime = ~0ULL; /* U64_MAX */
 	struct task_struct *p;
 
@@ -636,8 +636,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* Check the L3 queue */
 	if (l3 != L3_INVALID) {
-		u64 cell_l3_dsq = get_cell_l3_dsq_id(cell, l3);
-		bpf_for_each(scx_dsq, p, cell_l3_dsq, 0) {
+		dsq_id_t cell_l3_dsq = get_cell_l3_dsq_id(cell, l3);
+		bpf_for_each(scx_dsq, p, cell_l3_dsq.raw, 0) {
 			min_vtime = p->scx.dsq_vtime;
 			min_vtime_dsq = cell_l3_dsq;
 			found = true;
@@ -646,7 +646,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/* Check the CPU DSQ for a lower vtime */
-	bpf_for_each(scx_dsq, p, local_dsq, 0) {
+	bpf_for_each(scx_dsq, p, local_dsq.raw, 0) {
 		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
 			min_vtime = p->scx.dsq_vtime;
 			min_vtime_dsq = local_dsq;
@@ -666,14 +666,14 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		// We found a task in the local or cell-L3 DSQ
 
 		// If it was in the per cpu DSQ, there is no competation, grab it and return
-		if (min_vtime_dsq == local_dsq) {
-			scx_bpf_dsq_move_to_local(min_vtime_dsq);
+		if (min_vtime_dsq.raw == local_dsq.raw) {
+			scx_bpf_dsq_move_to_local(min_vtime_dsq.raw);
 			return;
 		}
 
 		// If it was in the cell L3 DSQ, we are competing with other cpus in the cell-l3
 		// try to move it to the local DSQ
-		if (scx_bpf_dsq_move_to_local(min_vtime_dsq)) {
+		if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw)) {
 			// We won the race and got the task, return
 			return;
 		}
@@ -1112,7 +1112,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 #endif
 
 	/* Validate task's DSQ before it starts running */
-	if (tctx->dsq == DSQ_INVALID) {
+	if (tctx->dsq.raw == DSQ_INVALID) {
 		if (tctx->all_cell_cpus_allowed) {
 			scx_bpf_error(
 				"Task %d has invalid DSQ 0 in running callback (CELL-SCHEDULABLE task, can run on any CPU in cell %d)",
@@ -1400,7 +1400,7 @@ static __always_inline void dump_l3_state(){
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	u64 dsq_id;
+	dsq_id_t dsq_id;
 	int i;
 	struct cell *cell;
 	struct cpu_ctx *cpu_ctx;
@@ -1429,7 +1429,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		dsq_id = get_cpu_dsq_id(i);
 		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
 			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
-			     scx_bpf_dsq_nr_queued(dsq_id));
+			     scx_bpf_dsq_nr_queued(dsq_id.raw));
 	}
 
 	dump_l3_state();
@@ -1447,7 +1447,7 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx,
 	scx_bpf_dump(
 		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u dsq=%llu all_cell_cpus_allowed=%d\n",
 		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell,
-		tctx->dsq, tctx->all_cell_cpus_allowed);
+		tctx->dsq.raw, tctx->all_cell_cpus_allowed);
 	scx_bpf_dump("Task[%d] CPUS=", p->pid);
 	dump_cpumask(p->cpus_ptr);
 	scx_bpf_dump("\n");
@@ -1479,7 +1479,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
-				ret = scx_bpf_create_dsq(get_cpu_dsq_id(i), ANY_NUMA);
+				ret = scx_bpf_create_dsq(get_cpu_dsq_id(i).raw, ANY_NUMA);
 				if (ret < 0) {
 					bpf_cpumask_release(cpumask);
 					return ret;
@@ -1541,8 +1541,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		u32 l3;
 		bpf_for(l3, 0, nr_l3)
 		{
-			u64 id = get_cell_l3_dsq_id(i, l3);
-			ret = scx_bpf_create_dsq(id, ANY_NUMA);
+			ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, l3).raw, ANY_NUMA);
 			if (ret < 0)
 				scx_bpf_error( "Failed to create DSQ for cell %d, L3 %d: err %d", i, l3, ret);
 		}

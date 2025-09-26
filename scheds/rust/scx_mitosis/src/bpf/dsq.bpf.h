@@ -144,9 +144,8 @@ static inline bool is_cpu_dsq(dsq_id_t dsq_id)
 }
 
 // If this is a per cpu dsq, return the cpu
-static inline u32 get_cpu_from_dsq(u64 id)
+static inline u32 get_cpu_from_dsq(dsq_id_t dsq_id)
 {
-	dsq_id_t dsq_id = (dsq_id_t) {.raw = id};
 	if (!is_cpu_dsq(dsq_id))
 		scx_bpf_error("trying to get cpu from non-cpu dsq\n");
 
@@ -154,21 +153,19 @@ static inline u32 get_cpu_from_dsq(u64 id)
 }
 
 /* Helper functions to construct DSQ IDs */
-static inline u64 get_cpu_dsq_id(u32 cpu)
+static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
 {
 	// Check for valid CPU range, 0 indexed so >=.
 	if (cpu >= MAX_CPUS)
 		scx_bpf_error("invalid cpu %u\n", cpu);
-	dsq_id_t dsq_id = { .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
 
-	return dsq_id.raw;
+	return (dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
 }
 
-static inline u64 get_cell_l3_dsq_id(u32 cell, u32 l3)
+static inline dsq_id_t get_cell_l3_dsq_id(u32 cell, u32 l3)
 {
 	if (cell >= MAX_CELLS || l3 >= MAX_L3S)
 		scx_bpf_error("cell %u or l3 %u too large\n", cell, l3);
-	dsq_id_t dsq_id = { .cell_l3_dsq = { .l3 = l3, .cell = cell, .type = DSQ_TYPE_CELL_L3 } };
 
-	return dsq_id.raw;
+	return (dsq_id_t){ .cell_l3_dsq = { .l3 = l3, .cell = cell, .type = DSQ_TYPE_CELL_L3 } };
 }

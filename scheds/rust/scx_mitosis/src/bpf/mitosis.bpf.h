@@ -83,8 +83,8 @@ struct cell {
 	// Number of L3s with at least one CPU in this cell
 	u32 l3_present_cnt;
 
-  // TODO XXX remove this, only here temporarily to make the code compile
-  // current vtime of the cell
+	// TODO XXX remove this, only here temporarily to make the code compile
+	// current vtime of the cell
 	u64 vtime_now;
 };
 
@@ -102,7 +102,7 @@ struct task_ctx {
 	u32 cell;
 	/* For the sake of scheduling, a task is exclusively owned by either a cell
 	 * or a cpu */
-	u64 dsq;
+	dsq_id_t dsq;
 	/* latest configuration that was applied for this task */
 	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
@@ -135,44 +135,3 @@ struct function_counters_map {
 	__type(value, u64);
 	__uint(max_entries, NR_COUNTERS);
 };
-
-// static __always_inline void task_release_cleanup(struct task_struct **pp)
-// {
-// 	if (*pp)
-// 		bpf_task_release(*pp);
-// }
-
-// #define SCOPED_TASK __attribute__((cleanup(task_release_cleanup)))
-
-// __always_inline struct task_struct * dsq_head_peek(u64 dsq_id, task_struct *p)
-// {
-// 	bpf_rcu_read_lock();
-// 	struct task_struct *p = NULL;
-// 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-// 		bpf_task_acquire(p); /* extend lifetime beyond loop */
-// 		break;               /* only want the head */
-// 	}
-// 	bpf_rcu_read_unlock();
-
-// 	return p;
-// }
-
-// static __always_inline struct task_struct *
-// dsq_head_peek(u64 dsq_id)
-// {
-// 	struct bpf_iter_scx_dsq it = {};
-// 	struct task_struct *p;
-
-// 	if (bpf_iter_scx_dsq_new(&it, dsq_id, 0))
-// 		return NULL;
-
-// 	/* First element in dispatch order is the head. */
-// 	p = bpf_iter_scx_dsq_next(&it);
-
-// 	/* Take a ref so the pointer remains valid after we destroy the iter. */
-// 	if (p)
-// 		bpf_task_acquire(p);
-
-// 	bpf_iter_scx_dsq_destroy(&it);
-// 	return p; /* caller must bpf_task_release(p) when done */
-// }
