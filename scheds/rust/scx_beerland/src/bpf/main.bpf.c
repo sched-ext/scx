@@ -564,6 +564,14 @@ static bool dispatch_from_remote_cpu(s32 from_cpu)
 		if (cpu == from_cpu)
 			continue;
 
+		/*
+		 * Avoid migrating if the remote CPU is not overloaded and
+		 * has only one task waiting: this task will likely get a
+		 * chance to run soon.
+		 */
+		if (scx_bpf_dsq_nr_queued(cpu) <= 1)
+			continue;
+
 		bpf_rcu_read_lock();
 		p = __COMPAT_scx_bpf_dsq_peek(cpu);
 		if (p && bpf_cpumask_test_cpu(from_cpu, p->cpus_ptr) &&
