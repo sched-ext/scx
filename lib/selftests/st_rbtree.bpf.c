@@ -634,6 +634,68 @@ __weak int scx_selftest_rbtree_least_pop(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
+__weak int scx_selftest_rbtree_alloc_check(rbtree_t __arg_arena *rbtree)
+{
+	rbtree_t *alloc, *noalloc;
+	rbnode_t *node;
+
+	alloc = rb_create(RB_ALLOC);
+	if (!alloc)
+		return 1;
+
+	noalloc = rb_create(RB_NOALLOC);
+	if (!noalloc)
+		return 2;
+
+	/* 
+	 * Can't allocate a node for a tree that allocates it itself. 
+	 * Ditto for noalloc.
+	 */
+	node = rb_node_alloc(alloc, 0, 0);
+	if (node)
+		return 3;
+
+	node = rb_node_alloc(alloc, 0, 0);
+	if (!node)
+		return 4;
+
+	/* 
+	 * RB_ALLOC trees can use rb_insert, RB_NOALLOC trees can
+	 * use rb_insert_node. RB_ALLOC and RB_NOALLOC trees cannot 
+	 * use each other's APIs. 
+	 *
+	 * NOTE: This begs the question, why not different types? We
+	 * want to partially share the API and that would require us
+	 * to duplicate it.
+	 */
+	if (rb_insert(alloc, 0, 0, RB_DEFAULT))
+		return 5;
+
+	if (!rb_insert_node(alloc, node, RB_DEFAULT))
+		return 6;
+
+	if (!rb_remove_node(alloc, node))
+		return 7;
+
+	if (rb_remove(alloc, 0))
+		return 8;
+
+
+	if (rb_insert_node(noalloc, node, RB_DEFAULT))
+		return 9;
+
+	if (!rb_insert(noalloc, 0, 0, RB_DEFAULT))
+		return 10;
+
+	if (!rb_remove(noalloc, 0))
+		return 11;
+
+	if (rb_remove_node(noalloc, node))
+		return 12;
+
+	return 0;
+}
+
 __weak int scx_selftest_rbtree_print(rbtree_t __arg_arena *rbtree)
 {
 	rb_print(rbtree);
@@ -647,7 +709,7 @@ int scx_selftest_rbtree(void)
 {
 	rbtree_t __arg_arena *rbtree;
 
-	rbtree = rb_create();
+	rbtree = rb_create(RB_ALLOC);
 	if (!rbtree)
 		return -ENOMEM;
 
@@ -663,6 +725,7 @@ int scx_selftest_rbtree(void)
 	SCX_RBTREE_SELFTEST(remove_many);
 	SCX_RBTREE_SELFTEST(add_remove_circular_reverse);
 	SCX_RBTREE_SELFTEST(add_remove_circular);
+	SCX_RBTREE_SELFTEST(alloc_check);
 
 	return 0;
 }

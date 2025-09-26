@@ -23,7 +23,7 @@ static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replac
 } while (0)
 
 __weak
-u64 rb_create_internal(void)
+u64 rb_create_internal(enum rbtree_alloc alloc)
 {
 	rbtree_t *rbtree;
 
@@ -32,6 +32,7 @@ u64 rb_create_internal(void)
 		return (u64)NULL;
 
 	rbtree->root = NULL;
+	rbtree->alloc = alloc;
 
 	return (u64)rbtree;
 }
@@ -169,6 +170,10 @@ u64 rb_node_alloc_internal(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 	rbnode_t *rbnode;
 	volatile rbnode_t *node;
 
+	/* We can't allocate an node for an rbtree that does the allocations itself. */
+	if (rbtree->alloc == RB_ALLOC)
+		return (u64)NULL;
+
 	do  {
 		rbnode = rbtree->freelist;
 		if (!rbnode)
@@ -212,8 +217,8 @@ int rb_node_free(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *rbnode)
 	return 0;
 }
 
-__weak
-int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enum rbtree_insert_mode mode)
+static 
+int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enum rbtree_insert_mode mode)
 {
 	rbnode_t *grandparent, *parent = rbtree->root;
 	u64 key = node->key;
@@ -245,7 +250,10 @@ int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enu
 			if (ret)
 				return ret;
 
-			rb_node_free(rbtree, parent);
+			/* Only free if called from rb_insert_node. */
+			if (rbtree->alloc == RB_ALLOC)
+				rb_node_free(rbtree, parent);
+
 			return 0;
 		}
 
@@ -304,15 +312,40 @@ int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enu
 }
 
 __weak
+int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, enum rbtree_insert_mode mode)
+{
+	if (unlikely(!rbtree))
+		return -EINVAL;
+
+	if (unlikely(rbtree->alloc == RB_ALLOC))
+		return -EINVAL;
+
+	return rb_node_insert(rbtree, node, mode);
+}
+
+__weak
 int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value, enum rbtree_insert_mode mode)
 {
 	rbnode_t *node;
+	int ret;
+
+	if (unlikely(!rbtree))
+		return -EINVAL;
+
+	if (unlikely(rbtree->alloc != RB_ALLOC))
+		return -EINVAL;
 
 	node = rb_node_alloc(rbtree, key, value);
 	if (!node)
 		return -ENOMEM;
 
-	return rb_insert_node(rbtree, node, mode);
+	ret = rb_node_insert(rbtree, node, mode);
+	if (ret) {
+		rb_node_free(rbtree, node);
+		return ret;
+	}
+
+	return 0;
 }
 
 static rbnode_t *rbnode_least(rbnode_t *subtree)
@@ -440,7 +473,7 @@ static void rbnode_switch(rbtree_t *rbtree, rbnode_t *a, rbnode_t *b)
 	rbnode_adjust_neighbors(rbtree, b, adir);
 }
 
-static inline int rbnode_remove_node_single_child(rbtree_t *rbtree, rbnode_t *node)
+static inline int rbnode_remove_node_single_child(rbtree_t *rbtree, rbnode_t *node, bool free)
 {
 	rbnode_t *child;
 	int dir;
@@ -472,7 +505,9 @@ static inline int rbnode_remove_node_single_child(rbtree_t *rbtree, rbnode_t *no
 	/* Color the child black. */
 	child->is_red = false;
 
-	rb_node_free(rbtree, node);
+	/* Only free if called from rb_remove. */
+	if (free)
+		rb_node_free(rbtree, node);
 
 	return 0;
 }
@@ -486,7 +521,7 @@ static inline bool rbnode_has_red_children(rbnode_t *node)
 }
 
 static
-int rb_remove_rbnode(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
+int rb_node_remove(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, bool free)
 {
 	rbnode_t *parent, *sibling, *close_nephew, *distant_nephew;
 	rbnode_t *replace, *initial;
@@ -515,14 +550,15 @@ int rb_remove_rbnode(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 
 	/* Only one child present, replace with child and paint it black. */
 	if (!node->left != !node->right)
-		return rbnode_remove_node_single_child(rbtree, node);
+		return rbnode_remove_node_single_child(rbtree, node, free);
 
 	/* (!node->left && !node->right) */
 
 	parent = node->parent;
 	if (!parent) {
 		rbtree->root = NULL;
-		rb_node_free(rbtree, node);
+		if (free)
+			rb_node_free(rbtree, node);
 		return 0;
 	}
 
@@ -530,7 +566,8 @@ int rb_remove_rbnode(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 	parent->child[dir] = NULL;
 	is_red = node->is_red;
 
-	rb_node_free(rbtree, node);
+	if (free)
+		rb_node_free(rbtree, node);
 
 	/* If we removed a red node, we did not unbalance the tree.*/
 	if (is_red)
@@ -665,11 +702,26 @@ int rb_remove_rbnode(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 }
 
 __weak
+int rb_remove_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
+{
+	if (unlikely(!rbtree))
+		return -EINVAL;
+
+	if (unlikely(rbtree->alloc == RB_ALLOC))
+		return -EINVAL;
+
+	return rb_node_remove(rbtree, node, false);
+}
+
+__weak
 int rb_remove(rbtree_t __arg_arena *rbtree, u64 key)
 {
 	rbnode_t *node;
 
 	if (unlikely(!rbtree))
+		return -EINVAL;
+
+	if (unlikely(rbtree->alloc != RB_ALLOC))
 		return -EINVAL;
 
 	if (!rbtree->root)
@@ -679,7 +731,7 @@ int rb_remove(rbtree_t __arg_arena *rbtree, u64 key)
 	if (!node || node->key != key)
 		return -ENOENT;
 
-	return rb_remove_rbnode(rbtree, node);
+	return rb_node_remove(rbtree, node, true);
 }
 
 __weak
@@ -702,7 +754,7 @@ int rb_pop(rbtree_t __arg_arena *rbtree, u64 *key, u64 *value)
 	if (value)
 		*value = node->value;
 
-	return rb_remove_rbnode(rbtree, node);
+	return rb_remove_node(rbtree, node);
 }
 
 inline void rbnode_print(size_t depth, rbnode_t *rbn)

@@ -17,7 +17,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	if (!atq)
 		return (u64)NULL;
 
-	atq->tree = rb_create();
+	atq->tree = rb_create(RB_ALLOC);
 	if (!atq->tree)
 		return (u64)NULL;
 

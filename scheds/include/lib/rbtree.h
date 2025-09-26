@@ -31,9 +31,19 @@ struct rbnode {
 	bool is_red;
 };
 
+/* 
+ * Does the rbtree allocate is own nodes, or do they get
+ * allocated by the caller?
+ */
+enum rbtree_alloc {
+	RB_ALLOC,
+	RB_NOALLOC,
+};
+
 struct rbtree {
 	rbnode_t *root;
 	rbnode_t *freelist;
+	enum rbtree_alloc alloc;
 };
 
 typedef struct rbtree __arena rbtree_t;
@@ -60,8 +70,8 @@ enum rbtree_insert_mode {
 };
 
 #ifdef __BPF__
-u64 rb_create_internal(void);
-#define rb_create() ((rbtree_t *)(rb_create_internal()))
+u64 rb_create_internal(enum rbtree_alloc alloc);
+#define rb_create(alloc) ((rbtree_t *)rb_create_internal((alloc)))
 
 int rb_destroy(rbtree_t *rbtree);
 int rb_insert(rbtree_t *rbtree, u64 key, u64 value, enum rbtree_insert_mode mode);
@@ -72,6 +82,7 @@ int rb_least(rbtree_t *rbtree, u64 *key, u64 *value);
 int rb_pop(rbtree_t *rbtree, u64 *key, u64 *value);
 
 int rb_insert_node(rbtree_t *rbtree, rbnode_t *node, enum rbtree_insert_mode mode);
+int rb_remove_node(rbtree_t *rbtree, rbnode_t *node);
 u64 rb_node_alloc_internal(rbtree_t *rbtree, u64 key, u64 value);
 #define rb_node_alloc(rbtree, key, value) ((rbnode_t *)rb_node_alloc_internal((rbtree), (key), (value)))
 int rb_node_free(rbtree_t *rbtree, rbnode_t *rbnode);
