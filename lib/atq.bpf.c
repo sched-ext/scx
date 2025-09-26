@@ -28,54 +28,46 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	return (u64)atq;
 }
 
+/* 
+ * XXXETSAL: We are using the __hidden antipattern for API functions because some
+ * older kernels do not allow function calls with preemption disabled. We will replace
+ * these annotations with the proper ones (__weak) at some point in the future.
+ */
+
 __hidden
-int scx_atq_insert(scx_atq_t *atq, u64 taskc_ptr)
+int scx_atq_insert_node(scx_atq_t __arg_arena *atq, rbnode_t __arg_arena *node, u64 key)
 {
-	rbnode_t *node;
 	int ret;
 
-	if (!atq->fifo)
-		return -EINVAL;
-
-	/*
-	 * Use dummy sequence number because we're
-	 * outside of the critical section.
-	 */
-	node = rb_node_alloc(atq->tree, 0, taskc_ptr);
-	if (!node)
-		return -ENOMEM;
-
 	ret = arena_spin_lock(&atq->lock);
-	if (ret) {
-		rb_node_free(atq->tree, node);
+	if (ret)
 		return ret;
-	}
 
 	if (unlikely(atq->size == atq->capacity)) {
 		ret = -ENOSPC;
-		goto error;
+		goto done;
+	}
+
+	if ((key == SCX_ATQ_FIFO) != atq->fifo) {
+		ret = -EINVAL;
+		goto done;
 	}
 
 	/*
-	 * "Leak" the seq on error. We only want
+	 * For FIFO, "Leak" the seq on error. We only want
 	 * sequence numbers to be monotonic, not
 	 * consecutive.
 	 */
-	node->key = atq->seq++;
+	node->key = (key == SCX_ATQ_FIFO) ? atq->seq++ : key;
 
 	ret = rb_insert_node(atq->tree, node, RB_DUPLICATE);
 	if (ret)
-		goto error;
+		goto done;
 
 	atq->size += 1;
 
+done:
 	arena_spin_unlock(&atq->lock);
-
-	return 0;
-
-error:
-	arena_spin_unlock(&atq->lock);
-	rb_node_free(atq->tree, node);
 
 	return ret;
 }
@@ -86,39 +78,27 @@ int scx_atq_insert_vtime(scx_atq_t *atq, u64 taskc_ptr, u64 vtime)
 	rbnode_t *node;
 	int ret;
 
-	if (atq->fifo)
-		return -EINVAL;
-
-	node = rb_node_alloc(atq->tree, vtime, taskc_ptr);
+	/*
+	 * Use dummy sequence number because we're
+	 * outside of the critical section.
+	 */
+	node = rb_node_alloc(atq->tree, 0, taskc_ptr);
 	if (!node)
 		return -ENOMEM;
 
-	ret = arena_spin_lock(&atq->lock);
+	ret = scx_atq_insert_node(atq, node, vtime);
 	if (ret) {
 		rb_node_free(atq->tree, node);
 		return ret;
 	}
 
-	if (unlikely(atq->size == atq->capacity)) {
-		ret = -ENOSPC;
-		goto error;
-	}
-
-	ret = rb_insert_node(atq->tree, node, RB_DUPLICATE);
-	if (ret)
-		goto error;
-
-	atq->size += 1;
-
-	arena_spin_unlock(&atq->lock);
-
 	return 0;
+}
 
-error:
-	arena_spin_unlock(&atq->lock);
-	rb_node_free(atq->tree, node);
-
-	return ret;
+__hidden
+int scx_atq_insert(scx_atq_t *atq, u64 taskc_ptr)
+{
+	return scx_atq_insert_vtime(atq, taskc_ptr, SCX_ATQ_FIFO);
 }
 
 __hidden

@@ -8,7 +8,10 @@
 
 #include <lib/rbtree.h>
 
-#define SCX_ATQ_INF_CAPACITY ((u64)-1)
+enum scx_atq_consts {
+	SCX_ATQ_INF_CAPACITY  = ((u64)-1),
+	SCX_ATQ_FIFO = ((u64)-1)
+};
 
 struct scx_atq {
 	rbtree_t *tree;
