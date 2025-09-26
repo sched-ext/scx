@@ -1,5 +1,7 @@
 #pragma once
 
+#include <lib/rbtree.h>
+
 #define SCX_SELFTEST(func, ...)		\
 	do {				\
 		int ret = func(__VA_ARGS__);	\
@@ -13,6 +15,7 @@
 struct task_ctx_nonarena {
 	u64 pid;
 	u64 vtime;
+	struct rbnode rbnode;
 };
 
 typedef struct task_ctx_nonarena __arena task_ctx;

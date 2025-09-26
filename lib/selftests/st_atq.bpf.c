@@ -70,13 +70,13 @@ int scx_selftest_atq_common(bool isfifo)
 
 
 		if (isfifo) {
-			ret = scx_atq_insert(atq, (u64)tasks[ind]);
+			ret = scx_atq_insert(atq, &tasks[ind]->rbnode, (u64)&tasks[ind]);
 			if (ret) {
 				bpf_printk("fifo atq insert failed with %d", ret);
 				return ret;
 			}
 		} else {
-			ret = scx_atq_insert_vtime(atq, (u64)tasks[ind], tasks[ind]->vtime);
+			ret = scx_atq_insert_vtime(atq, &tasks[ind]->rbnode, (u64)&tasks[ind], tasks[ind]->vtime);
 			if (ret) {
 				bpf_printk("fifo atq insert failed with %d", ret);
 				return ret;
@@ -118,7 +118,7 @@ int scx_selftest_atq_fifo(u64 unused)
 __weak
 int scx_selftest_atq_fail_fifo_with_weight(u64 unused)
 {
-	if (!scx_atq_insert_vtime(fifo, 0, 0)) {
+	if (!scx_atq_insert_vtime(fifo, &tasks[0]->rbnode, 0, 0)) {
 		bpf_printk("atq PRIO insert on FIFO atq succeeded");
 		return -EINVAL;
 	}
@@ -135,7 +135,7 @@ int scx_selftest_atq_vtime(u64 unused)
 __weak
 int scx_selftest_atq_fail_vtime_without_weight(u64 unused)
 {
-	if (!scx_atq_insert(prio, 0)) {
+	if (!scx_atq_insert(prio, &tasks[0]->rbnode, 0)) {
 		bpf_printk("atq FIFO insert on PRIO atq succeeded");
 		return -EINVAL;
 	}
@@ -149,8 +149,9 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	const int PUSHES_PER_TEST = 5;
 	const int POPS_PER_TEST = 2;
 	const int TEST_CYCLES = 32;
-	scx_atq_t *atq;
 	int expected, found;
+	scx_atq_t *atq;
+	rbnode_t *node;
 	u64 taskc;
 	int i, j;
 	int ret;
@@ -160,8 +161,12 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	for (i = 0; i < TEST_CYCLES && can_loop; i++ ) {
 
 		for (j = 0; j < PUSHES_PER_TEST && can_loop; j++ ) {
+			node = rb_node_alloc(atq->tree, 0, 0);
+			if (!node)
+				return -ENOMEM;
+
 			/* Also a nice way to check if we handle identical keys. */
-			ret = scx_atq_insert_vtime(atq, i, i);
+			ret = scx_atq_insert_vtime(atq, node, i, i);
 			if (ret) {
 				bpf_printk("atq insert failed with %d", ret);
 				return ret;
@@ -176,6 +181,10 @@ int scx_selftest_atq_nr_queued(u64 unused)
 		}
 
 		for (j = 0; j < POPS_PER_TEST && can_loop; j++ ) {
+			/* 
+			 * XXX We're leaking rbnodes by design here, ATQs nodes are normally embedded
+			 * into task contexts and get cleaned up with the task.
+			 */
 			scx_atq_pop(atq);
 
 			expected = (PUSHES_PER_TEST - POPS_PER_TEST) * i  + (PUSHES_PER_TEST - 1 - j);
@@ -213,6 +222,7 @@ int scx_selftest_atq_peek_nodestruct(u64 unused)
 {
 	const u64 elem = 5;
 	const int iters = 10;
+	rbnode_t *node;
 	u64 found;
 	int i;
 
@@ -222,7 +232,11 @@ int scx_selftest_atq_peek_nodestruct(u64 unused)
 		return -EINVAL;
 	}
 
-	if (scx_atq_insert(fifo, elem)) {
+	node = rb_node_alloc(fifo->tree, 0, 0);
+	if (!node)
+		return -ENOMEM;
+
+	if (scx_atq_insert(fifo, node, elem)) {
 		bpf_printk("ATQ insert failed");
 		return -EINVAL;
 	}
@@ -275,6 +289,7 @@ __weak
 int scx_selftest_atq_sized(u64 unused)
 {
 	scx_atq_t *sized_fifo, *sized_vtime;
+	rbnode_t *node;
 	int ret;
 
 	sized_fifo = (scx_atq_t *)scx_atq_create_size(true, 1);
@@ -289,25 +304,36 @@ int scx_selftest_atq_sized(u64 unused)
 		return -ENOMEM;
 	}
 
-	ret = scx_atq_insert(sized_fifo, 1234);
+	node = rb_node_alloc(sized_fifo->tree, 0, 0);
+	if (!node)
+		return -ENOMEM;
+
+	ret = scx_atq_insert(sized_fifo, node, 1234);
 	if (ret) {
 		bpf_printk("ATQ failed to insert into sized fifo ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert(sized_fifo, 5678);
+	/* Doesn't matter which rbtree we're allocating from. */
+	node = rb_node_alloc(sized_vtime->tree, 1234, 0);
+	if (!node)
+		return -ENOMEM;
+
+	ret = scx_atq_insert(sized_fifo, node, 5678);
 	if (!ret) {
 		bpf_printk("ATQ too many inserts into sized fifo ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert_vtime(sized_vtime, 1234, 7890);
+	/* Reusing the already allocated rbnode. */
+
+	ret = scx_atq_insert_vtime(sized_vtime, node, 0, 7890);
 	if (ret) {
 		bpf_printk("ATQ failed to insert into sized vtime ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert_vtime(sized_vtime, 1111, 2222);
+	ret = scx_atq_insert_vtime(sized_vtime, node, 0, 2222);
 	if (!ret) {
 		bpf_printk("ATQ too many inserts into sized vtime ATQ");
 		return -EINVAL;
