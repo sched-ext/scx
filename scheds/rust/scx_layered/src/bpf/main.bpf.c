@@ -480,8 +480,15 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 			} else {
 				if (layer->kind == LAYER_KIND_OPEN)
 					cpuc->in_open_layers = false;
-				else if (cpuc->layer_id == layer_id)
+				else if (cpuc->layer_id == layer_id) {
 					cpuc->layer_id = MAX_LAYERS;
+					cpuc->in_open_layers = true;
+
+					/* Belongs to no layer, so none of these hold. */
+					cpuc->protect_owned = false;
+					cpuc->protect_owned_preempt = false;
+
+				}
 				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 			}
 		} else {
@@ -1542,6 +1549,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	    try_preempt_cpu(task_cpu, p, taskc, layer, PREEMPT_FIRST))
 		return;
 
+#if 0 
 	/*
 	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
 	 */
@@ -1554,6 +1562,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 	}
+#endif
 
 	if (!(task_cpuc = lookup_cpu_ctx(task_cpu)))
 		return;
@@ -2063,6 +2072,13 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	u32 u;
 
 	if (!(layer = lookup_layer(layer_id)))
+		return false;
+
+	/*
+	 * If a layer is confined, and the CPU doens't belong to it, we shouldn't
+	 * consume from it.
+	 */
+	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
 		return false;
 
 	skip_remote_node = layer->skip_remote_node;

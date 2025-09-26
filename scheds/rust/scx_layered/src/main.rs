@@ -1104,12 +1104,8 @@ impl Stats {
         let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
         let pmu_cur: u64 = cur_layer_membw_agg
             .iter()
-            .map(|membw_agg| membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED])
+            .map(|membw_agg| { membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED] })
             .sum();
-        println!(
-            "memory BW usage: {}GiB",
-            (pmu_cur - pmu_prev) as f64 / 1024.0_f64.powf(3.0)
-        );
         let resctrl_cur = Self::resctrl_read_total_membw()?;
         let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
 
@@ -1170,17 +1166,6 @@ impl Stats {
                     })
                     .collect()
             };
-
-        let perf_diff = ((pmu_cur - pmu_prev) as f64 / (1024 as f64).powf(3.0)).round() as i64;
-        let resctrl_diff =
-            ((resctrl_cur - resctrl_prev) as f64 / (1024 as f64).powf(3.0)).round() as i64;
-        println!(
-            "[HACK] P {}\t R {}\t RATIO {} FACTOR {}",
-            perf_diff,
-            resctrl_diff,
-            resctrl_diff as f64 / perf_diff as f64,
-            factor
-        );
 
         let layer_utils: Vec<Vec<f64>> =
             metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
@@ -2653,29 +2638,20 @@ impl<'a> Scheduler<'a> {
         layer: &Layer,
         membw_limit: f64,
         membw: f64,
-        low: u64,
-        high: u64,
-    ) -> u64 {
+        curtarget: u64,
+    ) -> usize {
         let ncpu: u64 = layer.cpus.weight() as u64;
         let membw = (membw * (1024 as f64).powf(3.0)).round() as u64;
         let membw_limit = (membw_limit * (1024 as f64).powf(3.0)).round() as u64;
         let last_membw_percpu = if ncpu > 0 { membw / ncpu } else { 0 };
 
-        // If there's no way we're hitting the limit, we're good.
-        if last_membw_percpu * high < membw_limit {
-            return high;
+        // Either there is no memory bandwidth limit set, or the counters
+        // are not fully initialized yet. Just return the current target.
+        if membw_limit == 0 || last_membw_percpu == 0 {
+            return curtarget as usize;
         }
 
-        // If there's no way to drop our memory usage down enough,
-        // pin the target CPUs to low and drop a warning.
-        if last_membw_percpu * low > membw_limit {
-            warn!("cannot satisfy memory bw limit for layer {}", layer.name);
-            warn!("last_membw_percpu {last_membw_percpu} membw_limit {membw_limit}");
-            return low;
-        }
-
-        // Clamped membw is between low and high, clamp high.
-        return membw_limit / last_membw_percpu;
+        return (membw_limit / last_membw_percpu) as usize;
     }
 
     /// Calculate how many CPUs each layer would like to have if there were
@@ -2707,6 +2683,9 @@ impl<'a> Scheduler<'a> {
                     membw_gb,
                     ..
                 } => {
+                    let cpus_range =
+                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
+
                     // A grouped layer can choose to include open cputime
                     // for sizing. Also, as an empty layer can only get CPU
                     // time through fallback (counted as owned) or open
@@ -2726,7 +2705,7 @@ impl<'a> Scheduler<'a> {
 
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
-                    let mut high = ((util / util_range.0).floor() as usize).max(low);
+                    let high = ((util / util_range.0).floor() as usize).max(low);
 
                     let membw_limit = match membw_gb {
                         Some(membw_limit) => *membw_limit,
@@ -2738,20 +2717,8 @@ impl<'a> Scheduler<'a> {
                         layer.name
                     );
 
-                    if membw_limit > 0.0 {
-                        // XXXETSAL Fix
-                        high = self.clamp_target_by_membw(
-                            &layer,
-                            membw_limit as f64,
-                            membw as f64,
-                            low as u64,
-                            high as u64,
-                        ) as usize;
-                    }
 
                     let target = layer.cpus.weight().clamp(low, high);
-                    let cpus_range =
-                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
 
                     records.push((
                         (owned * 100.0) as u64,
@@ -2762,13 +2729,33 @@ impl<'a> Scheduler<'a> {
                         target,
                     ));
 
-                    (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
+                    let target = target.clamp(cpus_range.0, cpus_range.1);
+                    let membw_target= self.clamp_target_by_membw(
+                        &layer,
+                        membw_limit as f64,
+                        membw as f64,
+                        target as u64
+                    );
+
+                    trace!("CPU target pre- and post-membw adjustment: {target} -> {membw_target}");
+
+                    // If there's no way to drop our memory usage down enough,
+                    // pin the target CPUs to low and drop a warning.
+                    if membw_target < cpus_range.0 {
+                        warn!("cannot satisfy memory bw limit for layer {}", layer.name);
+                        warn!("membw_target {membw_target} low {}", cpus_range.0);
+                    };
+
+                    // Memory bandwidth target cannot override imposed limits or bump
+                    // the target above what CPU usage-based throttling requires.
+                    let target = membw_target.clamp(cpus_range.0, target);
+
+                    (target, cpus_range.0)
                 }
                 LayerKind::Open { .. } => (0, 0),
             });
         }
 
-        trace!("initial targets: {:?}", &targets);
         trace!("(owned, open, util, low, high, target): {:?}", &records);
         targets
     }
