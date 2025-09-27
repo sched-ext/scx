@@ -22,6 +22,8 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
+use inotify::{Inotify, WatchMask};
+
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -3162,12 +3164,126 @@ impl<'a> Scheduler<'a> {
         Ok(sys_stats)
     }
 
+    fn start_cgroup_watcher(&self, shutdown: Arc<AtomicBool>) -> Result<()> {
+        let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
+        let mut wd_to_path = HashMap::new();
+
+        // Watch for directory creation events
+        let root_wd = inotify
+            .watches()
+            .add("/sys/fs/cgroup", WatchMask::CREATE)
+            .context("Failed to add watch for /sys/fs/cgroup")?;
+        wd_to_path.insert(root_wd, PathBuf::from("/sys/fs/cgroup"));
+
+        // Also recursively watch existing directories for new subdirectories
+        self.add_recursive_watches(&mut inotify, &mut wd_to_path, Path::new("/sys/fs/cgroup"))?;
+
+        // Spawn watcher thread
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+
+            while !shutdown.load(Ordering::Relaxed) {
+                let events = match inotify.read_events_blocking(&mut buffer) {
+                    Ok(events) => events,
+                    Err(e) => {
+                        error!("Error reading inotify events: {}", e);
+                        break;
+                    }
+                };
+
+                for event in events {
+                    if !event.mask.contains(inotify::EventMask::CREATE) {
+                        continue;
+                    }
+
+                    let name = match event.name {
+                        Some(name) => name,
+                        None => continue,
+                    };
+
+                    let parent_path = match wd_to_path.get(&event.wd) {
+                        Some(parent) => parent,
+                        None => {
+                            warn!("Unknown watch descriptor: {:?}", event.wd);
+                            continue;
+                        }
+                    };
+
+                    let path = parent_path.join(name.to_string_lossy().as_ref());
+
+                    if !path.is_dir() {
+                        continue;
+                    }
+
+                    info!("New cgroup created: {}", path.display());
+
+                    // Add watch for this new directory
+                    match inotify.watches().add(&path, WatchMask::CREATE) {
+                        Ok(wd) => {
+                            wd_to_path.insert(wd, path.clone());
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to add watch for new cgroup {}: {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            info!("Cgroup watcher thread exiting");
+        });
+
+        Ok(())
+    }
+
+    fn add_recursive_watches(
+        &self,
+        inotify: &mut Inotify,
+        wd_to_path: &mut HashMap<inotify::WatchDescriptor, PathBuf>,
+        path: &Path,
+    ) -> Result<()> {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        // Add watch for this directory
+                        match inotify.watches().add(&entry_path, WatchMask::CREATE) {
+                            Ok(wd) => {
+                                wd_to_path.insert(wd, entry_path.clone());
+                            }
+                            Err(e) => {
+                                debug!("Failed to add watch for {}: {}", entry_path.display(), e);
+                            }
+                        }
+
+                        // Recursively add watches for subdirectories
+                        if let Err(e) = self.add_recursive_watches(inotify, wd_to_path, &entry_path)
+                        {
+                            debug!(
+                                "Failed to add recursive watches for {}: {}",
+                                entry_path.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
         let enable_layer_refresh = !self.layer_refresh_intv.is_zero();
         let mut next_layer_refresh_at = Instant::now() + self.layer_refresh_intv;
         let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
+
+        // Start the cgroup watcher
+        self.start_cgroup_watcher(shutdown.clone())?;
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
