@@ -261,6 +261,7 @@ enum layer_match_kind {
 	MATCH_AVG_RUNTIME,
 	MATCH_CGROUP_SUFFIX,
 	MATCH_CGROUP_CONTAINS,
+	MATCH_CGROUP_REGEX,
 	MATCH_HINT_EQUALS,
 
 	NR_LAYER_MATCH_KINDS,
@@ -271,6 +272,7 @@ struct layer_match {
 	char		cgroup_prefix[MAX_PATH];
 	char		cgroup_suffix[MAX_PATH];
 	char		cgroup_substr[MAX_PATH];
+	u32		cgroup_regex_id;
 	char		comm_prefix[MAX_COMM];
 	char		pcomm_prefix[MAX_COMM];
 	int		nice;

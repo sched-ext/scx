@@ -2358,6 +2358,9 @@ static __noinline bool match_one(struct layer_match *match,
 	case MATCH_CGROUP_CONTAINS: {
 		return match_str(match->cgroup_substr, cgrp_path, STR_SUBSTR);
 	}
+	case MATCH_CGROUP_REGEX: {
+		return false;
+	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
 		__builtin_memcpy(comm, p->comm, MAX_COMM);
@@ -3660,6 +3663,8 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_CGROUP_CONTAINS:
 				dbg("%s CGROUP_CONTAINS \"%s\"", header, match->cgroup_substr);
+				break;
+			case MATCH_CGROUP_REGEX:
 				break;
 			case MATCH_HINT_EQUALS:
 				dbg("%s HINT_EQUALS %d", header, match->hint);

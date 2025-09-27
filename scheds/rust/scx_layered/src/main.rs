@@ -1590,6 +1590,8 @@ struct Scheduler<'a> {
     proc_reader: fb_procfs::ProcReader,
     sched_stats: Stats,
 
+    cgroup_regexes: Option<HashMap<u32, Regex>>,
+
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
@@ -1600,12 +1602,18 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init_layers(skel: &mut OpenBpfSkel, specs: &[LayerSpec], topo: &Topology) -> Result<()> {
+    fn init_layers(
+        skel: &mut OpenBpfSkel,
+        specs: &[LayerSpec],
+        topo: &Topology,
+    ) -> Result<HashMap<u32, Regex>> {
         skel.maps.rodata_data.as_mut().unwrap().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
         let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
         let mut layer_weights: Vec<usize> = vec![];
+        let mut cgroup_regex_id = 0;
+        let mut cgroup_regexes = HashMap::new();
 
         for (spec_i, spec) in specs.iter().enumerate() {
             let layer = &mut skel.maps.bss_data.as_mut().unwrap().layers[spec_i];
@@ -1626,8 +1634,16 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
                         }
-                        LayerMatch::CgroupRegex(_) => {
-                            panic!("CgroupRegex match only supported in template");
+                        LayerMatch::CgroupRegex(regex_str) => {
+                            // CgroupRegex matching handled in userspace via cgroup watcher
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_REGEX as i32;
+                            mt.cgroup_regex_id = cgroup_regex_id;
+
+                            let regex = Regex::new(regex_str).with_context(|| {
+                                format!("Invalid regex '{}' in layer '{}'", regex_str, spec.name)
+                            })?;
+                            cgroup_regexes.insert(cgroup_regex_id, regex);
+                            cgroup_regex_id += 1;
                         }
                         LayerMatch::CgroupContains(substr) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
@@ -1840,7 +1856,7 @@ impl<'a> Scheduler<'a> {
             warn!("cpufreq support not available, ignoring perf configurations");
         }
 
-        Ok(())
+        Ok(cgroup_regexes)
     }
 
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
@@ -2410,7 +2426,7 @@ impl<'a> Scheduler<'a> {
             rodata.enable_hi_fb_thread_name_match = true;
         }
 
-        Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        let cgroup_regexes = Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -2488,6 +2504,7 @@ impl<'a> Scheduler<'a> {
         let mut gpu_task_handler =
             GpuTaskAffinitizer::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
         gpu_task_handler.init(topo.clone());
+
         let sched = Self {
             struct_ops: Some(struct_ops),
             layer_specs,
@@ -2501,6 +2518,7 @@ impl<'a> Scheduler<'a> {
 
             sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
 
+            cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
 
@@ -3164,7 +3182,10 @@ impl<'a> Scheduler<'a> {
         Ok(sys_stats)
     }
 
-    fn start_cgroup_watcher(&self, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn start_cgroup_watcher(
+        shutdown: Arc<AtomicBool>,
+        cgroup_regexes: HashMap<u32, Regex>,
+    ) -> Result<()> {
         let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
         let mut wd_to_path = HashMap::new();
 
@@ -3176,7 +3197,7 @@ impl<'a> Scheduler<'a> {
         wd_to_path.insert(root_wd, PathBuf::from("/sys/fs/cgroup"));
 
         // Also recursively watch existing directories for new subdirectories
-        self.add_recursive_watches(&mut inotify, &mut wd_to_path, Path::new("/sys/fs/cgroup"))?;
+        Self::add_recursive_watches(&mut inotify, &mut wd_to_path, Path::new("/sys/fs/cgroup"))?;
 
         // Spawn watcher thread
         std::thread::spawn(move || {
@@ -3220,6 +3241,14 @@ impl<'a> Scheduler<'a> {
 
                         info!("New cgroup created: {}", path.display());
 
+                        // Test against CgroupRegex rules
+                        let path_str = path.to_string_lossy();
+                        for (rule_id, regex) in &cgroup_regexes {
+                            if regex.is_match(&path_str) {
+                                info!("CgroupRegex rule ID {} matched: {}", rule_id, path_str);
+                            }
+                        }
+
                         // Add watch for this new directory
                         match inotify
                             .watches()
@@ -3260,7 +3289,6 @@ impl<'a> Scheduler<'a> {
     }
 
     fn add_recursive_watches(
-        &self,
         inotify: &mut Inotify,
         wd_to_path: &mut HashMap<inotify::WatchDescriptor, PathBuf>,
         path: &Path,
@@ -3284,7 +3312,8 @@ impl<'a> Scheduler<'a> {
                         }
 
                         // Recursively add watches for subdirectories
-                        if let Err(e) = self.add_recursive_watches(inotify, wd_to_path, &entry_path)
+                        if let Err(e) =
+                            Self::add_recursive_watches(inotify, wd_to_path, &entry_path)
                         {
                             debug!(
                                 "Failed to add recursive watches for {}: {}",
@@ -3306,8 +3335,11 @@ impl<'a> Scheduler<'a> {
         let mut next_layer_refresh_at = Instant::now() + self.layer_refresh_intv;
         let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
 
-        // Start the cgroup watcher
-        self.start_cgroup_watcher(shutdown.clone())?;
+        // Start the cgroup watcher only if there are CgroupRegex rules
+        let cgroup_regexes = self.cgroup_regexes.take().unwrap();
+        if !cgroup_regexes.is_empty() {
+            Self::start_cgroup_watcher(shutdown.clone(), cgroup_regexes)?;
+        }
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
