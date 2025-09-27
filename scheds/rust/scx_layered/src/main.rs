@@ -3168,10 +3168,10 @@ impl<'a> Scheduler<'a> {
         let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
         let mut wd_to_path = HashMap::new();
 
-        // Watch for directory creation events
+        // Watch for directory creation and deletion events
         let root_wd = inotify
             .watches()
-            .add("/sys/fs/cgroup", WatchMask::CREATE)
+            .add("/sys/fs/cgroup", WatchMask::CREATE | WatchMask::DELETE)
             .context("Failed to add watch for /sys/fs/cgroup")?;
         wd_to_path.insert(root_wd, PathBuf::from("/sys/fs/cgroup"));
 
@@ -3192,7 +3192,9 @@ impl<'a> Scheduler<'a> {
                 };
 
                 for event in events {
-                    if !event.mask.contains(inotify::EventMask::CREATE) {
+                    if !event.mask.contains(inotify::EventMask::CREATE)
+                        && !event.mask.contains(inotify::EventMask::DELETE)
+                    {
                         continue;
                     }
 
@@ -3211,23 +3213,42 @@ impl<'a> Scheduler<'a> {
 
                     let path = parent_path.join(name.to_string_lossy().as_ref());
 
-                    if !path.is_dir() {
-                        continue;
-                    }
-
-                    info!("New cgroup created: {}", path.display());
-
-                    // Add watch for this new directory
-                    match inotify.watches().add(&path, WatchMask::CREATE) {
-                        Ok(wd) => {
-                            wd_to_path.insert(wd, path.clone());
+                    if event.mask.contains(inotify::EventMask::CREATE) {
+                        if !path.is_dir() {
+                            continue;
                         }
-                        Err(e) => {
-                            warn!(
-                                "Failed to add watch for new cgroup {}: {}",
-                                path.display(),
-                                e
-                            );
+
+                        info!("New cgroup created: {}", path.display());
+
+                        // Add watch for this new directory
+                        match inotify
+                            .watches()
+                            .add(&path, WatchMask::CREATE | WatchMask::DELETE)
+                        {
+                            Ok(wd) => {
+                                wd_to_path.insert(wd, path.clone());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to add watch for new cgroup {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    } else if event.mask.contains(inotify::EventMask::DELETE) {
+                        info!("Cgroup removed: {}", path.display());
+
+                        // Find and remove the watch descriptor for this path
+                        let wd_to_remove = wd_to_path.iter().find_map(|(wd, watched_path)| {
+                            if watched_path == &path {
+                                Some(wd.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(wd) = wd_to_remove {
+                            wd_to_path.remove(&wd);
                         }
                     }
                 }
@@ -3250,7 +3271,10 @@ impl<'a> Scheduler<'a> {
                     let entry_path = entry.path();
                     if entry_path.is_dir() {
                         // Add watch for this directory
-                        match inotify.watches().add(&entry_path, WatchMask::CREATE) {
+                        match inotify
+                            .watches()
+                            .add(&entry_path, WatchMask::CREATE | WatchMask::DELETE)
+                        {
                             Ok(wd) => {
                                 wd_to_path.insert(wd, entry_path.clone());
                             }
