@@ -342,8 +342,10 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Dispatch the first task from the task pool.
-        self.dispatch_task();
+        // Dispatch the first task from the task pool only if there are tasks available.
+        if !self.tasks.is_empty() {
+            self.dispatch_task();
+        }
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
