@@ -36,6 +36,7 @@ enum consts {
 	/* 64 chars for user-provided name, 64 for possible template suffix. */
 	MAX_LAYER_NAME		= 128,
 	MAX_LAYERS		= 16,
+	MAX_CGROUP_REGEXES	= 16,
 	MAX_LAYER_WEIGHT	= 10000,
 	MIN_LAYER_WEIGHT	= 1,
 	DEFAULT_LAYER_WEIGHT	= 100,
@@ -75,6 +76,8 @@ static inline void ___consts_sanity_check___(void) {
 	_Static_assert(MAX_LLCS <= (1 << DSQ_ID_LAYER_SHIFT), "MAX_LLCS too high");
 	_Static_assert(MAX_LAYERS <= (DSQ_ID_LAYER_MASK >> DSQ_ID_LAYER_SHIFT) + 1,
 		       "MAX_LAYERS too high");
+	/* cgroup regex matching uses u64 as match bitmap */
+	_Static_assert(MAX_CGROUP_REGEXES <= 64, "MAX_CGROUP_REGEXES too high for u64 bitmap");
 }
 
 enum layer_kind {

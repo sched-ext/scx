@@ -1637,6 +1637,13 @@ impl<'a> Scheduler<'a> {
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
                         }
                         LayerMatch::CgroupRegex(regex_str) => {
+                            if cgroup_regex_id >= bpf_intf::consts_MAX_CGROUP_REGEXES {
+                                bail!(
+                                    "Too many cgroup regex rules. Maximum allowed: {}",
+                                    bpf_intf::consts_MAX_CGROUP_REGEXES
+                                );
+                            }
+
                             // CgroupRegex matching handled in userspace via cgroup watcher
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_REGEX as i32;
                             mt.cgroup_regex_id = cgroup_regex_id;
