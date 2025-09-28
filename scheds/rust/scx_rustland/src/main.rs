@@ -122,7 +122,7 @@ struct Opts {
 // Time constants.
 const NSEC_PER_USEC: u64 = 1_000;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Task {
     qtask: QueuedTask, // queued task
     deadline: u64,     // task deadline (that determines the order how tasks are dispatched)
@@ -138,6 +138,12 @@ impl Ord for Task {
             .cmp(&other.deadline)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
+    }
+}
+
+impl PartialOrd for Task {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
