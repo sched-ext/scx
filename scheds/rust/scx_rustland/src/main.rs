@@ -153,10 +153,10 @@ struct Scheduler<'a> {
     opts: &'a Opts,                         // scheduler options
     stats_server: StatsServer<(), Metrics>, // statistics
     tasks: BTreeSet<Task>,                  // tasks ordered by deadline
-    vruntime_now: u64,                      // Keep track of the minimum vruntime across all tasks
-    init_page_faults: u64,                  // Initial page faults counter
-    slice_ns: u64,                          // Default time slice (in ns)
-    slice_ns_min: u64,                      // Minimum time slice (in ns)
+    vruntime_now: u64,     // Tracks the latest observed (max) vruntime across tasks
+    init_page_faults: u64, // Initial page faults counter
+    slice_ns: u64,         // Default time slice (in ns)
+    slice_ns_min: u64,     // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
