@@ -80,6 +80,7 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use walkdir::WalkDir;
 
 const SCHEDULER_NAME: &str = "scx_layered";
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
@@ -3206,6 +3207,44 @@ impl<'a> Scheduler<'a> {
         Ok(sys_stats)
     }
 
+    // Helper function to process a cgroup creation (common logic for walkdir and inotify)
+    fn process_cgroup_creation(
+        path: &Path,
+        cgroup_regexes: &HashMap<u32, Regex>,
+        cgroup_path_to_id: &mut HashMap<String, u64>,
+        sender: &crossbeam::channel::Sender<CgroupEvent>,
+    ) {
+        let path_str = path.to_string_lossy().to_string();
+
+        // Get cgroup ID (inode number)
+        let cgroup_id = std::fs::metadata(path)
+            .map(|metadata| {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ino()
+            })
+            .unwrap_or(0);
+
+        // Build match bitmap by testing against CgroupRegex rules
+        let mut match_bitmap = 0u64;
+        for (rule_id, regex) in cgroup_regexes {
+            if regex.is_match(&path_str) {
+                match_bitmap |= 1u64 << rule_id;
+            }
+        }
+
+        // Store in hash
+        cgroup_path_to_id.insert(path_str.clone(), cgroup_id);
+
+        // Send event
+        if let Err(e) = sender.send(CgroupEvent::Created {
+            path: path_str,
+            cgroup_id,
+            match_bitmap,
+        }) {
+            error!("Failed to send cgroup creation event: {}", e);
+        }
+    }
+
     fn start_cgroup_watcher(
         shutdown: Arc<AtomicBool>,
         cgroup_regexes: HashMap<u32, Regex>,
@@ -3232,6 +3271,21 @@ impl<'a> Scheduler<'a> {
             let inotify_fd = inotify.as_raw_fd();
             // Maintain hash of cgroup path -> cgroup ID (inode number)
             let mut cgroup_path_to_id = HashMap::<String, u64>::new();
+
+            // Populate existing cgroups
+            for entry in WalkDir::new("/sys/fs/cgroup")
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_dir())
+            {
+                let path = entry.path();
+                Self::process_cgroup_creation(
+                    path,
+                    &cgroup_regexes,
+                    &mut cgroup_path_to_id,
+                    &sender,
+                );
+            }
 
             while !shutdown.load(Ordering::Relaxed) {
                 // Use select to wait for events with a 100ms timeout
@@ -3295,33 +3349,12 @@ impl<'a> Scheduler<'a> {
                             continue;
                         }
 
-                        // Get inode number (cgroup ID)
-                        let cgroup_id = std::fs::metadata(&path)
-                            .map(|metadata| {
-                                use std::os::unix::fs::MetadataExt;
-                                metadata.ino()
-                            })
-                            .unwrap_or(0);
-
-                        let path_str = path.to_string_lossy().to_string();
-
-                        // Build match bitmap by testing against CgroupRegex rules
-                        let mut match_bitmap = 0u64;
-                        for (rule_id, regex) in &cgroup_regexes {
-                            if regex.is_match(&path_str) {
-                                match_bitmap |= 1u64 << rule_id;
-                            }
-                        }
-
-                        // Store in hash and send event to main thread
-                        cgroup_path_to_id.insert(path_str.clone(), cgroup_id);
-                        if let Err(e) = sender.send(CgroupEvent::Created {
-                            path: path_str,
-                            cgroup_id,
-                            match_bitmap,
-                        }) {
-                            error!("Failed to send cgroup creation event: {}", e);
-                        }
+                        Self::process_cgroup_creation(
+                            &path,
+                            &cgroup_regexes,
+                            &mut cgroup_path_to_id,
+                            &sender,
+                        );
 
                         // Add watch for this new directory
                         match inotify
@@ -3367,7 +3400,6 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             }
-            info!("Cgroup watcher thread exiting");
         });
 
         Ok(receiver)
@@ -3378,35 +3410,23 @@ impl<'a> Scheduler<'a> {
         wd_to_path: &mut HashMap<inotify::WatchDescriptor, PathBuf>,
         path: &Path,
     ) -> Result<()> {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let entry_path = entry.path();
-                    if entry_path.is_dir() {
-                        // Add watch for this directory
-                        match inotify
-                            .watches()
-                            .add(&entry_path, WatchMask::CREATE | WatchMask::DELETE)
-                        {
-                            Ok(wd) => {
-                                wd_to_path.insert(wd, entry_path.clone());
-                            }
-                            Err(e) => {
-                                debug!("Failed to add watch for {}: {}", entry_path.display(), e);
-                            }
-                        }
-
-                        // Recursively add watches for subdirectories
-                        if let Err(e) =
-                            Self::add_recursive_watches(inotify, wd_to_path, &entry_path)
-                        {
-                            debug!(
-                                "Failed to add recursive watches for {}: {}",
-                                entry_path.display(),
-                                e
-                            );
-                        }
-                    }
+        for entry in WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_dir())
+            .skip(1) // Skip the root path itself
+        {
+            let entry_path = entry.path();
+            // Add watch for this directory
+            match inotify
+                .watches()
+                .add(entry_path, WatchMask::CREATE | WatchMask::DELETE)
+            {
+                Ok(wd) => {
+                    wd_to_path.insert(wd, entry_path.to_path_buf());
+                }
+                Err(e) => {
+                    debug!("Failed to add watch for {}: {}", entry_path.display(), e);
                 }
             }
         }
