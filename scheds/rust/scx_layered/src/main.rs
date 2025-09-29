@@ -2452,6 +2452,7 @@ impl<'a> Scheduler<'a> {
         }
 
         let cgroup_regexes = Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        skel.maps.rodata_data.as_mut().unwrap().nr_cgroup_regexes = cgroup_regexes.len() as u32;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -3522,30 +3523,25 @@ impl<'a> Scheduler<'a> {
 
                 recv(cgroup_rx) -> event => match event {
                     Ok(CgroupEvent::Created { path, cgroup_id, match_bitmap }) => {
-                        info!("Main thread received cgroup creation: {} (ID: {}, bitmap: 0x{:x})",
-                              path, cgroup_id, match_bitmap);
-
                         // Insert into BPF map
                         self.skel.maps.cgroup_match_bitmap.update(
                             &cgroup_id.to_ne_bytes(),
                             &match_bitmap.to_ne_bytes(),
                             libbpf_rs::MapFlags::ANY,
                         ).with_context(|| format!(
-                            "Failed to insert cgroup {} into BPF map. Cgroup map may be full \
+                            "Failed to insert cgroup {}({}) into BPF map. Cgroup map may be full \
                              (max 16384 entries). Aborting.",
-                            cgroup_id
+                            cgroup_id, path
                         ))?;
 
                         debug!("Added cgroup {} to BPF map with bitmap 0x{:x}", cgroup_id, match_bitmap);
                     }
                     Ok(CgroupEvent::Removed { path, cgroup_id }) => {
-                        info!("Main thread received cgroup removal: {} (ID: {})", path, cgroup_id);
-
                         // Delete from BPF map
                         if let Err(e) = self.skel.maps.cgroup_match_bitmap.delete(&cgroup_id.to_ne_bytes()) {
                             warn!("Failed to delete cgroup {} from BPF map: {}", cgroup_id, e);
                         } else {
-                            debug!("Removed cgroup {} from BPF map", cgroup_id);
+                            debug!("Removed cgroup {}({}) from BPF map", cgroup_id, path);
                         }
                     }
                     Err(e) => {
