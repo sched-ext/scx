@@ -23,6 +23,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use inotify::{Inotify, WatchMask};
+use std::os::unix::io::AsRawFd;
+use libc;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -3202,9 +3204,36 @@ impl<'a> Scheduler<'a> {
         // Spawn watcher thread
         std::thread::spawn(move || {
             let mut buffer = [0; 4096];
+            let inotify_fd = inotify.as_raw_fd();
 
             while !shutdown.load(Ordering::Relaxed) {
-                let events = match inotify.read_events_blocking(&mut buffer) {
+                // Use select to wait for events with a 100ms timeout
+                let ready = unsafe {
+                    let mut read_fds: libc::fd_set = std::mem::zeroed();
+                    libc::FD_ZERO(&mut read_fds);
+                    libc::FD_SET(inotify_fd, &mut read_fds);
+
+                    let mut timeout = libc::timeval {
+                        tv_sec: 0,
+                        tv_usec: 100_000, // 100ms
+                    };
+
+                    libc::select(
+                        inotify_fd + 1,
+                        &mut read_fds,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    )
+                };
+
+                if ready <= 0 {
+                    // Timeout or error, continue loop to check shutdown
+                    continue;
+                }
+
+                // Read events non-blocking
+                let events = match inotify.read_events(&mut buffer) {
                     Ok(events) => events,
                     Err(e) => {
                         error!("Error reading inotify events: {}", e);
