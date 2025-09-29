@@ -66,6 +66,7 @@ volatile u64 layer_refresh_seq_avgruntime;
 const volatile bool enable_antistall = true;
 const volatile bool enable_match_debug = false;
 const volatile bool enable_gpu_support = false;
+const volatile u32 nr_cgroup_regexes = 0;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
@@ -258,6 +259,14 @@ struct {
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tid SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u64);
+	__type(value, u64);
+	__uint(max_entries, 16384);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cgroup_match_bitmap SEC(".maps");
 
 // XXX - Converting this to bss array triggers verifier bugs. See
 // BpfStats::read(). Should also be cacheline aligned which doesn't work with
@@ -2358,6 +2367,16 @@ static __noinline bool match_one(struct layer_match *match,
 	case MATCH_CGROUP_CONTAINS: {
 		return match_str(match->cgroup_substr, cgrp_path, STR_SUBSTR);
 	}
+	case MATCH_CGROUP_REGEX: {
+		u64 cgroup_id = p->cgroups->dfl_cgrp->kn->id;
+		u64 *bitmap_ptr;
+
+		bitmap_ptr = bpf_map_lookup_elem(&cgroup_match_bitmap, &cgroup_id);
+		if (!bitmap_ptr)
+			return false;
+
+		return *bitmap_ptr & (1ULL << match->cgroup_regex_id);
+	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
 		__builtin_memcpy(comm, p->comm, MAX_COMM);
@@ -2605,7 +2624,28 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 
 	if (!taskc->refresh_layer)
 		return;
-	taskc->refresh_layer = false;
+
+	/*
+	 * If cgroup regex matching is configured, check if the cgroup bitmap
+	 * entry is ready. If not, return without clearing refresh_layer so we
+	 * can retry later once userspace populates the map. However, if the
+	 * task's layer_id is MAX_LAYERS (initial assignment not done), proceed
+	 * anyway as the task can't stay unassigned.
+	 */
+	bool cgroup_entry_ready = true;
+
+	if (nr_cgroup_regexes > 0) {
+		u64 cgroup_id = p->cgroups->dfl_cgrp->kn->id;
+
+		if (!bpf_map_lookup_elem(&cgroup_match_bitmap, &cgroup_id))
+			cgroup_entry_ready = false;
+	}
+
+	if (!cgroup_entry_ready && taskc->layer_id != MAX_LAYERS)
+		return;
+
+	if (cgroup_entry_ready)
+		taskc->refresh_layer = false;
 	taskc->layer_refresh_seq = layer_refresh_seq_avgruntime;
 
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
@@ -3660,6 +3700,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_CGROUP_CONTAINS:
 				dbg("%s CGROUP_CONTAINS \"%s\"", header, match->cgroup_substr);
+				break;
+			case MATCH_CGROUP_REGEX:
+				dbg("%s CGROUP_REGEX %d", header, match->cgroup_regex_id);
 				break;
 			case MATCH_HINT_EQUALS:
 				dbg("%s HINT_EQUALS %d", header, match->hint);

@@ -22,13 +22,18 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
+use inotify::{Inotify, WatchMask};
+use libc;
+use std::os::unix::io::AsRawFd;
+
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 pub use bpf_skel::*;
 use clap::Parser;
-use crossbeam::channel::RecvTimeoutError;
+use crossbeam::channel::Receiver;
+use crossbeam::select;
 use lazy_static::lazy_static;
 use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
@@ -75,6 +80,7 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use walkdir::WalkDir;
 
 const SCHEDULER_NAME: &str = "scx_layered";
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
@@ -728,6 +734,20 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+}
+
+// Cgroup event types for inter-thread communication
+#[derive(Debug, Clone)]
+enum CgroupEvent {
+    Created {
+        path: String,
+        cgroup_id: u64,    // inode number
+        match_bitmap: u64, // bitmap of matched regex rules
+    },
+    Removed {
+        path: String,
+        cgroup_id: u64, // inode number
+    },
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -1588,6 +1608,8 @@ struct Scheduler<'a> {
     proc_reader: fb_procfs::ProcReader,
     sched_stats: Stats,
 
+    cgroup_regexes: Option<HashMap<u32, Regex>>,
+
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
@@ -1598,12 +1620,18 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init_layers(skel: &mut OpenBpfSkel, specs: &[LayerSpec], topo: &Topology) -> Result<()> {
+    fn init_layers(
+        skel: &mut OpenBpfSkel,
+        specs: &[LayerSpec],
+        topo: &Topology,
+    ) -> Result<HashMap<u32, Regex>> {
         skel.maps.rodata_data.as_mut().unwrap().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
         let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
         let mut layer_weights: Vec<usize> = vec![];
+        let mut cgroup_regex_id = 0;
+        let mut cgroup_regexes = HashMap::new();
 
         for (spec_i, spec) in specs.iter().enumerate() {
             let layer = &mut skel.maps.bss_data.as_mut().unwrap().layers[spec_i];
@@ -1624,8 +1652,23 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
                         }
-                        LayerMatch::CgroupRegex(_) => {
-                            panic!("CgroupRegex match only supported in template");
+                        LayerMatch::CgroupRegex(regex_str) => {
+                            if cgroup_regex_id >= bpf_intf::consts_MAX_CGROUP_REGEXES {
+                                bail!(
+                                    "Too many cgroup regex rules. Maximum allowed: {}",
+                                    bpf_intf::consts_MAX_CGROUP_REGEXES
+                                );
+                            }
+
+                            // CgroupRegex matching handled in userspace via cgroup watcher
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_REGEX as i32;
+                            mt.cgroup_regex_id = cgroup_regex_id;
+
+                            let regex = Regex::new(regex_str).with_context(|| {
+                                format!("Invalid regex '{}' in layer '{}'", regex_str, spec.name)
+                            })?;
+                            cgroup_regexes.insert(cgroup_regex_id, regex);
+                            cgroup_regex_id += 1;
                         }
                         LayerMatch::CgroupContains(substr) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
@@ -1838,7 +1881,7 @@ impl<'a> Scheduler<'a> {
             warn!("cpufreq support not available, ignoring perf configurations");
         }
 
-        Ok(())
+        Ok(cgroup_regexes)
     }
 
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
@@ -2408,7 +2451,8 @@ impl<'a> Scheduler<'a> {
             rodata.enable_hi_fb_thread_name_match = true;
         }
 
-        Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        let cgroup_regexes = Self::init_layers(&mut skel, &layer_specs, &topo)?;
+        skel.maps.rodata_data.as_mut().unwrap().nr_cgroup_regexes = cgroup_regexes.len() as u32;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -2486,6 +2530,7 @@ impl<'a> Scheduler<'a> {
         let mut gpu_task_handler =
             GpuTaskAffinitizer::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
         gpu_task_handler.init(topo.clone());
+
         let sched = Self {
             struct_ops: Some(struct_ops),
             layer_specs,
@@ -2499,6 +2544,7 @@ impl<'a> Scheduler<'a> {
 
             sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
 
+            cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
 
@@ -3162,12 +3208,249 @@ impl<'a> Scheduler<'a> {
         Ok(sys_stats)
     }
 
+    // Helper function to process a cgroup creation (common logic for walkdir and inotify)
+    fn process_cgroup_creation(
+        path: &Path,
+        cgroup_regexes: &HashMap<u32, Regex>,
+        cgroup_path_to_id: &mut HashMap<String, u64>,
+        sender: &crossbeam::channel::Sender<CgroupEvent>,
+    ) {
+        let path_str = path.to_string_lossy().to_string();
+
+        // Get cgroup ID (inode number)
+        let cgroup_id = std::fs::metadata(path)
+            .map(|metadata| {
+                use std::os::unix::fs::MetadataExt;
+                metadata.ino()
+            })
+            .unwrap_or(0);
+
+        // Build match bitmap by testing against CgroupRegex rules
+        let mut match_bitmap = 0u64;
+        for (rule_id, regex) in cgroup_regexes {
+            if regex.is_match(&path_str) {
+                match_bitmap |= 1u64 << rule_id;
+            }
+        }
+
+        // Store in hash
+        cgroup_path_to_id.insert(path_str.clone(), cgroup_id);
+
+        // Send event
+        if let Err(e) = sender.send(CgroupEvent::Created {
+            path: path_str,
+            cgroup_id,
+            match_bitmap,
+        }) {
+            error!("Failed to send cgroup creation event: {}", e);
+        }
+    }
+
+    fn start_cgroup_watcher(
+        shutdown: Arc<AtomicBool>,
+        cgroup_regexes: HashMap<u32, Regex>,
+    ) -> Result<Receiver<CgroupEvent>> {
+        let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
+        let mut wd_to_path = HashMap::new();
+
+        // Create crossbeam channel for cgroup events (bounded to prevent memory issues)
+        let (sender, receiver) = crossbeam::channel::bounded::<CgroupEvent>(1024);
+
+        // Watch for directory creation and deletion events
+        let root_wd = inotify
+            .watches()
+            .add("/sys/fs/cgroup", WatchMask::CREATE | WatchMask::DELETE)
+            .context("Failed to add watch for /sys/fs/cgroup")?;
+        wd_to_path.insert(root_wd, PathBuf::from("/sys/fs/cgroup"));
+
+        // Also recursively watch existing directories for new subdirectories
+        Self::add_recursive_watches(&mut inotify, &mut wd_to_path, Path::new("/sys/fs/cgroup"))?;
+
+        // Spawn watcher thread
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            let inotify_fd = inotify.as_raw_fd();
+            // Maintain hash of cgroup path -> cgroup ID (inode number)
+            let mut cgroup_path_to_id = HashMap::<String, u64>::new();
+
+            // Populate existing cgroups
+            for entry in WalkDir::new("/sys/fs/cgroup")
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_dir())
+            {
+                let path = entry.path();
+                Self::process_cgroup_creation(
+                    path,
+                    &cgroup_regexes,
+                    &mut cgroup_path_to_id,
+                    &sender,
+                );
+            }
+
+            while !shutdown.load(Ordering::Relaxed) {
+                // Use select to wait for events with a 100ms timeout
+                let ready = unsafe {
+                    let mut read_fds: libc::fd_set = std::mem::zeroed();
+                    libc::FD_ZERO(&mut read_fds);
+                    libc::FD_SET(inotify_fd, &mut read_fds);
+
+                    let mut timeout = libc::timeval {
+                        tv_sec: 0,
+                        tv_usec: 100_000, // 100ms
+                    };
+
+                    libc::select(
+                        inotify_fd + 1,
+                        &mut read_fds,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    )
+                };
+
+                if ready <= 0 {
+                    // Timeout or error, continue loop to check shutdown
+                    continue;
+                }
+
+                // Read events non-blocking
+                let events = match inotify.read_events(&mut buffer) {
+                    Ok(events) => events,
+                    Err(e) => {
+                        error!("Error reading inotify events: {}", e);
+                        break;
+                    }
+                };
+
+                for event in events {
+                    if !event.mask.contains(inotify::EventMask::CREATE)
+                        && !event.mask.contains(inotify::EventMask::DELETE)
+                    {
+                        continue;
+                    }
+
+                    let name = match event.name {
+                        Some(name) => name,
+                        None => continue,
+                    };
+
+                    let parent_path = match wd_to_path.get(&event.wd) {
+                        Some(parent) => parent,
+                        None => {
+                            warn!("Unknown watch descriptor: {:?}", event.wd);
+                            continue;
+                        }
+                    };
+
+                    let path = parent_path.join(name.to_string_lossy().as_ref());
+
+                    if event.mask.contains(inotify::EventMask::CREATE) {
+                        if !path.is_dir() {
+                            continue;
+                        }
+
+                        Self::process_cgroup_creation(
+                            &path,
+                            &cgroup_regexes,
+                            &mut cgroup_path_to_id,
+                            &sender,
+                        );
+
+                        // Add watch for this new directory
+                        match inotify
+                            .watches()
+                            .add(&path, WatchMask::CREATE | WatchMask::DELETE)
+                        {
+                            Ok(wd) => {
+                                wd_to_path.insert(wd, path.clone());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to add watch for new cgroup {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    } else if event.mask.contains(inotify::EventMask::DELETE) {
+                        let path_str = path.to_string_lossy().to_string();
+
+                        // Get cgroup ID from our hash (since the directory is gone, we can't stat it)
+                        let cgroup_id = cgroup_path_to_id.remove(&path_str).unwrap_or(0);
+
+                        // Send removal event to main thread
+                        if let Err(e) = sender.send(CgroupEvent::Removed {
+                            path: path_str,
+                            cgroup_id,
+                        }) {
+                            error!("Failed to send cgroup removal event: {}", e);
+                        }
+
+                        // Find and remove the watch descriptor for this path
+                        let wd_to_remove = wd_to_path.iter().find_map(|(wd, watched_path)| {
+                            if watched_path == &path {
+                                Some(wd.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(wd) = wd_to_remove {
+                            wd_to_path.remove(&wd);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(receiver)
+    }
+
+    fn add_recursive_watches(
+        inotify: &mut Inotify,
+        wd_to_path: &mut HashMap<inotify::WatchDescriptor, PathBuf>,
+        path: &Path,
+    ) -> Result<()> {
+        for entry in WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_dir())
+            .skip(1)
+        {
+            let entry_path = entry.path();
+            // Add watch for this directory
+            match inotify
+                .watches()
+                .add(entry_path, WatchMask::CREATE | WatchMask::DELETE)
+            {
+                Ok(wd) => {
+                    wd_to_path.insert(wd, entry_path.to_path_buf());
+                }
+                Err(e) => {
+                    debug!("Failed to add watch for {}: {}", entry_path.display(), e);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
         let enable_layer_refresh = !self.layer_refresh_intv.is_zero();
         let mut next_layer_refresh_at = Instant::now() + self.layer_refresh_intv;
         let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
+
+        // Start the cgroup watcher only if there are CgroupRegex rules
+        let cgroup_regexes = self.cgroup_regexes.take().unwrap();
+        let cgroup_event_rx = if !cgroup_regexes.is_empty() {
+            Some(Self::start_cgroup_watcher(
+                shutdown.clone(),
+                cgroup_regexes,
+            )?)
+        } else {
+            None
+        };
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -3191,46 +3474,84 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            match req_ch.recv_deadline(next_sched_at) {
-                Ok(StatsReq::Hello(tid)) => {
-                    cpus_ranges.insert(
-                        tid,
-                        self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
-                    );
-                    let stats =
-                        Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
-                    res_ch.send(StatsRes::Hello(stats))?;
-                }
-                Ok(StatsReq::Refresh(tid, mut stats)) => {
-                    // Propagate self's layer cpu ranges into each stat's.
-                    for i in 0..self.nr_layer_cpus_ranges.len() {
-                        for (_, ranges) in cpus_ranges.iter_mut() {
-                            ranges[i] = (
-                                ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
-                                ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
-                            );
-                        }
-                        self.nr_layer_cpus_ranges[i] =
-                            (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
-                    }
+            // Handle both stats requests and cgroup events with timeout
+            let timeout_duration = next_sched_at.saturating_duration_since(Instant::now());
+            let never_rx = crossbeam::channel::never();
+            let cgroup_rx = cgroup_event_rx.as_ref().unwrap_or(&never_rx);
 
-                    stats.refresh(
-                        &mut self.skel,
-                        &self.proc_reader,
-                        now,
-                        self.processing_dur,
-                        &self.gpu_task_handler,
-                    )?;
-                    let sys_stats =
-                        self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
-                    res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+            select! {
+                recv(req_ch) -> msg => match msg {
+                    Ok(StatsReq::Hello(tid)) => {
+                        cpus_ranges.insert(
+                            tid,
+                            self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
+                        );
+                        let stats =
+                            Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
+                        res_ch.send(StatsRes::Hello(stats))?;
+                    }
+                    Ok(StatsReq::Refresh(tid, mut stats)) => {
+                        // Propagate self's layer cpu ranges into each stat's.
+                        for i in 0..self.nr_layer_cpus_ranges.len() {
+                            for (_, ranges) in cpus_ranges.iter_mut() {
+                                ranges[i] = (
+                                    ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
+                                    ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
+                                );
+                            }
+                            self.nr_layer_cpus_ranges[i] =
+                                (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
+                        }
+
+                        stats.refresh(
+                            &mut self.skel,
+                            &self.proc_reader,
+                            now,
+                            self.processing_dur,
+                            &self.gpu_task_handler,
+                        )?;
+                        let sys_stats =
+                            self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
+                        res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+                    }
+                    Ok(StatsReq::Bye(tid)) => {
+                        cpus_ranges.remove(&tid);
+                        res_ch.send(StatsRes::Bye)?;
+                    }
+                    Err(e) => Err(e)?,
+                },
+
+                recv(cgroup_rx) -> event => match event {
+                    Ok(CgroupEvent::Created { path, cgroup_id, match_bitmap }) => {
+                        // Insert into BPF map
+                        self.skel.maps.cgroup_match_bitmap.update(
+                            &cgroup_id.to_ne_bytes(),
+                            &match_bitmap.to_ne_bytes(),
+                            libbpf_rs::MapFlags::ANY,
+                        ).with_context(|| format!(
+                            "Failed to insert cgroup {}({}) into BPF map. Cgroup map may be full \
+                             (max 16384 entries). Aborting.",
+                            cgroup_id, path
+                        ))?;
+
+                        debug!("Added cgroup {} to BPF map with bitmap 0x{:x}", cgroup_id, match_bitmap);
+                    }
+                    Ok(CgroupEvent::Removed { path, cgroup_id }) => {
+                        // Delete from BPF map
+                        if let Err(e) = self.skel.maps.cgroup_match_bitmap.delete(&cgroup_id.to_ne_bytes()) {
+                            warn!("Failed to delete cgroup {} from BPF map: {}", cgroup_id, e);
+                        } else {
+                            debug!("Removed cgroup {}({}) from BPF map", cgroup_id, path);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error receiving cgroup event: {}", e);
+                    }
+                },
+
+                recv(crossbeam::channel::after(timeout_duration)) -> _ => {
+                    // Timeout - continue main loop
                 }
-                Ok(StatsReq::Bye(tid)) => {
-                    cpus_ranges.remove(&tid);
-                    res_ch.send(StatsRes::Bye)?;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(e) => Err(e)?,
             }
         }
 
