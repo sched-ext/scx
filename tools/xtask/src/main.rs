@@ -5,11 +5,9 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use cargo_metadata::{Metadata, MetadataCommand, Package};
 use clap::{Args, Parser, Subcommand};
 use once_cell::sync::OnceCell;
-
-use std::path::PathBuf;
-use std::process::Command;
 
 mod bump_versions;
 mod versions;
@@ -76,49 +74,33 @@ fn main() {
     }
 }
 
-fn get_cargo_metadata() -> Result<&'static serde_json::Value> {
-    static CARGO_METADATA: OnceCell<serde_json::Value> = OnceCell::new();
+fn get_cargo_metadata() -> Result<&'static Metadata> {
+    static CARGO_METADATA: OnceCell<Metadata> = OnceCell::new();
 
     CARGO_METADATA.get_or_try_init(|| {
-        let output = Command::new("cargo")
-            .args(["metadata", "--format-version", "1"])
-            .output()?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("Failed to run cargo metadata"));
-        }
-
-        Ok(serde_json::from_slice(&output.stdout)?)
+        MetadataCommand::new()
+            .exec()
+            .context("Failed to run cargo metadata")
     })
 }
 
-pub fn get_rust_paths() -> Result<Vec<PathBuf>> {
+pub fn get_workspace_packages() -> Result<Vec<&'static Package>> {
     let metadata = get_cargo_metadata()?;
 
-    // Get workspace member paths only
-    let workspace_members = metadata["workspace_members"]
-        .as_array()
-        .context("no workspace_members found in cargo metadata")?;
+    // Filter to workspace member packages only
+    let workspace_packages: Vec<&Package> = metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .collect();
 
-    let packages = metadata["packages"]
-        .as_array()
-        .context("no packages found in cargo metadata")?;
+    Ok(workspace_packages)
+}
 
-    let mut paths = Vec::new();
-
-    // Only include packages that are workspace members
-    for package in packages {
-        if let Some(id) = package["id"].as_str() {
-            if workspace_members
-                .iter()
-                .any(|member| member.as_str() == Some(id))
-            {
-                if let Some(manifest_path) = package["manifest_path"].as_str() {
-                    paths.push(PathBuf::from(manifest_path));
-                }
-            }
-        }
-    }
-
-    Ok(paths)
+pub fn get_rust_paths() -> Result<Vec<std::path::PathBuf>> {
+    let packages = get_workspace_packages()?;
+    Ok(packages
+        .iter()
+        .map(|pkg| pkg.manifest_path.as_std_path().to_path_buf())
+        .collect())
 }

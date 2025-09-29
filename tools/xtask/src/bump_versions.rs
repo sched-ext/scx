@@ -31,24 +31,22 @@ pub fn bump_versions_command(packages: Vec<String>, all: bool) -> Result<()> {
     let metadata = get_cargo_metadata()?;
 
     // Build map of workspace crates
-    let workspace_member_ids: HashSet<String> = metadata["workspace_members"]
-        .as_array()
-        .unwrap()
+    let workspace_member_ids: HashSet<String> = metadata
+        .workspace_members
         .iter()
-        .map(|id| id.as_str().unwrap().to_string())
+        .map(|id| id.to_string())
         .collect();
 
     let mut workspace_members = HashSet::new();
     let mut crate_paths = HashMap::new();
 
-    for pkg in metadata["packages"].as_array().unwrap() {
-        let pkg_id = pkg["id"].as_str().unwrap();
-        let pkg_name = pkg["name"].as_str().unwrap();
-
-        if workspace_member_ids.contains(pkg_id) {
-            workspace_members.insert(pkg_name.to_string());
-            let manifest_path = PathBuf::from(pkg["manifest_path"].as_str().unwrap());
-            crate_paths.insert(pkg_name.to_string(), manifest_path);
+    for pkg in &metadata.packages {
+        if workspace_member_ids.contains(&pkg.id.to_string()) {
+            workspace_members.insert(pkg.name.to_string());
+            crate_paths.insert(
+                pkg.name.to_string(),
+                pkg.manifest_path.as_std_path().to_path_buf(),
+            );
         }
     }
 
@@ -74,21 +72,19 @@ pub fn bump_versions_command(packages: Vec<String>, all: bool) -> Result<()> {
     // Find dependencies of target crates (what the target crates depend on)
     for target_crate in &target_crates {
         // Find the target crate's package in metadata
-        for pkg in metadata["packages"].as_array().unwrap() {
-            let pkg_name = pkg["name"].as_str().unwrap();
+        for pkg in &metadata.packages {
+            let pkg_name = pkg.name.as_str();
 
             if pkg_name == target_crate && workspace_members.contains(pkg_name) {
                 // Add all workspace dependencies of this target crate (exclude dev dependencies)
-                for dep in pkg["dependencies"].as_array().unwrap() {
-                    let dep_name = dep["name"].as_str().unwrap();
-                    let is_workspace_dep = dep["source"].is_null(); // workspace dependency has null source
-                    let dep_kind = dep.get("kind").and_then(|k| k.as_str());
-
-                    // Only include regular dependencies (kind=null) and build dependencies (kind="build")
-                    // Exclude dev dependencies (kind="dev")
+                for dep in &pkg.dependencies {
+                    let dep_name = dep.name.as_str();
+                    let is_workspace_dep = dep.source.is_none(); // workspace dependency has null source
+                                                                 // Only include regular dependencies and build dependencies
+                                                                 // Exclude dev dependencies
                     if is_workspace_dep
                         && workspace_members.contains(dep_name)
-                        && dep_kind != Some("dev")
+                        && !matches!(dep.kind, cargo_metadata::DependencyKind::Development)
                     {
                         crates_to_bump.insert(dep_name.to_string());
                     }
@@ -128,19 +124,15 @@ pub fn get_all_workspace_crates() -> Result<Vec<String>> {
     let metadata = get_cargo_metadata()?;
     let mut crates = Vec::new();
 
-    let workspace_member_ids: HashSet<String> = metadata["workspace_members"]
-        .as_array()
-        .unwrap()
+    let workspace_member_ids: HashSet<String> = metadata
+        .workspace_members
         .iter()
-        .map(|id| id.as_str().unwrap().to_string())
+        .map(|id| id.to_string())
         .collect();
 
-    for pkg in metadata["packages"].as_array().unwrap() {
-        let pkg_id = pkg["id"].as_str().unwrap();
-        let pkg_name = pkg["name"].as_str().unwrap();
-
-        if workspace_member_ids.contains(pkg_id) {
-            crates.push(pkg_name.to_string());
+    for pkg in &metadata.packages {
+        if workspace_member_ids.contains(&pkg.id.to_string()) {
+            crates.push(pkg.name.to_string());
         }
     }
 
