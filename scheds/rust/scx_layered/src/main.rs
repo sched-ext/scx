@@ -23,8 +23,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use inotify::{Inotify, WatchMask};
-use std::os::unix::io::AsRawFd;
 use libc;
+use std::os::unix::io::AsRawFd;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -32,7 +32,8 @@ use anyhow::Context;
 use anyhow::Result;
 pub use bpf_skel::*;
 use clap::Parser;
-use crossbeam::channel::RecvTimeoutError;
+use crossbeam::channel::Receiver;
+use crossbeam::select;
 use lazy_static::lazy_static;
 use libbpf_rs::libbpf_sys;
 use libbpf_rs::AsRawLibbpf;
@@ -732,6 +733,20 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+}
+
+// Cgroup event types for inter-thread communication
+#[derive(Debug, Clone)]
+enum CgroupEvent {
+    Created {
+        path: String,
+        cgroup_id: u64,    // inode number
+        match_bitmap: u64, // bitmap of matched regex rules
+    },
+    Removed {
+        path: String,
+        cgroup_id: u64, // inode number
+    },
 }
 
 fn read_total_cpu(reader: &fb_procfs::ProcReader) -> Result<fb_procfs::CpuStat> {
@@ -3194,9 +3209,12 @@ impl<'a> Scheduler<'a> {
     fn start_cgroup_watcher(
         shutdown: Arc<AtomicBool>,
         cgroup_regexes: HashMap<u32, Regex>,
-    ) -> Result<()> {
+    ) -> Result<Receiver<CgroupEvent>> {
         let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
         let mut wd_to_path = HashMap::new();
+
+        // Create crossbeam channel for cgroup events (bounded to prevent memory issues)
+        let (sender, receiver) = crossbeam::channel::bounded::<CgroupEvent>(1024);
 
         // Watch for directory creation and deletion events
         let root_wd = inotify
@@ -3212,6 +3230,8 @@ impl<'a> Scheduler<'a> {
         std::thread::spawn(move || {
             let mut buffer = [0; 4096];
             let inotify_fd = inotify.as_raw_fd();
+            // Maintain hash of cgroup path -> cgroup ID (inode number)
+            let mut cgroup_path_to_id = HashMap::<String, u64>::new();
 
             while !shutdown.load(Ordering::Relaxed) {
                 // Use select to wait for events with a 100ms timeout
@@ -3275,14 +3295,32 @@ impl<'a> Scheduler<'a> {
                             continue;
                         }
 
-                        info!("New cgroup created: {}", path.display());
+                        // Get inode number (cgroup ID)
+                        let cgroup_id = std::fs::metadata(&path)
+                            .map(|metadata| {
+                                use std::os::unix::fs::MetadataExt;
+                                metadata.ino()
+                            })
+                            .unwrap_or(0);
 
-                        // Test against CgroupRegex rules
-                        let path_str = path.to_string_lossy();
+                        let path_str = path.to_string_lossy().to_string();
+
+                        // Build match bitmap by testing against CgroupRegex rules
+                        let mut match_bitmap = 0u64;
                         for (rule_id, regex) in &cgroup_regexes {
                             if regex.is_match(&path_str) {
-                                info!("CgroupRegex rule ID {} matched: {}", rule_id, path_str);
+                                match_bitmap |= 1u64 << rule_id;
                             }
+                        }
+
+                        // Store in hash and send event to main thread
+                        cgroup_path_to_id.insert(path_str.clone(), cgroup_id);
+                        if let Err(e) = sender.send(CgroupEvent::Created {
+                            path: path_str,
+                            cgroup_id,
+                            match_bitmap,
+                        }) {
+                            error!("Failed to send cgroup creation event: {}", e);
                         }
 
                         // Add watch for this new directory
@@ -3302,7 +3340,18 @@ impl<'a> Scheduler<'a> {
                             }
                         }
                     } else if event.mask.contains(inotify::EventMask::DELETE) {
-                        info!("Cgroup removed: {}", path.display());
+                        let path_str = path.to_string_lossy().to_string();
+
+                        // Get cgroup ID from our hash (since the directory is gone, we can't stat it)
+                        let cgroup_id = cgroup_path_to_id.remove(&path_str).unwrap_or(0);
+
+                        // Send removal event to main thread
+                        if let Err(e) = sender.send(CgroupEvent::Removed {
+                            path: path_str,
+                            cgroup_id,
+                        }) {
+                            error!("Failed to send cgroup removal event: {}", e);
+                        }
 
                         // Find and remove the watch descriptor for this path
                         let wd_to_remove = wd_to_path.iter().find_map(|(wd, watched_path)| {
@@ -3321,7 +3370,7 @@ impl<'a> Scheduler<'a> {
             info!("Cgroup watcher thread exiting");
         });
 
-        Ok(())
+        Ok(receiver)
     }
 
     fn add_recursive_watches(
@@ -3373,9 +3422,14 @@ impl<'a> Scheduler<'a> {
 
         // Start the cgroup watcher only if there are CgroupRegex rules
         let cgroup_regexes = self.cgroup_regexes.take().unwrap();
-        if !cgroup_regexes.is_empty() {
-            Self::start_cgroup_watcher(shutdown.clone(), cgroup_regexes)?;
-        }
+        let cgroup_event_rx = if !cgroup_regexes.is_empty() {
+            Some(Self::start_cgroup_watcher(
+                shutdown.clone(),
+                cgroup_regexes,
+            )?)
+        } else {
+            None
+        };
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -3399,46 +3453,69 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            match req_ch.recv_deadline(next_sched_at) {
-                Ok(StatsReq::Hello(tid)) => {
-                    cpus_ranges.insert(
-                        tid,
-                        self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
-                    );
-                    let stats =
-                        Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
-                    res_ch.send(StatsRes::Hello(stats))?;
-                }
-                Ok(StatsReq::Refresh(tid, mut stats)) => {
-                    // Propagate self's layer cpu ranges into each stat's.
-                    for i in 0..self.nr_layer_cpus_ranges.len() {
-                        for (_, ranges) in cpus_ranges.iter_mut() {
-                            ranges[i] = (
-                                ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
-                                ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
-                            );
-                        }
-                        self.nr_layer_cpus_ranges[i] =
-                            (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
-                    }
+            // Handle both stats requests and cgroup events with timeout
+            let timeout_duration = next_sched_at.saturating_duration_since(Instant::now());
 
-                    stats.refresh(
-                        &mut self.skel,
-                        &self.proc_reader,
-                        now,
-                        self.processing_dur,
-                        &self.gpu_task_handler,
-                    )?;
-                    let sys_stats =
-                        self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
-                    res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+            select! {
+                recv(req_ch) -> msg => match msg {
+                    Ok(StatsReq::Hello(tid)) => {
+                        cpus_ranges.insert(
+                            tid,
+                            self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
+                        );
+                        let stats =
+                            Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
+                        res_ch.send(StatsRes::Hello(stats))?;
+                    }
+                    Ok(StatsReq::Refresh(tid, mut stats)) => {
+                        // Propagate self's layer cpu ranges into each stat's.
+                        for i in 0..self.nr_layer_cpus_ranges.len() {
+                            for (_, ranges) in cpus_ranges.iter_mut() {
+                                ranges[i] = (
+                                    ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
+                                    ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
+                                );
+                            }
+                            self.nr_layer_cpus_ranges[i] =
+                                (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
+                        }
+
+                        stats.refresh(
+                            &mut self.skel,
+                            &self.proc_reader,
+                            now,
+                            self.processing_dur,
+                            &self.gpu_task_handler,
+                        )?;
+                        let sys_stats =
+                            self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
+                        res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+                    }
+                    Ok(StatsReq::Bye(tid)) => {
+                        cpus_ranges.remove(&tid);
+                        res_ch.send(StatsRes::Bye)?;
+                    }
+                    Err(e) => Err(e)?,
+                },
+
+                recv(cgroup_event_rx.as_ref().unwrap_or(&crossbeam::channel::never())) -> event => match event {
+                    Ok(CgroupEvent::Created { path, cgroup_id, match_bitmap }) => {
+                        info!("Main thread received cgroup creation: {} (ID: {}, bitmap: 0x{:x})",
+                              path, cgroup_id, match_bitmap);
+                        // TODO: Handle cgroup creation in scheduler
+                    }
+                    Ok(CgroupEvent::Removed { path, cgroup_id }) => {
+                        info!("Main thread received cgroup removal: {} (ID: {})", path, cgroup_id);
+                        // TODO: Handle cgroup removal in scheduler
+                    }
+                    Err(e) => {
+                        error!("Error receiving cgroup event: {}", e);
+                    }
+                },
+
+                recv(crossbeam::channel::after(timeout_duration)) -> _ => {
+                    // Timeout - continue main loop
                 }
-                Ok(StatsReq::Bye(tid)) => {
-                    cpus_ranges.remove(&tid);
-                    res_ch.send(StatsRes::Bye)?;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(e) => Err(e)?,
             }
         }
 
