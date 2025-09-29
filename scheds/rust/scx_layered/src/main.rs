@@ -3414,7 +3414,7 @@ impl<'a> Scheduler<'a> {
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_dir())
-            .skip(1) // Skip the root path itself
+            .skip(1)
         {
             let entry_path = entry.path();
             // Add watch for this directory
@@ -3475,6 +3475,8 @@ impl<'a> Scheduler<'a> {
 
             // Handle both stats requests and cgroup events with timeout
             let timeout_duration = next_sched_at.saturating_duration_since(Instant::now());
+            let never_rx = crossbeam::channel::never();
+            let cgroup_rx = cgroup_event_rx.as_ref().unwrap_or(&never_rx);
 
             select! {
                 recv(req_ch) -> msg => match msg {
@@ -3518,15 +3520,33 @@ impl<'a> Scheduler<'a> {
                     Err(e) => Err(e)?,
                 },
 
-                recv(cgroup_event_rx.as_ref().unwrap_or(&crossbeam::channel::never())) -> event => match event {
+                recv(cgroup_rx) -> event => match event {
                     Ok(CgroupEvent::Created { path, cgroup_id, match_bitmap }) => {
                         info!("Main thread received cgroup creation: {} (ID: {}, bitmap: 0x{:x})",
                               path, cgroup_id, match_bitmap);
-                        // TODO: Handle cgroup creation in scheduler
+
+                        // Insert into BPF map
+                        self.skel.maps.cgroup_match_bitmap.update(
+                            &cgroup_id.to_ne_bytes(),
+                            &match_bitmap.to_ne_bytes(),
+                            libbpf_rs::MapFlags::ANY,
+                        ).with_context(|| format!(
+                            "Failed to insert cgroup {} into BPF map. Cgroup map may be full \
+                             (max 16384 entries). Aborting.",
+                            cgroup_id
+                        ))?;
+
+                        debug!("Added cgroup {} to BPF map with bitmap 0x{:x}", cgroup_id, match_bitmap);
                     }
                     Ok(CgroupEvent::Removed { path, cgroup_id }) => {
                         info!("Main thread received cgroup removal: {} (ID: {})", path, cgroup_id);
-                        // TODO: Handle cgroup removal in scheduler
+
+                        // Delete from BPF map
+                        if let Err(e) = self.skel.maps.cgroup_match_bitmap.delete(&cgroup_id.to_ne_bytes()) {
+                            warn!("Failed to delete cgroup {} from BPF map: {}", cgroup_id, e);
+                        } else {
+                            debug!("Removed cgroup {} from BPF map", cgroup_id);
+                        }
                     }
                     Err(e) => {
                         error!("Error receiving cgroup event: {}", e);

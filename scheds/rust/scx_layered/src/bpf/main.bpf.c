@@ -259,6 +259,14 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tid SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u64);
+	__type(value, u64);
+	__uint(max_entries, 16384);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cgroup_match_bitmap SEC(".maps");
+
 // XXX - Converting this to bss array triggers verifier bugs. See
 // BpfStats::read(). Should also be cacheline aligned which doesn't work with
 // the array map.
