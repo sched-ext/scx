@@ -116,6 +116,10 @@
                 # fenix managed rust toolchain
                 rust-toolchain
               ];
+
+              shellHook = ''
+                export LD_LIBRARY_PATH="${lib.makeLibraryPath (with pkgs; [ elfutils zlib zstd.out ])}:$LD_LIBRARY_PATH"
+              '';
             } // build-env-vars);
 
             gha-common = pkgs.mkShellNoCC {
