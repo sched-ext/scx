@@ -1,0 +1,12 @@
+target/release/scx_cosmos usr/sbin/
+target/release/scx_flash usr/sbin/
+target/release/scx_layered usr/sbin/
+target/release/scx_mitosis usr/sbin/
+target/release/scx_rusty usr/sbin/
+target/release/scx_rustland usr/sbin/
+target/release/scx_chaos usr/sbin/
+target/release/scx_bpfland usr/sbin/
+target/release/scx_p2dq usr/sbin/
+target/release/scx_rlfifo usr/sbin/
+target/release/scx_tickless usr/sbin/
+services/scx etc/default/

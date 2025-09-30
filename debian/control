@@ -1,0 +1,81 @@
+Source: scx
+Section: misc
+Priority: optional
+Maintainer: Andrea Righi <arighi@nvidia.com>
+Standards-Version: 4.7.3
+Build-Depends:
+ debhelper-compat (= 13),
+ fakeroot,
+ linux-libc-dev,
+ linux-perf,
+ bpftool,
+ libbpf-dev (>= 1.3),
+ dh-cargo,
+ librust-libbpf-rs-dev,
+ librust-libbpf-cargo-dev,
+ librust-anyhow-dev,
+ librust-bindgen-dev,
+ librust-bitvec-dev,
+ librust-clap-dev,
+ librust-crossbeam-dev,
+ librust-ctrlc-dev,
+ librust-enumset-dev,
+ librust-flate2-dev,
+ librust-glob-dev,
+ librust-hex-dev,
+ librust-lazy-static-dev,
+ librust-libbpf-sys-dev,
+ librust-libc-dev,
+ librust-lock-api-dev,
+ librust-log-dev,
+ librust-mio-dev,
+ librust-nix-dev,
+ librust-num-dev,
+ librust-parking-lot-dev,
+ librust-paste-dev,
+ librust-proc-macro2-dev,
+ librust-quote-dev,
+ librust-regex-dev,
+ librust-ruzstd-dev,
+ librust-ryu-dev,
+ librust-scan-fmt-dev,
+ librust-serde-dev,
+ librust-serde-json-dev,
+ librust-simd-adler32-dev,
+ librust-simplelog-dev,
+ librust-slog-dev,
+ librust-socket2-dev,
+ librust-stable-deref-trait-dev,
+ librust-syn-dev,
+ librust-tar-dev,
+ librust-tempfile-dev,
+ librust-tokio-dev,
+ librust-tracing-dev,
+ librust-tracing-subscriber-dev,
+ librust-vergen-dev,
+ librust-version-compare-dev,
+ librust-walkdir-dev,
+ librust-zbus-dev,
+ librust-zerocopy-dev,
+ binutils-dev,
+ libelf-dev,
+ libcap-dev,
+ libseccomp-dev,
+ zlib1g-dev,
+ pkg-config,
+ cmake,
+ pkgconf,
+ cargo,
+ rustc,
+ jq
+Homepage: https://github.com/sched-ext/scx
+Vcs-Git:  https://github.com/sched-ext/scx
+
+Package: scx
+Architecture: amd64 arm64 armhf ppc64el s390x
+Depends:
+ ${shlibs:Depends},
+Description: sched_ext schedulers and tools
+ sched_ext is a Linux kernel feature which enables implementing kernel thread
+ schedulers in BPF and dynamically loading them. This package contains various
+ scheduler implementations and support utilities.

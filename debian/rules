@@ -1,0 +1,35 @@
+#!/usr/bin/make -f
+
+ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+CARGO_BUILD_TARGETDIR := debian/cargo-target
+
+export RUSTC = /usr/bin/rustc
+export CARGO = /usr/bin/cargo
+export TARGET = $(shell $(RUSTC) -vV | sed -n 's/^host: //p')
+
+%:
+	dh $@ --buildsystem=none
+
+override_dh_auto_build:
+	rm -f Cargo.lock
+	# Generate lockfile - will download sscanf and nvml-wrapper (not in Debian)
+	$(CARGO) generate-lockfile
+	# Build - uses Debian packages where available, downloads sscanf/nvml-wrapper from crates.io
+	$(CARGO) build --release \
+		--exclude scxtop \
+		--exclude scx_wd40 \
+		--exclude scx_lavd \
+		--exclude xtask \
+		--exclude scxcash \
+		--exclude vmlinux_docify \
+		--exclude scx_arena_selftests \
+		--workspace
+
+override_dh_auto_test:
+	@echo "Skipping tests"
+
+override_dh_auto_install:
+	@echo "Skipping cargo install"
+
+override_dh_installsystemd:
+	dh_installsystemd --name=scx

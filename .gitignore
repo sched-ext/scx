@@ -3,6 +3,7 @@ libbpf/
 PKGBUILD
 target
 build/
+vendor
 *.swp
 .cache/
 .vscode/

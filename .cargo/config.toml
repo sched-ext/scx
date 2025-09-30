@@ -1,2 +1,5 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Cargo will check /usr/share/cargo/registry first (where Debian packages install)
+# and fall back to crates.io for packages not available in Debian
