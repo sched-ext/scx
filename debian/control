@@ -1,0 +1,28 @@
+Source: scx
+Section: misc
+Priority: optional
+Maintainer: Andrea Righi <andrea.righi@canonical.com>
+Standards-Version: 4.5.1
+Build-Depends: debhelper (>= 11), fakeroot,
+ linux-libc-dev, linux-tools-common, linux-tools-generic, bpftool,
+ libbpf-dev (>= 1.4.0), dh-cargo,
+ librust-libbpf-rs-dev, librust-anyhow-dev, librust-ctrlc-dev,
+ librust-simplelog-dev, librust-libbpf-sys-dev, librust-clap-dev,
+ librust-crossbeam-dev, librust-bitvec-dev, librust-hex-dev,
+ librust-lazy-static-dev, librust-libbpf-cargo-dev, librust-num-dev,
+ librust-paste-dev, librust-scan-fmt-dev, librust-tar-dev,
+ librust-tracing-dev, librust-tracing-subscriber-dev, librust-vergen-dev,
+ librust-version-compare-dev, librust-walkdir-dev, librust-zbus-dev,
+ binutils-dev, libelf-dev, libcap-dev, zlib1g-dev, pkg-config,
+ cmake, pkgconf, cargo, rustc, clang, llvm, llvm-dev, jq
+Homepage: https://github.com/sched-ext/scx
+Vcs-Git:  https://github.com/sched-ext/scx
+
+Package: scx
+Architecture: amd64 arm64 armhf ppc64el s390x
+Depends:
+ ${shlibs:Depends},
+Description: sched_ext schedulers and tools
+ sched_ext is a Linux kernel feature which enables implementing kernel thread
+ schedulers in BPF and dynamically loading them. This package contains various
+ scheduler implementations and support utilities.

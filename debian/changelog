@@ -1,0 +1,5 @@
+scx (1.0.16.1-1ubuntu1) questing; urgency=medium
+
+  * Initial packaging.
+
+ -- Andrea Righi <arighi@nvidia.com>  Tue, 30 Sep 2025 11:13:05 +0200

@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+CARGO_BUILD_TARGETDIR := debian/cargo-target
+
+%:
+	dh $@ --buildsystem=cargo
+
+override_dh_auto_build:
+	cargo build --release -p scx_cosmos
+
+override_dh_auto_test:
+	cargo build --release -p scx_cosmos
+
+override_dh_auto_install:
+	echo "skip cargo install"
