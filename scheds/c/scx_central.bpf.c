@@ -151,7 +151,7 @@ static bool dispatch_to_cpu(s32 cpu)
 		 * If we can't run the task at the top, do the dumb thing and
 		 * bounce it to the fallback dsq.
 		 */
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr) || is_migration_disabled(p)) {
 			__sync_fetch_and_add(&nr_mismatches, 1);
 			scx_bpf_dsq_insert(p, FALLBACK_DSQ_ID, SCX_SLICE_INF, 0);
 			bpf_task_release(p);
