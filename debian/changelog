@@ -1,0 +1,8 @@
+scx (1.1.1-1) resolute; urgency=medium
+
+  * New upstream release v1.1.1.
+
+  * Miscellaneous Ubuntu changes
+    - NVIDIA: SAUCE: deb: Add initial deb packaging for Ubuntu Resolute
+
+ -- Andrea Righi <arighi@nvidia.com>  Wed, 13 May 2026 07:33:46 +0200

@@ -1,0 +1,15 @@
+[Unit]
+Description=Start scx_scheduler
+ConditionPathIsDirectory=/sys/kernel/sched_ext
+StartLimitIntervalSec=30
+StartLimitBurst=2
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/scx
+ExecStart=/bin/bash -c 'exec ${SCX_SCHEDULER_OVERRIDE:-$SCX_SCHEDULER} ${SCX_FLAGS_OVERRIDE:-$SCX_FLAGS} '
+Restart=on-failure
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

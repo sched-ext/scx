@@ -1,0 +1,47 @@
+#!/usr/bin/make -f
+
+ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+CARGO_BUILD_TARGETDIR := debian/cargo-target
+CARGO_WORKSPACE_ARGS := \
+	--jobs 1 \
+	--frozen --offline --locked \
+	--exclude scxtop \
+	--exclude xtask \
+	--exclude scxcash \
+	--exclude vmlinux_docify \
+	--exclude scx_arena_selftests \
+	--workspace
+
+export RUSTC = /usr/bin/rustc
+export CARGO = /usr/bin/cargo
+export BPF_CLANG = /usr/bin/clang
+export TARGET = $(shell $(RUSTC) -vV | sed -n 's/^host: //p')
+
+%:
+	dh $@ --buildsystem=none
+
+fetch:
+	$(CARGO) vendor
+
+override_dh_auto_build:
+	@if [ -d vendor ]; then \
+		python3 debian/sanitize-vendor-checksums.py; \
+	fi
+	# Cap cargo parallelism as a safety margin against OOM on
+	# memory-constrained builders (e.g., Launchpad arm64).
+	BPF_CLANG=$(BPF_CLANG) $(CARGO) build --release \
+		$(CARGO_WORKSPACE_ARGS)
+
+override_dh_auto_test:
+	@if echo " $(DEB_BUILD_OPTIONS) " | grep -qw nocheck; then \
+		echo "Skipping tests due to DEB_BUILD_OPTIONS=nocheck"; \
+	else \
+		BPF_CLANG=$(BPF_CLANG) $(CARGO) test --release \
+			$(CARGO_WORKSPACE_ARGS); \
+	fi
+
+override_dh_auto_install:
+	@echo "Skipping cargo install"
+
+override_dh_installsystemd:
+	dh_installsystemd --name=scx
