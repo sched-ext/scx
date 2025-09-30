@@ -698,7 +698,7 @@ int save_gpu_tgid_pid(void) {
 	if (!enable_gpu_support)
 		return 0;
 	struct task_struct *p = NULL;
-	struct task_ctx *taskc;
+	struct task_ctx *taskc, *parent;
 	u64 pid_tgid;
 	u32 pid, tid;
 	u64 timestamp = 0;
@@ -713,6 +713,13 @@ int save_gpu_tgid_pid(void) {
 			if(!bpf_map_lookup_elem(&gpu_tid, &tid)) {
 				trace("New GPU tid: %d, force to refresh layer", tid);
 				taskc->refresh_layer = true;
+			}
+
+			if(!bpf_map_lookup_elem(&gpu_tgid, &pid) && 
+				(parent = lookup_task_ctx_may_fail(p->parent)) && parent) {
+
+				trace("New GPU pid: %d, force to refresh layer", pid);
+				parent->refresh_layer = true;
 			}
 
 			timestamp = taskc->running_at;
