@@ -79,6 +79,7 @@ use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
 use glob::glob;
+use log::info;
 use log::warn;
 use sscanf::sscanf;
 use std::cmp::min;
@@ -721,13 +722,19 @@ fn is_smt_active() -> Option<bool> {
     Some(smt_on == 1)
 }
 
-fn replace_with_virt_llcs(node: &mut Node, min_cores: usize, max_cores: usize) -> Result<()> {
-    let mut partition_id = 0;
+fn replace_with_virt_llcs(
+    node: &mut Node,
+    min_cores: usize,
+    max_cores: usize,
+    start_id: usize,
+) -> Result<usize> {
+    let mut next_id = start_id;
     let mut core_to_partition: BTreeMap<usize, usize> = BTreeMap::new();
     let mut partition_to_kernel_id: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut total_partitions = 0;
+    let num_orig_llcs = node.llcs.len();
 
-    // First pass: determine core to partition mapping, partition to kernel_id mapping, and total partitions needed
+    // First pass: determine core to partition mapping, partition to
+    // kernel_id mapping, and total partitions needed
     for (_llc_id, llc) in node.llcs.iter() {
         // Group cores by type (big/little) to partition separately
         let mut cores_by_type: BTreeMap<bool, Vec<usize>> = BTreeMap::new();
@@ -750,25 +757,24 @@ fn replace_with_virt_llcs(node: &mut Node, min_cores: usize, max_cores: usize) -
             // Assign cores to partitions within a group type
             for (bucket_idx, &core_id) in core_ids.iter().enumerate() {
                 let partition_idx = min(bucket_idx / best_split, num_partitions - 1);
-                let current_partition_id = partition_id + partition_idx;
+                let current_partition_id = next_id + partition_idx;
                 core_to_partition.insert(core_id, current_partition_id);
                 partition_to_kernel_id.insert(current_partition_id, llc.kernel_id);
             }
 
-            partition_id += num_partitions;
-            total_partitions = partition_id;
+            next_id += num_partitions;
         }
     }
 
     // Create new virtual LLC structures based on partitioning found above
     let mut virt_llcs: BTreeMap<usize, Arc<Llc>> = BTreeMap::new();
 
-    for partition_id in 0..total_partitions {
-        let kernel_id = partition_to_kernel_id.get(&partition_id).copied().unwrap();
+    for vllc_id in start_id..next_id {
+        let kernel_id = partition_to_kernel_id.get(&vllc_id).copied().unwrap();
         virt_llcs.insert(
-            partition_id,
+            vllc_id,
             Arc::new(Llc {
-                id: partition_id,
+                id: vllc_id,
                 kernel_id,
                 cores: BTreeMap::new(),
                 span: Cpumask::new(),
@@ -812,7 +818,30 @@ fn replace_with_virt_llcs(node: &mut Node, min_cores: usize, max_cores: usize) -
     // Replace original LLCs with virtual LLCs
     node.llcs = virt_llcs;
 
-    Ok(())
+    let num_virt_llcs = next_id - start_id;
+    let vllc_sizes: Vec<usize> = node.llcs.values().map(|llc| llc.cores.len()).collect();
+
+    if vllc_sizes.is_empty() {
+        return Ok(next_id);
+    }
+
+    // Most vLLCs should have the same size, only the last one might differ
+    let common_size = vllc_sizes[0];
+    let last_size = *vllc_sizes.last().unwrap();
+
+    if common_size == last_size {
+        info!(
+            "Node {}: split {} LLC(s) into {} virtual LLCs with {} cores each",
+            node.id, num_orig_llcs, num_virt_llcs, common_size
+        );
+    } else {
+        info!(
+            "Node {}: split {} LLC(s) into {} virtual LLCs with {} cores each (last with {})",
+            node.id, num_orig_llcs, num_virt_llcs, common_size, last_size
+        );
+    }
+
+    Ok(next_id)
 }
 
 fn create_default_node(
@@ -856,7 +885,7 @@ fn create_default_node(
     }
 
     if let Some((min_cores_val, max_cores_val)) = nr_cores_per_vllc {
-        replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val)?;
+        replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val, 0)?;
     }
 
     nodes.insert(node.id, node);
@@ -870,6 +899,7 @@ fn create_numa_nodes(
     nr_cores_per_vllc: Option<(usize, usize)>,
 ) -> Result<BTreeMap<usize, Node>> {
     let mut nodes = BTreeMap::<usize, Node>::new();
+    let mut next_virt_llc_id = 0;
 
     #[cfg(feature = "gpu-topology")]
     let system_gpus = create_gpus();
@@ -956,7 +986,8 @@ fn create_numa_nodes(
         }
 
         if let Some((min_cores_val, max_cores_val)) = nr_cores_per_vllc {
-            replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val)?;
+            next_virt_llc_id =
+                replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val, next_virt_llc_id)?;
         }
 
         nodes.insert(node.id, node);

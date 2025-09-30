@@ -71,6 +71,7 @@ use scx_utils::Cpumask;
 use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
+use scx_utils::TopologyArgs;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::NR_CPU_IDS;
@@ -731,6 +732,9 @@ struct Opts {
     /// Enable affinitized task to use hi fallback queue to get more CPU time.
     #[clap(long, default_value = "")]
     hi_fb_thread_name: String,
+
+    #[clap(flatten, next_help_heading = "Topology Options")]
+    topology: TopologyArgs,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -2211,6 +2215,8 @@ impl<'a> Scheduler<'a> {
 
         let topo = Arc::new(if disable_topology {
             Topology::with_flattened_llc_node()?
+        } else if opts.topology.virt_llc.is_some() {
+            Topology::with_args(&opts.topology)?
         } else {
             Topology::new()?
         });
