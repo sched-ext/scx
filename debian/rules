@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+
+ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+CARGO_BUILD_TARGETDIR := debian/cargo-target
+
+export RUSTC = /usr/bin/rustc
+export CARGO = /usr/bin/cargo
+export BPF_CLANG = /usr/bin/clang
+export TARGET = $(shell $(RUSTC) -vV | sed -n 's/^host: //p')
+
+%:
+	dh $@ --buildsystem=none
+
+fetch:
+	$(CARGO) vendor
+
+override_dh_auto_build:
+	@if [ -d vendor ]; then \
+		python3 debian/sanitize-vendor-checksums.py; \
+	fi
+	BPF_CLANG=$(BPF_CLANG) $(CARGO) build --release \
+		--frozen --offline --locked \
+		--exclude scxtop \
+		--exclude scx_wd40 \
+		--exclude xtask \
+		--exclude scxcash \
+		--exclude vmlinux_docify \
+		--exclude scx_arena_selftests \
+		--workspace
+
+override_dh_auto_test:
+	@echo "Skipping tests"
+
+override_dh_auto_install:
+	@echo "Skipping cargo install"
+
+override_dh_installsystemd:
+	dh_installsystemd --name=scx
