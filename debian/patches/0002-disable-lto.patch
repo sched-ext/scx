@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andrea Righi <arighi@nvidia.com>
+Date: Wed, 13 May 2026 00:00:00 +0000
+Subject: [PATCH] NVIDIA: SAUCE: Cargo.toml: disable LTO for release builds
+
+ThinLTO peak RSS at link time was OOM-killing the Launchpad arm64
+buildd VM before any build log could be uploaded. Disable LTO to keep
+peak memory within builder limits. The runtime cost is small (typically
+0-5%) and can be revisited once builder resources allow.
+
+Signed-off-by: Andrea Righi <arighi@nvidia.com>
+---
+ Cargo.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -34,7 +34,7 @@
+ resolver = "2"
+
+ [profile.release]
+-lto = "thin"
++lto = false
+
+ [profile.release-tiny]
+ inherits = "release"
+--
+2.54.0
+

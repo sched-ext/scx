@@ -1,0 +1,23 @@
+From d944aafd5113db1b1bd9e821c92ac037118cc941 Mon Sep 17 00:00:00 2001
+From: Andrea Righi <arighi@nvidia.com>
+Date: Tue, 17 Mar 2026 13:09:55 -0700
+Subject: [PATCH] NVIDIA: SAUCE: scx_cosmos: Optimal settings for the DGX Spark
+
+Signed-off-by: Andrea Righi <arighi@nvidia.com>
+---
+ services/scx | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/services/scx b/services/scx
+index 371585397..eee3007fd 100644
+--- a/services/scx
++++ b/services/scx
+@@ -2,4 +2,4 @@
+ SCX_SCHEDULER=scx_cosmos
+ 
+ # Set custom flags for each scheduler, below is an example of how to use
+-SCX_FLAGS='-s 700 -S'
++SCX_FLAGS='-m performance -s 20000'
+-- 
+2.54.0
+
