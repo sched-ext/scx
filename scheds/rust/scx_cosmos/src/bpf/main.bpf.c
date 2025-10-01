@@ -160,6 +160,7 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
  * Per-CPU context.
  */
 struct cpu_ctx {
+	struct bpf_cpumask __kptr *smt;
 	u64 last_update;
 	u64 perf_lvl;
 };
@@ -325,6 +326,19 @@ static inline const struct cpumask *get_idle_smtmask(s32 cpu)
 		return scx_bpf_get_idle_smtmask();
 
 	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_cpumask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_cpumask();
+
+	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
 }
 
 /*
@@ -577,6 +591,33 @@ static int init_cpumask(struct bpf_cpumask **p_cpumask)
 	return *p_cpumask ? 0 : -ENOMEM;
 }
 
+SEC("syscall")
+int enable_sibling_cpu(struct domain_arg *input)
+{
+	struct cpu_ctx *cctx;
+	struct bpf_cpumask *mask, **pmask;
+	int err = 0;
+
+	cctx = try_lookup_cpu_ctx(input->cpu_id);
+	if (!cctx)
+		return -ENOENT;
+
+	pmask = &cctx->smt;
+
+	/* Make sure the target CPU mask is initialized */
+	err = init_cpumask(pmask);
+	if (err)
+		return err;
+
+	bpf_rcu_read_lock();
+	mask = *pmask;
+	if (mask)
+		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
+	bpf_rcu_read_unlock();
+
+	return err;
+}
+
 /*
  * Called from user-space to add CPUs to the the primary domain.
  */
@@ -632,6 +673,25 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
+ * Return the SMT sibling CPU of a @cpu.
+ */
+static s32 smt_sibling(s32 cpu)
+{
+	const struct cpumask *smt;
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return cpu;
+
+	smt = cast_mask(cctx->smt);
+	if (!smt)
+		return cpu;
+
+	return bpf_cpumask_first(smt);
+}
+
+/*
  * Return true if the CPU is part of a fully busy SMT core, false
  * otherwise.
  *
@@ -640,15 +700,20 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
  */
 static bool is_smt_contended(s32 cpu)
 {
-	const struct cpumask *smt;
+	const struct cpumask *idle_mask;
 	bool is_contended;
 
-	if (!smt_enabled || !avoid_smt)
+	if (!smt_enabled)
 		return false;
 
-	smt = get_idle_smtmask(cpu);
-	is_contended = bpf_cpumask_empty(smt);
-	scx_bpf_put_cpumask(smt);
+	/*
+	 * If the sibling SMT CPU is not idle and there are other full-idle
+	 * SMT cores available, consider the current CPU as contended.
+	 */
+	idle_mask = get_idle_cpumask(cpu);
+	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
+		       !bpf_cpumask_empty(idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
 
 	return is_contended;
 }
@@ -668,7 +733,7 @@ static bool need_migrate(const struct task_struct *p, s32 prev_cpu, u64 enq_flag
 	/*
 	 * Always attempt to migrate if we're contending an SMT core.
 	 */
-	if (is_smt_contended(prev_cpu))
+	if (avoid_smt && is_smt_contended(prev_cpu))
 		return true;
 
 	/*
@@ -796,7 +861,8 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	 * wants to run on this SMT core, allow the previous task to run
 	 * for another time slot.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && !is_smt_contended(cpu))
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	    (!avoid_smt || !is_smt_contended(cpu)))
 		prev->scx.slice = task_slice(prev);
 }
 
