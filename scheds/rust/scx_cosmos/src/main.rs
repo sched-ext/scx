@@ -414,6 +414,11 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
 
+        // Initialize SMT domains.
+        if smt_enabled {
+            Self::init_smt_domains(&mut skel, &topo)?;
+        }
+
         // Enable primary scheduling domain, if defined.
         if primary_cpus.len() < *NR_CPU_IDS {
             for cpu in primary_cpus {
@@ -452,6 +457,44 @@ impl<'a> Scheduler<'a> {
         let out = prog.test_run(input).unwrap();
         if out.return_value != 0 {
             return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn enable_sibling_cpu(
+        skel: &mut BpfSkel<'_>,
+        cpu: usize,
+        sibling_cpu: usize,
+    ) -> Result<(), u32> {
+        let prog = &mut skel.progs.enable_sibling_cpu;
+        let mut args = domain_arg {
+            cpu_id: cpu as c_int,
+            sibling_cpu_id: sibling_cpu as c_int,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+        if out.return_value != 0 {
+            return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        let smt_siblings = topo.sibling_cpus();
+
+        info!("SMT sibling CPUs: {:?}", smt_siblings);
+        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
+            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).unwrap();
         }
 
         Ok(())
