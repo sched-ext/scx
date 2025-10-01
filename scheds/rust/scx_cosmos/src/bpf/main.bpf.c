@@ -3,6 +3,7 @@
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
 #include <scx/common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include "intf.h"
 
 /*
@@ -356,6 +357,75 @@ static inline bool is_cpu_idle(s32 cpu)
 }
 
 /*
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false
+ * otherwise.
+ */
+static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return true;
+
+	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+}
+
+/*
+ * Return true if @this_cpu is faster than @that_cpu, false otherwise.
+ */
+static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return false;
+
+	return cpu_priority(this_cpu) > cpu_priority(that_cpu);
+}
+
+/*
+ * Return the SMT sibling CPU of a @cpu.
+ */
+static s32 smt_sibling(s32 cpu)
+{
+	const struct cpumask *smt;
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return cpu;
+
+	smt = cast_mask(cctx->smt);
+	if (!smt)
+		return cpu;
+
+	return bpf_cpumask_first(smt);
+}
+
+/*
+ * Return true if the CPU is part of a fully busy SMT core, false
+ * otherwise.
+ *
+ * If SMT is disabled or SMT contention avoidance is disabled, always
+ * return false (since there's no SMT contention or it's ignored).
+ */
+static bool is_smt_contended(s32 cpu)
+{
+	const struct cpumask *idle_mask;
+	bool is_contended;
+
+	if (!smt_enabled)
+		return false;
+
+	/*
+	 * If the sibling SMT CPU is not idle and there are other full-idle
+	 * SMT cores available, consider the current CPU as contended.
+	 */
+	idle_mask = get_idle_cpumask(cpu);
+	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
+		       !bpf_cpumask_empty(idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
+
+	return is_contended;
+}
+
+/*
  * Try to pick the best idle CPU based on the @preferred_cpus ranking.
  * Return a full-idle SMT core if @do_idle_smt is true, or any idle CPU if
  * @do_idle_smt is false.
@@ -468,7 +538,8 @@ out:
  *
  * Return the CPU id or a negative value if an idle CPU can't be found.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool from_enqueue)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
+			 u64 wake_flags, bool from_enqueue)
 {
 	const struct cpumask *mask = cast_mask(primary_cpumask);
 	s32 cpu;
@@ -486,6 +557,28 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 */
 	if (no_wake_sync)
 		wake_flags &= ~SCX_WAKE_SYNC;
+
+	/*
+	 * On wakeup if the waker's CPU is faster than the wakee's CPU, try
+	 * to move the wakee closer to the waker.
+	 *
+	 * In presence of hybrid cores this helps to naturally migrate
+	 * tasks over to the faster cores.
+	 */
+	if ((wake_flags & SCX_WAKE_TTWU) && this_cpu >= 0 &&
+	    is_cpu_faster(this_cpu, prev_cpu)) {
+		/*
+		 * If both the waker's CPU and the wakee's CPU are in the
+		 * same LLC and the wakee's CPU is a fully idle SMT core,
+		 * don't migrate.
+		 */
+		if (cpus_share_cache(this_cpu, prev_cpu) &&
+		    !is_smt_contended(prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		prev_cpu = this_cpu;
+	}
 
 	/*
 	 * Fallback to the old API if the kernel doesn't support
@@ -673,52 +766,6 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 }
 
 /*
- * Return the SMT sibling CPU of a @cpu.
- */
-static s32 smt_sibling(s32 cpu)
-{
-	const struct cpumask *smt;
-	struct cpu_ctx *cctx;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return cpu;
-
-	smt = cast_mask(cctx->smt);
-	if (!smt)
-		return cpu;
-
-	return bpf_cpumask_first(smt);
-}
-
-/*
- * Return true if the CPU is part of a fully busy SMT core, false
- * otherwise.
- *
- * If SMT is disabled or SMT contention avoidance is disabled, always
- * return false (since there's no SMT contention or it's ignored).
- */
-static bool is_smt_contended(s32 cpu)
-{
-	const struct cpumask *idle_mask;
-	bool is_contended;
-
-	if (!smt_enabled)
-		return false;
-
-	/*
-	 * If the sibling SMT CPU is not idle and there are other full-idle
-	 * SMT cores available, consider the current CPU as contended.
-	 */
-	idle_mask = get_idle_cpumask(cpu);
-	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
-		       !bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return is_contended;
-}
-
-/*
  * Return true if we should attempt a task migration to an idle CPU, false
  * otherwise.
  */
@@ -759,8 +806,9 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_busy = is_system_busy();
-	s32 cpu;
+	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
 
 	/*
 	 * When the waker and wakee share the same address space and were previously
@@ -779,18 +827,39 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	}
 
 	/*
+	 * Make sure @prev_cpu is usable, otherwise try to move close to
+	 * the waker's CPU. If the waker's CPU is also not usable, then
+	 * pick the first usable CPU.
+	 */
+	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+		prev_cpu = is_this_cpu_allowed ? this_cpu : bpf_cpumask_first(p->cpus_ptr);
+
+	/*
 	 * Try to find an idle CPU and dispatch the task directly to the
 	 * target CPU.
-	 *
+	 */
+	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
+			    wake_flags, false);
+
+	/*
 	 * Since we only use local DSQs, there's no reason to bounce the
 	 * task to ops.enqueue(). Dispatching directly from here, even if
 	 * we can't find an idle CPU, allows to save some locking overhead.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, false);
 	if (cpu >= 0 || !is_busy)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 
-	return cpu >= 0 ? cpu : prev_cpu;
+	/*
+	 * If all the CPUs are busy, try to move the wakee to the waker's
+	 * CPU, if possible.
+	 *
+	 * This should help grouping together tasks that are part of the
+	 * same pipeline and reduce IPIs at system saturation.
+	 */
+	if (cpu < 0)
+		return is_this_cpu_allowed ? this_cpu : prev_cpu;
+
+	return cpu;
 }
 
 /*
@@ -817,7 +886,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * migrate.
 	 */
 	if (need_migrate(p, prev_cpu, enq_flags)) {
-		cpu = pick_idle_cpu(p, prev_cpu, 0, true);
+		cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
 			wakeup_cpu(cpu);
