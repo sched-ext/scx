@@ -599,7 +599,7 @@ struct task_ctx {
 	char 			join_layer[SCXCMD_COMLEN];
 	u64			layer_refresh_seq;
 
-	u64			member_expire_at;
+	u64			recheck_layer_membership;
 };
 
 struct {
@@ -1780,14 +1780,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 static inline void check_member_expired(struct task_ctx *taskc, u64 now)
 {
-	/* If TTL matching is on, decrement TTL and force matching refresh if applicable. */
-	if (taskc->member_expire_at == MEMBER_NOEXPIRE)
+	if (taskc->recheck_layer_membership == MEMBER_NOEXPIRE)
 		return;
 
-	if (now >= taskc->member_expire_at) {
-		taskc->member_expire_at = MEMBER_NOEXPIRE;
+	if (now >= taskc->recheck_layer_membership)
 		taskc->refresh_layer = true;
-	}
 }
 
 static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, u64 bytes)
@@ -2377,7 +2374,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	account_used(cpuc, taskc, scx_bpf_now(), 0);
 }
 
-static __noinline bool match_one(struct layer_match *match, struct task_ctx *taskc,
+static __noinline bool match_one(struct layer *layer, struct layer_match *match, struct task_ctx *taskc,
 				 struct task_struct *p, const char *cgrp_path)
 {
 	bool result = false;
@@ -2482,35 +2479,29 @@ static __noinline bool match_one(struct layer_match *match, struct task_ctx *tas
 	case MATCH_USED_GPU_TID:
 	case MATCH_USED_GPU_PID: {
 			u32 key = (match->kind == MATCH_USED_GPU_TID) ? p->pid : p->tgid;
-			bool used = (match->kind == MATCH_USED_GPU_TID) ? match->used_gpu_tid : match->used_gpu_pid;
-			u64 *timestamp;
+			bool must_be_used = (match->kind == MATCH_USED_GPU_TID) ? match->used_gpu_tid : match->used_gpu_pid;
+			u64 now = scx_bpf_now();
+			bool recently_used;
+			u64 *last_used;
 
 			if (!enable_gpu_support)
 				scx_bpf_error("UsedGpuPid requires --enable_gpu_support");
 
 			if (match->kind == MATCH_USED_GPU_TID)
-				timestamp = bpf_map_lookup_elem(&gpu_tid, &key);
+				last_used = bpf_map_lookup_elem(&gpu_tid, &key);
 			else
-				timestamp = bpf_map_lookup_elem(&gpu_tgid, &key);
+				last_used = bpf_map_lookup_elem(&gpu_tgid, &key);
 
 			/* If not found, we want the used predicate to be required false. */
-			if (!timestamp)
-				return !used;
+			if (!last_used)
+				return !must_be_used;
 
-			if (!used)
-				return false;
+			/* If the last kprobe fire was more than member_expire_ms ago, timestamp is stale. */
+			recently_used = true;
+			if (taskc->recheck_layer_membership != MEMBER_NOEXPIRE && (*last_used) + layer->member_expire_ms < now)
+				recently_used = false;
 
-			/* If timestamp is stale, remove the key and fail. */
-			if (taskc->member_expire_at && (*timestamp) >= taskc->member_expire_at) {
-				if (match->kind == MATCH_USED_GPU_TID)
-					bpf_map_delete_elem(&gpu_tid, &key);
-				else
-					bpf_map_delete_elem(&gpu_tgid, &key);
-
-				return false;
-			}
-
-			return true;
+			return recently_used == must_be_used;
 	}
 	case MATCH_AVG_RUNTIME: {
 			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
@@ -2582,7 +2573,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 				return -EINVAL;
 
 			match = &ands->matches[and_id];
-			if (!(match_one(match, taskc, p, cgrp_path) == !match->exclude)) {
+			if (!(match_one(layer, match, taskc, p, cgrp_path) == !match->exclude)) {
 				matched = false;
 				break;
 			}
@@ -2623,7 +2614,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	taskc->layered_cpus.seq = -1;
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
-	taskc->member_expire_at = layer->member_expire_ms ? now + layer->member_expire_ms * 1000 * 1000 : MEMBER_NOEXPIRE;
+	taskc->recheck_layer_membership = layer->member_expire_ms ? now + layer->member_expire_ms * 1000 * 1000 : MEMBER_NOEXPIRE;
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
