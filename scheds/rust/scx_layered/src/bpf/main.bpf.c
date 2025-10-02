@@ -706,23 +706,35 @@ int save_gpu_tgid_pid(void) {
 	pid_tgid = bpf_get_current_pid_tgid();
 	pid = pid_tgid >> 32;
 	tid = pid_tgid;
-	// To avoid race condition where the GPU process is discovered before kprobe is called
-	// If we discover new GPU tid, force task refresh_layer to match_layer again
+
 	if ((p = (struct task_struct*)bpf_get_current_task_btf()) && p) {
 		if ((taskc = lookup_task_ctx_may_fail(p)) && taskc) {
+			/* If it doesn't exist, recheck. If the timestamp is */
 			if(!bpf_map_lookup_elem(&gpu_tid, &tid)) {
 				trace("New GPU tid: %d, force to refresh layer", tid);
 				taskc->refresh_layer = true;
 			}
 
-			if(!bpf_map_lookup_elem(&gpu_tgid, &pid) && 
-				(parent = lookup_task_ctx_may_fail(p->parent)) && parent) {
+			/* 
+			 * GPU kprobe fire has expired for the member. 
+			 * Force a recheck to see if we should put it
+			 * back into the GPU layer.
+			 */
+			if (taskc->recheck_layer_membership == MEMBER_EXPIRED)
+				taskc->refresh_layer = true;
 
+			timestamp = taskc->running_at;
+		}
+		
+		/* Same logic for the parent. */
+		if ((parent = lookup_task_ctx_may_fail(p->parent))) {
+			if(!bpf_map_lookup_elem(&gpu_tgid, &pid)) {
 				trace("New GPU pid: %d, force to refresh layer", pid);
 				parent->refresh_layer = true;
 			}
 
-			timestamp = taskc->running_at;
+			if (parent->recheck_layer_membership == MEMBER_EXPIRED)
+				parent->refresh_layer = true;
 		}
 	}
 	bpf_map_update_elem(&gpu_tid, &tid, &timestamp, BPF_ANY);
@@ -1780,7 +1792,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 static inline void check_member_expired(struct task_ctx *taskc, u64 now)
 {
-	if (taskc->recheck_layer_membership == MEMBER_NOEXPIRE)
+	u64 recheck = taskc->recheck_layer_membership;
+
+	/* 
+	 * Don't trigger a recheck if:
+	 * - Membership never expires
+	 * - Membership already expired
+	 * - Member has been tested and hasn't joined any GPU layer
+	 *   even though it matches the GPU rule.
+	 */
+	if (recheck == MEMBER_NOEXPIRE || 
+		recheck == MEMBER_EXPIRED ||
+		recheck == MEMBER_CANTMATCH)
 		return;
 
 	if (now >= taskc->recheck_layer_membership)
@@ -2496,10 +2519,18 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			if (!last_used)
 				return !must_be_used;
 
-			/* If the last kprobe fire was more than member_expire_ms ago, timestamp is stale. */
+			/* 
+			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale. 
+			 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
+			 */
 			recently_used = true;
-			if (taskc->recheck_layer_membership != MEMBER_NOEXPIRE && (*last_used) + layer->member_expire_ms < now)
+			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE && 
+				taskc->recheck_layer_membership != MEMBER_CANTMATCH && 
+				(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
+
 				recently_used = false;
+				taskc->recheck_layer_membership = MEMBER_EXPIRED;
+			}
 
 			return recently_used == must_be_used;
 	}
@@ -2539,6 +2570,7 @@ __hidden
 int match_layer(u32 layer_id, struct task_ctx *taskc,
 		struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
+	bool matched_gpu = false;
 	struct layer *layer;
 	u32 nr_match_ors, pid;
 	u64 or_id, and_id;
@@ -2565,6 +2597,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS)
 			return -EINVAL;
 
+		matched_gpu = false;
 		bpf_for(and_id, 0, ands->nr_match_ands) {
 			struct layer_match *match;
 
@@ -2576,6 +2609,20 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 			if (!(match_one(layer, match, taskc, p, cgrp_path) == !match->exclude)) {
 				matched = false;
 				break;
+			}
+
+			if (match->kind == MATCH_USED_GPU_TID || match->kind == MATCH_USED_GPU_PID)
+				matched_gpu = true;
+		}
+
+		/* 
+		 * Matched GPU rule but not the rest. That means we'll never match them,
+		 * and should mark ourselves as such to avoid being forced to rematch
+		 * every time we touch the GPU.
+		 */
+		if (!matched && matched_gpu) {
+			if ((taskc = lookup_task_ctx_may_fail(p)) && taskc) {
+				taskc->recheck_layer_membership = MEMBER_CANTMATCH;
 			}
 		}
 
@@ -2614,7 +2661,15 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	taskc->layered_cpus.seq = -1;
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
-	taskc->recheck_layer_membership = layer->member_expire_ms ? now + layer->member_expire_ms * 1000 * 1000 : MEMBER_NOEXPIRE;
+
+	if (taskc->recheck_layer_membership != MEMBER_EXPIRED && 
+		taskc->recheck_layer_membership != MEMBER_CANTMATCH) {
+
+		/* Default to MEMBER_NOEXPIRE unless member_expire_ms is set. */
+		taskc->recheck_layer_membership = MEMBER_NOEXPIRE;
+		if (layer->member_expire_ms)
+			taskc->recheck_layer_membership = now + layer->member_expire_ms * 1000 * 1000;
+	}
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
