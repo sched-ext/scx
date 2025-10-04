@@ -48,6 +48,7 @@ use scx_rustland_core::ALLOCATOR;
 
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
+const TASK_COMM_LEN: usize = 16;
 
 // Allow to dispatch the task on any CPU.
 //
@@ -77,15 +78,31 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
-    pub pid: i32,             // pid that uniquely identifies a task
-    pub cpu: i32,             // CPU previously used by the task
-    pub nr_cpus_allowed: u64, // Number of CPUs that the task can use
-    pub flags: u64,           // task's enqueue flags
-    pub start_ts: u64,        // Timestamp since last time the task ran on a CPU (in ns)
-    pub stop_ts: u64,         // Timestamp since last time the task released a CPU (in ns)
-    pub exec_runtime: u64,    // Total cpu time since last sleep (in ns)
-    pub weight: u64,          // Task priority in the range [1..10000] (default is 100)
-    pub vtime: u64,           // Current task vruntime / deadline (set by the scheduler)
+    pub pid: i32,                  // pid that uniquely identifies a task
+    pub cpu: i32,                  // CPU previously used by the task
+    pub nr_cpus_allowed: u64,      // Number of CPUs that the task can use
+    pub flags: u64,                // task's enqueue flags
+    pub start_ts: u64,             // Timestamp since last time the task ran on a CPU (in ns)
+    pub stop_ts: u64,              // Timestamp since last time the task released a CPU (in ns)
+    pub exec_runtime: u64,         // Total cpu time since last sleep (in ns)
+    pub weight: u64,               // Task priority in the range [1..10000] (default is 100)
+    pub vtime: u64,                // Current task vruntime / deadline (set by the scheduler)
+    pub comm: [i8; TASK_COMM_LEN], // Task's executable name
+}
+
+impl QueuedTask {
+    /// Convert the task's comm field (C char array) into a Rust String.
+    #[allow(dead_code)]
+    pub fn comm_str(&self) -> String {
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(self.comm.as_ptr() as *const u8, self.comm.len()) };
+
+        // Find the first NUL byte, or take the whole array.
+        let nul_pos = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+
+        // Convert to String (handle invalid UTF-8 gracefully).
+        String::from_utf8_lossy(&bytes[..nul_pos]).into_owned()
+    }
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
@@ -149,6 +166,7 @@ impl EnqueuedMessage {
             exec_runtime: self.inner.exec_runtime,
             weight: self.inner.weight,
             vtime: self.inner.vtime,
+            comm: self.inner.comm,
         }
     }
 }
