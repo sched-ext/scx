@@ -68,6 +68,13 @@ enum consts {
 	SCXCMD_PREFIX		= 0x5C10,
 	SCXCMD_COMLEN		= 13,
 	MAX_GPU_PIDS 		= 100000,
+
+};
+
+enum layer_membership {
+	MEMBER_NOEXPIRE		= (u64)-1,
+	MEMBER_EXPIRED		= (u64)-2,
+	MEMBER_CANTMATCH	= (u64)-3,
 };
 
 static inline void ___consts_sanity_check___(void) {
@@ -369,6 +376,7 @@ struct layer {
 	bool			is_protected;
 	bool			periodically_refresh;
 	u8			cpuset[MAX_CPUS_U8];
+	u64			member_expire_ms;
 };
 
 struct scx_cmd {
