@@ -73,7 +73,6 @@ struct task_cpu_arg {
  * Specify a sibling CPU relationship for a specific scheduling domain.
  */
 struct domain_arg {
-	s32 lvl_id;
 	s32 cpu_id;
 	s32 sibling_cpu_id;
 };
