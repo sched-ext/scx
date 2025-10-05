@@ -485,6 +485,7 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Pick an idle CPU for the target PID.
+    #[allow(dead_code)]
     pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
         let prog = &mut self.skel.progs.rs_select_cpu;
         let mut args = task_cpu_arg {
