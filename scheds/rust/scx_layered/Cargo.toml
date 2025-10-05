@@ -15,6 +15,7 @@ crossbeam = "0.8.4"
 ctrlc = { version = "3.1", features = ["termination"] }
 fastrand = "2.1.1"
 fb_procfs = "0.7"
+inotify = "0.11"
 lazy_static = "1.5.0"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"

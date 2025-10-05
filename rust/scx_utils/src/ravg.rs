@@ -7,9 +7,9 @@
 //!
 //! Rust userland utilities to access running averages tracked by BPF
 //! ravg_data. See
-//! [ravg.bpf.h](https://github.com/sched-ext/scx/blob/main/scheds/include/common/ravg.bpf.h)
+//! [ravg.bpf.h](https://github.com/sched-ext/scx/blob/main/scheds/include/scx/ravg.bpf.h)
 //! and
-//! [ravg_impl.bpf.h](https://github.com/sched-ext/scx/blob/main/scheds/include/common/ravg_impl.bpf.h)
+//! [ravg_impl.bpf.h](https://github.com/sched-ext/scx/blob/main/scheds/include/scx/ravg_impl.bpf.h)
 //! for details.
 
 /// Read the current running average

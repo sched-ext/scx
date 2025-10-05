@@ -2,33 +2,33 @@
   "sched_ext/for-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git",
     "branch": "for-next",
-    "commitHash": "ebd9ec7689a7e21d28afb4e7fd060c9ae43a5582",
-    "lastModified": 1758080471,
-    "narHash": "sha256-KjVLocLdMyQqBm9skbPdRWWbM1mm/fRus+u7N+jYTJI=",
+    "commitHash": "e343e82601f93d749fccef04c3af9d0e33fe311a",
+    "lastModified": 1758771913,
+    "narHash": "sha256-rzPtap1k4phrpwmWJn4NRCbNz6+l6h3fDY/jMv5Tmwc=",
     "kernelVersion": "6.17.0-rc1"
   },
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
     "branch": "master",
-    "commitHash": "b13448dd64e27752fad252cec7da1a50ab9f0b6f",
-    "lastModified": 1757994115,
-    "narHash": "sha256-fa9pElUBw8FgjmB4eU2uCqK8ko/CEITm9olNbMIiE8w=",
-    "kernelVersion": "6.17.0-rc5"
+    "commitHash": "de7342228b7343774d6a9981c2ddbfb5e201044b",
+    "lastModified": 1759635871,
+    "narHash": "sha256-SDQ33Y75eJ+d4oi8G9jeaYs7caquq/Ez7nQU7Nw3NFY=",
+    "kernelVersion": "6.17.0"
   },
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "f6cf124428f51e3ef07a8e54c743873face9d2b2",
-    "lastModified": 1757648407,
-    "narHash": "sha256-dSviNXagjwc9k1Kp9yGip7xYRAkGHw3y1njn8DOGYjE=",
-    "kernelVersion": "6.12.47"
+    "commitHash": "72b82d56b82137a92a20e5584029d35408d810c2",
+    "lastModified": 1759549113,
+    "narHash": "sha256-Czi9AmGZu6jFeX4CcAScRTTebzipQvfZgjPJiygPzqo=",
+    "kernelVersion": "6.12.50"
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "e4c42304a8cd3b7d0b9755e80dd6835c20b8e0dc",
-    "lastModified": 1757648410,
-    "narHash": "sha256-lYv0j3SKupMFBnIJNpyGkObFfH2LA87neSGBkk/KoiU=",
-    "kernelVersion": "6.16.7"
+    "commitHash": "d21ef9ec28b612c5d9fdb56fdb8f935b5e1f40aa",
+    "lastModified": 1759462871,
+    "narHash": "sha256-Tt4MNvCvpjrhG4T8G6knoAhXsk2jew7BpK+acPqVHZs=",
+    "kernelVersion": "6.16.10"
   }
 }

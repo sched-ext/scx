@@ -698,7 +698,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	if (primary_all) {
 		p_mask = cpumask;
 	} else {
-		bpf_cpumask_and(mask, cpumask, cast_mask(primary));
+		if (!bpf_cpumask_and(mask, cpumask, cast_mask(primary)))
+			bpf_cpumask_copy(mask, cpumask);
 		p_mask = cast_mask(mask);
 	}
 
@@ -1490,8 +1491,13 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	if (!is_queued(p))
 		return false;
 
-	/* Do not keep running if the CPU is not in the primary domain */
-	if (!primary || !bpf_cpumask_test_cpu(cpu, primary))
+
+	/*
+	 * Do not keep running if the CPU is not in the primary domain and
+	 * the task can use the primary domain.
+	 */
+	if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
+	    !bpf_cpumask_test_cpu(cpu, primary))
 		return false;
 
 	/*

@@ -59,6 +59,8 @@ static __always_inline type func_name(s32 cpu)					\
 type func_name(s32 cpu) {					\
 	type *ptr;						\
 								\
+	if (!&var_name)						\
+		return -ENOENT;					\
 	ptr = bpf_per_cpu_ptr(&var_name, cpu);			\
 	if (!ptr)						\
 		return -EINVAL;					\

@@ -33,21 +33,25 @@ cargo build --profile=release-tiny
 To build **all crates** (schedulers, libraries, and tools):
 
 - Debug build (default):
+
   ```bash
   cargo build
   ```
 
 - Optimized release build:
+
   ```bash
   cargo build --release
   ```
 
 - Tiny profile:
+
   ```bash
   cargo build --profile=release-tiny
   ```
 
 - Fast profile:
+
   ```bash
   cargo build --profile=release-fast
   ```
@@ -95,26 +99,31 @@ cargo build --profile=release-tiny -p scx_flash
 Besides schedulers, the workspace includes several tools:
 
 - **scxctl** – CLI for managing schedulers:
+
   ```bash
   cargo build --release -p scxctl
   ```
 
 - **scx_loader** – Scheduler loader:
+
   ```bash
   cargo build --release -p scx_loader
   ```
 
 - **scxtop** – Monitoring tool:
+
   ```bash
   cargo build --release -p scxtop
   ```
 
 - **scxcash** – Caching utility:
+
   ```bash
   cargo build --release -p scxcash
   ```
 
 - **vmlinux_docify** – Kernel documentation generator:
+
   ```bash
   cargo build --release -p vmlinux_docify
   ```
@@ -143,23 +152,105 @@ This will place the binary in `~/.cargo/bin`, which you should add to your `PATH
 To make a scheduler or tool available system-wide, you can either:
 
 1. Copy the installed binary from `~/.cargo/bin` into a system directory, e.g.:
+
    ```bash
    sudo cp ~/.cargo/bin/scxctl /usr/local/bin/
    ```
 
 2. Or add `~/.cargo/bin` to your system `PATH`, for example by adding this line to `~/.bashrc` or `~/.zshrc`:
+
    ```bash
    export PATH="$HOME/.cargo/bin:$PATH"
    ```
 
 ---
 
-## 6. Summary
+## 6. Running tests
+
+To verify the correctness of the build, you can run tests:
+
+- For the entire workspace:
+
+  ```bash
+  cargo test
+  ```
+
+- For a specific scheduler:
+
+  ```bash
+  cargo test -p scx_flash
+  ```
+
+---
+
+## 7. Dependency management
+
+The workspace uses a shared `Cargo.lock` file.
+
+- To prefetch dependencies for offline builds:
+
+  ```bash
+  cargo fetch --locked
+  ```
+
+- To update dependencies:
+
+  ```bash
+  cargo update
+  ```
+
+---
+
+## 8. Cross-compilation
+
+You can build for different targets, for example **musl**:
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+Make sure the target is installed first:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+```
+
+---
+
+## 9. Debugging
+
+- Enable backtraces:
+
+  ```bash
+  sudo env RUST_BACKTRACE=1 ./target/debug/scx_flash
+  ```
+
+- Enable debug logging:
+
+  ```bash
+  sudo env RUST_LOG=debug ./target/debug/scx_flash
+  ```
+
+---
+
+## 10. Cleaning up
+
+To remove build artifacts and start fresh:
+
+```bash
+cargo clean
+```
+
+---
+
+## 11. Summary
 
 - **Build everything**: `cargo build --release`
 - **Build one scheduler**: `cargo build --profile=<profile> -p <name>`
 - **Install from crates.io**: `cargo install <crate_name>`
 - **Make available system-wide**: copy binary to `/usr/local/bin` or add `~/.cargo/bin` to `PATH`
+- **Run tests**: `cargo test`
+- **Cross-compile**: `cargo build --target=<target>`
 - **Profiles available**: `release`, `release-tiny`, `release-fast`
 
 This approach allows you to build and test either the whole project at once or focus on a single scheduler or tool.

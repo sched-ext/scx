@@ -19,16 +19,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Once;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 
 use plain::Plain;
 use procfs::process::all_processes;
 
+use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 
 use libc::{pthread_self, pthread_setschedparam, sched_param};
 
@@ -78,24 +78,24 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
     pub pid: i32,             // pid that uniquely identifies a task
-    pub cpu: i32,             // CPU where the task is running
+    pub cpu: i32,             // CPU previously used by the task
     pub nr_cpus_allowed: u64, // Number of CPUs that the task can use
-    pub flags: u64,           // task enqueue flags
-    pub start_ts: u64,        // Timestamp since last time the task ran on a CPU
-    pub stop_ts: u64,         // Timestamp since last time the task released a CPU
-    pub exec_runtime: u64,    // Total cpu time since last sleep
-    pub weight: u64,          // Task static priority
-    pub vtime: u64,           // Current vruntime
+    pub flags: u64,           // task's enqueue flags
+    pub start_ts: u64,        // Timestamp since last time the task ran on a CPU (in ns)
+    pub stop_ts: u64,         // Timestamp since last time the task released a CPU (in ns)
+    pub exec_runtime: u64,    // Total cpu time since last sleep (in ns)
+    pub weight: u64,          // Task priority in the range [1..10000] (default is 100)
+    pub vtime: u64,           // Current task vruntime / deadline (set by the scheduler)
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct DispatchedTask {
     pub pid: i32,      // pid that uniquely identifies a task
-    pub cpu: i32,      // target CPU selected by the scheduler
-    pub flags: u64,    // special dispatch flags
-    pub slice_ns: u64, // time slice assigned to the task (0 = default)
-    pub vtime: u64,    // task deadline / vruntime
+    pub cpu: i32, // target CPU selected by the scheduler (RL_CPU_ANY = dispatch on the first CPU available)
+    pub flags: u64, // task's enqueue flags
+    pub slice_ns: u64, // time slice in nanoseconds assigned to the task (0 = use default time slice)
+    pub vtime: u64, // this value can be used to send the task's vruntime or deadline directly to the underlying BPF dispatcher
 }
 
 impl DispatchedTask {
@@ -294,18 +294,41 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Set the name of the scx ops.
-    fn set_scx_ops_name(dst: &mut [i8], s: &str) -> Result<()> {
-        if !s.is_ascii() {
+    fn set_scx_ops_name(name_field: &mut [i8], src: &str) -> Result<()> {
+        if !src.is_ascii() {
             bail!("name must be an ASCII string");
         }
 
-        let bytes = s.as_bytes();
-        let n = bytes.len().min(dst.len().saturating_sub(1));
+        let bytes = src.as_bytes();
+        let n = bytes.len().min(name_field.len().saturating_sub(1));
 
-        dst.fill(0);
+        name_field.fill(0);
         for i in 0..n {
-            dst[i] = bytes[i] as i8;
+            name_field[i] = bytes[i] as i8;
         }
+
+        let version_suffix = ::scx_utils::build_id::ops_version_suffix(env!("CARGO_PKG_VERSION"));
+        let bytes = version_suffix.as_bytes();
+        let mut i = 0;
+        let mut bytes_idx = 0;
+        let mut found_null = false;
+
+        while i < name_field.len() - 1 {
+            found_null |= name_field[i] == 0;
+            if !found_null {
+                i += 1;
+                continue;
+            }
+
+            if bytes_idx < bytes.len() {
+                name_field[i] = bytes[bytes_idx] as i8;
+                bytes_idx += 1;
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        name_field[i] = 0;
 
         Ok(())
     }
@@ -439,61 +462,31 @@ impl<'cb> BpfScheduler<'cb> {
     // Counter of the online CPUs.
     #[allow(dead_code)]
     pub fn nr_online_cpus_mut(&mut self) -> &mut u64 {
-        &mut self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .unwrap()
-            .nr_online_cpus
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_online_cpus
     }
 
     // Counter of currently running tasks.
     #[allow(dead_code)]
     pub fn nr_running_mut(&mut self) -> &mut u64 {
-        &mut self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .unwrap()
-            .nr_running
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_running
     }
 
     // Counter of queued tasks.
     #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
-        &mut self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .unwrap()
-            .nr_queued
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_queued
     }
 
     // Counter of scheduled tasks.
     #[allow(dead_code)]
     pub fn nr_scheduled_mut(&mut self) -> &mut u64 {
-        &mut self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .unwrap()
-            .nr_scheduled
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_scheduled
     }
 
     // Counter of user dispatch events.
     #[allow(dead_code)]
     pub fn nr_user_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .unwrap()
-            .nr_user_dispatches
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_user_dispatches
     }
 
     // Counter of user kernel events.
@@ -547,13 +540,7 @@ impl<'cb> BpfScheduler<'cb> {
     // Counter of scheduler congestion events.
     #[allow(dead_code)]
     pub fn nr_sched_congested_mut(&mut self) -> &mut u64 {
-        &mut self
-            .skel
-            .maps
-            .bss_data
-            .as_mut()
-            .unwrap()
-            .nr_sched_congested
+        &mut self.skel.maps.bss_data.as_mut().unwrap().nr_sched_congested
     }
 
     // Set scheduling class for the scheduler itself to SCHED_EXT
