@@ -17,6 +17,13 @@ use std::mem::MaybeUninit;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use serde_json;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs::File;
+use std::io::Read;
+use tch::{CModule, Device, Tensor};
+
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::OpenObject;
@@ -147,20 +154,76 @@ impl PartialOrd for Task {
     }
 }
 
+struct AIModel {
+    task_names: HashMap<String, i32>,
+    model: CModule,
+    device: Device,
+}
+
+impl AIModel {
+    /// Create a new AIModel by loading task names and the model.
+    fn new(comm_file: &str, model_file: &str, device: Device) -> Result<Self, Box<dyn Error>> {
+        let task_names = Self::load_comm_labels(comm_file)?;
+        let model = CModule::load_on_device(model_file, device)?;
+        Ok(Self {
+            task_names,
+            model,
+            device,
+        })
+    }
+
+    /// Load prev_comm.json into a HashMap.
+    fn load_comm_labels(filename: &str) -> Result<HashMap<String, i32>, Box<dyn Error>> {
+        let mut file = File::open(filename)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        let comm_list: Vec<String> = serde_json::from_str(&contents)?;
+
+        let mut comm_map = HashMap::new();
+        for (index, comm) in comm_list.iter().enumerate() {
+            comm_map.insert(comm.clone(), index as i32);
+        }
+        Ok(comm_map)
+    }
+
+    fn predict(&self, name: &str, weight: u64) -> u64 {
+        // Map task name to numeric ID (default to -1 if unknown).
+        let task_id = self.task_names.get(name).copied().unwrap_or(-1);
+
+        // Build input tensor.
+        let input = Tensor::f_from_slice(&[task_id as f32, weight as f32])
+            .unwrap()
+            .reshape(&[1, 2])
+            .to_device(self.device);
+
+        // Run the model and return the prediction.
+        if let Ok(output) = self.model.forward_ts(&[input]) {
+            let pred_slice: f32 = output.double_value(&[0, 0]) as f32;
+            pred_slice as u64
+        } else {
+            0
+        }
+    }
+}
+
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>,                  // BPF connector
     opts: &'a Opts,                         // scheduler options
     stats_server: StatsServer<(), Metrics>, // statistics
+    ai: &'a AIModel,                        // AI model
     tasks: BTreeSet<Task>,                  // tasks ordered by deadline
     vruntime_now: u64,     // Tracks the latest observed (max) vruntime across tasks
     init_page_faults: u64, // Initial page faults counter
     slice_ns: u64,         // Default time slice (in ns)
-    slice_ns_min: u64,     // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &'a Opts,
+        ai: &'a AIModel,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+    ) -> Result<Self> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         // Low-level BPF connector.
@@ -186,11 +249,11 @@ impl<'a> Scheduler<'a> {
             bpf,
             opts,
             stats_server,
+            ai,
             tasks: BTreeSet::new(),
             vruntime_now: 0,
             init_page_faults: 0,
             slice_ns: opts.slice_us * NSEC_PER_USEC,
-            slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
         })
     }
 
@@ -227,21 +290,6 @@ impl<'a> Scheduler<'a> {
         ts.as_nanos() as u64
     }
 
-    // Return the total amount of tasks waiting in the user-space scheduler.
-    fn nr_tasks_scheduled(&mut self) -> u64 {
-        self.tasks.len() as u64
-    }
-
-    // Return the total amount of tasks waiting to be consumed by the user-space scheduler.
-    fn nr_tasks_queued(&mut self) -> u64 {
-        *self.bpf.nr_queued_mut()
-    }
-
-    // Return the total amount of tasks that are waiting to be scheduled.
-    fn nr_tasks_waiting(&mut self) -> u64 {
-        self.nr_tasks_queued() + self.nr_tasks_scheduled()
-    }
-
     // Return a value inversely proportional to the task's weight.
     fn scale_by_task_weight_inverse(task: &QueuedTask, value: u64) -> u64 {
         value * 100 / task.weight
@@ -260,11 +308,7 @@ impl<'a> Scheduler<'a> {
         // Update task's vruntime re-aligning it to vruntime_now (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
         let vruntime_now = self.vruntime_now.saturating_sub(self.slice_ns);
-        if task.vtime == 0 {
-            // Slightly penalize new tasks by charging an extra time slice to prevent bursts of such
-            // tasks from disrupting the responsiveness of already running ones.
-            task.vtime = vruntime_now + Self::scale_by_task_weight_inverse(task, self.slice_ns);
-        } else if task.vtime < vruntime_now {
+        if task.vtime < vruntime_now {
             task.vtime = vruntime_now;
         }
         task.vtime += Self::scale_by_task_weight_inverse(task, task.stop_ts - task.start_ts);
@@ -277,22 +321,19 @@ impl<'a> Scheduler<'a> {
     //
     // Return true on success, false if the BPF backend can't accept any more dispatch.
     fn dispatch_task(&mut self) -> bool {
-        let nr_waiting = self.nr_tasks_waiting() + 1;
-
         if let Some(task) = self.tasks.pop_first() {
-            // Scale time slice based on the amount of tasks that are waiting in the
-            // scheduler's queue and the previously unused time slice budget, but make sure
-            // to assign at least slice_us_min.
-            let slice_ns = (self.slice_ns / nr_waiting).max(self.slice_ns_min);
+            // Use AI model to estimate the optimal time slice.
+            let slice_ns = self.ai.predict(&task.qtask.comm_str(), task.qtask.weight);
 
             // Create a new task to dispatch.
             let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
-            // Assign the time slice to the task and propagate the vruntime.
+            // Assign the predicted time slice to the task.
             dispatched_task.slice_ns = slice_ns;
 
-            // Propagate the evaluated task's deadline to the scx_rustland_core backend.
-            dispatched_task.vtime = task.deadline;
+            // Propagate the evaluated task's deadline to the scx_rustland_core backend (also add
+            // the predicted time slice, so that it can contribute to the final deadline).
+            dispatched_task.vtime = task.deadline + slice_ns;
 
             // Try to pick an idle CPU for the task.
             let cpu = self
@@ -439,9 +480,18 @@ fn main() -> Result<()> {
         }
     }
 
+    // Initialize AIModel.
+    let device = Device::Cpu;
+    let ai = AIModel::new("comm.json", "timeslice.pt", device).unwrap();
+
+    // Perform an initial dummy prediction to trigger model initialization, preventing blocking
+    // operations after the scheduler is enabled.
+    let _ = ai.predict("scx_rustland", 100);
+
+    // Load scheduler
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        let mut sched = Scheduler::init(&opts, &ai, &mut open_object)?;
         if !sched.run()?.should_restart() {
             break;
         }
