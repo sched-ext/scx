@@ -7,7 +7,7 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:JakeHillion/nixpkgs/virtme-ng";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
 
     fenix = {
@@ -41,6 +41,7 @@
                   src = libbpf-src;
                   version = "git";
                 });
+                virtme-ng = prev.callPackage ../../.nix/pkgs/virtme-ng.nix { };
               })
             ];
           };
@@ -141,7 +142,7 @@
             nix-develop-gha = nix-develop-gha.packages.${system}.default;
             bpf-clang = makeBpfClang pkgs.llvmPackages self.packages.${system}."kernel_sched_ext/for-next";
 
-            veristat = pkgs.callPackage ./veristat.nix {
+            veristat = pkgs.callPackage ../../.nix/pkgs/veristat.nix {
               version = "git";
               src = veristat-src;
               libbpf = pkgs.libbpf-git;
@@ -237,7 +238,7 @@
               installPhase = "install -Dm755 ${../include/ci.py} $out/bin/ci";
             };
           } // (with lib.attrsets; mapAttrs'
-            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ./build-kernel.nix {
+            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ../../.nix/pkgs/build-kernel.nix {
               inherit name;
               inherit (details) repo branch commitHash narHash;
               version = details.kernelVersion;
