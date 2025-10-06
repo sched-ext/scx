@@ -1,0 +1,22 @@
+#!/usr/bin/env bpftrace
+
+// sched_switch: prev_comm, prev_pid, prev_prio, prev_state, next_comm, next_pid, next_prio
+tracepoint:sched:sched_switch
+/
+strncmp(args->prev_comm, "bpftrace", 8)
+/
+{
+    $ts = @start_ts_ns[args->prev_pid];
+    if ($ts) {
+        $delta = (uint64)(nsecs - $ts);
+
+        // Only print non-RT tasks (prio >= 100)
+        if (args->prev_prio >= 100) {
+            printf("%s,%d,%d\n",
+                args->prev_comm, args->prev_prio, $delta);
+        }
+        @start_ts_ns[args->prev_pid] = (uint64)0;
+    }
+
+    @start_ts_ns[args->next_pid] = (uint64)nsecs;
+}
