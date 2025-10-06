@@ -86,6 +86,7 @@ struct QueuedTask {
     pub exec_runtime: u64,     // Total cpu time since last sleep (in ns)
     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
     pub vtime: u64,            // Current task vruntime / deadline (set by the scheduler)
+    pub comm: [i8; TASK_COMM_LEN], // Task's executable name
 }
 ```
 
