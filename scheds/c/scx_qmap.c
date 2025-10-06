@@ -33,12 +33,14 @@ const char help_fmt[] =
 "  -d PID        Disallow a process from switching into SCHED_EXT (-1 for self)\n"
 "  -D LEN        Set scx_exit_info.dump buffer length\n"
 "  -S            Suppress qmap-specific debug dump\n"
+"  -i INTERVAL   Override the sleep interval (default: 1)\n"
 "  -p            Switch only tasks on SCHED_EXT policy instead of all\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
 static bool verbose;
 static volatile int exit_req;
+static u32 sleep_time = 1;
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
@@ -66,7 +68,7 @@ int main(int argc, char **argv)
 
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
-	while ((opt = getopt(argc, argv, "s:e:t:T:l:b:PHd:D:Spvh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:e:t:T:l:b:PHd:D:i:Spvh")) != -1) {
 		switch (opt) {
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
@@ -109,6 +111,11 @@ int main(int argc, char **argv)
 		case 'v':
 			verbose = true;
 			break;
+		case 'i':
+			sleep_time = strtoul(optarg, NULL, 0);
+			if (!sleep_time)
+				sleep_time = 1;
+			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
 			return opt != 'h';
@@ -141,7 +148,7 @@ int main(int argc, char **argv)
 			       skel->bss->cpuperf_target_avg,
 			       skel->bss->cpuperf_target_max);
 		fflush(stdout);
-		sleep(1);
+		sleep(sleep_time);
 	}
 
 	bpf_link__destroy(link);
