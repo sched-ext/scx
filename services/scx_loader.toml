@@ -1,5 +1,5 @@
 # This field specifies the scheduler that will be started automatically when scx_loader starts (e.g., on boot).
-#default_sched = "scx_flash"
+#default_sched = "scx_cosmos"
 
 # This field specifies the mode which will be used when scx_loader starts (e.g., on boot).
 #default_mode = "Auto"
