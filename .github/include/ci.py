@@ -54,7 +54,7 @@ async def get_kernel_path(kernel_name: str) -> str:
             "build",
             "--no-link",
             "--print-out-paths",
-            f"./.github/include#kernel_{kernel_name}",
+            f"./.nix#kernel_{kernel_name}",
         ]
     )
     return stdout.strip() + "/bzImage"
@@ -219,8 +219,8 @@ async def run_format():
     if nix_files:
         await run_command(
             ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
-            + [os.path.join("../../", x) for x in nix_files],
-            cwd=".github/include",
+            + [os.path.join("../", x) for x in nix_files],
+            cwd=".nix",
             no_capture=True,
         )
 
@@ -600,7 +600,7 @@ async def run_veristat():
                     if verdict != "success":
                         prog_name = cleaned_row.get("prog_name", "")
                         if prog_name:
-                            reproduction_cmd = f"nix run \".github/include#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
+                            reproduction_cmd = f"nix run \".nix#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
                             reproduction_cmds.add(reproduction_cmd)
 
             for cmd in sorted(reproduction_cmds):
