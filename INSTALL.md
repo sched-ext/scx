@@ -18,7 +18,7 @@ $ sudo do-release-upgrade -d
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev
+$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev libbpf-dev
 ```
 
 #### Build the scx schedulers from source
