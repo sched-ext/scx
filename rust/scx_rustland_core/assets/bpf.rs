@@ -30,7 +30,7 @@ use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 
-use libc::{pthread_self, pthread_setschedparam, sched_param};
+use libc::{pthread_self, pthread_setschedparam, sched_param, c_char};
 
 #[cfg(target_env = "musl")]
 use libc::timespec;
@@ -87,7 +87,7 @@ pub struct QueuedTask {
     pub exec_runtime: u64,         // Total cpu time since last sleep (in ns)
     pub weight: u64,               // Task priority in the range [1..10000] (default is 100)
     pub vtime: u64,                // Current task vruntime / deadline (set by the scheduler)
-    pub comm: [i8; TASK_COMM_LEN], // Task's executable name
+    pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
 }
 
 impl QueuedTask {
