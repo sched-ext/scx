@@ -1,5 +1,5 @@
 [package]
-name = "arenalib_selftests"
+name = "scx_arena_selftests"
 version = "1.0.3"
 edition = "2021"
 
