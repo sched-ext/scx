@@ -211,16 +211,20 @@ async def run_format():
 
     await run_command(["cargo", "fmt"], no_capture=True)
 
-    nix_files = glob.glob("**/*.nix", root_dir=".github/include/", recursive=True)
+    nix_files = list(
+        itertools.chain.from_iterable(
+            glob.glob(p + "**/*.nix", recursive=True) for p in ["", ".*/"]
+        )
+    )
     if nix_files:
         await run_command(
             ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
-            + nix_files,
+            + [os.path.join("../../", x) for x in nix_files],
             cwd=".github/include",
             no_capture=True,
         )
 
-    c_files = files = list(
+    c_files = list(
         itertools.chain.from_iterable(
             glob.glob(p, recursive=True)
             for p in ["tools/scxtop/**/*.h", "tools/scxtop/**/*.c"]
