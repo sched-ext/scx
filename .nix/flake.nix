@@ -40,6 +40,7 @@
                 libbpf-git = prev.libbpf.overrideAttrs (oldAttrs: {
                   src = libbpf-src;
                   version = "git";
+                  patches = [ ];
                 });
                 virtme-ng = prev.callPackage ./pkgs/virtme-ng.nix { };
               })
@@ -80,6 +81,10 @@
           build-env-vars = {
             BPF_CLANG = lib.getExe self.packages.${system}.bpf-clang;
             LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
+            RUSTFLAGS = "-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -C link-args=-Wl,-rpath,${lib.makeLibraryPath (with pkgs; [
+              elfutils
+              zlib
+            ])}";
           };
 
           gha-common-pkgs = with pkgs; [
@@ -148,6 +153,8 @@
               libbpf = pkgs.libbpf-git;
             };
 
+            virtme-ng = pkgs.virtme-ng;
+
             list-integration-tests = pkgs.python3Packages.buildPythonApplication rec {
               pname = "list-integration-tests";
               version = "git";
@@ -210,7 +217,6 @@
 
                 [ "--set" "PKG_CONFIG_PATH" "${lib.makeSearchPath "lib/pkgconfig" propagatedBuildInputs}" ]
 
-                [ "--set" "RUSTFLAGS" "\"-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd\"" ]
 
                 [ "--set" "NIX_BINTOOLS" pkgs.binutils ]
                 [ "--set" "NIX_CC" pkgs.gcc ]

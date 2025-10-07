@@ -8,11 +8,11 @@
         "rust-analyzer-src": "rust-analyzer-src"
       },
       "locked": {
-        "lastModified": 1752734526,
-        "narHash": "sha256-OIg7NwrqyYJVpXJdDgaagIzM0dtc4GghdncUrUsCgT8=",
+        "lastModified": 1759732757,
+        "narHash": "sha256-RUR2yXYbKSoDvI/JdH0AvojFjhCfxBXOA/BtGUpaoR0=",
         "owner": "nix-community",
         "repo": "fenix",
-        "rev": "f1526533e3a59a666dbae99594c9d29b201f302d",
+        "rev": "1d3600dda5c27ddbc9c424bb4edae744bdb9b14d",
         "type": "github"
       },
       "original": {
@@ -42,11 +42,11 @@
     "libbpf-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1752884596,
-        "narHash": "sha256-atjH2mL5PreCPj+VcJ//U9bdv4gAd57VU60KhbS7IqE=",
+        "lastModified": 1756253079,
+        "narHash": "sha256-2cX/d5W2ojMtQxNc+FO7oBfecXGjCOw0aoPOHj40zvM=",
         "owner": "libbpf",
         "repo": "libbpf",
-        "rev": "58dd1f58b57294b2e59482245b29e46f1812b82d",
+        "rev": "3f077472ee7e703b733c2c9ae15ef3f4c13ee25b",
         "type": "github"
       },
       "original": {
@@ -77,11 +77,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1751852175,
-        "narHash": "sha256-+MLlfTCCOvz4K6AcSPbaPiFM9MYi7fA2Wr1ibmRwIlM=",
+        "lastModified": 1759632233,
+        "narHash": "sha256-krgZxGAIIIKFJS+UB0l8do3sYUDWJc75M72tepmVMzE=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "2defa37146df235ef62f566cde69930a86f14df1",
+        "rev": "d7f52a7a640bc54c7bb414cca603835bf8dd4b10",
         "type": "github"
       },
       "original": {
@@ -104,11 +104,11 @@
     "rust-analyzer-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1752687976,
-        "narHash": "sha256-juLg/AlXwda5fwewOJq42Q5T49wU131glK55BzKyhvU=",
+        "lastModified": 1759691178,
+        "narHash": "sha256-O11yp/in47Ef1jLsEgNACXuziuRSSV4RAuxIWTdKI9w=",
         "owner": "rust-lang",
         "repo": "rust-analyzer",
-        "rev": "152087654552a79f85e588da0a8de905436e62d8",
+        "rev": "f0b496cbc774f589de0d46bb9c291ff7ff0329da",
         "type": "github"
       },
       "original": {
@@ -136,11 +136,11 @@
     "veristat-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1751555249,
-        "narHash": "sha256-7NbKM9GA2N2CZGXZKllh00bqWGKb8+ftG/lGG/JNPng=",
+        "lastModified": 1754566905,
+        "narHash": "sha256-Sl0ypWP9cI7DLaE5Rjsr8U9T/n+UpBMN0wHZCKuvnOQ=",
         "owner": "libbpf",
         "repo": "veristat",
-        "rev": "1b386f2cd5d798bc74dba1af5208f5273aba2b9d",
+        "rev": "ca3717b165522860a01e01ea67dd0e99c56e0faf",
         "type": "github"
       },
       "original": {
