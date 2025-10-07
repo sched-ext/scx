@@ -2,6 +2,8 @@
 name = "scx_arena"
 version = "0.1.1"
 edition = "2021"
+description = "Crate for setting up the BPF arena library for sched-ext schedulers."
+license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1.0.65"
