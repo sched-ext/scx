@@ -2,6 +2,8 @@
 name = "scx_raw_pmu"
 version = "0.1.1"
 edition = "2021"
+description = "Utilities to handle raw PMU counters in sched_ext schedulers"
+license = "GPL-2.0-only"
 
 [dependencies]
 anyhow = "1.0.65"
