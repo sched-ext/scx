@@ -763,14 +763,6 @@ static inline u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 
 	return value * 100 / p->scx.weight;
 }
 
-/*
- * Get a random u64 from the kernel's pseudo-random generator.
- */
-static inline u64 get_prandom_u64()
-{
-	return ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
-}
-
 
 #include "compat.bpf.h"
 #include "enums.bpf.h"
