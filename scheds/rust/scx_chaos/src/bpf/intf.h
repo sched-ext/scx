@@ -14,8 +14,6 @@ enum chaos_consts {
 	CHAOS_DSQ_BASE		= 1 << CHAOS_DSQ_BASE_SHIFT,
 
 	CHAOS_NUM_PPIDS_CHECK	= 1 << 20,
-
-	CHAOS_MAX_RAND_ATTEMPTS	= 512,
 };
 
 enum chaos_match {
