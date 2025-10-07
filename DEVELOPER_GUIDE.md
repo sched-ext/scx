@@ -40,7 +40,7 @@ This repository has a kernel lock file at `./kernel-versions.json` where we trac
 several kernels important to development.
 
 If your change requires a new commit from a branch, you can update this file with:
-    `nix run ./.github/include#update-kernels`
+    `nix run ./.nix#update-kernels`
 or with:
     `python3 ./.github/include/update-kernels.py`
 
@@ -52,7 +52,7 @@ both updating the kernel lock and making necessary fixes to the codebase.
 We use `virtme-ng` for testing in the CI environment, and it should be possible
 to reproduce behaviour locally with the same pinned kernels. To get an identical
 kernel to the CI with Nix installed, run:
-    `nix build ./.github/include#kernel_sched_ext/for-next`
+    `nix build ./.nix#kernel_sched_ext/for-next`
 And the kernel image will be available at `result/bzImage`. Alternatively you
 can clone the repo/commit from `kernel-versions.json`, but this isn't guaranteed
 to be reproducible.

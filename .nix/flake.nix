@@ -41,7 +41,7 @@
                   src = libbpf-src;
                   version = "git";
                 });
-                virtme-ng = prev.callPackage ../../.nix/pkgs/virtme-ng.nix { };
+                virtme-ng = prev.callPackage ./pkgs/virtme-ng.nix { };
               })
             ];
           };
@@ -142,7 +142,7 @@
             nix-develop-gha = nix-develop-gha.packages.${system}.default;
             bpf-clang = makeBpfClang pkgs.llvmPackages self.packages.${system}."kernel_sched_ext/for-next";
 
-            veristat = pkgs.callPackage ../../.nix/pkgs/veristat.nix {
+            veristat = pkgs.callPackage ./pkgs/veristat.nix {
               version = "git";
               src = veristat-src;
               libbpf = pkgs.libbpf-git;
@@ -159,7 +159,7 @@
                 rust-toolchain # requires cargo, use the toolchain to match version exactly
               ];
 
-              installPhase = "install -Dm755 ${./list-integration-tests.py} $out/bin/list-integration-tests";
+              installPhase = "install -Dm755 ${../.github/include/list-integration-tests.py} $out/bin/list-integration-tests";
             };
 
             ci = pkgs.python3Packages.buildPythonApplication rec {
@@ -235,16 +235,16 @@
                 ]
               ] ++ (lib.mapAttrsToList (key: val: "--set ${key} \"${val}\"") build-env-vars));
 
-              installPhase = "install -Dm755 ${../include/ci.py} $out/bin/ci";
+              installPhase = "install -Dm755 ${../.github/include/ci.py} $out/bin/ci";
             };
           } // (with lib.attrsets; mapAttrs'
-            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ../../.nix/pkgs/build-kernel.nix {
+            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ./pkgs/build-kernel.nix {
               inherit name;
               inherit (details) repo branch commitHash narHash;
               version = details.kernelVersion;
               patches = map (patchName: ./kernel-patches + ("/" + patchName)) (details.patches or [ ]);
             }))
-            (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json)));
+            (builtins.fromJSON (builtins.readFile ./../kernel-versions.json)));
         }) // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -271,7 +271,7 @@
                   nix
                 ];
 
-                installPhase = "install -Dm755 ${../include/update-kernels.py} $out/bin/update-kernels";
+                installPhase = "install -Dm755 ${../.github/include/update-kernels.py} $out/bin/update-kernels";
               };
             in
             {
