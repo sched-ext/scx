@@ -2976,7 +2976,6 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 
 	cpuc->current_preempt = layer->preempt ||
 		(is_percpu_kthread(p) && is_percpu_kthread_preempting(p));
-	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->used_at = now;
 	taskc->running_at = now;
 	cpuc->is_protected = layer->is_protected;
@@ -3090,7 +3089,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 
 	cpuc->running_fallback = false;
 	cpuc->current_preempt = false;
-	cpuc->task_layer_id = MAX_LAYERS;
 
 	if (nr_excl_layers) {
 		cpuc->prev_excl = cpuc->current_excl;
@@ -3849,7 +3847,6 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	if (!(cpuc = lookup_cpu_ctx(cpu))) {
 		return -ENOMEM;
 	}
-	cpuc->task_layer_id = MAX_LAYERS;
 
 
 	/*

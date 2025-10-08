@@ -204,7 +204,6 @@ struct cpu_ctx {
 	u64			lo_fb_dsq_id;
 	bool			in_open_layers;
 	u32			layer_id;
-	u32			task_layer_id;
 	u32			llc_id;
 	u32			node_id;
 	u32			perf;

@@ -2079,7 +2079,6 @@ impl<'a> Scheduler<'a> {
             let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
             cpu_ctxs[cpu].cpu = cpu as i32;
             cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
-            cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
 
             fastrand::seed(cpu as u64);
