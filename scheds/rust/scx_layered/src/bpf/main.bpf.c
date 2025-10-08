@@ -110,12 +110,15 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
-	__type(value, u32);
+	__type(value, struct hint_layer_info);
 	__uint(map_flags, 0);
 	__uint(max_entries, 1025);
 } hint_to_layer_id_map SEC(".maps");
 
 const volatile bool task_hint_map_enabled;
+
+/* EWMA value updated from userspace */
+u64 system_cpu_util_ewma = 0;
 
 static inline s32 prio_to_nice(s32 static_prio)
 {
@@ -650,57 +653,67 @@ static struct task_hint *lookup_task_hint(struct task_struct *p)
 	return hint;
 }
 
-static int lookup_task_hint_layer_id(struct task_struct *p) {
+static struct hint_layer_info *lookup_task_hint_layer_id(struct task_struct *p) {
 	struct task_hint *hint;
-	u32 *layer_idp;
 	u32 hint_val;
 
 	hint = lookup_task_hint(p);
 	if (!hint)
-		return -ENOENT;
+		return NULL;
 
 	hint_val = hint->hint;
-	layer_idp = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
-	if (!layer_idp)
-		return -EFAULT;
-	return *layer_idp;
+	return bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
 }
 
 static void switch_to_layer(struct task_struct *, struct task_ctx *, u64 layer_id, u64 now);
 
-static int lookup_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
+static bool is_task_layer_hint_stale(struct task_struct *p, struct task_ctx *taskc)
 {
-	u64 layer_id;
-	int ret;
+	struct hint_layer_info *info;
 
-	ret = lookup_task_hint_layer_id(p);
-	if (ret < 0)
-		return ret;
-	layer_id = ret;
+	if (!task_hint_map_enabled)
+		return false;
 
-        if (taskc->layer_id == layer_id)
-		return -EAGAIN;
-        /*
-	 * If the existing layer does not match the one corresponding to the
-         * hint, we must switch the layers, return the new layer_id.
-	 */
-	return layer_id;
+	info = lookup_task_hint_layer_id(p);
+	if (!info)
+		return false;
+	return taskc->layer_id != info->layer_id;
 }
 
-static void maybe_refresh_task_layer_from_hint(struct task_struct *p)
+static void maybe_refresh_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
 {
-	struct task_ctx *taskc;
-	u64 layer_id;
-	int ret;
+	struct hint_layer_info *info;
+	bool switch_layer = false;
 
-	if (!(taskc = lookup_task_ctx_may_fail(p)))
+	if (!task_hint_map_enabled)
 		return;
 
-	ret = lookup_task_layer_from_hint(p, taskc);
-	if (ret < 0)
+	info = lookup_task_hint_layer_id(p);
+	if (!info)
 		return;
-	layer_id = ret;
-	switch_to_layer(p, taskc, layer_id, scx_bpf_now());
+
+	/*
+	 * We need to check whether the task layer matches the HintEquals specification,
+	 * additionally qualified by predicates gating layer admission.
+	 */
+	if (taskc->layer_id != info->layer_id)
+		switch_layer = true;
+
+	if (info->system_cpu_util_below != (u64)-1) {
+		if (system_cpu_util_ewma >= info->system_cpu_util_below) {
+			/*
+			 * Refresh task so that it gets evicted out. It only needs
+			 * to be done for tasks in the current layer, for incoming
+			 * tasks we just reject admission.
+			 */
+			taskc->refresh_layer = switch_layer == false;
+			switch_layer = false;
+		}
+	}
+
+	/* All conditions satisfied for layer matching. */
+	if (switch_layer)
+		switch_to_layer(p, taskc, info->layer_id, scx_bpf_now());
 }
 
 int save_gpu_tgid_pid(void) {
@@ -1343,11 +1356,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	s32 cpu;
 
 	maybe_refresh_layer_cpumasks();
-	maybe_refresh_task_layer_from_hint(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
+	maybe_refresh_task_layer_from_hint(p, taskc);
 	/*
 	 * We usually update the layer in layered_runnable() to avoid confusion.
 	 * As layered_select_cpu() takes place before runnable, new tasks would
@@ -1545,12 +1558,13 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 *lstats;
 
 	maybe_refresh_layer_cpumasks();
-	/* Only invoke if we never went through select_cpu path. */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
-		maybe_refresh_task_layer_from_hint(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
+
+	/* Only invoke if we never went through select_cpu path. */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+		maybe_refresh_task_layer_from_hint(p, taskc);
 
 	layer_id = taskc->layer_id;
 	if (!(layer = lookup_layer(layer_id)))
@@ -2247,7 +2261,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 * Do not refresh the slice in case we need the task to be reenqueued
 		 * for layer membership change and subsequent CPU selection.
 		 */
-		if (lookup_task_layer_from_hint(prev, prev_taskc) >= 0)
+		if (is_task_layer_hint_stale(prev, prev_taskc))
 			return;
 		prev->scx.slice = prev_layer->slice_ns;
 		return;
@@ -2391,7 +2405,7 @@ replenish:
          * Do not refresh the slice in case we need the task to be reenqueued
          * for layer membership change and subsequent CPU selection.
          */
-        if (prev_taskc && prev_layer && lookup_task_layer_from_hint(prev, prev_taskc) < 0)
+        if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc))
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
@@ -2577,6 +2591,26 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 		if (!hint)
 			return false;
 		return match->hint == hint->hint;
+	}
+	case MATCH_SYSTEM_CPU_UTIL_BELOW: {
+		struct task_hint *hint;
+		struct hint_layer_info *info;
+		u32 hint_val;
+
+		hint = lookup_task_hint(p);
+		if (!hint)
+			return false;
+
+		hint_val = hint->hint;
+		info = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
+		if (!info)
+			return false;
+
+		/* Check if this matcher is enabled for this hint */
+		if (info->system_cpu_util_below == (u64)-1)
+			return false;
+
+		return system_cpu_util_ewma < info->system_cpu_util_below;
 	}
 
 	default:
@@ -3794,6 +3828,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_HINT_EQUALS:
 				dbg("%s HINT_EQUALS %d", header, match->hint);
+				break;
+			case MATCH_SYSTEM_CPU_UTIL_BELOW:
+				dbg("%s SYSTEM_CPU_UTIL_BELOW %llu", header, match->system_cpu_util_below);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

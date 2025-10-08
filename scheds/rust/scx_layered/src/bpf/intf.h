@@ -272,6 +272,7 @@ enum layer_match_kind {
 	MATCH_CGROUP_CONTAINS,
 	MATCH_CGROUP_REGEX,
 	MATCH_HINT_EQUALS,
+	MATCH_SYSTEM_CPU_UTIL_BELOW,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -299,6 +300,7 @@ struct layer_match {
 	u64		min_avg_runtime_us;
 	u64		max_avg_runtime_us;
 	u64		hint;
+	u64		system_cpu_util_below;	/* ratio * 10000 */
 };
 
 struct layer_match_ands {
@@ -383,5 +385,10 @@ struct scx_cmd {
 	u8 			opcode;
 	u8			cmd[SCXCMD_COMLEN];
 } __attribute__((packed));
+
+struct hint_layer_info {
+	u32			layer_id;
+	u64			system_cpu_util_below;	/* ratio * 10000, u64::MAX = disabled */
+};
 
 #endif /* __INTF_H */
