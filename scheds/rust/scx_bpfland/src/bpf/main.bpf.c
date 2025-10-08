@@ -43,6 +43,12 @@ const volatile u64 slice_lag = 40ULL * NSEC_PER_MSEC;
 const volatile bool no_wake_sync;
 
 /*
+ * Force tasks with a high rate of enqueues/sec to stay on the same CPU
+ * to reduce contention on the node DSQs.
+ */
+const volatile bool sticky_tasks = true;
+
+/*
  * When enabled always dispatch per-CPU kthreads directly.
  *
  * This allows to prioritize critical kernel threads that may potentially slow
@@ -574,7 +580,7 @@ void kprobe_ksys_read(void)
  */
 static bool is_task_sticky(const struct task_ctx *tctx)
 {
-	return time_after(tctx->pinned_at + slice_lag, bpf_ktime_get_ns());
+	return sticky_tasks && time_after(tctx->pinned_at + slice_lag, bpf_ktime_get_ns());
 }
 
 /*
