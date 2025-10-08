@@ -22,13 +22,13 @@ pub struct TopologyArgs {
     /// virtual LLC partition.
     ///
     /// Examples:
-    ///   --virt-llc 2-8    (partition with 2-8 cores each)
+    ///   --virt-llc=2-8    (partition with 2-8 cores each)
     ///   --virt-llc        (use default range: 2-8 cores)
     #[clap(
         long = "virt-llc",
         value_delimiter = '-',
-        num_args = 0..=2,
-        value_names = ["MIN_CORES", "MAX_CORES"],
+        num_args = 0..=1,
+        require_equals = true,
         help = "Enable virtual LLC partitioning with optional core range (format: min-max, defaults to 2-8)"
     )]
     pub virt_llc: Option<Vec<usize>>,
