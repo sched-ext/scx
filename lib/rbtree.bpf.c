@@ -22,7 +22,6 @@ static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replac
 	}									\
 } while (0)
 
-__weak
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
 	rbtree_t *rbtree;
@@ -205,7 +204,7 @@ u64 rb_node_alloc_internal(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 	return (u64)rbnode;
 }
 
-__weak
+__weak __attribute__((always_inline))
 int rb_node_free(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *rbnode)
 {
 	rbnode_t *old;
@@ -218,7 +217,7 @@ int rb_node_free(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *rbnode)
 	return 0;
 }
 
-static 
+static __attribute__((always_inline))
 int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 {
 	rbnode_t *grandparent, *parent = rbtree->root;
@@ -312,7 +311,6 @@ int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 	return 0;
 }
 
-__weak
 int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 {
 	if (unlikely(!rbtree))
@@ -349,7 +347,7 @@ int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 	return 0;
 }
 
-static rbnode_t *rbnode_least(rbnode_t *subtree)
+static inline rbnode_t *rbnode_least(rbnode_t *subtree)
 {
 	while (subtree->left && can_loop)
 		subtree = subtree->left;
@@ -521,7 +519,7 @@ static inline bool rbnode_has_red_children(rbnode_t *node)
 	return node->right && node->right->is_red;
 }
 
-static
+static __attribute__((always_inline))
 int rb_node_remove(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, bool free)
 {
 	rbnode_t *parent, *sibling, *close_nephew, *distant_nephew;
@@ -577,7 +575,6 @@ int rb_node_remove(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node, boo
 	sibling = parent->child[1 - dir];
 	if (unlikely(!sibling)) {
 		bpf_printk("rbtree: removed black node has no sibling");
-		rb_print(rbtree);
 		return -EINVAL;
 	}
 
