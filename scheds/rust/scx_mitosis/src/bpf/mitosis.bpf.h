@@ -46,8 +46,6 @@
 
 extern const volatile u32 nr_l3;
 
-
-
 extern struct cell_map cells;
 
 enum mitosis_constants {
@@ -71,8 +69,16 @@ enum mitosis_constants {
 	ANY_NUMA = -1,
 };
 
-
-
+static inline void copy_cell_skip_lock(struct cell *dst, const struct cell *src)
+{
+	/* Copy everything AFTER the lock field.
+	 * Since lock is first and 4 bytes (verified by static assertions),
+	 * we skip it and copy the remainder of the struct.
+	 */
+	__builtin_memcpy(&dst->in_use,
+	                 &src->in_use,
+	                 sizeof(struct cell) - sizeof(CELL_LOCK_T));
+}
 
 static inline struct cell *lookup_cell(int idx)
 {

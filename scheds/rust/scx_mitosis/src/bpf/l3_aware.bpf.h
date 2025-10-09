@@ -138,7 +138,7 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 		}
 	} // unlock RCU
 
-
+	// Write to cell
 	bpf_spin_lock(&cell->lock);
 	for (u32 l3 = 0; l3 < nr_l3; l3++) {
 			cell->l3_cpu_cnt[l3] = l3_cpu_cnt_tmp[l3];
@@ -159,7 +159,6 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
  * @cell_id: The cell ID to select an L3 from
  * @return: L3 ID on success, L3_INVALID on error
  */
-// TODO: Lock
 static inline s32 pick_l3_for_task(u32 cell_id)
 {
 	struct cell *cell;
@@ -170,9 +169,15 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 		return L3_INVALID;
 	}
 
+	// Snapshot the current state of the cell
+	struct cell cell_snapshot;
+	bpf_spin_lock(&cell->lock);
+	copy_cell_skip_lock(&cell_snapshot, cell);
+	bpf_spin_unlock(&cell->lock);
+
 	// No cpus
-	if (!cell->cpu_cnt) {
-		scx_bpf_error( "pick_l3_for_task: cell %d has no CPUs accounted yet", cell_id);
+	if (!cell_snapshot.cpu_cnt) {
+		scx_bpf_error("pick_l3_for_task: cell %d has no CPUs accounted yet", cell_id);
 		return L3_INVALID;
 	}
 
@@ -180,14 +185,14 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 	 * weighted selection - accumulate CPU counts until we exceed target */
 
 	/* Generate random target value in range [0, cpu_cnt) */
-	u32 target = bpf_get_prandom_u32() % cell->cpu_cnt;
+	u32 target = bpf_get_prandom_u32() % cell_snapshot.cpu_cnt;
 	u32 l3, cur = 0;
 	s32 ret = L3_INVALID;
 
 	// This could be a prefix sum. Find first l3 where we exceed target
 	bpf_for(l3, 0, nr_l3)
 	{
-		cur += cell->l3_cpu_cnt[l3];
+		cur += cell_snapshot.l3_cpu_cnt[l3];
 		if (target < cur) {
 			ret = (s32)l3;
 			break;
