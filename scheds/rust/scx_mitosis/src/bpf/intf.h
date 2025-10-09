@@ -11,6 +11,7 @@ typedef unsigned int u32;
 typedef _Bool bool;
 #endif
 
+
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/ravg.bpf.h"
@@ -34,6 +35,36 @@ enum consts {
 
 	PCPU_BASE = 0x80000000,
 	MAX_CG_DEPTH = 256,
+
+	MAX_L3S = 16,
+};
+
+/* Kernel side sees the real lock; userspace sees padded bytes of same size/alignment */
+#if defined(__BPF__)
+# define CELL_LOCK_T struct bpf_spin_lock
+#else
+/* userspace placeholder: kernel won’t copy spin_lock */
+# define CELL_LOCK_T struct { u32 __pad; }  /* 4-byte aligned as required */
+#endif
+
+struct cell {
+	// This is a lock in the kernel and padding in the user
+	CELL_LOCK_T lock;
+
+	// Whether or not the cell is used
+	u32 in_use;
+	// Number of CPUs in this cell
+	u32 cpu_cnt;
+	// per-L3 vtimes within this cell
+	u64 l3_vtime_now[MAX_L3S];
+	// Number of CPUs from each L3 assigned to this cell
+	u32 l3_cpu_cnt[MAX_L3S];
+	// Number of L3s with at least one CPU in this cell
+	u32 l3_present_cnt;
+
+	// TODO XXX remove this, only here temporarily to make the code compile
+	// current vtime of the cell
+	u64 vtime_now;
 };
 
 /* Statistics */

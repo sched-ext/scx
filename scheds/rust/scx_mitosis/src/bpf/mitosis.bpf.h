@@ -20,11 +20,7 @@
 #endif
 
 #include "intf.h"
-
-#define MAX_L3S 16
-
 #include "dsq.bpf.h"
-
 
 /*
  * A couple of tricky things about checking a cgroup's cpumask:
@@ -50,6 +46,10 @@
 
 extern const volatile u32 nr_l3;
 
+
+
+extern struct cell_map cells;
+
 enum mitosis_constants {
 
 	/* Root cell index */
@@ -71,22 +71,36 @@ enum mitosis_constants {
 	ANY_NUMA = -1,
 };
 
-struct cell {
-	// Whether or not the cell is used or not
-	u32 in_use;
-	// Number of CPUs in this cell
-	u32 cpu_cnt;
-	// per-L3 vtimes within this cell
-	u64 l3_vtime_now[MAX_L3S];
-	// Number of CPUs from each L3 assigned to this cell
-	u32 l3_cpu_cnt[MAX_L3S];
-	// Number of L3s with at least one CPU in this cell
-	u32 l3_present_cnt;
 
-	// TODO XXX remove this, only here temporarily to make the code compile
-	// current vtime of the cell
-	u64 vtime_now;
-};
+
+
+static inline struct cell *lookup_cell(int idx)
+{
+	struct cell *cell;
+
+	cell = bpf_map_lookup_elem(&cells, &idx);
+
+	if (!cell) {
+		scx_bpf_error("Invalid cell %d", idx);
+		return NULL;
+	}
+	return cell;
+}
+
+static inline struct bpf_spin_lock *get_cell_lock(u32 cell_idx)
+{
+	if (cell_idx >= MAX_CELLS) {
+		scx_bpf_error("Invalid cell index %d", cell_idx);
+		return NULL;
+	}
+
+	struct cell *cell = lookup_cell(cell_idx);
+	if (!cell) {
+		scx_bpf_error("Cell %d not found", cell_idx);
+		return NULL;
+	}
+	return &cell->lock;
+}
 
 /*
  * task_ctx is the per-task information kept by scx_mitosis
@@ -123,7 +137,6 @@ struct task_ctx {
 };
 
 // These could go in mitosis.bpf.h, but we'll cross that bridge when we get
-static inline struct cell *lookup_cell(int idx);
 static inline const struct cpumask *lookup_cell_cpumask(int idx);
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
@@ -135,3 +148,47 @@ struct function_counters_map {
 	__type(value, u64);
 	__uint(max_entries, NR_COUNTERS);
 };
+
+struct cell_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cell);
+	__uint(max_entries, MAX_CELLS);
+};
+
+struct rcu_read_guard {
+	bool active;
+};
+
+static inline struct rcu_read_guard rcu_read_lock_guard(void) {
+	bpf_rcu_read_lock();
+	return (struct rcu_read_guard){.active = true};
+}
+
+static inline void rcu_read_guard_release(struct rcu_read_guard *guard) {
+	if (guard->active) {
+		bpf_rcu_read_unlock();
+		guard->active = false;
+	}
+}
+#define RCU_READ_GUARD() \
+	struct rcu_read_guard __rcu_guard __attribute__((__cleanup__(rcu_read_guard_release))) = rcu_read_lock_guard()
+
+struct cpumask_guard {
+	struct bpf_cpumask *mask;
+};
+
+static inline struct cpumask_guard cpumask_create_guard(void) {
+	struct bpf_cpumask *mask = bpf_cpumask_create();
+	return (struct cpumask_guard){.mask = mask};
+}
+
+static inline void cpumask_guard_release(struct cpumask_guard *guard) {
+	if (guard->mask) {
+		bpf_cpumask_release(guard->mask);
+		guard->mask = NULL;
+	}
+}
+
+#define CPUMASK_GUARD(var_name) \
+	struct cpumask_guard var_name __attribute__((__cleanup__(cpumask_guard_release))) = cpumask_create_guard()

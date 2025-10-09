@@ -13,7 +13,7 @@
  */
 
 // TODO: fix debug printer.
-#include "intf.h"
+// #include "intf.h"
 
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
@@ -45,9 +45,15 @@ private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
 
+// Cells now defined as a map so we can lock.
+struct cell_map cells SEC(".maps");
+
 /*
  * Maps used for L3-aware scheduling
 */
+#if 0
+struct cell_locks_map cell_locks SEC(".maps");
+#endif
 struct cpu_to_l3_map cpu_to_l3 SEC(".maps");
 struct l3_to_cpus_map l3_to_cpus SEC(".maps");
 
@@ -162,19 +168,6 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cctx;
 }
 
-struct cell cells[MAX_CELLS];
-
-static inline struct cell *lookup_cell(int idx)
-{
-	struct cell *cell;
-
-	cell = MEMBER_VPTR(cells, [idx]);
-	if (!cell) {
-		scx_bpf_error("Invalid cell %d", idx);
-		return NULL;
-	}
-	return cell;
-}
 
 /*
  * Cells are allocated concurrently in some cases (e.g. cgroup_init).
@@ -191,8 +184,11 @@ static inline int allocate_cell()
 
 		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
 			// TODO XXX, I think we need to make this concurrent safe
+			// TODO, lock with recalc_cell...()
 			__builtin_memset(c->l3_cpu_cnt, 0, sizeof(c->l3_cpu_cnt));
 			c->l3_present_cnt = 0;
+			// TODO zero cpu_cnt
+			// TODO Just zero the whole cell struct?
 			return cell_idx;
 		}
 	}
@@ -325,8 +321,10 @@ static inline int update_task_cpumask(struct task_struct *p,
 		/* --- Pick a new L3 if needed --- */
 		if (tctx->l3 == L3_INVALID) {
 			s32 new_l3 = pick_l3_for_task(tctx->cell);
-			if (new_l3 < 0)
+			if (new_l3 < 0) {
+				scx_bpf_error("bad L3: %d", new_l3);
 				return -ENODEV;
+			}
 			tctx->l3 = new_l3;
 			l3_mask = lookup_l3_cpumask((u32)tctx->l3);
 			if (!l3_mask)
@@ -339,8 +337,10 @@ static inline int update_task_cpumask(struct task_struct *p,
 			bpf_cpumask_and(tctx->cpumask, (const struct cpumask *)tctx->cpumask, l3_mask);
 
 		/* If empty after intersection, nothing can run here */
-		if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask))
+		if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
+			scx_bpf_error("Empty cpumask after intersection");
 			return -ENODEV;
+		}
 
 		/* --- Point to the correct (cell,L3) DSQ and set vtime baseline --- */
 		tctx->dsq = get_cell_l3_dsq_id(tctx->cell, tctx->l3);
@@ -349,8 +349,10 @@ static inline int update_task_cpumask(struct task_struct *p,
 		if (!cell)
 			return -ENOENT;
 
-		if (!l3_is_valid(tctx->l3))
+		if (!l3_is_valid(tctx->l3)){
+			scx_bpf_error("Invalid L3 %d", tctx->l3);
 			return -EINVAL;
+		}
 
 		p->scx.dsq_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
 	} else {
@@ -1386,7 +1388,8 @@ static __always_inline void dump_cell_state(u32 cell_idx)
 		   cell_idx, cell->in_use, cell->cpu_cnt, cell->l3_present_cnt);
 
 	u32 l3;
-	// Print vtimes for L3s
+	// TODO Print vtimes for L3s
+	// TODO lock
 	bpf_for(l3, 0, nr_l3) {
 		if (cell->l3_cpu_cnt[l3] > 0) {
 			scx_bpf_dump("  L3[%d]: %d CPUs", l3, cell->l3_cpu_cnt[l3]);
@@ -1490,6 +1493,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		}
 	}
 
+
 	cpumask = bpf_kptr_xchg(&all_cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
@@ -1529,7 +1533,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		}
 	}
 
-	cells[0].in_use = true;
+	struct cell *cell = lookup_cell(0);
+	if (!cell) {
+		scx_bpf_error("Failed to lookup cell 0");
+		return -ENOENT;
+	}
+	cell->in_use = true;
 
 	/* Configure root cell (cell 0) topology at init time using nr_l3 and l3_to_cpu masks */
 	recalc_cell_l3_counts(ROOT_CELL_ID);

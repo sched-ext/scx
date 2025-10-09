@@ -24,7 +24,7 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::{MapCore, OpenObject};
+use libbpf_rs::{MapCore, OpenObject, MapFlags};
 use log::debug;
 use log::info;
 use log::trace;
@@ -48,6 +48,12 @@ use scx_utils::NR_CPUS_POSSIBLE;
 use stats::CellMetrics;
 use stats::Metrics;
 use crate::mitosis_topology_utils::{populate_topology_maps, MapKind};
+
+// This is the cell type from intf.h.
+// When copied to user, the lock field is omitted.
+// We can mmap it, or use calls to the BPF_MAP_LOOKUP_ELEM
+// command of the bpf() system call with the BPF_F_LOCK flag
+type BpfCell = bpf_intf::cell;
 
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
@@ -138,14 +144,14 @@ const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 3] = [
 
 // Per cell book-keeping
 #[derive(Debug)]
-struct Cell {
+struct CellMask {
     cpus: Cpumask,
 }
 
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     monitor_interval: Duration,
-    cells: HashMap<u32, Cell>,
+    cells: HashMap<u32, CellMask>,
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
@@ -193,11 +199,36 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
+    fn get_bpf_cell(&self, cell_id: u32) -> anyhow::Result<Option<BpfCell>> {
+        let key = cell_id.to_ne_bytes();
+        let map = &self.skel.maps.cells; // NOTE: map is a field, not a method
+
+        match map.lookup(&key, MapFlags::ANY)? {
+            Some(bytes) => {
+                let need = core::mem::size_of::<BpfCell>();
+                if bytes.len() != need {
+                    anyhow::bail!("cells value size {} != BpfCell {}", bytes.len(), need);
+                }
+                // Copy to an aligned buffer to avoid misaligned reference
+                let mut tmp = MaybeUninit::<BpfCell>::uninit();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        tmp.as_mut_ptr() as *mut u8,
+                        need,
+                    );
+                    Ok(Some(tmp.assume_init()))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
     fn is_cell_in_use(&self, cell_id: u32) -> bool {
-        let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
-        let bpf_cell = cells[cell_id as usize];
-        let in_use = unsafe { std::ptr::read_volatile(&bpf_cell.in_use as *const u32) };
-        in_use != 0
+        match self.get_bpf_cell(cell_id) {
+            Ok(Some(c)) => c.in_use != 0,
+            _ => false,
+        }
     }
 
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
@@ -234,6 +265,18 @@ impl<'a> Scheduler<'a> {
         }
 
         let mut skel = scx_ops_load!(skel, mitosis, uei)?;
+
+        // Verify our version of the cell datastructure is the same size
+        // as the bpf one.
+        let cells_info = skel.maps.cells.info()?;
+        let usz = core::mem::size_of::<BpfCell>() as u32;
+        if cells_info.info.value_size != usz {
+            bail!(
+                "cells value_size={} but Rust expects {} (BpfCell)",
+                cells_info.info.value_size,
+                usz
+            );
+        }
 
         // Set up CPU to L3 topology mapping using the common functionality
         populate_topology_maps(&mut skel, MapKind::CpuToL3, None)?;
@@ -474,7 +517,7 @@ impl<'a> Scheduler<'a> {
     fn print_debug_status(&self) {
         if let Ok(flags) = DEBUG_FLAGS.lock() {
             let mut disabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| (!enabled).then_some(format!("{}~{}{}", ANSI_RED, flag, ANSI_RESET))).collect();
-            let mut enabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| enabled.then_some(format!("{}+{}{}", ANSI_GREEN, flag, ANSI_RESET))).collect();
+            let enabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| enabled.then_some(format!("{}+{}{}", ANSI_GREEN, flag, ANSI_RESET))).collect();
             disabled.extend(enabled);
             trace!("Debug Flags: {}", if disabled.is_empty() { "none".to_string() } else { disabled.join(" ") });
             // trace!("hint: sudo ./scx_mitosis cli debug ~/+<flag_name>");
@@ -567,7 +610,7 @@ impl<'a> Scheduler<'a> {
             let percpu_values = self.skel
                 .maps
                 .function_counters
-                .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+                .lookup_percpu(&key, MapFlags::ANY)
                 .context("Failed to lookup function counter")?
                 .unwrap_or_default();
 
@@ -632,7 +675,7 @@ impl<'a> Scheduler<'a> {
             self.skel
                 .maps
                 .function_counters
-                .update_percpu(&key, &percpu_values, libbpf_rs::MapFlags::ANY)
+                .update_percpu(&key, &percpu_values, MapFlags::ANY)
                 .context("Failed to reset function counter")?;
         }
 
@@ -655,7 +698,7 @@ fn update_steal_metrics(&mut self) -> Result<()> {
     let key = 0u32.to_ne_bytes();
 
     // Read the count; lazily initialize the slot to 0 if it doesn't exist.
-    let steal_count = match self.skel.maps.steal_stats.lookup(&key, libbpf_rs::MapFlags::ANY) {
+    let steal_count = match self.skel.maps.steal_stats.lookup(&key, MapFlags::ANY) {
         Ok(Some(data)) if data.len() >= 8 => {
             u64::from_ne_bytes(data[..8].try_into().unwrap())
         }
@@ -667,7 +710,7 @@ fn update_steal_metrics(&mut self) -> Result<()> {
         }
         Ok(None) => {
             let zero = 0u64.to_ne_bytes();
-            if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero, libbpf_rs::MapFlags::ANY) {
+            if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero, MapFlags::ANY) {
                 if steals_debug {
                     debug!("Failed to initialize steal_stats map: {e}");
                 }
@@ -736,15 +779,12 @@ fn update_steal_metrics(&mut self) -> Result<()> {
         // Create cells we don't have yet, drop cells that are no longer in use.
         // If we continue to drop cell metrics once a cell is removed, we'll need to make sure we
         // flush metrics for a cell before we remove it completely.
-        let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
         for i in 0..MAX_CELLS {
             let cell_idx = i as u32;
-            let bpf_cell = cells[i];
-            let in_use = unsafe { std::ptr::read_volatile(&bpf_cell.in_use as *const u32) };
-            if in_use > 0 {
+            if self.is_cell_in_use(cell_idx) {
                 self.cells
                     .entry(cell_idx)
-                    .or_insert_with(|| Cell {
+                    .or_insert_with(|| CellMask {
                         cpus: Cpumask::new(),
                     })
                     .cpus = cell_to_cpus
@@ -769,7 +809,7 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     let cpu_ctxs_vec = skel
         .maps
         .cpu_ctxs
-        .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+        .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
     for cpu in 0..*NR_CPUS_POSSIBLE {
@@ -787,7 +827,7 @@ fn read_cpu_to_l3(skel: &BpfSkel) -> Result<Vec<u32>> {
         let val = skel
             .maps
             .cpu_to_l3
-            .lookup(&key, libbpf_rs::MapFlags::ANY)?
+            .lookup(&key, MapFlags::ANY)?
             .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
             .unwrap_or(0);
         cpu_to_l3.push(val);
@@ -806,7 +846,7 @@ fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<(u32, Cpumask)>> {
         let mask = if let Some(v) = skel
             .maps
             .l3_to_cpus
-            .lookup(&key, libbpf_rs::MapFlags::ANY)?
+            .lookup(&key, MapFlags::ANY)?
         {
             let bytes = v.as_slice();
             let mut longs = [0u64; CPUMASK_LONG_ENTRIES];

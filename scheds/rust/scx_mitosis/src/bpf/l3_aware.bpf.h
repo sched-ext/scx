@@ -86,46 +86,67 @@ static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
 static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 {
 	struct cell *cell = lookup_cell(cell_idx);
-	if (!cell)
-		return;
-
-	struct bpf_cpumask *tmp = bpf_cpumask_create();
-	if (!tmp)
-		return;
-
-	u32 l3, present = 0, total_cpus = 0;
-
-	bpf_rcu_read_lock();
-	const struct cpumask *cell_mask =
-		lookup_cell_cpumask(cell_idx); // RCU ptr
-	if (!cell_mask) {
-		bpf_rcu_read_unlock();
-		bpf_cpumask_release(tmp);
+	if (!cell) {
+		scx_bpf_error("recalc_cell_l3_counts: invalid cell %d",
+			      cell_idx);
 		return;
 	}
 
-	bpf_for(l3, 0, nr_l3)
-	{
-		const struct cpumask *l3_mask =
-			lookup_l3_cpumask(l3); // plain map memory
-		if (!l3_mask) {
-			cell->l3_cpu_cnt[l3] = 0;
-			continue;
+	CPUMASK_GUARD(tmp_guard);
+	if (!tmp_guard.mask) {
+		scx_bpf_error(
+			"recalc_cell_l3_counts: failed to create tmp mask");
+		return;
+	}
+
+	u32 l3, l3s_present = 0, total_cpus = 0;
+	// Just so we don't hold the lock longer than necessary
+	u32 l3_cpu_cnt_tmp[MAX_L3S] = {0};
+
+	{ // RCU context
+		RCU_READ_GUARD();
+		const struct cpumask *cell_mask =
+			lookup_cell_cpumask(cell_idx); // RCU ptr
+
+		if (!cell_mask) {
+			scx_bpf_error("recalc_cell_l3_counts: invalid cell mask");
+			return;
 		}
 
-		bpf_cpumask_and(tmp, cell_mask, l3_mask);
+		bpf_for(l3, 0, nr_l3)
+		{
+			const struct cpumask *l3_mask = lookup_l3_cpumask(l3);
+			if (!l3_mask) {
+				scx_bpf_error( "recalc_cell_l3_counts: invalid l3 mask");
+				return;
+			}
 
-		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp);
-		cell->l3_cpu_cnt[l3] = cnt;
-		total_cpus += cnt;
-		if (cnt)
-			present++;
+			bpf_cpumask_and(tmp_guard.mask, cell_mask, l3_mask);
+
+			u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp_guard.mask);
+
+			l3_cpu_cnt_tmp[l3] = cnt;
+
+			bpf_printk("recalc_cell_l3_counts: cnt %d", cnt);
+
+			// These are counted across the whole cell
+			total_cpus += cnt;
+
+			// Number of non-empty L3s in this cell
+			if (cnt)
+				l3s_present++;
+		}
+	} // unlock RCU
+
+
+	bpf_spin_lock(&cell->lock);
+	for (u32 l3 = 0; l3 < nr_l3; l3++) {
+			cell->l3_cpu_cnt[l3] = l3_cpu_cnt_tmp[l3];
 	}
-	bpf_rcu_read_unlock();
 
-	cell->l3_present_cnt = present;
+	cell->l3_present_cnt = l3s_present;
 	cell->cpu_cnt = total_cpus;
-	bpf_cpumask_release(tmp);
+	bpf_spin_unlock(&cell->lock);
 }
 
 /**
@@ -138,29 +159,32 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
  * @cell_id: The cell ID to select an L3 from
  * @return: L3 ID on success, L3_INVALID on error
  */
+// TODO: Lock
 static inline s32 pick_l3_for_task(u32 cell_id)
 {
 	struct cell *cell;
-	u32 l3, target, cur = 0;
-	s32 ret = L3_INVALID;
 
 	/* Look up the cell structure */
-	if (!(cell = lookup_cell(cell_id)))
-		return L3_INVALID;
-
-	/* Handle case where cell has no CPUs assigned yet */
-	if (!cell->cpu_cnt) {
-		scx_bpf_error(
-			"pick_l3_for_task: cell %d has no CPUs accounted yet",
-			cell_id);
+	if (!(cell = lookup_cell(cell_id))) {
+		scx_bpf_error("pick_l3_for_task: invalid cell %d", cell_id);
 		return L3_INVALID;
 	}
 
-	/* Generate random target value in range [0, cpu_cnt) */
-	target = bpf_get_prandom_u32() % cell->cpu_cnt;
+	// No cpus
+	if (!cell->cpu_cnt) {
+		scx_bpf_error( "pick_l3_for_task: cell %d has no CPUs accounted yet", cell_id);
+		return L3_INVALID;
+	}
 
 	/* Find the L3 domain corresponding to the target value using
 	 * weighted selection - accumulate CPU counts until we exceed target */
+
+	/* Generate random target value in range [0, cpu_cnt) */
+	u32 target = bpf_get_prandom_u32() % cell->cpu_cnt;
+	u32 l3, cur = 0;
+	s32 ret = L3_INVALID;
+
+	// This could be a prefix sum. Find first l3 where we exceed target
 	bpf_for(l3, 0, nr_l3)
 	{
 		cur += cell->l3_cpu_cnt[l3];
@@ -169,6 +193,12 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 			break;
 		}
 	}
+
+	if (ret == L3_INVALID) {
+		scx_bpf_error("pick_l3_for_task: invalid L3");
+		return L3_INVALID;
+	}
+
 	return ret;
 }
 
@@ -226,6 +256,7 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 
 		// Skip L3s that are not present in this cell
 		// Note: rechecking cell_ptr for verifier
+		// TODO: Lock?
 		if (cell_ptr && cell_ptr->l3_cpu_cnt[candidate_l3] == 0)
 			continue;
 
@@ -244,7 +275,7 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 		// Just a trick for peeking the head element
 		bpf_for_each(scx_dsq, task, candidate_dsq, 0)
 		{
-	 		task_ctx = lookup_task_ctx(task);
+			task_ctx = lookup_task_ctx(task);
 			found_task = (task_ctx != NULL);
 			break;
 		}
