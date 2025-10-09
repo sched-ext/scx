@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::io::{self, ErrorKind};
+use std::io::{self};
 use std::mem::MaybeUninit;
 
 use crate::bpf_intf;
@@ -296,8 +296,7 @@ impl<'cb> BpfScheduler<'cb> {
             let err = Self::use_sched_ext();
             if err < 0 {
                 return Err(anyhow::Error::msg(format!(
-                    "sched_setscheduler error: {}",
-                    err
+                    "sched_setscheduler error: {err}"
                 )));
             }
         }
@@ -419,11 +418,11 @@ impl<'cb> BpfScheduler<'cb> {
                 let cache_id = match cache_lvl {
                     2 => cpu.l2_id,
                     3 => cpu.l3_id,
-                    _ => panic!("invalid cache level {}", cache_lvl),
+                    _ => panic!("invalid cache level {cache_lvl}"),
                 };
                 cache_id_map
                     .entry(cache_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(*cpu_id);
             }
         }
@@ -433,11 +432,9 @@ impl<'cb> BpfScheduler<'cb> {
             for cpu in &cpus {
                 for sibling_cpu in &cpus {
                     enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu).map_err(|e| {
-                        io::Error::new(
-                            ErrorKind::Other,
+                        io::Error::other(
                             format!(
-                                "enable_sibling_cpu_fn failed for cpu {} sibling {}: err {}",
-                                cpu, sibling_cpu, e
+                                "enable_sibling_cpu_fn failed for cpu {cpu} sibling {sibling_cpu}: err {e}"
                             ),
                         )
                     })?;
@@ -631,8 +628,7 @@ impl<'cb> BpfScheduler<'cb> {
             }
             res if res < 0 => Err(res),
             res => panic!(
-                "Unexpected return value from libbpf-rs::consume_raw(): {}",
-                res
+                "Unexpected return value from libbpf-rs::consume_raw(): {res}"
             ),
         }
     }

@@ -730,7 +730,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<SysStats>(
-        &vec![],
+        &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |sst| {

@@ -410,7 +410,7 @@ pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Resu
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<SysStats>(
-        &vec![],
+        &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |sysstats| {
