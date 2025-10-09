@@ -33,6 +33,7 @@ enum chaos_trait_kind {
 	CHAOS_TRAIT_CPU_FREQ,
 	CHAOS_TRAIT_DEGRADATION,
 	CHAOS_TRAIT_KPROBE_RANDOM_DELAYS,
+	CHAOS_TRAIT_FUTEX_DELAYS,
 	CHAOS_TRAIT_MAX,
 };
 
@@ -44,12 +45,17 @@ struct chaos_task_ctx {
 	enum chaos_trait_kind pending_trait;
 	u64		      enq_flags;
 	u64		      p2dq_vtime;
+
+	// Futex delay state
+	u64		      futex_uaddr;
 };
 
 enum chaos_stat_idx {
 	CHAOS_STAT_TRAIT_RANDOM_DELAYS,
 	CHAOS_STAT_TRAIT_CPU_FREQ,
 	CHAOS_STAT_TRAIT_DEGRADATION,
+	CHAOS_STAT_TRAIT_FUTEX_DELAYS,
+	CHAOS_STAT_TRAIT_FUTEX_DELAYS_CONTENDED,
 	CHAOS_STAT_CHAOS_EXCLUDED,
 	CHAOS_STAT_CHAOS_SKIPPED,
 	CHAOS_STAT_KPROBE_RANDOM_DELAYS,
