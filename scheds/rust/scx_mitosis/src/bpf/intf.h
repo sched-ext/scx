@@ -41,10 +41,13 @@ enum consts {
 
 /* Kernel side sees the real lock; userspace sees padded bytes of same size/alignment */
 #if defined(__BPF__)
-# define CELL_LOCK_T struct bpf_spin_lock
+#define CELL_LOCK_T struct bpf_spin_lock
 #else
 /* userspace placeholder: kernel won’t copy spin_lock */
-# define CELL_LOCK_T struct { u32 __pad; }  /* 4-byte aligned as required */
+#define CELL_LOCK_T        \
+	struct {           \
+		u32 __pad; \
+	} /* 4-byte aligned as required */
 #endif
 
 struct cell {
@@ -74,25 +77,24 @@ struct cell {
 
 // All assertions work for both BPF and userspace builds
 _Static_assert(offsetof(struct cell, lock) == 0,
-               "lock/padding must be first field");
+	       "lock/padding must be first field");
 
 _Static_assert(sizeof(((struct cell *)0)->lock) == 4,
-               "lock/padding must be 4 bytes");
+	       "lock/padding must be 4 bytes");
 
 _Static_assert(_Alignof(CELL_LOCK_T) == 4,
-               "lock/padding must be 4-byte aligned");
+	       "lock/padding must be 4-byte aligned");
 
 _Static_assert(offsetof(struct cell, in_use) == 4,
-               "in_use must follow 4-byte lock/padding");
+	       "in_use must follow 4-byte lock/padding");
 
 // Verify these are the same size in both BPF and Rust.
 _Static_assert(sizeof(struct cell) ==
-               ( (4 * sizeof(u32)) + (4 * MAX_L3S) + (8 * MAX_L3S)),
-               "struct cell size must be stable for Rust bindings");
+		       ((4 * sizeof(u32)) + (4 * MAX_L3S) + (8 * MAX_L3S)),
+	       "struct cell size must be stable for Rust bindings");
 
-// Ensure no unexpected padding was added
 _Static_assert(sizeof(struct cell) == 208,
-               "struct cell must be exactly 208 bytes");
+	       "struct cell must be exactly 208 bytes");
 
 /* Statistics */
 enum cell_stat_idx {

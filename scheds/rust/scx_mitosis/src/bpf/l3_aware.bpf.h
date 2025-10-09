@@ -15,7 +15,7 @@
 #include "intf.h"
 
 typedef u32 l3_id_t;
-#define L3_INVALID ((l3_id_t) ~0u)
+#define L3_INVALID ((l3_id_t)~0u)
 
 // Configure how aggressively we steal work.
 // When task is detected as a steal candidate, skip it this many times
@@ -51,14 +51,16 @@ extern struct cpu_to_l3_map cpu_to_l3;
 extern struct l3_to_cpus_map l3_to_cpus;
 extern struct steal_stats_map steal_stats;
 
-static inline const bool l3_is_valid(u32 l3_id) {
+static inline const bool l3_is_valid(u32 l3_id)
+{
 	if (l3_id == L3_INVALID)
 		return false;
 
 	return (l3_id >= 0) && (l3_id < MAX_L3S);
 }
 
-static inline void init_task_l3(struct task_ctx *tctx) {
+static inline void init_task_l3(struct task_ctx *tctx)
+{
 	tctx->l3 = L3_INVALID;
 
 #if MITOSIS_ENABLE_STEALING
@@ -67,7 +69,6 @@ static inline void init_task_l3(struct task_ctx *tctx) {
 	tctx->last_stolen_at = 0;
 	tctx->steals_prevented = 0;
 #endif
-
 }
 
 static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
@@ -101,7 +102,7 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 
 	u32 l3, l3s_present = 0, total_cpus = 0;
 	// Just so we don't hold the lock longer than necessary
-	u32 l3_cpu_cnt_tmp[MAX_L3S] = {0};
+	u32 l3_cpu_cnt_tmp[MAX_L3S] = { 0 };
 
 	{ // RCU context
 		RCU_READ_GUARD();
@@ -109,7 +110,8 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 			lookup_cell_cpumask(cell_idx); // RCU ptr
 
 		if (!cell_mask) {
-			scx_bpf_error("recalc_cell_l3_counts: invalid cell mask");
+			scx_bpf_error(
+				"recalc_cell_l3_counts: invalid cell mask");
 			return;
 		}
 
@@ -117,13 +119,15 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 		{
 			const struct cpumask *l3_mask = lookup_l3_cpumask(l3);
 			if (!l3_mask) {
-				scx_bpf_error( "recalc_cell_l3_counts: invalid l3 mask");
+				scx_bpf_error(
+					"recalc_cell_l3_counts: invalid l3 mask");
 				return;
 			}
 
 			bpf_cpumask_and(tmp_guard.mask, cell_mask, l3_mask);
 
-			u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp_guard.mask);
+			u32 cnt = bpf_cpumask_weight(
+				(const struct cpumask *)tmp_guard.mask);
 
 			l3_cpu_cnt_tmp[l3] = cnt;
 
@@ -141,7 +145,7 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 	// Write to cell
 	bpf_spin_lock(&cell->lock);
 	for (u32 l3 = 0; l3 < nr_l3; l3++) {
-			cell->l3_cpu_cnt[l3] = l3_cpu_cnt_tmp[l3];
+		cell->l3_cpu_cnt[l3] = l3_cpu_cnt_tmp[l3];
 	}
 
 	cell->l3_present_cnt = l3s_present;
@@ -177,7 +181,9 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 
 	// No cpus
 	if (!cell_snapshot.cpu_cnt) {
-		scx_bpf_error("pick_l3_for_task: cell %d has no CPUs accounted yet", cell_id);
+		scx_bpf_error(
+			"pick_l3_for_task: cell %d has no CPUs accounted yet",
+			cell_id);
 		return L3_INVALID;
 	}
 

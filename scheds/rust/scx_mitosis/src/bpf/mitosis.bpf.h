@@ -75,9 +75,8 @@ static inline void copy_cell_skip_lock(struct cell *dst, const struct cell *src)
 	 * Since lock is first and 4 bytes (verified by static assertions),
 	 * we skip it and copy the remainder of the struct.
 	 */
-	__builtin_memcpy(&dst->in_use,
-	                 &src->in_use,
-	                 sizeof(struct cell) - sizeof(CELL_LOCK_T));
+	__builtin_memcpy(&dst->in_use, &src->in_use,
+			 sizeof(struct cell) - sizeof(CELL_LOCK_T));
 }
 
 static inline struct cell *lookup_cell(int idx)
@@ -166,35 +165,43 @@ struct rcu_read_guard {
 	bool active;
 };
 
-static inline struct rcu_read_guard rcu_read_lock_guard(void) {
+static inline struct rcu_read_guard rcu_read_lock_guard(void)
+{
 	bpf_rcu_read_lock();
-	return (struct rcu_read_guard){.active = true};
+	return (struct rcu_read_guard){ .active = true };
 }
 
-static inline void rcu_read_guard_release(struct rcu_read_guard *guard) {
+static inline void rcu_read_guard_release(struct rcu_read_guard *guard)
+{
 	if (guard->active) {
 		bpf_rcu_read_unlock();
 		guard->active = false;
 	}
 }
-#define RCU_READ_GUARD() \
-	struct rcu_read_guard __rcu_guard __attribute__((__cleanup__(rcu_read_guard_release))) = rcu_read_lock_guard()
+#define RCU_READ_GUARD()                                               \
+	struct rcu_read_guard __rcu_guard                              \
+		__attribute__((__cleanup__(rcu_read_guard_release))) = \
+			rcu_read_lock_guard()
 
 struct cpumask_guard {
 	struct bpf_cpumask *mask;
 };
 
-static inline struct cpumask_guard cpumask_create_guard(void) {
+static inline struct cpumask_guard cpumask_create_guard(void)
+{
 	struct bpf_cpumask *mask = bpf_cpumask_create();
-	return (struct cpumask_guard){.mask = mask};
+	return (struct cpumask_guard){ .mask = mask };
 }
 
-static inline void cpumask_guard_release(struct cpumask_guard *guard) {
+static inline void cpumask_guard_release(struct cpumask_guard *guard)
+{
 	if (guard->mask) {
 		bpf_cpumask_release(guard->mask);
 		guard->mask = NULL;
 	}
 }
 
-#define CPUMASK_GUARD(var_name) \
-	struct cpumask_guard var_name __attribute__((__cleanup__(cpumask_guard_release))) = cpumask_create_guard()
+#define CPUMASK_GUARD(var_name)                                       \
+	struct cpumask_guard var_name                                 \
+		__attribute__((__cleanup__(cpumask_guard_release))) = \
+			cpumask_create_guard()
