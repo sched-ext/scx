@@ -1131,7 +1131,7 @@ impl Stats {
         let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
         let pmu_cur: u64 = cur_layer_membw_agg
             .iter()
-            .map(|membw_agg| { membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED] })
+            .map(|membw_agg| membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED])
             .sum();
         let resctrl_cur = Self::resctrl_read_total_membw()?;
         let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
@@ -2774,7 +2774,6 @@ impl<'a> Scheduler<'a> {
                         layer.name
                     );
 
-
                     let target = layer.cpus.weight().clamp(low, high);
 
                     records.push((
@@ -2787,11 +2786,11 @@ impl<'a> Scheduler<'a> {
                     ));
 
                     let target = target.clamp(cpus_range.0, cpus_range.1);
-                    let membw_target= self.clamp_target_by_membw(
+                    let membw_target = self.clamp_target_by_membw(
                         &layer,
                         membw_limit as f64,
                         membw as f64,
-                        target as u64
+                        target as u64,
                     );
 
                     trace!("CPU target pre- and post-membw adjustment: {target} -> {membw_target}");
