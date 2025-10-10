@@ -420,10 +420,7 @@ impl<'cb> BpfScheduler<'cb> {
                     3 => cpu.l3_id,
                     _ => panic!("invalid cache level {cache_lvl}"),
                 };
-                cache_id_map
-                    .entry(cache_id)
-                    .or_default()
-                    .push(*cpu_id);
+                cache_id_map.entry(cache_id).or_default().push(*cpu_id);
             }
         }
 
@@ -627,9 +624,7 @@ impl<'cb> BpfScheduler<'cb> {
                 Ok(Some(task))
             }
             res if res < 0 => Err(res),
-            res => panic!(
-                "Unexpected return value from libbpf-rs::consume_raw(): {res}"
-            ),
+            res => panic!("Unexpected return value from libbpf-rs::consume_raw(): {res}"),
         }
     }
 
