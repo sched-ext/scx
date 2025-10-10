@@ -1549,20 +1549,34 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	    try_preempt_cpu(task_cpu, p, taskc, layer, PREEMPT_FIRST))
 		return;
 
-#if 0 
 	/*
 	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
 	 */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) || try_preempt_first) {
 		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
-		if (cpu >= 0) {
-			lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
-			taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
-			scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
-			return;
-		}
+		if (cpu < 0)
+			goto skip_ddsp;
+
+		/* Non-confined layers can run anywhere. */
+		if (layer->kind != LAYER_KIND_CONFINED)
+			goto do_ddsp;
+
+		struct cpu_ctx *target_cpuc = lookup_cpu_ctx(cpu);
+		if (!target_cpuc)
+			goto skip_ddsp;
+
+		/* Confined layers are only scheduled on their own CPUs. */
+		if (target_cpuc->layer_id != layer->id)
+			goto skip_ddsp;
+do_ddsp:
+
+		lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
+		taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
+		return;
 	}
-#endif
+
+skip_ddsp:
 
 	if (!(task_cpuc = lookup_cpu_ctx(task_cpu)))
 		return;
