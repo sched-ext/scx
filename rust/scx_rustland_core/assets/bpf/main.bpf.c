@@ -382,13 +382,8 @@ static u64 cpu_to_dsq(s32 cpu)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	const struct cpumask *idle_smtmask;
-	struct bpf_cpumask *l2_domain, *l3_domain;
-	struct bpf_cpumask *l2_mask, *l3_mask;
-	struct task_ctx *tctx;
-	struct cpu_ctx *cctx;
 	s32 cpu;
 
 	/*
@@ -402,148 +397,27 @@ static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu)
 		return -EBUSY;
 	}
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return -ENOENT;
-
-	cctx = try_lookup_cpu_ctx(prev_cpu);
-	if (!cctx)
-		return -ENOENT;
-
 	/*
-	 * Acquire the CPU masks to determine the idle CPUs in the system.
+	 * Fallback to the old API if the kernel doesn't support
+	 * scx_bpf_select_cpu_and().
+	 *
+	 * This is required to support kernels <= 6.16.
 	 */
-	idle_smtmask = scx_bpf_get_idle_smtmask();
+	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+		bool is_idle = false;
 
-	/*
-	 * Scheduling domains of the previously used CPU.
-	 */
-	l2_domain = cctx->l2_cpumask;
-	if (!l2_domain)
-		l2_domain = (struct bpf_cpumask *)p->cpus_ptr;
+		if (!wake_flags)
+			return -EBUSY;
 
-	l3_domain = cctx->l3_cpumask;
-	if (!l3_domain)
-		l3_domain = (struct bpf_cpumask *)p->cpus_ptr;
+		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
-	if (p->nr_cpus_allowed == nr_cpu_ids) {
-		l2_mask = l2_domain;
-		l3_mask = l3_domain;
-	} else {
-		/*
-		 * Determine the cache domain as the intersection of the
-		 * task's primary cpumask and the cache domain mask of the
-		 * previously used CPU (ignore if the cache cpumask
-		 * completely overlaps with the task's cpumask).
-		 */
-		l2_mask = tctx->l2_cpumask;
-		if (!l2_mask) {
-			scx_bpf_error("L2 cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-		if (!bpf_cpumask_and(l2_mask, p->cpus_ptr, cast_mask(l2_domain)))
-			l2_mask = NULL;
-
-		l3_mask = tctx->l3_cpumask;
-		if (!l3_mask) {
-			scx_bpf_error("L3 cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-		if (!bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain)))
-			l3_mask = NULL;
+		return is_idle ? cpu : -EBUSY;
 	}
 
 	/*
-	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
+	 * Pick any idle CPU usable by the task.
 	 */
-	if (smt_enabled) {
-		/*
-		 * If the task can still run on the previously used CPU and
-		 * it's a full-idle core, keep using it.
-		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * Search for any full-idle CPU in the task domain that shares
-		 * the same L2 cache.
-		 */
-		if (l2_mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(l2_mask), SCX_PICK_IDLE_CORE);
-			if (cpu >= 0)
-				goto out_put_cpumask;
-		}
-
-		/*
-		 * Search for any full-idle CPU in the task domain that shares
-		 * the same L3 cache.
-		 */
-		if (l3_mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(l3_mask), SCX_PICK_IDLE_CORE);
-			if (cpu >= 0)
-				goto out_put_cpumask;
-		}
-
-		/*
-		 * Otherwise, search for another usable full-idle core.
-		 */
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0)
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * If a full-idle core can't be found (or if this is not an SMT system)
-	 * try to re-use the same CPU, even if it's not in a full-idle core.
-	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
-		goto out_put_cpumask;
-	}
-
-	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L2 cache.
-	 */
-	if (l2_mask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(l2_mask), 0);
-		if (cpu >= 0)
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L3 cache.
-	 */
-	if (l3_mask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(l3_mask), 0);
-		if (cpu >= 0)
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * If all the previous attempts have failed, try to use any idle CPU in
-	 * the system.
-	 */
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (cpu >= 0)
-		goto out_put_cpumask;
-
-	/*
-	 * If all the previous attempts have failed, dispatch the task to the
-	 * first CPU that will become available.
-	 */
-	cpu = -EBUSY;
-
-out_put_cpumask:
-	scx_bpf_put_cpumask(idle_smtmask);
-
-	return cpu;
+	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
 }
 
 /*
@@ -657,8 +531,8 @@ static bool is_wake_sync(u64 wake_flags)
  * On success, return the idle CPU where the task has been dispatched, or
  * return a negative value otherwise.
  */
-static s32 try_direct_dispatch(struct task_struct *p,
-			       s32 prev_cpu, u64 enq_flags, bool *dispatched)
+static s32 try_direct_dispatch(struct task_struct *p, s32 prev_cpu,
+			       u64 enq_flags, u64 wake_flags, bool *dispatched)
 {
 	s32 cpu;
 
@@ -675,7 +549,7 @@ static s32 try_direct_dispatch(struct task_struct *p,
 	/*
 	 * Pick the idle CPU closest to prev_cpu usable by the task.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu);
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
 	if (cpu < 0)
 		return cpu;
 
@@ -729,7 +603,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (is_usersched_task(p))
 		return prev_cpu;
 
-	cpu = try_direct_dispatch(p, prev_cpu, 0, &dispatched);
+	cpu = try_direct_dispatch(p, prev_cpu, 0, wake_flags, &dispatched);
 	if (cpu >= 0)
 		return cpu;
 
@@ -756,7 +630,7 @@ int rs_select_cpu(struct task_cpu_arg *input)
 		return -EINVAL;
 
 	bpf_rcu_read_lock();
-	cpu = pick_idle_cpu(p, input->cpu);
+	cpu = pick_idle_cpu(p, input->cpu, 0);
 	bpf_rcu_read_unlock();
 
 	bpf_task_release(p);
@@ -843,7 +717,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
 		bool dispatched = false;
 
-		cpu = try_direct_dispatch(p, scx_bpf_task_cpu(p), enq_flags, &dispatched);
+		cpu = try_direct_dispatch(p, scx_bpf_task_cpu(p), enq_flags, 0, &dispatched);
 		if (dispatched) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
