@@ -3,7 +3,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::io::{self};
 use std::mem::MaybeUninit;
 
 use crate::bpf_intf;
@@ -13,7 +12,6 @@ use crate::bpf_skel::*;
 use std::ffi::c_int;
 use std::ffi::c_ulong;
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -268,10 +266,6 @@ impl<'cb> BpfScheduler<'cb> {
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
 
-        // Initialize cache domains.
-        Self::init_l2_cache_domains(&mut skel, &topo)?;
-        Self::init_l3_cache_domains(&mut skel, &topo)?;
-
         let struct_ops = Some(scx_ops_attach!(skel, rustland)?);
 
         // Build the ring buffer of queued tasks.
@@ -371,93 +365,6 @@ impl<'cb> BpfScheduler<'cb> {
         }
 
         0
-    }
-
-    fn enable_sibling_cpu(
-        skel: &mut BpfSkel<'_>,
-        lvl: usize,
-        cpu: usize,
-        sibling_cpu: usize,
-    ) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_sibling_cpu;
-        let mut args = domain_arg {
-            lvl_id: lvl as c_int,
-            cpu_id: cpu as c_int,
-            sibling_cpu_id: sibling_cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
-    fn init_cache_domains<SiblingCpuFn>(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-        cache_lvl: usize,
-        enable_sibling_cpu_fn: &SiblingCpuFn,
-    ) -> Result<(), std::io::Error>
-    where
-        SiblingCpuFn: Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
-    {
-        // Determine the list of CPU IDs associated to each cache node.
-        let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
-        for core in topo.all_cores.values() {
-            for (cpu_id, cpu) in &core.cpus {
-                let cache_id = match cache_lvl {
-                    2 => cpu.l2_id,
-                    3 => cpu.l3_id,
-                    _ => panic!("invalid cache level {cache_lvl}"),
-                };
-                cache_id_map.entry(cache_id).or_default().push(*cpu_id);
-            }
-        }
-
-        // Update the BPF cpumasks for the cache domains.
-        for (_cache_id, cpus) in cache_id_map {
-            for cpu in &cpus {
-                for sibling_cpu in &cpus {
-                    enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu).map_err(|e| {
-                        io::Error::other(
-                            format!(
-                                "enable_sibling_cpu_fn failed for cpu {cpu} sibling {sibling_cpu}: err {e}"
-                            ),
-                        )
-                    })?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn init_l2_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
-    }
-
-    fn init_l3_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
     }
 
     // Notify the BPF component that the user-space scheduler has completed its scheduling cycle,

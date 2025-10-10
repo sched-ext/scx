@@ -114,24 +114,6 @@ const volatile bool builtin_idle;
 const volatile bool smt_enabled = true;
 
 /*
- * Allocate/re-allocate a new cpumask.
- */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
-
-/*
  * Maximum amount of tasks queued between kernel and user-space at a certain
  * time.
  *
@@ -169,41 +151,11 @@ struct {
 } dispatched SEC(".maps");
 
 /*
- * Per-CPU context.
- */
-struct cpu_ctx {
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
-} cpu_ctx_stor SEC(".maps");
-
-/*
- * Return a CPU context.
- */
-struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
-{
-	const u32 idx = 0;
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
-}
-
-/*
  * Per-task local storage.
  *
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	/*
-	 * Temporary cpumask for calculating scheduling domains.
-	 */
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
-
 	/*
 	 * Timestamp since last time the task ran on a CPU.
 	 */
@@ -954,46 +906,6 @@ void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
 }
 
 /*
- * A new task @p is being created.
- *
- * Allocate and initialize all the internal structures for the task (this
- * function is allowed to block, so it can be used to preallocate memory).
- */
-s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
-{
-	struct task_ctx *tctx;
-	struct bpf_cpumask *cpumask;
-
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!tctx)
-		return -ENOMEM;
-
-	/*
-	 * Create task's L2 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	/*
-	 * Create task's L3 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
-
-/*
  * Heartbeat scheduler timer callback.
  *
  * If the system is completely idle the sched-ext watchdog may incorrectly
@@ -1122,62 +1034,23 @@ static int dsq_init(void)
 	return 0;
 }
 
-static int init_cpumask(struct bpf_cpumask **cpumask)
+/*
+ * A new task @p is being created.
+ *
+ * Allocate and initialize all the internal structures for the task (this
+ * function is allowed to block, so it can be used to preallocate memory).
+ */
+s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
-	struct bpf_cpumask *mask;
-	int err = 0;
+	struct task_ctx *tctx;
 
-	/*
-	 * Do nothing if the mask is already initialized.
-	 */
-	mask = *cpumask;
-	if (mask)
-		return 0;
-	/*
-	 * Create the CPU mask.
-	 */
-	err = calloc_cpumask(cpumask);
-	if (!err)
-		mask = *cpumask;
-	if (!mask)
-		err = -ENOMEM;
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
+		return -ENOMEM;
 
-	return err;
-}
-
-SEC("syscall")
-int enable_sibling_cpu(struct domain_arg *input)
-{
-	struct cpu_ctx *cctx;
-	struct bpf_cpumask *mask, **pmask;
-	int err = 0;
-
-	cctx = try_lookup_cpu_ctx(input->cpu_id);
-	if (!cctx)
-		return -ENOENT;
-
-	/* Make sure the target CPU mask is initialized */
-	switch (input->lvl_id) {
-	case 2:
-		pmask = &cctx->l2_cpumask;
-		break;
-	case 3:
-		pmask = &cctx->l3_cpumask;
-		break;
-	default:
-		return -EINVAL;
-	}
-	err = init_cpumask(pmask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = *pmask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
-	bpf_rcu_read_unlock();
-
-	return err;
+	return 0;
 }
 
 /*
