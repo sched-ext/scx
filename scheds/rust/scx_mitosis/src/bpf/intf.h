@@ -20,9 +20,7 @@ typedef _Bool bool;
 #endif
 
 /* ---- Work stealing config (compile-time) ------------------------------- */
-#ifndef MITOSIS_ENABLE_STEALING
 #define MITOSIS_ENABLE_STEALING 1
-#endif
 /* ----------------------------------------------------------------------- */
 
 enum consts {

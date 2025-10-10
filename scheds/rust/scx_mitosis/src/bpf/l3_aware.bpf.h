@@ -20,9 +20,7 @@ typedef u32 l3_id_t;
 // Configure how aggressively we steal work.
 // When task is detected as a steal candidate, skip it this many times
 // On a web server workload, 100 reduced steal count by ~90%
-#ifdef MITOSIS_ENABLE_STEALING
 #define PREVENT_N_STEALS 0
-#endif
 
 /* Work stealing statistics map - accessible from both BPF and userspace */
 struct steal_stats_map {
@@ -213,7 +211,7 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 	return ret;
 }
 
-#ifdef MITOSIS_ENABLE_STEALING
+#if MITOSIS_ENABLE_STEALING
 
 static inline bool try_stealing_this_task(struct task_ctx *task_ctx,
 					  s32 local_l3, u64 candidate_dsq)
@@ -280,7 +278,7 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 
 		// Optimization: skip if faster than constructing an iterator
 		// Not redundant with later checking if task found (race)
-		if (scx_bpf_dsq_nr_queued(candidate_dsq))
+		if (!scx_bpf_dsq_nr_queued(candidate_dsq))
 			continue;
 
 		// Just a trick for peeking the head element

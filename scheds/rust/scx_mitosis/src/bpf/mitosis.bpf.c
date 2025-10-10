@@ -1625,11 +1625,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 {
-	// int i;
-	// bpf_for(i, 0, MAX_CELLS); {
-	// 	dump_cell_state((u32)i);
-	// }
-
 	UEI_RECORD(uei, ei);
 }
 
