@@ -641,10 +641,25 @@ async def run_veristat():
 async def extract_bpf_objects(scheduler_name: str, output_dir: str) -> List[str]:
     """Extract BPF objects from scheduler binary using existing script."""
 
-    # Find the scheduler binary in target/debug
-    binary_path = f"target/debug/{scheduler_name}"
-    if not os.path.exists(binary_path):
-        raise Exception(f"Warning: Scheduler binary {binary_path} not found")
+    if scheduler_name == "scx_chaos":
+        # Use Nix-built binary for scx_chaos
+        print(f"Building {scheduler_name} with Nix for BPF extraction...", flush=True)
+        stdout = await run_command(
+            [
+                "nix",
+                "build",
+                "--no-link",
+                "--print-out-paths",
+                f"./.nix#{scheduler_name}",
+            ]
+        )
+        nix_store_path = stdout.strip()
+        binary_path = f"{nix_store_path}/bin/{scheduler_name}"
+    else:
+        # Find the scheduler binary in target/debug for other schedulers
+        binary_path = f"target/debug/{scheduler_name}"
+        if not os.path.exists(binary_path):
+            raise Exception(f"Warning: Scheduler binary {binary_path} not found")
 
     result = await run_command(
         ["./scripts/extract_bpf_objects.sh", binary_path, output_dir]
@@ -671,7 +686,11 @@ async def run_veristat_debug(kernel_name: str, scheduler_name: str, symbol_name:
     )
 
     # Build the specific scheduler first
-    await run_command(["cargo", "build", "-p", scheduler_name], no_capture=True)
+    if scheduler_name == "scx_chaos":
+        # For scx_chaos, building is handled in extract_bpf_objects using Nix
+        pass
+    else:
+        await run_command(["cargo", "build", "-p", scheduler_name], no_capture=True)
 
     # Create temporary directory for BPF object extraction
     with tempfile.TemporaryDirectory() as temp_dir:

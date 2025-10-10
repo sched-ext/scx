@@ -15,6 +15,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    crane = {
+      url = "github:ipetkov/crane";
+    };
+
     nix-develop-gha.url = "github:nicknovitski/nix-develop";
     nix-develop-gha.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -29,7 +33,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, fenix, nix-develop-gha, libbpf-src, veristat-src, ... }:
+  outputs = { self, nixpkgs, flake-utils, fenix, crane, nix-develop-gha, libbpf-src, veristat-src, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" ]
       (system:
         let
@@ -86,6 +90,71 @@
               zlib
             ])}";
           };
+
+          craneLib = crane.mkLib pkgs;
+          craneBuild = craneLib.overrideToolchain rust-toolchain;
+
+          src = lib.cleanSourceWith {
+            src = ../..;
+            filter = path: type:
+              (lib.hasSuffix "Cargo.toml" path) ||
+              (lib.hasSuffix "Cargo.lock" path) ||
+              (lib.hasSuffix ".rs" path) ||
+              (lib.hasSuffix ".h" path) ||
+              (lib.hasSuffix ".c" path) ||
+              (lib.hasSuffix ".bpf.c" path) ||
+              (lib.hasInfix "/include/" path) ||
+              (type == "symlink") ||
+              (type == "directory");
+          };
+
+          # Common crane arguments
+          commonArgs = {
+            src = ../.;
+            strictDeps = true;
+
+            nativeBuildInputs = with pkgs; [
+              pkg-config
+              clang
+              llvmPackages.libclang
+            ];
+
+            buildInputs = with pkgs; [
+              elfutils
+              libbpf-git
+              libseccomp
+              protobuf
+              zlib
+              zstd
+            ];
+
+            env = build-env-vars;
+          };
+
+          cargoArtifacts = craneBuild.buildDepsOnly (commonArgs // {
+            pname = "scx-workspace";
+            version = "git";
+          });
+
+          individualCrateArgs = commonArgs // {
+            inherit cargoArtifacts;
+            doCheck = false;
+          };
+
+          makeCargoSchedulerPackage = name:
+            craneBuild.buildPackage (individualCrateArgs // {
+              pname = name;
+              version = "git";
+              cargoExtraArgs = "-p ${name}";
+
+              meta = with lib; {
+                description = "sched_ext scheduler: ${name}";
+                homepage = "https://github.com/sched-ext/scx";
+                license = licenses.gpl2Only;
+                maintainers = [ ];
+                platforms = platforms.linux;
+              };
+            });
 
           gha-common-pkgs = with pkgs; [
             cachix
@@ -243,6 +312,9 @@
 
               installPhase = "install -Dm755 ${../.github/include/ci.py} $out/bin/ci";
             };
+
+            # scx_chaos scheduler built with Nix
+            scx_chaos = makeCargoSchedulerPackage "scx_chaos";
           } // (with lib.attrsets; mapAttrs'
             (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ./pkgs/build-kernel.nix {
               inherit name;
