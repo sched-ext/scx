@@ -18,7 +18,7 @@ $ sudo do-release-upgrade -d
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev
+$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev libbpf-dev
 ```
 
 #### Build the scx schedulers from source
@@ -61,7 +61,6 @@ emerge sys-kernel/scx sys-libs/libseccomp dev-libs/protobuf
 The kernel config used for CI can be used as a reference for required configs.
 See [kernel.config](kernel.config) for reference.
 
-
 ## Fedora
 
 CachyOS provides a [community-maintained copr repository](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos) for
@@ -90,9 +89,11 @@ Alternatively, we also provide a `-git` package that is synced daily to match th
 #### Debugging/Security Note
 
 In past documentation it was reccomended to set the SELinux boolean domain_kernel_load_modules on in order to facilitate loading kernel modules by confined domains (e.g. scx_rusty). However recently, this has proven unnecessary in most cases in which the CachyOS kernel is present on the machine. If you expirience issues running your desired scheduler on a Fedora system, you may try running the following command:
+
 ```sh
 $ sudo setsebool -P domain_kernel_load_modules on
 ```
+
 NOTE: Running the above command inherently decreases the effectiveness of SELinux in containing malware IF it is present on the machine, by way of allowing a confined domain to load kernel modules, which in theory could allow an attacker to insert malicious code into the kernel.
 
 #### Setting up Dev Environment
@@ -126,8 +127,8 @@ The scx package is included in openSUSE Factory and can be installed directly fr
 All schedulers are provided in the scx package
 
 Example:
-```
 
+```sh
 $ sudo zypper install scx
 $ sudo scx_rusty
 ```

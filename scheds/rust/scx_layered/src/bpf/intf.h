@@ -36,6 +36,7 @@ enum consts {
 	/* 64 chars for user-provided name, 64 for possible template suffix. */
 	MAX_LAYER_NAME		= 128,
 	MAX_LAYERS		= 16,
+	MAX_CGROUP_REGEXES	= 16,
 	MAX_LAYER_WEIGHT	= 10000,
 	MIN_LAYER_WEIGHT	= 1,
 	DEFAULT_LAYER_WEIGHT	= 100,
@@ -67,6 +68,13 @@ enum consts {
 	SCXCMD_PREFIX		= 0x5C10,
 	SCXCMD_COMLEN		= 13,
 	MAX_GPU_PIDS 		= 100000,
+
+};
+
+enum layer_membership {
+	MEMBER_NOEXPIRE		= (u64)-1,
+	MEMBER_EXPIRED		= (u64)-2,
+	MEMBER_CANTMATCH	= (u64)-3,
 };
 
 static inline void ___consts_sanity_check___(void) {
@@ -75,6 +83,8 @@ static inline void ___consts_sanity_check___(void) {
 	_Static_assert(MAX_LLCS <= (1 << DSQ_ID_LAYER_SHIFT), "MAX_LLCS too high");
 	_Static_assert(MAX_LAYERS <= (DSQ_ID_LAYER_MASK >> DSQ_ID_LAYER_SHIFT) + 1,
 		       "MAX_LAYERS too high");
+	/* cgroup regex matching uses u64 as match bitmap */
+	_Static_assert(MAX_CGROUP_REGEXES <= 64, "MAX_CGROUP_REGEXES too high for u64 bitmap");
 }
 
 enum layer_kind {
@@ -261,6 +271,7 @@ enum layer_match_kind {
 	MATCH_AVG_RUNTIME,
 	MATCH_CGROUP_SUFFIX,
 	MATCH_CGROUP_CONTAINS,
+	MATCH_CGROUP_REGEX,
 	MATCH_HINT_EQUALS,
 
 	NR_LAYER_MATCH_KINDS,
@@ -271,6 +282,7 @@ struct layer_match {
 	char		cgroup_prefix[MAX_PATH];
 	char		cgroup_suffix[MAX_PATH];
 	char		cgroup_substr[MAX_PATH];
+	u32		cgroup_regex_id;
 	char		comm_prefix[MAX_COMM];
 	char		pcomm_prefix[MAX_COMM];
 	int		nice;
@@ -364,6 +376,7 @@ struct layer {
 	bool			is_protected;
 	bool			periodically_refresh;
 	u8			cpuset[MAX_CPUS_U8];
+	u64			member_expire_ms;
 };
 
 struct scx_cmd {

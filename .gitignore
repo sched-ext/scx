@@ -10,3 +10,4 @@ tags
 *.o
 *.skel.h
 selftest
+CLAUDE.md

@@ -23,10 +23,10 @@ jobs:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Format
-        run: nix run ./.github/include#ci -- format
+        run: nix run ./.nix#ci -- format
 
       - name: Clippy
-        run: nix run ./.github/include#ci -- clippy
+        run: nix run ./.nix#ci -- clippy
 
   build-and-test:
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
@@ -40,13 +40,13 @@ jobs:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Build
-        run: nix run ./.github/include#ci -- build
+        run: nix run ./.nix#ci -- build
 
       - name: Test
-        run: nix run ./.github/include#ci -- test
+        run: nix run ./.nix#ci -- test
 
       - name: Veristat
-        run: nix run ./.github/include#ci -- veristat
+        run: nix run ./.nix#ci -- veristat
 
   integration-test:
     uses: ./.github/workflows/integration-tests.yml
@@ -65,7 +65,7 @@ jobs:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@v4
-      - run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-build-kernels
+      - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
       - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
 
   pages:

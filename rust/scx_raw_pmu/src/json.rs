@@ -1,18 +1,19 @@
 use anyhow::bail;
 use csv::Reader;
 use procfs::CpuInfo;
-use procfs::FromBufRead;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use std::env;
 use std::env::consts::ARCH;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::Path;
 
+use crate::resources::ResourceDir;
 use anyhow::Result;
 
 use std::collections::HashMap;
@@ -128,7 +129,7 @@ pub struct PMUSpec {
 }
 
 pub struct PMUManager {
-    pub dataroot: PathBuf,
+    pub dataroot: OsString,
     pub arch: String,
     pub tuple: String,
     pub codename: String,
@@ -142,7 +143,7 @@ impl PMUManager {
         let file = File::open("/proc/cpuinfo")?;
         let bufreader = BufReader::new(file);
 
-        let cpuinfo = CpuInfo::from_buf_read(bufreader)?;
+        let cpuinfo = CpuInfo::from_reader(bufreader)?;
         Ok(format!(
             "{}-{}-{:X}",
             cpuinfo.fields["vendor_id"],
@@ -161,38 +162,14 @@ impl PMUManager {
     }
 
     pub fn list_metadata(&self) -> () {
-        println!("Dataroot {}", self.dataroot.display());
+        println!("Dataroot {}", self.dataroot.to_string_lossy());
         println!("Arch: {}", self.arch);
         println!("Tuple: {}", self.tuple);
         println!("Codename: {}", self.codename);
     }
 
-    fn read_file_counters(jsonfile: PathBuf) -> Result<Vec<PMUSpec>> {
-        let content = fs::read_to_string(jsonfile)?;
-
-        Ok(serde_json::from_str(&content)?)
-    }
-
-    fn read_all_counters(jsondir: PathBuf) -> Result<HashMap<String, PMUSpec>> {
-        let mut pmuspecs = HashMap::new();
-        for entry in fs::read_dir(jsondir)? {
-            let filename = entry?.path().as_path().canonicalize()?;
-            // metricgroups.json isn't actually PMU definitions.
-            if filename
-                .to_str()
-                .expect("no filename")
-                .ends_with("metricgroups.json")
-            {
-                continue;
-            }
-
-            let counters = Self::read_file_counters(filename)?;
-
-            for counter in counters.iter() {
-                pmuspecs.insert(String::from(&counter.name), counter.clone());
-            }
-        }
-        Ok(pmuspecs)
+    fn read_file_counters(json_bytes: &[u8]) -> Result<Vec<PMUSpec>> {
+        Ok(serde_json::from_slice(json_bytes)?)
     }
 
     fn arch_code() -> String {
@@ -211,48 +188,76 @@ impl PMUManager {
         })
     }
 
-    fn spec_dir(basedir: PathBuf, arch: &str, tuple: &str) -> Result<(String, String)> {
-        let path = basedir.clone().join("arch").join(arch).join("mapfile.csv");
+    fn spec_dir(resource_dir: &ResourceDir, arch: &str, tuple: &str) -> Result<String> {
+        let arch_dir = resource_dir.get_dir(arch)?;
+        let mapfile = arch_dir.get_file("mapfile.csv")?;
+        let mapfile_contents = mapfile.read()?;
 
-        let csv = File::open(path)?;
-        for record in Reader::from_reader(csv).records() {
+        for record in Reader::from_reader(mapfile_contents.as_ref()).records() {
             let record = record?;
-
             let regex = record.get(0).expect("no regex found in csv");
             let codename = record.get(2).expect("no codename found in csv");
             let re = Regex::new(regex)?;
 
             if re.is_match(tuple) {
-                let path = basedir.clone().join("arch").join(arch).join(&codename);
-                return Ok((path.to_string_lossy().into_owned(), String::from(codename)));
+                return Ok(codename.to_string());
             }
         }
 
-        println!("{}", line!());
         bail!("No matching config for tuple")
     }
 
-    pub fn new(dataroot: Option<&str>) -> Result<Self> {
-        let dataroot = match dataroot {
-            Some(path) => fs::canonicalize(path)?,
-            None => env::current_dir()?.to_path_buf(),
-        };
-
+    fn new_with_resource_dir(
+        resource_dir: ResourceDir,
+        dataroot_display: OsString,
+    ) -> Result<Self> {
         let tuple = Self::identify_architecture()?;
         let arch = Self::arch_code();
-        let (path, codename) = Self::spec_dir(dataroot.clone(), &arch, tuple.as_str())?;
+        let codename = Self::spec_dir(&resource_dir, &arch, &tuple)?;
 
-        let jsondir = dataroot.join(&tuple).join(&arch).join(&path);
+        let arch_dir = resource_dir.get_dir(&arch)?;
+        let spec_dir = arch_dir.get_dir(&codename)?;
 
-        let pmus = Self::read_all_counters(jsondir)?;
+        let mut pmus = HashMap::new();
+        for file in spec_dir.files()? {
+            // metricgroups.json isn't actually PMU definitions.
+            if file.path().ends_with("metricgroups.json") {
+                continue;
+            }
+
+            let file_contents = file.read()?;
+            let counters = Self::read_file_counters(file_contents.as_ref())?;
+
+            for counter in counters.iter() {
+                pmus.insert(String::from(&counter.name), counter.clone());
+            }
+        }
 
         Ok(Self {
-            dataroot,
+            dataroot: dataroot_display,
             arch,
             tuple,
             codename,
             pmus,
         })
+    }
+
+    pub fn new() -> Result<Self> {
+        let mut dataroot: OsString = env::current_exe()?.into();
+        dataroot.push(":embedded");
+
+        let resource_dir = ResourceDir::default();
+        Self::new_with_resource_dir(resource_dir, dataroot)
+    }
+
+    pub fn new_with_dataroot(dataroot: Option<&Path>) -> Result<Self> {
+        let dataroot = match dataroot {
+            Some(path) => fs::canonicalize(path)?,
+            None => env::current_dir()?.to_path_buf(),
+        };
+
+        let resource_dir = ResourceDir::new_filesystem(dataroot.clone());
+        Self::new_with_resource_dir(resource_dir, dataroot.into())
     }
 }
 
@@ -261,10 +266,20 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
-    fn test() {
-        let dataroot = env!("CARGO_MANIFEST_DIR");
-        let manager = PMUManager::new(Some(dataroot)).expect("could not create PMU manager");
+    fn test_with_resources() {
+        let manager = PMUManager::new().expect("could not create PMU manager");
+
+        manager.list_metadata();
+        manager.list_counters().expect("could not list counters");
+    }
+
+    #[test]
+    fn test_with_dir() {
+        let td = tempfile::tempdir().unwrap();
+        crate::resources::extract_arch_resources(td.path()).expect("could not extract resources");
+
+        let manager =
+            PMUManager::new_with_dataroot(Some(td.path())).expect("could not create PMU manager");
 
         manager.list_metadata();
         manager.list_counters().expect("could not list counters");

@@ -30,7 +30,7 @@ use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
 ///
 /// All sched_ext BPF implementations require `vmlinux.h` and many make use
 /// of common constructs such as
-/// [`user_exit_info`](https://github.com/sched-ext/scx/blob/main/scheds/include/common/user_exit_info.h).
+/// [`user_exit_info`](https://github.com/sched-ext/scx/blob/main/scheds/include/scx/user_exit_info.h).
 /// `BpfBuilder` makes these headers available when compiling BPF source
 /// code and generating bindings for it. The included headers can be browsed
 /// at <https://github.com/sched-ext/scx/tree/main/scheds/include>.

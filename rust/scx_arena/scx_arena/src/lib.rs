@@ -3,9 +3,9 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-//! # Arena library setup utilities
+//! # SCX Arena library setup utilities
 //!
-//! Crate for setting up the arena library for a scheduler.
+//! Crate for setting up the BPF arena library for sched-ext schedulers.
 
 mod bpf_skel;
 

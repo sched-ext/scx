@@ -853,10 +853,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn balance_between_nodes(&mut self) -> Result<()> {
-        if self.nodes.len() < 2 {
-            return Ok(());
-        }
-
         debug!("Node <-> Node LB started");
 
         // Keep track of the nodes we're pushing load from, and pulling load to,
@@ -873,7 +869,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         //              with a positive load imbalance):
         //                      For each "pull domain" (i.e. each domain in
         //                      "pull node" with a negative load imbalance):
-        //                              load = try_move_load(push_dom -> pull-dom)
+        //                              load = try_move_load(push_dom -> pull_dom)
         //                              if load > 0
         //                                      goto restart_pushext_pull
         //

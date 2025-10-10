@@ -16,7 +16,7 @@ runs:
     - name: Load dependencies
       if: ${{ runner.environment == 'self-hosted' }}
       run: |
-        nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-common
+        nix run ./.nix#nix-develop-gha -- ./.nix#gha-common
       shell: bash
 
     - uses: cachix/cachix-action@v14

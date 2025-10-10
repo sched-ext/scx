@@ -24,8 +24,8 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
 
-use arenalib::ArenaLib;
 use libbpf_rs::skel::Skel;
+use scx_arena::ArenaLib;
 use scx_p2dq::types;
 use scx_utils::NR_CPU_IDS;
 

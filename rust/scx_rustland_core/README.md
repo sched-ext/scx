@@ -42,15 +42,15 @@ component.
 
 ## Getting Started
 
- - **Installation**:
-   - Add `scx_rustland_core` to your `Cargo.toml` dependencies.
+- **Installation**:
+  - Add `scx_rustland_core` to your `Cargo.toml` dependencies.
 
- - **Implementation**:
-   - Create your scheduler by implementing the provided API.
+- **Implementation**:
+  - Create your scheduler by implementing the provided API.
 
- - **Execution**:
-   - Compile and run your scheduler. Ensure that your kernel supports
-     `sched_ext` and is configured to load your BPF programs.
+- **Execution**:
+  - Compile and run your scheduler. Ensure that your kernel supports
+    `sched_ext` and is configured to load your BPF programs.
 
 ### struct `BpfScheduler`
 
@@ -74,7 +74,8 @@ The `BpfScheduler` struct is the core interface for interacting with
     can sleep)
 
 Each task received from `.dequeue_task()` contains the following:
-```
+
+```rust
 struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU previously used by the task
@@ -85,11 +86,13 @@ struct QueuedTask {
     pub exec_runtime: u64,     // Total cpu time since last sleep (in ns)
     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
     pub vtime: u64,            // Current task vruntime / deadline (set by the scheduler)
+    pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
 }
 ```
 
 Each task dispatched using `.dispatch_task()` contains the following:
-```
+
+```rust
 struct DispatchedTask {
     pub pid: i32,      // pid that uniquely identifies a task
     pub cpu: i32,      // target CPU selected by the scheduler
@@ -103,7 +106,8 @@ struct DispatchedTask {
 ```
 
 Other internal statistics that can be used to implement better scheduling policies:
-```
+
+```rust
 let n: u64 = *self.bpf.nr_online_cpus_mut();       // amount of online CPUs
 let n: u64 = *self.bpf.nr_running_mut();           // amount of currently running tasks
 let n: u64 = *self.bpf.nr_queued_mut();            // amount of tasks queued to be scheduled
@@ -120,7 +124,7 @@ let n: u64 = *self.bpf.nr_sched_congested_mut();   // amount of scheduler conges
 
 Check out
 [scx_rlfifo](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rlfifo)
-for a basic implementation of a working round-robin scheduler.
+for a basic implementation of a working Round-Robin scheduler.
 
 ## License
 

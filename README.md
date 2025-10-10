@@ -116,13 +116,13 @@ This repository provides two build systems:
 - **Rust schedulers**: Use `cargo`
 
 **Dependencies:**
+
 - `clang`: >=16 required, >=17 recommended
 - `libbpf`: >=1.2.2 required, >=1.3 recommended
 - `bpftool`: Usually available in `linux-tools-common` or similar packages
 - `libelf`, `libz`, `libzstd`: For linking against libbpf
 - `pkg-config`: For finding system libraries
 - `Rust` toolchain: >=1.82
-
 
 The kernel has to be built with the following configuration:
 
@@ -179,10 +179,12 @@ Both `make` and `cargo` support these environment variables for BPF compilation:
 - `BPF_EXTRA_CFLAGS_POST_INCL`: Extra flags after include paths
 
 C schedulers only:
+
 - `BPFTOOL`: The bpftool command to use. (Default: `bpftool`)
 - `CC`: The C compiler to use. (Default: `cc`)
 
 **Examples:**
+
 ```shell
 # Use specific clang version for C schedulers
 $ BPF_CLANG=clang-17 make all
@@ -193,7 +195,6 @@ $ BPF_CLANG=clang-17 cargo build --release
 # Use clang for C compilation and system bpftool
 $ CC=clang BPFTOOL=/usr/bin/bpftool make all
 ```
-
 
 ## Checking scx_stats
 
@@ -271,6 +272,8 @@ $ scx_rustland --monitor 5
 
 See: [scx_loader](tools/scx_loader/README.md) and [scxctl](tools/scxctl/README.md)
 
+See also migration guide from `scx.service` to `scx_loader.service`: [GUIDE](services/systemd/README.md)
+
 ## Kernel Feature Status
 
 The kernel feature is not yet upstream and can be found in the
@@ -321,12 +324,16 @@ channel on `Discord` for details.
 
 ## Additional Resources
 
-There are blog posts and articles about `sched_ext`, which helps you to explore
+There are articles and videos about `sched_ext`, which helps you to explore
 `sched_ext` in various ways. Followings are some examples:
 
+- [`Sched_ext` YT playlist](https://youtube.com/playlist?list=PLLLT4NxU7U1TnhgFH6k57iKjRu6CXJ3yB&si=DETiqpfwMoj8Anvl)
 - [LWN: The extensible scheduler class (February, 2023)](https://lwn.net/Articles/922405/)
 - [arighi's blog: Implement your own kernel CPU scheduler in Ubuntu with `sched_ext` (July, 2023)](https://arighi.blogspot.com/2023/07/implement-your-own-cpu-scheduler-in.html)
+- [David Vernet's talk : Kernel Recipes 2023 - `sched_ext`: pluggable scheduling in the Linux kernel (September, 2023)](https://youtu.be/8kAcnNVSAdI)
 - [Changwoo's blog: `sched_ext`: a BPF-extensible scheduler class (Part 1) (December, 2023)](https://blogs.igalia.com/changwoo/sched-ext-a-bpf-extensible-scheduler-class-part-1/)
 - [arighi's blog: Getting started with `sched_ext` development (April, 2024)](https://arighi.blogspot.com/2024/04/getting-started-with-sched-ext.html)
 - [Changwoo's blog: `sched_ext`: scheduler architecture and interfaces (Part 2) (June, 2024)](https://blogs.igalia.com/changwoo/sched-ext-scheduler-architecture-and-interfaces-part-2/)
 - [arighi's YT channel: `scx_bpfland` Linux scheduler demo: topology awareness (August, 2024)](https://youtu.be/R-FEZOveG-I)
+- [David Vernet's talk: Kernel Recipes 2024 - Scheduling with superpowers: Using `sched_ext` to get big perf gains (September, 2024)](https://youtu.be/Cy7-oqdcUCs)
+- [arighi's talk: Kernel Recipes 2025 - Schedule Recipes (September, 2025)](https://youtu.be/NEwCs7EqAbU)

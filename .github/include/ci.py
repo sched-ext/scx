@@ -54,7 +54,7 @@ async def get_kernel_path(kernel_name: str) -> str:
             "build",
             "--no-link",
             "--print-out-paths",
-            f"./.github/include#kernel_{kernel_name}",
+            f"./.nix#kernel_{kernel_name}",
         ]
     )
     return stdout.strip() + "/bzImage"
@@ -211,16 +211,20 @@ async def run_format():
 
     await run_command(["cargo", "fmt"], no_capture=True)
 
-    nix_files = glob.glob("**/*.nix", root_dir=".github/include/", recursive=True)
+    nix_files = list(
+        itertools.chain.from_iterable(
+            glob.glob(p + "**/*.nix", recursive=True) for p in ["", ".*/"]
+        )
+    )
     if nix_files:
         await run_command(
             ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
-            + nix_files,
-            cwd=".github/include",
+            + [os.path.join("../", x) for x in nix_files],
+            cwd=".nix",
             no_capture=True,
         )
 
-    c_files = files = list(
+    c_files = list(
         itertools.chain.from_iterable(
             glob.glob(p, recursive=True)
             for p in ["tools/scxtop/**/*.h", "tools/scxtop/**/*.c"]
@@ -282,7 +286,7 @@ async def run_tests():
     print("Running tests...", flush=True)
 
     # Make sure the selftest is built in case the build was not already run.
-    await run_command(["cargo", "build", "-p", "arenalib_selftests"], no_capture=True)
+    await run_command(["cargo", "build", "-p", "scx_arena_selftests"], no_capture=True)
 
     await run_command(
         [
@@ -596,7 +600,7 @@ async def run_veristat():
                     if verdict != "success":
                         prog_name = cleaned_row.get("prog_name", "")
                         if prog_name:
-                            reproduction_cmd = f"nix run \".github/include#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
+                            reproduction_cmd = f"nix run \".nix#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
                             reproduction_cmds.add(reproduction_cmd)
 
             for cmd in sorted(reproduction_cmds):
@@ -702,7 +706,7 @@ async def run_tests_in_vm():
         check=True,
     )
 
-    subprocess.run(["target/debug/arenalib_selftests"], check=True)
+    subprocess.run(["target/debug/scx_arena_selftests"], check=True)
 
 
 async def run_all():

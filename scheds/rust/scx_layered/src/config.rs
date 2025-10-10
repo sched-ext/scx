@@ -144,6 +144,8 @@ pub struct LayerCommon {
     pub llcs: Vec<usize>,
     #[serde(default)]
     pub placement: LayerPlacement,
+    #[serde(default)]
+    pub member_expire_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

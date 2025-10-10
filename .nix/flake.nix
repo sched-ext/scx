@@ -7,7 +7,7 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:JakeHillion/nixpkgs/virtme-ng";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
 
     fenix = {
@@ -40,7 +40,9 @@
                 libbpf-git = prev.libbpf.overrideAttrs (oldAttrs: {
                   src = libbpf-src;
                   version = "git";
+                  patches = [ ];
                 });
+                virtme-ng = prev.callPackage ./pkgs/virtme-ng.nix { };
               })
             ];
           };
@@ -79,6 +81,10 @@
           build-env-vars = {
             BPF_CLANG = lib.getExe self.packages.${system}.bpf-clang;
             LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
+            RUSTFLAGS = "-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -C link-args=-Wl,-rpath,${lib.makeLibraryPath (with pkgs; [
+              elfutils
+              zlib
+            ])}";
           };
 
           gha-common-pkgs = with pkgs; [
@@ -141,11 +147,13 @@
             nix-develop-gha = nix-develop-gha.packages.${system}.default;
             bpf-clang = makeBpfClang pkgs.llvmPackages self.packages.${system}."kernel_sched_ext/for-next";
 
-            veristat = pkgs.callPackage ./veristat.nix {
+            veristat = pkgs.callPackage ./pkgs/veristat.nix {
               version = "git";
               src = veristat-src;
               libbpf = pkgs.libbpf-git;
             };
+
+            virtme-ng = pkgs.virtme-ng;
 
             list-integration-tests = pkgs.python3Packages.buildPythonApplication rec {
               pname = "list-integration-tests";
@@ -158,7 +166,7 @@
                 rust-toolchain # requires cargo, use the toolchain to match version exactly
               ];
 
-              installPhase = "install -Dm755 ${./list-integration-tests.py} $out/bin/list-integration-tests";
+              installPhase = "install -Dm755 ${../.github/include/list-integration-tests.py} $out/bin/list-integration-tests";
             };
 
             ci = pkgs.python3Packages.buildPythonApplication rec {
@@ -209,7 +217,6 @@
 
                 [ "--set" "PKG_CONFIG_PATH" "${lib.makeSearchPath "lib/pkgconfig" propagatedBuildInputs}" ]
 
-                [ "--set" "RUSTFLAGS" "\"-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd\"" ]
 
                 [ "--set" "NIX_BINTOOLS" pkgs.binutils ]
                 [ "--set" "NIX_CC" pkgs.gcc ]
@@ -234,16 +241,16 @@
                 ]
               ] ++ (lib.mapAttrsToList (key: val: "--set ${key} \"${val}\"") build-env-vars));
 
-              installPhase = "install -Dm755 ${../include/ci.py} $out/bin/ci";
+              installPhase = "install -Dm755 ${../.github/include/ci.py} $out/bin/ci";
             };
           } // (with lib.attrsets; mapAttrs'
-            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ./build-kernel.nix {
+            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ./pkgs/build-kernel.nix {
               inherit name;
               inherit (details) repo branch commitHash narHash;
               version = details.kernelVersion;
               patches = map (patchName: ./kernel-patches + ("/" + patchName)) (details.patches or [ ]);
             }))
-            (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json)));
+            (builtins.fromJSON (builtins.readFile ./../kernel-versions.json)));
         }) // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -270,7 +277,7 @@
                   nix
                 ];
 
-                installPhase = "install -Dm755 ${../include/update-kernels.py} $out/bin/update-kernels";
+                installPhase = "install -Dm755 ${../.github/include/update-kernels.py} $out/bin/update-kernels";
               };
             in
             {

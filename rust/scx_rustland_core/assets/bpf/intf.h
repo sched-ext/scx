@@ -45,6 +45,10 @@ typedef int pid_t;
  */
 #define MAX_CPUS 1024
 
+#ifndef TASK_COMM_LEN
+#define TASK_COMM_LEN	16
+#endif
+
 /* Special dispatch flags */
 enum {
 	/*
@@ -89,6 +93,7 @@ struct queued_task_ctx {
 	u64 exec_runtime; /* Total cpu time since last sleep */
 	u64 weight; /* Task static priority */
 	u64 vtime; /* Current task's vruntime */
+	char comm[TASK_COMM_LEN]; /* Task's executable name */
 };
 
 /*

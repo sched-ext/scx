@@ -1,6 +1,6 @@
 [package]
 name = "scx_rlfifo"
-version = "1.0.16"
+version = "1.0.17"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 edition = "2021"
 description = "A simple FIFO scheduler in Rust that runs in user-space"
@@ -9,16 +9,16 @@ license = "GPL-2.0-only"
 [dependencies]
 anyhow = "1.0.65"
 plain = "0.2.3"
-procfs = "0.17"
+procfs = "0.18"
 ctrlc = { version = "3.1", features = ["termination"] }
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.21" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.3.6" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.22" }
+scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.3.7" }
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.21" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.3.6" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.22" }
+scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.3.7" }
 
 [features]
 enable_backtrace = []
