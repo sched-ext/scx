@@ -34,6 +34,7 @@
 #include <scx/common.bpf.h>
 #endif
 
+#include <scx/percpu.bpf.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -326,6 +327,55 @@ static u64 cpu_to_dsq(s32 cpu)
 }
 
 /*
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false
+ * otherwise.
+ */
+static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return true;
+
+	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+}
+
+/*
+ * Return true if @this_cpu is faster than @that_cpu, false otherwise.
+ */
+static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return false;
+
+	return cpu_priority(this_cpu) > cpu_priority(that_cpu);
+}
+
+/*
+ * Return true if @cpu is a fully-idle SMT core, false otherwise.
+ */
+static inline bool is_smt_idle(s32 cpu)
+{
+	const struct cpumask *idle_smtmask;
+        bool is_idle;
+
+	if (!smt_enabled)
+		return true;
+
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+        is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
+        scx_bpf_put_cpumask(idle_smtmask);
+
+	return is_idle;
+}
+
+/*
+ * Return true on a wake-up event, false otherwise.
+ */
+static inline bool is_wakeup(u64 wake_flags)
+{
+	return wake_flags & SCX_WAKE_TTWU;
+}
+
+/*
  * Find an idle CPU in the system for the task.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -336,7 +386,7 @@ static u64 cpu_to_dsq(s32 cpu)
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	s32 cpu;
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
@@ -347,6 +397,28 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 			return prev_cpu;
 
 		return -EBUSY;
+	}
+
+	/*
+	 * On wakeup if the waker's CPU is faster than the wakee's CPU, try
+	 * to move the wakee closer to the waker.
+	 *
+	 * In presence of hybrid cores this helps to naturally migrate
+	 * tasks over to the faster cores.
+	 */
+	if (is_wakeup(wake_flags) && this_cpu >= 0 &&
+	    is_cpu_faster(this_cpu, prev_cpu)) {
+		/*
+		 * If both the waker's CPU and the wakee's CPU are in the
+		 * same LLC and the wakee's CPU is a fully idle SMT core,
+		 * don't migrate.
+		 */
+		if (cpus_share_cache(this_cpu, prev_cpu) &&
+		    is_smt_idle(prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		prev_cpu = this_cpu;
 	}
 
 	/*
