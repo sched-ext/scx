@@ -255,7 +255,6 @@ impl<'cb> BpfScheduler<'cb> {
 
         // Enable scheduler flags.
         skel.struct_ops.rustland_mut().flags = *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
