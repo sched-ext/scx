@@ -85,6 +85,7 @@ pub struct QueuedTask {
     pub exec_runtime: u64,             // Total cpu time since last sleep (in ns)
     pub weight: u64,                   // Task priority in the range [1..10000] (default is 100)
     pub vtime: u64,                    // Current task vruntime / deadline (set by the scheduler)
+    pub enq_cnt: u64,
     pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
 }
 
@@ -111,6 +112,7 @@ pub struct DispatchedTask {
     pub flags: u64, // task's enqueue flags
     pub slice_ns: u64, // time slice in nanoseconds assigned to the task (0 = use default time slice)
     pub vtime: u64, // this value can be used to send the task's vruntime or deadline directly to the underlying BPF dispatcher
+    pub enq_cnt: u64,
 }
 
 impl DispatchedTask {
@@ -125,6 +127,7 @@ impl DispatchedTask {
             flags: task.flags,
             slice_ns: 0, // use default time slice
             vtime: 0,
+            enq_cnt: task.enq_cnt,
         }
     }
 }
@@ -164,6 +167,7 @@ impl EnqueuedMessage {
             exec_runtime: self.inner.exec_runtime,
             weight: self.inner.weight,
             vtime: self.inner.vtime,
+            enq_cnt: self.inner.enq_cnt,
             comm: self.inner.comm,
         }
     }
@@ -553,6 +557,7 @@ impl<'cb> BpfScheduler<'cb> {
             flags,
             slice_ns,
             vtime,
+            enq_cnt,
             ..
         } = &mut dispatched_task.as_mut();
 
@@ -561,6 +566,7 @@ impl<'cb> BpfScheduler<'cb> {
         *flags = task.flags;
         *slice_ns = task.slice_ns;
         *vtime = task.vtime;
+        *enq_cnt = task.enq_cnt;
 
         // Store the task in the user ring buffer.
         //
