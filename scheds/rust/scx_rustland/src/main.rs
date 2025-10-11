@@ -344,9 +344,20 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
+    }
 
-        // Dispatch the first task from the task pool only if there are tasks available.
-        if !self.tasks.is_empty() {
+    // Dispatch tasks to the target CPUs in the order determined by the scheduler.
+    fn dispatch_queued_tasks(&mut self) {
+        let nr_tasks = self.tasks.len();
+
+        let nr_to_dispatch = match nr_tasks {
+            0 => 0,
+            1..=128 => 1,              // drain 1 task
+            129..=512 => nr_tasks / 8, // drain nr_tasks/8 tasks
+            _ => nr_tasks,             // drain all tasks
+        };
+
+        for _ in 0..nr_to_dispatch {
             self.dispatch_task();
         }
     }
@@ -355,6 +366,7 @@ impl<'a> Scheduler<'a> {
     // and dispatch them to the BPF part via the dispatched list).
     fn schedule(&mut self) {
         self.drain_queued_tasks();
+        self.dispatch_queued_tasks();
 
         // Notify the dispatcher if there are still pending tasks to be processed,
         self.bpf.notify_complete(self.tasks.len() as u64);
