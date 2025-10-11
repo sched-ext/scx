@@ -34,6 +34,7 @@
 #include <scx/common.bpf.h>
 #endif
 
+#include <scx/percpu.bpf.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -114,24 +115,6 @@ const volatile bool builtin_idle;
 const volatile bool smt_enabled = true;
 
 /*
- * Allocate/re-allocate a new cpumask.
- */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
-
-/*
  * Maximum amount of tasks queued between kernel and user-space at a certain
  * time.
  *
@@ -169,41 +152,11 @@ struct {
 } dispatched SEC(".maps");
 
 /*
- * Per-CPU context.
- */
-struct cpu_ctx {
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
-} cpu_ctx_stor SEC(".maps");
-
-/*
- * Return a CPU context.
- */
-struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
-{
-	const u32 idx = 0;
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
-}
-
-/*
  * Per-task local storage.
  *
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	/*
-	 * Temporary cpumask for calculating scheduling domains.
-	 */
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
-
 	/*
 	 * Timestamp since last time the task ran on a CPU.
 	 */
@@ -374,6 +327,55 @@ static u64 cpu_to_dsq(s32 cpu)
 }
 
 /*
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false
+ * otherwise.
+ */
+static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return true;
+
+	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+}
+
+/*
+ * Return true if @this_cpu is faster than @that_cpu, false otherwise.
+ */
+static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return false;
+
+	return cpu_priority(this_cpu) > cpu_priority(that_cpu);
+}
+
+/*
+ * Return true if @cpu is a fully-idle SMT core, false otherwise.
+ */
+static inline bool is_smt_idle(s32 cpu)
+{
+	const struct cpumask *idle_smtmask;
+        bool is_idle;
+
+	if (!smt_enabled)
+		return true;
+
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+        is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
+        scx_bpf_put_cpumask(idle_smtmask);
+
+	return is_idle;
+}
+
+/*
+ * Return true on a wake-up event, false otherwise.
+ */
+static inline bool is_wakeup(u64 wake_flags)
+{
+	return wake_flags & SCX_WAKE_TTWU;
+}
+
+/*
  * Find an idle CPU in the system for the task.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -382,14 +384,9 @@ static u64 cpu_to_dsq(s32 cpu)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	const struct cpumask *idle_smtmask;
-	struct bpf_cpumask *l2_domain, *l3_domain;
-	struct bpf_cpumask *l2_mask, *l3_mask;
-	struct task_ctx *tctx;
-	struct cpu_ctx *cctx;
-	s32 cpu;
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
@@ -402,148 +399,49 @@ static s32 pick_idle_cpu(const struct task_struct *p, s32 prev_cpu)
 		return -EBUSY;
 	}
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return -ENOENT;
-
-	cctx = try_lookup_cpu_ctx(prev_cpu);
-	if (!cctx)
-		return -ENOENT;
-
 	/*
-	 * Acquire the CPU masks to determine the idle CPUs in the system.
+	 * On wakeup if the waker's CPU is faster than the wakee's CPU, try
+	 * to move the wakee closer to the waker.
+	 *
+	 * In presence of hybrid cores this helps to naturally migrate
+	 * tasks over to the faster cores.
 	 */
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-
-	/*
-	 * Scheduling domains of the previously used CPU.
-	 */
-	l2_domain = cctx->l2_cpumask;
-	if (!l2_domain)
-		l2_domain = (struct bpf_cpumask *)p->cpus_ptr;
-
-	l3_domain = cctx->l3_cpumask;
-	if (!l3_domain)
-		l3_domain = (struct bpf_cpumask *)p->cpus_ptr;
-
-	if (p->nr_cpus_allowed == nr_cpu_ids) {
-		l2_mask = l2_domain;
-		l3_mask = l3_domain;
-	} else {
+	if (is_wakeup(wake_flags) && this_cpu >= 0 &&
+	    is_cpu_faster(this_cpu, prev_cpu)) {
 		/*
-		 * Determine the cache domain as the intersection of the
-		 * task's primary cpumask and the cache domain mask of the
-		 * previously used CPU (ignore if the cache cpumask
-		 * completely overlaps with the task's cpumask).
+		 * If both the waker's CPU and the wakee's CPU are in the
+		 * same LLC and the wakee's CPU is a fully idle SMT core,
+		 * don't migrate.
 		 */
-		l2_mask = tctx->l2_cpumask;
-		if (!l2_mask) {
-			scx_bpf_error("L2 cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-		if (!bpf_cpumask_and(l2_mask, p->cpus_ptr, cast_mask(l2_domain)))
-			l2_mask = NULL;
+		if (cpus_share_cache(this_cpu, prev_cpu) &&
+		    is_smt_idle(prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
 
-		l3_mask = tctx->l3_cpumask;
-		if (!l3_mask) {
-			scx_bpf_error("L3 cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-		if (!bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain)))
-			l3_mask = NULL;
+		prev_cpu = this_cpu;
 	}
 
 	/*
-	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
+	 * Fallback to the old API if the kernel doesn't support
+	 * scx_bpf_select_cpu_and().
+	 *
+	 * This is required to support kernels <= 6.16.
 	 */
-	if (smt_enabled) {
-		/*
-		 * If the task can still run on the previously used CPU and
-		 * it's a full-idle core, keep using it.
-		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto out_put_cpumask;
-		}
+	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+		bool is_idle = false;
 
-		/*
-		 * Search for any full-idle CPU in the task domain that shares
-		 * the same L2 cache.
-		 */
-		if (l2_mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(l2_mask), SCX_PICK_IDLE_CORE);
-			if (cpu >= 0)
-				goto out_put_cpumask;
-		}
+		if (!wake_flags)
+			return -EBUSY;
 
-		/*
-		 * Search for any full-idle CPU in the task domain that shares
-		 * the same L3 cache.
-		 */
-		if (l3_mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(l3_mask), SCX_PICK_IDLE_CORE);
-			if (cpu >= 0)
-				goto out_put_cpumask;
-		}
+		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
-		/*
-		 * Otherwise, search for another usable full-idle core.
-		 */
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0)
-			goto out_put_cpumask;
+		return is_idle ? cpu : -EBUSY;
 	}
 
 	/*
-	 * If a full-idle core can't be found (or if this is not an SMT system)
-	 * try to re-use the same CPU, even if it's not in a full-idle core.
+	 * Pick any idle CPU usable by the task.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
-		goto out_put_cpumask;
-	}
-
-	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L2 cache.
-	 */
-	if (l2_mask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(l2_mask), 0);
-		if (cpu >= 0)
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L3 cache.
-	 */
-	if (l3_mask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(l3_mask), 0);
-		if (cpu >= 0)
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * If all the previous attempts have failed, try to use any idle CPU in
-	 * the system.
-	 */
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (cpu >= 0)
-		goto out_put_cpumask;
-
-	/*
-	 * If all the previous attempts have failed, dispatch the task to the
-	 * first CPU that will become available.
-	 */
-	cpu = -EBUSY;
-
-out_put_cpumask:
-	scx_bpf_put_cpumask(idle_smtmask);
-
-	return cpu;
+	return scx_bpf_select_cpu_and(p, prev_cpu, wake_flags, p->cpus_ptr, 0);
 }
 
 /*
@@ -657,8 +555,8 @@ static bool is_wake_sync(u64 wake_flags)
  * On success, return the idle CPU where the task has been dispatched, or
  * return a negative value otherwise.
  */
-static s32 try_direct_dispatch(struct task_struct *p,
-			       s32 prev_cpu, u64 enq_flags, bool *dispatched)
+static s32 try_direct_dispatch(struct task_struct *p, s32 prev_cpu,
+			       u64 enq_flags, u64 wake_flags, bool *dispatched)
 {
 	s32 cpu;
 
@@ -675,7 +573,7 @@ static s32 try_direct_dispatch(struct task_struct *p,
 	/*
 	 * Pick the idle CPU closest to prev_cpu usable by the task.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu);
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
 	if (cpu < 0)
 		return cpu;
 
@@ -729,7 +627,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (is_usersched_task(p))
 		return prev_cpu;
 
-	cpu = try_direct_dispatch(p, prev_cpu, 0, &dispatched);
+	cpu = try_direct_dispatch(p, prev_cpu, 0, wake_flags, &dispatched);
 	if (cpu >= 0)
 		return cpu;
 
@@ -756,7 +654,7 @@ int rs_select_cpu(struct task_cpu_arg *input)
 		return -EINVAL;
 
 	bpf_rcu_read_lock();
-	cpu = pick_idle_cpu(p, input->cpu);
+	cpu = pick_idle_cpu(p, input->cpu, 0);
 	bpf_rcu_read_unlock();
 
 	bpf_task_release(p);
@@ -843,7 +741,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
 		bool dispatched = false;
 
-		cpu = try_direct_dispatch(p, scx_bpf_task_cpu(p), enq_flags, &dispatched);
+		cpu = try_direct_dispatch(p, scx_bpf_task_cpu(p), enq_flags, 0, &dispatched);
 		if (dispatched) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
@@ -1080,46 +978,6 @@ void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
 }
 
 /*
- * A new task @p is being created.
- *
- * Allocate and initialize all the internal structures for the task (this
- * function is allowed to block, so it can be used to preallocate memory).
- */
-s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
-{
-	struct task_ctx *tctx;
-	struct bpf_cpumask *cpumask;
-
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!tctx)
-		return -ENOMEM;
-
-	/*
-	 * Create task's L2 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	/*
-	 * Create task's L3 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	return 0;
-}
-
-/*
  * Heartbeat scheduler timer callback.
  *
  * If the system is completely idle the sched-ext watchdog may incorrectly
@@ -1248,62 +1106,23 @@ static int dsq_init(void)
 	return 0;
 }
 
-static int init_cpumask(struct bpf_cpumask **cpumask)
+/*
+ * A new task @p is being created.
+ *
+ * Allocate and initialize all the internal structures for the task (this
+ * function is allowed to block, so it can be used to preallocate memory).
+ */
+s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
-	struct bpf_cpumask *mask;
-	int err = 0;
+	struct task_ctx *tctx;
 
-	/*
-	 * Do nothing if the mask is already initialized.
-	 */
-	mask = *cpumask;
-	if (mask)
-		return 0;
-	/*
-	 * Create the CPU mask.
-	 */
-	err = calloc_cpumask(cpumask);
-	if (!err)
-		mask = *cpumask;
-	if (!mask)
-		err = -ENOMEM;
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
+		return -ENOMEM;
 
-	return err;
-}
-
-SEC("syscall")
-int enable_sibling_cpu(struct domain_arg *input)
-{
-	struct cpu_ctx *cctx;
-	struct bpf_cpumask *mask, **pmask;
-	int err = 0;
-
-	cctx = try_lookup_cpu_ctx(input->cpu_id);
-	if (!cctx)
-		return -ENOENT;
-
-	/* Make sure the target CPU mask is initialized */
-	switch (input->lvl_id) {
-	case 2:
-		pmask = &cctx->l2_cpumask;
-		break;
-	case 3:
-		pmask = &cctx->l3_cpumask;
-		break;
-	default:
-		return -EINVAL;
-	}
-	err = init_cpumask(pmask);
-	if (err)
-		return err;
-
-	bpf_rcu_read_lock();
-	mask = *pmask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
-	bpf_rcu_read_unlock();
-
-	return err;
+	return 0;
 }
 
 /*
