@@ -496,11 +496,11 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 
 	/*
 	 * If the target CPU selected by the user-space scheduler is not
-	 * valid, dispatch it to the SHARED_DSQ, independently on what the
-	 * user-space scheduler has decided.
+	 * valid, keep the task on the previously used CPU, overriding the
+	 * user-space scheduler decision.
 	 */
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task->slice_ns, task->vtime, task->flags);
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 		kick_task_cpu(p, prev_cpu);
