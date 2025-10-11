@@ -171,6 +171,11 @@ struct task_ctx {
 	 * Execution time (in nanoseconds) since the last sleep event.
 	 */
 	u64 exec_runtime;
+
+	/*
+	 * Task generation counter to detect duplicate enqueues.
+	 */
+	u64 enq_cnt;
 };
 
 /* Map that contains task-local storage. */
@@ -475,6 +480,7 @@ static void kick_task_cpu(const struct task_struct *p, s32 cpu)
  */
 static void dispatch_task(const struct dispatched_task_ctx *task)
 {
+	struct task_ctx *tctx;
 	struct task_struct *p;
 	s32 prev_cpu, cpu = task->cpu;
 
@@ -513,15 +519,13 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 				 task->slice_ns, task->vtime, task->flags);
 
 	/*
-	 * If the cpumask is not valid anymore, ignore the dispatch event.
+	 * If the task was dequeued while still in the user-space
+	 * scheduler, this dispatch can be ignored.
 	 *
-	 * This can happen if the task has changed its affinity and the
-	 * target CPU has become invalid. In this case cancelling the
-	 * dispatch allows to prevent potential stalls in the scheduler,
-	 * since the task will be re-enqueued by the core sched-ext code,
-	 * potentially selecting a different CPU.
+	 * Another enqueue event for the same task will be received later.
 	 */
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx || tctx->enq_cnt > task->enq_cnt) {
 		scx_bpf_dispatch_cancel();
 		__sync_fetch_and_add(&nr_cancel_dispatches, 1);
 		goto out_release;
@@ -679,19 +683,19 @@ int rs_select_cpu(struct task_cpu_arg *input)
  * scheduler.
  */
 static void get_task_info(struct queued_task_ctx *task,
-			  const struct task_struct *p, u64 enq_flags)
+			  const struct task_struct *p,
+			  struct task_ctx *tctx, u64 enq_flags)
 {
-	struct task_ctx *tctx = try_lookup_task_ctx(p);
-
 	task->pid = p->pid;
 	task->cpu = scx_bpf_task_cpu(p);
 	task->nr_cpus_allowed = p->nr_cpus_allowed;
 	task->flags = enq_flags;
-	task->start_ts = tctx ? tctx->start_ts : 0;
-	task->stop_ts = tctx ? tctx->stop_ts : 0;
-	task->exec_runtime = tctx ? tctx->exec_runtime : 0;
+	task->start_ts = tctx->start_ts;
+	task->stop_ts = tctx->stop_ts;
+	task->exec_runtime = tctx->exec_runtime;
 	task->weight = p->scx.weight;
 	task->vtime = p->scx.dsq_vtime;
+	task->enq_cnt = ++tctx->enq_cnt;
 
 	bpf_core_read(&task->comm, sizeof(task->comm), &p->comm);
 }
@@ -723,6 +727,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu = -EBUSY;
 	struct queued_task_ctx *task;
+	struct task_ctx *tctx;
 
 	/*
 	 * Insert the user-space scheduler to its dedicated DSQ, it will be
@@ -785,8 +790,9 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		goto out_kick;
 	}
-	get_task_info(task, p, enq_flags);
+	get_task_info(task, p, tctx, enq_flags);
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
+
 	bpf_ringbuf_submit(task, 0);
 
 	__sync_fetch_and_add(&nr_queued, 1);
