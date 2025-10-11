@@ -652,11 +652,26 @@ int rs_select_cpu(struct task_cpu_arg *input)
 	p = bpf_task_from_pid(input->pid);
 	if (!p)
 		return -EINVAL;
-
 	bpf_rcu_read_lock();
-	cpu = pick_idle_cpu(p, input->cpu, 0);
-	bpf_rcu_read_unlock();
 
+	/*
+	 * Kernels that don't provide scx_bpf_select_cpu_and() only allow
+	 * to use the built-in idle CPU selection policy only from
+	 * ops.select_cpu() and opt.enqueue(), return any idle CPU usable
+	 * by the task in this case.
+	 */
+	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	} else {
+		/*
+		 * Set SCX_WAKE_TTWU, pretending to be a wakeup, to prioritize
+		 * faster CPU selection (we probably want to add an option to allow
+		 * the user-space scheduler to use this logic or not).
+		 */
+		cpu = pick_idle_cpu(p, input->cpu, SCX_WAKE_TTWU);
+	}
+
+	bpf_rcu_read_unlock();
 	bpf_task_release(p);
 
 	return cpu;
