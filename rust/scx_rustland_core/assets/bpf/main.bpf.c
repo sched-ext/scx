@@ -217,7 +217,7 @@ struct {
  * Time period of the scheduler heartbeat, used to periodically kick the
  * user-space scheduler and check if there is any pending activity.
  */
-#define USERSCHED_TIMER_NS (NSEC_PER_SEC / 10)
+#define USERSCHED_TIMER_NS	NSEC_PER_SEC
 
 /*
  * Return true if the target task @p is the user-space scheduler.
@@ -307,6 +307,9 @@ static bool test_and_clear_usersched_needed(void)
  */
 static bool usersched_has_pending_tasks(void)
 {
+	if (test_and_clear_usersched_needed())
+		return true;
+
 	if (nr_scheduled)
 		return true;
 
@@ -406,8 +409,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 * In presence of hybrid cores this helps to naturally migrate
 	 * tasks over to the faster cores.
 	 */
-	if (is_wakeup(wake_flags) && this_cpu >= 0 &&
-	    is_cpu_faster(this_cpu, prev_cpu)) {
+	if (is_wakeup(wake_flags) && is_cpu_faster(this_cpu, prev_cpu)) {
 		/*
 		 * If both the waker's CPU and the wakee's CPU are in the
 		 * same LLC and the wakee's CPU is a fully idle SMT core,
@@ -474,7 +476,7 @@ static void kick_task_cpu(const struct task_struct *p, s32 cpu)
 static void dispatch_task(const struct dispatched_task_ctx *task)
 {
 	struct task_struct *p;
-	s32 prev_cpu;
+	s32 prev_cpu, cpu = task->cpu;
 
 	/* Ignore entry if the task doesn't exist anymore */
 	p = bpf_task_from_pid(task->pid);
@@ -490,31 +492,25 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
 					 task->slice_ns, task->vtime, task->flags);
 		kick_task_cpu(p, prev_cpu);
-
 		goto out_release;
 	}
 
 	/*
-	 * If the target CPU selected by the user-space scheduler is not
-	 * valid, keep the task on the previously used CPU, overriding the
-	 * user-space scheduler decision.
+	 * Dispatch the task to the target CPU selected by the
+	 * user-space scheduler.
+	 *
+	 * However, if the target CPU is not valid (due to affinity
+	 * constraints), keep the task on the previously used CPU,
+	 * overriding the user-space scheduler decision.
 	 */
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 task->slice_ns, task->vtime, task->flags);
+		cpu = prev_cpu;
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-		kick_task_cpu(p, prev_cpu);
-
-		goto out_release;
+	} else {
+		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
-
-	/*
-	 * Dispatch a task to a target CPU selected by the user-space
-	 * scheduler.
-	 */
-	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(task->cpu),
+	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
 				 task->slice_ns, task->vtime, task->flags);
-	__sync_fetch_and_add(&nr_user_dispatches, 1);
 
 	/*
 	 * If the cpumask is not valid anymore, ignore the dispatch event.
@@ -525,14 +521,16 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	 * since the task will be re-enqueued by the core sched-ext code,
 	 * potentially selecting a different CPU.
 	 */
-	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 		scx_bpf_dispatch_cancel();
 		__sync_fetch_and_add(&nr_cancel_dispatches, 1);
-
 		goto out_release;
 	}
 
-	scx_bpf_kick_cpu(task->cpu, SCX_KICK_IDLE);
+	/*
+	 * CPU selected by the user-space scheduler is valid, kick it.
+	 */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 out_release:
 	bpf_task_release(p);
@@ -636,7 +634,6 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * prioritize the waker's CPU.
 	 */
 	return is_wake_sync(wake_flags) ? bpf_get_smp_processor_id() : prev_cpu;
-
 }
 
 /*
@@ -724,15 +721,22 @@ static bool is_queued_wakeup(const struct task_struct *p, u64 enq_flags)
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	s32 prev_cpu = scx_bpf_task_cpu(p), cpu = -EBUSY;
 	struct queued_task_ctx *task;
-	s32 cpu = -EBUSY;
 
 	/*
-	 * Scheduler is dispatched directly in .dispatch() when needed, so
-	 * we can skip it here.
+	 * Insert the user-space scheduler to its dedicated DSQ, it will be
+	 * consumed from ops.dispatch() only when there's any pending
+	 * scheduling action to do.
+	 *
+	 * We also want to assign an infinite time slice to make sure it
+	 * completes all the actions uninterrupted, before giving control
+	 * back to the regular tasks.
 	 */
-	if (is_usersched_task(p))
-		return;
+	if (is_usersched_task(p)) {
+		scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_INF, enq_flags);
+		goto out_kick;
+	}
 
 	/*
 	 * Always dispatch per-CPU kthreads directly on their target CPU.
@@ -742,11 +746,10 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if ((is_kthread(p) && p->nr_cpus_allowed == 1) || is_kswapd(p) || is_khugepaged(p)) {
-		cpu = scx_bpf_task_cpu(p);
-                scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-		return;
+		goto out_kick;
 	}
 
 	/*
@@ -756,12 +759,16 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
 		bool dispatched = false;
 
-		cpu = try_direct_dispatch(p, scx_bpf_task_cpu(p), enq_flags, 0, &dispatched);
+		cpu = try_direct_dispatch(p, prev_cpu, enq_flags, 0, &dispatched);
 		if (dispatched) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return;
+			prev_cpu = cpu;
+			goto out_kick;
 		}
 	}
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		goto out_kick;
 
 	/*
 	 * Add tasks to the @queued list, they will be processed by the
@@ -785,34 +792,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	__sync_fetch_and_add(&nr_queued, 1);
 
 out_kick:
-	if (cpu < 0)
-		cpu = scx_bpf_task_cpu(p);
-	kick_task_cpu(p, cpu);
-}
-
-/*
- * Dispatch the user-space scheduler.
- */
-static void dispatch_user_scheduler(void)
-{
-	struct task_struct *p;
-
-	p = bpf_task_from_pid(usersched_pid);
-	if (!p) {
-		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
-		return;
-	}
-
-	/*
-	 * Assign an infinite time slice to the user-space scheduler, so
-	 * that it can completely drain all the pending tasks.
-	 *
-	 * The user-space scheduler will voluntarily yield the CPU upon
-	 * completion through BpfScheduler->notify_complete().
-	 */
-	scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_INF, 0);
-
-	bpf_task_release(p);
+	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 /*
@@ -845,13 +825,6 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Fire up the user-space scheduler: it will run only if no other
-	 * task needs to run.
-	 */
-	if (test_and_clear_usersched_needed())
-		dispatch_user_scheduler();
-
-	/*
 	 * Consume all tasks from the @dispatched list and immediately
 	 * dispatch them on the target CPU decided by the user-space
 	 * scheduler.
@@ -860,6 +833,14 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 					 handle_dispatched_task, NULL, BPF_RB_NO_WAKEUP);
 	if (ret)
 		dbg_msg("User ringbuf drain error: %d", ret);
+
+	/*
+	 * Dispatch the user-space scheduler if there's any pending action
+	 * to do.
+	 */
+	if (usersched_has_pending_tasks() &&
+	    scx_bpf_dsq_move_to_local(SCHED_DSQ))
+		return;
 
 	/*
 	 * Consume a task from the per-CPU DSQ.
@@ -874,25 +855,14 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Lastly, consume and dispatch the user-space scheduler.
-	 */
-	if (scx_bpf_dsq_move_to_local(SCHED_DSQ))
-		return;
-
-	/*
-	 * If there are still pending task, notify the user-space scheduler
-	 * and prevent the CPU from going idle.
-	 */
-	if (usersched_has_pending_tasks()) {
-		set_usersched_needed();
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		return;
-	}
-
-	/*
 	 * If the current task expired its time slice and no other task
 	 * wants to run, simply replenish its time slice and let it run for
 	 * another round on the same CPU.
+	 *
+	 * Ignore the user-space scheduler, because it has an infinite time
+	 * slice assigned, so when it releases the CPU it means that it
+	 * actually needs to sleep (otherwise it would spin unnecessarily
+	 * on its CPU).
 	 */
 	if (prev && is_queued(prev) && !is_usersched_task(prev))
 		prev->scx.slice = SCX_SLICE_DFL;
@@ -967,23 +937,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 }
 
 /*
- * A CPU is taken away from the scheduler, preempting the current task by
- * another one running in a higher priority sched_class.
- */
-void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
-				struct scx_cpu_release_args *args)
-{
-	struct task_struct *p = args->task;
-	/*
-	 * If the interrupted task is the user-space scheduler make sure to
-	 * re-schedule it immediately.
-	 */
-	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
-	if (is_usersched_task(p))
-		set_usersched_needed();
-}
-
-/*
  * A task joins the sched_ext scheduler.
  */
 void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
@@ -1014,12 +967,8 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		bpf_rcu_read_lock();
 		p = bpf_task_from_pid(usersched_pid);
 		if (p) {
-			s32 cpu;
-
 			set_usersched_needed();
-			cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-			if (cpu >= 0)
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
 			bpf_task_release(p);
 		}
 		bpf_rcu_read_unlock();
@@ -1182,7 +1131,6 @@ SCX_OPS_DEFINE(rustland,
 	       .runnable		= (void *)rustland_runnable,
 	       .running			= (void *)rustland_running,
 	       .stopping		= (void *)rustland_stopping,
-	       .cpu_release		= (void *)rustland_cpu_release,
 	       .enable			= (void *)rustland_enable,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
