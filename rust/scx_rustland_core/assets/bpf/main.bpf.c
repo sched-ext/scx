@@ -395,6 +395,7 @@ static inline bool is_wakeup(u64 wake_flags)
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
+	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
@@ -414,7 +415,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 * In presence of hybrid cores this helps to naturally migrate
 	 * tasks over to the faster cores.
 	 */
-	if (is_wakeup(wake_flags) && is_cpu_faster(this_cpu, prev_cpu)) {
+	if (is_wakeup(wake_flags) &&
+	    is_cpu_faster(this_cpu, prev_cpu) && is_this_cpu_allowed) {
 		/*
 		 * If both the waker's CPU and the wakee's CPU are in the
 		 * same LLC and the wakee's CPU is a fully idle SMT core,
@@ -541,86 +543,27 @@ out_release:
 }
 
 /*
- * Return true if the waker commits to release the CPU after waking up @p,
- * false otherwise.
+ * Return true it's safe to dispatch directly on @cpu, false otherwise.
  */
-static bool is_wake_sync(u64 wake_flags)
+static bool can_direct_dispatch(s32 cpu)
 {
-	const struct task_struct *current = (void *)bpf_get_current_task_btf();
-
-	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
-}
-
-/*
- * Try to dispatch a task directly on an idle CPU.
- *
- * On success, return the idle CPU where the task has been dispatched, or
- * return a negative value otherwise.
- */
-static s32 try_direct_dispatch(struct task_struct *p, s32 prev_cpu,
-			       u64 enq_flags, u64 wake_flags, bool *dispatched)
-{
-	s32 cpu;
-
-	*dispatched = false;
-
-	/*
-	 * If built-in idle CPU policy is not enabled completely delegate
-	 * the idle selection policy to user-space and keep re-using the
-	 * same CPU here.
-	 */
-	if (!builtin_idle)
-		return -EBUSY;
-
-	/*
-	 * Pick the idle CPU closest to prev_cpu usable by the task.
-	 */
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu < 0)
-		return cpu;
-
-	/*
-	 * If we picked an invalid CPU for the task, give up and ignore
-	 * direct dispatch.
-	 */
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-		/*
-		 * We selected a CPU that the task cannot run on, which
-		 * causes it to become idle-locked, so it can't be chosen
-		 * by other tasks and may remain unused for a long time.
-		 *
-		 * To avoid wasting CPU time, we kick the CPU to let it
-		 * pull a task from the SHARED_DSQ. If a task is available,
-		 * it runs for a slice, then returns idle again, refreshing
-		 * its state and becoming eligible again as an idle CPU. If
-		 * no task is available, it will continue running the idle
-		 * task, refreshing its idle state and rejoining the pool
-		 * of idle CPUs.
-		 */
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		return -EBUSY;
-	}
-
-	/*
-	 * Perform direct dispatch only if the SHAREQ_DSQ is empty,
-	 * otherwise we may risk to starve the tasks waiting in the
-	 * SHARED_DSQ.
-	 */
-	if (!scx_bpf_dsq_nr_queued(SHARED_DSQ) && !scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-					 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-		*dispatched = true;
-	}
-
-	return cpu;
+	return !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
+	       !scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 }
 
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	bool dispatched = false;
-	s32 cpu;
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
+	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
+
+	/*
+	 * Make sure @prev_cpu is usable, otherwise try to move close to
+	 * the waker's CPU. If the waker's CPU is also not usable, then
+	 * pick the first usable CPU.
+	 */
+	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+		prev_cpu = is_this_cpu_allowed ? this_cpu : bpf_cpumask_first(p->cpus_ptr);
 
 	/*
 	 * Scheduler is dispatched directly in .dispatch() when needed, so
@@ -629,15 +572,32 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (is_usersched_task(p))
 		return prev_cpu;
 
-	cpu = try_direct_dispatch(p, prev_cpu, 0, wake_flags, &dispatched);
-	if (cpu >= 0)
+	/*
+	 * If built-in idle CPU policy is not enabled, completely delegate
+	 * the idle selection policy to user-space and keep re-using the
+	 * same CPU here.
+	 */
+	if (!builtin_idle)
+		return prev_cpu;
+
+	/*
+	 * Pick the idle CPU closest to @prev_cpu usable by the task.
+	 */
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
+	if (cpu >= 0) {
+		if (can_direct_dispatch(cpu)) {
+			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+						 SCX_SLICE_DFL, p->scx.dsq_vtime, 0);
+			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		}
 		return cpu;
+	}
 
 	/*
 	 * If we couldn't find an idle CPU, in case of a sync wakeup
 	 * prioritize the waker's CPU.
 	 */
-	return is_wake_sync(wake_flags) ? bpf_get_smp_processor_id() : prev_cpu;
+	return prev_cpu;
 }
 
 /*
@@ -725,7 +685,7 @@ static bool is_queued_wakeup(const struct task_struct *p, u64 enq_flags)
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	s32 prev_cpu = scx_bpf_task_cpu(p), cpu = -EBUSY;
+	s32 prev_cpu = scx_bpf_task_cpu(p);
 	struct queued_task_ctx *task;
 	struct task_ctx *tctx;
 
@@ -762,12 +722,30 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * ops.select_cpu() was skipped.
 	 */
 	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
-		bool dispatched = false;
+		s32 cpu;
 
-		cpu = try_direct_dispatch(p, prev_cpu, enq_flags, 0, &dispatched);
-		if (dispatched) {
+		cpu = pick_idle_cpu(p, prev_cpu, 0);
+		if (cpu >= 0) {
 			prev_cpu = cpu;
-			goto out_kick;
+
+			/*
+			 * We can race with a dequeue here and the selected
+			 * idle CPU might be not valid anymore, if the task
+			 * affinity has changed.
+			 *
+			 * In this case just kick the picked CPU and ignore
+			 * the enqueue. Another enqueue event for the same
+			 * task will be received later.
+			 */
+			if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+				goto out_kick;
+
+			if (can_direct_dispatch(cpu)) {
+				scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+							 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
+				__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+				goto out_kick;
+			}
 		}
 	}
 
@@ -786,7 +764,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		goto out_kick;
 	}
