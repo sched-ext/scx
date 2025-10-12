@@ -693,13 +693,9 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Insert the user-space scheduler to its dedicated DSQ, it will be
 	 * consumed from ops.dispatch() only when there's any pending
 	 * scheduling action to do.
-	 *
-	 * We also want to assign an infinite time slice to make sure it
-	 * completes all the actions uninterrupted, before giving control
-	 * back to the regular tasks.
 	 */
 	if (is_usersched_task(p)) {
-		scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_INF, enq_flags);
+		scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_DFL, enq_flags);
 		goto out_kick;
 	}
 
@@ -844,12 +840,11 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * wants to run, simply replenish its time slice and let it run for
 	 * another round on the same CPU.
 	 *
-	 * Ignore the user-space scheduler, because it has an infinite time
-	 * slice assigned, so when it releases the CPU it means that it
-	 * actually needs to sleep (otherwise it would spin unnecessarily
-	 * on its CPU).
+	 * In case of the user-space scheduler task, replenish its time
+	 * slice only if there're still pending scheduling actions to do.
 	 */
-	if (prev && is_queued(prev) && !is_usersched_task(prev))
+	if (prev && is_queued(prev) &&
+	    (!is_usersched_task(prev) || usersched_has_pending_tasks()))
 		prev->scx.slice = SCX_SLICE_DFL;
 }
 
