@@ -17,6 +17,12 @@ use std::mem::MaybeUninit;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufReader;
+use tch::{CModule, Device, Tensor};
+
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::OpenObject;
@@ -121,6 +127,7 @@ struct Opts {
 
 // Time constants.
 const NSEC_PER_USEC: u64 = 1_000;
+const NSEC_PER_MSEC: u64 = 1_000 * NSEC_PER_USEC;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 struct Task {
@@ -147,11 +154,107 @@ impl PartialOrd for Task {
     }
 }
 
+pub struct AIModel {
+    task_names: HashMap<String, i32>,
+    model: CModule,
+    device: Device,
+    x_min: Vec<f32>,
+    x_max: Vec<f32>,
+    y_max: f32,
+    prediction_cache: HashMap<(i32, u64), u64>,
+}
+
+impl AIModel {
+    /// Load task names and model
+    pub fn new(comm_file: &str, model_file: &str, norm_file: &str, device: Device) -> Self {
+        // Load task names.
+        let file = File::open(comm_file).unwrap();
+        let reader = BufReader::new(file);
+        let comm_list: Vec<String> = serde_json::from_reader(reader).unwrap();
+        let mut task_names = HashMap::new();
+        for (i, name) in comm_list.iter().enumerate() {
+            task_names.insert(name.clone(), i as i32);
+        }
+
+        // Load model.
+        let model = CModule::load_on_device(model_file, device).unwrap();
+
+        // Load normalization parameters.
+        let file = File::open(norm_file).unwrap();
+        let reader = BufReader::new(file);
+        let norm_json: Value = serde_json::from_reader(reader).unwrap();
+        let x_min: Vec<f32> = norm_json["X_min"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let x_max: Vec<f32> = norm_json["X_max"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let y_max: f32 = norm_json["y_max"].as_f64().unwrap() as f32;
+
+        Self {
+            task_names,
+            model,
+            device,
+            x_min,
+            x_max,
+            y_max,
+            prediction_cache: HashMap::new(),
+        }
+    }
+
+    /// Predict the time slice using the neural network
+    pub fn predict(&mut self, name: &str, weight: u64) -> u64 {
+        const SLICE_MIN: u64 = 1 * NSEC_PER_USEC;
+        const SLICE_MAX: u64 = 50 * NSEC_PER_MSEC;
+
+        let Some(&task_id) = self.task_names.get(name) else {
+            return SLICE_MIN;
+        };
+
+        let key = (task_id, weight);
+        if let Some(&cached) = self.prediction_cache.get(&key) {
+            return cached;
+        }
+
+        // Normalize inputs.
+        let mut input_norm = [0f32; 2];
+        input_norm[0] = (task_id as f32 - self.x_min[0]) / (self.x_max[0] - self.x_min[0]).max(1.0);
+        input_norm[1] = (weight as f32 - self.x_min[1]) / (self.x_max[1] - self.x_min[1]).max(1.0);
+
+        // Build input tensor.
+        let input = Tensor::from_slice(&input_norm)
+            .reshape(&[1, 2])
+            .to_device(self.device);
+
+        // Run the model.
+        let output = self.model.forward_ts(&[input]).unwrap();
+
+        // Clamp and return predicted slice.
+        let slice = {
+            let res = output.double_value(&[0, 0]);
+            let pred = res.abs() * self.y_max as f64;
+
+            (pred.round() as u64).clamp(SLICE_MIN, SLICE_MAX)
+        };
+
+        self.prediction_cache.insert(key, slice);
+
+        slice
+    }
+}
+
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>,                  // BPF connector
     opts: &'a Opts,                         // scheduler options
     stats_server: StatsServer<(), Metrics>, // statistics
+    ai: &'a mut AIModel,                    // AI model
     tasks: BTreeSet<Task>,                  // tasks ordered by deadline
     vruntime_now: u64,     // Tracks the latest observed (max) vruntime across tasks
     init_page_faults: u64, // Initial page faults counter
@@ -160,7 +263,11 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &'a Opts,
+        ai: &'a mut AIModel,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+    ) -> Result<Self> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         let slice_ns = opts.slice_us * NSEC_PER_USEC;
@@ -190,6 +297,7 @@ impl<'a> Scheduler<'a> {
             bpf,
             opts,
             stats_server,
+            ai,
             tasks: BTreeSet::new(),
             vruntime_now: 0,
             init_page_faults: 0,
@@ -261,9 +369,11 @@ impl<'a> Scheduler<'a> {
         task.vtime += vslice;
         self.vruntime_now += vslice;
 
-        // Compute the deadline, adding the accumulated runtime since the last sleep. Cap
-        // exec_runtime to 100 time slices to prevent starvation of CPU-intensive tasks.
-        task.vtime + task.exec_runtime.min(self.slice_ns.saturating_mul(100))
+        // Compute the deadline, adding the predicted time slice to the vruntime.
+        let pred_slice = self.ai.predict(&task.comm_str(), task.weight);
+        // info!("{} {} {}", task.comm_str(), task.weight, pred_slice);
+
+        task.vtime + task.exec_runtime.min(self.slice_ns * 100) + pred_slice
     }
 
     /// Dispatch the next task in the queue.
@@ -421,9 +531,14 @@ fn main() -> Result<()> {
         }
     }
 
+    // Initialize AIModel.
+    let mut ai = AIModel::new("comm.json", "timeslice.pt", "norm.json", Device::Cpu);
+    let _ = ai.predict("ksoftirqd/0", 100);
+
+    // Load scheduler
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        let mut sched = Scheduler::init(&opts, &mut ai, &mut open_object)?;
         if !sched.run()?.should_restart() {
             break;
         }

@@ -16,6 +16,8 @@ libc = "0.2.175"
 log = "0.4.17"
 ordered-float = "3.4.0"
 procfs = "0.18"
+tch = "0.22"
+serde_json = "1.0"
 serde = { version = "1.0.215", features = ["derive"] }
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.18" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.18" }
