@@ -174,16 +174,15 @@ struct Opts {
     #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
     no_wake_sync: bool,
 
-    /// Disable sticky tasks.
+    /// Enable sticky tasks.
     ///
-    /// By default the scheduler forces tasks with a high rate of enqueues/sec to stay on the same
-    /// CPU, to reduce locking contention on the shared runqueues. With this option tasks are
-    /// always re-enqueued to the shared runqueues.
+    /// If enabled force tasks with a high rate of enqueues/sec to stay on the same CPU, to reduce
+    /// locking contention on the shared runqueues.
     ///
-    /// This can help improve latency, but it makes the scheduler less robust in presence of
-    /// intense re-enqueue activity.
+    /// This can help making the scheduler more robust with intensive scheduling workloads and
+    /// benchmarks, but it can negatively impact on latency.
     #[clap(short = 'S', long, action = clap::ArgAction::SetTrue)]
-    no_sticky_tasks: bool,
+    sticky_tasks: bool,
 
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
@@ -328,7 +327,7 @@ impl<'a> Scheduler<'a> {
         rodata.numa_enabled = numa_enabled;
         rodata.local_pcpu = opts.local_pcpu;
         rodata.no_wake_sync = opts.no_wake_sync;
-        rodata.sticky_tasks = !opts.no_sticky_tasks;
+        rodata.sticky_tasks = opts.sticky_tasks;
         rodata.slice_max = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
@@ -339,7 +338,7 @@ impl<'a> Scheduler<'a> {
         rodata.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
 
         // Enable conditional kprobes to classify sticky tasks.
-        if !opts.no_sticky_tasks {
+        if opts.sticky_tasks {
             if let Err(err) =
                 compat::cond_kprobe_enable("do_nanosleep", &skel.progs.kprobe_do_nanosleep)
             {
