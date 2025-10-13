@@ -26,7 +26,7 @@ auto_mode = []
 gaming_mode = []
 lowlatency_mode = ["-m", "performance", "-w"]
 powersave_mode = ["-s", "20000", "-m", "powersave", "-I", "100", "-t", "100"]
-server_mode = ["-s", "20000"]
+server_mode = ["-s", "20000", "-S"]
 
 [scheds.scx_rusty]
 auto_mode = []
@@ -107,7 +107,7 @@ The example configuration above shows how to set custom flags for different sche
 * For `scx_bpfland`:
     * Low Latency mode: `-m performance -w`
     * Power Save mode: `-s 20000 -m powersave -I 100 -t 100`
-    * Server mode: `-s 20000`
+    * Server mode: `-s 20000 -S`
 * For `scx_rusty`:
     * No custom flags are defined, so the default flags for each mode will be used.
 * For `scx_lavd`:
