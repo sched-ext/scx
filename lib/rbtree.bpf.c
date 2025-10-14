@@ -319,15 +319,26 @@ int rb_node_insert(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 
 int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 {
+	volatile int i = 0;
+
 	if (unlikely(!rbtree))
 		return -EINVAL;
 
 	if (unlikely(rbtree->alloc == RB_ALLOC))
 		return -EINVAL;
 
-	if (unlikely(node->left || node->right || node->parent))
-		return -EINVAL;
 	node->is_red = true;
+	/* XXXETSAL: Variable i is not used. It is only there to 
+	 * prevent the compiler from causing verification failures 
+	 * in its attempt to optimize the series of assignments
+	 * to the rbnode_t * into a single operation.
+	 */
+
+	node->left = NULL;
+	i += 1;
+	node->right = NULL;
+	i += 1;
+	node->parent = NULL;
 
 	return rb_node_insert(rbtree, node);
 }
@@ -916,6 +927,9 @@ int rb_integrity_check(rbtree_t __arg_arena *rbtree)
 
 	if (unlikely(!rbtree))
 		return -EINVAL;
+
+	if (!rbtree->root)
+		return 0;
 
 	depth = 0;
 	state = RB_NONE_VISITED;
