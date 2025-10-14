@@ -23,8 +23,8 @@ default_mode = "Auto"
 
 [scheds.scx_bpfland]
 auto_mode = []
-gaming_mode = []
-lowlatency_mode = ["-m", "performance", "-w"]
+gaming_mode = ["-s", "10"]
+lowlatency_mode = ["-s", "10", "-m", "performance", "-w"]
 powersave_mode = ["-s", "20000", "-m", "powersave", "-I", "100", "-t", "100"]
 server_mode = ["-s", "20000", "-S"]
 
@@ -105,7 +105,8 @@ server_mode = ["-a", "-s", "20000"]
 The example configuration above shows how to set custom flags for different schedulers and modes, and how to configure `scx_bpfland` to start automatically on boot.
 
 * For `scx_bpfland`:
-    * Low Latency mode: `-m performance -w`
+    * Gaming mode: `-s 10`
+    * Low Latency mode: `-s 10 -m performance -w`
     * Power Save mode: `-s 20000 -m powersave -I 100 -t 100`
     * Server mode: `-s 20000 -S`
 * For `scx_rusty`:
