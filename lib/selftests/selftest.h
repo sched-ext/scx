@@ -16,6 +16,7 @@ struct task_ctx_nonarena {
 	u64 pid;
 	u64 vtime;
 	struct rbnode rbnode;
+	struct task_ctx_nonarena __arena *next;
 };
 
 typedef struct task_ctx_nonarena __arena task_ctx;

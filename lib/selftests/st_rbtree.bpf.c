@@ -219,6 +219,7 @@ __weak int scx_selftest_rbtree_duplicate(rbtree_t __arg_arena *rbtree)
 __weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
 {
 	const size_t numkeys = sizeof(keys) / sizeof(keys[0]);
+	task_ctx *taskc;
 	u64 key, value;
 	int ret;
 	int i;
@@ -228,7 +229,18 @@ __weak int scx_selftest_rbtree_insert_many(rbtree_t __arg_arena *rbtree)
 
 	for (i = 0; i < numkeys && can_loop; i++) {
 		key = keys[i];
-		ret = rb_insert(rbtree, key, 2 * key);
+		if (rbtree->alloc != RB_ALLOC) {
+			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			if (!taskc) {
+				bpf_printk("out of memory");
+				return -ENOMEM;
+			}
+			taskc->rbnode.key = key;
+			taskc->rbnode.value = 2 * key;
+			ret = rb_insert_node(rbtree, &taskc->rbnode);
+		} else {
+			ret = rb_insert(rbtree, key, 2 * key);
+		}
 		if (ret)
 			return 2 + 3 * i;
 
@@ -289,9 +301,38 @@ __weak int scx_selftest_rbtree_remove_one(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
+/*
+ * This method, but lets us pass verification by encapsulating a bunch
+ * of if-else paths within the for loop.
+ */
+__weak
+u64 remove_key(rbtree_t __arg_arena *rbtree, task_ctx __arg_arena *taskc, u64 key, int *ret)
+{
+	task_ctx *tmp;
+	
+	if (!ret)
+		return (u64)NULL;
+
+	if (rbtree->alloc == RB_ALLOC) {
+		*ret = rb_remove(rbtree, key);
+		return (u64)NULL;
+	}
+
+	if (key != taskc->rbnode.key) {
+		*ret = -EINVAL;
+		return (u64)NULL;
+	}
+
+	tmp = taskc->next->next;
+	*ret = rb_remove_node(rbtree, &taskc->rbnode);
+
+	return (u64)tmp;
+}
+
 __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 {
 	const size_t numkeys = sizeof(morekeys) / sizeof(morekeys[0]);
+	task_ctx *taskc = NULL, *tmp;
 	u64 key, value;
 	int errval = 1;
 	int ret;
@@ -302,7 +343,20 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 
 	bpf_for(i, 0, numkeys) {
 		key = morekeys[i];
-		ret = rb_insert(rbtree, key, 2 * key);
+		if (rbtree->alloc != RB_ALLOC) {
+			tmp = taskc;
+			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			if (!taskc) {
+				bpf_printk("out of memory");
+				return -ENOMEM;
+			}
+			taskc->rbnode.key = key;
+			taskc->rbnode.value = 2 * key;
+			taskc->next = tmp;
+			ret = rb_insert_node(rbtree, &taskc->rbnode);
+		} else {
+			ret = rb_insert(rbtree, key, 2 * key);
+		}
 		if (ret)
 			return errval;
 
@@ -342,7 +396,8 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 	/* Remove half of them. */
 	for (i = 0; i < numkeys && can_loop; i += 2) {
 		key = morekeys[i];
-		ret = rb_remove(rbtree, key);
+
+		taskc = (task_ctx *)remove_key(rbtree, taskc, key, &ret);
 		if (ret) {
 			bpf_printk("Failed to remove %ld", key);
 			return errval;
@@ -705,7 +760,7 @@ __weak int scx_selftest_rbtree_print(rbtree_t __arg_arena *rbtree)
 __weak
 int scx_selftest_rbtree(void)
 {
-	rbtree_t *standard, *update, *duplicate;
+	rbtree_t *standard, *update, *duplicate, *noalloc;
 
 	standard = rb_create(RB_ALLOC, RB_DEFAULT);
 	if (!standard)
@@ -719,6 +774,10 @@ int scx_selftest_rbtree(void)
 	if (!duplicate)
 		return -ENOMEM;
 
+	noalloc = rb_create(RB_NOALLOC, RB_DUPLICATE);
+	if (!standard)
+		return -ENOMEM;
+
 	SCX_RBTREE_SELFTEST(find_nonexistent, standard);
 	SCX_RBTREE_SELFTEST(insert_one, update);
 	SCX_RBTREE_SELFTEST(print, update);
@@ -727,6 +786,7 @@ int scx_selftest_rbtree(void)
 	SCX_RBTREE_SELFTEST(duplicate, duplicate);
 	SCX_RBTREE_SELFTEST(insert_ten, update);
 	SCX_RBTREE_SELFTEST(insert_many, update);
+	SCX_RBTREE_SELFTEST(insert_many, noalloc);
 	SCX_RBTREE_SELFTEST(remove_one, standard);
 	SCX_RBTREE_SELFTEST(remove_many, update);
 	SCX_RBTREE_SELFTEST(add_remove_circular_reverse, update);
