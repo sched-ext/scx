@@ -372,6 +372,14 @@ lazy_static! {
 /// - HintEquals: u64. Match tasks whose hint value equals this value.
 ///   The value must be in the range [0, 1024].
 ///
+/// - SystemCpuUtilBelow: f64. Match when the system CPU utilization fraction
+///   is below the specified threshold (a value in the range [0.0, 1.0]). This
+///   option can only be used in conjunction with HintEquals.
+///
+/// - DsqInsertBelow: f64. Match when the layer DSQ insertion fraction is below
+///   the specified threshold (a value in the range [0.0, 1.0]). This option can
+///   only be used in conjunction with HintEquals.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
