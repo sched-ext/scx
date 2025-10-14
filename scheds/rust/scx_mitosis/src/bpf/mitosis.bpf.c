@@ -28,12 +28,12 @@ char _license[] SEC("license") = "GPL";
 /*
  * Variables populated by userspace
  */
-const volatile u32 nr_possible_cpus = 1;
-const volatile bool smt_enabled = true;
+const volatile u32	     nr_possible_cpus = 1;
+const volatile bool	     smt_enabled      = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
-const volatile u64 slice_ns;
-const volatile u64 root_cgid = 1;
+const volatile u64	     slice_ns;
+const volatile u64	     root_cgid = 1;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -79,7 +79,7 @@ static inline u32 dsq_to_cpu(u32 dsq)
 }
 
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
-						  u32 ancestor)
+						  u32		 ancestor)
 {
 	struct cgroup *cg;
 
@@ -97,7 +97,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct cgrp_ctx);
-} cgrp_ctxs SEC(".maps");
+} cgrp_ctxs		       SEC(".maps");
 
 static inline struct cgrp_ctx *lookup_cgrp_ctx_fallible(struct cgroup *cgrp)
 {
@@ -157,7 +157,7 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct task_ctx);
-} task_ctxs SEC(".maps");
+} task_ctxs		       SEC(".maps");
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
@@ -176,12 +176,12 @@ struct {
 	__type(key, u32);
 	__type(value, struct cpu_ctx);
 	__uint(max_entries, 1);
-} cpu_ctxs SEC(".maps");
+} cpu_ctxs		      SEC(".maps");
 
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
 	struct cpu_ctx *cctx;
-	u32 zero = 0;
+	u32		zero = 0;
 
 	if (cpu < 0)
 		cctx = bpf_map_lookup_elem(&cpu_ctxs, &zero);
@@ -196,7 +196,7 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cctx;
 }
 
-struct cell cells[MAX_CELLS];
+struct cell		   cells[MAX_CELLS];
 
 static inline struct cell *lookup_cell(int idx)
 {
@@ -265,7 +265,7 @@ struct {
 	__type(value, struct cell_cpumask_wrapper);
 	__uint(max_entries, MAX_CELLS);
 	__uint(map_flags, 0);
-} cell_cpumasks SEC(".maps");
+} cell_cpumasks			    SEC(".maps");
 
 static inline const struct cpumask *lookup_cell_cpumask(int idx)
 {
@@ -299,12 +299,12 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 }
 
 static inline int update_task_cpumask(struct task_struct *p,
-				      struct task_ctx *tctx)
+				      struct task_ctx	 *tctx)
 {
 	const struct cpumask *cell_cpumask;
-	struct cpu_ctx *cpu_ctx;
-	struct cell *cell;
-	u32 cpu;
+	struct cpu_ctx	     *cpu_ctx;
+	struct cell	     *cell;
+	u32		      cpu;
 
 	if (!(cell_cpumask = lookup_cell_cpumask(tctx->cell)))
 		return -ENOENT;
@@ -337,7 +337,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
-		tctx->dsq = cpu_dsq(cpu);
+		tctx->dsq	 = cpu_dsq(cpu);
 		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
 	}
 
@@ -370,12 +370,12 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 }
 
 /* Helper function for picking an idle cpu out of a candidate set */
-static s32 pick_idle_cpu_from(struct task_struct *p,
+static s32 pick_idle_cpu_from(struct task_struct   *p,
 			      const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask)
 {
 	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
-	s32 cpu;
+	s32  cpu;
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -400,10 +400,10 @@ static s32 pick_idle_cpu_from(struct task_struct *p,
 
 /* Check if we need to update the cell/cpumask mapping */
 static __always_inline int maybe_refresh_cell(struct task_struct *p,
-					      struct task_ctx *tctx)
+					      struct task_ctx	 *tctx)
 {
 	struct cgroup *cgrp;
-	int ret = 0;
+	int	       ret = 0;
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq)) {
 		if (!(cgrp = task_cgroup(p)))
 			return -1;
@@ -415,12 +415,12 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 }
 
 static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
-					 struct cpu_ctx *cctx,
+					 struct cpu_ctx	 *cctx,
 					 struct task_ctx *tctx)
 {
-	struct cpumask *task_cpumask;
+	struct cpumask	     *task_cpumask;
 	const struct cpumask *idle_smtmask;
-	s32 cpu;
+	s32		      cpu;
 
 	if (!(task_cpumask = (struct cpumask *)tctx->cpumask) ||
 	    !(idle_smtmask = scx_bpf_get_idle_smtmask())) {
@@ -449,8 +449,8 @@ out:
 s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	s32 cpu;
-	struct cpu_ctx *cctx;
+	s32		 cpu;
+	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
@@ -492,13 +492,13 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
-	struct cell *cell;
-	s32 task_cpu = scx_bpf_task_cpu(p);
-	u64 vtime = p->scx.dsq_vtime;
-	s32 cpu = -1;
-	u64 basis_vtime;
+	struct cell	*cell;
+	s32		 task_cpu = scx_bpf_task_cpu(p);
+	u64		 vtime	  = p->scx.dsq_vtime;
+	s32		 cpu	  = -1;
+	u64		 basis_vtime;
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
@@ -572,31 +572,31 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
-	u32 cell;
+	u32		cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
-	cell = READ_ONCE(cctx->cell);
+	cell			  = READ_ONCE(cctx->cell);
 
-	bool found = false;
-	u64 min_vtime_dsq;
-	u64 min_vtime;
+	bool		    found = false;
+	u64		    min_vtime_dsq;
+	u64		    min_vtime;
 
 	struct task_struct *p;
 	bpf_for_each(scx_dsq, p, cell, 0) {
-		min_vtime = p->scx.dsq_vtime;
+		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cell;
-		found = true;
+		found	      = true;
 		break;
 	}
 
 	u64 dsq = cpu_dsq(cpu);
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
-			min_vtime = p->scx.dsq_vtime;
+			min_vtime     = p->scx.dsq_vtime;
 			min_vtime_dsq = dsq;
-			found = true;
+			found	      = true;
 		}
 		break;
 	}
@@ -641,7 +641,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 struct cpumask_entry {
 	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
-	u64 used;
+	u64	      used;
 };
 
 struct {
@@ -649,7 +649,7 @@ struct {
 	__type(key, u32);
 	__type(value, struct cpumask_entry);
 	__uint(max_entries, MAX_CPUMASK_ENTRIES);
-} cgrp_init_percpu_cpumask SEC(".maps");
+} cgrp_init_percpu_cpumask	    SEC(".maps");
 
 static inline struct cpumask_entry *allocate_cpumask_entry()
 {
@@ -704,7 +704,7 @@ struct cpuset___cpumask_arr {
  * Given a cgroup, get its cpumask (populated in entry), returns 0 if no
  * cpumask, < 0 on error and > 0 on a populated cpumask.
  */
-static inline int get_cgroup_cpumask(struct cgroup *cgrp,
+static inline int get_cgroup_cpumask(struct cgroup	  *cgrp,
 				     struct cpumask_entry *entry)
 {
 	if (!cgrp->subsys[cpuset_cgrp_id])
@@ -788,7 +788,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		return 0;
 
 	/* Get the root cell (cell 0) and its cpumask */
-	int zero = 0;
+	int			     zero = 0;
 	struct cell_cpumask_wrapper *root_cell_cpumaskw;
 	if (!(root_cell_cpumaskw =
 		      bpf_map_lookup_elem(&cell_cpumasks, &zero))) {
@@ -821,7 +821,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	bpf_cpumask_copy(root_bpf_cpumask, (const struct cpumask *)all_cpumask);
 
 	struct cgroup_subsys_state *root_css, *pos;
-	struct cgroup *cur_cgrp, *root_cgrp_ref;
+	struct cgroup		   *cur_cgrp, *root_cgrp_ref;
 
 	if (!root_cgrp) {
 		scx_bpf_error("root_cgrp should not be null");
@@ -1013,9 +1013,9 @@ out:
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
-	struct cell *cell;
+	struct cell	*cell;
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
 	    !(cell = lookup_cell(cctx->cell)))
@@ -1036,11 +1036,11 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
-	struct cell *cell;
-	u64 now, used;
-	u32 cidx;
+	struct cell	*cell;
+	u64		 now, used;
+	u32		 cidx;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1049,8 +1049,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	if (!(cell = lookup_cell(cidx)))
 		return;
 
-	now = scx_bpf_now();
-	used = now - tctx->started_running_at;
+	now			 = scx_bpf_now();
+	used			 = now - tctx->started_running_at;
 	tctx->started_running_at = now;
 	/* scale the execution time by the inverse of the weight and charge */
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
@@ -1178,7 +1178,7 @@ void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p,
 s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct task_ctx *tctx;
+	struct task_ctx	   *tctx;
 	struct bpf_cpumask *cpumask;
 
 	tctx = bpf_task_storage_get(&task_ctxs, p, 0,
@@ -1246,9 +1246,9 @@ static void dump_cell_cpumask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	u64 dsq_id;
-	int i;
-	struct cell *cell;
+	u64		dsq_id;
+	int		i;
+	struct cell    *cell;
 	struct cpu_ctx *cpu_ctx;
 
 	scx_bpf_dump_header();
@@ -1301,11 +1301,11 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx,
 s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 {
 	struct bpf_cpumask *cpumask;
-	u32 i;
-	s32 ret;
+	u32		    i;
+	s32		    ret;
 
-	u32 key = 0;
-	struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
+	u32		    key	  = 0;
+	struct bpf_timer   *timer = bpf_map_lookup_elem(&update_timer, &key);
 	if (!timer) {
 		scx_bpf_error("Failed to lookup update timer");
 		return -ESRCH;
@@ -1400,6 +1400,7 @@ void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
+// clang-format off
 SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
@@ -1416,3 +1417,4 @@ SCX_OPS_DEFINE(mitosis,
 	       .init			= (void *)mitosis_init,
 	       .exit			= (void *)mitosis_exit,
 	       .name			= "mitosis");
+// clang-format on

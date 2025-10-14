@@ -7,7 +7,7 @@
 
 #ifndef __KERNEL__
 typedef unsigned long long u64;
-typedef unsigned int u32;
+typedef unsigned int	   u32;
 typedef _Bool bool;
 #endif
 
@@ -19,17 +19,17 @@ typedef _Bool bool;
 #endif
 
 enum consts {
-	CACHELINE_SIZE = 64,
-	MAX_CPUS_SHIFT = 9,
-	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
-	MAX_CPUS_U8 = MAX_CPUS / 8,
-	MAX_CELLS = 16,
-	USAGE_HALF_LIFE = 100000000, /* 100ms */
+	CACHELINE_SIZE	  = 64,
+	MAX_CPUS_SHIFT	  = 9,
+	MAX_CPUS	  = 1 << MAX_CPUS_SHIFT,
+	MAX_CPUS_U8	  = MAX_CPUS / 8,
+	MAX_CELLS	  = 16,
+	USAGE_HALF_LIFE	  = 100000000, /* 100ms */
 	TIMER_INTERVAL_NS = 100000000, /* 100 ms */
-	CLOCK_BOOTTIME = 7,
+	CLOCK_BOOTTIME	  = 7,
 
-	PCPU_BASE = 0x80000000,
-	MAX_CG_DEPTH = 256,
+	PCPU_BASE	  = 0x80000000,
+	MAX_CG_DEPTH	  = 256,
 };
 
 /* Statistics */
@@ -49,7 +49,7 @@ struct cpu_ctx {
 };
 
 struct cgrp_ctx {
-	u32 cell;
+	u32  cell;
 	bool cell_owner;
 };
 

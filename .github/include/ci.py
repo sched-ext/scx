@@ -239,6 +239,8 @@ async def run_format():
         "tools/scxtop/**/*.c",
         "scheds/rust/scx_chaos/**/*.c",
         "scheds/rust/scx_chaos/**/*.h",
+        "scheds/rust/scx_mitosis/**/*.c",
+        "scheds/rust/scx_mitosis/**/*.h",
     ]
     c_files = []
     for pattern in c_patterns:
