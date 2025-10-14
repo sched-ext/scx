@@ -259,7 +259,7 @@ pub fn server_data() -> StatsServerData<StatsCtx, (StatsCtx, ClusterStats)> {
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<ClusterStats>(
-        &vec![],
+        &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |cst| {

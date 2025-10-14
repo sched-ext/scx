@@ -195,10 +195,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&mut self) -> Metrics {
-        let page_faults = match Self::get_page_faults() {
-            Ok(page_faults) => page_faults,
-            Err(_) => 0,
-        };
+        let page_faults = Self::get_page_faults().unwrap_or_default();
         if self.init_page_faults == 0 {
             self.init_page_faults = page_faults;
         }
@@ -318,7 +315,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        return true;
+        true
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -342,7 +339,7 @@ impl<'a> Scheduler<'a> {
                     break;
                 }
                 Err(err) => {
-                    warn!("Error: {}", err);
+                    warn!("Error: {err}");
                     break;
                 }
             }
@@ -365,10 +362,8 @@ impl<'a> Scheduler<'a> {
 
     // Get total page faults from the process.
     fn get_page_faults() -> Result<u64, io::Error> {
-        let myself = Process::myself().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let stat = myself
-            .stat()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let myself = Process::myself().map_err(io::Error::other)?;
+        let stat = myself.stat().map_err(io::Error::other)?;
 
         Ok(stat.minflt + stat.majflt)
     }

@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import csv
+import fnmatch
 import glob
 import io
 import itertools
@@ -16,6 +17,19 @@ import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional
+
+
+def rglob_no_symlinks(pattern):
+    for base, dirs, files in os.walk(".", followlinks=False):
+        for name in files:
+            path = os.path.join(base, name)
+            # skip symlinked files too (optional)
+            if not os.path.islink(path):
+                # Convert to relative path and normalize separators
+                rel_path = os.path.relpath(path, ".")
+                # Match against the full relative path using fnmatch
+                if fnmatch.fnmatch(rel_path, pattern):
+                    yield rel_path
 
 
 async def run_command(
@@ -204,18 +218,14 @@ async def run_format():
     """Format all targets."""
     print("Running format...", flush=True)
 
-    py_files = glob.glob(".github/include/**/*.py", recursive=True)
+    py_files = list(rglob_no_symlinks(".github/include/**/*.py"))
     if py_files:
         await run_command(["black"] + py_files, no_capture=True)
         await run_command(["isort"] + py_files, no_capture=True)
 
     await run_command(["cargo", "fmt"], no_capture=True)
 
-    nix_files = list(
-        itertools.chain.from_iterable(
-            glob.glob(p + "**/*.nix", recursive=True) for p in ["", ".*/"]
-        )
-    )
+    nix_files = list(rglob_no_symlinks("**/*.nix"))
     if nix_files:
         await run_command(
             ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
@@ -224,12 +234,18 @@ async def run_format():
             no_capture=True,
         )
 
-    c_files = list(
-        itertools.chain.from_iterable(
-            glob.glob(p, recursive=True)
-            for p in ["tools/scxtop/**/*.h", "tools/scxtop/**/*.c"]
-        )
-    )
+    c_patterns = [
+        "tools/scxtop/**/*.h",
+        "tools/scxtop/**/*.c",
+        "scheds/rust/scx_chaos/**/*.c",
+        "scheds/rust/scx_chaos/**/*.h",
+        "scheds/rust/scx_mitosis/**/*.c",
+        "scheds/rust/scx_mitosis/**/*.h",
+    ]
+    c_files = []
+    for pattern in c_patterns:
+        c_files.extend(list(rglob_no_symlinks(pattern)))
+
     if c_files:
         await run_command(["clang-format", "-i"] + c_files, no_capture=True)
 

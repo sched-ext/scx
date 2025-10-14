@@ -18,10 +18,17 @@ If no configuration file is found at any of these paths, `scx_loader` will use t
 The configuration file has the following structure:
 
 ```toml
-default_sched = "scx_flash"
+default_sched = "scx_cosmos"
 default_mode = "Auto"
 
-[scheds.scx_rustland]
+[scheds.scx_bpfland]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = ["-m", "performance", "-w"]
+powersave_mode = ["-s", "20000", "-m", "powersave", "-I", "100", "-t", "100"]
+server_mode = ["-s", "20000", "-S"]
+
+[scheds.scx_rusty]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []
@@ -49,26 +56,19 @@ lowlatency_mode = ["-y", "-f", "--task-slice", "true"]
 powersave_mode = ["--sched-mode", "efficiency"]
 server_mode = ["--keep-running"]
 
-[scheds.scx_rusty]
-auto_mode = []
-gaming_mode = []
-lowlatency_mode = []
-powersave_mode = []
-server_mode = []
-
-[scheds.scx_bpfland]
-auto_mode = []
-gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
-powersave_mode = ["-m", "powersave"]
-server_mode = ["-p"]
-
 [scheds.scx_tickless]
 auto_mode = []
 gaming_mode = ["-f", "5000", "-s", "5000"]
 lowlatency_mode = ["-f", "5000", "-s", "1000"]
 powersave_mode = ["-f", "50", "-p"]
 server_mode = ["-f", "100"]
+
+[scheds.scx_rustland]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
+server_mode = []
 
 [scheds.scx_cosmos]
 auto_mode = ["-d"]
@@ -105,10 +105,9 @@ server_mode = ["-a", "-s", "20000"]
 The example configuration above shows how to set custom flags for different schedulers and modes, and how to configure `scx_bpfland` to start automatically on boot.
 
 * For `scx_bpfland`:
-    * Gaming mode: `-m performance`
-    * Low Latency mode: `-s 5000 -S 500 -l 5000 -m performance`
-    * Power Save mode: `-m powersave`
-    * Server mode: `-p`
+    * Low Latency mode: `-m performance -w`
+    * Power Save mode: `-s 20000 -m powersave -I 100 -t 100`
+    * Server mode: `-s 20000 -S`
 * For `scx_rusty`:
     * No custom flags are defined, so the default flags for each mode will be used.
 * For `scx_lavd`:

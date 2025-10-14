@@ -110,12 +110,16 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
-	__type(value, u32);
+	__type(value, struct hint_layer_info);
 	__uint(map_flags, 0);
 	__uint(max_entries, 1025);
 } hint_to_layer_id_map SEC(".maps");
 
 const volatile bool task_hint_map_enabled;
+
+/* EWMA value updated from userspace */
+u64 system_cpu_util_ewma = 0;
+u64 layer_dsq_insert_ewma[MAX_LAYERS];
 
 static inline s32 prio_to_nice(s32 static_prio)
 {
@@ -657,57 +661,79 @@ static struct task_hint *lookup_task_hint(struct task_struct *p)
 	return hint;
 }
 
-static int lookup_task_hint_layer_id(struct task_struct *p) {
+static struct hint_layer_info *lookup_task_hint_layer_id(struct task_struct *p) {
 	struct task_hint *hint;
-	u32 *layer_idp;
 	u32 hint_val;
 
 	hint = lookup_task_hint(p);
 	if (!hint)
-		return -ENOENT;
+		return NULL;
 
 	hint_val = hint->hint;
-	layer_idp = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
-	if (!layer_idp)
-		return -EFAULT;
-	return *layer_idp;
+	return bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
 }
 
 static void switch_to_layer(struct task_struct *, struct task_ctx *, u64 layer_id, u64 now);
 
-static int lookup_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
+static bool is_task_layer_hint_stale(struct task_struct *p, struct task_ctx *taskc)
 {
-	u64 layer_id;
-	int ret;
+	struct hint_layer_info *info;
 
-	ret = lookup_task_hint_layer_id(p);
-	if (ret < 0)
-		return ret;
-	layer_id = ret;
+	if (!task_hint_map_enabled)
+		return false;
 
-        if (taskc->layer_id == layer_id)
-		return -EAGAIN;
-        /*
-	 * If the existing layer does not match the one corresponding to the
-         * hint, we must switch the layers, return the new layer_id.
-	 */
-	return layer_id;
+	info = lookup_task_hint_layer_id(p);
+	if (!info)
+		return false;
+	return taskc->layer_id != info->layer_id;
 }
 
-static void maybe_refresh_task_layer_from_hint(struct task_struct *p)
+static void maybe_refresh_task_layer_from_hint(struct task_struct *p, struct task_ctx *taskc)
 {
-	struct task_ctx *taskc;
-	u64 layer_id;
-	int ret;
+	struct hint_layer_info *info;
+	bool switch_layer = false;
 
-	if (!(taskc = lookup_task_ctx_may_fail(p)))
+	if (!task_hint_map_enabled)
 		return;
 
-	ret = lookup_task_layer_from_hint(p, taskc);
-	if (ret < 0)
+	/* We are already going to refresh this task, skip. */
+	if (taskc->refresh_layer)
 		return;
-	layer_id = ret;
-	switch_to_layer(p, taskc, layer_id, scx_bpf_now());
+
+	info = lookup_task_hint_layer_id(p);
+	if (!info)
+		return;
+
+	/*
+	 * We need to check whether the task layer matches the HintEquals specification,
+	 * additionally qualified by predicates gating layer admission.
+	 */
+	if (taskc->layer_id != info->layer_id)
+		switch_layer = true;
+
+	if (info->system_cpu_util_below != (u64)-1) {
+		if (system_cpu_util_ewma >= info->system_cpu_util_below) {
+			/*
+			 * Refresh task so that it gets evicted out. It only needs
+			 * to be done for tasks in the current layer, for incoming
+			 * tasks we just reject admission.
+			 */
+			taskc->refresh_layer = switch_layer == false;
+			switch_layer = false;
+		}
+	}
+
+	if (info->dsq_insert_below != (u64)-1 && taskc->layer_id < MAX_LAYERS) {
+		if (layer_dsq_insert_ewma[taskc->layer_id] >= info->dsq_insert_below) {
+			/* Same idea as above. */
+			taskc->refresh_layer = switch_layer == false;
+			switch_layer = false;
+		}
+	}
+
+	/* All conditions satisfied for layer matching. */
+	if (switch_layer)
+		switch_to_layer(p, taskc, info->layer_id, scx_bpf_now());
 }
 
 int save_gpu_tgid_pid(void) {
@@ -731,8 +757,8 @@ int save_gpu_tgid_pid(void) {
 				taskc->refresh_layer = true;
 			}
 
-			/* 
-			 * GPU kprobe fire has expired for the member. 
+			/*
+			 * GPU kprobe fire has expired for the member.
 			 * Force a recheck to see if we should put it
 			 * back into the GPU layer.
 			 */
@@ -741,7 +767,7 @@ int save_gpu_tgid_pid(void) {
 
 			timestamp = taskc->running_at;
 		}
-		
+
 		/* Same logic for the parent. */
 		if ((parent = lookup_task_ctx_may_fail(p->parent))) {
 			if(!bpf_map_lookup_elem(&gpu_tgid, &pid)) {
@@ -1350,11 +1376,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	s32 cpu;
 
 	maybe_refresh_layer_cpumasks();
-	maybe_refresh_task_layer_from_hint(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
+	maybe_refresh_task_layer_from_hint(p, taskc);
 	/*
 	 * We usually update the layer in layered_runnable() to avoid confusion.
 	 * As layered_select_cpu() takes place before runnable, new tasks would
@@ -1552,12 +1578,13 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 *lstats;
 
 	maybe_refresh_layer_cpumasks();
-	/* Only invoke if we never went through select_cpu path. */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
-		maybe_refresh_task_layer_from_hint(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
+
+	/* Only invoke if we never went through select_cpu path. */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+		maybe_refresh_task_layer_from_hint(p, taskc);
 
 	layer_id = taskc->layer_id;
 	if (!(layer = lookup_layer(layer_id)))
@@ -1826,14 +1853,14 @@ static inline void check_member_expired(struct task_ctx *taskc, u64 now)
 {
 	u64 recheck = taskc->recheck_layer_membership;
 
-	/* 
+	/*
 	 * Don't trigger a recheck if:
 	 * - Membership never expires
 	 * - Membership already expired
 	 * - Member has been tested and hasn't joined any GPU layer
 	 *   even though it matches the GPU rule.
 	 */
-	if (recheck == MEMBER_NOEXPIRE || 
+	if (recheck == MEMBER_NOEXPIRE ||
 		recheck == MEMBER_EXPIRED ||
 		recheck == MEMBER_CANTMATCH)
 		return;
@@ -2287,7 +2314,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 * Do not refresh the slice in case we need the task to be reenqueued
 		 * for layer membership change and subsequent CPU selection.
 		 */
-		if (lookup_task_layer_from_hint(prev, prev_taskc) >= 0)
+		if (is_task_layer_hint_stale(prev, prev_taskc))
 			return;
 		prev->scx.slice = prev_layer->slice_ns;
 		return;
@@ -2431,7 +2458,7 @@ replenish:
          * Do not refresh the slice in case we need the task to be reenqueued
          * for layer membership change and subsequent CPU selection.
          */
-        if (prev_taskc && prev_layer && lookup_task_layer_from_hint(prev, prev_taskc) < 0)
+        if (prev_taskc && prev_layer && !is_task_layer_hint_stale(prev, prev_taskc))
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
@@ -2578,13 +2605,13 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			if (!last_used)
 				return !must_be_used;
 
-			/* 
-			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale. 
+			/*
+			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
 			 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
 			 */
 			recently_used = true;
-			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE && 
-				taskc->recheck_layer_membership != MEMBER_CANTMATCH && 
+			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
+				taskc->recheck_layer_membership != MEMBER_CANTMATCH &&
 				(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
 
 				recently_used = false;
@@ -2617,6 +2644,50 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 		if (!hint)
 			return false;
 		return match->hint == hint->hint;
+	}
+	case MATCH_SYSTEM_CPU_UTIL_BELOW: {
+		struct task_hint *hint;
+		struct hint_layer_info *info;
+		u32 hint_val;
+
+		hint = lookup_task_hint(p);
+		if (!hint)
+			return false;
+
+		hint_val = hint->hint;
+		info = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
+		if (!info)
+			return false;
+
+		/* Check if this matcher is enabled for this hint */
+		if (info->system_cpu_util_below == (u64)-1)
+			return false;
+
+		return system_cpu_util_ewma < info->system_cpu_util_below;
+	}
+	case MATCH_DSQ_INSERT_BELOW: {
+		struct task_hint *hint;
+		struct hint_layer_info *info;
+		u32 hint_val;
+
+		hint = lookup_task_hint(p);
+		if (!hint)
+			return false;
+
+		hint_val = hint->hint;
+		info = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
+		if (!info)
+			return false;
+
+		/* Check if this matcher is enabled for this hint */
+		if (info->dsq_insert_below == (u64)-1)
+			return false;
+
+		/* Check per-layer DSQ insertion ratio */
+		if (layer->id >= MAX_LAYERS)
+			return false;
+
+		return layer_dsq_insert_ewma[layer->id] < info->dsq_insert_below;
 	}
 
 	default:
@@ -2674,7 +2745,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 				matched_gpu = true;
 		}
 
-		/* 
+		/*
 		 * Matched GPU rule but not the rest. That means we'll never match them,
 		 * and should mark ourselves as such to avoid being forced to rematch
 		 * every time we touch the GPU.
@@ -2721,7 +2792,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
 
-	if (taskc->recheck_layer_membership != MEMBER_EXPIRED && 
+	if (taskc->recheck_layer_membership != MEMBER_EXPIRED &&
 		taskc->recheck_layer_membership != MEMBER_CANTMATCH) {
 
 		/* Default to MEMBER_NOEXPIRE unless member_expire_ms is set. */
@@ -3016,7 +3087,6 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 
 	cpuc->current_preempt = layer->preempt ||
 		(is_percpu_kthread(p) && is_percpu_kthread_preempting(p));
-	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->used_at = now;
 	taskc->running_at = now;
 	cpuc->is_protected = layer->is_protected;
@@ -3125,7 +3195,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 
 	cpuc->running_fallback = false;
 	cpuc->current_preempt = false;
-	cpuc->task_layer_id = MAX_LAYERS;
 
 	if (nr_excl_layers) {
 		cpuc->prev_excl = cpuc->current_excl;
@@ -3832,6 +3901,12 @@ static s32 init_layer(int layer_id)
 			case MATCH_HINT_EQUALS:
 				dbg("%s HINT_EQUALS %d", header, match->hint);
 				break;
+			case MATCH_SYSTEM_CPU_UTIL_BELOW:
+				dbg("%s SYSTEM_CPU_UTIL_BELOW %llu", header, match->system_cpu_util_below);
+				break;
+			case MATCH_DSQ_INSERT_BELOW:
+				dbg("%s DSQ_INSERT_BELOW %llu", header, match->dsq_insert_below);
+				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
 				return -EINVAL;
@@ -3884,7 +3959,6 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	if (!(cpuc = lookup_cpu_ctx(cpu))) {
 		return -ENOMEM;
 	}
-	cpuc->task_layer_id = MAX_LAYERS;
 
 
 	/*

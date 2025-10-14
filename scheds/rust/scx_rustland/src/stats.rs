@@ -93,7 +93,7 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
 
 pub fn monitor(intv: Duration) -> Result<()> {
     scx_utils::monitor_stats::<Metrics>(
-        &vec![],
+        &[],
         intv,
         || false,
         |metrics| metrics.format(&mut std::io::stdout()),
