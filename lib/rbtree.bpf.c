@@ -325,6 +325,10 @@ int rb_insert_node(rbtree_t __arg_arena *rbtree, rbnode_t __arg_arena *node)
 	if (unlikely(rbtree->alloc == RB_ALLOC))
 		return -EINVAL;
 
+	if (unlikely(node->left || node->right || node->parent))
+		return -EINVAL;
+	node->is_red = true;
+
 	return rb_node_insert(rbtree, node);
 }
 
