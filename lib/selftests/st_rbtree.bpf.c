@@ -332,7 +332,7 @@ u64 remove_key(rbtree_t __arg_arena *rbtree, task_ctx __arg_arena *taskc, u64 ke
 __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 {
 	const size_t numkeys = sizeof(morekeys) / sizeof(morekeys[0]);
-	task_ctx *taskc = NULL, *tmp;
+	task_ctx *taskc = NULL, *first = NULL, *last = NULL;
 	u64 key, value;
 	int errval = 1;
 	int ret;
@@ -344,7 +344,6 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 	bpf_for(i, 0, numkeys) {
 		key = morekeys[i];
 		if (rbtree->alloc != RB_ALLOC) {
-			tmp = taskc;
 			taskc = scx_static_alloc(sizeof(*taskc), 1);
 			if (!taskc) {
 				bpf_printk("out of memory");
@@ -352,13 +351,26 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 			}
 			taskc->rbnode.key = key;
 			taskc->rbnode.value = 2 * key;
-			taskc->next = tmp;
+			taskc->next = NULL;
+
+			if (!first)
+				first = taskc;
+
+			if (last)
+				last->next = taskc;
+			last = taskc;
+
 			ret = rb_insert_node(rbtree, &taskc->rbnode);
 		} else {
 			ret = rb_insert(rbtree, key, 2 * key);
 		}
 		if (ret)
 			return errval;
+
+		if (rb_integrity_check(rbtree)) {
+			bpf_printk("iteration %d", i);
+			return -EINVAL;
+		}
 
 		errval += 1;
 
@@ -397,7 +409,7 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 	for (i = 0; i < numkeys && can_loop; i += 2) {
 		key = morekeys[i];
 
-		taskc = (task_ctx *)remove_key(rbtree, taskc, key, &ret);
+		first = (task_ctx *)remove_key(rbtree, first, key, &ret);
 		if (ret) {
 			bpf_printk("Failed to remove %ld", key);
 			return errval;
@@ -412,7 +424,6 @@ __weak int scx_selftest_rbtree_remove_many(rbtree_t __arg_arena *rbtree)
 
 		errval += 1;
 	}
-
 
 	/* Ensure removed pairs are missing and added pairs are present. */
 	for (i = 0; i < numkeys && can_loop; i += 2) {
@@ -789,6 +800,7 @@ int scx_selftest_rbtree(void)
 	SCX_RBTREE_SELFTEST(insert_many, noalloc);
 	SCX_RBTREE_SELFTEST(remove_one, standard);
 	SCX_RBTREE_SELFTEST(remove_many, update);
+	SCX_RBTREE_SELFTEST(remove_many, noalloc);
 	SCX_RBTREE_SELFTEST(add_remove_circular_reverse, update);
 	SCX_RBTREE_SELFTEST(add_remove_circular, update);
 	SCX_RBTREE_SELFTEST(alloc_check, standard);
