@@ -68,17 +68,16 @@ int scx_selftest_atq_common(bool isfifo)
 
 		pids[i] = ind;
 
-
 		if (isfifo) {
-			ret = scx_atq_insert(atq, &tasks[ind]->rbnode, (u64)&tasks[ind]);
+			ret = scx_atq_insert(atq, &tasks[ind]->rbnode, (u64)tasks[ind]);
 			if (ret) {
 				bpf_printk("fifo atq insert failed with %d", ret);
 				return ret;
 			}
 		} else {
-			ret = scx_atq_insert_vtime(atq, &tasks[ind]->rbnode, (u64)&tasks[ind], tasks[ind]->vtime);
+			ret = scx_atq_insert_vtime(atq, &tasks[ind]->rbnode, (u64)tasks[ind], tasks[ind]->vtime);
 			if (ret) {
-				bpf_printk("fifo atq insert failed with %d", ret);
+				bpf_printk("vtime atq insert failed with %d", ret);
 				return ret;
 			}
 		}
@@ -88,11 +87,18 @@ int scx_selftest_atq_common(bool isfifo)
 		 * guarantees we don't revisit indices.
 		 */
 		ind = (ind + step) % NTASKS_IN_QUEUE;
+		if (rb_integrity_check(atq->tree))
+			return -EINVAL;
 	}
 
 	vtime = 0;
 	for (i = 0; i < NTASKS_IN_QUEUE && can_loop; i++ ) {
 		taskc = (task_ctx *)scx_atq_pop(atq);
+		if (!taskc) {
+			bpf_printk("NULL pointer on iteration %d", i);
+			return -EINVAL;
+		}
+
 		if (isfifo && taskc->pid != i) {
 			bpf_printk("Popped out unexpected element from FIFO atq (pid %ld, vtime %ld), expected %d", taskc->pid, taskc->vtime, i);
 			return -EINVAL;
@@ -102,9 +108,14 @@ int scx_selftest_atq_common(bool isfifo)
 		}
 
 		vtime = taskc->vtime;
+
+		if (rb_integrity_check(atq->tree))
+			return -EINVAL;
 	}
 
 #undef NTASKS_IN_QUEUE
+	if (rb_integrity_check(atq->tree))
+		return -EINVAL;
 
 	return 0;
 }
@@ -357,10 +368,10 @@ int scx_selftest_atq(void)
 	}
 
 	SCX_ATQ_SELFTEST(create);
-	SCX_ATQ_SELFTEST(fifo);
-	SCX_ATQ_SELFTEST(fail_fifo_with_weight);
 	SCX_ATQ_SELFTEST(vtime);
 	SCX_ATQ_SELFTEST(fail_vtime_without_weight);
+	SCX_ATQ_SELFTEST(fifo);
+	SCX_ATQ_SELFTEST(fail_fifo_with_weight);
 	SCX_ATQ_SELFTEST(nr_queued);
 	SCX_ATQ_SELFTEST(peek_nodestruct);
 	SCX_ATQ_SELFTEST(peek_empty);
