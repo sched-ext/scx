@@ -724,8 +724,8 @@ int save_gpu_tgid_pid(void) {
 				taskc->refresh_layer = true;
 			}
 
-			/* 
-			 * GPU kprobe fire has expired for the member. 
+			/*
+			 * GPU kprobe fire has expired for the member.
 			 * Force a recheck to see if we should put it
 			 * back into the GPU layer.
 			 */
@@ -734,7 +734,7 @@ int save_gpu_tgid_pid(void) {
 
 			timestamp = taskc->running_at;
 		}
-		
+
 		/* Same logic for the parent. */
 		if ((parent = lookup_task_ctx_may_fail(p->parent))) {
 			if(!bpf_map_lookup_elem(&gpu_tgid, &pid)) {
@@ -1803,14 +1803,14 @@ static inline void check_member_expired(struct task_ctx *taskc, u64 now)
 {
 	u64 recheck = taskc->recheck_layer_membership;
 
-	/* 
+	/*
 	 * Don't trigger a recheck if:
 	 * - Membership never expires
 	 * - Membership already expired
 	 * - Member has been tested and hasn't joined any GPU layer
 	 *   even though it matches the GPU rule.
 	 */
-	if (recheck == MEMBER_NOEXPIRE || 
+	if (recheck == MEMBER_NOEXPIRE ||
 		recheck == MEMBER_EXPIRED ||
 		recheck == MEMBER_CANTMATCH)
 		return;
@@ -2538,13 +2538,13 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			if (!last_used)
 				return !must_be_used;
 
-			/* 
-			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale. 
+			/*
+			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
 			 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
 			 */
 			recently_used = true;
-			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE && 
-				taskc->recheck_layer_membership != MEMBER_CANTMATCH && 
+			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
+				taskc->recheck_layer_membership != MEMBER_CANTMATCH &&
 				(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
 
 				recently_used = false;
@@ -2634,7 +2634,7 @@ int match_layer(u32 layer_id, struct task_ctx *taskc,
 				matched_gpu = true;
 		}
 
-		/* 
+		/*
 		 * Matched GPU rule but not the rest. That means we'll never match them,
 		 * and should mark ourselves as such to avoid being forced to rematch
 		 * every time we touch the GPU.
@@ -2681,7 +2681,7 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
 
-	if (taskc->recheck_layer_membership != MEMBER_EXPIRED && 
+	if (taskc->recheck_layer_membership != MEMBER_EXPIRED &&
 		taskc->recheck_layer_membership != MEMBER_CANTMATCH) {
 
 		/* Default to MEMBER_NOEXPIRE unless member_expire_ms is set. */
