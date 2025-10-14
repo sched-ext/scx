@@ -689,6 +689,10 @@ static void maybe_refresh_task_layer_from_hint(struct task_struct *p, struct tas
 	if (!task_hint_map_enabled)
 		return;
 
+	/* We are already going to refresh this task, skip. */
+	if (taskc->refresh_layer)
+		return;
+
 	info = lookup_task_hint_layer_id(p);
 	if (!info)
 		return;
