@@ -99,6 +99,7 @@ pub enum LayerMatch {
     AvgRuntime(u64, u64),
     HintEquals(u64),
     SystemCpuUtilBelow(f64),
+    DsqInsertBelow(f64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

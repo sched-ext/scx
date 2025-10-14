@@ -971,7 +971,8 @@ struct Stats {
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
-    system_cpu_util_ewma: f64, // 10s EWMA of system CPU utilization
+    system_cpu_util_ewma: f64,       // 10s EWMA of system CPU utilization
+    layer_dsq_insert_ewma: Vec<f64>, // 10s EWMA of per-layer DSQ insertion ratio
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
@@ -1042,6 +1043,7 @@ impl Stats {
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
             system_cpu_util_ewma: 0.0,
+            layer_dsq_insert_ewma: vec![0.0; nr_layers],
 
             bpf_stats: bpf_stats.clone(),
             prev_bpf_stats: bpf_stats,
@@ -1158,6 +1160,32 @@ impl Stats {
         let cur_bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
 
+        // Calculate per-layer DSQ insertion EWMA (10 second window)
+        const DSQ_INSERT_EWMA_SECS: f64 = 10.0;
+        let dsq_alpha = elapsed_f64 / DSQ_INSERT_EWMA_SECS.max(elapsed_f64);
+        let layer_dsq_insert_ewma: Vec<f64> = (0..self.nr_layers)
+            .map(|layer_id| {
+                let sel_local = bpf_stats.lstats[layer_id]
+                    [bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize]
+                    as f64;
+                let enq_local = bpf_stats.lstats[layer_id]
+                    [bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize]
+                    as f64;
+                let enq_dsq = bpf_stats.lstats[layer_id]
+                    [bpf_intf::layer_stat_id_LSTAT_ENQ_DSQ as usize]
+                    as f64;
+                let total_dispatches = sel_local + enq_local + enq_dsq;
+
+                let cur_ratio = if total_dispatches > 0.0 {
+                    enq_dsq / total_dispatches
+                } else {
+                    0.0
+                };
+
+                dsq_alpha * cur_ratio + (1.0 - dsq_alpha) * self.layer_dsq_insert_ewma[layer_id]
+            })
+            .collect();
+
         let processing_dur = cur_processing_dur
             .checked_sub(self.prev_processing_dur)
             .unwrap();
@@ -1181,6 +1209,7 @@ impl Stats {
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
             system_cpu_util_ewma,
+            layer_dsq_insert_ewma,
 
             bpf_stats,
             prev_bpf_stats: cur_bpf_stats,
@@ -1782,6 +1811,10 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::SystemCpuUtilBelow(threshold) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_SYSTEM_CPU_UTIL_BELOW as i32;
                             mt.system_cpu_util_below = (*threshold * 10000.0) as u64;
+                        }
+                        LayerMatch::DsqInsertBelow(threshold) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_DSQ_INSERT_BELOW as i32;
+                            mt.dsq_insert_below = (*threshold * 10000.0) as u64;
                         }
                     }
                 }
@@ -2493,7 +2526,11 @@ impl<'a> Scheduler<'a> {
                     (*info_ptr).layer_id = v.layer_id as u32;
                     (*info_ptr).system_cpu_util_below = match v.system_cpu_util_below {
                         Some(threshold) => (threshold * 10000.0) as u64,
-                        None => u64::MAX,  // disabled sentinel
+                        None => u64::MAX, // disabled sentinel
+                    };
+                    (*info_ptr).dsq_insert_below = match v.dsq_insert_below {
+                        Some(threshold) => (threshold * 10000.0) as u64,
+                        None => u64::MAX, // disabled sentinel
                     };
                 }
 
@@ -3220,9 +3257,23 @@ impl<'a> Scheduler<'a> {
             &self.gpu_task_handler,
         )?;
 
-        // Update BPF with system CPU utilization EWMA
-        self.skel.maps.bss_data.as_mut().unwrap().system_cpu_util_ewma =
-            (self.sched_stats.system_cpu_util_ewma * 10000.0) as u64;
+        // Update BPF with EWMA values
+        self.skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .system_cpu_util_ewma = (self.sched_stats.system_cpu_util_ewma * 10000.0) as u64;
+
+        for layer_id in 0..self.sched_stats.nr_layers {
+            self.skel
+                .maps
+                .bss_data
+                .as_mut()
+                .unwrap()
+                .layer_dsq_insert_ewma[layer_id] =
+                (self.sched_stats.layer_dsq_insert_ewma[layer_id] * 10000.0) as u64;
+        }
 
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
@@ -3621,10 +3672,11 @@ fn write_example_file(path: &str) -> Result<()> {
 struct HintLayerInfo {
     layer_id: usize,
     system_cpu_util_below: Option<f64>,
+    dsq_insert_below: Option<f64>,
 }
 
 fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>> {
-    let mut hint_to_layer_map = HashMap::<u64, (usize, String, Option<f64>)>::new();
+    let mut hint_to_layer_map = HashMap::<u64, (usize, String, Option<f64>, Option<f64>)>::new();
 
     let nr_specs = specs.len();
     if nr_specs == 0 {
@@ -3664,8 +3716,10 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
             }
             let mut hint_equals_cnt = 0;
             let mut system_cpu_util_below_cnt = 0;
+            let mut dsq_insert_below_cnt = 0;
             let mut hint_value: Option<u64> = None;
             let mut system_cpu_util_threshold: Option<f64> = None;
+            let mut dsq_insert_threshold: Option<f64> = None;
             for one in ands.iter() {
                 match one {
                     LayerMatch::CgroupPrefix(prefix) => {
@@ -3703,6 +3757,16 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                         system_cpu_util_threshold = Some(*threshold);
                         system_cpu_util_below_cnt += 1;
                     }
+                    LayerMatch::DsqInsertBelow(threshold) => {
+                        if *threshold < 0.0 || *threshold > 1.0 {
+                            bail!(
+                                "Spec {:?} has DsqInsertBelow threshold outside the range [0.0, 1.0]",
+                                spec.name
+                            );
+                        }
+                        dsq_insert_threshold = Some(*threshold);
+                        dsq_insert_below_cnt += 1;
+                    }
                     LayerMatch::HintEquals(hint) => {
                         if *hint > 1024 {
                             bail!(
@@ -3719,15 +3783,20 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
             if hint_equals_cnt > 1 {
                 bail!("Only 1 HintEquals match permitted per AND block");
             }
-            if system_cpu_util_below_cnt > 0 {
-                if hint_equals_cnt == 0 {
-                    bail!("SystemCpuUtilBelow must be used with HintEquals");
+            let high_freq_matcher_cnt = system_cpu_util_below_cnt + dsq_insert_below_cnt;
+            if high_freq_matcher_cnt > 0 {
+                if hint_equals_cnt != 1 {
+                    bail!("High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals");
                 }
                 if system_cpu_util_below_cnt > 1 {
                     bail!("Only 1 SystemCpuUtilBelow match permitted per AND block");
                 }
-                if ands.len() != 2 {
-                    bail!("SystemCpuUtilBelow must be used only with HintEquals (no other matchers)");
+                if dsq_insert_below_cnt > 1 {
+                    bail!("Only 1 DsqInsertBelow match permitted per AND block");
+                }
+                if ands.len() != hint_equals_cnt + system_cpu_util_below_cnt + dsq_insert_below_cnt
+                {
+                    bail!("High-frequency matchers must be used only with HintEquals (no other matchers)");
                 }
             } else if hint_equals_cnt == 1 && ands.len() != 1 {
                 bail!("HintEquals match cannot be in conjunction with other matches");
@@ -3735,7 +3804,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
 
             // Insert hint into map if present
             if let Some(hint) = hint_value {
-                if let Some((layer_id, name, _)) = hint_to_layer_map.get(&hint) {
+                if let Some((layer_id, name, _, _)) = hint_to_layer_map.get(&hint) {
                     if *layer_id != idx {
                         bail!(
                             "Spec {:?} has hint value ({}) that is already mapped to Spec {:?}",
@@ -3745,7 +3814,15 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
                         );
                     }
                 } else {
-                    hint_to_layer_map.insert(hint, (idx, spec.name.clone(), system_cpu_util_threshold));
+                    hint_to_layer_map.insert(
+                        hint,
+                        (
+                            idx,
+                            spec.name.clone(),
+                            system_cpu_util_threshold,
+                            dsq_insert_threshold,
+                        ),
+                    );
                 }
             }
         }
@@ -3786,10 +3863,16 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>
 
     Ok(hint_to_layer_map
         .into_iter()
-        .map(|(k, v)| (k, HintLayerInfo {
-            layer_id: v.0,
-            system_cpu_util_below: v.2,
-        }))
+        .map(|(k, v)| {
+            (
+                k,
+                HintLayerInfo {
+                    layer_id: v.0,
+                    system_cpu_util_below: v.2,
+                    dsq_insert_below: v.3,
+                },
+            )
+        })
         .collect())
 }
 

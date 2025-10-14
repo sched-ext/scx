@@ -119,6 +119,7 @@ const volatile bool task_hint_map_enabled;
 
 /* EWMA value updated from userspace */
 u64 system_cpu_util_ewma = 0;
+u64 layer_dsq_insert_ewma[MAX_LAYERS];
 
 static inline s32 prio_to_nice(s32 static_prio)
 {
@@ -706,6 +707,14 @@ static void maybe_refresh_task_layer_from_hint(struct task_struct *p, struct tas
 			 * to be done for tasks in the current layer, for incoming
 			 * tasks we just reject admission.
 			 */
+			taskc->refresh_layer = switch_layer == false;
+			switch_layer = false;
+		}
+	}
+
+	if (info->dsq_insert_below != (u64)-1 && taskc->layer_id < MAX_LAYERS) {
+		if (layer_dsq_insert_ewma[taskc->layer_id] >= info->dsq_insert_below) {
+			/* Same idea as above. */
 			taskc->refresh_layer = switch_layer == false;
 			switch_layer = false;
 		}
@@ -2612,6 +2621,30 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 
 		return system_cpu_util_ewma < info->system_cpu_util_below;
 	}
+	case MATCH_DSQ_INSERT_BELOW: {
+		struct task_hint *hint;
+		struct hint_layer_info *info;
+		u32 hint_val;
+
+		hint = lookup_task_hint(p);
+		if (!hint)
+			return false;
+
+		hint_val = hint->hint;
+		info = bpf_map_lookup_elem(&hint_to_layer_id_map, &hint_val);
+		if (!info)
+			return false;
+
+		/* Check if this matcher is enabled for this hint */
+		if (info->dsq_insert_below == (u64)-1)
+			return false;
+
+		/* Check per-layer DSQ insertion ratio */
+		if (layer->id >= MAX_LAYERS)
+			return false;
+
+		return layer_dsq_insert_ewma[layer->id] < info->dsq_insert_below;
+	}
 
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
@@ -3831,6 +3864,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_SYSTEM_CPU_UTIL_BELOW:
 				dbg("%s SYSTEM_CPU_UTIL_BELOW %llu", header, match->system_cpu_util_below);
+				break;
+			case MATCH_DSQ_INSERT_BELOW:
+				dbg("%s DSQ_INSERT_BELOW %llu", header, match->dsq_insert_below);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

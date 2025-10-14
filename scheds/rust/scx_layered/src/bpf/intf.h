@@ -273,6 +273,7 @@ enum layer_match_kind {
 	MATCH_CGROUP_REGEX,
 	MATCH_HINT_EQUALS,
 	MATCH_SYSTEM_CPU_UTIL_BELOW,
+	MATCH_DSQ_INSERT_BELOW,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -301,6 +302,7 @@ struct layer_match {
 	u64		max_avg_runtime_us;
 	u64		hint;
 	u64		system_cpu_util_below;	/* ratio * 10000 */
+	u64		dsq_insert_below;	/* ratio * 10000 */
 };
 
 struct layer_match_ands {
@@ -389,6 +391,7 @@ struct scx_cmd {
 struct hint_layer_info {
 	u32			layer_id;
 	u64			system_cpu_util_below;	/* ratio * 10000, u64::MAX = disabled */
+	u64			dsq_insert_below;	/* ratio * 10000, u64::MAX = disabled */
 };
 
 #endif /* __INTF_H */
