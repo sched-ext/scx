@@ -653,7 +653,7 @@ __weak int scx_selftest_rbtree_alloc_check(rbtree_t __arg_arena *rbtree)
 	if (node)
 		return 3;
 
-	node = rb_node_alloc(alloc, 0, 0);
+	node = rb_node_alloc(noalloc, 0, 0);
 	if (!node)
 		return 4;
 
@@ -711,11 +711,11 @@ int scx_selftest_rbtree(void)
 	if (!standard)
 		return -ENOMEM;
 
-	update = rb_create(RB_ALLOC, RB_DEFAULT);
+	update = rb_create(RB_ALLOC, RB_UPDATE);
 	if (!update)
 		return -ENOMEM;
 
-	duplicate = rb_create(RB_ALLOC, RB_DEFAULT);
+	duplicate = rb_create(RB_ALLOC, RB_DUPLICATE);
 	if (!duplicate)
 		return -ENOMEM;
 

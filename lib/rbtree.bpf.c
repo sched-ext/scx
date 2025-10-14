@@ -164,15 +164,12 @@ int rb_find(rbtree_t __arg_arena *rbtree, u64 key, u64 *value)
 	return 0;
 }
 
-__weak
-u64 rb_node_alloc_internal(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
+static inline rbnode_t *rb_node_alloc_common(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 {
 	rbnode_t *rbnode;
 	volatile rbnode_t *node;
 
 	/* We can't allocate an node for an rbtree that does the allocations itself. */
-	if (rbtree->alloc == RB_ALLOC)
-		return (u64)NULL;
 
 	do  {
 		rbnode = rbtree->freelist;
@@ -184,7 +181,7 @@ u64 rb_node_alloc_internal(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 	if (!rbnode)
 		rbnode = (rbnode_t *)scx_static_alloc(sizeof(*rbnode), 1);
 	if (!rbnode)
-		return (u64)NULL;
+		return NULL;
 
 	/*
 	 * XXXETSAL:  Use a second volatile variable because the verifier demotes
@@ -201,7 +198,16 @@ u64 rb_node_alloc_internal(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 	node->value = value;
 	node->is_red = true;
 
-	return (u64)rbnode;
+	return rbnode;
+}
+
+__weak
+u64 rb_node_alloc_internal(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
+{
+	if (rbtree->alloc == RB_ALLOC)
+		return (u64)NULL;
+
+	return (u64)rb_node_alloc_common(rbtree, key, value);
 }
 
 __weak __attribute__((always_inline))
@@ -334,7 +340,7 @@ int rb_insert(rbtree_t __arg_arena *rbtree, u64 key, u64 value)
 	if (unlikely(rbtree->alloc != RB_ALLOC))
 		return -EINVAL;
 
-	node = rb_node_alloc(rbtree, key, value);
+	node = rb_node_alloc_common(rbtree, key, value);
 	if (!node)
 		return -ENOMEM;
 
