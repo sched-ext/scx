@@ -979,6 +979,8 @@ struct Stats {
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
+    prev_pmu_resctrl_membw: (u64, u64), // (PMU-reported membw, resctrl-reported membw)
+
     system_cpu_util_ewma: f64,       // 10s EWMA of system CPU utilization
     layer_dsq_insert_ewma: Vec<f64>, // 10s EWMA of per-layer DSQ insertion ratio
 
@@ -1016,13 +1018,39 @@ impl Stats {
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
-                    let delta = cpu_ctxs[cpu].layer_membw_agg[layer][usage];
-                    layer_membw_agg[layer][usage] += delta;
+                    layer_membw_agg[layer][usage] += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
                 }
             }
         }
 
         layer_membw_agg
+    }
+
+    /// Use the membw reported by resctrl to normalize the values reported by hw counters.
+    /// We have the following problem:
+    /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
+    /// less transparently, since we would require different RMID for each task.
+    /// 2) We want to directly use perf counters for tracking per-task memory bandwidth, but
+    /// we can't: Non-resctrl counters do not measure the right thing (e.g., they only measure
+    /// proxies like load operations),
+    /// 3) Resctrl counters are not accessible directly so we cannot read them from the BPF side.
+    ///
+    /// Approximate per-task memory bandwidth using perf counters to measure _relative_ memory
+    /// bandwidth usage.
+    fn resctrl_read_total_membw() -> Result<u64> {
+        let mut total_membw = 0u64;
+        for entry in WalkDir::new("/sys/fs/resctrl/mon_data")
+            .min_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|x| x.path().is_dir())
+        {
+            let mut path = entry.path().to_path_buf();
+            path.push("mbm_total_bytes");
+            total_membw += fs::read_to_string(path)?.trim().parse::<u64>()?;
+        }
+
+        Ok(total_membw)
     }
 
     fn new(
@@ -1034,6 +1062,7 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
+        let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
@@ -1046,7 +1075,11 @@ impl Stats {
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
-            prev_layer_membw_agg: Self::read_layer_membw_agg(&cpu_ctxs, nr_layers),
+            // This is not normalized because we don't have enough history to do so.
+            // It should not matter too much, since the value is dropped on the first
+            // iteration.
+            prev_layer_membw_agg: pmu_membw,
+            prev_pmu_resctrl_membw: (0, 0),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
@@ -1101,6 +1134,21 @@ impl Stats {
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
 
+        // Memory BW normalization. It requires finding the delta according to perf, the delta
+        // according to resctl, and finding the factor between them. This also helps in
+        // determining whether this delta is stable.
+        //
+        // We scale only the raw PMC delta - the part of the counter incremented between two
+        // periods. This is because the scaling factor is only valid for that time period.
+        // Non-scaled samples are not comparable, while scaled ones are.
+        let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
+        let pmu_cur: u64 = cur_layer_membw_agg
+            .iter()
+            .map(|membw_agg| membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED])
+            .sum();
+        let resctrl_cur = Self::resctrl_read_total_membw()?;
+        let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
+
         // Computes the runtime deltas and converts them from ns to s.
         let compute_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
@@ -1115,8 +1163,8 @@ impl Stats {
                 .collect()
         };
 
-        // Computes the total memory traffic done since last computation and normalizes to bytes/s
-        // over the elapsed timescale.
+        // Computes the total memory traffic done since last computation and normalizes to GBs.
+        // We derive the rate of consumption elsewhere.
         let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
                 .iter()
@@ -1124,7 +1172,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| (c - p) as f64 / elapsed_f64)
+                        .map(|(c, p)| ((*c as i64 - *p as i64) as f64 / (1024 as f64).powf(3.0)))
                         .collect()
                 })
                 .collect()
@@ -1132,8 +1180,15 @@ impl Stats {
 
         let cur_layer_utils: Vec<Vec<f64>> =
             compute_diff(&cur_layer_usages, &self.prev_layer_usages);
+
+        // Scale the raw value delta by the resctrl/pmc computed factor.
         let cur_layer_membw: Vec<Vec<f64>> =
             compute_mem_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
+
+        let cur_layer_membw: Vec<Vec<f64>> = cur_layer_membw
+            .iter()
+            .map(|x| x.iter().map(|x| *x * factor).collect())
+            .collect();
 
         let metric_decay =
             |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>, decay_rate: f64| {
@@ -1213,6 +1268,8 @@ impl Stats {
             layer_membws,
             prev_layer_usages: cur_layer_usages,
             prev_layer_membw_agg: cur_layer_membw_agg,
+            // Was updated during normalization.
+            prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
@@ -2356,7 +2413,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
         // No memory BW tracking by default
-        skel.progs.scx_pmu_tc.set_autoload(membw_tracking);
+        skel.progs.scx_pmu_switch_tc.set_autoload(membw_tracking);
+        skel.progs.scx_pmu_tick_tc.set_autoload(membw_tracking);
 
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
@@ -2704,28 +2762,22 @@ impl<'a> Scheduler<'a> {
     fn clamp_target_by_membw(
         &self,
         layer: &Layer,
-        membw_limit: usize,
-        last_membw: usize,
-        low: usize,
-        high: usize,
+        membw_limit: f64,
+        membw: f64,
+        curtarget: u64,
     ) -> usize {
-        let ncpu = layer.cpus.weight();
-        let last_membw_percpu = if ncpu > 0 { last_membw / ncpu } else { 0 };
+        let ncpu: u64 = layer.cpus.weight() as u64;
+        let membw = (membw * (1024 as f64).powf(3.0)).round() as u64;
+        let membw_limit = (membw_limit * (1024 as f64).powf(3.0)).round() as u64;
+        let last_membw_percpu = if ncpu > 0 { membw / ncpu } else { 0 };
 
-        // If there's no way we're hitting the limit, we're good.
-        if last_membw_percpu * high < membw_limit {
-            return high;
+        // Either there is no memory bandwidth limit set, or the counters
+        // are not fully initialized yet. Just return the current target.
+        if membw_limit == 0 || last_membw_percpu == 0 {
+            return curtarget as usize;
         }
 
-        // If there's no way to drop our memory usage down enough,
-        // pin the target CPUs to low and drop a warning.
-        if last_membw_percpu * low > membw_limit {
-            warn!("cannot satisfy memory bw limit for layer {}", layer.name);
-            return low;
-        }
-
-        // Clamped membw is between low and high, clamp high.
-        return membw_limit / last_membw_percpu;
+        return (membw_limit / last_membw_percpu) as usize;
     }
 
     /// Calculate how many CPUs each layer would like to have if there were
@@ -2736,6 +2788,7 @@ impl<'a> Scheduler<'a> {
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.topo.all_cpus.len();
         let utils = &self.sched_stats.layer_utils;
+        let membws = &self.sched_stats.layer_membws;
 
         let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
         let mut targets: Vec<(usize, usize)> = vec![];
@@ -2756,6 +2809,9 @@ impl<'a> Scheduler<'a> {
                     membw_gb,
                     ..
                 } => {
+                    let cpus_range =
+                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
+
                     // A grouped layer can choose to include open cputime
                     // for sizing. Also, as an empty layer can only get CPU
                     // time through fallback (counted as owned) or open
@@ -2763,34 +2819,31 @@ impl<'a> Scheduler<'a> {
                     let owned = utils[idx][LAYER_USAGE_OWNED];
                     let open = utils[idx][LAYER_USAGE_OPEN];
 
+                    let membw_owned = membws[idx][LAYER_USAGE_OWNED];
+                    let membw_open = membws[idx][LAYER_USAGE_OPEN];
+
                     let mut util = owned;
+                    let mut membw = membw_owned;
                     if layer.kind.util_includes_open_cputime() || layer.nr_cpus == 0 {
                         util += open;
+                        membw += membw_open;
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
-                    let mut high = ((util / util_range.0).floor() as usize).max(low);
+                    let high = ((util / util_range.0).floor() as usize).max(low);
 
-                    if let Some(membw_limit) = membw_gb {
-                        let membw_cpus = &self.sched_stats.layer_membws[idx];
-                        let last_membw = membw_cpus.into_iter().map(|x: &f64| *x as usize).sum();
-                        trace!(
-                            "(last_membw, membw_limit): ({last_membw} bytes, {membw_limit} GiB)"
-                        );
+                    let membw_limit = match membw_gb {
+                        Some(membw_limit) => *membw_limit,
+                        None => 0.0,
+                    };
 
-                        high = self.clamp_target_by_membw(
-                            &layer,
-                            (*membw_limit * (1024_u64.pow(3) as f64)) as usize,
-                            last_membw,
-                            low,
-                            high,
-                        );
-                    }
+                    trace!(
+                        "layer {0} (membw, membw_limit): ({membw} gi_b, {membw_limit} gi_b)",
+                        layer.name
+                    );
 
                     let target = layer.cpus.weight().clamp(low, high);
-                    let cpus_range =
-                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
 
                     records.push((
                         (owned * 100.0) as u64,
@@ -2801,13 +2854,33 @@ impl<'a> Scheduler<'a> {
                         target,
                     ));
 
-                    (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
+                    let target = target.clamp(cpus_range.0, cpus_range.1);
+                    let membw_target = self.clamp_target_by_membw(
+                        &layer,
+                        membw_limit as f64,
+                        membw as f64,
+                        target as u64,
+                    );
+
+                    trace!("CPU target pre- and post-membw adjustment: {target} -> {membw_target}");
+
+                    // If there's no way to drop our memory usage down enough,
+                    // pin the target CPUs to low and drop a warning.
+                    if membw_target < cpus_range.0 {
+                        warn!("cannot satisfy memory bw limit for layer {}", layer.name);
+                        warn!("membw_target {membw_target} low {}", cpus_range.0);
+                    };
+
+                    // Memory bandwidth target cannot override imposed limits or bump
+                    // the target above what CPU usage-based throttling requires.
+                    let target = membw_target.clamp(cpus_range.0, target);
+
+                    (target, cpus_range.0)
                 }
                 LayerKind::Open { .. } => (0, 0),
             });
         }
 
-        trace!("initial targets: {:?}", &targets);
         trace!("(owned, open, util, low, high, target): {:?}", &records);
         targets
     }
@@ -3968,6 +4041,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
     attr.type_ = perf::bindings::PERF_TYPE_RAW;
     attr.config = event;
     attr.sample_type = 0u64;
+    attr.__bindgen_anon_1.sample_period = 0u64;
     attr.set_disabled(0);
 
     let perf_events_map = &skel.maps.scx_pmu_map;
@@ -4004,7 +4078,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
     }
 
     if failures > 0 {
-        trace!("failed to install {failures} counters");
+        println!("membw tracking: failed to install {failures} counters");
         // Keep going, do not fail the scheduler for this
     }
 
@@ -4030,7 +4104,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
         | "cascadelakex" | "arrowlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
         | "graniterapids" => {
             trace!("found Intel codename {codename}");
-            pmumanager.pmus.get("MEM_LOAD_RETIRED.L3_MISS")
+            pmumanager.pmus.get("LONGEST_LAT_CACHE.MISS")
         }
 
         _ => {

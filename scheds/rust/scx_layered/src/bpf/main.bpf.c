@@ -503,8 +503,15 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 			} else {
 				if (layer->kind == LAYER_KIND_OPEN)
 					cpuc->in_open_layers = false;
-				else if (cpuc->layer_id == layer_id)
+				else if (cpuc->layer_id == layer_id) {
 					cpuc->layer_id = MAX_LAYERS;
+					cpuc->in_open_layers = true;
+
+					/* Belongs to no layer, so none of these hold. */
+					cpuc->protect_owned = false;
+					cpuc->protect_owned_preempt = false;
+
+				}
 				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 			}
 		} else {
@@ -1616,13 +1623,29 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) || try_preempt_first) {
 		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
-		if (cpu >= 0) {
-			lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
-			taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
-			scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
-			return;
-		}
+		if (cpu < 0)
+			goto skip_ddsp;
+
+		/* Non-confined layers can run anywhere. */
+		if (layer->kind != LAYER_KIND_CONFINED)
+			goto do_ddsp;
+
+		struct cpu_ctx *target_cpuc = lookup_cpu_ctx(cpu);
+		if (!target_cpuc)
+			goto skip_ddsp;
+
+		/* Confined layers are only scheduled on their own CPUs. */
+		if (target_cpuc->layer_id != layer->id)
+			goto skip_ddsp;
+do_ddsp:
+
+		lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
+		taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
+		return;
 	}
+
+skip_ddsp:
 
 	if (!(task_cpuc = lookup_cpu_ctx(task_cpu)))
 		return;
@@ -1846,10 +1869,16 @@ static inline void check_member_expired(struct task_ctx *taskc, u64 now)
 		taskc->refresh_layer = true;
 }
 
-static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, u64 bytes)
+static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
 {
 	s32 task_lid;
 	u64 used;
+	u64 bytes;
+
+	/* Try to get the memory bandwidth, actively ignore the error if we fail. */
+	if (scx_pmu_read(p, membw_event, &bytes, true))
+		bytes = 0;
+	bytes *= 64;
 
 	used = now - cpuc->used_at;
 	if (!used)
@@ -1874,10 +1903,14 @@ static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now, 
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OWNED] += bytes;
-		if (cpuc->protect_owned)
+		if (cpuc->protect_owned) {
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-		if (cpuc->protect_owned_preempt)
+			cpuc->layer_membw_agg[task_lid][LAYER_USAGE_PROTECTED] += bytes;
+		}
+		if (cpuc->protect_owned_preempt) {
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
+			cpuc->layer_membw_agg[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += bytes;
+		}
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
@@ -2144,6 +2177,13 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	u32 u;
 
 	if (!(layer = lookup_layer(layer_id)))
+		return false;
+
+	/*
+	 * If a layer is confined, and the CPU doens't belong to it, we shouldn't
+	 * consume from it.
+	 */
+	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
 		return false;
 
 	skip_remote_node = layer->skip_remote_node;
@@ -2430,7 +2470,7 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	account_used(cpuc, taskc, scx_bpf_now(), 0);
+	account_used(p, cpuc, taskc, scx_bpf_now());
 }
 
 static __noinline bool match_one(struct layer *layer, struct layer_match *match, struct task_ctx *taskc,
@@ -3103,7 +3143,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct layer *task_layer;
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
-	u64 cachelines;
 	s32 task_lid;
 	u64 runtime;
 
@@ -3119,11 +3158,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
 
-	/* Try to get the memory bandwdith, actively ignore the error if we fail. */
-	if (scx_pmu_read(p, membw_event, &cachelines, false))
-		cachelines = 0;
-
-	account_used(cpuc, taskc, now, cachelines * 64);
+	account_used(p, cpuc, taskc, now);
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
 		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
