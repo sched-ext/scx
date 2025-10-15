@@ -93,6 +93,7 @@ struct queued_task_ctx {
 	u64 exec_runtime; /* Total cpu time since last sleep */
 	u64 weight; /* Task static priority */
 	u64 vtime; /* Current task's vruntime */
+	u64 enq_cnt;
 	char comm[TASK_COMM_LEN]; /* Task's executable name */
 };
 
@@ -108,6 +109,7 @@ struct dispatched_task_ctx {
 	u64 flags; /* task enqueue flags */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
 	u64 vtime; /* task deadline / vruntime */
+	u64 enq_cnt;
 };
 
 #endif /* __INTF_H */

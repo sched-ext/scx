@@ -85,6 +85,7 @@ pub struct QueuedTask {
     pub exec_runtime: u64,             // Total cpu time since last sleep (in ns)
     pub weight: u64,                   // Task priority in the range [1..10000] (default is 100)
     pub vtime: u64,                    // Current task vruntime / deadline (set by the scheduler)
+    pub enq_cnt: u64,
     pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
 }
 
@@ -111,6 +112,7 @@ pub struct DispatchedTask {
     pub flags: u64, // task's enqueue flags
     pub slice_ns: u64, // time slice in nanoseconds assigned to the task (0 = use default time slice)
     pub vtime: u64, // this value can be used to send the task's vruntime or deadline directly to the underlying BPF dispatcher
+    pub enq_cnt: u64,
 }
 
 impl DispatchedTask {
@@ -125,6 +127,7 @@ impl DispatchedTask {
             flags: task.flags,
             slice_ns: 0, // use default time slice
             vtime: 0,
+            enq_cnt: task.enq_cnt,
         }
     }
 }
@@ -164,6 +167,7 @@ impl EnqueuedMessage {
             exec_runtime: self.inner.exec_runtime,
             weight: self.inner.weight,
             vtime: self.inner.vtime,
+            enq_cnt: self.inner.enq_cnt,
             comm: self.inner.comm,
         }
     }
@@ -251,7 +255,6 @@ impl<'cb> BpfScheduler<'cb> {
 
         // Enable scheduler flags.
         skel.struct_ops.rustland_mut().flags = *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
@@ -485,6 +488,7 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Pick an idle CPU for the target PID.
+    #[allow(dead_code)]
     pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
         let prog = &mut self.skel.progs.rs_select_cpu;
         let mut args = task_cpu_arg {
@@ -552,6 +556,7 @@ impl<'cb> BpfScheduler<'cb> {
             flags,
             slice_ns,
             vtime,
+            enq_cnt,
             ..
         } = &mut dispatched_task.as_mut();
 
@@ -560,6 +565,7 @@ impl<'cb> BpfScheduler<'cb> {
         *flags = task.flags;
         *slice_ns = task.slice_ns;
         *vtime = task.vtime;
+        *enq_cnt = task.enq_cnt;
 
         // Store the task in the user ring buffer.
         //
