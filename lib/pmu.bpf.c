@@ -112,10 +112,11 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 		if (ret)
 			return ret;
 
-		if (update)
+		if (update) {
+			/* Add the delta for this scheduling interval. */
 			cntrs->agg[idx] += value.counter - cntrs->start[idx];
+		}
 
-		/* Add the delta for this scheduling interval. */
 		cntrs->start[idx] = value.counter;
 
 	}
