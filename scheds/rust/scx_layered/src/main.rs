@@ -1172,7 +1172,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| ((*c as i64 - *p as i64) as f64 / (1024 as f64).powf(3.0)))
+                        .map(|(c, p)| (*c as i64 - *p as i64) as f64 / (1024 as f64).powf(3.0))
                         .collect()
                 })
                 .collect()
