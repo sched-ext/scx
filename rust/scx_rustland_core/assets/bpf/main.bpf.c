@@ -69,6 +69,11 @@ u64 usersched_last_run_at; /* Timestamp of the last user-space scheduler executi
 static u64 nr_cpu_ids; /* Maximum possible CPU number */
 
 /*
+ * Default task time slice.
+ */
+const volatile u64 slice_ns;
+
+/*
  * Number of tasks that are queued for scheduling.
  *
  * This number is incremented by the BPF component when a task is queued to the
@@ -587,7 +592,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (cpu >= 0) {
 		if (can_direct_dispatch(cpu)) {
 			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-						 SCX_SLICE_DFL, p->scx.dsq_vtime, 0);
+						 slice_ns, p->scx.dsq_vtime, 0);
 			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		}
 		return cpu;
@@ -695,7 +700,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * scheduling action to do.
 	 */
 	if (is_usersched_task(p)) {
-		scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCHED_DSQ, slice_ns, enq_flags);
 		goto out_kick;
 	}
 
@@ -708,7 +713,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if ((is_kthread(p) && p->nr_cpus_allowed == 1) || is_kswapd(p) || is_khugepaged(p)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
+					 slice_ns, p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		goto out_kick;
 	}
@@ -738,7 +743,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 
 			if (can_direct_dispatch(cpu)) {
 				scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-							 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
+							 slice_ns, p->scx.dsq_vtime, enq_flags);
 				__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 				goto out_kick;
 			}
@@ -761,7 +766,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!task) {
 		sched_congested(p);
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
-					 SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
+					 slice_ns, p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		goto out_kick;
 	}
@@ -845,7 +850,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (prev && is_queued(prev) &&
 	    (!is_usersched_task(prev) || usersched_has_pending_tasks()))
-		prev->scx.slice = SCX_SLICE_DFL;
+		prev->scx.slice = slice_ns;
 }
 
 void BPF_STRUCT_OPS(rustland_runnable, struct task_struct *p, u64 enq_flags)
@@ -922,7 +927,7 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = 0;
-	p->scx.slice = SCX_SLICE_DFL;
+	p->scx.slice = slice_ns;
 }
 
 /*
