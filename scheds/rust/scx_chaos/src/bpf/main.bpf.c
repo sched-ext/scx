@@ -37,6 +37,39 @@
 		 scx_bpf_dispatch_vtime_from_dsq___compat(                    \
 			 (it__iter), (p), (dsq_id), (enq_flags)))
 
+/*
+ * The following defines are from 'linux/include/uapi/linux/futex.h'
+ */
+#define FUTEX_WAIT		0
+#define FUTEX_WAKE		1
+#define FUTEX_FD		2
+#define FUTEX_REQUEUE		3
+#define FUTEX_CMP_REQUEUE	4
+#define FUTEX_WAKE_OP		5
+#define FUTEX_LOCK_PI		6
+#define FUTEX_UNLOCK_PI		7
+#define FUTEX_TRYLOCK_PI	8
+#define FUTEX_WAIT_BITSET	9
+#define FUTEX_WAKE_BITSET	10
+#define FUTEX_WAIT_REQUEUE_PI	11
+#define FUTEX_CMP_REQUEUE_PI	12
+#define FUTEX_LOCK_PI2		13
+
+#define FUTEX_PRIVATE_FLAG	128
+#define FUTEX_CLOCK_REALTIME	256
+#define FUTEX_CMD_MASK		~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME)
+
+struct tp_syscall_enter_futex {
+	struct trace_entry ent;
+	int __syscall_nr;
+	u32 __attribute__((btf_type_tag("user"))) * uaddr;
+	int op;
+	u32 val;
+	struct __kernel_timespec __attribute__((btf_type_tag("user"))) * utime;
+	u32 __attribute__((btf_type_tag("user"))) * uaddr2;
+	u32 val3;
+};
+
 const volatile int  ppid_targeting_ppid = 1;
 const volatile bool ppid_targeting_inclusive =
 	false; /* include ppid_targeting_ppid in chaos */
@@ -59,6 +92,11 @@ const volatile u64 degradation_frac7	     = 0;
 const volatile u32 kprobe_delays_freq_frac32 = 1;
 const volatile u64 kprobe_delays_min_ns	     = 1;
 const volatile u64 kprobe_delays_max_ns	     = 2;
+
+const volatile u64 futex_uncontended_delay_ns = 1;
+const volatile u64 futex_contended_delay_min_ns = 1;
+const volatile u64 futex_contended_delay_max_ns = 1;
+
 
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -88,6 +126,30 @@ struct {
 	__type(key, u32);
 	__type(value, u64);
 } chaos_stats	       SEC(".maps");
+
+struct chaos_futex_key {
+	u32	tgid;
+	u64	uaddr;
+};
+
+struct chaos_futex_waiter {
+	struct bpf_spin_lock	lock;
+	u64			timeout_key;
+	u32			pid;
+	s32			delay_dsq_cpu_idx;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024*1024);
+	__type(key, struct chaos_futex_key);
+	__type(value, struct chaos_futex_waiter);
+} chaos_futex_waiters SEC(".maps");
+
+static __always_inline u64 chaos_get_prandom_u64()
+{
+	return ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
+}
 
 struct chaos_task_ctx *lookup_create_chaos_task_ctx(struct task_struct *p)
 {
@@ -166,8 +228,14 @@ choose_chaos(struct chaos_task_ctx *taskc)
 static __always_inline bool
 chaos_trait_skips_select_cpu(struct chaos_task_ctx *taskc)
 {
-	return taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS ||
-	       taskc->next_trait == CHAOS_TRAIT_KPROBE_RANDOM_DELAYS;
+	switch (taskc->next_trait) {
+	case CHAOS_TRAIT_RANDOM_DELAYS:
+	case CHAOS_TRAIT_KPROBE_RANDOM_DELAYS:
+	case CHAOS_TRAIT_FUTEX_DELAYS:
+		return true;
+	default:
+		return false;
+	}
 }
 
 static __always_inline u64 get_cpu_delay_dsq(int cpu_idx)
@@ -306,6 +374,134 @@ out:
 	return ret;
 }
 
+// Traverse a DSQ to find the first element with a key with hideous complexity.
+// This is O(n) in DSQ members.
+//
+// To improve:
+// - Add this as a kfunc to the kernel where it can be O(log n)
+// - Use arena DSQs where we can get this behaviour in O(log n)
+static __always_inline
+void bpf_iter_scx_dsq_search(struct bpf_iter_scx_dsq *it,
+			     struct task_struct **p,
+			     u64 dsq_id,
+			     u64 flags,
+			     u64 key)
+{
+	bpf_iter_scx_dsq_new(it, dsq_id, flags);
+
+	while((*p = bpf_iter_scx_dsq_next(it))) {
+		if ((*p)->scx.dsq_vtime == key)
+			return;
+
+		if ((*p)->scx.dsq_vtime > key)
+			break;
+	}
+
+	*p = NULL;
+}
+
+static __always_inline bool update_delayed_task_vtime(s32 cpu_idx, u64 key,
+						      u64 pid, u64 new_vtime)
+{
+	u64 dsq_id = get_cpu_delay_dsq(cpu_idx);
+	struct bpf_iter_scx_dsq it;
+	struct task_struct *p;
+	bool ret = false;
+
+	bpf_iter_scx_dsq_search(&it, &p, dsq_id, 0, key);
+	if (!p)
+		goto out;
+
+	while (p->pid != pid && (p = bpf_iter_scx_dsq_next(&it)) && p->scx.dsq_vtime == key) {}
+	if (!p || p->pid != pid)
+		goto out;
+
+	ret = true;
+	__COMPAT_chaos_scx_bpf_dsq_move_set_vtime(&it, new_vtime);
+	ret = __COMPAT_chaos_scx_bpf_dsq_move_vtime(&it, p, dsq_id, 0);
+
+out:
+	bpf_iter_scx_dsq_destroy(&it);
+	return ret;
+}
+
+__weak s32 enqueue_futex_delay(struct task_struct *p __arg_trusted,
+			       u64 enq_flags,
+			       struct chaos_task_ctx *taskc __arg_nonnull)
+{
+	s64 ret;
+	struct chaos_futex_key key;
+	struct chaos_futex_waiter *entry;
+	struct chaos_futex_waiter val;
+	u64 vtime, now;
+	s32 cpu;
+
+	key.tgid = p->tgid;
+	key.uaddr = taskc->futex_uaddr;
+
+	// First ensure an entry exists but in a largely empty state. We need the
+	// spinlock to correctly interlock with the delay DSQ.
+	val.pid = -1;
+
+	ret = bpf_map_update_elem(&chaos_futex_waiters, &key, &val, BPF_NOEXIST);
+	if (ret && ret != -EEXIST) {
+		scx_bpf_error("failed to create chaos_futex_waiter in runnable_futex_delays");
+		return false;
+	}
+
+	// Get the real element. This might be an empty element that we inserted
+	// or it might be an element filled with another PID. It doesn't matter
+	// whether we inserted the element or somebody else did, this races.
+	entry = (struct chaos_futex_waiter*)bpf_map_lookup_elem(&chaos_futex_waiters, &key);
+	if (!entry) {
+		scx_bpf_error("failed to lookup chaos_futex_waiter in runnable_futex_delays");
+		return false;
+	}
+
+	// enqueue ourselves before entering the spinlock. critical sections
+	// can't call kfuncs.
+	now = bpf_ktime_get_ns();
+	cpu = bpf_get_smp_processor_id();
+
+	chaos_stat_inc(CHAOS_STAT_TRAIT_FUTEX_DELAYS);
+	scx_bpf_dsq_insert_vtime(p, get_cpu_delay_dsq(cpu), 0, now + futex_uncontended_delay_ns, enq_flags);
+
+	// critical sections can't call kfuncs which makes this very complicated.
+	// we must have already enqueued ourselves, and we must then insert
+	// ourselves in the hashmap. when we take a task out of the lock we
+	// should attempt to re-queue it after. the task will not hit this path
+	// again until it has been re-queued, thus this isn't racy - either we
+	// will re-queue it, or it will run naturally when its delay expires.
+	// This might mean it doesn't get quite enough delay, but no invariants
+	// are broken.
+	bpf_spin_lock(&entry->lock);
+
+	val.pid = entry->pid;
+	val.timeout_key = entry->timeout_key;
+	val.delay_dsq_cpu_idx = entry->delay_dsq_cpu_idx;
+
+	// enqueue ourselves and prepare the metadata for the next one to come along
+	entry->pid = p->pid;
+	entry->timeout_key = now + futex_uncontended_delay_ns;
+	entry->delay_dsq_cpu_idx = cpu;
+
+	bpf_spin_unlock(&entry->lock);
+
+	// re-queue task that has a contender behind it
+	if (val.pid != -1) {
+		vtime = now + futex_contended_delay_min_ns;
+		if (futex_contended_delay_min_ns != futex_contended_delay_max_ns) {
+			vtime += chaos_get_prandom_u64()
+				% (futex_contended_delay_max_ns - futex_contended_delay_min_ns);
+		}
+
+		if (update_delayed_task_vtime(val.delay_dsq_cpu_idx, val.timeout_key, val.pid, vtime))
+			chaos_stat_inc(CHAOS_STAT_TRAIT_FUTEX_DELAYS_CONTENDED);
+	}
+
+	return true;
+}
+
 __weak s32 enqueue_random_delay(struct task_struct *p	     __arg_trusted,
 				u64			     enq_flags,
 				struct chaos_task_ctx *taskc __arg_nonnull,
@@ -334,6 +530,10 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 					   random_delays_max_ns);
 		chaos_stat_inc(CHAOS_STAT_TRAIT_RANDOM_DELAYS);
 		break;
+
+	case CHAOS_TRAIT_FUTEX_DELAYS:
+		out = enqueue_futex_delay(p, enq_flags, taskc);
+		break;
 	case CHAOS_TRAIT_NONE:
 		chaos_stat_inc(CHAOS_STAT_CHAOS_SKIPPED);
 		out = false;
@@ -345,7 +545,6 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 		break;
 	}
 
-	taskc->next_trait = CHAOS_TRAIT_NONE;
 	return out;
 }
 
@@ -580,10 +779,10 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted,
 	if (promise.kind == P2DQ_ENQUEUE_PROMISE_FAILED)
 		goto cleanup;
 
-	if ((taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS ||
-	     taskc->next_trait == CHAOS_TRAIT_KPROBE_RANDOM_DELAYS) &&
-	    enqueue_chaotic(p, enq_flags, taskc))
+	if (enqueue_chaotic(p, enq_flags, taskc)) {
+		taskc->next_trait = CHAOS_TRAIT_NONE;
 		goto cleanup;
+	}
 
 	// NOTE: this may not work for affinitized tasks because p2dq does
 	// direct dispatch in some situations.
@@ -695,6 +894,52 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init_task, struct task_struct *p,
 
 	return 0;
 }
+
+SEC("?tracepoint/syscalls/sys_enter_futex")
+int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
+{
+	struct task_struct *p;
+	struct chaos_task_ctx *taskc;
+	int futex_op;
+	s32 ret;
+
+	// should be detached from userspace but if it is attached then no-op
+	if (!futex_uncontended_delay_ns && !futex_contended_delay_min_ns &&
+	     !futex_contended_delay_max_ns)
+		return 0;
+
+	p = (struct task_struct *)bpf_get_current_task_btf();
+	taskc = lookup_create_chaos_task_ctx(p);
+	if (!taskc)
+		return 0;
+
+	if (!(taskc->match & CHAOS_MATCH_COMPLETE)) {
+		ret = calculate_chaos_match(p);
+		if (ret) {
+			scx_bpf_error("failed to match task");
+			return 0;
+		}
+	}
+
+	if (taskc->match & CHAOS_MATCH_EXCLUDED)
+		return 0;
+
+	futex_op = ctx->op & FUTEX_CMD_MASK;
+
+	if (futex_op != FUTEX_WAIT && futex_op != FUTEX_WAIT_BITSET &&
+	      futex_op != FUTEX_WAIT_REQUEUE_PI)
+		return 0;
+
+	// The task is either about to wait because it hit FUTEX_WAIT on the slow
+	// path or hit the fast path. The fast path is irrelevant for our purposes
+	// as we have no scheduler input there, so it's safe to delay our work
+	// until a struct_ops .runnable callback comes along.
+	taskc->pending_trait = CHAOS_TRAIT_FUTEX_DELAYS;
+	taskc->futex_uaddr = (u64)ctx->uaddr;
+
+	return 0;
+}
+
 
 SEC("kprobe/generic")
 int generic(struct pt_regs *ctx)
