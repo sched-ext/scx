@@ -76,15 +76,15 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
-    pub pid: i32,                      // pid that uniquely identifies a task
-    pub cpu: i32,                      // CPU previously used by the task
-    pub nr_cpus_allowed: u64,          // Number of CPUs that the task can use
-    pub flags: u64,                    // task's enqueue flags
-    pub start_ts: u64,                 // Timestamp since last time the task ran on a CPU (in ns)
-    pub stop_ts: u64,                  // Timestamp since last time the task released a CPU (in ns)
-    pub exec_runtime: u64,             // Total cpu time since last sleep (in ns)
-    pub weight: u64,                   // Task priority in the range [1..10000] (default is 100)
-    pub vtime: u64,                    // Current task vruntime / deadline (set by the scheduler)
+    pub pid: i32,             // pid that uniquely identifies a task
+    pub cpu: i32,             // CPU previously used by the task
+    pub nr_cpus_allowed: u64, // Number of CPUs that the task can use
+    pub flags: u64,           // task's enqueue flags
+    pub start_ts: u64,        // Timestamp since last time the task ran on a CPU (in ns)
+    pub stop_ts: u64,         // Timestamp since last time the task released a CPU (in ns)
+    pub exec_runtime: u64,    // Total cpu time since last sleep (in ns)
+    pub weight: u64,          // Task priority in the range [1..10000] (default is 100)
+    pub vtime: u64,           // Current task vruntime / deadline (set by the scheduler)
     pub enq_cnt: u64,
     pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
 }
@@ -254,8 +254,8 @@ impl<'cb> BpfScheduler<'cb> {
         skel.maps.rodata_data.as_mut().unwrap().smt_enabled = topo.smt_enabled;
 
         // Enable scheduler flags.
-        skel.struct_ops.rustland_mut().flags = *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+        skel.struct_ops.rustland_mut().flags =
+            *compat::SCX_OPS_ENQ_LAST | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
