@@ -163,6 +163,9 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        let slice_ns = opts.slice_us * NSEC_PER_USEC;
+        let slice_ns_min = opts.slice_us_min * NSEC_PER_USEC;
+
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             open_object,
@@ -171,6 +174,7 @@ impl<'a> Scheduler<'a> {
             opts.partial,
             opts.verbose,
             true, // Enable built-in idle CPU selection policy
+            slice_ns_min,
             "rustland",
         )?;
 
@@ -189,8 +193,8 @@ impl<'a> Scheduler<'a> {
             tasks: BTreeSet::new(),
             vruntime_now: 0,
             init_page_faults: 0,
-            slice_ns: opts.slice_us * NSEC_PER_USEC,
-            slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
+            slice_ns,
+            slice_ns_min,
         })
     }
 

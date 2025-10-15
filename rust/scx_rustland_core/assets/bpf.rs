@@ -213,6 +213,7 @@ impl<'cb> BpfScheduler<'cb> {
         partial: bool,
         debug: bool,
         builtin_idle: bool,
+        slice_ns: u64,
         name: &str,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -263,6 +264,7 @@ impl<'cb> BpfScheduler<'cb> {
         skel.maps.rodata_data.as_mut().unwrap().usersched_pid = std::process::id();
         skel.maps.rodata_data.as_mut().unwrap().khugepaged_pid = Self::khugepaged_pid();
         skel.maps.rodata_data.as_mut().unwrap().builtin_idle = builtin_idle;
+        skel.maps.rodata_data.as_mut().unwrap().slice_ns = slice_ns;
         skel.maps.rodata_data.as_mut().unwrap().debug = debug;
         let _ = Self::set_scx_ops_name(&mut skel.struct_ops.rustland_mut().name, name);
 

@@ -116,6 +116,7 @@ impl<'a> Scheduler<'a> {
             false,    // partial (false = include all tasks)
             false,    // debug (false = debug mode off)
             true,     // builtin_idle (true = allow BPF to use idle CPUs if available)
+            SLICE_NS, // default time slice (for tasks automatically dispatched by the backend)
             "rlfifo", // name of the scx ops
         )?;
         Ok(Self { bpf })
