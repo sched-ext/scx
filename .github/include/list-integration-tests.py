@@ -132,6 +132,7 @@ def main():
             "scx_rustland",
             "scx_rusty",
             "scx_tickless",
+            "scx_wd40",
         ]:
             reqs = kernel_reqs.get(scheduler, {})
             allowlist = reqs.get("allowlist", [])
