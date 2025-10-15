@@ -273,6 +273,7 @@ next:
 	if (!next->pid)
 		return 0;
 
+	/* Skip update when there was no previous task to obtain delta */
 	return scx_pmu_event_start(next, false);
 }
 
