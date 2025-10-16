@@ -63,6 +63,8 @@ const volatile u64 kprobe_delays_max_ns	     = 2;
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
+#define U64_MAX ((u64)~0ULL)
+
 enum chaos_timer_callbacks {
 	CHAOS_TIMER_CHECK_QUEUES,
 	CHAOS_MAX_TIMERS,
@@ -141,6 +143,33 @@ static __always_inline void chaos_stat_inc(enum chaos_stat_idx stat)
 	u64 *cnt_p = bpf_map_lookup_elem(&chaos_stats, &stat);
 	if (cnt_p)
 		(*cnt_p)++;
+}
+
+/*
+ * Get the next time a delay DSQ needs processing.
+ *
+ * Safe for delay DSQs which use monotonic time (vtimes won't wrap to U64_MAX).
+ * Must be called with RCU read lock held.
+ */
+static __always_inline u64 delay_dsq_next_time(u64 dsq_id)
+{
+	struct task_struct *first_p;
+	u64		    vtime;
+
+	// If we don't have native peek, fall back to always iterating
+	if (!bpf_ksym_exists(scx_bpf_dsq_peek)) {
+		chaos_stat_inc(CHAOS_STAT_PEEK_NEEDS_PROCESSING);
+		return 0;
+	}
+
+	first_p = scx_bpf_dsq_peek(dsq_id);
+	if (!first_p) {
+		chaos_stat_inc(CHAOS_STAT_PEEK_EMPTY_DSQ);
+		return U64_MAX;
+	}
+
+	vtime = first_p->scx.dsq_vtime;
+	return vtime;
 }
 
 static __always_inline enum chaos_trait_kind
@@ -362,9 +391,25 @@ __weak u64 check_dsq_times(int cpu_idx)
 	u64		    next_trigger_time = 0;
 	u64		    now		      = bpf_ktime_get_ns();
 	bool		    has_kicked	      = false;
+	u64		    dsq_id	      = get_cpu_delay_dsq(cpu_idx);
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(cpu_idx), 0) {
+
+	next_trigger_time = delay_dsq_next_time(dsq_id);
+	if (next_trigger_time > now + chaos_timer_check_queues_slack_ns) {
+		chaos_stat_inc(CHAOS_STAT_PEEK_NOT_READY);
+		// DSQ empty (U64_MAX) or first task beyond slack window
+		bpf_rcu_read_unlock();
+		return next_trigger_time == U64_MAX ? 0 : next_trigger_time;
+	}
+
+	chaos_stat_inc(CHAOS_STAT_PEEK_NEEDS_PROCESSING);
+
+	// Need to iterate: no peek support (0), task ready, or task within slack window
+	next_trigger_time = 0;
+
+	// Need to iterate to handle ready tasks
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			break;
@@ -387,8 +432,8 @@ __weak u64 check_dsq_times(int cpu_idx)
 		if (next_trigger_time > now + chaos_timer_check_queues_slack_ns)
 			break;
 	}
-	bpf_rcu_read_unlock();
 
+	bpf_rcu_read_unlock();
 	return next_trigger_time;
 }
 
@@ -531,9 +576,17 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 	struct enqueue_promise promise;
 	struct chaos_task_ctx *taskc;
 	struct task_struct    *p;
-	u64		       now = bpf_ktime_get_ns();
+	u64		       now    = bpf_ktime_get_ns();
+	u64		       dsq_id = get_cpu_delay_dsq(-1);
 
-	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(-1), 0) {
+	// Check if we need to process the delay DSQ
+	if (delay_dsq_next_time(dsq_id) > now) {
+		chaos_stat_inc(CHAOS_STAT_PEEK_NOT_READY);
+		goto p2dq;
+	}
+	chaos_stat_inc(CHAOS_STAT_PEEK_NEEDS_PROCESSING);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
@@ -557,6 +610,7 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 		bpf_task_release(p);
 	}
 
+p2dq:
 	return p2dq_dispatch_impl(cpu, prev);
 }
 
