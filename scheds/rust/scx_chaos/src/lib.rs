@@ -200,6 +200,10 @@ impl Scheduler {
             kprobe_random_delays: stats
                 [bpf_intf::chaos_stat_idx_CHAOS_STAT_KPROBE_RANDOM_DELAYS as usize],
             timer_kicks: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TIMER_KICKS as usize],
+            peek_empty_dsq: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_PEEK_EMPTY_DSQ as usize],
+            peek_not_ready: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_PEEK_NOT_READY as usize],
+            peek_needs_processing: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_PEEK_NEEDS_PROCESSING as usize],
         }
     }
 
