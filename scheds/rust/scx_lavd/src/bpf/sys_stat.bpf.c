@@ -99,6 +99,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_sum = 0;
+		cpdomc->avg_util_sum = 0;
 		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
 		if (per_cpu_dsq) {
 			bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
@@ -255,8 +256,10 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
-		if (cpdomc)
+		if (cpdomc) {
 			cpdomc->cur_util_sum += cpuc->cur_util;
+			cpdomc->avg_util_sum += cpuc->avg_util;
+		}
 
 		/*
 		 * Accmulate system-wide idle time.
