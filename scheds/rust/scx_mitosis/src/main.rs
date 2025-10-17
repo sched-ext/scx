@@ -8,7 +8,7 @@ pub mod bpf_intf;
 mod stats;
 
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
@@ -477,37 +477,34 @@ impl<'a> Scheduler<'a> {
         // Create cells we don't have yet, drop cells that are no longer in use.
         // If we continue to drop cell metrics once a cell is removed, we'll need to make sure we
         // flush metrics for a cell before we remove it completely.
-        let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
-        for i in 0..MAX_CELLS {
-            let cell_idx = i as u32;
-            let bpf_cell = cells[i];
-            let in_use = unsafe {
-                let ptr = &bpf_cell.in_use as *const u32;
-                (ptr as *const std::sync::atomic::AtomicU32)
-                    .as_ref()
-                    .unwrap()
-                    .load(std::sync::atomic::Ordering::Acquire)
-            };
-            if in_use > 0 {
-                let cpus = cell_to_cpus.get(&cell_idx).cloned().unwrap_or_else(|| {
-                    warn!(
-                        "Cell {} marked in_use but has no CPUs assigned, using empty cpumask",
-                        cell_idx
-                    );
-                    Cpumask::new()
-                });
-                self.cells
-                    .entry(cell_idx)
-                    .or_insert_with(|| Cell {
-                        cpus: Cpumask::new(),
-                    })
-                    .cpus = cpus;
-                self.metrics.cells.insert(cell_idx, CellMetrics::default());
-            } else {
-                self.cells.remove(&cell_idx);
-                self.metrics.cells.remove(&cell_idx);
-            }
+        //
+        // IMPORTANT: We determine which cells exist based on CPU assignments (which are
+        // synchronized by applied_configuration_seq), NOT by reading the in_use field
+        // separately. This avoids a TOCTOU race where a cell's in_use is set before
+        // CPUs are assigned.
+
+        // Cell 0 (root cell) always exists even if it has no CPUs temporarily
+        let cells_with_cpus: HashSet<u32> = cell_to_cpus.keys().copied().collect();
+        let mut active_cells = cells_with_cpus.clone();
+        active_cells.insert(0);
+
+        for cell_idx in &active_cells {
+            let cpus = cell_to_cpus
+                .get(cell_idx)
+                .cloned()
+                .unwrap_or_else(|| Cpumask::new());
+            self.cells
+                .entry(*cell_idx)
+                .or_insert_with(|| Cell {
+                    cpus: Cpumask::new(),
+                })
+                .cpus = cpus;
+            self.metrics.cells.insert(*cell_idx, CellMetrics::default());
         }
+
+        // Remove cells that no longer have CPUs assigned
+        self.cells.retain(|&k, _| active_cells.contains(&k));
+        self.metrics.cells.retain(|&k, _| active_cells.contains(&k));
 
         self.last_configuration_seq = Some(applied_configuration);
 

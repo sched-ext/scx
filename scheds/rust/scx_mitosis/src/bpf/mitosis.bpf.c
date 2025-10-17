@@ -1216,11 +1216,13 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 
 	record_cgroup_exit(cgrp->kn->id);
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
-					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
-		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
-			      cgrp->kn->id);
-		return -ENOENT;
+	/*
+	 * Use lookup without CREATE since this is the exit path. If the cgroup
+	 * doesn't have storage, it's not a cell owner anyway.
+	 */
+	if (!(cgc = lookup_cgrp_ctx(cgrp))) {
+		/* Errors above on failure, verifier. */
+		return 0;
 	}
 
 	if (cgc->cell_owner) {
