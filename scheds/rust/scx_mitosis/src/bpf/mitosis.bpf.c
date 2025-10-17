@@ -33,7 +33,8 @@ const volatile bool	     smt_enabled      = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64	     slice_ns;
-const volatile u64	     root_cgid = 1;
+const volatile u64	     root_cgid		  = 1;
+const volatile bool	     debug_events_enabled = false;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -42,6 +43,18 @@ const volatile u64	     root_cgid = 1;
  */
 u32 configuration_seq;
 u32 applied_configuration_seq;
+
+/*
+ * Debug events circular buffer
+ */
+u32 debug_event_pos;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, DEBUG_EVENTS_BUF_SIZE);
+	__type(key, u32);
+	__type(value, struct debug_event);
+} debug_events SEC(".maps");
 
 struct update_timer {
 	struct bpf_timer timer;
@@ -244,6 +257,70 @@ static inline int free_cell(int cell_idx)
 
 	WRITE_ONCE(c->in_use, 0);
 	return 0;
+}
+
+/*
+ * Record debug events to the circular buffer
+ */
+static inline void record_cgroup_init(u64 cgid)
+{
+	struct debug_event *event;
+	u32		    pos, idx;
+
+	if (likely(!debug_events_enabled))
+		return;
+
+	pos   = __sync_fetch_and_add(&debug_event_pos, 1);
+	idx   = pos % DEBUG_EVENTS_BUF_SIZE;
+
+	event = bpf_map_lookup_elem(&debug_events, &idx);
+	if (unlikely(!event))
+		return;
+
+	event->timestamp	= scx_bpf_now();
+	event->event_type	= DEBUG_EVENT_CGROUP_INIT;
+	event->cgroup_init.cgid = cgid;
+}
+
+static inline void record_init_task(u64 cgid, u32 pid)
+{
+	struct debug_event *event;
+	u32		    pos, idx;
+
+	if (likely(!debug_events_enabled))
+		return;
+
+	pos   = __sync_fetch_and_add(&debug_event_pos, 1);
+	idx   = pos % DEBUG_EVENTS_BUF_SIZE;
+
+	event = bpf_map_lookup_elem(&debug_events, &idx);
+	if (unlikely(!event))
+		return;
+
+	event->timestamp      = scx_bpf_now();
+	event->event_type     = DEBUG_EVENT_INIT_TASK;
+	event->init_task.cgid = cgid;
+	event->init_task.pid  = pid;
+}
+
+static inline void record_cgroup_exit(u64 cgid)
+{
+	struct debug_event *event;
+	u32		    pos, idx;
+
+	if (likely(!debug_events_enabled))
+		return;
+
+	pos   = __sync_fetch_and_add(&debug_event_pos, 1);
+	idx   = pos % DEBUG_EVENTS_BUF_SIZE;
+
+	event = bpf_map_lookup_elem(&debug_events, &idx);
+	if (unlikely(!event))
+		return;
+
+	event->timestamp	= scx_bpf_now();
+	event->event_type	= DEBUG_EVENT_CGROUP_EXIT;
+	event->cgroup_exit.cgid = cgid;
 }
 
 /*
@@ -1081,6 +1158,9 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
 	struct cgrp_ctx *cgc;
+
+	record_cgroup_init(cgrp->kn->id);
+
 	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
@@ -1126,6 +1206,10 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
+	int		 ret;
+
+	record_cgroup_exit(cgrp->kn->id);
+
 	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
@@ -1134,7 +1218,6 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 	}
 
 	if (cgc->cell_owner) {
-		int ret;
 		if ((ret = free_cell(cgc->cell)))
 			return ret;
 		/*
@@ -1180,6 +1263,8 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 {
 	struct task_ctx	   *tctx;
 	struct bpf_cpumask *cpumask;
+
+	record_init_task(args->cgroup->kn->id, p->pid);
 
 	tctx = bpf_task_storage_get(&task_ctxs, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -1278,6 +1363,55 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
 			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
 			     scx_bpf_dsq_nr_queued(dsq_id));
+	}
+
+	if (!debug_events_enabled)
+		return;
+
+	/* Dump debug events */
+	scx_bpf_dump("\n");
+	scx_bpf_dump("DEBUG EVENTS (last %d):\n", DEBUG_EVENTS_BUF_SIZE);
+
+	u32 total_events = READ_ONCE(debug_event_pos);
+	u32 start_idx	 = total_events > DEBUG_EVENTS_BUF_SIZE ?
+				   total_events - DEBUG_EVENTS_BUF_SIZE :
+				   0;
+
+	bpf_for(i, 0, DEBUG_EVENTS_BUF_SIZE)
+	{
+		u32 event_num = start_idx + i;
+		if (event_num >= total_events)
+			break;
+
+		u32		    idx = event_num % DEBUG_EVENTS_BUF_SIZE;
+		struct debug_event *event =
+			bpf_map_lookup_elem(&debug_events, &idx);
+		if (!event)
+			continue;
+
+		switch (event->event_type) {
+		case DEBUG_EVENT_CGROUP_INIT:
+			scx_bpf_dump("[%3d] CGROUP_INIT cgid=%llu ts=%llu\n",
+				     event_num, event->cgroup_init.cgid,
+				     event->timestamp);
+			break;
+		case DEBUG_EVENT_INIT_TASK:
+			scx_bpf_dump(
+				"[%3d] INIT_TASK   cgid=%llu pid=%u ts=%llu\n",
+				event_num, event->init_task.cgid,
+				event->init_task.pid, event->timestamp);
+			break;
+		case DEBUG_EVENT_CGROUP_EXIT:
+			scx_bpf_dump("[%3d] CGROUP_EXIT cgid=%llu ts=%llu\n",
+				     event_num, event->cgroup_exit.cgid,
+				     event->timestamp);
+			break;
+		default:
+			scx_bpf_dump("[%3d] UNKNOWN     type=%u ts=%llu\n",
+				     event_num, event->event_type,
+				     event->timestamp);
+			break;
+		}
 	}
 }
 

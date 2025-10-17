@@ -19,17 +19,44 @@ typedef _Bool bool;
 #endif
 
 enum consts {
-	CACHELINE_SIZE	  = 64,
-	MAX_CPUS_SHIFT	  = 9,
-	MAX_CPUS	  = 1 << MAX_CPUS_SHIFT,
-	MAX_CPUS_U8	  = MAX_CPUS / 8,
-	MAX_CELLS	  = 16,
-	USAGE_HALF_LIFE	  = 100000000, /* 100ms */
-	TIMER_INTERVAL_NS = 100000000, /* 100 ms */
-	CLOCK_BOOTTIME	  = 7,
+	CACHELINE_SIZE	      = 64,
+	MAX_CPUS_SHIFT	      = 9,
+	MAX_CPUS	      = 1 << MAX_CPUS_SHIFT,
+	MAX_CPUS_U8	      = MAX_CPUS / 8,
+	MAX_CELLS	      = 16,
+	USAGE_HALF_LIFE	      = 100000000, /* 100ms */
+	TIMER_INTERVAL_NS     = 100000000, /* 100 ms */
+	CLOCK_BOOTTIME	      = 7,
 
-	PCPU_BASE	  = 0x80000000,
-	MAX_CG_DEPTH	  = 256,
+	PCPU_BASE	      = 0x80000000,
+	MAX_CG_DEPTH	      = 256,
+
+	DEBUG_EVENTS_BUF_SIZE = 256,
+};
+
+/* Debug event types */
+enum debug_event_type {
+	DEBUG_EVENT_CGROUP_INIT,
+	DEBUG_EVENT_INIT_TASK,
+	DEBUG_EVENT_CGROUP_EXIT,
+};
+
+/* Debug event record - discriminated union */
+struct debug_event {
+	u64 timestamp;
+	u32 event_type;
+	union {
+		struct {
+			u64 cgid;
+		} cgroup_init;
+		struct {
+			u64 cgid;
+			u32 pid;
+		} init_task;
+		struct {
+			u64 cgid;
+		} cgroup_exit;
+	};
 };
 
 /* Statistics */

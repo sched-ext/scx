@@ -90,6 +90,11 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
+    /// Enable debug event tracking for cgroup_init, init_task, and cgroup_exit.
+    /// Events are recorded in a ring buffer and output in dump().
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    debug_events: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -176,6 +181,7 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
         skel.maps.rodata_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
+        skel.maps.rodata_data.as_mut().unwrap().debug_events_enabled = opts.debug_events;
 
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
