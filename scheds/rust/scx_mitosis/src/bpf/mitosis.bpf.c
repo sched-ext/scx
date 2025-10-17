@@ -1130,6 +1130,10 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	used			 = now - tctx->started_running_at;
 	tctx->started_running_at = now;
 	/* scale the execution time by the inverse of the weight and charge */
+	if (p->scx.weight == 0) {
+		scx_bpf_error("Task %d has zero weight", p->pid);
+		return;
+	}
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
