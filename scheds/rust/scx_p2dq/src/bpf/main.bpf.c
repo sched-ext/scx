@@ -996,9 +996,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// Handle affinitized tasks separately
-	if (!taskc->all_cpus ||
-	    (p->cpus_ptr == &p->cpus_mask &&
-	     p->nr_cpus_allowed != topo_config.nr_cpus)) {
+	if (!taskc->all_cpus) {
 		if (!__COMPAT_is_enq_cpu_selected(enq_flags) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			cpu = pick_idle_affinitized_cpu(p,
@@ -1025,9 +1023,12 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			enq_flags |= SCX_ENQ_PREEMPT;
 
 		// Idle affinitized tasks can be direct dispatched.
+		// Use SCX_DSQ_LOCAL instead of SCX_DSQ_LOCAL_ON to avoid race
+		// condition where affinity changes after scx_bpf_dsq_insert() but
+		// before kernel's deferred dispatch executes.
 		if (ret->has_cleared_idle || cpuc->nice_task) {
 			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+			ret->fifo.dsq_id = SCX_DSQ_LOCAL;
 			ret->fifo.slice_ns = taskc->slice_ns;
 			ret->fifo.enq_flags = enq_flags;
 			ret->kick_idle = ret->has_cleared_idle;
@@ -1070,7 +1071,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 		if (ret->has_cleared_idle || cpuc->nice_task) {
 			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+			// Use SCX_DSQ_LOCAL to avoid race condition where task affinity
+			// changes after scx_bpf_dsq_insert() but before kernel's deferred
+			// dispatch executes. We can't use SCX_DSQ_LOCAL_ON safely because
+			// set_cpumask may be called before p->cpus_ptr is updated.
+			ret->fifo.dsq_id = SCX_DSQ_LOCAL;
 			ret->fifo.slice_ns = taskc->slice_ns;
 			ret->fifo.enq_flags = enq_flags;
 			ret->kick_idle = ret->has_cleared_idle;
@@ -1129,7 +1134,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	ret->has_cleared_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 	if (ret->has_cleared_idle || cpuc->nice_task) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-		ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+		// Use SCX_DSQ_LOCAL to avoid race condition where task affinity
+		// changes after scx_bpf_dsq_insert() but before kernel's deferred
+		// dispatch executes. We can't use SCX_DSQ_LOCAL_ON safely because
+		// set_cpumask may be called before p->cpus_ptr is updated.
+		ret->fifo.dsq_id = SCX_DSQ_LOCAL;
 		ret->fifo.slice_ns = taskc->slice_ns;
 		ret->fifo.enq_flags = enq_flags;
 		ret->kick_idle = ret->has_cleared_idle;
@@ -1174,6 +1183,28 @@ static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struc
 	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
 		break;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
+		// If dispatching to a specific CPU via SCX_DSQ_LOCAL_ON,
+		// re-validate that the task can still run there. Task affinity
+		// may have changed between enqueue and completion.
+		if (pro->fifo.dsq_id & SCX_DSQ_LOCAL_ON) {
+			s32 target_cpu = pro->fifo.dsq_id & (~SCX_DSQ_LOCAL_ON);
+
+			// Verify task can still run on target CPU
+			if (!bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr)) {
+				// Affinity changed - fall back to SCX_DSQ_LOCAL
+				// and let the kernel choose an appropriate CPU
+				scx_bpf_dsq_insert(p,
+						   SCX_DSQ_LOCAL,
+						   pro->fifo.slice_ns,
+						   pro->fifo.enq_flags);
+				stat_inc(P2DQ_STAT_AFFINITY_CHANGED);
+				trace("AFFINITY_CHANGED %s->%d target_cpu %d no longer allowed",
+				      p->comm, p->pid, target_cpu);
+				break;
+			}
+		}
+
+		// Affinity is valid - proceed with original dispatch
 		scx_bpf_dsq_insert(p,
 				   pro->fifo.dsq_id,
 				   pro->fifo.slice_ns,
