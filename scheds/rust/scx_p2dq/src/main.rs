@@ -38,6 +38,7 @@ use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
 use bpf_intf::stat_idx_P2DQ_NR_STATS;
+use bpf_intf::stat_idx_P2DQ_STAT_AFFINITY_CHANGED;
 use bpf_intf::stat_idx_P2DQ_STAT_ATQ_ENQ;
 use bpf_intf::stat_idx_P2DQ_STAT_ATQ_REENQ;
 use bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
@@ -184,6 +185,7 @@ impl<'a> Scheduler<'a> {
             wake_prev: stats[stat_idx_P2DQ_STAT_WAKE_PREV as usize],
             wake_llc: stats[stat_idx_P2DQ_STAT_WAKE_LLC as usize],
             wake_mig: stats[stat_idx_P2DQ_STAT_WAKE_MIG as usize],
+            affinity_changed: stats[stat_idx_P2DQ_STAT_AFFINITY_CHANGED as usize],
         }
     }
 

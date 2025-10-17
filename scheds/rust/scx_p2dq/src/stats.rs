@@ -51,6 +51,8 @@ pub struct Metrics {
     pub wake_llc: u64,
     #[stat(desc = "Number of times tasks have been woken and migrated llc")]
     pub wake_mig: u64,
+    #[stat(desc = "Number of times affinity changed between enqueue and dispatch")]
+    pub affinity_changed: u64,
 }
 
 impl Metrics {
@@ -72,7 +74,7 @@ impl Metrics {
         )?;
         writeln!(
             w,
-            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
+            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\taffinity_changed: {}",
             self.wake_prev,
             self.wake_llc,
             self.wake_mig,
@@ -80,6 +82,7 @@ impl Metrics {
             self.dispatch_pick2,
             self.llc_migrations,
             self.node_migrations,
+            self.affinity_changed,
         )?;
         Ok(())
     }
@@ -104,6 +107,7 @@ impl Metrics {
             wake_prev: self.wake_prev - rhs.wake_prev,
             wake_llc: self.wake_llc - rhs.wake_llc,
             wake_mig: self.wake_mig - rhs.wake_mig,
+            affinity_changed: self.affinity_changed - rhs.affinity_changed,
         }
     }
 }
