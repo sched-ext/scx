@@ -236,8 +236,10 @@ static inline int allocate_cell()
 		if (!(c = lookup_cell(cell_idx)))
 			return -1;
 
-		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1))
+		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
+			WRITE_ONCE(c->vtime_now, 0);
 			return cell_idx;
+		}
 	}
 	scx_bpf_error("No available cells to allocate");
 	return -1;
