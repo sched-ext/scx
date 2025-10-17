@@ -523,6 +523,13 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
+    if cpu_ctxs_vec.len() < *NR_CPUS_POSSIBLE {
+        bail!(
+            "Percpu map returned {} entries but expected {}",
+            cpu_ctxs_vec.len(),
+            *NR_CPUS_POSSIBLE
+        );
+    }
     for cpu in 0..*NR_CPUS_POSSIBLE {
         cpu_ctxs.push(*unsafe {
             &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
