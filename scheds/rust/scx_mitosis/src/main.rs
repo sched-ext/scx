@@ -485,15 +485,19 @@ impl<'a> Scheduler<'a> {
                     .load(std::sync::atomic::Ordering::Acquire)
             };
             if in_use > 0 {
+                let cpus = cell_to_cpus.get(&cell_idx).cloned().unwrap_or_else(|| {
+                    warn!(
+                        "Cell {} marked in_use but has no CPUs assigned, using empty cpumask",
+                        cell_idx
+                    );
+                    Cpumask::new()
+                });
                 self.cells
                     .entry(cell_idx)
                     .or_insert_with(|| Cell {
                         cpus: Cpumask::new(),
                     })
-                    .cpus = cell_to_cpus
-                    .get(&cell_idx)
-                    .expect("missing cell in cpu map")
-                    .clone();
+                    .cpus = cpus;
                 self.metrics.cells.insert(cell_idx, CellMetrics::default());
             } else {
                 self.cells.remove(&cell_idx);
