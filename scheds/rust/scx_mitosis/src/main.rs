@@ -441,15 +441,17 @@ impl<'a> Scheduler<'a> {
 
     fn refresh_bpf_cells(&mut self) -> Result<()> {
         let applied_configuration = unsafe {
-            std::ptr::read_volatile(
-                &self
-                    .skel
-                    .maps
-                    .bss_data
-                    .as_ref()
-                    .unwrap()
-                    .applied_configuration_seq as *const u32,
-            )
+            let ptr = &self
+                .skel
+                .maps
+                .bss_data
+                .as_ref()
+                .unwrap()
+                .applied_configuration_seq as *const u32;
+            (ptr as *const std::sync::atomic::AtomicU32)
+                .as_ref()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Acquire)
         };
         if self
             .last_configuration_seq
@@ -475,7 +477,13 @@ impl<'a> Scheduler<'a> {
         for i in 0..MAX_CELLS {
             let cell_idx = i as u32;
             let bpf_cell = cells[i];
-            let in_use = unsafe { std::ptr::read_volatile(&bpf_cell.in_use as *const u32) };
+            let in_use = unsafe {
+                let ptr = &bpf_cell.in_use as *const u32;
+                (ptr as *const std::sync::atomic::AtomicU32)
+                    .as_ref()
+                    .unwrap()
+                    .load(std::sync::atomic::Ordering::Acquire)
+            };
             if in_use > 0 {
                 self.cells
                     .entry(cell_idx)
