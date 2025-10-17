@@ -145,10 +145,14 @@ impl Display for DistributionStats {
         // given logging interval, the global and cell queueing decision counts print at the same width.
         // Second, it reduces variance in column width between logging intervals. 5 is simply a heuristic.
         const MIN_DECISIONS_WIDTH: usize = 5;
-        let descisions_width = max(
-            MIN_DECISIONS_WIDTH,
-            (self.global_queue_decisions as f64).log10().ceil() as usize,
-        );
+        let descisions_width = if self.global_queue_decisions > 0 {
+            max(
+                MIN_DECISIONS_WIDTH,
+                (self.global_queue_decisions as f64).log10().ceil() as usize,
+            )
+        } else {
+            MIN_DECISIONS_WIDTH
+        };
         write!(
             f,
             "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
