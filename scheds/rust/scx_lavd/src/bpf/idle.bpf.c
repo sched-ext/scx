@@ -376,7 +376,7 @@ bool test_cpu_stickable(struct pick_ctx *ctx, s32 cpu, bool is_task_big)
 			ctx->i_m++;
 		}
 		else {
-			ctx->cpdoms_not_match[ctx->i_m] = cpuc->cpdom_alt_id;
+			ctx->cpdoms_not_match[ctx->i_nm] = cpuc->cpdom_alt_id;
 			ctx->cpus_not_match[ctx->i_nm] = cpu;
 			ctx->i_nm++;
 		}
