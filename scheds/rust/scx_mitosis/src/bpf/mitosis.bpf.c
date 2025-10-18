@@ -236,8 +236,10 @@ static inline int allocate_cell()
 		if (!(c = lookup_cell(cell_idx)))
 			return -1;
 
-		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1))
+		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
+			WRITE_ONCE(c->vtime_now, 0);
 			return cell_idx;
+		}
 	}
 	scx_bpf_error("No available cells to allocate");
 	return -1;
@@ -1130,6 +1132,10 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	used			 = now - tctx->started_running_at;
 	tctx->started_running_at = now;
 	/* scale the execution time by the inverse of the weight and charge */
+	if (p->scx.weight == 0) {
+		scx_bpf_error("Task %d has zero weight", p->pid);
+		return;
+	}
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
@@ -1210,11 +1216,13 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 
 	record_cgroup_exit(cgrp->kn->id);
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
-					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
-		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
-			      cgrp->kn->id);
-		return -ENOENT;
+	/*
+	 * Use lookup without CREATE since this is the exit path. If the cgroup
+	 * doesn't have storage, it's not a cell owner anyway.
+	 */
+	if (!(cgc = lookup_cgrp_ctx(cgrp))) {
+		/* Errors above on failure, verifier. */
+		return 0;
 	}
 
 	if (cgc->cell_owner) {

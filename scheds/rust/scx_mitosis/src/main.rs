@@ -8,7 +8,7 @@ pub mod bpf_intf;
 mod stats;
 
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
@@ -145,10 +145,14 @@ impl Display for DistributionStats {
         // given logging interval, the global and cell queueing decision counts print at the same width.
         // Second, it reduces variance in column width between logging intervals. 5 is simply a heuristic.
         const MIN_DECISIONS_WIDTH: usize = 5;
-        let descisions_width = max(
-            MIN_DECISIONS_WIDTH,
-            (self.global_queue_decisions as f64).log10().ceil() as usize,
-        );
+        let descisions_width = if self.global_queue_decisions > 0 {
+            max(
+                MIN_DECISIONS_WIDTH,
+                (self.global_queue_decisions as f64).log10().ceil() as usize,
+            )
+        } else {
+            MIN_DECISIONS_WIDTH
+        };
         write!(
             f,
             "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
@@ -441,15 +445,17 @@ impl<'a> Scheduler<'a> {
 
     fn refresh_bpf_cells(&mut self) -> Result<()> {
         let applied_configuration = unsafe {
-            std::ptr::read_volatile(
-                &self
-                    .skel
-                    .maps
-                    .bss_data
-                    .as_ref()
-                    .unwrap()
-                    .applied_configuration_seq as *const u32,
-            )
+            let ptr = &self
+                .skel
+                .maps
+                .bss_data
+                .as_ref()
+                .unwrap()
+                .applied_configuration_seq as *const u32;
+            (ptr as *const std::sync::atomic::AtomicU32)
+                .as_ref()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Acquire)
         };
         if self
             .last_configuration_seq
@@ -471,27 +477,34 @@ impl<'a> Scheduler<'a> {
         // Create cells we don't have yet, drop cells that are no longer in use.
         // If we continue to drop cell metrics once a cell is removed, we'll need to make sure we
         // flush metrics for a cell before we remove it completely.
-        let cells = &self.skel.maps.bss_data.as_ref().unwrap().cells;
-        for i in 0..MAX_CELLS {
-            let cell_idx = i as u32;
-            let bpf_cell = cells[i];
-            let in_use = unsafe { std::ptr::read_volatile(&bpf_cell.in_use as *const u32) };
-            if in_use > 0 {
-                self.cells
-                    .entry(cell_idx)
-                    .or_insert_with(|| Cell {
-                        cpus: Cpumask::new(),
-                    })
-                    .cpus = cell_to_cpus
-                    .get(&cell_idx)
-                    .expect("missing cell in cpu map")
-                    .clone();
-                self.metrics.cells.insert(cell_idx, CellMetrics::default());
-            } else {
-                self.cells.remove(&cell_idx);
-                self.metrics.cells.remove(&cell_idx);
-            }
+        //
+        // IMPORTANT: We determine which cells exist based on CPU assignments (which are
+        // synchronized by applied_configuration_seq), NOT by reading the in_use field
+        // separately. This avoids a TOCTOU race where a cell's in_use is set before
+        // CPUs are assigned.
+
+        // Cell 0 (root cell) always exists even if it has no CPUs temporarily
+        let cells_with_cpus: HashSet<u32> = cell_to_cpus.keys().copied().collect();
+        let mut active_cells = cells_with_cpus.clone();
+        active_cells.insert(0);
+
+        for cell_idx in &active_cells {
+            let cpus = cell_to_cpus
+                .get(cell_idx)
+                .cloned()
+                .unwrap_or_else(|| Cpumask::new());
+            self.cells
+                .entry(*cell_idx)
+                .or_insert_with(|| Cell {
+                    cpus: Cpumask::new(),
+                })
+                .cpus = cpus;
+            self.metrics.cells.insert(*cell_idx, CellMetrics::default());
         }
+
+        // Remove cells that no longer have CPUs assigned
+        self.cells.retain(|&k, _| active_cells.contains(&k));
+        self.metrics.cells.retain(|&k, _| active_cells.contains(&k));
 
         self.last_configuration_seq = Some(applied_configuration);
 
@@ -507,6 +520,13 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
+    if cpu_ctxs_vec.len() < *NR_CPUS_POSSIBLE {
+        bail!(
+            "Percpu map returned {} entries but expected {}",
+            cpu_ctxs_vec.len(),
+            *NR_CPUS_POSSIBLE
+        );
+    }
     for cpu in 0..*NR_CPUS_POSSIBLE {
         cpu_ctxs.push(*unsafe {
             &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
