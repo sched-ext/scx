@@ -133,6 +133,7 @@ The kernel has to be built with the following configuration:
 - `CONFIG_BPF_JIT_ALWAYS_ON=y`
 - `CONFIG_BPF_JIT_DEFAULT_ON=y`
 - `CONFIG_SCHED_CLASS_EXT=y`
+- `CONFIG_BPF_LSM=y`
 
 The [`scx/kernel.config`](./kernel.config) file includes all required and other recommended options for using `sched_ext`.
 You can append its contents to your kernel `.config` file to enable the necessary features.
