@@ -1,9 +1,21 @@
 #!/bin/sh
 
-echo "Running cargo fmt..."
-cargo fmt --all
+if command -v cargo >/dev/null 2>&1; then
+    echo "Running cargo fmt..."
+    cargo fmt --all
+else
+    echo "Warning: cargo not found, skipping Rust formatting"
+fi
 
-# Stage any files modified by cargo fmt
+if command -v clang-format >/dev/null 2>&1; then
+    echo "Running clang-format on scx_mitosis"
+    for file in scheds/rust/scx_mitosis/src/bpf/*.c scheds/rust/scx_mitosis/src/bpf/*.h; do
+        [ -f "$file" ] && clang-format -i "$file"
+    done
+else
+    echo "Warning: clang-format not found, skipping formatting"
+fi
+
 git add $(git diff --name-only)
 
 exit 0
