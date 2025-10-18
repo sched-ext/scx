@@ -42,6 +42,5 @@ incremental = true
 
 [profile.release-fast]
 inherits = "release"
-target-cpu = "native"
 lto = false
 incremental = true
