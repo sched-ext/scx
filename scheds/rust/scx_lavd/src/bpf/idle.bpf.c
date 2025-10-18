@@ -814,6 +814,7 @@ skip_fully_idle_neighbor:
 	if (can_run_on_cpu(ctx, ctx->prev_cpu)) {
 		cpu = ctx->prev_cpu;
 		sticky_cpdom = -ENOENT;
+		goto unlock_out;
 	}
 
 	/*
