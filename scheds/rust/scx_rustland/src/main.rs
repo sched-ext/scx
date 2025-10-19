@@ -243,20 +243,14 @@ impl<'a> Scheduler<'a> {
     ///
     /// This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &mut QueuedTask) -> u64 {
-        // Compute the minimum allowed vruntime: prevent sleeping tasks from gaining more than one
-        // full slice of vruntime credit.
-        let vruntime_min = self.vruntime_now.saturating_sub(self.slice_ns);
-
-        // Re-align task vruntime to vruntime_min.
-        task.vtime = match task.vtime {
-            0 => {
-                // Charge a full time slice to new tasks to slightly penalize them. This prevents
-                // bursts of new tasks from disrupting the responsiveness of tasks that are already
-                // running.
-                vruntime_min + Self::scale_by_task_weight_inverse(task, self.slice_ns)
-            }
-            v if v < vruntime_min => vruntime_min,
-            v => v,
+        // Update task's vruntime.
+        task.vtime = if task.vtime == 0 {
+            // Re-align new tasks to the current vruntime.
+            self.vruntime_now
+        } else {
+            // Prevent sleeping tasks from gaining more than one full slice of vruntime credit.
+            let vruntime_min = self.vruntime_now.saturating_sub(self.slice_ns);
+            task.vtime.max(vruntime_min)
         };
 
         // Compute the time slice the task just consumed.
