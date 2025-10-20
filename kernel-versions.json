@@ -26,9 +26,9 @@
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "608f2e77e49f99663221a857f518c568a320a4cc",
-    "lastModified": 1760672708,
-    "narHash": "sha256-4+Do5wNH9Hra1x3eFJv//mh8BFxj51MaBiNo3uDi8pU=",
-    "kernelVersion": "6.17.3"
+    "commitHash": "7a9479eb30f1ff5aa2ffe1caf95d071da4709bc7",
+    "lastModified": 1760932588,
+    "narHash": "sha256-ZlcrOxeWVcHGkHqTv4kt0GvPkRxbSaukMgyA+xHvxD8=",
+    "kernelVersion": "6.17.4"
   }
 }
