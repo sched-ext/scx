@@ -684,15 +684,52 @@ static bool is_queued_wakeup(const struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Queue a task to the user-space scheduler.
+ */
+static void queue_task_to_userspace(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
+{
+	struct queued_task_ctx *task;
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Allocate a new entry in the ring buffer.
+	 *
+	 * If ring buffer is full, the user-space scheduler is congested,
+	 * so dispatch the task directly using the shared DSQ (the task
+	 * will be consumed by the first CPU available).
+	 */
+	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
+	if (!task) {
+		sched_congested(p);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 slice_ns, p->scx.dsq_vtime, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
+
+	/*
+	 * Collect task information and store them in the ring buffer that
+	 * will be consumed by the user-space scheduler.
+	 */
+	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
+	get_task_info(task, p, tctx, enq_flags);
+	bpf_ringbuf_submit(task, 0);
+	__sync_fetch_and_add(&nr_queued, 1);
+}
+
+/*
  * Task @p becomes ready to run. We can dispatch the task directly here if the
  * user-space scheduler is not required, or enqueue it to be processed by the
  * scheduler.
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	s32 prev_cpu = scx_bpf_task_cpu(p);
-	struct queued_task_ctx *task;
-	struct task_ctx *tctx;
+	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
+	bool is_wakeup = is_queued_wakeup(p, enq_flags);
 
 	/*
 	 * Insert the user-space scheduler to its dedicated DSQ, it will be
@@ -719,66 +756,66 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Give the task a chance to be directly dispatched if
-	 * ops.select_cpu() was skipped.
+	 * If @builtin_idle is enabled, give the task a chance to be
+	 * directly dispatched only on a wakeup and only if
+	 * ops.select_cpu() was skipped, otherwise the task is always
+	 * queued to the user-space scheduler.
 	 */
-	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
-		s32 cpu;
-
-		cpu = pick_idle_cpu(p, prev_cpu, 0);
-		if (cpu >= 0) {
-			prev_cpu = cpu;
-
-			/*
-			 * We can race with a dequeue here and the selected
-			 * idle CPU might be not valid anymore, if the task
-			 * affinity has changed.
-			 *
-			 * In this case just kick the picked CPU and ignore
-			 * the enqueue. Another enqueue event for the same
-			 * task will be received later.
-			 */
-			if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-				goto out_kick;
-
-			if (can_direct_dispatch(cpu)) {
-				scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-							 slice_ns, p->scx.dsq_vtime, enq_flags);
-				__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-				goto out_kick;
-			}
-		}
+	if (!(builtin_idle && is_wakeup)) {
+		queue_task_to_userspace(p, prev_cpu, enq_flags);
+		goto out_kick;
 	}
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
+	/*
+	 * Try to find an idle CPU in the system, if all CPUs are busy
+	 * queue the task to the user-space scheduler.
+	 */
+	cpu = pick_idle_cpu(p, prev_cpu, 0);
+	if (cpu < 0) {
+		queue_task_to_userspace(p, prev_cpu, enq_flags);
+		goto out_kick;
+	}
+
+	/*
+	 * Always force a CPU wakeup, so that the allocated CPU can be
+	 * released and go back idle even if the task isn't directly
+	 * dispatched.
+	 */
+	prev_cpu = cpu;
+	is_wakeup = true;
+
+	/*
+	 * Bounce the task to the user-space scheduler if we can't directly
+	 * dispatch to the selected CPU.
+	 */
+	if (!can_direct_dispatch(cpu)) {
+		queue_task_to_userspace(p, prev_cpu, enq_flags);
+		goto out_kick;
+	}
+
+	/*
+	 * We can race with a dequeue here and the selected idle CPU might
+	 * be not valid anymore, if the task affinity has changed.
+	 *
+	 * In this case just wakeup the picked CPU and ignore the enqueue,
+	 * another enqueue event for the same task will be received later.
+	 */
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		goto out_kick;
 
 	/*
-	 * Add tasks to the @queued list, they will be processed by the
-	 * user-space scheduler.
-	 *
-	 * If @queued list is full (user-space scheduler is congested) tasks
-	 * will be dispatched directly from the kernel (using the first CPU
-	 * available in this case).
+	 * Directly dispatch the task to selected idle CPU (queued wakeup).
 	 */
-	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
-	if (!task) {
-		sched_congested(p);
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
-					 slice_ns, p->scx.dsq_vtime, enq_flags);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-		goto out_kick;
-	}
-	get_task_info(task, p, tctx, enq_flags);
-	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
-
-	bpf_ringbuf_submit(task, 0);
-
-	__sync_fetch_and_add(&nr_queued, 1);
+	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+				 slice_ns, p->scx.dsq_vtime, enq_flags);
+	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 
 out_kick:
-	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	/*
+	 * Wakeup the task's CPU if needed.
+	 */
+	if (is_wakeup)
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 /*
