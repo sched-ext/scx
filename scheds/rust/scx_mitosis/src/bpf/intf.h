@@ -23,7 +23,7 @@ enum consts {
 	MAX_CPUS_SHIFT	      = 9,
 	MAX_CPUS	      = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8	      = MAX_CPUS / 8,
-	MAX_CELLS	      = 16,
+	MAX_CELLS	      = 256,
 	USAGE_HALF_LIFE	      = 100000000, /* 100ms */
 	TIMER_INTERVAL_NS     = 100000000, /* 100 ms */
 	CLOCK_BOOTTIME	      = 7,
