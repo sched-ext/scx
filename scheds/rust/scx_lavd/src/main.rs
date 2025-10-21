@@ -129,6 +129,14 @@ struct Opts {
     #[clap(long = "mig-delta-pct", default_value = "0", value_parser=Opts::mig_delta_pct_range)]
     mig_delta_pct: u8,
 
+    /// Slice duration in microseconds to use for all tasks when pinned tasks
+    /// are running on a CPU. Must be between slice-min-us and slice-max-us.
+    /// When this option is enabled, pinned tasks are always enqueued to per-CPU DSQs
+    /// and the dispatch logic compares vtimes across all DSQs to select the lowest
+    /// vtime task. This helps improve responsiveness for pinned tasks.
+    #[clap(long = "pinned-slice-us")]
+    pinned_slice_us: Option<u64>,
+
     /// Limit the ratio of preemption to the roughly top P% of latency-critical
     /// tasks. When N is given as an argument, P is 0.5^N * 100. The default
     /// value is 6, which limits the preemption for the top 1.56% of
@@ -313,6 +321,20 @@ impl Opts {
         if !EnergyModel::has_energy_model() || !self.cpu_pref_order.is_empty() {
             self.no_use_em = true;
             info!("Energy model won't be used for CPU preference order.");
+        }
+
+        if let Some(pinned_slice) = self.pinned_slice_us {
+            if pinned_slice < self.slice_min_us || pinned_slice > self.slice_max_us {
+                info!(
+                    "pinned-slice-us ({}) must be between slice-min-us ({}) and slice-max-us ({})",
+                    pinned_slice, self.slice_min_us, self.slice_max_us
+                );
+                return None;
+            }
+            info!(
+                "Pinned task slice mode is enabled ({} us). Pinned tasks will use per-CPU DSQs.",
+                pinned_slice
+            );
         }
 
         Some(self)
@@ -555,6 +577,7 @@ impl<'a> Scheduler<'a> {
         rodata.verbose = opts.verbose;
         rodata.slice_max_ns = opts.slice_max_us * 1000;
         rodata.slice_min_ns = opts.slice_min_us * 1000;
+        rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
         rodata.preempt_shift = opts.preempt_shift;
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.no_use_em = opts.no_use_em as u8;

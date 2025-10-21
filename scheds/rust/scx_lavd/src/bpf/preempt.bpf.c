@@ -246,6 +246,7 @@ __hidden
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
 	u64 dur, new_slice = 0;
+	u64 target_slice;
 
 	/*
 	 * Shrink the time slice of the slice-boosted task into a regular
@@ -255,9 +256,16 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 	 */
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 
+	/*
+	 * If pinned_slice_ns is enabled and there are pinned tasks
+	 * waiting on this CPU, use pinned slice instead of regular slice.
+	 */
+	target_slice = (pinned_slice_ns && cpuc->nr_pinned_tasks) ?
+		       pinned_slice_ns : sys_stat.slice;
+
 	dur = time_delta(now, cpuc->running_clk);
-	if (sys_stat.slice > dur)
-		new_slice = time_delta(sys_stat.slice, dur);
+	if (target_slice > dur)
+		new_slice = time_delta(target_slice, dur);
 
 	if (!new_slice)
 		scx_bpf_kick_cpu(cpuc->cpu_id, SCX_KICK_PREEMPT);

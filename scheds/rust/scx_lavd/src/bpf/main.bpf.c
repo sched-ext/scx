@@ -213,6 +213,13 @@ const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
  */
 const volatile u8	mig_delta_pct = 0;
 
+/*
+ * Slice time for all tasks when pinned tasks are running on the CPU.
+ * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
+ * the dispatch logic compares vtimes across DSQs.
+ */
+const volatile u64	pinned_slice_ns = 0;
+
 static volatile u64	nr_cpus_big;
 
 /*
@@ -265,6 +272,17 @@ static u64 calc_time_slice(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 	 */
 	if (!taskc || !cpuc)
 		return LAVD_SLICE_MAX_NS_DFL;
+
+	/*
+	 * If pinned_slice_ns is enabled and there are pinned tasks waiting
+	 * to run on this CPU, unconditionally reduce the time slice for
+	 * all tasks to ensure pinned tasks can run promptly.
+	 */
+	if (pinned_slice_ns && cpuc->nr_pinned_tasks) {
+		taskc->slice = pinned_slice_ns;
+		reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
+		return taskc->slice;
+	}
 
 	/*
 	 * If the task's avg_runtime is greater than the regular time slice
@@ -655,11 +673,14 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Enqueue the task to a DSQ. If it is safe to directly dispatch
 	 * to the local DSQ of the chosen CPU, do it. Otherwise, enqueue
 	 * to the chosen DSQ of the chosen domain.
+	 *
+	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
+	 * to enable vtime comparison across DSQs during dispatch.
 	 */
 	if (can_direct_dispatch(cpu_to_dsq(cpu), cpu, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
-	} else if (per_cpu_dsq) {
+	} else if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p))) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	} else {
@@ -1076,6 +1097,17 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 
 	now = scx_bpf_now();
 	account_task_runtime(p, taskc, cpuc, now);
+
+	/*
+	 * If pinned_slice_ns is enabled and there are pinned tasks waiting
+	 * to run on this CPU, unconditionally reduce the time slice for
+	 * all tasks to ensure pinned tasks can run promptly.
+	 */
+	if (pinned_slice_ns && cpuc->nr_pinned_tasks &&
+	    p->scx.slice > pinned_slice_ns) {
+		p->scx.slice = pinned_slice_ns;
+		return;
+	}
 
 	/*
 	 * If this task is slice-boosted and there is a pinned task that
@@ -1778,8 +1810,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 
 	/*
 	 * Initialize per-CPU DSQs.
+	 * Per-CPU DSQs are created when per_cpu_dsq is enabled OR when
+	 * pinned_slice_ns is enabled (for pinned task handling).
 	 */
-	if (per_cpu_dsq) {
+	if (per_cpu_dsq || pinned_slice_ns) {
 		err = init_per_cpu_dsqs();
 		if (err)
 			return err;
