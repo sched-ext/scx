@@ -313,7 +313,7 @@ static bool dispatch_cpu(s32 cpu, bool from_dispatch)
 			break;
 		}
 
-		if (!__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL_ON | cpu, 0)) {
+		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL_ON | cpu, 0)) {
 			bpf_task_release(p);
 			continue;
 		}

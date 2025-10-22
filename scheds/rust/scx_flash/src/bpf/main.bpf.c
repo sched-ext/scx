@@ -808,7 +808,7 @@ static s32 pick_idle_cpu_builtin(struct task_struct *p, s32 prev_cpu, u64 wake_f
 	const struct cpumask *primary;
 	s32 cpu;
 
-	if (!builtin_idle || !bpf_ksym_exists(scx_bpf_select_cpu_and))
+	if (!builtin_idle || !__COMPAT_bpf_ksym_exists(scx_bpf_select_cpu_and))
 		return -ENOENT;
 
 	primary = cast_mask(primary_cpumask);

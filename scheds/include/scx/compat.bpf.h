@@ -15,120 +15,41 @@
 	__ret;									\
 })
 
-/* v6.12: 819513666966 ("sched_ext: Add cgroup support") */
-#define __COMPAT_scx_bpf_task_cgroup(p)						\
-	(bpf_ksym_exists(scx_bpf_task_cgroup) ?					\
-	 scx_bpf_task_cgroup((p)) : NULL)
+/*
+ * Extended version of bpf_ksym_exists() that handles static inline kfunc
+ * wrappers, falling back to ___compat versions.
+ */
+#define __COMPAT_bpf_ksym_exists(sym) \
+	(__builtin_constant_p(!!sym) ? bpf_ksym_exists(sym##___compat) : !!sym)
 
 /*
- * v6.13: The verb `dispatch` was too overloaded and confusing. kfuncs are
- * renamed to unload the verb.
+ * v6.15: 950ad93df2fc ("bpf: add kfunc for populating cpumask bits")
  *
- * Build error is triggered if old names are used. New binaries work with both
- * new and old names. The compat macros will be removed on v6.15 release.
- *
- * scx_bpf_dispatch_from_dsq() and friends were added during v6.12 by
- * 4c30f5ce4f7a ("sched_ext: Implement scx_bpf_dispatch[_vtime]_from_dsq()").
- * Preserve __COMPAT macros until v6.15.
+ * Compat macro will be dropped on v6.19 release.
  */
-void scx_bpf_dispatch___compat(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym __weak;
-void scx_bpf_dispatch_vtime___compat(struct task_struct *p, u64 dsq_id, u64 slice, u64 vtime, u64 enq_flags) __ksym __weak;
-bool scx_bpf_consume___compat(u64 dsq_id) __ksym __weak;
-void scx_bpf_dispatch_from_dsq_set_slice___compat(struct bpf_iter_scx_dsq *it__iter, u64 slice) __ksym __weak;
-void scx_bpf_dispatch_from_dsq_set_vtime___compat(struct bpf_iter_scx_dsq *it__iter, u64 vtime) __ksym __weak;
-bool scx_bpf_dispatch_from_dsq___compat(struct bpf_iter_scx_dsq *it__iter, struct task_struct *p, u64 dsq_id, u64 enq_flags) __ksym __weak;
-bool scx_bpf_dispatch_vtime_from_dsq___compat(struct bpf_iter_scx_dsq *it__iter, struct task_struct *p, u64 dsq_id, u64 enq_flags) __ksym __weak;
 int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym __weak;
-
-#define scx_bpf_dsq_insert(p, dsq_id, slice, enq_flags)				\
-	(bpf_ksym_exists(scx_bpf_dsq_insert) ?					\
-	 scx_bpf_dsq_insert((p), (dsq_id), (slice), (enq_flags)) :		\
-	 scx_bpf_dispatch___compat((p), (dsq_id), (slice), (enq_flags)))
-
-#define scx_bpf_dsq_insert_vtime(p, dsq_id, slice, vtime, enq_flags)		\
-	(bpf_ksym_exists(scx_bpf_dsq_insert_vtime) ?				\
-	 scx_bpf_dsq_insert_vtime((p), (dsq_id), (slice), (vtime), (enq_flags)) : \
-	 scx_bpf_dispatch_vtime___compat((p), (dsq_id), (slice), (vtime), (enq_flags)))
-
-#define scx_bpf_dsq_move_to_local(dsq_id)					\
-	(bpf_ksym_exists(scx_bpf_dsq_move_to_local) ?				\
-	 scx_bpf_dsq_move_to_local((dsq_id)) :					\
-	 scx_bpf_consume___compat((dsq_id)))
-
-#define __COMPAT_scx_bpf_dsq_move_set_slice(it__iter, slice)			\
-	(bpf_ksym_exists(scx_bpf_dsq_move_set_slice) ?				\
-	 scx_bpf_dsq_move_set_slice((it__iter), (slice)) :			\
-	 (bpf_ksym_exists(scx_bpf_dispatch_from_dsq_set_slice___compat) ?	\
-	  scx_bpf_dispatch_from_dsq_set_slice___compat((it__iter), (slice)) :	\
-	  (void)0))
-
-#define __COMPAT_scx_bpf_dsq_move_set_vtime(it__iter, vtime)			\
-	(bpf_ksym_exists(scx_bpf_dsq_move_set_vtime) ?				\
-	 scx_bpf_dsq_move_set_vtime((it__iter), (vtime)) :			\
-	 (bpf_ksym_exists(scx_bpf_dispatch_from_dsq_set_vtime___compat) ?	\
-	  scx_bpf_dispatch_from_dsq_set_vtime___compat((it__iter), (vtime)) :	\
-	  (void) 0))
-
-#define __COMPAT_scx_bpf_dsq_move(it__iter, p, dsq_id, enq_flags)		\
-	(bpf_ksym_exists(scx_bpf_dsq_move) ?					\
-	 scx_bpf_dsq_move((it__iter), (p), (dsq_id), (enq_flags)) :		\
-	 (bpf_ksym_exists(scx_bpf_dispatch_from_dsq___compat) ?			\
-	  scx_bpf_dispatch_from_dsq___compat((it__iter), (p), (dsq_id), (enq_flags)) : \
-	  false))
-
-#define __COMPAT_scx_bpf_dsq_move_vtime(it__iter, p, dsq_id, enq_flags)		\
-	(bpf_ksym_exists(scx_bpf_dsq_move_vtime) ?				\
-	 scx_bpf_dsq_move_vtime((it__iter), (p), (dsq_id), (enq_flags)) :	\
-	 (bpf_ksym_exists(scx_bpf_dispatch_vtime_from_dsq___compat) ?		\
-	  scx_bpf_dispatch_vtime_from_dsq___compat((it__iter), (p), (dsq_id), (enq_flags)) : \
-	  false))
 
 #define __COMPAT_bpf_cpumask_populate(cpumask, src, size__sz)		\
 	(bpf_ksym_exists(bpf_cpumask_populate) ?			\
 	 (bpf_cpumask_populate(cpumask, src, size__sz)) : -EOPNOTSUPP)
 
-#define scx_bpf_dispatch(p, dsq_id, slice, enq_flags)				\
-	_Static_assert(false, "scx_bpf_dispatch() renamed to scx_bpf_dsq_insert()")
+/*
+ * v6.19: Introduce lockless peek API for user DSQs.
+ *
+ * Preserve the following macro until v6.21.
+ */
+static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p = NULL;
+	struct bpf_iter_scx_dsq it;
 
-#define scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, enq_flags)		\
-	_Static_assert(false, "scx_bpf_dispatch_vtime() renamed to scx_bpf_dsq_insert_vtime()")
-
-#define scx_bpf_consume(dsq_id) ({						\
-	_Static_assert(false, "scx_bpf_consume() renamed to scx_bpf_dsq_move_to_local()"); \
-	false;									\
-})
-
-#define scx_bpf_dispatch_from_dsq_set_slice(it__iter, slice)		\
-	_Static_assert(false, "scx_bpf_dispatch_from_dsq_set_slice() renamed to scx_bpf_dsq_move_set_slice()")
-
-#define scx_bpf_dispatch_from_dsq_set_vtime(it__iter, vtime)		\
-	_Static_assert(false, "scx_bpf_dispatch_from_dsq_set_vtime() renamed to scx_bpf_dsq_move_set_vtime()")
-
-#define scx_bpf_dispatch_from_dsq(it__iter, p, dsq_id, enq_flags) ({	\
-	_Static_assert(false, "scx_bpf_dispatch_from_dsq() renamed to scx_bpf_dsq_move()"); \
-	false;									\
-})
-
-#define scx_bpf_dispatch_vtime_from_dsq(it__iter, p, dsq_id, enq_flags) ({  \
-	_Static_assert(false, "scx_bpf_dispatch_vtime_from_dsq() renamed to scx_bpf_dsq_move_vtime()"); \
-	false;									\
-})
-
-#define __COMPAT_scx_bpf_dispatch_from_dsq_set_slice(it__iter, slice)		\
-	_Static_assert(false, "__COMPAT_scx_bpf_dispatch_from_dsq_set_slice() renamed to __COMPAT_scx_bpf_dsq_move_set_slice()")
-
-#define __COMPAT_scx_bpf_dispatch_from_dsq_set_vtime(it__iter, vtime)		\
-	_Static_assert(false, "__COMPAT_scx_bpf_dispatch_from_dsq_set_vtime() renamed to __COMPAT_scx_bpf_dsq_move_set_vtime()")
-
-#define __COMPAT_scx_bpf_dispatch_from_dsq(it__iter, p, dsq_id, enq_flags) ({	\
-	_Static_assert(false, "__COMPAT_scx_bpf_dispatch_from_dsq() renamed to __COMPAT_scx_bpf_dsq_move()"); \
-	false;									\
-})
-
-#define __COMPAT_scx_bpf_dispatch_vtime_from_dsq(it__iter, p, dsq_id, enq_flags) ({  \
-	_Static_assert(false, "__COMPAT_scx_bpf_dispatch_vtime_from_dsq() renamed to __COMPAT_scx_bpf_dsq_move_vtime()"); \
-	false;									\
-})
+	if (bpf_ksym_exists(scx_bpf_dsq_peek))
+		return scx_bpf_dsq_peek(dsq_id);
+	if (!bpf_iter_scx_dsq_new(&it, dsq_id, 0))
+		p = bpf_iter_scx_dsq_next(&it);
+	bpf_iter_scx_dsq_destroy(&it);
+	return p;
+}
 
 /**
  * __COMPAT_is_enq_cpu_selected - Test if SCX_ENQ_CPU_SELECTED is on
@@ -229,6 +150,162 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	(bpf_ksym_exists(scx_bpf_pick_any_cpu_node) ?				\
 	 scx_bpf_pick_any_cpu_node(cpus_allowed, node, flags) :			\
 	 scx_bpf_pick_any_cpu(cpus_allowed, flags))
+
+/*
+ * v6.18: Add a helper to retrieve the current task running on a CPU.
+ *
+ * Keep this helper available until v6.20 for compatibility.
+ */
+static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
+{
+	struct rq *rq;
+
+	if (bpf_ksym_exists(scx_bpf_cpu_curr))
+		return scx_bpf_cpu_curr(cpu);
+
+	rq = scx_bpf_cpu_rq(cpu);
+
+	return rq ? rq->curr : NULL;
+}
+
+/*
+ * v6.19: Mirror the following _args structs, to prevent build errors in
+ * kernels that don't have these structs defined yet.
+ *
+ * The kernel will carry these __COMPAT_* structs until v6.23 (see below).
+ */
+#define scx_bpf_select_cpu_and_args __COMPAT_scx_bpf_select_cpu_and_args
+struct __COMPAT_scx_bpf_select_cpu_and_args {
+	s32 prev_cpu;
+	u64 wake_flags;
+	u64 flags;
+};
+
+#define scx_bpf_dsq_insert_vtime_args __COMPAT_scx_bpf_dsq_insert_vtime_args
+struct __COMPAT_scx_bpf_dsq_insert_vtime_args {
+	u64 dsq_id;
+	u64 slice;
+	u64 vtime;
+	u64 enq_flags;
+};
+
+/*
+ * v6.19: To work around BPF maximum parameter limit, the following kfuncs are
+ * replaced with variants that pack scalar arguments in a struct. Wrappers are
+ * provided to maintain source compatibility.
+ *
+ * The kernel will carry the compat variants until v6.23 to maintain binary
+ * compatibility. After v6.23 release, remove the compat handling and move the
+ * wrappers to common.bpf.h.
+ */
+s32 __scx_bpf_select_cpu_and(struct task_struct *p, const struct cpumask *cpus_allowed,
+			     struct scx_bpf_select_cpu_and_args *args) __ksym __weak;
+s32 scx_bpf_select_cpu_and___compat(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
+				    const struct cpumask *cpus_allowed, u64 flags) __ksym __weak;
+bool __scx_bpf_dsq_insert_vtime(struct task_struct *p, struct scx_bpf_dsq_insert_vtime_args *args) __ksym __weak;
+void scx_bpf_dsq_insert_vtime___compat(struct task_struct *p, u64 dsq_id, u64 slice, u64 vtime, u64 enq_flags) __ksym __weak;
+
+/**
+ * scx_bpf_select_cpu_and - Pick an idle CPU usable by task @p
+ * @p: task_struct to select a CPU for
+ * @prev_cpu: CPU @p was on previously
+ * @wake_flags: %SCX_WAKE_* flags
+ * @cpus_allowed: cpumask of allowed CPUs
+ * @flags: %SCX_PICK_IDLE* flags
+ *
+ * Inline wrapper that packs scalar arguments into a struct and calls
+ * __scx_bpf_select_cpu_and(). See __scx_bpf_select_cpu_and() for details.
+ */
+static inline s32
+scx_bpf_select_cpu_and(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
+		       const struct cpumask *cpus_allowed, u64 flags)
+{
+	if (bpf_core_type_exists(struct scx_bpf_select_cpu_and_args)) {
+		struct scx_bpf_select_cpu_and_args args = {
+			.prev_cpu = prev_cpu,
+			.wake_flags = wake_flags,
+			.flags = flags,
+		};
+
+		return __scx_bpf_select_cpu_and(p, cpus_allowed, &args);
+	} else {
+		return scx_bpf_select_cpu_and___compat(p, prev_cpu, wake_flags,
+						       cpus_allowed, flags);
+	}
+}
+
+/**
+ * scx_bpf_dsq_insert_vtime - Insert a task into the vtime priority queue of a DSQ
+ * @p: task_struct to insert
+ * @dsq_id: DSQ to insert into
+ * @slice: duration @p can run for in nsecs, 0 to keep the current value
+ * @vtime: @p's ordering inside the vtime-sorted queue of the target DSQ
+ * @enq_flags: SCX_ENQ_*
+ *
+ * Inline wrapper that packs scalar arguments into a struct and calls
+ * __scx_bpf_dsq_insert_vtime(). See __scx_bpf_dsq_insert_vtime() for details.
+ */
+static inline bool
+scx_bpf_dsq_insert_vtime(struct task_struct *p, u64 dsq_id, u64 slice, u64 vtime,
+			 u64 enq_flags)
+{
+	if (bpf_core_type_exists(struct scx_bpf_dsq_insert_vtime_args)) {
+		struct scx_bpf_dsq_insert_vtime_args args = {
+			.dsq_id = dsq_id,
+			.slice = slice,
+			.vtime = vtime,
+			.enq_flags = enq_flags,
+		};
+
+		return __scx_bpf_dsq_insert_vtime(p, &args);
+	} else {
+		scx_bpf_dsq_insert_vtime___compat(p, dsq_id, slice, vtime,
+						  enq_flags);
+		return true;
+	}
+}
+
+/*
+ * v6.19: scx_bpf_dsq_insert() now returns bool instead of void. Move
+ * scx_bpf_dsq_insert() decl to common.bpf.h and drop compat helper after v6.22.
+ */
+bool scx_bpf_dsq_insert___v2(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym __weak;
+void scx_bpf_dsq_insert___v1(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym __weak;
+
+static inline bool
+scx_bpf_dsq_insert(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags)
+{
+	if (bpf_ksym_exists(scx_bpf_dsq_insert___v2)) {
+		return scx_bpf_dsq_insert___v2(p, dsq_id, slice, enq_flags);
+	} else {
+		scx_bpf_dsq_insert___v1(p, dsq_id, slice, enq_flags);
+		return true;
+	}
+}
+
+/*
+ * v6.19: scx_bpf_task_set_slice() and scx_bpf_task_set_dsq_vtime() added to for
+ * sub-sched authority checks. Drop the wrappers and move the decls to
+ * common.bpf.h after v6.22.
+ */
+bool scx_bpf_task_set_slice___new(struct task_struct *p, u64 slice) __ksym __weak;
+bool scx_bpf_task_set_dsq_vtime___new(struct task_struct *p, u64 vtime) __ksym __weak;
+
+static inline void scx_bpf_task_set_slice(struct task_struct *p, u64 slice)
+{
+	if (bpf_ksym_exists(scx_bpf_task_set_slice___new))
+		scx_bpf_task_set_slice___new(p, slice);
+	else
+		p->scx.slice = slice;
+}
+
+static inline void scx_bpf_task_set_dsq_vtime(struct task_struct *p, u64 vtime)
+{
+	if (bpf_ksym_exists(scx_bpf_task_set_dsq_vtime___new))
+		scx_bpf_task_set_dsq_vtime___new(p, vtime);
+	else
+		p->scx.dsq_vtime = vtime;
+}
 
 /*
  * Define sched_ext_ops. This may be expanded to define multiple variants for

@@ -441,7 +441,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 *
 	 * This is required to support kernels <= 6.16.
 	 */
-	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+	if (!__COMPAT_bpf_ksym_exists(scx_bpf_select_cpu_and)) {
 		bool is_idle = false;
 
 		if (!wake_flags)
@@ -641,7 +641,7 @@ int rs_select_cpu(struct task_cpu_arg *input)
 	 * ops.select_cpu() and opt.enqueue(), return any idle CPU usable
 	 * by the task in this case.
 	 */
-	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+	if (!__COMPAT_bpf_ksym_exists(scx_bpf_select_cpu_and)) {
 		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
 			cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	} else {

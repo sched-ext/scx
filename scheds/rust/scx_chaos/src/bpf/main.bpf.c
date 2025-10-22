@@ -13,29 +13,17 @@
 #include <stdbool.h>
 
 #define __COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, slice)        \
-	(bpf_ksym_exists(scx_bpf_dsq_move_set_slice) ?                    \
-		 scx_bpf_dsq_move_set_slice((it__iter), (slice)) :        \
-		 scx_bpf_dispatch_from_dsq_set_slice___compat((it__iter), \
-							      (slice)))
+		 scx_bpf_dsq_move_set_slice((it__iter), (slice))
 
 #define __COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, dsq_id, enq_flags)        \
-	(bpf_ksym_exists(scx_bpf_dsq_move) ?                                   \
-		 scx_bpf_dsq_move((it__iter), (p), (dsq_id), (enq_flags)) :    \
-		 scx_bpf_dispatch_from_dsq___compat((it__iter), (p), (dsq_id), \
-						    (enq_flags)))
+		 scx_bpf_dsq_move((it__iter), (p), (dsq_id), (enq_flags))
 
 #define __COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, vtime)        \
-	(bpf_ksym_exists(scx_bpf_dsq_move_set_vtime) ?                    \
-		 scx_bpf_dsq_move_set_vtime((it__iter), (vtime)) :        \
-		 scx_bpf_dispatch_from_dsq_set_vtime___compat((it__iter), \
-							      (vtime)))
+		 scx_bpf_dsq_move_set_vtime((it__iter), (vtime))
 
 #define __COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, dsq_id, enq_flags) \
-	(bpf_ksym_exists(scx_bpf_dsq_move_vtime) ?                            \
 		 scx_bpf_dsq_move_vtime((it__iter), (p), (dsq_id),            \
-					(enq_flags)) :                        \
-		 scx_bpf_dispatch_vtime_from_dsq___compat(                    \
-			 (it__iter), (p), (dsq_id), (enq_flags)))
+					(enq_flags))
 
 const volatile int  ppid_targeting_ppid = 1;
 const volatile bool ppid_targeting_inclusive =

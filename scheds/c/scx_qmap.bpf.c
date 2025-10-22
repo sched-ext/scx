@@ -318,11 +318,11 @@ static bool dispatch_highpri(bool from_timer)
 
 		if (tctx->highpri) {
 			/* exercise the set_*() and vtime interface too */
-			__COMPAT_scx_bpf_dsq_move_set_slice(
+			scx_bpf_dsq_move_set_slice(
 				BPF_FOR_EACH_ITER, slice_ns * 2);
-			__COMPAT_scx_bpf_dsq_move_set_vtime(
+			scx_bpf_dsq_move_set_vtime(
 				BPF_FOR_EACH_ITER, highpri_seq++);
-			__COMPAT_scx_bpf_dsq_move_vtime(
+			scx_bpf_dsq_move_vtime(
 				BPF_FOR_EACH_ITER, p, HIGHPRI_DSQ, 0);
 		}
 	}
@@ -340,7 +340,7 @@ static bool dispatch_highpri(bool from_timer)
 		else
 			cpu = scx_bpf_pick_any_cpu(p->cpus_ptr, 0);
 
-		if (__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 					      SCX_DSQ_LOCAL_ON | cpu,
 					      SCX_ENQ_PREEMPT)) {
 			if (cpu == this_cpu) {
@@ -774,7 +774,7 @@ static int monitor_timerfn(void *map, int *key, struct bpf_timer *timer)
 	if (print_shared_dsq)
 		dump_shared_dsq();
 
-	__COMPAT_scx_bpf_events(&events, sizeof(events));
+	scx_bpf_events(&events, sizeof(events));
 
 	bpf_printk("%35s: %lld", "SCX_EV_SELECT_CPU_FALLBACK",
 		   scx_read_event(&events, SCX_EV_SELECT_CPU_FALLBACK));

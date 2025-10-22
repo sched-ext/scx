@@ -375,7 +375,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	 *
 	 * This is required to support kernels <= 6.16.
 	 */
-	if (!bpf_ksym_exists(scx_bpf_select_cpu_and)) {
+	if (!__COMPAT_bpf_ksym_exists(scx_bpf_select_cpu_and)) {
 		bool is_idle = false;
 
 		if (from_enqueue)
