@@ -575,8 +575,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	struct cell	*cell;
 	s32		 task_cpu = scx_bpf_task_cpu(p);
-	u64		 vtime	  = p->scx.dsq_vtime;
-	s32		 cpu	  = -1;
+	u64		 vtime;
+	s32		 cpu = -1;
 	u64		 basis_vtime;
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
@@ -584,6 +584,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
+
+	/* Ensure this is done *AFTER* refreshing cell which might manipulate vtime */
+	vtime = p->scx.dsq_vtime;
 
 	if (!tctx->all_cell_cpus_allowed) {
 		cpu = dsq_to_cpu(tctx->dsq);
@@ -631,7 +634,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx->basis_vtime = basis_vtime;
 
 	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
-		scx_bpf_error("vtime is too far in the future for %d", p->pid);
+		scx_bpf_error(
+			"vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
+			p->pid, p->scx.dsq_vtime, basis_vtime,
+			p->scx.dsq_vtime - basis_vtime, tctx->cell);
 		return;
 	}
 	/*
