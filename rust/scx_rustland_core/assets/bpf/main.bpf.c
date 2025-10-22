@@ -666,10 +666,10 @@ out_release:
  */
 static void get_task_info(struct queued_task_ctx *task,
 			  const struct task_struct *p,
-			  struct task_ctx *tctx, u64 enq_flags)
+			  struct task_ctx *tctx, u64 enq_flags, s32 prev_cpu)
 {
 	task->pid = p->pid;
-	task->cpu = scx_bpf_task_cpu(p);
+	task->cpu = prev_cpu;
 	task->nr_cpus_allowed = p->nr_cpus_allowed;
 	task->flags = enq_flags;
 	task->start_ts = tctx->start_ts;
@@ -733,7 +733,7 @@ static void queue_task_to_userspace(struct task_struct *p, s32 prev_cpu, u64 enq
 	 * will be consumed by the user-space scheduler.
 	 */
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
-	get_task_info(task, p, tctx, enq_flags);
+	get_task_info(task, p, tctx, enq_flags, prev_cpu);
 	bpf_ringbuf_submit(task, 0);
 	__sync_fetch_and_add(&nr_queued, 1);
 }
