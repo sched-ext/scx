@@ -1446,22 +1446,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	u32		    i;
 	s32		    ret;
 
-	u32		    key	  = 0;
-	struct bpf_timer   *timer = bpf_map_lookup_elem(&update_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup update timer");
-		return -ESRCH;
-	}
-	bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
-	bpf_timer_set_callback(timer, update_timer_cb);
-	if ((ret = bpf_timer_start(timer, TIMER_INTERVAL_NS, 0))) {
-		scx_bpf_error("Failed to arm update timer");
-		return ret;
-	}
+	u32		    key = 0;
 
-	struct cgroup *rootcg;
+	struct cgroup	   *rootcg;
 	if (!(rootcg = bpf_cgroup_from_id(root_cgid)))
 		return -ENOENT;
+
+	/* initialize cgrp storage for rootcg so that it is always available in the timer */
+	if (!bpf_cgrp_storage_get(&cgrp_ctxs, rootcg, 0,
+				  BPF_LOCAL_STORAGE_GET_F_CREATE)) {
+		scx_bpf_error("cgrp_ctx creation failed for rootcg");
+		bpf_cgroup_release(rootcg);
+		return -ENOENT;
+	}
 
 	rootcg = bpf_kptr_xchg(&root_cgrp, rootcg);
 	if (rootcg)
@@ -1533,7 +1530,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		}
 	}
 
-	cells[0].in_use = true;
+	cells[0].in_use		= true;
+	struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
+	if (!timer) {
+		scx_bpf_error("Failed to lookup update timer");
+		return -ESRCH;
+	}
+	bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
+	bpf_timer_set_callback(timer, update_timer_cb);
+	if ((ret = bpf_timer_start(timer, TIMER_INTERVAL_NS, 0))) {
+		scx_bpf_error("Failed to arm update timer");
+		return ret;
+	}
 	return 0;
 }
 
