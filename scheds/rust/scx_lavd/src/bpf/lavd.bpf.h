@@ -110,6 +110,7 @@ struct cpdom_ctx {
 	u32	sc_load;			    /* scaled load considering DSQ length and CPU utilization */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_sum;			    /* the sum of CPU utilization in the current interval */
+	u32	avg_util_sum;			    /* the sum of average CPU utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */

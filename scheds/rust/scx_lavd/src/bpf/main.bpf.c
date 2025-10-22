@@ -208,6 +208,11 @@ static u64		cur_svc_time;
 const volatile u64	slice_min_ns = LAVD_SLICE_MIN_NS_DFL;
 const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
 
+/*
+ * Migration delta threshold percentage (0-100)
+ */
+const volatile u8	mig_delta_pct = 0;
+
 static volatile u64	nr_cpus_big;
 
 /*

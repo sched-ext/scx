@@ -119,6 +119,16 @@ struct Opts {
     #[clap(long = "slice-min-us", default_value = "500")]
     slice_min_us: u64,
 
+    /// Migration delta threshold percentage (0-100). When set to a non-zero value,
+    /// uses average utilization for threshold calculation instead of current
+    /// utilization, and the threshold is calculated as: avg_load * (mig-delta-pct / 100).
+    /// Additionally, disables force task stealing in the consume path, relying only
+    /// on the is_stealer/is_stealee thresholds for more predictable load balancing.
+    /// Default is 0 (disabled, uses dynamic threshold based on load with both
+    /// probabilistic and force task stealing enabled). This is an experimental feature.
+    #[clap(long = "mig-delta-pct", default_value = "0", value_parser=Opts::mig_delta_pct_range)]
+    mig_delta_pct: u8,
+
     /// Limit the ratio of preemption to the roughly top P% of latency-critical
     /// tasks. When N is given as an argument, P is 0.5^N * 100. The default
     /// value is 6, which limits the preemption for the top 1.56% of
@@ -310,6 +320,10 @@ impl Opts {
 
     fn preempt_shift_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 10)
+    }
+
+    fn mig_delta_pct_range(s: &str) -> Result<u8, String> {
+        number_range(s, 0, 100)
     }
 }
 
@@ -542,6 +556,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_max_ns = opts.slice_max_us * 1000;
         rodata.slice_min_ns = opts.slice_min_us * 1000;
         rodata.preempt_shift = opts.preempt_shift;
+        rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
