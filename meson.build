@@ -4,10 +4,15 @@ project('sched_ext schedulers', 'c',
         license: 'GPL-2.0',
         meson_version : '>= 1.2.0',)
 
-warning('Meson builds are deprecated. Please switch to `cargo build` for Rust'
-        + ' schedulers and `make` for C schedulers. Meson will be removed in an'
-        + ' upcoming release. Please report any issues packaing for distributions'
-        + ' at https://github.com/sched-ext/scx/discussions/2731')
+force_meson = get_option('force_meson')
+if not force_meson
+  error('Meson builds are deprecated. Please switch to `cargo build` for Rust'
+          + ' schedulers and `make` for C schedulers. Meson will be removed in an'
+          + ' upcoming release. Please report any issues packaging for distributions'
+          + ' at https://github.com/sched-ext/scx/discussions/2731. If you need'
+          + ' Meson to unblock yourself temporarily, add `-Dforce_meson=true` when'
+          + ' configuring.')
+endif
 
 fs = import('fs')
 

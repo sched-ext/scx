@@ -56,3 +56,9 @@ option(
   value: '',
   description: 'extra sched args for stress tests',
 )
+option(
+  'force_meson',
+  type: 'boolean',
+  value: false,
+  description: 'force use of deprecated meson build system',
+)
