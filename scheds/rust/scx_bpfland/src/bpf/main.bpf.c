@@ -237,6 +237,32 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
+ * Return the DSQ id of the corresponding @cpu.
+ */
+static inline u64 cpu_dsq(s32 cpu)
+{
+	return cpu;
+}
+
+/*
+ * Return the DSQ id of the corresponding @cpu.
+ */
+static inline u64 node_dsq(s32 cpu)
+{
+	int node = __COMPAT_scx_bpf_cpu_node(cpu);
+
+	return nr_cpu_ids + node;
+}
+
+/*
+ * Return true if @dsq_id is a per-CPU DSQ, false otherwise.
+ */
+static inline bool is_cpu_dsq(u64 dsq_id)
+{
+	return dsq_id < nr_cpu_ids;
+}
+
+/*
  * Return true if the target task @p is a kernel thread.
  */
 static inline bool is_kthread(const struct task_struct *p)
@@ -651,49 +677,13 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
 	if (cpu >= 0) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		scx_bpf_dsq_insert(p, cpu_dsq(cpu), task_slice(p), 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 		return cpu;
 	}
 
 	return prev_cpu;
-}
-
-/*
- * Return true if we should attempt a task migration to an idle CPU, false
- * otherwise.
- */
-static bool try_direct_dispatch(const struct task_struct *p, s32 prev_cpu, u64 enq_flags)
-{
-	/*
-	 * Per-CPU tasks are not allowed to migrate, so don't attempt a
-	 * direct dispatch on a different CPU.
-	 */
-	if (is_pcpu_task(p))
-		return false;
-
-	/*
-	 * Always attempt to migrate to a different CPU if the task was
-	 * re-enqueued due to a higher scheduling class stealing the CPU it
-	 * was using or queued on.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ)
-		return true;
-
-	/*
-	 * Always attempt to dispatch directly to another CPU if we're
-	 * contending an SMT core.
-	 */
-	if (is_smt_contended(prev_cpu))
-		return true;
-
-	/*
-	 * Attempt a direct dispatch on wakeup (if ops.select_cpu() was
-	 * skipped) or if the task was re-enqueued due to a higher
-	 * scheduling class stealing the CPU it was queued on.
-	 */
-	return !__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p);
 }
 
 /*
@@ -775,7 +765,6 @@ static u64 update_freq(u64 freq, u64 interval)
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p);
-	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 	u64 slice = task_slice(p);
 	struct task_ctx *tctx;
 
@@ -784,7 +773,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * only run on one CPU directly.
 	 */
 	if (local_pcpu && is_pcpu_task(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -794,21 +783,29 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * directly on their assigned CPU.
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
 
 	/*
-	 * Attempt to dispatch directly to an idle CPU if possible.
+	 * Attempt to dispatch directly to an idle CPU if ops.select_cpu() was
+	 * skipped.
 	 */
-	if (try_direct_dispatch(p, prev_cpu, enq_flags)) {
-		s32 cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		s32 cpu;
+
+		if (is_pcpu_task(p))
+			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
+		else
+			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, enq_flags);
+			scx_bpf_dsq_insert(p, cpu_dsq(cpu), slice, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+			if (prev_cpu != cpu || !scx_bpf_task_running(p))
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -821,7 +818,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -830,9 +827,15 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch the task to the node DSQ, using the deadline-based
 	 * scheduling.
 	 */
-	scx_bpf_dsq_insert_vtime(p, node, task_slice(p), task_dl(p, tctx), enq_flags);
-	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	scx_bpf_dsq_insert_vtime(p, node_dsq(prev_cpu),
+				 task_slice(p), task_dl(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+
+	/*
+	 * No need to kick the CPU if ops.select_cpu() has been called.
+	 */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 /*
@@ -862,10 +865,63 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return true;
 }
 
+/*
+ * NOTE: drop this when a proper scx_bpf_dsq_peek() helper is added.
+ */
+struct task_struct *scx_bpf_dsq_peek(u64 dsq_id) __ksym __weak;
+
+/*
+ * NOTE: drop this when a proper scx_bpf_dsq_peek() helper is added.
+ */
+static inline struct task_struct *dsq_first_task(u64 dsq_id)
+{
+	struct task_struct *p = NULL;
+	struct bpf_iter_scx_dsq it;
+
+	if (bpf_ksym_exists(scx_bpf_dsq_peek))
+		return scx_bpf_dsq_peek(dsq_id);
+
+	if (!bpf_iter_scx_dsq_new(&it, dsq_id, 0))
+		p = bpf_iter_scx_dsq_next(&it);
+	bpf_iter_scx_dsq_destroy(&it);
+
+	return p;
+}
+
+/*
+ * Consume and dispatch the first task from @dsq_id. If the first task can't be
+ * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
+ */
+static bool consume_first_task(u64 dsq_id)
+{
+	struct task_struct *p = dsq_first_task(dsq_id);
+	bool dispatched;
+
+	if (!p)
+		return false;
+
+	dispatched = scx_bpf_dsq_move_to_local(dsq_id);
+
+	/*
+	 * In case of a per-CPU DSQ, if @p is still at the head of the DSQ
+	 * after a task has been consumed, it implies that @p is not
+	 * runnable on this CPU. In this case, redirect it to the local DSQ
+	 * of its currently assigned CPU.
+	 */
+	if (is_cpu_dsq(dsq_id) && p == dsq_first_task(dsq_id)) {
+		bpf_for_each(scx_dsq, p, dsq_id, 0) {
+			__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER,
+						  p, SCX_DSQ_LOCAL, 0);
+			break;
+		}
+		dispatched = false;
+	}
+
+	return dispatched;
+}
+
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
 	/*
 	 * Let the CPU go idle if the system is throttled.
 	 */
@@ -873,10 +929,17 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Consume regular tasks from the shared DSQ, transferring them to the
-	 * local CPU DSQ.
+	 * Consume tasks from the per-CPU DSQ, transferring them to the local
+	 * CPU DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(node))
+	if (consume_first_task(cpu_dsq(cpu)))
+		return;
+
+	/*
+	 * Consume tasks from the per-node DSQ, transferring them to the local
+	 * CPU DSQ.
+	 */
+	if (consume_first_task(node_dsq(cpu)))
 		return;
 
 	/*
@@ -1218,7 +1281,7 @@ static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	struct bpf_timer *timer;
-	int err, node;
+	int err, i;
 	u32 key = 0;
 
 	/* Initialize amount of online and possible CPUs */
@@ -1229,12 +1292,28 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	init_cpuperf_target();
 
 	/*
-	 * Create the global shared DSQ.
+	 * Create the per-CPU DSQs.
 	 */
-	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
-		err = scx_bpf_create_dsq(node, node);
+	bpf_for(i, 0, nr_cpu_ids) {
+		int node = __COMPAT_scx_bpf_cpu_node(i);
+		u64 dsq_id = i;
+
+		err = scx_bpf_create_dsq(dsq_id, node);
 		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", node, err);
+			scx_bpf_error("failed to create DSQ %llu: %d", dsq_id, err);
+			return err;
+		}
+	}
+
+	/*
+	 * Create the per-node DSQs.
+	 */
+	bpf_for(i, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		u64 dsq_id = nr_cpu_ids + i;
+
+		err = scx_bpf_create_dsq(dsq_id, i);
+		if (err) {
+			scx_bpf_error("failed to create DSQ %llu: %d", dsq_id, err);
 			return err;
 		}
 	}
