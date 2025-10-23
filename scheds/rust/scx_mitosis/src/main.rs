@@ -97,6 +97,10 @@ struct Opts {
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
+
+    // No of times to make errors warnings around startup.
+    #[clap(long, default_value = "100")]
+    start_pass_iter: u32,
 }
 
 // The subset of cstats we care about.
@@ -125,6 +129,8 @@ struct Scheduler<'a> {
     metrics: Metrics,
     stats_server: StatsServer<(), Metrics>,
     last_configuration_seq: Option<u32>,
+    start_iter_count: u32,
+    start_pass_iter: u32,
 }
 
 struct DistributionStats {
@@ -209,6 +215,8 @@ impl<'a> Scheduler<'a> {
             metrics: Metrics::default(),
             stats_server,
             last_configuration_seq: None,
+            start_iter_count: 0,
+            start_pass_iter: opts.start_pass_iter,
         })
     }
 
@@ -221,6 +229,11 @@ impl<'a> Scheduler<'a> {
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             self.refresh_bpf_cells()?;
+
+            if self.start_iter_count < self.start_pass_iter {
+                self.start_iter_count += 1;
+            }
+
             self.collect_metrics()?;
 
             match req_ch.recv_timeout(self.monitor_interval) {
@@ -384,14 +397,20 @@ impl<'a> Scheduler<'a> {
             .flat_map(|cell| QUEUE_STATS_IDX.iter().map(|&idx| cell[idx as usize]))
             .sum();
 
-        // We don't want to divide by zero later, but this is never expected.
+        // make err warning during startup.
         if global_queue_decisions == 0 {
-            bail!("Error: No queueing decisions made globally");
+            if self.start_iter_count < self.start_pass_iter {
+                warn!("No queueing decisions made globally");
+                // avoid div by 0 later
+                return Ok(());
+            } else {
+                bail!("No queueing decisions made globally");
+            }
         }
 
-        self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_global_queue_stats(global_queue_decisions, cell_stats_delta)?;
 
-        self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_cell_queue_stats(global_queue_decisions, cell_stats_delta)?;
 
         Ok(())
     }
