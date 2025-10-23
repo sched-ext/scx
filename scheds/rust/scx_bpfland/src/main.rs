@@ -11,7 +11,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_ulong};
 use std::fmt::Write;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -197,6 +197,13 @@ struct Opts {
     #[clap(short = 'm', long, default_value = "auto")]
     primary_domain: String,
 
+    /// Enable preferred idle CPU scanning.
+    ///
+    /// With this option enabled, the scheduler will prioritize assigning tasks to higher-ranked
+    /// cores before considering lower-ranked ones.
+    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
+    preferred_idle_scan: bool,
+
     /// Disable SMT awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
@@ -332,6 +339,21 @@ impl<'a> Scheduler<'a> {
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;
+
+        // Generate the list of available CPUs sorted by capacity in descending order.
+        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+        for (i, cpu) in cpus.iter().enumerate() {
+            rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
+            rodata.preferred_cpus[i] = cpu.id as u64;
+        }
+        if opts.preferred_idle_scan {
+            info!(
+                "Preferred CPUs: {:?}",
+                &rodata.preferred_cpus[0..cpus.len()]
+            );
+        }
+        rodata.preferred_idle_scan = opts.preferred_idle_scan;
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).
