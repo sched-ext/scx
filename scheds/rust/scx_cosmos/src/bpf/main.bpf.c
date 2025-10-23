@@ -162,6 +162,7 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 struct cpu_ctx {
 	u64 last_update;
 	u64 perf_lvl;
+	struct bpf_cpumask __kptr *smt;
 };
 
 struct {
@@ -178,6 +179,93 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
+/*
+ * Return the cpumask of fully idle SMT cores within the NUMA node that
+ * contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_smtmask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_smtmask();
+
+	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
+ *
+ * If NUMA support is disabled, @cpu is ignored.
+ */
+static inline const struct cpumask *get_idle_cpumask(s32 cpu)
+{
+	if (!numa_enabled)
+		return scx_bpf_get_idle_cpumask();
+
+	return __COMPAT_scx_bpf_get_idle_cpumask_node(__COMPAT_scx_bpf_cpu_node(cpu));
+}
+
+/*
+ * Return true if the CPU is running the idle thread, false otherwise.
+ */
+static inline bool is_cpu_idle(s32 cpu)
+{
+	struct rq *rq = scx_bpf_cpu_rq(cpu);
+
+	if (!rq) {
+		scx_bpf_error("Failed to access rq %d", cpu);
+		return false;
+	}
+	return rq->curr->flags & PF_IDLE;
+}
+
+/*
+ * Return the SMT sibling CPU of a @cpu.
+ */
+static s32 smt_sibling(s32 cpu)
+{
+	const struct cpumask *smt;
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return cpu;
+
+	smt = cast_mask(cctx->smt);
+	if (!smt)
+		return cpu;
+
+	return bpf_cpumask_first(smt);
+}
+
+/*
+ * Return true if the CPU is part of a fully busy SMT core, false
+ * otherwise.
+ *
+ * If SMT is disabled or SMT contention avoidance is disabled, always
+ * return false (since there's no SMT contention or it's ignored).
+ */
+static bool is_smt_contended(s32 cpu)
+{
+	const struct cpumask *idle_mask;
+	bool is_contended;
+
+	if (!smt_enabled)
+		return false;
+
+	/*
+	 * If the sibling SMT CPU is not idle and there are other full-idle
+	 * SMT cores available, consider the current CPU as contended.
+	 */
+	idle_mask = get_idle_cpumask(cpu);
+	is_contended = !bpf_cpumask_test_cpu(smt_sibling(cpu), idle_mask) &&
+		       !bpf_cpumask_empty(idle_mask);
+	scx_bpf_put_cpumask(idle_mask);
+
+	return is_contended;
 }
 
 /*
@@ -302,6 +390,14 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_task_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
  * Return true if the system is busy, false otherwise.
  *
  * This function determines when the scheduler needs to switch to
@@ -311,34 +407,6 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 static inline bool is_system_busy(void)
 {
 	return cpu_util >= busy_threshold;
-}
-
-/*
- * Return the cpumask of fully idle SMT cores within the NUMA node that
- * contains @cpu.
- *
- * If NUMA support is disabled, @cpu is ignored.
- */
-static inline const struct cpumask *get_idle_smtmask(s32 cpu)
-{
-	if (!numa_enabled)
-		return scx_bpf_get_idle_smtmask();
-
-	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
-}
-
-/*
- * Return true if the CPU is running the idle thread, false otherwise.
- */
-static inline bool is_cpu_idle(s32 cpu)
-{
-	struct rq *rq = scx_bpf_cpu_rq(cpu);
-
-	if (!rq) {
-		scx_bpf_error("Failed to access rq %d", cpu);
-		return false;
-	}
-	return rq->curr->flags & PF_IDLE;
 }
 
 /*
@@ -577,6 +645,31 @@ static int init_cpumask(struct bpf_cpumask **p_cpumask)
 	return *p_cpumask ? 0 : -ENOMEM;
 }
 
+SEC("syscall")
+int enable_sibling_cpu(struct domain_arg *input)
+{
+	struct cpu_ctx *cctx;
+	struct bpf_cpumask *mask, **pmask;
+	int err = 0;
+
+	cctx = try_lookup_cpu_ctx(input->cpu_id);
+	if (!cctx)
+		return -ENOENT;
+
+	pmask = &cctx->smt;
+	err = init_cpumask(pmask);
+	if (err)
+		return err;
+
+	bpf_rcu_read_lock();
+	mask = *pmask;
+	if (mask)
+		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
+	bpf_rcu_read_unlock();
+
+	return err;
+}
+
 /*
  * Called from user-space to add CPUs to the the primary domain.
  */
@@ -629,28 +722,6 @@ static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
 		scx_bpf_error("Failed to re-arm wakeup timer");
 
 	return 0;
-}
-
-/*
- * Return true if the CPU is part of a fully busy SMT core, false
- * otherwise.
- *
- * If SMT is disabled or SMT contention avoidance is disabled, always
- * return false (since there's no SMT contention or it's ignored).
- */
-static bool is_smt_contended(s32 cpu)
-{
-	const struct cpumask *smt;
-	bool is_contended;
-
-	if (!smt_enabled || !avoid_smt)
-		return false;
-
-	smt = get_idle_smtmask(cpu);
-	is_contended = bpf_cpumask_empty(smt);
-	scx_bpf_put_cpumask(smt);
-
-	return is_contended;
 }
 
 /*
@@ -739,6 +810,7 @@ static inline void wakeup_cpu(s32 cpu)
 	 */
 	if (deferred_wakeups)
 		return;
+
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
@@ -782,6 +854,33 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	wakeup_cpu(prev_cpu);
 }
 
+/*
+ * Return true if the task can keep running on its current CPU from
+ * ops.dispatch(), false if the task should migrate.
+ */
+static bool keep_running(const struct task_struct *p, s32 cpu)
+{
+	/* Do not keep running if the task doesn't need to run */
+	if (!is_task_queued(p))
+		return false;
+
+	/*
+	 * If the task can only run on this CPU, keep it running.
+	 */
+	if (is_pcpu_task(p))
+		return true;
+
+	/*
+	 * If the task is not running in a full-idle SMT core and there are
+	 * full-idle SMT cores available in the system, give it a chance to
+	 * migrate elsewhere.
+	 */
+	if (is_smt_contended(cpu))
+		return false;
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
@@ -792,11 +891,11 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * If the previous task expired its time slice, but no other task
-	 * wants to run on this SMT core, allow the previous task to run
-	 * for another time slot.
+	 * If the current task expired its time slice and no other task wants
+	 * to run, simply replenish its time slice and let it run for another
+	 * round on the same CPU.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && !is_smt_contended(cpu))
+	if (prev && keep_running(prev, cpu))
 		prev->scx.slice = task_slice(prev);
 }
 
