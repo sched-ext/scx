@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use once_cell::sync::OnceCell;
 
 mod bump_versions;
+mod test_e2e;
 mod versions;
 
 #[derive(Parser)]
@@ -42,6 +43,24 @@ enum Commands {
         #[command(flatten)]
         target: BumpTarget,
     },
+    Test {
+        #[command(subcommand)]
+        test_type: TestCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TestCommands {
+    E2e {
+        #[arg(long, help = "List available tests")]
+        list: bool,
+        #[arg(long, help = "Output format", default_value = "human")]
+        format: String,
+        #[arg(long, help = "Specific kernel to test with")]
+        kernel: Option<String>,
+        #[arg(help = "Specific test to run (scheduler or scheduler::test)")]
+        test_name: Option<String>,
+    },
 }
 
 fn main() {
@@ -66,6 +85,14 @@ fn main() {
         Commands::BumpVersions { target } => {
             bump_versions::bump_versions_command(target.packages, target.all)
         }
+        Commands::Test { test_type } => match test_type {
+            TestCommands::E2e {
+                list,
+                format,
+                kernel,
+                test_name,
+            } => test_e2e::e2e_command(list, &format, kernel, test_name),
+        },
     };
 
     if let Err(e) = res {

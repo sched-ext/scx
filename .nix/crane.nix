@@ -12,6 +12,7 @@
 , protobuf
 , zlib
 , zstd
+, virtme-ng
 }:
 
 let
@@ -83,4 +84,28 @@ in
         platforms = platforms.linux;
       };
     });
+
+  xtask =
+    let
+      xtaskPackage = craneLib.buildPackage (individualCrateArgs // {
+        pname = "xtask";
+        version = "git";
+        cargoExtraArgs = "-p xtask";
+
+        meta = with lib; {
+          description = "sched_ext xtask tool";
+          homepage = "https://github.com/sched-ext/scx";
+          license = licenses.gpl2Only;
+          maintainers = [ ];
+          platforms = platforms.linux;
+        };
+      });
+    in
+    pkgs.writeShellApplication {
+      name = "xtask";
+      runtimeInputs = [ virtme-ng pkgs.nix ];
+      text = ''
+        exec ${xtaskPackage}/bin/xtask "$@"
+      '';
+    };
 }

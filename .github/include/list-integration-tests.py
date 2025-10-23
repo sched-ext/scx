@@ -123,7 +123,6 @@ def main():
 
         for scheduler in [
             "scx_bpfland",
-            "scx_chaos",
             "scx_cosmos",
             "scx_flash",
             "scx_lavd",

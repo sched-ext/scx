@@ -1,0 +1,91 @@
+name: e2e-tests
+
+on:
+  workflow_call:
+    inputs:
+      repo-name:
+        type: string
+
+jobs:
+  list-e2e-tests:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
+    outputs:
+      matrix: ${{ steps.output.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: List E2E tests
+        id: output
+        run: nix run ./.nix#xtask -- test e2e --list --format json >> $GITHUB_OUTPUT
+
+  e2e-test:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    needs: list-e2e-tests
+    strategy:
+      matrix:
+        test: ${{ fromJson(needs.list-e2e-tests.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # Print system info for debugging
+      - run: |
+          echo "Test: ${{ matrix.test.name }}"
+          echo "Kernel: ${{ matrix.test.kernel }}"
+          echo "Flags: ${{ matrix.test.flags }}"
+          grep 'model name' /proc/cpuinfo | head -1
+
+      # Run E2E test
+      - name: Run E2E test
+        run: |
+          nix run ./.nix#xtask -- test e2e "${{ matrix.test.name }}" --kernel "${{ matrix.test.kernel }}"
+
+      # Collect logs on failure
+      - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
+        if: failure()
+      - run: mkdir -p ./log_save/
+        if: failure()
+      - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \; || true
+        if: failure()
+
+      - name: Set artifact name
+        if: failure()
+        run: |
+          KERNEL_SUFFIX=""
+          if [ -n "${{ matrix.test.kernel }}" ]; then
+            KERNEL_CLEAN=$(echo "${{ matrix.test.kernel }}" | tr '/' '_')
+            KERNEL_SUFFIX="_${KERNEL_CLEAN}"
+          fi
+          echo "ARTIFACT_NAME=${{ matrix.test.name }}${KERNEL_SUFFIX}_logs_${{ github.run_id }}_${{ github.run_attempt }}" >> $GITHUB_ENV
+
+      - name: Upload debug logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ./log_save/*.ci.log
+          compression-level: 9
+
+  all-success:
+    needs: e2e-test
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
+    if: always()
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
+      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'

@@ -53,11 +53,17 @@ jobs:
     needs: build-and-test
     secrets: inherit
 
+  e2e-test:
+    uses: ./.github/workflows/e2e-tests.yml
+    needs: build-kernels
+    secrets: inherit
+
   required-checks:
     needs: [
       lint,
       build-and-test,
       integration-test,
+      e2e-test,
     ]
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     if: always()
