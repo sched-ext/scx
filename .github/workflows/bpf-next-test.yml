@@ -17,11 +17,19 @@ jobs:
     with:
       repo-name: bpf/bpf-next
 
+  e2e-test:
+    uses: ./.github/workflows/e2e-tests.yml
+    needs: build-kernels
+    secrets: inherit
+    with:
+      repo-name: bpf/bpf-next
+
   notify-job:
     runs-on: ubuntu-latest
     if: ${{ failure() && github.ref == 'refs/heads/main' }}
     needs:
       - integration-test
+      - e2e-test
     steps:
     - uses: actions/checkout@v2
     - name: Slack Notification

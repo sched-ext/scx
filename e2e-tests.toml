@@ -1,0 +1,41 @@
+# E2E Test Configuration for sched_ext schedulers
+# This file defines end-to-end tests for schedulers built with Nix
+
+[scheduler.scx_chaos]
+nix_package = "scx_chaos"  # References .nix#scx_chaos
+binary_name = "scx_chaos"
+kernels = ["sched_ext/for-next", "stable/6_12"]  # Default kernel list
+
+[[scheduler.scx_chaos.tests]]
+name = "basic_chaos"
+description = "Basic chaos scheduler functionality test with low frequency chaos injection"
+scheduler_args = ["--random-delay-frequency", "0.1", "--random-delay-min-us", "100", "--random-delay-max-us", "1000"]
+workload = "dd if=/dev/zero of=/dev/null bs=1M count=200 & dd if=/dev/urandom of=/tmp/test bs=1M count=50"
+timeout_sec = 30
+expected_outcome = "success"
+kernels = ["sched_ext/for-next"]  # Override for specific test
+
+[[scheduler.scx_chaos.tests]]
+name = "high_chaos"
+description = "High frequency chaos injection test to validate scheduler resilience"
+scheduler_args = ["--random-delay-frequency", "0.8", "--random-delay-min-us", "1000", "--random-delay-max-us", "5000"]
+workload = "for i in $(seq 1 4); do dd if=/dev/zero of=/dev/null bs=1M count=1000 & done; wait"
+timeout_sec = 45
+expected_outcome = "success"
+metrics = ["scheduler_exits", "task_migrations"]
+
+[[scheduler.scx_chaos.tests]]
+name = "chaos_under_load"
+description = "Chaos scheduler behavior under heavy system load with multiple stressors"
+scheduler_args = ["--random-delay-frequency", "0.5", "--random-delay-min-us", "500", "--random-delay-max-us", "2000"]
+workload = "find /nix -name '*.so' | head -1000 | xargs -P 8 -I {} dd if={} of=/dev/null"
+timeout_sec = 60
+expected_outcome = "success"
+
+[[scheduler.scx_chaos.tests]]
+name = "minimal_chaos"
+description = "Minimal chaos injection to test basic scheduler operation"
+scheduler_args = ["--random-delay-frequency", "0.01", "--random-delay-min-us", "10", "--random-delay-max-us", "100"]
+workload = "dd if=/dev/zero of=/dev/null bs=1M count=100"
+timeout_sec = 15
+expected_outcome = "success"
