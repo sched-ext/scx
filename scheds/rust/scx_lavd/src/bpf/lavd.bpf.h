@@ -275,6 +275,7 @@ extern volatile u64		powersave_mode_ns;
 
 /* Helpers from util.bpf.c for querying CPU/task state. */
 extern const volatile bool	per_cpu_dsq;
+extern const volatile u64	pinned_slice_ns;
 
 extern volatile bool		reinit_cpumask_for_performance;
 extern volatile bool		no_preemption;
