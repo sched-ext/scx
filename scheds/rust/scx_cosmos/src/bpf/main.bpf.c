@@ -3,7 +3,15 @@
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
 #include <scx/common.bpf.h>
+#include <scx/percpu.bpf.h>
 #include "intf.h"
+
+char _license[] SEC("license") = "GPL";
+
+/*
+ * Scheduler's exit status.
+ */
+UEI_DEFINE(uei);
 
 /*
  * Maximum amount of CPUs supported by the scheduler when flat or preferred
@@ -62,6 +70,11 @@ const volatile bool preferred_idle_scan = false;
 const volatile u64 preferred_cpus[MAX_CPUS];
 
 /*
+ * Cache CPU capacity values.
+ */
+const volatile u64 cpu_capacity[MAX_CPUS];
+
+/*
  * Enable cpufreq integration.
  */
 const volatile bool cpufreq_enabled = true;
@@ -112,13 +125,6 @@ const volatile u64 busy_threshold;
  * Current global CPU utilization percentage in the range [0 .. 1024].
  */
 volatile u64 cpu_util;
-
-char _license[] SEC("license") = "GPL";
-
-/*
- * Scheduler's exit status.
- */
-UEI_DEFINE(uei);
 
 /*
  * Maximum amount of CPUs supported by the system.
@@ -179,6 +185,45 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
+/*
+ * Return true if @cpu is valid, otherwise trigger an error and return
+ * false.
+ */
+static inline bool is_cpu_valid(s32 cpu)
+{
+	if (cpu < 0 || cpu >= MAX_CPUS) {
+		scx_bpf_error("invalid CPU id: %d", cpu);
+		return false;
+	}
+	return true;
+}
+
+/*
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false
+ * otherwise.
+ */
+static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return true;
+
+	return cpu_llc_id(this_cpu) == cpu_llc_id(that_cpu);
+}
+
+/*
+ * Return true if @this_cpu is faster than @that_cpu, false otherwise.
+ */
+static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+{
+        if (this_cpu == that_cpu)
+                return false;
+
+	if (!is_cpu_valid(this_cpu) || !is_cpu_valid(that_cpu))
+		return false;
+
+	return cpu_capacity[this_cpu] > cpu_capacity[that_cpu];
 }
 
 /*
@@ -266,6 +311,14 @@ static bool is_smt_contended(s32 cpu)
 	scx_bpf_put_cpumask(idle_mask);
 
 	return is_contended;
+}
+
+/*
+ * Return true in case of a task wakeup, false otherwise.
+ */
+static inline bool is_wakeup(u64 wake_flags)
+{
+	return wake_flags & SCX_WAKE_TTWU;
 }
 
 /*
@@ -525,7 +578,7 @@ out:
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool from_enqueue)
 {
 	const struct cpumask *mask = cast_mask(primary_cpumask);
-	s32 cpu;
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 
 	/*
 	 * Use lightweight idle CPU scanning when flat or preferred idle
@@ -540,6 +593,22 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 */
 	if (no_wake_sync)
 		wake_flags &= ~SCX_WAKE_SYNC;
+
+	/*
+	 * Attempt to migrate to the waker's CPU if it's faster.
+	 */
+	if (is_wakeup(wake_flags) && is_cpu_faster(this_cpu, prev_cpu)) {
+		/*
+		 * If both the waker's CPU and the wakee's CPU are in the same
+		 * LLC and the wakee's CPU is idle, don't migrate.
+		 */
+		if (cpus_share_cache(this_cpu, prev_cpu) &&
+		    !is_smt_contended(prev_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		prev_cpu = this_cpu;
+	}
 
 	/*
 	 * Fallback to the old API if the kernel doesn't support

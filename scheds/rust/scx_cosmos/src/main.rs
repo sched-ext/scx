@@ -12,7 +12,7 @@ pub use bpf_intf::*;
 
 mod stats;
 use std::collections::HashSet;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_ulong};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
@@ -367,12 +367,13 @@ impl<'a> Scheduler<'a> {
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
 
         // Generate the list of available CPUs sorted by capacity in descending order.
+        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+        for (i, cpu) in cpus.iter().enumerate() {
+            rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
+            rodata.preferred_cpus[i] = cpu.id as u64;
+        }
         if opts.preferred_idle_scan {
-            let mut cpus: Vec<_> = topo.all_cpus.values().collect();
-            cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
-            for (i, cpu) in cpus.iter().enumerate() {
-                rodata.preferred_cpus[i] = cpu.id as u64;
-            }
             info!(
                 "Preferred CPUs: {:?}",
                 &rodata.preferred_cpus[0..cpus.len()]
