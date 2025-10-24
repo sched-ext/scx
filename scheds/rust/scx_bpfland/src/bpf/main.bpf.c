@@ -15,8 +15,12 @@
 /*
  * Maximum rate of task wakeups/sec (tasks with a higher rate are capped to
  * this value).
+ *
+ * Note that the wakeup rate is evaluate over a period of 100ms, so this
+ * number must be multiplied by 10 to determine the actual limit in
+ * wakeups/sec.
  */
-#define MAX_WAKEUP_FREQ		128ULL
+#define MAX_WAKEUP_FREQ		64ULL
 
 char _license[] SEC("license") = "GPL";
 
