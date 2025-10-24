@@ -287,6 +287,21 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
+ * Return true if @p1's deadline is less than @p2's deadline, false
+ * otherwise.
+ */
+static inline bool
+is_deadline_min(const struct task_struct *p1, const struct task_struct *p2)
+{
+	if (!p1)
+		return false;
+	if (!p2)
+		return true;
+
+	return p1->scx.dsq_vtime < p2->scx.dsq_vtime;
+}
+
+/*
  * Return the cpumask of idle CPUs within the NUMA node that contains @cpu.
  *
  * If NUMA support is disabled, @cpu is ignored.
@@ -892,9 +907,8 @@ static inline struct task_struct *dsq_first_task(u64 dsq_id)
  * Consume and dispatch the first task from @dsq_id. If the first task can't be
  * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
  */
-static bool consume_first_task(u64 dsq_id)
+static bool consume_first_task(u64 dsq_id, struct task_struct *p)
 {
-	struct task_struct *p = dsq_first_task(dsq_id);
 	bool dispatched;
 
 	if (!p)
@@ -922,6 +936,9 @@ static bool consume_first_task(u64 dsq_id)
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct task_struct *p = dsq_first_task(cpu_dsq(cpu));
+	struct task_struct *q = dsq_first_task(node_dsq(cpu));
+
 	/*
 	 * Let the CPU go idle if the system is throttled.
 	 */
@@ -929,18 +946,17 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Consume tasks from the per-CPU DSQ, transferring them to the local
-	 * CPU DSQ.
+	 * Try to consume the first task either from the per-CPU DSQ or the
+	 * per-node DSQ, picking the one with the minimum deadline that can
+	 * run on @cpu.
 	 */
-	if (consume_first_task(cpu_dsq(cpu)))
-		return;
-
-	/*
-	 * Consume tasks from the per-node DSQ, transferring them to the local
-	 * CPU DSQ.
-	 */
-	if (consume_first_task(node_dsq(cpu)))
-		return;
+	if (!is_deadline_min(q, p)) {
+		if (consume_first_task(cpu_dsq(cpu), p) || consume_first_task(node_dsq(cpu), q))
+			return;
+	} else {
+		if (consume_first_task(node_dsq(cpu), q) || consume_first_task(cpu_dsq(cpu), p))
+			return;
+	}
 
 	/*
 	 * If the current task expired its time slice and no other task wants
