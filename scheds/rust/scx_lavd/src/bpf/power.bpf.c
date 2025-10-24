@@ -251,7 +251,6 @@ int do_core_compaction(void)
 	struct cpdom_ctx *cpdomc;
 	int nr_active, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
-	bool need_kick, cpu_on;
 	u64 cpdom_id;
 
 	bpf_rcu_read_lock();
@@ -296,13 +295,9 @@ int do_core_compaction(void)
 		/*
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
-		cpu_on = false;
-		need_kick = false;
 		if (i < nr_active) {
 			bpf_cpumask_set_cpu(cpu, active);
 			bpf_cpumask_clear_cpu(cpu, ovrflw);
-			cpu_on = true;
-			need_kick = true;
 
 			/*
 			 * Accumulate the capacity of active CPUs and
@@ -324,8 +319,6 @@ int do_core_compaction(void)
 				 * add this CPU{ to the overflow set.
 				 */
 				bpf_cpumask_set_cpu(cpu, ovrflw);
-				cpu_on = true;
-				need_kick = true;
 			} else if ((bpf_get_prandom_u32() %
 				    LAVD_CC_CPU_PIN_INTERVAL_DIV)) {
 				/*
@@ -343,26 +336,23 @@ int do_core_compaction(void)
 				 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
 				 */
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
-			} else if (bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-				cpu_on = true;
-				need_kick = true;
+				continue;
+			} else if (!bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
+				continue;
 			}
 		}
 
 		/*
 		 * When the CPU is in either an active or overflow set, kick it.
 		 */
-		if (need_kick)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 		/*
 		 * Calculate big capacity ratio if a CPU is on.
 		 */
-		if (cpu_on) {
-			sum_capacity += cpuc->capacity;
-			if (cpuc->big_core)
-				big_capacity += cpuc->capacity;
-		}
+		sum_capacity += cpuc->capacity;
+		if (cpuc->big_core)
+			big_capacity += cpuc->capacity;
 	}
 
 	cur_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
