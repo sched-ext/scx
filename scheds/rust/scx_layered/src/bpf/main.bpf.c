@@ -611,6 +611,7 @@ struct task_ctx {
 	u64			runtime_avg;
 	u64			dsq_id;
 	u32			llc_id;
+	u32			llc_runs;
 
 	/* for llcc->queue_runtime */
 	u32			qrt_layer_id;
@@ -1281,6 +1282,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
 
+		/* Check if task is sticky to current LLC */
+		if (layer->llc_sticky_runs > 0 &&
+		    taskc->llc_runs < layer->llc_sticky_runs) {
+			lstat_inc(LSTAT_LLC_STICKY_SKIP, layer, cpuc);
+			cpu = -1;
+			goto out_put;
+		}
+
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
 		    prev_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
@@ -1365,6 +1374,7 @@ bool maybe_update_task_llc(struct task_struct *p, struct task_ctx *taskc, s32 ne
 	p->scx.dsq_vtime = new_llcc->vtime_now[layer_id] + vtime_delta;
 
 	taskc->llc_id = new_llc_id;
+	taskc->llc_runs = 0;
 	return true;
 }
 
@@ -3085,6 +3095,10 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
+	/* Increment LLC run counter if stickiness is enabled */
+	if (layer->llc_sticky_runs > 0)
+		taskc->llc_runs++;
+
 	cpuc->current_preempt = layer->preempt ||
 		(is_percpu_kthread(p) && is_percpu_kthread_preempting(p));
 	cpuc->used_at = now;
@@ -3439,6 +3453,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
+	taskc->llc_runs = 0;
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 

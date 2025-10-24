@@ -148,6 +148,7 @@ enum layer_stat_id {
 	LSTAT_XNUMA_MIGRATION,
 	LSTAT_XLLC_MIGRATION,
 	LSTAT_XLLC_MIGRATION_SKIP,
+	LSTAT_LLC_STICKY_SKIP,
 	LSTAT_XLAYER_WAKE,
 	LSTAT_XLAYER_REWAKE,
 	LSTAT_LLC_DRAIN_TRY,
@@ -348,6 +349,7 @@ struct layer {
 	u64			disallow_open_after_ns;
 	u64			disallow_preempt_after_ns;
 	u64			xllc_mig_min_ns;
+	u32			llc_sticky_runs;
 
 	int			kind;
 	bool			preempt;

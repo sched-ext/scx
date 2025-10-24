@@ -132,6 +132,8 @@ pub struct LayerCommon {
     pub disallow_preempt_after_us: Option<u64>,
     #[serde(default)]
     pub xllc_mig_min_us: f64,
+    #[serde(default)]
+    pub llc_sticky_runs: u32,
     #[serde(default, skip_serializing)]
     pub idle_smt: Option<bool>,
     #[serde(default)]
