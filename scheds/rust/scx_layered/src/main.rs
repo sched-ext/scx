@@ -152,6 +152,7 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 1000.0,
+                        llc_sticky_runs: 0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         idle_resume_us: None,
                         perf: 1024,
@@ -188,6 +189,7 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
+                        llc_sticky_runs: 0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         idle_resume_us: None,
@@ -229,6 +231,7 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
+                        llc_sticky_runs: 2,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         idle_resume_us: None,
@@ -268,6 +271,7 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 100.0,
+                        llc_sticky_runs: 0,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         idle_resume_us: None,
@@ -1908,6 +1912,7 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    llc_sticky_runs,
                     placement,
                     member_expire_ms,
                     ..
@@ -1944,6 +1949,7 @@ impl<'a> Scheduler<'a> {
                     v => v * 1000,
                 };
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
+                layer.llc_sticky_runs = *llc_sticky_runs;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;

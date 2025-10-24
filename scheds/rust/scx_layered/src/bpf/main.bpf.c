@@ -611,6 +611,7 @@ struct task_ctx {
 	u64			runtime_avg;
 	u64			dsq_id;
 	u32			llc_id;
+	u32			llc_runs;
 
 	/* for llcc->queue_runtime */
 	u32			qrt_layer_id;
@@ -1281,6 +1282,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
 
+		/* Check if task is sticky to current LLC */
+		if (layer->llc_sticky_runs > 0 &&
+		    taskc->llc_runs < layer->llc_sticky_runs) {
+			lstat_inc(LSTAT_LLC_STICKY_SKIP, layer, cpuc);
+			cpu = -1;
+			goto out_put;
+		}
+
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
 		    prev_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
@@ -1365,6 +1374,7 @@ bool maybe_update_task_llc(struct task_struct *p, struct task_ctx *taskc, s32 ne
 	p->scx.dsq_vtime = new_llcc->vtime_now[layer_id] + vtime_delta;
 
 	taskc->llc_id = new_llc_id;
+	taskc->llc_runs = 0;
 	return true;
 }
 
@@ -2174,6 +2184,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	u32 nid = llc_node_id(llcc->id);
 	bool xllc_mig_skipped = false;
 	bool skip_remote_node;
+	u64 dsq_id;
 	u32 u;
 
 	if (!(layer = lookup_layer(layer_id)))
@@ -2196,6 +2207,8 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			return false;
 		}
 
+		dsq_id = layer_dsq_id(layer_id, *llc_idp);
+
 		if (u > 0) {
 			struct llc_ctx *remote_llcc;
 
@@ -2211,9 +2224,42 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 				xllc_mig_skipped = true;
 				continue;
 			}
+
+			/*
+			 * For remote LLC DSQs with LLC stickiness enabled, use
+			 * DSQ iterator to validate tasks can migrate before
+			 * dispatching directly.
+			 */
+			if (layer->llc_sticky_runs > 0 && bpf_ksym_exists(scx_bpf_dsq_move)) {
+				struct task_struct *p;
+				bool dispatched = false;
+
+				bpf_for_each(scx_dsq, p, dsq_id, 0) {
+					struct task_ctx *taskc;
+
+					if (!(taskc = lookup_task_ctx(p)))
+						continue;
+
+					if (taskc->llc_runs < layer->llc_sticky_runs) {
+						lstat_inc(LSTAT_LLC_STICKY_SKIP, layer, cpuc);
+						continue;
+					}
+
+					if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+							     SCX_DSQ_LOCAL, 0)) {
+						dispatched = true;
+						break;
+					}
+				}
+
+				if (dispatched)
+					return true;
+
+				continue;
+			}
 		}
 
-		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
+		if (scx_bpf_dsq_move_to_local(dsq_id))
 			return true;
 	}
 
@@ -2546,7 +2592,22 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			bpf_rcu_read_unlock();
 			return result;
 		}
-		pid_t nspid = get_pid_nr_ns(p_pid, pid_ns);
+
+		/* Inline get_pid_nr_ns logic to avoid RCU lock crossing
+		 * function boundary, this all depends on if it gets inlined so
+		 * we can't just do: 
+		 * pid_t nspid = get_pid_nr_ns(p_pid, pid_ns);
+		 */
+		pid_t nspid = 0;
+		int level = BPF_CORE_READ(p_pid, level);
+		int ns_level = BPF_CORE_READ(pid_ns, level);
+		if (ns_level <= level) {
+			struct upid upid;
+			upid = BPF_CORE_READ(p_pid, numbers[ns_level]);
+			if (upid.ns == pid_ns)
+				nspid = upid.nr;
+		}
+
 		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
 		bpf_rcu_read_unlock();
 		return (u32)nspid == match->pid && nsid == match->nsid;
@@ -3085,6 +3146,10 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
+	/* Increment LLC run counter if stickiness is enabled */
+	if (layer->llc_sticky_runs > 0)
+		taskc->llc_runs++;
+
 	cpuc->current_preempt = layer->preempt ||
 		(is_percpu_kthread(p) && is_percpu_kthread_preempting(p));
 	cpuc->used_at = now;
@@ -3439,6 +3504,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
+	taskc->llc_runs = 0;
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
