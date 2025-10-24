@@ -255,14 +255,6 @@ static inline u64 node_dsq(s32 cpu)
 }
 
 /*
- * Return true if @dsq_id is a per-CPU DSQ, false otherwise.
- */
-static inline bool is_cpu_dsq(u64 dsq_id)
-{
-	return dsq_id < nr_cpu_ids;
-}
-
-/*
  * Return true if the target task @p is a kernel thread.
  */
 static inline bool is_kthread(const struct task_struct *p)
@@ -909,29 +901,10 @@ static inline struct task_struct *dsq_first_task(u64 dsq_id)
  */
 static bool consume_first_task(u64 dsq_id, struct task_struct *p)
 {
-	bool dispatched;
-
 	if (!p)
 		return false;
 
-	dispatched = scx_bpf_dsq_move_to_local(dsq_id);
-
-	/*
-	 * In case of a per-CPU DSQ, if @p is still at the head of the DSQ
-	 * after a task has been consumed, it implies that @p is not
-	 * runnable on this CPU. In this case, redirect it to the local DSQ
-	 * of its currently assigned CPU.
-	 */
-	if (is_cpu_dsq(dsq_id) && p == dsq_first_task(dsq_id)) {
-		bpf_for_each(scx_dsq, p, dsq_id, 0) {
-			__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER,
-						  p, SCX_DSQ_LOCAL, 0);
-			break;
-		}
-		dispatched = false;
-	}
-
-	return dispatched;
+	return scx_bpf_dsq_move_to_local(dsq_id);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
