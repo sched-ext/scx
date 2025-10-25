@@ -66,14 +66,17 @@ pub struct CpuStatTracker {
 }
 
 impl CpuStatTracker {
+    /// Update CPU statistics, reading frequency data from sysinfo
+    /// Note: The System reference should have CPU frequencies refreshed externally
+    /// by a background thread to avoid blocking the main loop
     pub fn update(&mut self, sys: &mut System) -> Result<()> {
         self.prev = std::mem::take(&mut self.current);
         self.system_prev = std::mem::take(&mut self.system_current);
 
         let kernel_stats = KernelStats::new()?;
         let cpu_stat_data = kernel_stats.cpu_time;
-        sys.refresh_cpu_frequency();
 
+        // Read CPU frequencies from sysinfo (should be refreshed by background thread)
         let mut total_freq_khz = 0;
         for (i, cpu) in sys.cpus().iter().enumerate() {
             if let Some(cpu_time) = cpu_stat_data.get(i) {
