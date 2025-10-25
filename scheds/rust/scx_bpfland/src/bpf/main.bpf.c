@@ -684,9 +684,14 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
 	if (cpu >= 0) {
-		scx_bpf_dsq_insert(p, cpu_dsq(cpu), task_slice(p), 0);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		struct task_ctx *tctx;
 
+		tctx = try_lookup_task_ctx(p);
+		if (tctx) {
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
+						 task_slice(p), task_dl(p, tctx), 0);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		}
 		return cpu;
 	}
 
@@ -772,15 +777,19 @@ static u64 update_freq(u64 freq, u64 interval)
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p);
-	u64 slice = task_slice(p);
 	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 
 	/*
 	 * If @local_pcpu is enabled always dispatch tasks that can
 	 * only run on one CPU directly.
 	 */
 	if (local_pcpu && is_pcpu_task(p)) {
-		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p), task_dl(p, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -790,7 +799,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * directly on their assigned CPU.
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p), task_dl(p, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -808,7 +818,9 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, cpu_dsq(cpu), slice, enq_flags);
+
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
+						 task_slice(p), task_dl(p, tctx), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			if (prev_cpu != cpu || !scx_bpf_task_running(p))
@@ -821,12 +833,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If the task is marked as sticky, just force it to stay on the
 	 * local CPU.
 	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
 	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
-		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p), task_dl(p, tctx), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
 
