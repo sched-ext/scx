@@ -216,7 +216,7 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	u64 exec_runtime;
+	u64 awake_vtime;
 	u64 last_run_at;
 	u64 wakeup_freq;
 	u64 last_woke_at;
@@ -620,20 +620,20 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
  *
  *  The deadline is defined as:
  *
- *    deadline = vruntime + exec_vruntime
+ *    deadline = vruntime + awake_vtime
  *
  * Here, `vruntime` represents the task's total accumulated runtime,
- * inversely scaled by its weight, while `exec_vruntime` accounts the
- * runtime accumulated since the last sleep event, also inversely scaled by
- * the task's weight.
+ * inversely scaled by its weight, while `awake_vtime` accounts the runtime
+ * accumulated since the last sleep event, also inversely scaled by the
+ * task's weight.
  *
- * Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize
+ * Fairness is driven by `vruntime`, while `awake_vtime` helps prioritize
  * tasks that sleep frequently and use the CPU in short bursts (resulting
- * in a small `exec_vruntime` value), which are typically latency critical.
+ * in a small `awake_vtime` value), which are typically latency critical.
  *
  * Additionally, to prevent over-prioritizing tasks that sleep for long
- * periods of time, the vruntime credit they can accumulate while sleeping
- * is limited by @slice_lag, which is also scaled based on the task's
+ * periods of time, the maximum vruntime they can accumulate while sleeping
+ * is limited to @slice_lag, which is also scaled based on the task's
  * weight.
  *
  * To prioritize tasks that sleep frequently over those with long sleep
@@ -645,13 +645,28 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
-	u64 vtime_min = vtime_now - vsleep_max;
+	u64 vtime_min = vtime_now - scale_by_task_weight(p, slice_lag * lag_scale);
+	u64 awake_max = scale_by_task_weight_inverse(p, slice_lag);
 
+	/*
+	 * Cap the vruntime credit while sleeping to @vtime_min.
+	 */
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		p->scx.dsq_vtime = vtime_min;
 
-	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
+	/*
+	 * Cap the partial accumulated vruntime since last sleep to
+	 * @slice_lag.
+	 */
+	if (time_after(tctx->awake_vtime, awake_max))
+		tctx->awake_vtime = awake_max;
+
+	/*
+	 * Evaluate task's deadline as the accumulated vruntime +
+	 * accumulated vruntime since last sleep + the expected time slice
+	 * that the task is going to use.
+	 */
+	return p->scx.dsq_vtime + tctx->awake_vtime;
 }
 
 /*
@@ -1046,17 +1061,14 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = bpf_ktime_get_ns() - tctx->last_run_at;
+	slice = scale_by_task_weight_inverse(p, bpf_ktime_get_ns() - tctx->last_run_at);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
 	 * sleep.
-	 *
-	 * Cap the maximum accumulated time since last sleep to @slice_lag,
-	 * to prevent starving CPU-intensive tasks.
 	 */
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
-	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
+	p->scx.dsq_vtime += slice;
+	tctx->awake_vtime += slice;
 
 	/*
 	 * Update CPU runtime.
@@ -1077,7 +1089,7 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	tctx->exec_runtime = 0;
+	tctx->awake_vtime = 0;
 
 	/*
 	 * Update the task's wakeup frequency based on the time since the
