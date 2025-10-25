@@ -475,6 +475,36 @@ static bool is_interactive(task_ctx *taskc)
 	return taskc->dsq_index == 0;
 }
 
+/*
+ * Returns if a task is allowed to run on all CPUs.
+ */
+static inline bool task_all_cpus(struct task_struct *p)
+{
+	return p->cpus_ptr == &p->cpus_mask &&
+		p->nr_cpus_allowed == topo_config.nr_cpus;
+}
+
+/*
+ * Runtime check during complete_p2dq_enqueue to validate that the task is
+ * still able to run on the assigned DSQ. Returns the corrected DSQ if task
+ * affinity has changed.
+ */
+static u64 task_enqueue_dsq(struct task_struct *p, u64 dsq_id)
+{
+	// If dispatching to a specific CPU via SCX_DSQ_LOCAL_ON,
+	// re-validate that the task can still run there. Task affinity
+	// may have changed between enqueue and completion.
+	if (dsq_id & SCX_DSQ_LOCAL_ON) {
+		s32 target_cpu = dsq_id & (~SCX_DSQ_LOCAL_ON);
+		if (!bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr)) {
+			stat_inc(P2DQ_STAT_AFFINITY_CHANGED);
+			return SCX_DSQ_LOCAL;
+		}
+	}
+	return dsq_id;
+}
+
+
 static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 {
 	if (topo_config.nr_llcs < 2 ||
@@ -996,9 +1026,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// Handle affinitized tasks separately
-	if (!taskc->all_cpus ||
-	    (p->cpus_ptr == &p->cpus_mask &&
-	     p->nr_cpus_allowed != topo_config.nr_cpus)) {
+	if (!taskc->all_cpus || !task_all_cpus(p)) {
 		if (!__COMPAT_is_enq_cpu_selected(enq_flags) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			cpu = pick_idle_affinitized_cpu(p,
@@ -1024,7 +1052,6 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (cpuc->nice_task)
 			enq_flags |= SCX_ENQ_PREEMPT;
 
-		// Idle affinitized tasks can be direct dispatched.
 		if (ret->has_cleared_idle || cpuc->nice_task) {
 			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
 			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
@@ -1175,13 +1202,13 @@ static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struc
 		break;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
 		scx_bpf_dsq_insert(p,
-				   pro->fifo.dsq_id,
+				   task_enqueue_dsq(p, pro->fifo.dsq_id),
 				   pro->fifo.slice_ns,
 				   pro->fifo.enq_flags);
 		break;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
 		scx_bpf_dsq_insert_vtime(p,
-					 pro->vtime.dsq_id,
+					 task_enqueue_dsq(p, pro->vtime.dsq_id),
 					 pro->vtime.slice_ns,
 				         pro->vtime.vtime,
 					 pro->vtime.enq_flags);
@@ -1195,7 +1222,7 @@ static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struc
 		if (!ret) {
 			// The ATQ was full, fallback to the DSQ.
 			scx_bpf_dsq_insert(p,
-					   pro->vtime.dsq_id,
+					   task_enqueue_dsq(p, pro->vtime.dsq_id),
 					   pro->vtime.slice_ns,
 					   pro->vtime.enq_flags);
 			stat_inc(P2DQ_STAT_ATQ_REENQ);
@@ -1209,12 +1236,12 @@ static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struc
 			break;
 		}
 		ret = scx_atq_insert_vtime(pro->vtime.atq,
-					       (u64)p->pid,
-					       pro->vtime.vtime);
+					   (u64)p->pid,
+					   pro->vtime.vtime);
 		if (!ret) {
 			// The ATQ was full, fallback to the DSQ.
 			scx_bpf_dsq_insert_vtime(p,
-						 pro->vtime.dsq_id,
+						 task_enqueue_dsq(p, pro->vtime.dsq_id),
 						 pro->vtime.slice_ns,
 						 pro->vtime.vtime,
 						 pro->vtime.enq_flags);
@@ -1729,9 +1756,7 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	taskc->all_cpus =
-		p->cpus_ptr == &p->cpus_mask &&
-		p->nr_cpus_allowed == topo_config.nr_cpus;
+	taskc->all_cpus = task_all_cpus(p);
 }
 
 void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
@@ -1860,8 +1885,7 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 	}
 	taskc->last_dsq_index = taskc->dsq_index;
 	taskc->slice_ns = slice_ns;
-	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask &&
-			  p->nr_cpus_allowed == topo_config.nr_cpus;
+	taskc->all_cpus = task_all_cpus(p);
 	taskc->interactive = is_interactive(taskc);
 	p->scx.dsq_vtime = llcx->vtime;
 	task_refresh_llc_runs(taskc);
