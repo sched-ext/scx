@@ -1101,16 +1101,6 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->last_woke_at = now;
 }
 
-void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
-{
-	/*
-	 * When a CPU is taken by a higher priority scheduler class,
-	 * re-enqueue all the tasks that are waiting in the local DSQ, so
-	 * that we can give them a chance to run on another CPU.
-	 */
-	scx_bpf_reenqueue_local();
-}
-
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
 	/*
@@ -1372,7 +1362,6 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .running			= (void *)bpfland_running,
 	       .stopping		= (void *)bpfland_stopping,
 	       .runnable		= (void *)bpfland_runnable,
-	       .cpu_release		= (void *)bpfland_cpu_release,
 	       .enable			= (void *)bpfland_enable,
 	       .init_task		= (void *)bpfland_init_task,
 	       .init			= (void *)bpfland_init,
