@@ -37,6 +37,7 @@ impl Default for KeyMap {
     /// Returns the default keymap.
     fn default() -> Self {
         let mut bindings = HashMap::new();
+        bindings.insert(Key::Char('b'), Action::SetState(AppState::BpfPrograms));
         bindings.insert(Key::Char('d'), Action::SetState(AppState::Default));
         bindings.insert(Key::Char(' '), Action::SetState(AppState::Pause));
         bindings.insert(Key::Char('e'), Action::SetState(AppState::PerfEvent));
@@ -361,6 +362,9 @@ pub fn parse_key(key_str: &str) -> Result<Key> {
 /// Parses an Action from a string.
 pub fn parse_action(action_str: &str) -> Result<Action> {
     match action_str {
+        "AppStateBpfPrograms" | "SetState(BpfPrograms)" => {
+            Ok(Action::SetState(AppState::BpfPrograms))
+        }
         "AppStateDefault" | "SetState(Default)" => Ok(Action::SetState(AppState::Default)),
         "AppStatePause" | "SetState(Pause)" => Ok(Action::SetState(AppState::Pause)),
         "AppStatePerfEvent" | "SetState(PerfEvent)" => Ok(Action::SetState(AppState::PerfEvent)),

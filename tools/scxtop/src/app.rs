@@ -6,19 +6,22 @@
 use crate::available_kprobe_events;
 use crate::available_perf_events;
 use crate::bpf_intf;
+use crate::bpf_prog_data::{BpfProgData, BpfProgStats};
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
-    get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
-    get_memory_summary_columns, get_pagefault_summary_columns, get_perf_top_columns,
-    get_perf_top_columns_no_bpf, get_process_columns, get_process_columns_no_bpf, get_slab_columns,
-    get_swap_summary_columns, get_thread_columns, get_thread_columns_no_bpf, Column, Columns,
+    get_bpf_program_columns, get_memory_detail_columns, get_memory_detail_metrics,
+    get_memory_rates_columns, get_memory_summary_columns, get_pagefault_summary_columns,
+    get_perf_top_columns, get_perf_top_columns_no_bpf, get_process_columns,
+    get_process_columns_no_bpf, get_slab_columns, get_swap_summary_columns, get_thread_columns,
+    get_thread_columns_no_bpf, Column, Columns,
 };
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::network_stats::InterfaceStats;
 use crate::search;
+use crate::symbol_data::SymbolData;
 use crate::util::{
     check_perf_capability, default_scxtop_sched_ext_stats, format_bits, format_bytes, format_hz,
     read_file_string, sanitize_nbsp, u32_to_i32,
@@ -63,8 +66,8 @@ use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
-    layout::{Alignment, Layout, Margin, Rect},
-    prelude::{Direction, Stylize},
+    layout::{Alignment, Direction, Layout, Margin, Rect},
+    prelude::Stylize,
     style::{Color, Modifier, Style},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     symbols::line::THICK,
@@ -86,11 +89,11 @@ use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 /// App is the struct for scxtop application state.
@@ -103,6 +106,8 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     sys: Arc<StdMutex<System>>,
+    /// CPU frequency refresh interval shared with background thread (in milliseconds)
+    cpu_freq_refresh_interval_ms: Arc<AtomicU64>,
     mem_info: MemStatSnapshot,
     memory_view_state: ComponentViewState,
     network_view_state: ComponentViewState,
@@ -134,6 +139,31 @@ pub struct App<'a> {
     dsq_data: BTreeMap<u64, EventData>,
     proc_data: BTreeMap<i32, ProcData>,
     network_stats: NetworkStatSnapshot,
+
+    // BPF program statistics
+    bpf_program_stats: BpfProgStats,
+    bpf_program_columns: Columns<u32, BpfProgData>,
+    bpf_program_table_state: TableState,
+    selected_bpf_program_id: Option<u32>,
+    cached_bpf_symbol_info: Option<crate::bpf_prog_data::BpfSymbolInfo>,
+    filtered_bpf_programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)>,
+    bpf_stats_fd: Option<i32>,
+
+    // System-wide CPU time tracking for overhead calculation
+    total_cpu_time_ns: u64,
+    prev_total_cpu_time_ns: u64,
+    prev_bpf_total_runtime_ns: u64,
+    bpf_overhead_history: VecDeque<f64>,
+    terminal_width: u16,
+
+    // BPF program detail view perf data
+    #[allow(dead_code)]
+    bpf_program_symbol_data: SymbolData,
+    bpf_program_symbol_table_state: TableState,
+    bpf_program_filtered_symbols: Vec<crate::symbol_data::SymbolSample>,
+
+    // Perf sampling control
+    bpf_perf_sampling_active: bool,
 
     // Event related
     active_event: ProfilingEvent,
@@ -291,6 +321,29 @@ impl<'a> App<'a> {
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
 
+        // Create System object and spawn background thread for CPU frequency refresh
+        let sys = Arc::new(StdMutex::new(System::new_all()));
+        let sys_clone = sys.clone();
+        let tick_rate_ms = config.tick_rate_ms();
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let should_quit_clone = should_quit.clone();
+
+        // Create shared atomic for CPU frequency refresh interval
+        let cpu_freq_refresh_interval_ms = Arc::new(AtomicU64::new(tick_rate_ms as u64));
+        let interval_clone = cpu_freq_refresh_interval_ms.clone();
+
+        // Spawn background thread to refresh CPU frequencies at the same rate as tick_rate
+        // This moves the expensive sysfs reads off the main thread
+        std::thread::spawn(move || {
+            while !should_quit_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(mut system_guard) = sys_clone.lock() {
+                    system_guard.refresh_cpu_frequency();
+                }
+                let interval_ms = interval_clone.load(std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            }
+        });
+
         let mut app = Self {
             config,
             localize: true,
@@ -299,7 +352,8 @@ impl<'a> App<'a> {
             stats_client,
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
-            sys: Arc::new(StdMutex::new(System::new_all())),
+            sys,
+            cpu_freq_refresh_interval_ms,
             mem_info,
             memory_view_state: ComponentViewState::Default,
             network_view_state: ComponentViewState::Default,
@@ -309,7 +363,7 @@ impl<'a> App<'a> {
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
-            should_quit: Arc::new(AtomicBool::new(false)),
+            should_quit,
             action_tx,
             skel: Some(skel),
             large_core_count: topo.all_cpus.len() >= 128,
@@ -329,6 +383,31 @@ impl<'a> App<'a> {
             dsq_data: BTreeMap::new(),
             proc_data,
             network_stats: NetworkStatSnapshot::new(100),
+
+            // BPF program statistics
+            bpf_program_stats: BpfProgStats::new(),
+            bpf_program_columns: Columns::new(get_bpf_program_columns()),
+            bpf_program_table_state: TableState::default(),
+            selected_bpf_program_id: None,
+            cached_bpf_symbol_info: None,
+            filtered_bpf_programs: Vec::new(),
+            bpf_stats_fd: None,
+
+            // System-wide CPU time tracking
+            total_cpu_time_ns: 0,
+            prev_total_cpu_time_ns: 0,
+            prev_bpf_total_runtime_ns: 0,
+            bpf_overhead_history: VecDeque::new(),
+            terminal_width: 80, // Default value, will be updated on first render
+
+            // BPF program detail view perf data
+            bpf_program_symbol_data: SymbolData::new(),
+            bpf_program_symbol_table_state: TableState::default(),
+            bpf_program_filtered_symbols: Vec::new(),
+
+            // Perf sampling control
+            bpf_perf_sampling_active: false,
+
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -488,6 +567,29 @@ impl<'a> App<'a> {
         // No hardware pressure monitoring without BPF
         let hw_pressure = false;
 
+        // Create System object and spawn background thread for CPU frequency refresh
+        let sys = Arc::new(StdMutex::new(System::new_all()));
+        let sys_clone = sys.clone();
+        let tick_rate_ms = config.tick_rate_ms();
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let should_quit_clone = should_quit.clone();
+
+        // Create shared atomic for CPU frequency refresh interval
+        let cpu_freq_refresh_interval_ms = Arc::new(AtomicU64::new(tick_rate_ms as u64));
+        let interval_clone = cpu_freq_refresh_interval_ms.clone();
+
+        // Spawn background thread to refresh CPU frequencies at the same rate as tick_rate
+        // This moves the expensive sysfs reads off the main thread
+        std::thread::spawn(move || {
+            while !should_quit_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(mut system_guard) = sys_clone.lock() {
+                    system_guard.refresh_cpu_frequency();
+                }
+                let interval_ms = interval_clone.load(std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            }
+        });
+
         let mut app = Self {
             config,
             localize: true,
@@ -496,7 +598,8 @@ impl<'a> App<'a> {
             stats_client,
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
-            sys: Arc::new(StdMutex::new(System::new_all())),
+            sys,
+            cpu_freq_refresh_interval_ms,
             mem_info,
             memory_view_state: ComponentViewState::Default,
             network_view_state: ComponentViewState::Default,
@@ -506,7 +609,7 @@ impl<'a> App<'a> {
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
-            should_quit: Arc::new(AtomicBool::new(false)),
+            should_quit,
             action_tx,
             skel: None, // No BPF skeleton in non-BPF mode
             large_core_count: topo.all_cpus.len() >= 128,
@@ -525,6 +628,31 @@ impl<'a> App<'a> {
             dsq_data: BTreeMap::new(),
             proc_data,
             network_stats: NetworkStatSnapshot::new(100),
+
+            // BPF program statistics
+            bpf_program_stats: BpfProgStats::new(),
+            bpf_program_columns: Columns::new(get_bpf_program_columns()),
+            bpf_program_table_state: TableState::default(),
+            selected_bpf_program_id: None,
+            cached_bpf_symbol_info: None,
+            filtered_bpf_programs: Vec::new(),
+            bpf_stats_fd: None,
+
+            // System-wide CPU time tracking
+            total_cpu_time_ns: 0,
+            prev_total_cpu_time_ns: 0,
+            prev_bpf_total_runtime_ns: 0,
+            bpf_overhead_history: VecDeque::new(),
+            terminal_width: 80, // Default value, will be updated on first render
+
+            // BPF program detail view perf data
+            bpf_program_symbol_data: SymbolData::new(),
+            bpf_program_symbol_table_state: TableState::default(),
+            bpf_program_filtered_symbols: Vec::new(),
+
+            // Perf sampling control
+            bpf_perf_sampling_active: false,
+
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -640,6 +768,36 @@ impl<'a> App<'a> {
                 self.max_fps = 1;
                 self.frames_since_update = 0;
             }
+        }
+
+        // Manage BPF stats collection based on current state
+        let is_bpf_related_state = matches!(
+            self.state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+        let was_bpf_related_state = matches!(
+            self.prev_state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+
+        // If transitioning away from BPF-related states, disable BPF stats tracking
+        if was_bpf_related_state && !is_bpf_related_state {
+            self.disable_bpf_stats();
+        }
+
+        // Manage BPF stats collection based on current state
+        let is_bpf_related_state = matches!(
+            self.state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+        let was_bpf_related_state = matches!(
+            self.prev_state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+
+        // If transitioning away from BPF-related states, disable BPF stats tracking
+        if was_bpf_related_state && !is_bpf_related_state {
+            self.disable_bpf_stats();
         }
     }
 
@@ -920,18 +1078,93 @@ impl<'a> App<'a> {
     /// Uses view-specific data collection to optimize performance.
     fn on_tick(&mut self) -> Result<()> {
         match self.state {
+            AppState::BpfProgramDetail => self.on_tick_bpf_program_detail(),
+            AppState::BpfPrograms => self.on_tick_bpf_programs(),
             AppState::Default => self.on_tick_default(),
-            AppState::Process => self.on_tick_process(),
+            AppState::Help | AppState::Pause | AppState::Tracing => self.on_tick_static(),
+            AppState::Llc => self.on_tick_llc(),
+            AppState::MangoApp => self.on_tick_mango_app(),
             AppState::Memory => self.on_tick_memory(),
             AppState::Network => self.on_tick_network(),
-            AppState::Llc => self.on_tick_llc(),
             AppState::Node => self.on_tick_node(),
-            AppState::Power => self.on_tick_power(),
-            AppState::Scheduler => self.on_tick_scheduler(),
             AppState::PerfEvent | AppState::KprobeEvent => self.on_tick_events(),
             AppState::PerfTop => self.on_tick_perf_top(),
-            AppState::MangoApp => self.on_tick_mango_app(),
-            AppState::Help | AppState::Pause | AppState::Tracing => self.on_tick_static(),
+            AppState::Power => self.on_tick_power(),
+            AppState::Process => self.on_tick_process(),
+            AppState::Scheduler => self.on_tick_scheduler(),
+        }
+    }
+
+    /// Filters BPF programs based on the current filter input
+    fn filter_bpf_programs(&mut self) {
+        self.filtered_bpf_programs.clear();
+
+        if self.event_input_buffer.is_empty() {
+            // No filter, show all programs
+            self.filtered_bpf_programs = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
+        } else {
+            let filter_text = self.event_input_buffer.to_lowercase();
+
+            // Special filter for sched_ext programs
+            if filter_text == "sched_ext" || filter_text == "scheduler" {
+                self.filtered_bpf_programs = self
+                    .bpf_program_stats
+                    .programs
+                    .iter()
+                    .filter_map(|(id, data)| {
+                        if data.is_sched_ext {
+                            Some((*id, data.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            } else {
+                // Apply substring filter with scheduler name included
+                self.filtered_bpf_programs = self
+                    .bpf_program_stats
+                    .programs
+                    .iter()
+                    .filter_map(|(id, data)| {
+                        // Search in program name, type, scheduler name, and ID
+                        let search_text = format!(
+                            "{} {} {} {}",
+                            data.name.to_lowercase(),
+                            data.prog_type.to_lowercase(),
+                            data.sched_ext_ops_name
+                                .as_ref()
+                                .unwrap_or(&"".to_string())
+                                .to_lowercase(),
+                            id
+                        );
+
+                        if search_text.contains(&filter_text) {
+                            Some((*id, data.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
+        }
+
+        // Sort by average runtime descending (same as the main view)
+        self.filtered_bpf_programs.sort_by(|a, b| {
+            b.1.avg_runtime_ns()
+                .partial_cmp(&a.1.avg_runtime_ns())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Reset table selection to the first item
+        if !self.filtered_bpf_programs.is_empty() {
+            self.bpf_program_table_state.select(Some(0));
+        } else {
+            self.bpf_program_table_state.select(None);
         }
     }
 
@@ -2972,6 +3205,15 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: display BPF programs view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::BpfPrograms))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: display process view",
                     self.config
                         .active_keymap
@@ -4863,7 +5105,11 @@ impl<'a> App<'a> {
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
+        // Update terminal width for overhead history sizing
+        self.terminal_width = area.width;
         match self.state {
+            AppState::BpfPrograms => self.render_bpf_programs(frame),
+            AppState::BpfProgramDetail => self.render_bpf_program_detail(frame),
             AppState::Help => self.render_help(frame),
             AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
             AppState::Process => self.render_table(frame, area, true),
@@ -4900,9 +5146,836 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Renders the BPF programs view
+    fn render_bpf_programs(&mut self, frame: &mut Frame) -> Result<()> {
+        // Split screen: table on top, sparkline on bottom
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(10),   // Table area
+                Constraint::Length(5), // Sparkline section
+            ])
+            .split(frame.area());
+
+        if self.filtering && !self.event_input_buffer.is_empty() {
+            // Further split table area for filter input
+            let table_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3)])
+                .split(main_chunks[0]);
+
+            self.render_bpf_programs_table(frame, table_chunks[0])?;
+            self.render_filter_input(frame, table_chunks[1])?;
+        } else {
+            self.render_bpf_programs_table(frame, main_chunks[0])?;
+        }
+
+        // Render overhead sparkline
+        self.render_bpf_overhead_sparkline(frame, main_chunks[1])?;
+
+        Ok(())
+    }
+
+    /// Renders the BPF programs table
+    fn render_bpf_programs_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = self.theme();
+
+        // Use filtered programs if filtering is active, otherwise use all programs
+        let programs_to_display: Vec<(u32, BpfProgData)> = if self.filtering {
+            self.filtered_bpf_programs.clone()
+        } else {
+            // Create sorted list of BPF programs for display
+            let mut programs: Vec<(u32, BpfProgData)> = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
+
+            // Sort by average runtime descending
+            programs.sort_by(|a, b| {
+                b.1.avg_runtime_ns()
+                    .partial_cmp(&a.1.avg_runtime_ns())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            programs
+        };
+
+        // Build table rows with sched_ext highlighting
+        let rows: Vec<Row> = programs_to_display
+            .iter()
+            .map(|(id, data)| {
+                let cols = self.bpf_program_columns.visible_columns();
+                let cells: Vec<Cell> = cols
+                    .map(|col| {
+                        let mut value = (col.value_fn)(*id, data);
+                        // Special handling for runtime percentage column
+                        if col.header == "Runtime %" {
+                            let percentage =
+                                data.runtime_percentage(self.bpf_program_stats.total_runtime_ns);
+                            value = format!("{:.2}%", percentage);
+                        }
+                        Cell::from(value)
+                    })
+                    .collect();
+
+                // Apply sched_ext highlighting
+                let row = Row::new(cells);
+                if data.is_sched_ext {
+                    row.style(
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    row
+                }
+            })
+            .collect();
+
+        // Create header
+        let header = Row::new(
+            self.bpf_program_columns
+                .visible_columns()
+                .map(|col| Cell::from(col.header))
+                .collect::<Vec<_>>(),
+        )
+        .style(theme.title_style())
+        .height(1);
+
+        // Get constraints for visible columns
+        let constraints: Vec<Constraint> = self
+            .bpf_program_columns
+            .visible_columns()
+            .map(|col| col.constraint)
+            .collect();
+
+        // Create title with filter information
+        let title = if self.filtering {
+            format!(
+                "BPF Programs ({}/{} programs) - Filtering: {} - Press Enter for details, Esc to clear filter",
+                programs_to_display.len(),
+                self.bpf_program_stats.programs.len(),
+                self.event_input_buffer
+            )
+        } else {
+            format!(
+                "BPF Programs ({} programs) - Press f to filter, Enter for details",
+                self.bpf_program_stats.programs.len()
+            )
+        };
+
+        // Create table widget
+        let table = Table::new(rows, constraints)
+            .header(header)
+            .block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(theme.border_style())
+                    .title_top(
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.config.theme().text_important_color())
+                            .right_aligned(),
+                    ),
+            )
+            .style(Style::default().fg(theme.text_color()))
+            .row_highlight_style(Style::default().fg(theme.text_enabled_color()))
+            .highlight_symbol(">> ");
+
+        // Render the table
+        frame.render_stateful_widget(table, area, &mut self.bpf_program_table_state);
+        Ok(())
+    }
+
+    /// Renders the filter input area
+    fn render_filter_input(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = self.theme();
+
+        let input = Paragraph::new(self.event_input_buffer.as_str())
+            .style(Style::default().fg(theme.text_color()))
+            .block(
+                Block::bordered()
+                    .title("Filter")
+                    .border_style(theme.border_style()),
+            );
+
+        frame.render_widget(input, area);
+        Ok(())
+    }
+
+    /// Render BPF overhead sparkline showing trend over time
+    fn render_bpf_overhead_sparkline(&self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = self.theme();
+
+        if self.bpf_overhead_history.is_empty() {
+            // No data yet, show empty sparkline
+            let sparkline = Sparkline::default()
+                .block(
+                    Block::bordered()
+                        .title("BPF CPU Overhead: No data yet")
+                        .border_style(theme.border_style()),
+                )
+                .style(Style::default().fg(Color::Cyan));
+
+            frame.render_widget(sparkline, area);
+            return Ok(());
+        }
+
+        // Calculate the number of data points needed to fill the width
+        // Subtract 2 for borders
+        let available_width = area.width.saturating_sub(2) as usize;
+
+        // Prepare data to fill the entire width
+        let mut data: Vec<u64> = Vec::with_capacity(available_width);
+
+        if self.bpf_overhead_history.len() >= available_width {
+            // We have enough data, take the most recent points
+            data = self
+                .bpf_overhead_history
+                .iter()
+                .rev()
+                .take(available_width)
+                .rev()
+                .map(|v| (*v * 100.0) as u64)
+                .collect();
+        } else {
+            // Not enough data yet, pad with zeros at the beginning
+            let padding = available_width - self.bpf_overhead_history.len();
+            data.extend(std::iter::repeat_n(0, padding));
+            data.extend(
+                self.bpf_overhead_history
+                    .iter()
+                    .map(|v| (*v * 100.0) as u64),
+            );
+        }
+
+        let current_overhead = self.bpf_overhead_history.back().unwrap_or(&0.0);
+
+        let sparkline = Sparkline::default()
+            .block(
+                Block::bordered()
+                    .title(format!("BPF CPU Overhead: {:.2}%", current_overhead))
+                    .border_style(theme.border_style()),
+            )
+            .data(&data)
+            .style(Style::default().fg(Color::Cyan));
+
+        frame.render_widget(sparkline, area);
+        Ok(())
+    }
+
+    /// Render per-operation breakdown for sched_ext programs
+    fn render_operation_breakdown(&self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = self.theme();
+
+        // Sort operations by runtime descending
+        let mut ops: Vec<(
+            &crate::bpf_prog_data::SchedExtOpType,
+            &crate::bpf_prog_data::OperationStats,
+        )> = self.bpf_program_stats.operation_stats.iter().collect();
+        ops.sort_by(|a, b| b.1.total_runtime_ns.cmp(&a.1.total_runtime_ns));
+
+        let mut text = vec![
+            Line::from(Span::styled(
+                "sched_ext Callback Statistics:",
+                Style::default().fg(theme.title_style().fg.unwrap_or(Color::Yellow)),
+            )),
+            Line::from(""),
+            // Header row
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>12}  ", "Operation"),
+                    Style::default()
+                        .fg(theme.text_color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:>10}       ", "Calls"),
+                    Style::default()
+                        .fg(theme.text_color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:>8}       ", "Avg Time"),
+                    Style::default()
+                        .fg(theme.text_color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:>8}", "% Runtime"),
+                    Style::default()
+                        .fg(theme.text_color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ];
+
+        // Show top 8 operations
+        for (op_type, stats) in ops.iter().take(8) {
+            let avg_ns = if stats.total_calls > 0 {
+                stats.total_runtime_ns / stats.total_calls
+            } else {
+                0
+            };
+
+            let pct = if self.bpf_program_stats.total_runtime_ns > 0 {
+                (stats.total_runtime_ns as f64 / self.bpf_program_stats.total_runtime_ns as f64)
+                    * 100.0
+            } else {
+                0.0
+            };
+
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{:>12}: ", op_type.display_name()),
+                    Style::default().fg(theme.text_color()),
+                ),
+                Span::styled(
+                    format!("{:>10} calls  ", stats.total_calls),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+                Span::styled(
+                    format!("{:>8.2}μs avg  ", avg_ns as f64 / 1000.0),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+                Span::styled(
+                    format!("{:>5.1}%", pct),
+                    Style::default().fg(if pct > 50.0 { Color::Red } else { Color::Green }),
+                ),
+            ]);
+            text.push(line);
+        }
+
+        let paragraph = Paragraph::new(text).block(
+            Block::bordered()
+                .title("sched_ext Callback Operations")
+                .border_style(theme.border_style()),
+        );
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
+    /// Renders the BPF program detail view using real BPF_ENABLE_STATS data
+    fn render_bpf_program_detail(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        let theme = self.theme();
+
+        // Get the selected program data and clone it to avoid borrowing issues
+        let selected_program_data = if let Some(prog_id) = self.selected_bpf_program_id {
+            self.bpf_program_stats.programs.get(&prog_id).cloned()
+        } else {
+            None
+        };
+
+        if let Some(prog_data) = selected_program_data {
+            // Split the area based on whether this is a sched_ext program
+            let chunks = if prog_data.is_sched_ext {
+                // For sched_ext programs, include operation breakdown section
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(10), // Program info
+                        Constraint::Length(8),  // Runtime stats
+                        Constraint::Min(15),    // Historical sparklines (fills remaining space)
+                        Constraint::Length(12), // Operation breakdown
+                        Constraint::Min(10),    // Symbol table
+                    ])
+                    .split(area)
+            } else {
+                // For non-sched_ext programs, use original layout
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(10), // Program info
+                        Constraint::Length(8),  // Runtime stats
+                        Constraint::Min(15),    // Historical sparklines (fills remaining space)
+                        Constraint::Min(10),    // Symbol table
+                    ])
+                    .split(area)
+            };
+
+            // Render program information with BPF_ENABLE_STATS emphasis
+            self.render_bpf_program_info_with_stats(frame, chunks[0], &prog_data)?;
+
+            // Render runtime statistics collected via BPF_ENABLE_STATS
+            self.render_bpf_runtime_stats(frame, chunks[1], &prog_data)?;
+
+            // Render historical sparklines
+            self.render_bpf_program_sparklines(frame, chunks[2], &prog_data)?;
+
+            if prog_data.is_sched_ext {
+                // Render operation breakdown for sched_ext programs
+                self.render_operation_breakdown(frame, chunks[3])?;
+                // Render symbol table in the last chunk
+                self.render_bpf_program_symbol_table(frame, chunks[4])?;
+            } else {
+                // Render symbol table (perf top style)
+                self.render_bpf_program_symbol_table(frame, chunks[3])?;
+            }
+        } else {
+            // No program selected, show message
+            let paragraph = Paragraph::new("No BPF program selected")
+                .block(
+                    Block::bordered()
+                        .title("BPF Program Detail")
+                        .border_style(theme.border_style()),
+                )
+                .style(Style::default().fg(theme.text_color()));
+
+            frame.render_widget(paragraph, area);
+        }
+
+        Ok(())
+    }
+
+    /// Renders BPF program information with emphasis on BPF_ENABLE_STATS data collection
+    fn render_bpf_program_info_with_stats(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        prog_data: &BpfProgData,
+    ) -> Result<()> {
+        let theme = self.theme();
+
+        let info_text = vec![
+            Line::from(vec![
+                Span::styled("Program ID: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    prog_data.id.to_string(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+                Span::styled("  Type: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    prog_data.prog_type.clone(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Name: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    if prog_data.name.is_empty() {
+                        format!("<unnamed-{}>", prog_data.id)
+                    } else {
+                        prog_data.name.clone()
+                    },
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Instructions: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    prog_data.verified_insns.to_string(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+                Span::styled("  BTF ID: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    if prog_data.btf_id == 0 {
+                        "-".to_string()
+                    } else {
+                        prog_data.btf_id.to_string()
+                    },
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("UID: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    prog_data.uid.to_string(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+                Span::styled(
+                    "  GPL Compatible: ",
+                    Style::default().fg(theme.text_color()),
+                ),
+                Span::styled(
+                    if prog_data.gpl_compatible {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                    .to_string(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+            ]),
+            Line::from(""),
+        ];
+
+        // Create title with perf sampling status
+        let title = if self.bpf_perf_sampling_active {
+            format!(
+                "BPF Program {} Details - Perf Sampling ACTIVE ({}) - Press 'p' to stop",
+                prog_data.id,
+                self.active_event.event_name()
+            )
+        } else {
+            format!(
+                "BPF Program {} Details - Press 'p' to enable perf sampling",
+                prog_data.id
+            )
+        };
+
+        let paragraph = Paragraph::new(info_text)
+            .block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(theme.border_style())
+                    .title_top(
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.config.theme().text_important_color())
+                            .right_aligned(),
+                    ),
+            )
+            .style(Style::default().fg(theme.text_color()));
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
+    /// Renders BPF runtime statistics collected via BPF_ENABLE_STATS
+    fn render_bpf_runtime_stats(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        prog_data: &BpfProgData,
+    ) -> Result<()> {
+        let theme = self.theme();
+
+        let avg_runtime_ns = if prog_data.run_cnt > 0 {
+            prog_data.run_time_ns / prog_data.run_cnt
+        } else {
+            0
+        };
+
+        let runtime_percentage =
+            prog_data.runtime_percentage(self.bpf_program_stats.total_runtime_ns);
+
+        let stats_text = vec![
+            Line::from(vec![
+                Span::styled("Total Runtime: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    if prog_data.run_time_ns > 1_000_000_000 {
+                        format!("{:.2}s", prog_data.run_time_ns as f64 / 1_000_000_000.0)
+                    } else if prog_data.run_time_ns > 1_000_000 {
+                        format!("{:.2}ms", prog_data.run_time_ns as f64 / 1_000_000.0)
+                    } else if prog_data.run_time_ns > 1_000 {
+                        format!("{:.2}μs", prog_data.run_time_ns as f64 / 1_000.0)
+                    } else {
+                        format!("{}ns", prog_data.run_time_ns)
+                    },
+                    Style::default()
+                        .fg(theme.text_enabled_color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  Runtime %: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    format!("{:.2}%", runtime_percentage),
+                    Style::default()
+                        .fg(theme.text_enabled_color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Run Count: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    prog_data.run_cnt.to_string(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+                Span::styled("  Avg Runtime: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    if avg_runtime_ns > 1_000_000 {
+                        format!("{:.2}ms", avg_runtime_ns as f64 / 1_000_000.0)
+                    } else if avg_runtime_ns > 1_000 {
+                        format!("{:.2}μs", avg_runtime_ns as f64 / 1_000.0)
+                    } else {
+                        format!("{}ns", avg_runtime_ns)
+                    },
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Maps: ", Style::default().fg(theme.text_color())),
+                Span::styled(
+                    prog_data.nr_map_ids.to_string(),
+                    Style::default().fg(theme.text_enabled_color()),
+                ),
+            ]),
+            Line::from(""),
+        ];
+
+        let paragraph = Paragraph::new(stats_text)
+            .block(
+                Block::bordered()
+                    .title("Runtime Statistics")
+                    .border_style(theme.border_style()),
+            )
+            .style(Style::default().fg(theme.text_color()));
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
+    /// Renders historical sparklines for BPF program metrics
+    fn render_bpf_program_sparklines(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        prog_data: &BpfProgData,
+    ) -> Result<()> {
+        let theme = self.theme();
+
+        // Split area into three horizontal sparklines (side by side)
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+            ])
+            .spacing(0)
+            .split(area);
+
+        // Calculate available width for data (subtract 2 for borders)
+        let available_width = chunks[0].width.saturating_sub(2) as usize;
+
+        // Convert runtime_history to Vec<u64> for Sparkline, trimming to available width
+        let runtime_data: Vec<u64> = prog_data
+            .runtime_history
+            .iter()
+            .rev()
+            .take(available_width)
+            .rev()
+            .copied()
+            .collect();
+
+        // Convert calls_history deltas to calls per second, trimming to available width
+        let mut calls_per_sec_data: Vec<u64> = Vec::new();
+        if prog_data.calls_history.len() >= 2 && prog_data.timestamp_history.len() >= 2 {
+            let start_idx = prog_data
+                .calls_history
+                .len()
+                .saturating_sub(available_width + 1);
+            for i in (start_idx + 1)..prog_data.calls_history.len() {
+                let call_delta =
+                    prog_data.calls_history[i].saturating_sub(prog_data.calls_history[i - 1]);
+                let time_delta_ns = prog_data.timestamp_history[i]
+                    .saturating_sub(prog_data.timestamp_history[i - 1]);
+
+                if time_delta_ns > 0 {
+                    let calls_per_sec =
+                        (call_delta as f64 / time_delta_ns as f64) * 1_000_000_000.0;
+                    calls_per_sec_data.push(calls_per_sec as u64);
+                } else {
+                    calls_per_sec_data.push(0);
+                }
+            }
+        }
+
+        // Calculate percentile data for sparkline (p50, p90, p99 over time), trimming to available width
+        // For simplicity, we'll use a rolling window approach
+        let mut p99_data: Vec<u64> = Vec::new();
+        if runtime_data.len() >= 10 {
+            let start_idx = 9.max(runtime_data.len().saturating_sub(available_width));
+            for i in start_idx..runtime_data.len() {
+                let window_start = i.saturating_sub(9);
+                let window: Vec<u64> = runtime_data[window_start..=i].to_vec();
+                let mut sorted = window.clone();
+                sorted.sort_unstable();
+                let idx = ((sorted.len() - 1) as f64 * 0.99) as usize;
+                p99_data.push(sorted[idx]);
+            }
+        }
+
+        // Helper function to calculate min/max/avg
+        let calc_stats = |data: &[u64]| -> (u64, u64, u64) {
+            if data.is_empty() {
+                return (0, 0, 0);
+            }
+            let min = *data.iter().min().unwrap_or(&0);
+            let max = *data.iter().max().unwrap_or(&0);
+            let sum: u64 = data.iter().sum();
+            let avg = sum / data.len() as u64;
+            (min, max, avg)
+        };
+
+        // Calculate stats for each dataset
+        let (runtime_min, runtime_max, runtime_avg) = calc_stats(&runtime_data);
+        let (calls_min, calls_max, calls_avg) = calc_stats(&calls_per_sec_data);
+        let (p99_min, p99_max, p99_avg) = calc_stats(&p99_data);
+
+        // Runtime sparkline with min/max/avg labels
+        let runtime_sparkline = Sparkline::default()
+            .block(
+                Block::bordered()
+                    .title(format!(
+                        "Runtime (ns/call) Min:{} Avg:{} Max:{}",
+                        runtime_min, runtime_avg, runtime_max
+                    ))
+                    .border_style(theme.border_style()),
+            )
+            .data(&runtime_data)
+            .max(runtime_max.max(1))
+            .bar_set(NINE_LEVELS)
+            .style(Style::default().fg(theme.text_important_color()));
+
+        // Calls per second sparkline with min/max/avg labels
+        let calls_sparkline = Sparkline::default()
+            .block(
+                Block::bordered()
+                    .title(format!(
+                        "Calls/sec Min:{} Avg:{} Max:{}",
+                        calls_min, calls_avg, calls_max
+                    ))
+                    .border_style(theme.border_style()),
+            )
+            .data(&calls_per_sec_data)
+            .max(calls_max.max(1))
+            .bar_set(NINE_LEVELS)
+            .style(Style::default().fg(theme.positive_value_color()));
+
+        // P99 sparkline with min/max/avg labels
+        let p99_sparkline = Sparkline::default()
+            .block(
+                Block::bordered()
+                    .title(format!(
+                        "P99 Runtime Min:{} Avg:{} Max:{}",
+                        p99_min, p99_avg, p99_max
+                    ))
+                    .border_style(theme.border_style()),
+            )
+            .data(&p99_data)
+            .max(p99_max.max(1))
+            .bar_set(NINE_LEVELS)
+            .style(Style::default().fg(theme.userspace_symbol_color()));
+
+        frame.render_widget(runtime_sparkline, chunks[0]);
+        frame.render_widget(calls_sparkline, chunks[1]);
+        frame.render_widget(p99_sparkline, chunks[2]);
+
+        Ok(())
+    }
+
+    /// Renders BPF program symbol table (perf top style)
+    fn render_bpf_program_symbol_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = self.theme();
+
+        // Build table rows from filtered symbols with module name and source location
+        let rows: Vec<Row> = self
+            .bpf_program_filtered_symbols
+            .iter()
+            .map(|symbol| {
+                let source_location = if let (Some(file), Some(line)) = (
+                    &symbol.symbol_info.file_name,
+                    symbol.symbol_info.line_number,
+                ) {
+                    format!("{}:{}", file, line)
+                } else {
+                    "-".to_string()
+                };
+
+                Row::new(vec![
+                    Cell::from(format!("{:.2}%", symbol.percentage)),
+                    Cell::from(symbol.count.to_string()),
+                    Cell::from(format!("0x{:x}", symbol.symbol_info.address)),
+                    Cell::from(symbol.symbol_info.symbol_name.clone()),
+                    Cell::from(symbol.symbol_info.module_name.clone()),
+                    Cell::from(source_location),
+                ])
+            })
+            .collect();
+
+        // Create header
+        let header = Row::new(vec![
+            Cell::from("Overhead"),
+            Cell::from("Samples"),
+            Cell::from("Address"),
+            Cell::from("Symbol"),
+            Cell::from("Module"),
+            Cell::from("Source"),
+        ])
+        .style(theme.title_style())
+        .height(1);
+
+        // Define column constraints
+        let constraints = vec![
+            Constraint::Length(10), // Overhead
+            Constraint::Length(10), // Samples
+            Constraint::Length(16), // Address
+            Constraint::Fill(1),    // Symbol (with line number included in name)
+            Constraint::Length(10), // Module
+            Constraint::Length(20), // Source location
+        ];
+
+        // Create table widget
+        let table = Table::new(rows, constraints)
+            .header(header)
+            .block(
+                Block::bordered()
+                    .title(format!(
+                        "BPF Program Symbols ({} symbols) - Line numbers from jited_line_info",
+                        self.bpf_program_filtered_symbols.len()
+                    ))
+                    .border_style(theme.border_style()),
+            )
+            .style(Style::default().fg(theme.text_color()))
+            .row_highlight_style(Style::default().fg(theme.text_enabled_color()))
+            .highlight_symbol(">> ");
+
+        // Render the table
+        frame.render_stateful_widget(table, area, &mut self.bpf_program_symbol_table_state);
+        Ok(())
+    }
+
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        if self.state == AppState::PerfTop {
+        if self.state == AppState::BpfPrograms {
+            // Handle navigation for BPF programs view
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected < programs_to_display.len() - 1 {
+                    current_selected + 1
+                } else {
+                    0 // Wrap to top
+                };
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::BpfProgramDetail {
+            // Handle navigation for BPF program detail symbol table
+            let symbols_count = self.bpf_program_filtered_symbols.len();
+            if symbols_count > 0 {
+                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected < symbols_count - 1 {
+                    current_selected + 1
+                } else {
+                    0 // Wrap to top
+                };
+                self.bpf_program_symbol_table_state
+                    .select(Some(new_selected));
+            }
+        } else if self.state == AppState::PerfTop {
             // Handle PerfTop navigation separately
             let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
             if self.selected_symbol_index < max_index {
@@ -4928,13 +6001,61 @@ impl<'a> App<'a> {
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        if self.state == AppState::PerfTop {
-            // Handle PerfTop navigation separately
+        if self.state == AppState::BpfPrograms {
+            // Handle navigation for BPF programs view
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected > 0 {
+                    current_selected - 1
+                } else {
+                    programs_to_display.len() - 1 // Wrap to bottom
+                };
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::BpfProgramDetail {
+            // Handle navigation for BPF program detail symbol table
+            let symbols_count = self.bpf_program_filtered_symbols.len();
+            if symbols_count > 0 {
+                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected > 0 {
+                    current_selected - 1
+                } else {
+                    symbols_count - 1 // Wrap to bottom
+                };
+                self.bpf_program_symbol_table_state
+                    .select(Some(new_selected));
+            }
+        } else if self.state == AppState::PerfTop {
+            // Handle navigation for PerfTop view
             if self.selected_symbol_index > 0 {
                 self.selected_symbol_index -= 1;
-                self.perf_top_table_state
-                    .select(Some(self.selected_symbol_index));
             }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else if self.state == AppState::Help {
         } else {
             let mut filtered_state = self.filtered_state.lock().unwrap();
             if (self.state == AppState::PerfEvent
@@ -4953,7 +6074,45 @@ impl<'a> App<'a> {
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        if self.state == AppState::PerfTop {
+        if self.state == AppState::BpfPrograms {
+            // Handle page down for BPF programs view
+            let page_size = 10;
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let max_index = programs_to_display.len() - 1;
+
+                let new_selected = if current_selected + page_size <= max_index {
+                    current_selected + page_size
+                } else {
+                    max_index
+                };
+
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::PerfTop {
             // Handle page down for PerfTop view
             let page_size = 10;
             let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
@@ -4982,7 +6141,40 @@ impl<'a> App<'a> {
     }
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        if self.state == AppState::PerfTop {
+        if self.state == AppState::BpfPrograms {
+            // Handle page up for BPF programs view
+            let page_size = 10;
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+
+                let new_selected = current_selected.saturating_sub(page_size);
+
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::PerfTop {
             // Handle page up for PerfTop view
             let page_size = 10;
 
@@ -5075,6 +6267,55 @@ impl<'a> App<'a> {
                 self.filtering = false;
                 self.filter_symbols();
             }
+            AppState::BpfPrograms => {
+                // Enter BPF program detail view for the selected program
+                if let Some(selected_index) = self.bpf_program_table_state.selected() {
+                    // Use filtered programs if filtering is active, otherwise use all programs
+                    let programs_list: Vec<(u32, BpfProgData)> = if self.filtering {
+                        self.filtered_bpf_programs.clone()
+                    } else {
+                        // Get sorted list of BPF programs to match table order
+                        let mut programs: Vec<(u32, BpfProgData)> = self
+                            .bpf_program_stats
+                            .programs
+                            .iter()
+                            .map(|(id, data)| (*id, data.clone()))
+                            .collect();
+
+                        // Sort by average runtime descending (must match display sort order!)
+                        programs.sort_by(|a, b| {
+                            b.1.avg_runtime_ns()
+                                .partial_cmp(&a.1.avg_runtime_ns())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        programs
+                    };
+
+                    // Get the selected program ID
+                    if let Some((prog_id, _)) = programs_list.get(selected_index) {
+                        self.selected_bpf_program_id = Some(*prog_id);
+
+                        // Cache the BPF symbol info for this program (expensive operation)
+                        self.cached_bpf_symbol_info =
+                            BpfProgStats::get_real_symbol_info(*prog_id).ok().flatten();
+
+                        if let Some(ref symbol_info) = self.cached_bpf_symbol_info {
+                            log::info!(
+                                "Cached BPF symbol info for prog {}: {} ksyms, {} func_lens, {} line_info",
+                                prog_id,
+                                symbol_info.jited_ksyms.len(),
+                                symbol_info.jited_func_lens.len(),
+                                symbol_info.jited_line_info.len()
+                            );
+                        } else {
+                            log::warn!("Failed to get BPF symbol info for prog {}", prog_id);
+                        }
+
+                        self.prev_state = self.state.clone();
+                        self.state = AppState::BpfProgramDetail;
+                    }
+                }
+            }
             AppState::Default | AppState::Node | AppState::Llc | AppState::Process => {
                 // Reset process view
                 self.filtering = false;
@@ -5100,6 +6341,23 @@ impl<'a> App<'a> {
 
     fn on_escape(&mut self) -> Result<()> {
         match self.state() {
+            AppState::BpfPrograms => {
+                if self.filtering {
+                    // Clear filter and exit filtering mode
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_bpf_programs();
+                }
+            }
+            AppState::BpfProgramDetail => {
+                // Go back to BPF programs list view
+                self.selected_bpf_program_id = None;
+                self.cached_bpf_symbol_info = None;
+                self.state = AppState::BpfPrograms;
+                self.filtering = false;
+                self.event_input_buffer.clear();
+                self.filter_bpf_programs();
+            }
             AppState::PerfEvent | AppState::KprobeEvent => {
                 self.event_input_buffer.clear();
                 self.filter_events();
@@ -5718,8 +6976,42 @@ impl<'a> App<'a> {
 
     /// Handles perf sample events for the perf top view.
     pub fn on_perf_sample(&mut self, action: &crate::PerfSampleAction) {
-        // Only process perf samples when in PerfTop state
-        if self.state == AppState::PerfTop {
+        // Check if we're profiling a specific BPF program
+        if self.state == AppState::BpfProgramDetail && self.bpf_perf_sampling_active {
+            if let Some(prog_id) = self.selected_bpf_program_id {
+                // For BPF program profiling, we need to check if this sample is from the BPF program
+                // BPF programs execute as JIT-compiled kernel code
+                if action.is_kernel {
+                    // Use cached BPF symbol info to check if instruction pointer is in this BPF program
+                    let is_bpf_program_sample =
+                        if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info {
+                            // Use the contains_address method to check if IP falls within BPF program
+                            bpf_symbol_info.contains_address(action.instruction_pointer)
+                        } else {
+                            // No cached symbol info - don't accept samples without address info
+                            false
+                        };
+
+                    if is_bpf_program_sample {
+                        // This is a sample from our BPF program or kernel code it calls
+                        self.bpf_program_symbol_data
+                            .add_sample_with_stacks_and_layer(
+                                action.instruction_pointer,
+                                prog_id, // Use prog_id as pid for BPF programs
+                                action.cpu_id,
+                                true, // BPF programs are kernel code
+                                &action.kernel_stack,
+                                &action.user_stack,
+                                None, // No layer ID for BPF programs
+                            );
+
+                        // Update filtered BPF symbols
+                        self.filter_bpf_symbols();
+                    }
+                }
+            }
+        } else if self.state == AppState::PerfTop {
+            // Original PerfTop behavior
             // Get layer ID from BPF sample (negative if not present)
             let layer_id = if action.layer_id >= 0 {
                 Some(action.layer_id)
@@ -5753,6 +7045,67 @@ impl<'a> App<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// Filters BPF program symbols based on the current filter text
+    fn filter_bpf_symbols(&mut self) {
+        let top_symbols = self.bpf_program_symbol_data.get_top_symbols(1000);
+
+        // Enhance symbols with BPF line information if available
+        let enhanced_symbols: Vec<crate::symbol_data::SymbolSample> = top_symbols
+            .into_iter()
+            .map(|sample| {
+                let mut enhanced = sample.clone();
+
+                // If we have cached BPF symbol info, try to get source location
+                if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info {
+                    if let Some((line, _col)) =
+                        bpf_symbol_info.get_source_location(sample.symbol_info.address)
+                    {
+                        // Update the symbol name to include line number
+                        let base_name = &sample.symbol_info.symbol_name;
+                        enhanced.symbol_info.symbol_name = format!("{} (line {})", base_name, line);
+                        enhanced.symbol_info.line_number = Some(line);
+                    }
+                }
+
+                enhanced
+            })
+            .collect();
+
+        if !self.event_input_buffer.is_empty() {
+            let filter_text = self.event_input_buffer.to_lowercase();
+            self.bpf_program_filtered_symbols = enhanced_symbols
+                .into_iter()
+                .filter(|sample| {
+                    sample
+                        .symbol_info
+                        .symbol_name
+                        .to_lowercase()
+                        .contains(&filter_text)
+                        || sample
+                            .symbol_info
+                            .module_name
+                            .to_lowercase()
+                            .contains(&filter_text)
+                        || sample
+                            .symbol_info
+                            .file_name
+                            .as_ref()
+                            .is_some_and(|f| f.to_lowercase().contains(&filter_text))
+                })
+                .collect();
+        } else {
+            self.bpf_program_filtered_symbols = enhanced_symbols;
+        }
+
+        // Reset selection if out of bounds
+        if self.bpf_program_symbol_table_state.selected().unwrap_or(0)
+            >= self.bpf_program_filtered_symbols.len()
+            && !self.bpf_program_filtered_symbols.is_empty()
+        {
+            self.bpf_program_symbol_table_state.select(Some(0));
         }
     }
 
@@ -5826,6 +7179,7 @@ impl<'a> App<'a> {
         };
 
         let all_cpus = self.topo.all_cpus.clone();
+        let total_cpus = all_cpus.len();
         let mut attached_count = 0;
 
         for (cpu_id, _cpu_info) in all_cpus {
@@ -5938,6 +7292,12 @@ impl<'a> App<'a> {
         if attached_count == 0 {
             return Err(anyhow::anyhow!("Failed to attach perf events to any CPU"));
         }
+
+        log::info!(
+            "Attached perf sampling to {} CPUs (out of {} total)",
+            attached_count,
+            total_cpus
+        );
 
         // Store the current sampling event for display in UI
         self.current_sampling_event = Some(sampling_event);
@@ -6263,8 +7623,14 @@ impl<'a> App<'a> {
                 self.set_theme(self.theme().next());
             }
             Action::TickRateChange(dur) => {
-                self.config
-                    .set_tick_rate_ms(dur.as_millis().try_into().unwrap());
+                let new_tick_rate_ms: u64 = dur.as_millis().try_into().unwrap();
+                self.config.set_tick_rate_ms(new_tick_rate_ms as usize);
+                // Update the CPU frequency refresh interval for the background thread
+                self.cpu_freq_refresh_interval_ms
+                    .store(new_tick_rate_ms, Ordering::Relaxed);
+            }
+            Action::ToggleBpfPerfSampling => {
+                self.toggle_bpf_perf_sampling()?;
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
@@ -6274,6 +7640,22 @@ impl<'a> App<'a> {
                 if self.state == AppState::PerfTop {
                     // In PerfTop view, control perf sample rate
                     self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
+                    // Restart perf sampling with new rate if active
+                    if self.current_sampling_event.is_some() {
+                        self.detach_perf_sampling();
+                        let _ = self.attach_perf_sampling();
+                    }
+                } else if self.state == AppState::BpfProgramDetail && self.bpf_perf_sampling_active
+                {
+                    // In BPF program detail view with perf sampling active, control global perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
+                    // Restart perf sampling with new rate
+                    self.detach_perf_sampling();
+                    let _ = self.attach_perf_sampling();
+                    log::info!(
+                        "Increased perf sample rate to {} samples/sec per CPU",
+                        self.perf_sample_rate
+                    );
                 } else if let Some(ref skel) = self.skel {
                     // Normal BPF sample rate control
                     let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
@@ -6288,6 +7670,22 @@ impl<'a> App<'a> {
                 if self.state == AppState::PerfTop {
                     // In PerfTop view, control perf sample rate
                     self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
+                    // Restart perf sampling with new rate if active
+                    if self.current_sampling_event.is_some() {
+                        self.detach_perf_sampling();
+                        let _ = self.attach_perf_sampling();
+                    }
+                } else if self.state == AppState::BpfProgramDetail && self.bpf_perf_sampling_active
+                {
+                    // In BPF program detail view with perf sampling active, control global perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
+                    // Restart perf sampling with new rate
+                    self.detach_perf_sampling();
+                    let _ = self.attach_perf_sampling();
+                    log::info!(
+                        "Decreased perf sample rate to {} samples/sec per CPU",
+                        self.perf_sample_rate
+                    );
                 } else if let Some(ref skel) = self.skel {
                     // Normal BPF sample rate control
                     let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
@@ -6322,6 +7720,10 @@ impl<'a> App<'a> {
                     self.filtering = true;
                     self.filter_events();
                 }
+                AppState::BpfPrograms => {
+                    self.filtering = true;
+                    self.filter_bpf_programs();
+                }
                 AppState::PerfTop => {
                     self.filtering = true;
                     self.filter_symbols();
@@ -6331,6 +7733,9 @@ impl<'a> App<'a> {
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
                 match self.state {
+                    AppState::BpfPrograms => {
+                        self.filter_bpf_programs();
+                    }
                     AppState::PerfTop => {
                         self.filter_symbols();
                     }
@@ -6342,6 +7747,9 @@ impl<'a> App<'a> {
             Action::Backspace => {
                 self.event_input_buffer.pop();
                 match self.state {
+                    AppState::BpfPrograms => {
+                        self.filter_bpf_programs();
+                    }
                     AppState::PerfTop => {
                         self.filter_symbols();
                     }
@@ -7831,7 +9239,10 @@ impl<'a> App<'a> {
 
         // Always call filter_events to update the filtered state with all processes
         // even when not actively filtering (when filtering is false, it includes all processes)
-        self.filter_events();
+        // But skip this for BpfPrograms state as it has its own filtering logic
+        if self.state != AppState::BpfPrograms {
+            self.filter_events();
+        }
 
         Ok(())
     }
@@ -8086,5 +9497,238 @@ impl<'a> App<'a> {
     /// Static views: minimal or no updates needed
     fn on_tick_static(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    /// Ensures BPF stats tracking is enabled by opening the BPF stats FD if needed
+    fn ensure_bpf_stats_enabled(&mut self) -> Result<()> {
+        if self.bpf_stats_fd.is_none() {
+            match self.enable_bpf_stats() {
+                Ok(fd) => {
+                    self.bpf_stats_fd = Some(fd);
+                    log::debug!("BPF stats tracking enabled with FD: {}", fd);
+                }
+                Err(e) => {
+                    log::warn!("Failed to enable BPF stats tracking: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Disables BPF stats tracking by closing the BPF stats FD
+    fn disable_bpf_stats(&mut self) {
+        if let Some(fd) = self.bpf_stats_fd.take() {
+            unsafe {
+                libc::close(fd);
+            }
+            log::debug!("BPF stats tracking disabled, closed FD: {}", fd);
+        }
+    }
+
+    /// Enable BPF runtime statistics using BPF_ENABLE_STATS
+    fn enable_bpf_stats(&self) -> Result<i32> {
+        use libbpf_rs::libbpf_sys::bpf_enable_stats;
+        let fd = unsafe { bpf_enable_stats(libbpf_rs::libbpf_sys::BPF_STATS_RUN_TIME) };
+        if fd < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to enable BPF stats: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(fd as i32)
+    }
+
+    /// Toggle perf sampling for the selected BPF program
+    fn toggle_bpf_perf_sampling(&mut self) -> Result<()> {
+        // Only allow toggling in BPF program detail view
+        if self.state != AppState::BpfProgramDetail {
+            log::debug!("Perf sampling toggle only available in BPF program detail view");
+            return Ok(());
+        }
+
+        if self.selected_bpf_program_id.is_none() {
+            log::warn!("No BPF program selected for perf sampling");
+            return Ok(());
+        }
+
+        let prog_id = self.selected_bpf_program_id.unwrap();
+
+        if self.bpf_perf_sampling_active {
+            // Stop sampling
+            self.bpf_perf_sampling_active = false;
+            self.detach_perf_sampling();
+            log::info!("Stopped perf sampling for BPF program {}", prog_id);
+        } else {
+            // Start sampling - attach perf events to all CPUs
+            self.attach_perf_sampling()?;
+            self.bpf_perf_sampling_active = true;
+            log::info!(
+                "Started perf sampling for BPF program {} (global sample rate: {} samples/sec per CPU)",
+                prog_id,
+                self.perf_sample_rate
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Update total CPU time from /proc/stat
+    fn update_total_cpu_time(&mut self) -> Result<()> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let file = File::open("/proc/stat")?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.starts_with("cpu ") {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() > 7 {
+                    // Sum all CPU time fields (user, nice, system, idle, iowait, irq, softirq, etc.)
+                    // Fields are in jiffies, need to convert to nanoseconds
+                    let jiffies_sum: u64 = fields[1..]
+                        .iter()
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .sum();
+
+                    // Convert jiffies to nanoseconds (assuming 100 HZ, 1 jiffy = 10ms)
+                    let clock_ticks_per_sec = 100; // sysconf(_SC_CLK_TCK), typically 100
+                    let ns_per_tick = 1_000_000_000 / clock_ticks_per_sec;
+
+                    self.prev_total_cpu_time_ns = self.total_cpu_time_ns;
+                    self.total_cpu_time_ns = jiffies_sum * ns_per_tick;
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Calculate BPF overhead as percentage of CPU time
+    fn calculate_bpf_overhead(&mut self) {
+        if self.prev_total_cpu_time_ns == 0 {
+            return; // First sample, no delta to calculate
+        }
+
+        let cpu_time_delta = self
+            .total_cpu_time_ns
+            .saturating_sub(self.prev_total_cpu_time_ns);
+        let bpf_time_delta = self
+            .bpf_program_stats
+            .total_runtime_ns
+            .saturating_sub(self.prev_bpf_total_runtime_ns);
+
+        if cpu_time_delta > 0 {
+            let overhead_pct = (bpf_time_delta as f64 / cpu_time_delta as f64) * 100.0;
+
+            // Add to history for trending
+            self.bpf_overhead_history.push_back(overhead_pct);
+
+            // Limit history size to terminal width (accounting for borders)
+            // This ensures we keep exactly the right amount of data for display
+            let max_history = self.terminal_width.saturating_sub(2).max(10) as usize;
+            while self.bpf_overhead_history.len() > max_history {
+                self.bpf_overhead_history.pop_front();
+            }
+        }
+
+        // Update previous BPF runtime for next delta calculation
+        self.prev_bpf_total_runtime_ns = self.bpf_program_stats.total_runtime_ns;
+    }
+
+    /// Runs callbacks to update BPF programs statistics on tick.
+    fn on_tick_bpf_programs(&mut self) -> Result<()> {
+        // Enable BPF stats tracking if not already enabled
+        self.ensure_bpf_stats_enabled()?;
+
+        // Update total CPU time from /proc/stat
+        self.update_total_cpu_time()?;
+
+        // Collect BPF program statistics (update existing to maintain history)
+        if let Err(e) = self.bpf_program_stats.collect_and_update() {
+            log::warn!("Failed to collect BPF program stats: {e}");
+        }
+
+        // Calculate BPF overhead percentage
+        self.calculate_bpf_overhead();
+
+        // Always refresh filtered programs list (filtering logic is inside the method)
+        self.filter_bpf_programs();
+
+        // Get the current display list (filtered or unfiltered, sorted)
+        let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = if self.filtering {
+            self.filtered_bpf_programs.clone()
+        } else {
+            let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
+            programs.sort_by(|a, b| {
+                b.1.avg_runtime_ns()
+                    .partial_cmp(&a.1.avg_runtime_ns())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            programs
+        };
+
+        // Try to preserve the selection across refreshes
+        if let Some(selected_id) = self.selected_bpf_program_id {
+            // Find the selected program in the new list
+            if let Some(new_index) = programs_to_display
+                .iter()
+                .position(|(id, _)| *id == selected_id)
+            {
+                // The selected program is still in the list, update table state to point to its new position
+                self.bpf_program_table_state.select(Some(new_index));
+            } else {
+                // The selected program is no longer in the list (e.g., unloaded or filtered out)
+                // Clear the selection and let the initialization logic below handle it
+                self.selected_bpf_program_id = None;
+                self.bpf_program_table_state.select(None);
+            }
+        }
+
+        // Initialize table selection if no item is selected and we have programs
+        if !programs_to_display.is_empty() && self.bpf_program_table_state.selected().is_none() {
+            self.bpf_program_table_state.select(Some(0));
+            // Update selected program ID to match the first item
+            if let Some((prog_id, _)) = programs_to_display.first() {
+                self.selected_bpf_program_id = Some(*prog_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Runs callbacks to update BPF program detail view on tick.
+    fn on_tick_bpf_program_detail(&mut self) -> Result<()> {
+        // Enable BPF stats tracking if not already enabled
+        self.ensure_bpf_stats_enabled()?;
+
+        // Collect BPF program statistics to keep the detailed view up to date (update existing to maintain history)
+        if let Err(e) = self.bpf_program_stats.collect_and_update() {
+            log::warn!("Failed to collect BPF program stats: {e}");
+        }
+
+        // Clear BPF symbols when not sampling
+        // (Samples are collected in on_perf_sample when sampling is active)
+        if !self.bpf_perf_sampling_active {
+            self.bpf_program_filtered_symbols.clear();
+            self.bpf_program_symbol_data = SymbolData::new();
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for App<'_> {
+    fn drop(&mut self) {
+        // Ensure BPF stats file descriptor is closed when App is dropped
+        self.disable_bpf_stats();
     }
 }

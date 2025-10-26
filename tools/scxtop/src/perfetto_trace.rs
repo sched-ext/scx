@@ -262,22 +262,23 @@ impl PerfettoTraceManager {
 
         // Let's check if this is the first time we've seen this process.
         let parent_key = self.generate_key(pid, pid);
-        if !self.process_descriptors.contains_key(&parent_key) {
-            let process_name = if pid == tid {
-                Some(comm)
-            } else {
-                self.get_comm(pid)
-            };
-            let cmdline = self.get_cmdline(pid);
-            self.process_descriptors.insert(
-                parent_key,
-                ProcessDescriptor {
-                    pid: Some(pid as i32),
-                    cmdline: cmdline.clone(),
-                    process_name,
-                    ..ProcessDescriptor::default()
-                },
-            );
+        // Get the values before calling entry() to avoid borrow checker issues
+        let process_name = if pid == tid {
+            Some(comm)
+        } else {
+            self.get_comm(pid)
+        };
+        let cmdline = self.get_cmdline(pid);
+
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.process_descriptors.entry(parent_key)
+        {
+            e.insert(ProcessDescriptor {
+                pid: Some(pid as i32),
+                cmdline: cmdline.clone(),
+                process_name,
+                ..ProcessDescriptor::default()
+            });
 
             self.processes.insert(
                 parent_key,

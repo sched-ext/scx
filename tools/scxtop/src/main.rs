@@ -77,7 +77,13 @@ fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
             if let Some(action) = handle_input_entry(app, c.to_string()) {
                 action
             } else {
-                keymap.action(&Key::Char(c))
+                // Check for state-specific key bindings before falling back to global keymap
+                match (app.state(), c) {
+                    // In BPF program detail view, 'p' toggles perf sampling
+                    (AppState::BpfProgramDetail, 'p') => Action::ToggleBpfPerfSampling,
+                    // Fall back to global keymap for all other cases
+                    _ => keymap.action(&Key::Char(c)),
+                }
             }
         }
         _ => keymap.action(&Key::Code(key.code)),
@@ -93,6 +99,7 @@ fn handle_input_entry(app: &App, s: String) -> Option<Action> {
         | AppState::Process
         | AppState::Memory
         | AppState::PerfTop
+        | AppState::BpfPrograms
             if app.filtering() =>
         {
             Some(Action::InputEntry(s))
