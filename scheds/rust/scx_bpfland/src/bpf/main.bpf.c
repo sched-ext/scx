@@ -15,8 +15,12 @@
 /*
  * Maximum rate of task wakeups/sec (tasks with a higher rate are capped to
  * this value).
+ *
+ * Note that the wakeup rate is evaluate over a period of 100ms, so this
+ * number must be multiplied by 10 to determine the actual limit in
+ * wakeups/sec.
  */
-#define MAX_WAKEUP_FREQ		128ULL
+#define MAX_WAKEUP_FREQ		64ULL
 
 char _license[] SEC("license") = "GPL";
 
@@ -212,7 +216,7 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	u64 exec_runtime;
+	u64 awake_vtime;
 	u64 last_run_at;
 	u64 wakeup_freq;
 	u64 last_woke_at;
@@ -255,14 +259,6 @@ static inline u64 node_dsq(s32 cpu)
 }
 
 /*
- * Return true if @dsq_id is a per-CPU DSQ, false otherwise.
- */
-static inline bool is_cpu_dsq(u64 dsq_id)
-{
-	return dsq_id < nr_cpu_ids;
-}
-
-/*
  * Return true if the target task @p is a kernel thread.
  */
 static inline bool is_kthread(const struct task_struct *p)
@@ -284,6 +280,21 @@ static bool is_task_queued(const struct task_struct *p)
 static inline bool is_pcpu_task(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
+}
+
+/*
+ * Return true if @p1's deadline is less than @p2's deadline, false
+ * otherwise.
+ */
+static inline bool
+is_deadline_min(const struct task_struct *p1, const struct task_struct *p2)
+{
+	if (!p1)
+		return false;
+	if (!p2)
+		return true;
+
+	return p1->scx.dsq_vtime < p2->scx.dsq_vtime;
 }
 
 /*
@@ -609,20 +620,20 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
  *
  *  The deadline is defined as:
  *
- *    deadline = vruntime + exec_vruntime
+ *    deadline = vruntime + awake_vtime
  *
  * Here, `vruntime` represents the task's total accumulated runtime,
- * inversely scaled by its weight, while `exec_vruntime` accounts the
- * runtime accumulated since the last sleep event, also inversely scaled by
- * the task's weight.
+ * inversely scaled by its weight, while `awake_vtime` accounts the runtime
+ * accumulated since the last sleep event, also inversely scaled by the
+ * task's weight.
  *
- * Fairness is driven by `vruntime`, while `exec_vruntime` helps prioritize
+ * Fairness is driven by `vruntime`, while `awake_vtime` helps prioritize
  * tasks that sleep frequently and use the CPU in short bursts (resulting
- * in a small `exec_vruntime` value), which are typically latency critical.
+ * in a small `awake_vtime` value), which are typically latency critical.
  *
  * Additionally, to prevent over-prioritizing tasks that sleep for long
- * periods of time, the vruntime credit they can accumulate while sleeping
- * is limited by @slice_lag, which is also scaled based on the task's
+ * periods of time, the maximum vruntime they can accumulate while sleeping
+ * is limited to @slice_lag, which is also scaled based on the task's
  * weight.
  *
  * To prioritize tasks that sleep frequently over those with long sleep
@@ -634,13 +645,28 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vsleep_max = scale_by_task_weight(p, slice_lag * lag_scale);
-	u64 vtime_min = vtime_now - vsleep_max;
+	u64 vtime_min = vtime_now - scale_by_task_weight(p, slice_lag * lag_scale);
+	u64 awake_max = scale_by_task_weight_inverse(p, slice_lag);
 
+	/*
+	 * Cap the vruntime credit while sleeping to @vtime_min.
+	 */
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		p->scx.dsq_vtime = vtime_min;
 
-	return p->scx.dsq_vtime + scale_by_task_weight_inverse(p, tctx->exec_runtime);
+	/*
+	 * Cap the partial accumulated vruntime since last sleep to
+	 * @slice_lag.
+	 */
+	if (time_after(tctx->awake_vtime, awake_max))
+		tctx->awake_vtime = awake_max;
+
+	/*
+	 * Evaluate task's deadline as the accumulated vruntime +
+	 * accumulated vruntime since last sleep + the expected time slice
+	 * that the task is going to use.
+	 */
+	return p->scx.dsq_vtime + tctx->awake_vtime;
 }
 
 /*
@@ -677,9 +703,14 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	cpu = pick_idle_cpu(p, prev_cpu, is_this_cpu_allowed ? this_cpu : -1,
 			    wake_flags, false);
 	if (cpu >= 0) {
-		scx_bpf_dsq_insert(p, cpu_dsq(cpu), task_slice(p), 0);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		struct task_ctx *tctx;
 
+		tctx = try_lookup_task_ctx(p);
+		if (tctx) {
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
+						 task_slice(p), task_dl(p, tctx), 0);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		}
 		return cpu;
 	}
 
@@ -765,15 +796,19 @@ static u64 update_freq(u64 freq, u64 interval)
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p);
-	u64 slice = task_slice(p);
 	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 
 	/*
 	 * If @local_pcpu is enabled always dispatch tasks that can
 	 * only run on one CPU directly.
 	 */
 	if (local_pcpu && is_pcpu_task(p)) {
-		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p), task_dl(p, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -783,7 +818,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * directly on their assigned CPU.
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p), task_dl(p, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -801,7 +837,9 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, cpu_dsq(cpu), slice, enq_flags);
+
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
+						 task_slice(p), task_dl(p, tctx), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			if (prev_cpu != cpu || !scx_bpf_task_running(p))
@@ -814,12 +852,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If the task is marked as sticky, just force it to stay on the
 	 * local CPU.
 	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
 	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, cpu_dsq(prev_cpu), slice, enq_flags);
-		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+					 task_slice(p), task_dl(p, tctx), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
 
@@ -892,36 +928,19 @@ static inline struct task_struct *dsq_first_task(u64 dsq_id)
  * Consume and dispatch the first task from @dsq_id. If the first task can't be
  * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
  */
-static bool consume_first_task(u64 dsq_id)
+static bool consume_first_task(u64 dsq_id, struct task_struct *p)
 {
-	struct task_struct *p = dsq_first_task(dsq_id);
-	bool dispatched;
-
 	if (!p)
 		return false;
 
-	dispatched = scx_bpf_dsq_move_to_local(dsq_id);
-
-	/*
-	 * In case of a per-CPU DSQ, if @p is still at the head of the DSQ
-	 * after a task has been consumed, it implies that @p is not
-	 * runnable on this CPU. In this case, redirect it to the local DSQ
-	 * of its currently assigned CPU.
-	 */
-	if (is_cpu_dsq(dsq_id) && p == dsq_first_task(dsq_id)) {
-		bpf_for_each(scx_dsq, p, dsq_id, 0) {
-			__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER,
-						  p, SCX_DSQ_LOCAL, 0);
-			break;
-		}
-		dispatched = false;
-	}
-
-	return dispatched;
+	return scx_bpf_dsq_move_to_local(dsq_id);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct task_struct *p = dsq_first_task(cpu_dsq(cpu));
+	struct task_struct *q = dsq_first_task(node_dsq(cpu));
+
 	/*
 	 * Let the CPU go idle if the system is throttled.
 	 */
@@ -929,18 +948,17 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Consume tasks from the per-CPU DSQ, transferring them to the local
-	 * CPU DSQ.
+	 * Try to consume the first task either from the per-CPU DSQ or the
+	 * per-node DSQ, picking the one with the minimum deadline that can
+	 * run on @cpu.
 	 */
-	if (consume_first_task(cpu_dsq(cpu)))
-		return;
-
-	/*
-	 * Consume tasks from the per-node DSQ, transferring them to the local
-	 * CPU DSQ.
-	 */
-	if (consume_first_task(node_dsq(cpu)))
-		return;
+	if (!is_deadline_min(q, p)) {
+		if (consume_first_task(cpu_dsq(cpu), p) || consume_first_task(node_dsq(cpu), q))
+			return;
+	} else {
+		if (consume_first_task(node_dsq(cpu), q) || consume_first_task(cpu_dsq(cpu), p))
+			return;
+	}
 
 	/*
 	 * If the current task expired its time slice and no other task wants
@@ -1043,17 +1061,14 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = bpf_ktime_get_ns() - tctx->last_run_at;
+	slice = scale_by_task_weight_inverse(p, bpf_ktime_get_ns() - tctx->last_run_at);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
 	 * sleep.
-	 *
-	 * Cap the maximum accumulated time since last sleep to @slice_lag,
-	 * to prevent starving CPU-intensive tasks.
 	 */
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
-	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, slice_lag);
+	p->scx.dsq_vtime += slice;
+	tctx->awake_vtime += slice;
 
 	/*
 	 * Update CPU runtime.
@@ -1074,7 +1089,7 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	tctx->exec_runtime = 0;
+	tctx->awake_vtime = 0;
 
 	/*
 	 * Update the task's wakeup frequency based on the time since the
