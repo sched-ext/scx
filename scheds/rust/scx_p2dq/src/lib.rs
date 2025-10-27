@@ -336,7 +336,15 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
             );
-            rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority);
+
+            // Check if cpu_priority is supported by the kernel
+            let cpu_priority_supported = compat::ksym_exists("sched_core_priority").unwrap_or(false);
+            if opts.cpu_priority && !cpu_priority_supported {
+                ::log::warn!("CPU priority scheduling requested but kernel doesn't support sched_core_priority");
+                ::log::warn!("Feature disabled - requires kernel with hybrid CPU support and appropriate CPU governor (e.g., amd-pstate)");
+                ::log::warn!("See README for kernel requirements");
+            }
+            rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority && cpu_priority_supported);
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
