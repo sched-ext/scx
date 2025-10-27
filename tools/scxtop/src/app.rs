@@ -20,6 +20,7 @@ use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
 use crate::network_stats::InterfaceStats;
+use crate::render::ProcessRenderer;
 use crate::search;
 use crate::symbol_data::SymbolData;
 use crate::util::{
@@ -3577,28 +3578,6 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Common helper to create table header and constraints from visible columns
-    fn create_table_header_and_constraints<T, D>(
-        &self,
-        visible_columns: &[&crate::columns::Column<T, D>],
-    ) -> (Row<'_>, Vec<Constraint>) {
-        let header = visible_columns
-            .iter()
-            .map(|col| Cell::from(col.header))
-            .collect::<Row>()
-            .height(1)
-            .style(self.theme().text_color())
-            .bold()
-            .underlined();
-
-        let constraints = visible_columns
-            .iter()
-            .map(|col| col.constraint)
-            .collect::<Vec<_>>();
-
-        (header, constraints)
-    }
-
     /// Common helper to update events list size
     fn update_events_list_size(&mut self, area: Rect) {
         let height = if area.height > 0 { area.height - 1 } else { 1 };
@@ -3614,107 +3593,33 @@ impl<'a> App<'a> {
         area: Rect,
         render_tick_rate: bool,
     ) -> Result<()> {
-        let [scroll_area, data_area] =
-            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
-        self.update_events_list_size(data_area);
-
         let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
-        let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
+        let filtered_state = self.filtered_state.lock().unwrap();
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
 
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(self.theme().border_style())
-            .title_top(
-                Line::from(format!("Processes (total: {})", self.proc_data.len()))
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .title_top(
-                Line::from(vec![
-                    Span::styled("f", self.theme().text_important_color()),
-                    Span::styled(
-                        if self.filtering {
-                            format!(" {}_", self.event_input_buffer)
-                        } else {
-                            "ilter".to_string()
-                        },
-                        self.theme().text_color(),
-                    ),
-                ])
-                .left_aligned(),
-            )
-            .title_top(
-                Line::from(format!(
-                    "sample rate {}{}",
-                    self.skel
-                        .as_ref()
-                        .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
-                        .unwrap_or(0),
-                    if render_tick_rate {
-                        format!(" --- tick rate {}", self.config.tick_rate_ms())
-                    } else {
-                        "".to_string()
-                    }
-                ))
-                .style(self.theme().text_important_color())
-                .right_aligned(),
-            );
+        let theme = self.theme();
+        let (selected_pid, new_size) = ProcessRenderer::render_process_table(
+            frame,
+            area,
+            &self.proc_data,
+            visible_columns,
+            &filtered_state,
+            self.filtering,
+            &self.event_input_buffer,
+            sample_rate,
+            self.config.tick_rate_ms(),
+            render_tick_rate,
+            theme,
+            self.events_list_size,
+        )?;
 
-        // We want to hold the lock for as short as possible
-        let (mut filtered_processes, selected): (Vec<_>, usize) = {
-            let filtered_state = self.filtered_state.lock().unwrap();
-            let processes = filtered_state
-                .list
-                .iter()
-                .filter_map(|item| {
-                    item.as_int()
-                        .and_then(|pid| self.proc_data.get(&pid).map(|data| (pid, data)))
-                })
-                .collect();
-            (processes, filtered_state.selected)
-        };
-
-        filtered_processes.sort_unstable_by(|a, b| {
-            b.1.cpu_util_perc
-                .partial_cmp(&a.1.cpu_util_perc)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.1.num_threads.cmp(&a.1.num_threads))
-        });
-
-        let rows = filtered_processes
-            .iter()
-            .enumerate()
-            .map(|(i, (tgid, data))| {
-                visible_columns
-                    .iter()
-                    .map(|col| Cell::from((col.value_fn)(*tgid, data)))
-                    .collect::<Row>()
-                    .height(1)
-                    .style(if i == selected {
-                        self.theme().text_important_color()
-                    } else {
-                        self.theme().text_color()
-                    })
-            });
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        frame.render_stateful_widget(
-            table,
-            data_area,
-            &mut TableState::new().with_offset(selected),
-        );
-
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            scroll_area,
-            &mut ScrollbarState::new(filtered_processes.len()).position(selected),
-        );
-
-        if let Some((tgid, _)) = filtered_processes.get(selected) {
-            self.selected_process = Some(*tgid);
+        self.events_list_size = new_size;
+        if let Some(pid) = selected_pid {
+            self.selected_process = Some(pid);
         }
 
         Ok(())
@@ -3726,10 +3631,6 @@ impl<'a> App<'a> {
         area: Rect,
         render_tick_rate: bool,
     ) -> Result<()> {
-        let [scroll_area, data_area] =
-            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
-        self.update_events_list_size(data_area);
-
         let error_str = format!(
             "Process has been killed. Press escape or {} to return to process view.",
             self.config.active_keymap.action_keys_string(Action::Quit)
@@ -3744,101 +3645,32 @@ impl<'a> App<'a> {
         };
 
         let visible_columns: Vec<_> = self.thread_columns.visible_columns().collect();
-        let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
+        let filtered_state = self.filtered_state.lock().unwrap();
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
+        let _quit_keys = self.config.active_keymap.action_keys_string(Action::Quit);
+        let theme = self.theme();
 
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(self.theme().border_style())
-            .title_top(
-                Line::from(format!(
-                    "Process: {:.15} [{}] (total threads: {})",
-                    proc_data.process_name, proc_data.tgid, proc_data.num_threads,
-                ))
-                .style(self.theme().title_style())
-                .centered(),
-            )
-            .title_top(
-                Line::from(vec![
-                    Span::styled("f", self.theme().text_important_color()),
-                    Span::styled(
-                        if self.filtering {
-                            format!(" {}_", self.event_input_buffer)
-                        } else {
-                            "ilter".to_string()
-                        },
-                        self.theme().text_color(),
-                    ),
-                ])
-                .left_aligned(),
-            )
-            .title_top(
-                Line::from(if let Some(ref skel) = self.skel {
-                    format!(
-                        "sample rate {}{}",
-                        skel.maps.data_data.as_ref().unwrap().sample_rate,
-                        if render_tick_rate {
-                            format!(" --- tick rate {}", self.config.tick_rate_ms())
-                        } else {
-                            "".to_string()
-                        }
-                    )
-                } else if render_tick_rate {
-                    format!("tick rate {}", self.config.tick_rate_ms())
-                } else {
-                    "".to_string()
-                })
-                .style(self.theme().text_important_color())
-                .right_aligned(),
-            );
+        let new_size = ProcessRenderer::render_thread_table(
+            frame,
+            area,
+            tgid,
+            proc_data,
+            visible_columns,
+            &filtered_state,
+            self.filtering,
+            &self.event_input_buffer,
+            sample_rate,
+            self.config.tick_rate_ms(),
+            render_tick_rate,
+            theme,
+            self.events_list_size,
+        )?;
 
-        let (mut filtered_threads, selected): (Vec<_>, usize) = {
-            let filtered_state = self.filtered_state.lock().unwrap();
-            let threads = filtered_state
-                .list
-                .iter()
-                .filter_map(|item| {
-                    item.as_int()
-                        .and_then(|tid| proc_data.threads.get(&tid).map(|data| (tid, data)))
-                })
-                .collect();
-            (threads, filtered_state.selected)
-        };
-
-        filtered_threads.sort_unstable_by(|a, b| {
-            b.1.cpu_util_perc
-                .partial_cmp(&a.1.cpu_util_perc)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let rows = filtered_threads.iter().enumerate().map(|(i, (tid, data))| {
-            visible_columns
-                .iter()
-                .map(|col| Cell::from((col.value_fn)(*tid, data)))
-                .collect::<Row>()
-                .height(1)
-                .style(if i == selected {
-                    self.theme().text_important_color()
-                } else {
-                    self.theme().text_color()
-                })
-        });
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        frame.render_stateful_widget(
-            table,
-            data_area,
-            &mut TableState::new().with_offset(selected),
-        );
-
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            scroll_area,
-            &mut ScrollbarState::new(filtered_threads.len()).position(selected),
-        );
-
+        self.events_list_size = new_size;
         Ok(())
     }
 
