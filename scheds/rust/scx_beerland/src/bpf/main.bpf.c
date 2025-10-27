@@ -704,7 +704,7 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 /*
  * Try to consume a task from a remote DSQ.
  */
-static bool dispatch_from_remote_cpu(s32 from_cpu)
+static bool dispatch_from_any_cpu(s32 from_cpu)
 {
 	u64 min_vtime = ULLONG_MAX, cpu, min_cpu;
 
@@ -717,25 +717,12 @@ static bool dispatch_from_remote_cpu(s32 from_cpu)
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct task_struct *p;
 
-		if (cpu == from_cpu)
-			continue;
-
-		/*
-		 * Avoid migrating if the remote CPU is not overloaded and
-		 * has only one task waiting: this task will likely get a
-		 * chance to run soon.
-		 */
-		if (scx_bpf_dsq_nr_queued(cpu) <= 1)
-			continue;
-
-		bpf_rcu_read_lock();
 		p = __COMPAT_scx_bpf_dsq_peek(cpu);
 		if (p && bpf_cpumask_test_cpu(from_cpu, p->cpus_ptr) &&
 		    p->scx.dsq_vtime < min_vtime) {
 			min_vtime = p->scx.dsq_vtime;
 			min_cpu = cpu;
 		}
-		bpf_rcu_read_unlock();
 	}
 
 	return min_vtime < ULLONG_MAX && scx_bpf_dsq_move_to_local(min_cpu);
@@ -761,7 +748,7 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Do no trigger any rebalance unless the system is completely
 	 * saturated.
 	 */
-	if (is_system_busy() && dispatch_from_remote_cpu(cpu)) {
+	if (is_system_busy() && dispatch_from_any_cpu(cpu)) {
 		__sync_fetch_and_add(&nr_remote_dispatch, 1);
 		return;
 	}
