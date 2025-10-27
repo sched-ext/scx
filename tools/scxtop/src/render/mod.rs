@@ -5,5 +5,8 @@
 
 // Process and thread rendering
 pub mod process;
+// Memory rendering
+pub mod memory;
 
 pub use process::ProcessRenderer;
+pub use memory::MemoryRenderer;
