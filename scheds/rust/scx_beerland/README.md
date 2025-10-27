@@ -7,10 +7,10 @@ This is a single user-defined scheduler used within [`sched_ext`](https://github
 scx_beerland (BPF-Enhanced Execution Runtime Locality-Aware Non-blocking
 Dispatcher) is a scheduler designed to prioritize locality and scalability.
 
-The scheduler uses separate DSQ (vruntime ordered) for each CPU. Tasks get
+The scheduler uses separate DSQ (deadline ordered) for each CPU. Tasks get
 a chance to migrate only on wakeup, when the system is not saturated. If
 the system becomes saturated, CPUs also start pulling tasks from the remote
-DSQs, always selecting the task with the smallest vruntime.
+DSQs, always selecting the task with the smallest deadline.
 
 ## Typical Use Case
 

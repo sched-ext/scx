@@ -14,7 +14,7 @@
  * Maximum rate of task wakeups/sec (tasks with a higher rate are capped to
  * this value).
  */
-#define MAX_WAKEUP_FREQ		128ULL
+#define MAX_WAKEUP_FREQ		64ULL
 
 char _license[] SEC("license") = "GPL";
 
@@ -24,6 +24,15 @@ UEI_DEFINE(uei);
  * Default time slice.
  */
 const volatile u64 slice_ns = NSEC_PER_MSEC;
+
+/*
+ * Maximum time slice lag.
+ *
+ * Increasing this value can help to increase the responsiveness of interactive
+ * tasks at the cost of making regular and newly created tasks less responsive
+ * (0 = disabled).
+ */
+const volatile u64 slice_lag = 40ULL * NSEC_PER_MSEC;
 
 /*
  * Maximum amount of CPUs supported by the system.
@@ -101,6 +110,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 last_woke_at;
 	u64 wakeup_freq;
+	u64 awake_vtime;
 };
 
 struct {
@@ -156,35 +166,32 @@ static u64 task_slice(struct task_struct *p, s32 cpu)
 }
 
 /*
- * Return task's wakeup frequency.
- */
-static u64 task_wakeup_freq(const struct task_struct *p)
-{
-	const struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return 1;
-
-	return MAX(tctx->wakeup_freq, 1);
-}
-
-/*
- * Evaluate the vruntime of task @p.
+ * Evaluate the deadline of task @p.
  *
- * Proportionally scale vruntime in function of the task's priority.
- * Moreover, cap the maximum amount of vruntime credit, accumulated while
- * the task is sleeping, proportionally to the task's priority and the
- * wakeup rate.
+ * Scale the runtime according to the task's priority. Additionally, limit
+ * the maximum vruntime credit accumulated while the task is sleeping based
+ * on its priority, @slice_lag, and wakeup rate.
+ *
+ * Then, include the vruntime accumulated while the task was awake. This
+ * compensates the fact that the wakeup frequency is only updated in
+ * ops.runnable(): if a task never sleeps, it would retain its initial
+ * wakeup frequency; by incorporating the awake vruntime into the deadline,
+ * we penalize continuously running tasks even when their wakeup frequency
+ * remains unchanged.
  */
-static u64 task_vtime(const struct task_struct *p)
+static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vtime, vtime_min;
+	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
+	u64 vtime_min = vtime_now - scale_by_task_weight(p, slice_lag * lag_scale);
+	u64 awake_max = scale_by_task_weight_inverse(p, slice_lag);
 
-	vtime = p->scx.dsq_vtime;
-	vtime_min = vtime_now - scale_by_task_weight(p, slice_ns * task_wakeup_freq(p));
+	if (time_before(p->scx.dsq_vtime, vtime_min))
+		p->scx.dsq_vtime = vtime_min;
 
-	return time_before(vtime, vtime_min) ? vtime_min : vtime;
+	if (time_after(tctx->awake_vtime, awake_max))
+		tctx->awake_vtime = awake_max;
+
+	return p->scx.dsq_vtime + tctx->awake_vtime;
 }
 
 /*
@@ -613,6 +620,11 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 {
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
 
 	/*
 	 * Make sure @prev_cpu is usable, otherwise try to move close to
@@ -656,7 +668,7 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	 * The target CPU is automatically kicked when returning from this
 	 * callback.
 	 */
-	scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, cpu), task_vtime(p), 0);
+	scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, cpu), task_dl(p, tctx), 0);
 
 	return cpu;
 }
@@ -668,6 +680,11 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 cpu, prev_cpu = task_cpu(p, scx_bpf_task_cpu(p));
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 
 	/*
 	 * Attempt a migration to an idle CPU if possible.
@@ -676,7 +693,7 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 		cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, prev_cpu),
-						 task_vtime(p), enq_flags);
+						 task_dl(p, tctx), enq_flags);
 			if (prev_cpu != cpu || !scx_bpf_task_running(p))
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
@@ -687,7 +704,7 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Keep running on the same CPU.
 	 */
 	scx_bpf_dsq_insert_vtime(p, prev_cpu, task_slice(p, prev_cpu),
-				 task_vtime(p), enq_flags);
+				 task_dl(p, tctx), enq_flags);
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
@@ -726,14 +743,6 @@ static bool dispatch_from_any_cpu(s32 from_cpu)
 void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Consume from the local DSQ first.
-	 */
-	if (scx_bpf_dsq_move_to_local(cpu)) {
-		__sync_fetch_and_add(&nr_local_dispatch, 1);
-		return;
-	}
-
-	/*
 	 * Try to consume a task from a remote CPU.
 	 *
 	 * Do no trigger any rebalance unless the system is completely
@@ -741,6 +750,14 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (is_system_busy() && dispatch_from_any_cpu(cpu)) {
 		__sync_fetch_and_add(&nr_remote_dispatch, 1);
+		return;
+	}
+
+	/*
+	 * Consume from the local DSQ first.
+	 */
+	if (scx_bpf_dsq_move_to_local(cpu)) {
+		__sync_fetch_and_add(&nr_local_dispatch, 1);
 		return;
 	}
 
@@ -756,12 +773,14 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(beerland_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = scx_bpf_now(), delta_t;
+	u64 now = bpf_ktime_get_ns(), delta_t;
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	tctx->awake_vtime = 0;
 
 	/*
 	 * Update the task's wakeup frequency based on the time since the
@@ -785,7 +804,7 @@ void BPF_STRUCT_OPS(beerland_running, struct task_struct *p)
 	 * Save a timestamp when the task begins to run (used to evaluate
 	 * the used time slice).
 	 */
-	tctx->last_run_at = scx_bpf_now();
+	tctx->last_run_at = bpf_ktime_get_ns();
 
 	/*
 	 * Update current system's vruntime.
@@ -806,13 +825,14 @@ void BPF_STRUCT_OPS(beerland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = scx_bpf_now() - tctx->last_run_at;
+	slice = scale_by_task_weight_inverse(p, bpf_ktime_get_ns() - tctx->last_run_at);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
 	 * sleep.
 	 */
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, slice);
+	p->scx.dsq_vtime += slice;
+	tctx->awake_vtime += slice;
 }
 
 void BPF_STRUCT_OPS(beerland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
