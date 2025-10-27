@@ -20,7 +20,7 @@ pub mod layered_util;
 mod llc_data;
 pub mod mangoapp;
 mod mem_stats;
-mod network_stats;
+pub mod network_stats;
 mod node_data;
 mod perfetto_trace;
 mod power_data;

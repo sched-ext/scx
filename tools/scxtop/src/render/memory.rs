@@ -14,10 +14,8 @@ use anyhow::Result;
 use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::symbols::line::THICK;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Cell, LineGauge, Row, Table,
-};
-use ratatui::{Frame, layout::Rect};
+use ratatui::widgets::{Block, BorderType, Cell, LineGauge, Row, Table};
+use ratatui::{layout::Rect, Frame};
 
 /// Renderer for memory views
 pub struct MemoryRenderer;
@@ -219,7 +217,9 @@ impl MemoryRenderer {
             Line::from(vec![
                 Span::styled(
                     &memory_key,
-                    theme.title_style().add_modifier(ratatui::style::Modifier::BOLD),
+                    theme
+                        .title_style()
+                        .add_modifier(ratatui::style::Modifier::BOLD),
                 ),
                 Span::styled("emory Statistics", theme.text_color()),
             ])

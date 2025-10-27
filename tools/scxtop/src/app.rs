@@ -11,19 +11,18 @@ use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
     get_bpf_program_columns, get_perf_top_columns, get_perf_top_columns_no_bpf,
-    get_process_columns, get_process_columns_no_bpf, get_thread_columns,
-    get_thread_columns_no_bpf, Columns,
+    get_process_columns, get_process_columns_no_bpf, get_thread_columns, get_thread_columns_no_bpf,
+    Columns,
 };
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
-use crate::network_stats::InterfaceStats;
-use crate::render::{MemoryRenderer, ProcessRenderer};
+use crate::render::{MemoryRenderer, NetworkRenderer, ProcessRenderer};
 use crate::search;
 use crate::symbol_data::SymbolData;
 use crate::util::{
-    check_perf_capability, default_scxtop_sched_ext_stats, format_bits, format_bytes, format_hz,
-    read_file_string, sanitize_nbsp, u32_to_i32,
+    check_perf_capability, default_scxtop_sched_ext_stats, format_hz, read_file_string,
+    sanitize_nbsp, u32_to_i32,
 };
 use crate::AppState;
 use crate::AppTheme;
@@ -2831,91 +2830,60 @@ impl<'a> App<'a> {
 
     /// Renders a simplified network summary for the default view.
     fn render_network_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        // Create a table for the network interfaces
-        let header = Row::new(vec![
-            Cell::from("Interface"),
-            Cell::from("RX Bytes"),
-            Cell::from("TX Bytes"),
-            Cell::from("RX Packets"),
-            Cell::from("TX Packets"),
-        ])
-        .height(1)
-        .style(self.theme().text_color())
-        .bold()
-        .underlined();
+        let theme = self.theme();
+        NetworkRenderer::render_network_summary(
+            frame,
+            area,
+            &self.network_stats,
+            &self.config.active_keymap,
+            self.localize,
+            &self.locale,
+            theme,
+        )
+    }
 
-        let constraints = vec![
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-        ];
-
-        let mut interfaces: Vec<(&String, &InterfaceStats)> =
-            self.network_stats.interfaces.iter().collect();
-        interfaces.sort_by(|a, b| b.1.recv_bytes.cmp(&a.1.recv_bytes));
-
-        // Limit to top 5 interfaces by received bytes
-        let top_interfaces = interfaces.into_iter().take(5);
-
-        let rows = top_interfaces.map(|(interface, _)| {
-            let delta_recv_bytes = self.network_stats.get_delta_recv_bytes(interface);
-            let delta_sent_bytes = self.network_stats.get_delta_sent_bytes(interface);
-            let delta_recv_packets = self.network_stats.get_delta_recv_packets(interface);
-            let delta_sent_packets = self.network_stats.get_delta_sent_packets(interface);
-
-            Row::new(vec![
-                Cell::from(interface.to_string()),
-                Cell::from(format_bytes(delta_recv_bytes) + "/s"),
-                Cell::from(format_bytes(delta_sent_bytes) + "/s"),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{delta_recv_packets}/s")
-                }),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{delta_sent_packets}/s")
-                }),
-            ])
-            .height(1)
-            .style(self.theme().text_color())
-        });
-
-        let block = Block::bordered()
-            .title_top({
-                let network_key = self
-                    .config
-                    .active_keymap
-                    .action_keys_string(Action::SetState(AppState::Network));
-
-                if network_key == "N" || network_key == "n" {
-                    let key_char = network_key.clone();
-                    Line::from(vec![
-                        Span::styled(
-                            key_char,
-                            self.theme().title_style().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("etwork", self.theme().text_color()),
-                    ])
-                    .style(self.theme().title_style())
-                    .centered()
-                } else {
-                    Line::from(format!("Network (press {network_key} for full view)"))
-                        .style(self.theme().title_style())
-                        .centered()
+    /// Renders the application to the frame.
+    pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        // Update terminal width for overhead history sizing
+        self.terminal_width = area.width;
+        match self.state {
+            AppState::BpfPrograms => self.render_bpf_programs(frame),
+            AppState::BpfProgramDetail => self.render_bpf_program_detail(frame),
+            AppState::Help => self.render_help(frame),
+            AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
+            AppState::Process => self.render_table(frame, area, true),
+            AppState::MangoApp => self.render_mangoapp(frame),
+            AppState::Memory => self.render_memory(frame),
+            AppState::Network => self.render_network(frame),
+            AppState::Node => self.render_node(frame),
+            AppState::Llc => self.render_llc(frame),
+            AppState::PerfTop => self.render_perf_top(frame),
+            AppState::Power => self.render_power(frame),
+            AppState::Scheduler => {
+                if self.has_capability_warnings() {
+                    self.render_capability_warnings(frame, area)?;
+                    return Ok(());
                 }
-            })
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        frame.render_widget(table, area);
-
-        Ok(())
+                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+                let [left_top, left_center, left_bottom] = Layout::vertical([
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                ])
+                .areas(left);
+                let [right_top, right_bottom] =
+                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+                        .areas(right);
+                self.render_scheduler("dsq_lat_us", frame, left_top, false, true)?;
+                self.render_scheduler("dsq_slice_consumed", frame, left_center, false, false)?;
+                self.render_scheduler("dsq_vtime", frame, left_bottom, false, false)?;
+                self.render_scheduler("dsq_nr_queued", frame, right_bottom, false, false)?;
+                self.render_scheduler_stats(frame, right_top)
+            }
+            AppState::Tracing => self.render_tracing(frame),
+            _ => self.render_default(frame),
+        }
     }
 
     /// Renders the help TUI.
@@ -4046,664 +4014,15 @@ impl<'a> App<'a> {
 
     /// Renders the network application state.
     fn render_network(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-
-        // Create a table for the network interfaces
-        let header = Row::new(vec![
-            Cell::from("Interface"),
-            Cell::from("RX Bits"),
-            Cell::from("TX Bits"),
-            Cell::from("RX Packets"),
-            Cell::from("TX Packets"),
-            Cell::from("RX Errors"),
-            Cell::from("TX Errors"),
-        ])
-        .height(1)
-        .style(self.theme().text_color())
-        .bold()
-        .underlined();
-
-        let constraints = vec![
-            Constraint::Percentage(20),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-        ];
-
-        let mut interfaces: Vec<(&String, &InterfaceStats)> =
-            self.network_stats.interfaces.iter().collect();
-        interfaces.sort_by(|a, b| a.0.cmp(b.0));
-
-        // Get totals for summary row
-        let total_delta_recv_bytes = self.network_stats.get_total_delta_recv_bytes();
-        let total_delta_sent_bytes = self.network_stats.get_total_delta_sent_bytes();
-        let total_delta_recv_packets = self.network_stats.get_total_delta_recv_packets();
-        let total_delta_sent_packets = self.network_stats.get_total_delta_sent_packets();
-        let total_delta_recv_errs = self.network_stats.get_total_delta_recv_errs();
-        let total_delta_sent_errs = self.network_stats.get_total_delta_sent_errs();
-
-        let mut rows: Vec<Row> = interfaces
-            .iter()
-            .map(|(interface, _)| {
-                let delta_recv_bytes = self.network_stats.get_delta_recv_bytes(interface);
-                let delta_sent_bytes = self.network_stats.get_delta_sent_bytes(interface);
-                let delta_recv_packets = self.network_stats.get_delta_recv_packets(interface);
-                let delta_sent_packets = self.network_stats.get_delta_sent_packets(interface);
-                let delta_recv_errs = self.network_stats.get_delta_recv_errs(interface);
-                let delta_sent_errs = self.network_stats.get_delta_sent_errs(interface);
-
-                Row::new(vec![
-                    Cell::from(interface.to_string()),
-                    Cell::from(format_bits(delta_recv_bytes) + "/s"),
-                    Cell::from(format_bits(delta_sent_bytes) + "/s"),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_recv_packets}/s")
-                    }),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_sent_packets}/s")
-                    }),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_recv_errs.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_recv_errs}/s")
-                    }),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_sent_errs.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_sent_errs}/s")
-                    }),
-                ])
-                .height(1)
-                .style(self.theme().text_color())
-            })
-            .collect();
-
-        // Add summary row at the bottom
-        rows.push(
-            Row::new(vec![
-                Cell::from("TOTAL").style(
-                    Style::default()
-                        .fg(self.theme().text_important_color())
-                        .bold(),
-                ),
-                Cell::from(format_bits(total_delta_recv_bytes) + "/s")
-                    .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(format_bits(total_delta_sent_bytes) + "/s")
-                    .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_recv_packets}/s")
-                })
-                .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_sent_packets}/s")
-                })
-                .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_recv_errs.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_recv_errs}/s")
-                })
-                .style(Style::default().fg(if total_delta_recv_errs > 0 {
-                    Color::Red
-                } else {
-                    self.theme().text_important_color()
-                })),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_sent_errs.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_sent_errs}/s")
-                })
-                .style(Style::default().fg(if total_delta_sent_errs > 0 {
-                    Color::Red
-                } else {
-                    self.theme().text_important_color()
-                })),
-            ])
-            .height(1),
-        );
-
-        let block = Block::bordered()
-            .title_top(
-                Line::from("Network Interfaces")
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .title_top(
-                Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                    .style(self.theme().text_important_color())
-                    .right_aligned(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        // Render the network interfaces table with integrated summary
-        frame.render_widget(table, left);
-
-        // Render network traffic charts on the right side
-        self.render_network_charts(frame, right)?;
-
-        Ok(())
-    }
-
-    /// Renders network traffic charts showing historical data per interface.
-    fn render_network_charts(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        // Get the top 3 most active interfaces by total bytes
-        let mut interface_activity: Vec<(String, u64)> = self
-            .network_stats
-            .interfaces
-            .iter()
-            .map(|(name, stats)| (name.clone(), stats.recv_bytes + stats.sent_bytes))
-            .collect();
-        interface_activity.sort_by(|a, b| b.1.cmp(&a.1));
-        let top_interfaces: Vec<String> = interface_activity
-            .into_iter()
-            .take(3)
-            .map(|(name, _)| name)
-            .collect();
-
-        if top_interfaces.is_empty() {
-            let block = Block::bordered()
-                .title_top(
-                    Line::from("Network Traffic History")
-                        .style(self.theme().title_style())
-                        .centered(),
-                )
-                .border_type(BorderType::Rounded)
-                .style(self.theme().border_style());
-
-            let paragraph = Paragraph::new("No network interfaces detected")
-                .block(block)
-                .alignment(Alignment::Center);
-
-            frame.render_widget(paragraph, area);
-            return Ok(());
-        }
-
-        // Create vertical layout for each interface (each interface gets 2 charts: bytes + packets)
-        let interface_count = top_interfaces.len();
-        let constraints: Vec<Constraint> = (0..interface_count)
-            .map(|_| Constraint::Ratio(1, interface_count as u32))
-            .collect();
-
-        let interface_areas = Layout::vertical(constraints).split(area);
-
-        // Render charts for each interface
-        for (i, interface) in top_interfaces.iter().enumerate() {
-            if i < interface_areas.len() {
-                self.render_interface_charts(frame, interface_areas[i], interface)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Renders charts for a single interface (bytes and packets stacked vertically).
-    fn render_interface_charts(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        interface: &str,
-    ) -> Result<()> {
-        // Split area vertically: bytes chart on top, packets chart on bottom
-        let [bytes_area, packets_area] =
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-
-        // Render bytes chart for this interface
-        self.render_interface_bytes_chart(frame, bytes_area, interface)?;
-
-        // Render packets chart for this interface
-        self.render_interface_packets_chart(frame, packets_area, interface)?;
-
-        Ok(())
-    }
-
-    /// Renders the bytes chart for a single interface.
-    fn render_interface_bytes_chart(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        interface: &str,
-    ) -> Result<()> {
-        // Split area to make room for summary statistics at the bottom
-        let [chart_area, stats_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
-
-        let rx_history = self
-            .network_stats
-            .get_historical_data(interface, "recv_bytes");
-        let tx_history = self
-            .network_stats
-            .get_historical_data(interface, "sent_bytes");
-
-        // Convert to (x, y) coordinates with RX as negative, TX as positive
-        let rx_data: Vec<(f64, f64)> = rx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, -(y as f64)))
-            .collect();
-
-        let tx_data: Vec<(f64, f64)> = tx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, y as f64))
-            .collect();
-
-        // Collect all values for scaling
-        let mut all_values = Vec::new();
-        all_values.extend(rx_history.iter().map(|&v| v as f64));
-        all_values.extend(tx_history.iter().map(|&v| v as f64));
-
-        let marker = self.theme().plot_marker();
-        let tx_color = self.theme().positive_value_color();
-        let rx_color = self.theme().negative_value_color();
-
-        // Create datasets
-        let datasets = vec![
-            Dataset::default()
-                .name(format!("{interface} RX"))
-                .marker(marker)
-                .style(Style::default().fg(rx_color))
-                .data(&rx_data),
-            Dataset::default()
-                .name(format!("{interface} TX"))
-                .marker(marker)
-                .style(Style::default().fg(tx_color))
-                .data(&tx_data),
-        ];
-
-        let max_value = all_values.iter().fold(0.0f64, |a, &b| a.max(b)).max(1000.0); // Minimum 1000 bytes/s for reasonable scaling
-        let history_len = self.network_stats.max_history_size as f64;
-
-        let chart = Chart::new(datasets)
-            .block(
-                Block::bordered()
-                    .title_top(
-                        Line::from(format!("{interface} - Bits/s"))
-                            .style(self.theme().title_style())
-                            .centered(),
-                    )
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style()),
-            )
-            .x_axis(
-                Axis::default()
-                    .title("Time")
-                    .style(self.theme().text_color())
-                    .bounds([0.0, history_len]),
-            )
-            .y_axis(
-                Axis::default()
-                    .title("Bits/s")
-                    .style(self.theme().text_color())
-                    .bounds([-max_value, max_value])
-                    .labels(vec![
-                        Span::styled(
-                            format!("RX {}", format_bits(max_value as u64)),
-                            Style::default().fg(self.theme().negative_value_color()),
-                        ),
-                        Span::styled("0", self.theme().text_color()),
-                        Span::styled(
-                            format!("TX {}", format_bits(max_value as u64)),
-                            Style::default().fg(self.theme().positive_value_color()),
-                        ),
-                    ]),
-            );
-
-        frame.render_widget(chart, chart_area);
-
-        // Calculate and render summary statistics
-        self.render_bytes_summary_stats(frame, stats_area, &rx_history, &tx_history)?;
-
-        Ok(())
-    }
-
-    /// Renders summary statistics for bytes data.
-    fn render_bytes_summary_stats(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        rx_history: &[u64],
-        tx_history: &[u64],
-    ) -> Result<()> {
-        if rx_history.is_empty() && tx_history.is_empty() {
-            return Ok(());
-        }
-
-        // Calculate RX statistics
-        let (rx_min, rx_max, rx_avg) = if rx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *rx_history.iter().min().unwrap_or(&0);
-            let max = *rx_history.iter().max().unwrap_or(&0);
-            let avg = rx_history.iter().sum::<u64>() / rx_history.len() as u64;
-            (min, max, avg)
-        };
-
-        // Calculate TX statistics
-        let (tx_min, tx_max, tx_avg) = if tx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *tx_history.iter().min().unwrap_or(&0);
-            let max = *tx_history.iter().max().unwrap_or(&0);
-            let avg = tx_history.iter().sum::<u64>() / tx_history.len() as u64;
-            (min, max, avg)
-        };
-
-        let stats_text = vec![Line::from(vec![
-            Span::raw("Min: "),
-            Span::styled(
-                format_bits(rx_min),
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                format_bits(tx_min),
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Max: "),
-            Span::styled(
-                format_bits(rx_max),
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                format_bits(tx_max),
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Avg: "),
-            Span::styled(
-                format_bits(rx_avg),
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                format_bits(tx_avg),
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-        ])];
-
-        let stats_paragraph = Paragraph::new(stats_text).style(self.theme().text_color());
-
-        frame.render_widget(stats_paragraph, area);
-        Ok(())
-    }
-
-    /// Renders the packets chart for a single interface.
-    fn render_interface_packets_chart(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        interface: &str,
-    ) -> Result<()> {
-        // Split area to make room for summary statistics at the bottom
-        let [chart_area, stats_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
-
-        let rx_history = self
-            .network_stats
-            .get_historical_data(interface, "recv_packets");
-        let tx_history = self
-            .network_stats
-            .get_historical_data(interface, "sent_packets");
-
-        // Convert to (x, y) coordinates with RX as negative, TX as positive
-        let rx_data: Vec<(f64, f64)> = rx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, -(y as f64)))
-            .collect();
-
-        let tx_data: Vec<(f64, f64)> = tx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, y as f64))
-            .collect();
-
-        // Collect all values for scaling
-        let mut all_values = Vec::new();
-        all_values.extend(rx_history.iter().map(|&v| v as f64));
-        all_values.extend(tx_history.iter().map(|&v| v as f64));
-
-        let marker = self.theme().plot_marker();
-        let tx_color = self.theme().positive_value_color();
-        let rx_color = self.theme().negative_value_color();
-
-        // Create datasets
-        let datasets = vec![
-            Dataset::default()
-                .name(format!("{interface} RX"))
-                .marker(marker)
-                .style(Style::default().fg(rx_color))
-                .data(&rx_data),
-            Dataset::default()
-                .name(format!("{interface} TX"))
-                .marker(marker)
-                .style(Style::default().fg(tx_color))
-                .data(&tx_data),
-        ];
-
-        let max_value = all_values.iter().fold(0.0f64, |a, &b| a.max(b)).max(100.0); // Minimum 100 packets/s for reasonable scaling
-        let history_len = self.network_stats.max_history_size as f64;
-
-        let chart = Chart::new(datasets)
-            .block(
-                Block::bordered()
-                    .title_top(
-                        Line::from(format!("{interface} - Packets/s"))
-                            .style(self.theme().title_style())
-                            .centered(),
-                    )
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style()),
-            )
-            .x_axis(
-                Axis::default()
-                    .title("Time")
-                    .style(self.theme().text_color())
-                    .bounds([0.0, history_len]),
-            )
-            .y_axis(
-                Axis::default()
-                    .title("Packets/s")
-                    .style(self.theme().text_color())
-                    .bounds([-max_value, max_value])
-                    .labels(vec![
-                        Span::styled(
-                            if self.localize {
-                                format!(
-                                    "RX {}",
-                                    sanitize_nbsp(
-                                        (max_value as u64).to_formatted_string(&self.locale)
-                                    )
-                                )
-                            } else {
-                                format!("RX {}", max_value as u64)
-                            },
-                            Style::default().fg(self.theme().negative_value_color()),
-                        ),
-                        Span::styled("0", self.theme().text_color()),
-                        Span::styled(
-                            if self.localize {
-                                format!(
-                                    "TX {}",
-                                    sanitize_nbsp(
-                                        (max_value as u64).to_formatted_string(&self.locale)
-                                    )
-                                )
-                            } else {
-                                format!("TX {}", max_value as u64)
-                            },
-                            Style::default().fg(self.theme().positive_value_color()),
-                        ),
-                    ]),
-            );
-
-        frame.render_widget(chart, chart_area);
-
-        // Calculate and render summary statistics
-        self.render_packets_summary_stats(frame, stats_area, &rx_history, &tx_history)?;
-
-        Ok(())
-    }
-
-    /// Renders summary statistics for packets data.
-    fn render_packets_summary_stats(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        rx_history: &[u64],
-        tx_history: &[u64],
-    ) -> Result<()> {
-        if rx_history.is_empty() && tx_history.is_empty() {
-            return Ok(());
-        }
-
-        // Calculate RX statistics
-        let (rx_min, rx_max, rx_avg) = if rx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *rx_history.iter().min().unwrap_or(&0);
-            let max = *rx_history.iter().max().unwrap_or(&0);
-            let avg = rx_history.iter().sum::<u64>() / rx_history.len() as u64;
-            (min, max, avg)
-        };
-
-        // Calculate TX statistics
-        let (tx_min, tx_max, tx_avg) = if tx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *tx_history.iter().min().unwrap_or(&0);
-            let max = *tx_history.iter().max().unwrap_or(&0);
-            let avg = tx_history.iter().sum::<u64>() / tx_history.len() as u64;
-            (min, max, avg)
-        };
-
-        let rx_min_str = if self.localize {
-            sanitize_nbsp(rx_min.to_formatted_string(&self.locale))
-        } else {
-            rx_min.to_string()
-        };
-        let rx_max_str = if self.localize {
-            sanitize_nbsp(rx_max.to_formatted_string(&self.locale))
-        } else {
-            rx_max.to_string()
-        };
-        let rx_avg_str = if self.localize {
-            sanitize_nbsp(rx_avg.to_formatted_string(&self.locale))
-        } else {
-            rx_avg.to_string()
-        };
-        let tx_min_str = if self.localize {
-            sanitize_nbsp(tx_min.to_formatted_string(&self.locale))
-        } else {
-            tx_min.to_string()
-        };
-        let tx_max_str = if self.localize {
-            sanitize_nbsp(tx_max.to_formatted_string(&self.locale))
-        } else {
-            tx_max.to_string()
-        };
-        let tx_avg_str = if self.localize {
-            sanitize_nbsp(tx_avg.to_formatted_string(&self.locale))
-        } else {
-            tx_avg.to_string()
-        };
-
-        let stats_text = vec![Line::from(vec![
-            Span::raw("Min: "),
-            Span::styled(
-                rx_min_str,
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                tx_min_str,
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Max: "),
-            Span::styled(
-                rx_max_str,
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                tx_max_str,
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Avg: "),
-            Span::styled(
-                rx_avg_str,
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                tx_avg_str,
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-        ])];
-
-        let stats_paragraph = Paragraph::new(stats_text).style(self.theme().text_color());
-
-        frame.render_widget(stats_paragraph, area);
-        Ok(())
-    }
-
-    /// Renders the application to the frame.
-    pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        // Update terminal width for overhead history sizing
-        self.terminal_width = area.width;
-        match self.state {
-            AppState::BpfPrograms => self.render_bpf_programs(frame),
-            AppState::BpfProgramDetail => self.render_bpf_program_detail(frame),
-            AppState::Help => self.render_help(frame),
-            AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
-            AppState::Process => self.render_table(frame, area, true),
-            AppState::MangoApp => self.render_mangoapp(frame),
-            AppState::Memory => self.render_memory(frame),
-            AppState::Network => self.render_network(frame),
-            AppState::Node => self.render_node(frame),
-            AppState::Llc => self.render_llc(frame),
-            AppState::PerfTop => self.render_perf_top(frame),
-            AppState::Power => self.render_power(frame),
-            AppState::Scheduler => {
-                if self.has_capability_warnings() {
-                    self.render_capability_warnings(frame, area)?;
-                    return Ok(());
-                }
-                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-                let [left_top, left_center, left_bottom] = Layout::vertical([
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                ])
-                .areas(left);
-                let [right_top, right_bottom] =
-                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
-                        .areas(right);
-                self.render_scheduler("dsq_lat_us", frame, left_top, false, true)?;
-                self.render_scheduler("dsq_slice_consumed", frame, left_center, false, false)?;
-                self.render_scheduler("dsq_vtime", frame, left_bottom, false, false)?;
-                self.render_scheduler("dsq_nr_queued", frame, right_bottom, false, false)?;
-                self.render_scheduler_stats(frame, right_top)
-            }
-            AppState::Tracing => self.render_tracing(frame),
-            _ => self.render_default(frame),
-        }
+        let theme = self.theme();
+        NetworkRenderer::render_network_view(
+            frame,
+            &self.network_stats,
+            self.config.tick_rate_ms(),
+            self.localize,
+            &self.locale,
+            theme,
+        )
     }
 
     /// Renders the BPF programs view
