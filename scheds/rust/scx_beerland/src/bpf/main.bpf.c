@@ -641,21 +641,12 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	}
 
 	/*
-	 * Rely on the sched_ext built-in idle CPU selection policy (that
-	 * automatically applies topology optimizations).
+	 * Try to find an optimal idle CPU for the task. If no idle CPU is
+	 * found, keep using the same one.
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags);
-	if (cpu < 0) {
-		/*
-		 * If all the CPUs are busy, try to move the wakee to the
-		 * waker's CPU, if possible.
-		 *
-		 * This should help grouping together tasks that are part
-		 * of the same pipeline and reduce IPIs at system
-		 * saturation.
-		 */
-		cpu = is_this_cpu_allowed ? this_cpu : prev_cpu;
-	}
+	if (cpu < 0)
+		cpu = prev_cpu;
 
 	/*
 	 * Always dispatch directly to the target CPU, since the task will
