@@ -5774,11 +5774,22 @@ impl<'a> App<'a> {
         // Calculate percentile data for sparkline (p50, p90, p99 over time), trimming to available width
         // For simplicity, we'll use a rolling window approach
         let mut p99_data: Vec<u64> = Vec::new();
-        if runtime_data.len() >= 10 {
-            let start_idx = 9.max(runtime_data.len().saturating_sub(available_width));
-            for i in start_idx..runtime_data.len() {
+        if prog_data.runtime_history.len() >= 10 {
+            let start_idx = 9.max(
+                prog_data
+                    .runtime_history
+                    .len()
+                    .saturating_sub(available_width),
+            );
+            for i in start_idx..prog_data.runtime_history.len() {
                 let window_start = i.saturating_sub(9);
-                let window: Vec<u64> = runtime_data[window_start..=i].to_vec();
+                let window: Vec<u64> = prog_data
+                    .runtime_history
+                    .iter()
+                    .skip(window_start)
+                    .take(i - window_start + 1)
+                    .copied()
+                    .collect();
                 let mut sorted = window.clone();
                 sorted.sort_unstable();
                 let idx = ((sorted.len() - 1) as f64 * 0.99) as usize;
