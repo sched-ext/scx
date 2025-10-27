@@ -111,6 +111,8 @@ struct task_ctx {
 	u64 last_woke_at;
 	u64 wakeup_freq;
 	u64 awake_vtime;
+	u64 stime;
+	u64 utime;
 };
 
 struct {
@@ -127,6 +129,48 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
+}
+
+/*
+ * Return true if the target task @p is a kernel thread.
+ */
+static inline bool is_kthread(const struct task_struct *p)
+{
+	return p->flags & PF_KTHREAD;
+}
+
+/*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_task_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
+ * Return true if @p can only run on a single CPU, false otherwise.
+ */
+static inline bool is_pcpu_task(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
+}
+
+/*
+ * Return true if @p is a regular (non-kthread) task that is doing mostly
+ * system time (likely I/O-bound), false otherwise.
+ */
+static bool is_sys_task(const struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	if (is_kthread(p))
+		return false;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return false;
+
+	return p->stime - tctx->stime >= p->utime - tctx->utime;
 }
 
 /*
@@ -286,14 +330,6 @@ static bool is_smt_contended(s32 cpu)
 }
 
 /*
- * Return true if @p still wants to run, false otherwise.
- */
-static bool is_task_queued(const struct task_struct *p)
-{
-	return p->scx.flags & SCX_TASK_QUEUED;
-}
-
-/*
  * Return true if all the CPUs in the system are busy, false otherwise.
  */
 static bool is_system_busy(void)
@@ -317,7 +353,7 @@ static bool is_system_busy(void)
  */
 static bool try_migrate(const struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 {
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
+	if (is_pcpu_task(p))
 		return false;
 
 	/*
@@ -363,7 +399,7 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	/*
 	 * If the task can only run on this CPU, keep it running.
 	 */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
+	if (is_pcpu_task(p))
 		return true;
 
 	/*
@@ -509,7 +545,7 @@ static s32 pick_idle_cpu_scan(struct task_struct *p, s32 prev_cpu)
 	 * If the task can't migrate, there's no point looking for other
 	 * CPUs.
 	 */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+	if (is_pcpu_task(p)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out;
@@ -742,6 +778,21 @@ static bool dispatch_from_any_cpu(s32 from_cpu)
  */
 void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu);
+
+	/*
+	 * Regular (non-kthread) tasks that spend significant time in
+	 * system mode are likely I/O bound. These tasks typically benefit
+	 * from CPU locality, so if the first task in the local DSQ falls
+	 * into this category, prefer to keep it running on the same CPU.
+	 */
+	if (p && is_sys_task(p)) {
+		if (scx_bpf_dsq_move_to_local(cpu)) {
+			__sync_fetch_and_add(&nr_local_dispatch, 1);
+			return;
+		}
+	}
+
 	/*
 	 * Try to consume a task from a remote CPU.
 	 *
@@ -754,9 +805,9 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * Consume from the local DSQ first.
+	 * Consume from the local DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(cpu)) {
+	if (p && scx_bpf_dsq_move_to_local(cpu)) {
 		__sync_fetch_and_add(&nr_local_dispatch, 1);
 		return;
 	}
@@ -790,6 +841,15 @@ void BPF_STRUCT_OPS(beerland_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
 	tctx->wakeup_freq = MIN(tctx->wakeup_freq, MAX_WAKEUP_FREQ);
 	tctx->last_woke_at = now;
+
+	/*
+	 * Update the system and user time counters. These will be compared
+	 * against the corresponding fields in task_struct to determine the
+	 * amount of user and system time consumed during this run to
+	 * determine if the task is I/O bound or not.
+	 */
+	tctx->utime = p->utime;
+	tctx->stime = p->stime;
 }
 
 void BPF_STRUCT_OPS(beerland_running, struct task_struct *p)
