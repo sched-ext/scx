@@ -214,6 +214,25 @@ pub fn debugfs_mount() -> Result<std::path::PathBuf> {
     mounts.into_iter().next().context("No debugfs mount found")
 }
 
+pub fn tracer_available(tracer: &str) -> Result<bool> {
+    let base_path = tracefs_mount().unwrap_or_else(|_| debugfs_mount().unwrap().join("tracing"));
+    let file = match std::fs::File::open(base_path.join("available_tracers")) {
+        Ok(f) => f,
+        Err(_) => return Ok(false),
+    };
+    let reader = std::io::BufReader::new(file);
+
+    for line in reader.lines() {
+        for tc in line.unwrap().split_whitespace() {
+            if tracer == tc {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
     let base_path = tracefs_mount().unwrap_or_else(|_| debugfs_mount().unwrap().join("tracing"));
     let file = match std::fs::File::open(base_path.join("available_events")) {

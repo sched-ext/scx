@@ -455,6 +455,11 @@ impl<'a> Scheduler<'a> {
             ("futex_unlock_pi", &skel.progs.fexit_futex_unlock_pi),
         ];
 
+        if compat::tracer_available("function_graph")? == false {
+            info!("Ftrace is not enabled in the kernel.");
+            return Ok(false);
+        }
+
         compat::cond_kprobes_enable(ftraces)
     }
 
