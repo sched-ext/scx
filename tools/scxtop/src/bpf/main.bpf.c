@@ -9,8 +9,10 @@
 #endif
 #define LSP_INC
 #include "../../../include/scx/common.bpf.h"
+#include "../../../include/scx/compat.bpf.h"
 #else
 #include <scx/common.bpf.h>
+#include <scx/compat.bpf.h>
 #endif
 
 #include "intf.h"
@@ -941,16 +943,18 @@ int collect_scx_stats(struct collect_scx_stats_args *args)
 {
 	struct scx_event_stats kernel_stats = {};
 
-	scx_bpf_events(&kernel_stats, sizeof(kernel_stats));
+	__COMPAT_scx_bpf_events(&kernel_stats, sizeof(kernel_stats));
 
 	args->stats.select_cpu_fallback =
-		kernel_stats.SCX_EV_SELECT_CPU_FALLBACK;
-	args->stats.dispatch_local_dsq_offline =
-		kernel_stats.SCX_EV_DISPATCH_LOCAL_DSQ_OFFLINE;
-	args->stats.dispatch_keep_last = kernel_stats.SCX_EV_DISPATCH_KEEP_LAST;
-	args->stats.enq_skip_exiting   = kernel_stats.SCX_EV_ENQ_SKIP_EXITING;
-	args->stats.enq_skip_migration_disabled =
-		kernel_stats.SCX_EV_ENQ_SKIP_MIGRATION_DISABLED;
+		scx_read_event(&kernel_stats, SCX_EV_SELECT_CPU_FALLBACK);
+	args->stats.dispatch_local_dsq_offline = scx_read_event(
+		&kernel_stats, SCX_EV_DISPATCH_LOCAL_DSQ_OFFLINE);
+	args->stats.dispatch_keep_last =
+		scx_read_event(&kernel_stats, SCX_EV_DISPATCH_KEEP_LAST);
+	args->stats.enq_skip_exiting =
+		scx_read_event(&kernel_stats, SCX_EV_ENQ_SKIP_EXITING);
+	args->stats.enq_skip_migration_disabled = scx_read_event(
+		&kernel_stats, SCX_EV_ENQ_SKIP_MIGRATION_DISABLED);
 	args->stats.timestamp_ns = bpf_ktime_get_ns();
 
 	return 0;
