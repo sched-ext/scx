@@ -176,7 +176,7 @@ impl<'a> ArenaLib<'a> {
         }
         for (_, cpu) in topo.all_cpus {
             let mut mask = [0; Self::MAX_CPU_ARRSZ - 1];
-            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+            mask[cpu.id / 64] |= 1 << (cpu.id % 64);
             self.setup_topology_node(&mask)?;
         }
 
