@@ -825,6 +825,16 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * If the task is marked as sticky, force it to stay on the same
+	 * CPU.
+	 */
+	if (is_task_sticky(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
+	}
+
+	/*
 	 * Attempt to dispatch directly to an idle CPU if ops.select_cpu() was
 	 * skipped.
 	 */
@@ -837,7 +847,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
 
 		if (cpu >= 0) {
-
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
 						 task_slice(p), task_dl(p, tctx), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
@@ -846,17 +855,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
-	}
-
-	/*
-	 * If the task is marked as sticky, just force it to stay on the
-	 * local CPU.
-	 */
-	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
-					 task_slice(p), task_dl(p, tctx), enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		return;
 	}
 
 	/*
