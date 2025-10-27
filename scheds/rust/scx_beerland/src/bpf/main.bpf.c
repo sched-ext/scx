@@ -284,15 +284,13 @@ static bool try_migrate(const struct task_struct *p, s32 prev_cpu, u64 enq_flags
 	/*
 	 * Migrate if ops.select_cpu() was skipped and one of the following
 	 * conditions is true:
-	 *  - task was not running (task wakeup),
-	 *  - the previously used CPU is contended by other tasks,
-	 *  - SMT is enabled, the previously used CPU is not a full-idle
-	 *    SMT core and there are other full-idle SMT cores available
+	 *  - migration was not attempted already via ops.select_cpu(),
+	 *  - the CPU is contended by other tasks,
+	 *  - SMT is enabled and the SMT core is contended by other tasks.
 	 */
-	return !__COMPAT_is_enq_cpu_selected(enq_flags) &&
-		       (!scx_bpf_task_running(p) ||
-			scx_bpf_dsq_nr_queued(prev_cpu) ||
-			(smt_enabled && is_smt_contended(prev_cpu)));
+	return (!scx_bpf_task_running(p) && !__COMPAT_is_enq_cpu_selected(enq_flags)) ||
+	       scx_bpf_dsq_nr_queued(prev_cpu) ||
+	       is_smt_contended(prev_cpu);
 }
 
 /*
@@ -541,8 +539,13 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (try_migrate(p, prev_cpu, enq_flags)) {
 		cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
-		if (cpu >= 0)
-			prev_cpu = cpu;
+		if (cpu >= 0) {
+			scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, prev_cpu),
+						 task_vtime(p), enq_flags);
+			if (prev_cpu != cpu || !scx_bpf_task_running(p))
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			return;
+		}
 	}
 
 	/*
@@ -550,7 +553,8 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dsq_insert_vtime(p, prev_cpu, task_slice(p, prev_cpu),
 				 task_vtime(p), enq_flags);
-	scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 /*
