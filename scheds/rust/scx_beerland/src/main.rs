@@ -61,6 +61,13 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
+    /// Maximum time slice lag in microseconds.
+    ///
+    /// A positive value can help to enhance the responsiveness of interactive tasks, but it can
+    /// also make performance more "spikey".
+    #[clap(short = 'l', long, default_value = "40000")]
+    slice_us_lag: u64,
+
     /// Specifies a list of CPUs to prioritize.
     ///
     /// Accepts a comma-separated list of CPUs or ranges (i.e., 0-3,12-15) or the following special
@@ -251,6 +258,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.slice_ns = opts.slice_us * 1000;
+        rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.smt_enabled = smt_enabled;
 
         // Define the primary scheduling domain.
