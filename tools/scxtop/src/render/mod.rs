@@ -12,7 +12,10 @@ pub mod memory;
 pub mod network;
 // Scheduler rendering
 pub mod scheduler;
+// BPF program rendering
+pub mod bpf_programs;
 
+pub use bpf_programs::BpfProgramRenderer;
 pub use memory::MemoryRenderer;
 pub use network::NetworkRenderer;
 pub use process::ProcessRenderer;

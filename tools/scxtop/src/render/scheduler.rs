@@ -17,6 +17,41 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use std::collections::BTreeMap;
 
+/// Parameters for rendering scheduler views
+pub struct SchedulerViewParams<'a> {
+    pub event: &'a str,
+    pub scheduler_name: &'a str,
+    pub dsq_data: &'a BTreeMap<u64, EventData>,
+    pub sample_rate: u32,
+    pub localize: bool,
+    pub locale: &'a SystemLocale,
+    pub theme: &'a AppTheme,
+    pub render_title: bool,
+    pub render_sample_rate: bool,
+}
+
+/// Parameters for DSQ visualization
+pub struct DsqRenderParams<'a> {
+    pub event: &'a str,
+    pub dsq_data: &'a BTreeMap<u64, EventData>,
+    pub sample_rate: u32,
+    pub localize: bool,
+    pub locale: &'a SystemLocale,
+    pub theme: &'a AppTheme,
+    pub render_title: bool,
+    pub render_sample_rate: bool,
+}
+
+/// Parameters for scheduler statistics
+pub struct SchedulerStatsParams<'a> {
+    pub scheduler_name: &'a str,
+    pub sched_stats_raw: &'a str,
+    pub tick_rate_ms: usize,
+    pub dispatch_keep_last: i64,
+    pub select_cpu_fallback: i64,
+    pub theme: &'a AppTheme,
+}
+
 /// Renderer for scheduler views
 pub struct SchedulerRenderer;
 
@@ -25,67 +60,25 @@ impl SchedulerRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render_scheduler_view(
         frame: &mut Frame,
-        event: &str,
         area: Rect,
         view_state: &ViewState,
-        scheduler_name: &str,
-        dsq_data: &BTreeMap<u64, EventData>,
-        sample_rate: u32,
         max_sched_events: usize,
-        localize: bool,
-        locale: &SystemLocale,
-        theme: &AppTheme,
-        render_title: bool,
-        render_sample_rate: bool,
+        params: &SchedulerViewParams,
     ) -> Result<usize> {
         // If no scheduler is attached, display a message and return early.
-        if scheduler_name.is_empty() {
+        if params.scheduler_name.is_empty() {
             Self::render_error_msg(frame, area, "Missing Scheduler");
             return Ok(max_sched_events);
         }
 
         match view_state {
-            ViewState::Sparkline => Self::render_scheduler_sparklines(
-                frame,
-                event,
-                area,
-                scheduler_name,
-                dsq_data,
-                sample_rate,
-                max_sched_events,
-                localize,
-                locale,
-                theme,
-                render_title,
-                render_sample_rate,
-            ),
-            ViewState::BarChart => Self::render_scheduler_barchart(
-                frame,
-                event,
-                area,
-                scheduler_name,
-                dsq_data,
-                sample_rate,
-                localize,
-                locale,
-                theme,
-                render_title,
-                render_sample_rate,
-            ),
-            ViewState::LineGauge => Self::render_scheduler_sparklines(
-                frame,
-                event,
-                area,
-                scheduler_name,
-                dsq_data,
-                sample_rate,
-                max_sched_events,
-                localize,
-                locale,
-                theme,
-                render_title,
-                render_sample_rate,
-            ),
+            ViewState::Sparkline => {
+                Self::render_scheduler_sparklines(frame, area, max_sched_events, params)
+            }
+            ViewState::BarChart => Self::render_scheduler_barchart(frame, area, params),
+            ViewState::LineGauge => {
+                Self::render_scheduler_sparklines(frame, area, max_sched_events, params)
+            }
         }
     }
 
@@ -94,36 +87,31 @@ impl SchedulerRenderer {
     pub fn render_scheduler_stats(
         frame: &mut Frame,
         area: Rect,
-        scheduler_name: &str,
-        sched_stats_raw: &str,
-        tick_rate_ms: usize,
-        dispatch_keep_last: i64,
-        select_cpu_fallback: i64,
-        theme: &AppTheme,
+        params: &SchedulerStatsParams,
     ) -> Result<()> {
-        let paragraph = Paragraph::new(sched_stats_raw.to_string());
+        let paragraph = Paragraph::new(params.sched_stats_raw.to_string());
         let block = Block::bordered()
             .title_top(
-                Line::from(scheduler_name.to_string())
-                    .style(theme.title_style())
+                Line::from(params.scheduler_name.to_string())
+                    .style(params.theme.title_style())
                     .centered(),
             )
             .title_top(
-                Line::from(format!("{}ms", tick_rate_ms))
-                    .style(theme.text_important_color())
+                Line::from(format!("{}ms", params.tick_rate_ms))
+                    .style(params.theme.text_important_color())
                     .right_aligned(),
             )
             .title_bottom(
-                Line::from(format!("keep_last {}", dispatch_keep_last))
-                    .style(theme.text_important_color())
+                Line::from(format!("keep_last {}", params.dispatch_keep_last))
+                    .style(params.theme.text_important_color())
                     .right_aligned(),
             )
             .title_bottom(
-                Line::from(format!("select_fall {}", select_cpu_fallback))
-                    .style(theme.text_important_color())
+                Line::from(format!("select_fall {}", params.select_cpu_fallback))
+                    .style(params.theme.text_important_color())
                     .left_aligned(),
             )
-            .style(theme.border_style())
+            .style(params.theme.border_style())
             .border_type(BorderType::Rounded);
 
         frame.render_widget(paragraph.block(block), area);
@@ -135,21 +123,14 @@ impl SchedulerRenderer {
     #[allow(clippy::too_many_arguments)]
     fn render_scheduler_sparklines(
         frame: &mut Frame,
-        event: &str,
         area: Rect,
-        scheduler_name: &str,
-        dsq_data: &BTreeMap<u64, EventData>,
-        sample_rate: u32,
         max_sched_events: usize,
-        localize: bool,
-        locale: &SystemLocale,
-        theme: &AppTheme,
-        render_title: bool,
-        render_sample_rate: bool,
+        params: &SchedulerViewParams,
     ) -> Result<usize> {
-        let num_dsqs = dsq_data
+        let num_dsqs = params
+            .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(params.event))
             .count();
 
         let mut dsq_constraints = Vec::new();
@@ -163,14 +144,14 @@ impl SchedulerRenderer {
 
         if num_dsqs == 0 {
             let block = Block::default()
-                .title_top(if render_title {
-                    Line::from(scheduler_name.to_string())
-                        .style(theme.title_style())
+                .title_top(if params.render_title {
+                    Line::from(params.scheduler_name.to_string())
+                        .style(params.theme.title_style())
                         .centered()
                 } else {
                     Line::from("".to_string())
                 })
-                .style(theme.border_style())
+                .style(params.theme.border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
@@ -182,21 +163,23 @@ impl SchedulerRenderer {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        Self::dsq_sparklines(
-            event,
-            dsq_data,
-            sample_rate,
-            localize,
-            locale,
-            theme,
-            true,
-            render_sample_rate,
-        )
-        .iter()
-        .enumerate()
-        .for_each(|(j, dsq_sparkline)| {
-            frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
-        });
+        let dsq_params = DsqRenderParams {
+            event: params.event,
+            dsq_data: params.dsq_data,
+            sample_rate: params.sample_rate,
+            localize: params.localize,
+            locale: params.locale,
+            theme: params.theme,
+            render_title: true,
+            render_sample_rate: params.render_sample_rate,
+        };
+
+        Self::dsq_sparklines(&dsq_params)
+            .iter()
+            .enumerate()
+            .for_each(|(j, dsq_sparkline)| {
+                frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
+            });
 
         Ok(new_max_sched_events)
     }
@@ -205,71 +188,70 @@ impl SchedulerRenderer {
     #[allow(clippy::too_many_arguments)]
     fn render_scheduler_barchart(
         frame: &mut Frame,
-        event: &str,
         area: Rect,
-        scheduler_name: &str,
-        dsq_data: &BTreeMap<u64, EventData>,
-        sample_rate: u32,
-        localize: bool,
-        locale: &SystemLocale,
-        theme: &AppTheme,
-        render_title: bool,
-        render_sample_rate: bool,
+        params: &SchedulerViewParams,
     ) -> Result<usize> {
-        let num_dsqs = dsq_data.len();
+        let num_dsqs = params.dsq_data.len();
         if num_dsqs == 0 {
             let block = Block::default()
-                .title_top(if render_title {
-                    Line::from(scheduler_name.to_string())
-                        .style(theme.title_style())
+                .title_top(if params.render_title {
+                    Line::from(params.scheduler_name.to_string())
+                        .style(params.theme.title_style())
                         .centered()
                 } else {
                     Line::from("".to_string())
                 })
-                .style(theme.border_style())
+                .style(params.theme.border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
             return Ok(0);
         }
 
-        let dsq_global_iter = dsq_data
+        let dsq_global_iter = params
+            .dsq_data
             .values()
-            .flat_map(|dsq_data| dsq_data.event_data_immut(event))
+            .flat_map(|dsq_data| dsq_data.event_data_immut(params.event))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, None);
 
         let bar_block = Block::default()
             .title_top(
-                Line::from(if localize {
+                Line::from(if params.localize {
                     format!(
                         "{} avg {} max {} min {}",
-                        event,
-                        sanitize_nbsp(stats.avg.to_formatted_string(locale)),
-                        sanitize_nbsp(stats.max.to_formatted_string(locale)),
-                        sanitize_nbsp(stats.min.to_formatted_string(locale))
+                        params.event,
+                        sanitize_nbsp(stats.avg.to_formatted_string(params.locale)),
+                        sanitize_nbsp(stats.max.to_formatted_string(params.locale)),
+                        sanitize_nbsp(stats.min.to_formatted_string(params.locale))
                     )
                 } else {
                     format!(
                         "{} avg {} max {} min {}",
-                        event, stats.avg, stats.max, stats.min,
+                        params.event, stats.avg, stats.max, stats.min,
                     )
                 })
-                .style(theme.title_style())
+                .style(params.theme.title_style())
                 .centered(),
             )
-            .title_top(if render_sample_rate {
-                Line::from(format!("sample rate {sample_rate}"))
-                    .style(theme.text_important_color())
+            .title_top(if params.render_sample_rate {
+                Line::from(format!("sample rate {}", params.sample_rate))
+                    .style(params.theme.text_important_color())
                     .right_aligned()
             } else {
                 Line::from("")
             })
-            .style(theme.border_style())
+            .style(params.theme.border_style())
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
-        let dsq_bars: Vec<Bar> = Self::dsq_bars(event, dsq_data, localize, locale, theme);
+        let dsq_bars: Vec<Bar> = Self::dsq_bars(
+            params.event,
+            params.dsq_data,
+            params.localize,
+            params.locale,
+            params.theme,
+        );
 
         let barchart = BarChart::default()
             .data(BarGroup::default().bars(&dsq_bars))
@@ -286,20 +268,15 @@ impl SchedulerRenderer {
     /// Creates a sparkline for a single DSQ
     #[allow(clippy::too_many_arguments)]
     fn dsq_sparkline(
-        event: &str,
         dsq_id: u64,
-        dsq_data: &BTreeMap<u64, EventData>,
-        sample_rate: u32,
         borders: Borders,
-        localize: bool,
-        locale: &SystemLocale,
-        theme: &AppTheme,
         render_title: bool,
         render_sample_rate: bool,
+        params: &DsqRenderParams,
     ) -> Sparkline<'static> {
-        let data = if dsq_data.contains_key(&dsq_id) {
-            let dsq_data = dsq_data.get(&dsq_id).unwrap();
-            dsq_data.event_data_immut(event)
+        let data = if params.dsq_data.contains_key(&dsq_id) {
+            let dsq_data = params.dsq_data.get(&dsq_id).unwrap();
+            dsq_data.event_data_immut(params.event)
         } else {
             Vec::new()
         };
@@ -309,34 +286,34 @@ impl SchedulerRenderer {
             .data(&data)
             .max(stats.max)
             .direction(RenderDirection::RightToLeft)
-            .style(theme.sparkline_style())
+            .style(params.theme.sparkline_style())
             .block(
                 Block::new()
                     .borders(borders)
                     .border_type(BorderType::Rounded)
-                    .style(theme.border_style())
+                    .style(params.theme.border_style())
                     .title_top(if render_sample_rate {
-                        Line::from(format!("sample rate {}", sample_rate))
-                            .style(theme.text_important_color())
+                        Line::from(format!("sample rate {}", params.sample_rate))
+                            .style(params.theme.text_important_color())
                             .right_aligned()
                     } else {
                         Line::from("".to_string())
                     })
                     .title_top(if render_title {
-                        Line::from(format!("{event} "))
-                            .style(theme.title_style())
+                        Line::from(format!("{} ", params.event))
+                            .style(params.theme.title_style())
                             .left_aligned()
                     } else {
                         Line::from("".to_string())
                     })
                     .title_top(
-                        Line::from(if localize {
+                        Line::from(if params.localize {
                             format!(
                                 "dsq {:#X} avg {} max {} min {}",
                                 dsq_id,
-                                sanitize_nbsp(stats.avg.to_formatted_string(locale)),
-                                sanitize_nbsp(stats.max.to_formatted_string(locale)),
-                                sanitize_nbsp(stats.min.to_formatted_string(locale))
+                                sanitize_nbsp(stats.avg.to_formatted_string(params.locale)),
+                                sanitize_nbsp(stats.max.to_formatted_string(params.locale)),
+                                sanitize_nbsp(stats.min.to_formatted_string(params.locale))
                             )
                         } else {
                             format!(
@@ -344,40 +321,26 @@ impl SchedulerRenderer {
                                 dsq_id, stats.avg, stats.max, stats.min,
                             )
                         })
-                        .style(theme.title_style())
+                        .style(params.theme.title_style())
                         .centered(),
                     ),
             )
     }
 
     /// Generates dsq sparklines.
-    #[allow(clippy::too_many_arguments)]
-    fn dsq_sparklines(
-        event: &str,
-        dsq_data: &BTreeMap<u64, EventData>,
-        sample_rate: u32,
-        localize: bool,
-        locale: &SystemLocale,
-        theme: &AppTheme,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Vec<Sparkline<'static>> {
-        dsq_data
+    fn dsq_sparklines(params: &DsqRenderParams) -> Vec<Sparkline<'static>> {
+        params
+            .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(params.event))
             .enumerate()
             .map(|(j, (dsq_id, _data))| {
                 Self::dsq_sparkline(
-                    event,
                     *dsq_id,
-                    dsq_data,
-                    sample_rate,
                     Borders::ALL,
-                    localize,
-                    locale,
-                    theme,
-                    j == 0 && render_title,
-                    j == 0 && render_sample_rate,
+                    j == 0 && params.render_title,
+                    j == 0 && params.render_sample_rate,
+                    params,
                 )
             })
             .collect()
