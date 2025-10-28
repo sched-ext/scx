@@ -17,10 +17,7 @@ use crate::columns::{
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
-use crate::render::{
-    MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderConfig, SchedulerRenderer,
-    SchedulerStatsConfig, SchedulerViewContext,
-};
+use crate::render::{MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderer};
 use crate::search;
 use crate::symbol_data::SymbolData;
 use crate::util::{
@@ -1019,7 +1016,6 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// resizes existing sched event data based on new max value.
     /// resizes existing events based on new max value.
     fn resize_events(&mut self, max_events: usize) {
         for node in self.topo.nodes.keys() {
@@ -2533,102 +2529,78 @@ impl<'a> App<'a> {
                     .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
                     .unwrap_or(0);
 
-                // First view with sample rate displayed
-                let new_max = {
-                    let theme = self.theme();
-                    let render_config_first =
-                        SchedulerRenderConfig::new(self.localize, &self.locale, theme, false, true);
-                    let ctx = SchedulerViewContext {
-                        event: "dsq_lat_us",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        left_top,
-                        &ctx,
-                        &render_config_first,
-                    )?
-                };
+                let new_max = SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    "dsq_lat_us",
+                    left_top,
+                    &self.view_state,
+                    &self.scheduler,
+                    &self.dsq_data,
+                    sample_rate,
+                    self.max_sched_events,
+                    self.localize,
+                    &self.locale,
+                    self.theme(),
+                    false,
+                    true,
+                )?;
                 self.max_sched_events = new_max;
 
-                // Remaining views
-                {
-                    let theme = self.theme();
-                    let render_config_rest = SchedulerRenderConfig::new(
-                        self.localize,
-                        &self.locale,
-                        theme,
-                        false,
-                        false,
-                    );
-
-                    let ctx_slice = SchedulerViewContext {
-                        event: "dsq_slice_consumed",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        left_center,
-                        &ctx_slice,
-                        &render_config_rest,
-                    )?;
-
-                    let ctx_vtime = SchedulerViewContext {
-                        event: "dsq_vtime",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        left_bottom,
-                        &ctx_vtime,
-                        &render_config_rest,
-                    )?;
-
-                    let ctx_nr_queued = SchedulerViewContext {
-                        event: "dsq_nr_queued",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        right_bottom,
-                        &ctx_nr_queued,
-                        &render_config_rest,
-                    )?;
-                }
-
-                // Stats view
-                {
-                    let theme = self.theme();
-                    let stats_config = SchedulerStatsConfig::new(
-                        self.config.tick_rate_ms(),
-                        self.scx_stats.dispatch_keep_last,
-                        self.scx_stats.select_cpu_fallback,
-                    );
-                    SchedulerRenderer::render_scheduler_stats(
-                        frame,
-                        right_top,
-                        &self.scheduler,
-                        &self.sched_stats_raw,
-                        &stats_config,
-                        theme,
-                    )
-                }
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    "dsq_slice_consumed",
+                    left_center,
+                    &self.view_state,
+                    &self.scheduler,
+                    &self.dsq_data,
+                    sample_rate,
+                    self.max_sched_events,
+                    self.localize,
+                    &self.locale,
+                    self.theme(),
+                    false,
+                    false,
+                )?;
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    "dsq_vtime",
+                    left_bottom,
+                    &self.view_state,
+                    &self.scheduler,
+                    &self.dsq_data,
+                    sample_rate,
+                    self.max_sched_events,
+                    self.localize,
+                    &self.locale,
+                    self.theme(),
+                    false,
+                    false,
+                )?;
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    "dsq_nr_queued",
+                    right_bottom,
+                    &self.view_state,
+                    &self.scheduler,
+                    &self.dsq_data,
+                    sample_rate,
+                    self.max_sched_events,
+                    self.localize,
+                    &self.locale,
+                    self.theme(),
+                    false,
+                    false,
+                )?;
+                SchedulerRenderer::render_scheduler_stats(
+                    frame,
+                    right_top,
+                    &self.scheduler,
+                    &self.sched_stats_raw,
+                    self.config.tick_rate_ms(),
+                    self.scx_stats.dispatch_keep_last,
+                    self.scx_stats.select_cpu_fallback,
+                    self.theme(),
+                )
             }
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
@@ -3174,40 +3146,35 @@ impl<'a> App<'a> {
             .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
             .unwrap_or(0);
 
-        let theme = self.theme();
-        let render_config_first =
-            SchedulerRenderConfig::new(self.localize, &self.locale, theme, false, true);
-        let render_config_rest =
-            SchedulerRenderConfig::new(self.localize, &self.locale, theme, false, false);
-
-        let ctx_lat = SchedulerViewContext {
-            event: "dsq_lat_us",
-            view_state: &self.view_state,
-            scheduler_name: &self.scheduler,
-            dsq_data: &self.dsq_data,
-            sample_rate,
-            max_sched_events: self.max_sched_events,
-        };
         SchedulerRenderer::render_scheduler_view(
             frame,
+            "dsq_lat_us",
             left_areas[1],
-            &ctx_lat,
-            &render_config_first,
-        )?;
-
-        let ctx_slice = SchedulerViewContext {
-            event: "dsq_slice_consumed",
-            view_state: &self.view_state,
-            scheduler_name: &self.scheduler,
-            dsq_data: &self.dsq_data,
+            &self.view_state,
+            &self.scheduler,
+            &self.dsq_data,
             sample_rate,
-            max_sched_events: self.max_sched_events,
-        };
+            self.max_sched_events,
+            self.localize,
+            &self.locale,
+            self.theme(),
+            false,
+            true,
+        )?;
         SchedulerRenderer::render_scheduler_view(
             frame,
+            "dsq_slice_consumed",
             left_areas[2],
-            &ctx_slice,
-            &render_config_rest,
+            &self.view_state,
+            &self.scheduler,
+            &self.dsq_data,
+            sample_rate,
+            self.max_sched_events,
+            self.localize,
+            &self.locale,
+            self.theme(),
+            false,
+            false,
         )?;
 
         Ok(())

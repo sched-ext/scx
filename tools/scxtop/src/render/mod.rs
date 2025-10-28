@@ -16,6 +16,4 @@ pub mod scheduler;
 pub use memory::MemoryRenderer;
 pub use network::NetworkRenderer;
 pub use process::ProcessRenderer;
-pub use scheduler::{
-    SchedulerRenderConfig, SchedulerRenderer, SchedulerStatsConfig, SchedulerViewContext,
-};
+pub use scheduler::SchedulerRenderer;
