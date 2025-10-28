@@ -8,7 +8,7 @@ on:
 
 jobs:
   list-tests:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
@@ -127,7 +127,7 @@ jobs:
 
   all-success:
     needs: integration-test
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     if: always()
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}

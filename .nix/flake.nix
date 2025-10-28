@@ -201,6 +201,7 @@
               clang
               coreutils
               diffutils
+              gawk
               gcc
               git
               gnugrep

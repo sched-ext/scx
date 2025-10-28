@@ -6,7 +6,7 @@ on:
 
 jobs:
   list-kernels:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
@@ -28,7 +28,7 @@ jobs:
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   update-kernels:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     needs: list-kernels
     strategy:
       matrix:
