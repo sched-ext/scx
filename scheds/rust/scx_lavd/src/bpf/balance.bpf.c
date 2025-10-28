@@ -386,7 +386,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * When per_cpu_dsq or pinned_slice_ns is enabled, compare vtimes
 	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
 	 */
-	if (per_cpu_dsq || pinned_slice_ns) {
+	if (per_cpu_dsq) {
 		bpf_for_each(scx_dsq, p, cpu_dsq_id, 0) {
 			vtime = p->scx.dsq_vtime;
 			break;
