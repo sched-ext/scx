@@ -95,6 +95,12 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     debug_events: bool,
 
+    /// Enable workaround for exiting tasks with offline cgroups during scheduler load.
+    /// This works around a kernel bug where tasks can be initialized with cgroups that
+    /// were never initialized. Disable this once the kernel bug is fixed.
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    exiting_task_workaround: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -186,6 +192,11 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
         skel.maps.rodata_data.as_mut().unwrap().debug_events_enabled = opts.debug_events;
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .unwrap()
+            .exiting_task_workaround_enabled = opts.exiting_task_workaround;
 
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {

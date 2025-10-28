@@ -33,8 +33,9 @@ const volatile bool	     smt_enabled      = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64	     slice_ns;
-const volatile u64	     root_cgid		  = 1;
-const volatile bool	     debug_events_enabled = false;
+const volatile u64	     root_cgid			     = 1;
+const volatile bool	     debug_events_enabled	     = false;
+const volatile bool	     exiting_task_workaround_enabled = true;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -432,8 +433,35 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 {
 	struct cgrp_ctx *cgc;
 
-	if (!(cgc = lookup_cgrp_ctx(cg)))
-		return -ENOENT;
+	cgc = lookup_cgrp_ctx_fallible(cg);
+
+	if (!cgc) {
+		/*
+		 * Cgroup lookup failed - this can happen during scheduler load
+		 * for tasks that were forked before the scheduler was loaded,
+		 * whose cgroups went offline before scx_cgroup_init() ran.
+		 * Only fall back to root cgroup if the workaround is enabled
+		 * and the task is exiting.
+		 */
+		if (exiting_task_workaround_enabled &&
+		    (p->flags & PF_EXITING)) {
+			struct cgroup *rootcg = READ_ONCE(root_cgrp);
+			if (!rootcg) {
+				scx_bpf_error(
+					"Unexpected uninitialized rootcg");
+				return -ENOENT;
+			}
+
+			cgc = lookup_cgrp_ctx(rootcg);
+		}
+
+		if (!cgc) {
+			scx_bpf_error(
+				"cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x)",
+				cg->kn->id, p->pid, p->flags);
+			return -ENOENT;
+		}
+	}
 
 	/*
 	 * This ordering is pretty important, we read applied_configuration_seq
