@@ -19,6 +19,7 @@ mod keymap;
 pub mod layered_util;
 mod llc_data;
 pub mod mangoapp;
+pub mod mcp;
 mod mem_stats;
 mod network_stats;
 mod node_data;
