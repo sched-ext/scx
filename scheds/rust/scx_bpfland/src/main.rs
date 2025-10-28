@@ -359,19 +359,6 @@ impl<'a> Scheduler<'a> {
         // (it's never a good idea to throttle per-CPU kthreads).
         rodata.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
 
-        // Enable conditional kprobes to classify sticky tasks.
-        if opts.sticky_tasks {
-            if let Err(err) =
-                compat::cond_kprobe_enable("do_nanosleep", &skel.progs.kprobe_do_nanosleep)
-            {
-                warn!("failed to enable kprobe/do_nanosleep{}", err);
-            }
-            if let Err(err) = compat::cond_kprobe_enable("ksys_read", &skel.progs.kprobe_ksys_read)
-            {
-                warn!("failed to enable kprobe/ksys_read{}", err);
-            }
-        }
-
         // Set scheduler flags.
         skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
