@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+
+<!--
+  Policy definitions for scx_loader D-Bus service
+
+  This file defines authorization policies for controlling sched_ext schedulers
+  through the scx_loader D-Bus service. Install to /usr/share/polkit-1/actions/
+
+  Authorization modes:
+  - auth_admin: Requires administrator authentication
+  - auth_admin_keep: Admin authentication with session persistence
+  - yes: Allow without authentication (not recommended for production)
+-->
+
+<policyconfig>
+  <vendor>sched_ext</vendor>
+  <vendor_url>https://github.com/sched-ext/scx</vendor_url>
+
+  <!-- Start a scheduler -->
+  <action id="org.scx.Loader.start-scheduler">
+    <description>Start a sched_ext scheduler</description>
+    <message>Authentication is required to start a kernel scheduler</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scx_loader</annotate>
+  </action>
+
+  <!-- Stop a scheduler -->
+  <action id="org.scx.Loader.stop-scheduler">
+    <description>Stop a sched_ext scheduler</description>
+    <message>Authentication is required to stop a kernel scheduler</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scx_loader</annotate>
+  </action>
+
+  <!-- Switch to another scheduler -->
+  <action id="org.scx.Loader.switch-scheduler">
+    <description>Switch to a different sched_ext scheduler</description>
+    <message>Authentication is required to switch kernel schedulers</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scx_loader</annotate>
+  </action>
+
+  <!-- Restart current scheduler -->
+  <action id="org.scx.Loader.restart-scheduler">
+    <description>Restart the current sched_ext scheduler</description>
+    <message>Authentication is required to restart a kernel scheduler</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/scx_loader</annotate>
+  </action>
+
+  <!-- Query scheduler status (read-only) -->
+  <action id="org.scx.Loader.query-status">
+    <description>Query sched_ext scheduler status</description>
+    <message>Authentication is required to query scheduler status</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

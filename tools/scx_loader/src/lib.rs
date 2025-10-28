@@ -5,8 +5,11 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+pub mod audit;
+pub mod auth;
 pub mod config;
 pub mod dbus;
+pub mod validator;
 
 use std::str::FromStr;
 

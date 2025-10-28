@@ -11,3 +11,79 @@
 #lowlatency_mode = []
 #powersave_mode = []
 #server_mode = []
+
+# Security configuration for the scx_loader D-Bus service
+# Uncomment and configure these options to harden your system
+#
+# IMPORTANT: By default, scx_loader runs in PERMISSIVE mode where any local user
+# can control kernel schedulers. This is INSECURE for production systems.
+#
+# To generate a secure configuration, run:
+#   scx_loader init-config --secure --output /etc/scx_loader.toml
+#
+#[security]
+# Authorization mode: "permissive", "group", or "polkit"
+# - permissive: Any local user can control schedulers (INSECURE, development only)
+# - group: Only members of required_group can control schedulers
+# - polkit: Use Polkit for fine-grained authorization (requires org.scx.Loader.policy)
+#authorization_mode = "group"
+
+# Required group for group-based authorization (when authorization_mode = "group")
+#required_group = "wheel"
+
+# Enable argument validation to prevent command injection
+#validate_arguments = true
+
+# Use strict allowlist validation (requires additional configuration)
+# When false, uses format validation (safer default)
+#strict_allowlist = false
+
+# Maximum number of arguments allowed per scheduler invocation
+#max_arguments = 128
+
+# Maximum length of any single argument
+#max_argument_length = 4096
+
+# Allow auto-mode (automatic scheduler launch on high CPU usage)
+# SECURITY WARNING: Auto-mode bypasses D-Bus authorization checks
+# Disable this in production unless you fully trust the system
+#allow_auto_mode = false
+
+# Maximum concurrent scheduler start attempts (prevents resource exhaustion)
+# Valid range: 1-100, default: 3
+# Set to 0 to use default value
+#max_concurrent_starts = 0
+
+# Delay between retry attempts in milliseconds
+# Valid range: 0-60000 (60 seconds), default: 500
+# Set to 0 to use default value
+#retry_delay_ms = 0
+
+# Argument allowlist configuration (optional)
+# When strict_allowlist = true, only arguments matching these patterns are allowed
+# This provides the strongest security but requires explicit configuration
+#
+# Example allowlist for scx_lavd:
+#[security.allowlist.scx_lavd]
+#allowed_args = [
+#    "--performance",
+#    "--powersave",
+#    "--help",
+#    "--version",
+#]
+#
+# Example allowlist with patterns for scx_rusty:
+#[security.allowlist.scx_rusty]
+#allowed_args = [
+#    "-d",           # Enable direct dispatching
+#    "-k",           # Enable kthreads local
+#    "-h",           # Print help
+#    "--help",
+#]
+#allowed_arg_patterns = [
+#    "^--slice-us=[0-9]+$",           # Slice duration in microseconds
+#    "^--interval=[0-9]+(\\.[0-9]+)?$", # Load interval in seconds
+#]
+#
+# Note: When strict_allowlist = false (default), format validation is used instead
+# which is safer than no validation but more permissive than allowlists

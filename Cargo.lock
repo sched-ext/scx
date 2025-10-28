@@ -2958,6 +2958,7 @@ dependencies = [
  "ctrlc",
  "log",
  "nix 0.30.1",
+ "regex",
  "serde",
  "sysinfo",
  "tokio",

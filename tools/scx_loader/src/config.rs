@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -22,6 +22,7 @@ pub struct Config {
     pub default_sched: Option<SupportedSched>,
     pub default_mode: Option<SchedMode>,
     pub scheds: HashMap<String, Sched>,
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -33,48 +34,220 @@ pub struct Sched {
     pub server_mode: Option<Vec<String>>,
 }
 
-/// Initialize config from first found config path, overwise fallback to default config
-pub fn init_config() -> Result<Config> {
-    if let Ok(config_path) = get_config_path() {
-        parse_config_file(&config_path)
-    } else {
-        Ok(get_default_config())
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Authorization mode: "permissive" (any user), "group" (group-based), "polkit" (Polkit)
+    pub authorization_mode: AuthorizationMode,
+
+    /// Group name required for D-Bus access (when authorization_mode = "group")
+    pub required_group: Option<String>,
+
+    /// Enable argument validation
+    pub validate_arguments: bool,
+
+    /// Use strict allowlist validation (requires allowlist config)
+    pub strict_allowlist: bool,
+
+    /// Maximum number of arguments per scheduler invocation
+    pub max_arguments: usize,
+
+    /// Maximum length of any single argument
+    pub max_argument_length: usize,
+
+    /// Enable auto-mode (automatic scheduler launch on CPU threshold)
+    pub allow_auto_mode: bool,
+
+    /// Maximum concurrent scheduler start attempts
+    pub max_concurrent_starts: usize,
+
+    /// Delay between retry attempts in milliseconds
+    pub retry_delay_ms: u64,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorizationMode {
+    /// No authorization (backward compatible, insecure)
+    Permissive,
+    /// Require membership in specific group
+    Group,
+    /// Use Polkit for authorization
+    Polkit,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            authorization_mode: AuthorizationMode::Permissive,
+            required_group: Some("wheel".to_string()),
+            validate_arguments: true,
+            strict_allowlist: false,
+            max_arguments: 128,
+            max_argument_length: 4096,
+            allow_auto_mode: true,
+            // 0 means "use defaults from main.rs constants"
+            max_concurrent_starts: 0,
+            retry_delay_ms: 0,
+        }
     }
 }
 
+/// Initialize config from first found config path, overwise fallback to default config
+pub fn init_config() -> Result<Config> {
+    let config = if let Ok(config_path) = get_config_path() {
+        parse_config_file(&config_path)?
+    } else {
+        get_default_config()
+    };
+
+    config.validate()?;
+    Ok(config)
+}
+
+// Maximum size for config file (1 MB)
+const MAX_CONFIG_SIZE: usize = 1024 * 1024;
+
+// Maximum nesting depth for TOML structures
+const MAX_TOML_DEPTH: usize = 10;
+
 pub fn parse_config_file(filepath: &str) -> Result<Config> {
-    let file_content = fs::read_to_string(filepath)?;
+    // Check file size before reading
+    let metadata = std::fs::metadata(filepath)
+        .with_context(|| format!("Failed to read metadata for {}", filepath))?;
+
+    if metadata.len() > MAX_CONFIG_SIZE as u64 {
+        anyhow::bail!(
+            "Config file {} is too large: {} bytes exceeds maximum of {}",
+            filepath,
+            metadata.len(),
+            MAX_CONFIG_SIZE
+        );
+    }
+
+    // Read file content
+    let file_content = fs::read_to_string(filepath)
+        .with_context(|| format!("Failed to read config file {}", filepath))?;
+
+    // Additional safety: double-check content size
+    if file_content.len() > MAX_CONFIG_SIZE {
+        anyhow::bail!("Config file content exceeds size limit");
+    }
+
     parse_config_content(&file_content)
 }
 
 pub fn get_config_path() -> Result<String> {
-    let vendordir = option_env!("MESON_VENDORDIR").unwrap_or("/usr/share");
-    // Search in system directories
+    // Use fixed, absolute paths only - no environment variable interpolation
+    // This prevents path traversal via environment manipulation
     let check_paths = [
         // locations for user config
-        "/etc/scx_loader/config.toml".to_owned(),
-        "/etc/scx_loader.toml".to_owned(),
+        "/etc/scx_loader/config.toml",
+        "/etc/scx_loader.toml",
         // locations for distributions to ship default configuration
-        format!("{vendordir}/scx_loader/config.toml").to_owned(),
-        format!("{vendordir}/scx_loader.toml").to_owned(),
+        "/usr/share/scx_loader/config.toml",
+        "/usr/share/scx_loader.toml",
     ];
+
     for check_path in check_paths {
-        if !Path::new(&check_path).exists() {
+        // Validate path is absolute
+        let path = Path::new(check_path);
+        if !path.is_absolute() {
+            log::warn!("Skipping non-absolute path: {}", check_path);
             continue;
         }
-        // we found config path
-        return Ok(check_path);
+
+        // Check if path exists before attempting canonicalization
+        if !path.exists() {
+            continue;
+        }
+
+        // Resolve symlinks and check final path
+        match std::fs::canonicalize(path) {
+            Ok(canonical) => {
+                // Ensure canonical path starts with expected prefix
+                let canonical_str = canonical.to_string_lossy();
+                if !canonical_str.starts_with("/etc/scx_loader")
+                    && !canonical_str.starts_with("/usr/share/scx_loader")
+                {
+                    log::warn!(
+                        "Config path {} resolves outside allowed directories to {}",
+                        check_path,
+                        canonical_str
+                    );
+                    continue;
+                }
+
+                log::info!("Using config file: {}", canonical_str);
+                return Ok(canonical.to_string_lossy().to_string());
+            }
+            Err(e) => {
+                // Path exists but can't be canonicalized, skip
+                log::warn!("Failed to canonicalize path {}: {}", check_path, e);
+                continue;
+            }
+        }
     }
 
-    anyhow::bail!("Failed to find config!");
+    anyhow::bail!(
+        "Failed to find config in allowed locations: /etc/scx_loader/, /usr/share/scx_loader/"
+    );
 }
 
 fn parse_config_content(file_content: &str) -> Result<Config> {
     if file_content.is_empty() {
         anyhow::bail!("The config file is empty!")
     }
-    let config: Config = toml::from_str(file_content)?;
+
+    // Validate TOML structure depth (protection against TOML bombs)
+    validate_toml_depth(file_content)?;
+
+    // Parse with TOML parser
+    let config: Config =
+        toml::from_str(file_content).with_context(|| "Failed to parse TOML configuration")?;
+
     Ok(config)
+}
+
+fn validate_toml_depth(content: &str) -> Result<()> {
+    let mut max_depth = 0;
+    let mut current_depth = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Count opening brackets for nested tables
+        let opens = trimmed.matches('[').count();
+        let closes = trimmed.matches(']').count();
+
+        // Account for table headers like [table.subtable]
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            // Count dots in table name to determine depth
+            let table_name = trimmed.trim_matches(|c| c == '[' || c == ']');
+            let depth = table_name.matches('.').count() + 1;
+            current_depth = depth;
+        } else {
+            // For inline tables and arrays
+            current_depth += opens;
+            current_depth = current_depth.saturating_sub(closes);
+        }
+
+        max_depth = max_depth.max(current_depth);
+
+        if max_depth > MAX_TOML_DEPTH {
+            anyhow::bail!(
+                "TOML structure exceeds maximum nesting depth of {}",
+                MAX_TOML_DEPTH
+            );
+        }
+    }
+
+    Ok(())
 }
 
 pub fn get_default_config() -> Config {
@@ -88,11 +261,12 @@ pub fn get_default_config() -> Config {
         SupportedSched::Rustland,
         SupportedSched::Cosmos,
     ];
-    let scheds_map = HashMap::from(supported_scheds.map(|x| init_default_config_entry(x)));
+    let scheds_map = HashMap::from(supported_scheds.map(init_default_config_entry));
     Config {
         default_sched: None,
         default_mode: Some(SchedMode::Auto),
         scheds: scheds_map,
+        security: SecurityConfig::default(),
     }
 }
 
@@ -248,6 +422,92 @@ fn init_default_config_entry(scx_sched: SupportedSched) -> (String, Sched) {
     )
 }
 
+/// Validate security configuration
+pub fn validate_security_config(config: &SecurityConfig) -> Result<()> {
+    if config.authorization_mode == AuthorizationMode::Group && config.required_group.is_none() {
+        anyhow::bail!("authorization_mode 'group' requires required_group to be set");
+    }
+
+    if config.max_arguments == 0 {
+        anyhow::bail!("max_arguments must be greater than 0");
+    }
+
+    if config.max_argument_length == 0 {
+        anyhow::bail!("max_argument_length must be greater than 0");
+    }
+
+    // max_concurrent_starts: 0 means "use default", so allow it
+    if config.max_concurrent_starts > 100 {
+        anyhow::bail!("max_concurrent_starts must be 100 or less (0 uses default)");
+    }
+
+    // retry_delay_ms: 0 means "use default", so allow it
+    if config.retry_delay_ms > 60_000 {
+        anyhow::bail!("retry_delay_ms must be 60000 (60 seconds) or less (0 uses default)");
+    }
+
+    Ok(())
+}
+
+impl Config {
+    /// Validate the configuration
+    pub fn validate(&self) -> Result<()> {
+        validate_security_config(&self.security)?;
+
+        // Validate scheduler configurations
+        for (sched_name, sched_config) in &self.scheds {
+            validate_sched_config(sched_name, sched_config, &self.security)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_sched_config(
+    sched_name: &str,
+    sched_config: &Sched,
+    security: &SecurityConfig,
+) -> Result<()> {
+    let modes = [
+        ("auto_mode", &sched_config.auto_mode),
+        ("gaming_mode", &sched_config.gaming_mode),
+        ("lowlatency_mode", &sched_config.lowlatency_mode),
+        ("powersave_mode", &sched_config.powersave_mode),
+        ("server_mode", &sched_config.server_mode),
+    ];
+
+    for (mode_name, mode_args) in modes {
+        if let Some(args) = mode_args {
+            // Check argument count
+            if args.len() > security.max_arguments {
+                anyhow::bail!(
+                    "Scheduler {} {}: too many arguments ({} > {})",
+                    sched_name,
+                    mode_name,
+                    args.len(),
+                    security.max_arguments
+                );
+            }
+
+            // Check argument lengths
+            for (idx, arg) in args.iter().enumerate() {
+                if arg.len() > security.max_argument_length {
+                    anyhow::bail!(
+                        "Scheduler {} {} argument {}: too long ({} > {})",
+                        sched_name,
+                        mode_name,
+                        idx,
+                        arg.len(),
+                        security.max_argument_length
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::*;
@@ -374,5 +634,83 @@ auto_mode = ["--help"]
         let config_str = "";
         let result = parse_config_content(config_str);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_toml_depth_validation_pass() {
+        let config_str = r#"
+[security]
+authorization_mode = "permissive"
+
+[scheds.scx_rusty]
+auto_mode = []
+"#;
+        let result = validate_toml_depth(config_str);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_toml_depth_validation_fail() {
+        // Create a deeply nested structure (>10 levels)
+        let config_str = r#"
+[a.b.c.d.e.f.g.h.i.j.k]
+value = "too deep"
+"#;
+        let result = validate_toml_depth(config_str);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nesting depth"));
+    }
+
+    #[test]
+    fn test_scheduler_arg_count_validation() {
+        let mut config = get_default_config();
+        config.security.max_arguments = 5;
+
+        // Add a scheduler with too many arguments
+        let sched_config = Sched {
+            auto_mode: Some(vec![
+                "arg1".to_string(),
+                "arg2".to_string(),
+                "arg3".to_string(),
+                "arg4".to_string(),
+                "arg5".to_string(),
+                "arg6".to_string(), // This exceeds the limit
+            ]),
+            gaming_mode: None,
+            lowlatency_mode: None,
+            powersave_mode: None,
+            server_mode: None,
+        };
+
+        let result = validate_sched_config("test_sched", &sched_config, &config.security);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("too many arguments"));
+    }
+
+    #[test]
+    fn test_scheduler_arg_length_validation() {
+        let mut config = get_default_config();
+        config.security.max_argument_length = 10;
+
+        let sched_config = Sched {
+            auto_mode: Some(vec!["this_is_way_too_long_for_the_limit".to_string()]),
+            gaming_mode: None,
+            lowlatency_mode: None,
+            powersave_mode: None,
+            server_mode: None,
+        };
+
+        let result = validate_sched_config("test_sched", &sched_config, &config.security);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too long"));
+    }
+
+    #[test]
+    fn test_config_validation_with_valid_scheds() {
+        let config = get_default_config();
+        assert!(config.validate().is_ok());
     }
 }
