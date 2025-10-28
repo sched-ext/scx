@@ -11,7 +11,6 @@ use scxtop::{
     render::ProcessRenderer, AppTheme, Column, EventData, FilterItem, FilteredState, ProcData,
     ThreadData,
 };
-use smartstring::alias::String as SsoString;
 use std::collections::BTreeMap;
 
 // Helper function to create test ProcData
@@ -85,7 +84,7 @@ fn test_create_table_header_basic() {
     };
 
     let visible_columns = vec![&col1, &col2];
-    let (header, constraints) =
+    let (_header, constraints) =
         ProcessRenderer::create_table_header_and_constraints(&visible_columns, &theme);
 
     // Verify constraints
@@ -98,7 +97,7 @@ fn test_create_table_header_basic() {
 fn test_create_table_header_empty() {
     let theme = AppTheme::Default;
     let visible_columns: Vec<&Column<i32, ProcData>> = vec![];
-    let (header, constraints) =
+    let (_header, constraints) =
         ProcessRenderer::create_table_header_and_constraints(&visible_columns, &theme);
 
     assert_eq!(constraints.len(), 0);
@@ -115,7 +114,7 @@ fn test_create_table_header_single_column() {
     };
 
     let visible_columns = vec![&col];
-    let (header, constraints) =
+    let (_header, constraints) =
         ProcessRenderer::create_table_header_and_constraints(&visible_columns, &theme);
 
     assert_eq!(constraints.len(), 1);
@@ -153,7 +152,7 @@ fn test_create_table_header_multiple_columns() {
     ];
 
     let visible_columns: Vec<&Column<i32, ProcData>> = columns.iter().collect();
-    let (header, constraints) =
+    let (_header, constraints) =
         ProcessRenderer::create_table_header_and_constraints(&visible_columns, &theme);
 
     assert_eq!(constraints.len(), 4);
