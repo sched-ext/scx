@@ -8,7 +8,7 @@ on:
 
 jobs:
   list-tests:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
@@ -127,11 +127,17 @@ jobs:
 
   all-success:
     needs: integration-test
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "podman:nixos" ]') || 'ubuntu-latest' }}
     if: always()
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
       - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
       - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
