@@ -1039,7 +1039,7 @@ mod tests {
             header,
             constraint: Constraint::Length(10),
             visible,
-            value_fn: Box::new(|_, _| format!("value")),
+            value_fn: Box::new(|_, _| "value".to_string()),
         }
     }
 

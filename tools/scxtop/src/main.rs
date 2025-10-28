@@ -727,6 +727,299 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
         })
 }
 
+fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
+    use scx_utils::Topology;
+    use scxtop::mcp::{events::action_to_mcp_event, McpServer, McpServerConfig};
+    use std::sync::Arc;
+
+    // Set up logging to stderr (important: not stdout, which is used for MCP protocol)
+    TermLogger::init(
+        match mcp_args.verbose {
+            0 => LevelFilter::Warn,
+            1 => LevelFilter::Info,
+            2 => LevelFilter::Debug,
+            _ => LevelFilter::Trace,
+        },
+        SimplelogConfig::default(),
+        TerminalMode::Stderr,
+        ColorChoice::Auto,
+    )?;
+
+    // Initialize topology
+    let topo = Topology::new().expect("Failed to create topology");
+    let topo_arc = Arc::new(topo);
+
+    let mcp_config = McpServerConfig {
+        daemon_mode: mcp_args.daemon,
+        enable_logging: mcp_args.enable_logging,
+    };
+
+    if mcp_args.daemon {
+        // Daemon mode: Full BPF event processing
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut open_object = MaybeUninit::uninit();
+                let (action_tx, mut action_rx) = mpsc::unbounded_channel();
+
+                // Create shared stats for MCP server
+                use scxtop::mcp::create_shared_stats;
+                let shared_stats = create_shared_stats();
+                let shared_stats_for_event_handler = shared_stats.clone();
+
+                // Set up BPF
+                let builder = BpfSkelBuilder::default();
+                let skel = builder.open(&mut open_object)?;
+                let mut skel = skel.load()?;
+
+                // Set up event dispatch manager
+                let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
+                let mut edm = EventDispatchManager::new(None, None);
+                edm.register_bpf_handler(Box::new(bpf_publisher));
+
+                // Set up ring buffer
+                let mut event_rbb = RingBufferBuilder::new();
+                let event_handler = move |data: &[u8]| {
+                    let mut event = bpf_event::default();
+                    plain::copy_from_bytes(&mut event, data)
+                        .expect("Event data buffer was too short");
+
+                    // Update shared stats from BPF event
+                    if let Ok(mut stats) = shared_stats_for_event_handler.write() {
+                        stats.update_from_event(&event);
+                    }
+
+                    let _ = edm.on_event(&event);
+                    0
+                };
+                event_rbb.add(&skel.maps.events, event_handler)?;
+                let event_rb = event_rbb.build()?;
+
+                // Attach BPF programs initially
+                let (initial_links, _warnings) = attach_progs(&mut skel)?;
+
+                // Initialize BPF program
+                if !initial_links.is_empty() || is_root() {
+                    skel.progs
+                        .scxtop_init
+                        .test_run(ProgramInput::default())
+                        .ok();
+                }
+
+                // Create BPF perf event attacher BEFORE passing skeleton to App
+                // This gives us a handle to attach perf events for profiling
+                // We create a closure that captures a raw pointer to the program
+                use scxtop::mcp::BpfPerfEventAttacher;
+                // Get raw pointer to the perf_sample_handler program as usize to make it Send
+                let perf_program_addr = &skel.progs.perf_sample_handler as *const _ as usize;
+
+                let bpf_attacher = BpfPerfEventAttacher::new(move |perf_fd| {
+                    // SAFETY: The skeleton is kept alive in the App and not dropped
+                    // until the MCP server is done, so this pointer remains valid
+                    unsafe {
+                        // Cast back to ProgramImpl with Mut parameter
+                        let prog =
+                            &*(perf_program_addr as *const libbpf_rs::ProgramImpl<libbpf_rs::Mut>);
+                        prog.attach_perf_event(perf_fd)
+                            .map(|link| Box::new(link) as Box<dyn std::any::Any + Send>)
+                            .map_err(|e| anyhow::anyhow!("Failed to attach perf event: {}", e))
+                    }
+                });
+                let bpf_attacher_arc = Arc::new(bpf_attacher);
+
+                // Create event control for dynamic BPF program attachment/detachment
+                use scxtop::mcp::{AttachCallback, EventControl, StatsControlCommand};
+                let mut event_control_instance = EventControl::new();
+
+                // Create attach callback using skeleton pointer (similar to perf attacher)
+                // SAFETY: Skeleton is kept alive in App until daemon shutdown
+                let skel_ptr = &mut skel as *mut _ as usize;
+                let attach_callback: AttachCallback = Box::new(move || {
+                    unsafe {
+                        let skel_ref = &mut *(skel_ptr as *mut BpfSkel);
+                        attach_progs(skel_ref).map(|(links, _)| links)
+                    }
+                });
+
+                // Give EventControl the initial links and callback, then immediately detach
+                // to start with minimal overhead
+                event_control_instance.set_bpf_links(initial_links, attach_callback);
+                event_control_instance.disable_event_tracking()?;
+                info!("BPF programs detached by default - use control_event_tracking to enable");
+
+                // Create stats control channel
+                let (stats_tx, stats_rx) = mpsc::unbounded_channel::<StatsControlCommand>();
+                event_control_instance.set_stats_control_channel(stats_tx);
+
+                // Wrap in Arc after configuration
+                let event_control = Arc::new(event_control_instance);
+
+                // Create App (but don't use it in spawned tasks due to Send constraints)
+                let config = Config::default_config();
+                let scheduler =
+                    read_file_string(SCHED_NAME_PATH).unwrap_or_else(|_| "".to_string());
+                let mut app = App::new(
+                    config,
+                    scheduler,
+                    100,
+                    mcp_args.process_id,
+                    mcp_args.layered,
+                    action_tx.clone(),
+                    skel,
+                )?;
+
+                // Create MCP server
+                let mut server = McpServer::new(mcp_config)
+                    .with_topology(topo_arc)
+                    .setup_scheduler_resource()
+                    .setup_profiling_resources()
+                    .with_bpf_perf_attacher(bpf_attacher_arc)
+                    .with_shared_stats(shared_stats.clone())
+                    .with_stats_client(None)
+                    .with_event_control(event_control.clone())
+                    .setup_stats_resources();
+
+                // Enable event streaming
+                let _event_stream_rx = server.enable_event_streaming();
+                let resources = server.get_resources_handle();
+
+                // Get BPF stats collector for periodic sampling
+                let bpf_stats = server.get_bpf_stats_collector();
+
+                // Get perf profiler for stack trace collection
+                let perf_profiler = server.get_perf_profiler();
+
+                // Start BPF polling task
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let shutdown_poll = shutdown.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let _ = event_rb.poll(Duration::from_millis(1));
+                        if shutdown_poll.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                });
+
+                // Start controllable BPF stats collection task
+                // Task responds to start/stop commands via channel, starts in stopped state
+                if let Some(collector) = bpf_stats {
+                    let shutdown_stats = shutdown.clone();
+                    let mut stats_rx_task = stats_rx;
+                    tokio::spawn(async move {
+                        let mut running = false;
+                        let mut interval_ms = 100u64;
+                        let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+
+                        loop {
+                            tokio::select! {
+                                // Handle control commands
+                                Some(cmd) = stats_rx_task.recv() => {
+                                    match cmd {
+                                        StatsControlCommand::Start(new_interval_ms) => {
+                                            running = true;
+                                            interval_ms = new_interval_ms;
+                                            interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                                            info!("Stats collection started with {}ms interval", interval_ms);
+                                        }
+                                        StatsControlCommand::Stop => {
+                                            running = false;
+                                            info!("Stats collection stopped");
+                                        }
+                                    }
+                                }
+
+                                // Collect stats if running
+                                _ = interval.tick(), if running => {
+                                    if shutdown_stats.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    let _ = collector.collect_sample();
+                                }
+
+                                // Check shutdown even when not running
+                                _ = tokio::time::sleep(Duration::from_millis(100)), if !running => {
+                                    if shutdown_stats.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+
+                info!("MCP daemon started, processing BPF events");
+
+                // Main loop: handle both MCP server and action processing
+                let mut mcp_server_task = Box::pin(server.run_async());
+                loop {
+                    tokio::select! {
+                        // Handle MCP server
+                        result = &mut mcp_server_task => {
+                            info!("MCP server exited");
+                            shutdown.store(true, Ordering::Relaxed);
+                            // Links are managed by EventControl and will be dropped on shutdown
+                            return result;
+                        }
+
+                        // Handle actions from BPF
+                        Some(action) = action_rx.recv() => {
+                            // Check for shutdown
+                            if matches!(action, Action::Quit) {
+                                info!("Received quit action");
+                                shutdown.store(true, Ordering::Relaxed);
+                                // Links are managed by EventControl and will be dropped on shutdown
+                                break;
+                            }
+
+                            // Feed perf samples to profiler if it's collecting
+                            if let Some(ref profiler) = perf_profiler {
+                                if let Action::PerfSample(ref perf_sample) = action {
+                                    use scxtop::mcp::RawSample;
+                                    profiler.add_sample(RawSample {
+                                        address: perf_sample.instruction_pointer,
+                                        pid: perf_sample.pid,
+                                        cpu_id: perf_sample.cpu_id,
+                                        is_kernel: perf_sample.is_kernel,
+                                        kernel_stack: perf_sample.kernel_stack.clone(),
+                                        user_stack: perf_sample.user_stack.clone(),
+                                        layer_id: if perf_sample.layer_id >= 0 {
+                                            Some(perf_sample.layer_id)
+                                        } else {
+                                            None
+                                        },
+                                    });
+                                }
+                            }
+
+                            // Update app state
+                            let _ = app.handle_action(&action);
+
+                            // Convert action to MCP event and push to stream
+                            if let Some(event) = action_to_mcp_event(&action) {
+                                let _ = resources.push_event(event);
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+    } else {
+        // One-shot mode: No BPF, just serve static data
+        let mut server = McpServer::new(mcp_config)
+            .with_topology(topo_arc)
+            .setup_scheduler_resource()
+            .setup_profiling_resources()
+            .with_stats_client(None)
+            .setup_stats_resources();
+        server.run_blocking()
+    }
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
 
@@ -736,6 +1029,9 @@ fn main() -> Result<()> {
         }
         Commands::Trace(trace_args) => {
             run_trace(trace_args)?;
+        }
+        Commands::Mcp(mcp_args) => {
+            run_mcp(mcp_args)?;
         }
         Commands::GenerateCompletions { shell, output } => {
             generate_completions(Cli::command(), *shell, output.clone())
