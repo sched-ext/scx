@@ -306,7 +306,14 @@ impl Builder<'_> {
         };
         let open_opts = LibbpfOpts::default().into_bpf_open_opts();
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos, open_opts)?;
-        scx_p2dq::init_open_skel!(&mut open_skel, &topo, self.p2dq_opts, self.verbose)?;
+        let hw_profile = scx_p2dq::HardwareProfile::detect();
+        scx_p2dq::init_open_skel!(
+            &mut open_skel,
+            &topo,
+            self.p2dq_opts,
+            self.verbose,
+            &hw_profile
+        )?;
 
         let rodata = open_skel.maps.rodata_data.as_mut().unwrap();
 
