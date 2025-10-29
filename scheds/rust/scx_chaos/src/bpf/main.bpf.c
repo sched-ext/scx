@@ -474,7 +474,7 @@ destroy_p2dq_enqueue_promise(struct enqueue_promise *pro)
 	// If the idle bit of a CPU has already been cleared but we don't plan
 	// to execute a task on it we should kick the CPU. If the CPU goes to
 	// sleep again it will reset the kernel managed idle state.
-	if (pro->has_cleared_idle)
+	if (enqueue_promise_test_flag(pro, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE))
 		scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
 }
 
@@ -512,7 +512,7 @@ complete_p2dq_enqueue_move(struct enqueue_promise  *pro,
 		break;
 	}
 
-	if (pro->kick_idle)
+	if (enqueue_promise_test_flag(pro, ENQUEUE_PROMISE_F_KICK_IDLE))
 		scx_bpf_kick_cpu(pro->cpu, SCX_KICK_IDLE);
 
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
