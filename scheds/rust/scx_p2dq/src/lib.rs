@@ -78,7 +78,70 @@ impl SchedMode {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone)]
+pub struct HardwareProfile {
+    pub single_llc: bool,
+    pub core_count: usize,
+    pub is_arm64: bool,
+    pub is_neoverse_v2: bool,
+}
+
+impl HardwareProfile {
+    pub fn detect() -> Self {
+        let single_llc = TOPO.all_llcs.len() == 1;
+        let core_count = TOPO.all_cpus.len();
+
+        let is_arm64 = cfg!(target_arch = "aarch64");
+        let is_neoverse_v2 = is_arm64 && Self::detect_neoverse_v2();
+
+        Self {
+            single_llc,
+            core_count,
+            is_arm64,
+            is_neoverse_v2,
+        }
+    }
+
+    fn detect_neoverse_v2() -> bool {
+        // Read /proc/cpuinfo to detect Neoverse-V2
+        if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+            cpuinfo.contains("Neoverse-V2")
+        } else {
+            false
+        }
+    }
+
+    pub fn optimize_scheduler_opts(&self, opts: &mut SchedulerOpts) {
+        if self.single_llc {
+            // Disable pick2 dispatch since there's only one LLC
+            opts.dispatch_pick2_disable = true;
+            // Disable wakeup LLC migrations
+            opts.wakeup_llc_migrations = false;
+            // For single LLC, set min_llc_runs_pick2 to 0 (effectively disable)
+            opts.min_llc_runs_pick2 = 0;
+            log::info!("Single LLC detected - disabling multi-LLC optimizations");
+        }
+
+        if self.is_neoverse_v2 && self.single_llc && self.core_count >= 64 {
+            // Optimize shard count for large single-LLC systems
+            let optimal_shards = (self.core_count / 8).min(16) as u32;
+            if opts.llc_shards == get_default_llc_shards() {
+                opts.llc_shards = optimal_shards;
+                log::info!(
+                    "Large single-LLC system ({} cores) - using {} shards",
+                    self.core_count,
+                    opts.llc_shards
+                );
+            }
+        }
+
+        if self.is_neoverse_v2 {
+            log::info!("ARM64 Neoverse-V2 detected - ARM-specific optimizations available");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Parser)]
 pub struct SchedulerOpts {
     /// Disables per-cpu kthreads directly dispatched into local dsqs.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
@@ -232,6 +295,14 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub virt_llc_enabled: bool,
 
+    /// Enable hardware-specific optimizations automatically
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub hw_auto_optimize: bool,
+
+    /// Force single-LLC fast path optimizations
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub single_llc_fast_path: bool,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
 }
@@ -246,11 +317,12 @@ pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
 
 #[macro_export]
 macro_rules! init_open_skel {
-    ($skel: expr, $topo: expr, $opts: expr, $verbose: expr) => {
+    ($skel: expr, $topo: expr, $opts: expr, $verbose: expr, $hw_profile: expr) => {
         'block: {
-            let skel = $skel;
+            let skel = &mut *$skel;
             let opts: &$crate::SchedulerOpts = $opts;
             let verbose: u8 = $verbose;
+            let hw_profile: &$crate::HardwareProfile = $hw_profile;
 
             if opts.init_dsq_index > opts.dumb_queues - 1 {
                 break 'block ::anyhow::Result::Err(::anyhow::anyhow!(
@@ -321,6 +393,9 @@ macro_rules! init_open_skel {
                 MaybeUninit::new(opts.dispatch_lb_interactive);
             rodata.lb_config.wakeup_lb_busy = opts.wakeup_lb_busy;
             rodata.lb_config.wakeup_llc_migrations = MaybeUninit::new(opts.wakeup_llc_migrations);
+            rodata.lb_config.single_llc_mode = MaybeUninit::new(
+                opts.single_llc_fast_path || (opts.hw_auto_optimize && hw_profile.single_llc),
+            );
 
             // p2dq config
             rodata.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
