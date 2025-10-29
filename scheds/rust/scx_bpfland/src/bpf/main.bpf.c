@@ -812,24 +812,36 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * If @local_pcpu is enabled always dispatch tasks that can
-	 * only run on one CPU directly.
+	 * If @local_kthread is specified dispatch per-CPU kthreads
+	 * directly on their assigned CPU bypassing the per-CPU and
+	 * per-node DSQs.
 	 */
-	if (local_pcpu && is_pcpu_task(p)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
-					 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
 
 	/*
-	 * If @local_kthread is specified dispatch per-CPU kthreads
-	 * directly on their assigned CPU.
+	 * If the task can only run on the current CPU, dispatch it to the
+	 * corresponding per-CPU DSQ.
+	 *
+	 * This does not cause starvation for tasks in per-node DSQs, since
+	 * ops.dispatch() always picks the task with the earliest deadline
+	 * between per-node and per-CPU DSQs.
+	 *
+	 * However, if @local_pcpu is enabled, per-CPU tasks are dispatched
+	 * directly to SCX_DSQ_LOCAL, which can lead to starvation, but it
+	 * also grants them higher priority, which can improve performance
+	 * for certain workloads.
 	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
-					 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
-		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+	if (is_pcpu_task(p)) {
+		if (local_pcpu)
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		else
+			scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
+						 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
 
