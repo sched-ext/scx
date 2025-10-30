@@ -20,6 +20,7 @@ use std::time::Duration;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use clap::error::ErrorKind;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
@@ -546,8 +547,61 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
+fn get_log_config() -> simplelog::Config {
+    simplelog::ConfigBuilder::new()
+        .set_time_offset_to_local()
+        .expect("Failed to set local time offset")
+        .set_time_level(simplelog::LevelFilter::Error)
+        .set_location_level(simplelog::LevelFilter::Off)
+        .set_target_level(simplelog::LevelFilter::Off)
+        .set_thread_level(simplelog::LevelFilter::Off)
+        .build()
+}
+
+// stopgap till logging is redone
+fn pre_init_log(logger: &dyn log::Log, level: log::Level, msg: String) {
+    logger.log(
+        &log::Record::builder()
+            .args(format_args!("{}", msg))
+            .level(level)
+            .target(module_path!())
+            .build(),
+    );
+}
+
+// this all rly should be redone/rethought
+fn parse_opts() -> Opts {
+    let pre_init_logger =
+        simplelog::SimpleLogger::new(simplelog::LevelFilter::Warn, get_log_config());
+
+    Opts::try_parse().unwrap_or_else(|e| {
+        // Version to avoid breakage for when/if custom version thing is removed.
+        if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+            e.exit();
+        }
+        let opts = Opts::parse_from([""]);
+        let err_str = e.to_string();
+        let err_msg = err_str
+            .lines()
+            .take_while(|line| !line.trim().is_empty() && !line.contains("Usage:"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        pre_init_log(
+            &*pre_init_logger,
+            log::Level::Error,
+            format!("Failed to parse args: {}", err_msg.trim()),
+        );
+        pre_init_log(
+            &*pre_init_logger,
+            log::Level::Error,
+            format!("Using default arg values: {:?}", opts),
+        );
+        opts
+    })
+}
+
 fn main() -> Result<()> {
-    let opts = Opts::parse();
+    let opts = parse_opts();
 
     if opts.version {
         println!(
@@ -557,21 +611,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
     simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
+        match opts.verbose {
+            0 => simplelog::LevelFilter::Info,
+            1 => simplelog::LevelFilter::Debug,
+            _ => simplelog::LevelFilter::Trace,
+        },
+        get_log_config(),
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     )?;
