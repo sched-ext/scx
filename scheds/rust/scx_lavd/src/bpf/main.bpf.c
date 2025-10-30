@@ -680,7 +680,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (can_direct_dispatch(cpu_to_dsq(cpu), cpu, is_idle)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
-	} else if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p))) {
+	} else if (per_cpu_dsq) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	} else {
@@ -1813,7 +1813,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * Per-CPU DSQs are created when per_cpu_dsq is enabled OR when
 	 * pinned_slice_ns is enabled (for pinned task handling).
 	 */
-	if (per_cpu_dsq || pinned_slice_ns) {
+	if (per_cpu_dsq) {
 		err = init_per_cpu_dsqs();
 		if (err)
 			return err;

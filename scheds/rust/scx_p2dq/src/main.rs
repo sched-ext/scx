@@ -131,7 +131,15 @@ impl<'a> Scheduler<'a> {
             to this issue or file an issue on the scx repo if the problem persists. \
             https://github.com/sched-ext/scx/issues/new?labels=scx_p2dq&title=scx_p2dq:%20New%20Issue&assignees=hodgesds&body=Kernel%20version:%20(fill%20me%20out)%0ADistribution:%20(fill%20me%20out)%0AHardware:%20(fill%20me%20out)%0A%0AIssue:%20(fill%20me%20out)"
         )?;
-        scx_p2dq::init_open_skel!(&mut open_skel, topo, opts, verbose)?;
+
+        // Apply hardware-specific optimizations before macro
+        let hw_profile = scx_p2dq::HardwareProfile::detect();
+        let mut opts_optimized = opts.clone();
+        if opts.hw_auto_optimize {
+            hw_profile.optimize_scheduler_opts(&mut opts_optimized);
+        }
+
+        scx_p2dq::init_open_skel!(&mut open_skel, topo, &opts_optimized, verbose, &hw_profile)?;
 
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;

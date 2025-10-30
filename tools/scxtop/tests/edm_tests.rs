@@ -37,7 +37,7 @@ impl BpfEventHandler for MockBpfEventHandler {
         if self.should_fail {
             Err(anyhow!("Mock BPF event handler error"))
         } else {
-            self.events_received.push(event.clone());
+            self.events_received.push(*event);
             Ok(())
         }
     }

@@ -7,6 +7,12 @@
 #include "intf.h"
 
 /*
+ * Maximum time a task can wait in the scheduler's queue before triggering
+ * a stall.
+ */
+#define STARVATION_MS	5000ULL
+
+/*
  * Maximum amount of CPUs supported by the scheduler when flat or preferred
  * idle CPU scan is enabled.
  */
@@ -220,7 +226,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 wakeup_freq;
 	u64 last_woke_at;
-	u64 pinned_at;
+	u64 avg_runtime;
 };
 
 /* Map that contains task-local storage. */
@@ -642,15 +648,38 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
  * to accumulate more time-slice credit than tasks with infrequent, long
  * sleeps.
  */
-static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
+static u64 task_dl(struct task_struct *p, s32 cpu, struct task_ctx *tctx)
 {
+	/*
+	 * Reference queue depth: how many tasks would take 1/10 the SLA to
+	 * drain at average slice usage.
+	 */
+	const u64 STARVATION_THRESH = STARVATION_MS * NSEC_PER_MSEC / 10;
+	const u64 q_thresh = MAX(STARVATION_THRESH / slice_max, 1);
+
+	u64 nr_queued = scx_bpf_dsq_nr_queued(cpu_dsq(cpu)) +
+			scx_bpf_dsq_nr_queued(node_dsq(cpu));
 	u64 lag_scale = MAX(tctx->wakeup_freq, 1);
-	u64 vtime_min = vtime_now - scale_by_task_weight(p, slice_lag * lag_scale);
 	u64 awake_max = scale_by_task_weight_inverse(p, slice_lag);
+	u64 vtime_min;
 
 	/*
-	 * Cap the vruntime credit while sleeping to @vtime_min.
+	 * Queue pressure factor = q_thresh / (q_thresh + nr_queued), applied to
+	 * @lag_scale.
+	 *
+	 * Emergency clamp: if queued work (q * slice_max) already spans
+	 * the starvation window, stop boosting vruntime credit.
 	 */
+	if (nr_queued * slice_max >= STARVATION_THRESH)
+		lag_scale = 1;
+	else
+		lag_scale = MAX(lag_scale * q_thresh / (q_thresh + nr_queued), 1);
+
+	/*
+	 * Cap the partial accumulated vruntime since last sleep in
+	 * function of @slice_lag and @lag_scale.
+	 */
+	vtime_min = vtime_now - scale_by_task_weight(p, slice_lag * lag_scale);
 	if (time_before(p->scx.dsq_vtime, vtime_min))
 		p->scx.dsq_vtime = vtime_min;
 
@@ -663,8 +692,13 @@ static u64 task_dl(struct task_struct *p, struct task_ctx *tctx)
 
 	/*
 	 * Evaluate task's deadline as the accumulated vruntime +
-	 * accumulated vruntime since last sleep + the expected time slice
-	 * that the task is going to use.
+	 * accumulated vruntime since last sleep.
+	 *
+	 * Note that, since the wakeup frequency is only updated in
+	 * ops.runnable(), a task that runs continuously without sleeping
+	 * will retain a high wakeup frequency. However, this is balanced
+	 * by its high total and awake vruntimes, resulting in a higher
+	 * deadline, as intended.
 	 */
 	return p->scx.dsq_vtime + tctx->awake_vtime;
 }
@@ -708,7 +742,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		tctx = try_lookup_task_ctx(p);
 		if (tctx) {
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
-						 task_slice(p), task_dl(p, tctx), 0);
+						 task_slice(p), task_dl(p, cpu, tctx), 0);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		}
 		return cpu;
@@ -718,48 +752,12 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 }
 
 /*
- * Tasks that frequently perform short sleeps, whether due to read
- * operations or explicit sleep calls, can generate a high rate of
- * rescheduling events, leading to excessive lock contention in the
- * global/node DSQs.
- *
- * To mitigate this, force such tasks to be dispatched to the local DSQ for
- * a cooldown period (@slice_lag).
- */
-static void set_task_sticky(void)
-{
-	const struct task_struct *p = (void *)bpf_get_current_task_btf();
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	/*
-	 * This will decay after @slice_lag ns, see ops.enqueue().
-	 */
-	tctx->pinned_at = bpf_ktime_get_ns();
-}
-
-SEC("?kprobe/do_nanosleep")
-void kprobe_do_nanosleep(void)
-{
-	set_task_sticky();
-}
-
-SEC("?kprobe/ksys_read")
-void kprobe_ksys_read(void)
-{
-	set_task_sticky();
-}
-
-/*
- * Return true if the task is forced to stay on the same CPU, false
+ * Return true if the task should be forced to stay on the same CPU, false
  * otherwise.
  */
 static bool is_task_sticky(const struct task_ctx *tctx)
 {
-	return sticky_tasks && time_after(tctx->pinned_at + slice_lag, bpf_ktime_get_ns());
+	return sticky_tasks && tctx->avg_runtime < 10 * NSEC_PER_USEC;
 }
 
 /*
@@ -803,12 +801,23 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
+	 * If the task is marked as sticky due to excessive rescheduling
+	 * activity, dispatch it directly to the same CPU to reduce the
+	 * locking pressure on the per-CPU and per-node DSQs.
+	 */
+	if (is_task_sticky(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
+	}
+
+	/*
 	 * If @local_pcpu is enabled always dispatch tasks that can
 	 * only run on one CPU directly.
 	 */
 	if (local_pcpu && is_pcpu_task(p)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
-					 task_slice(p), task_dl(p, tctx), enq_flags);
+					 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -819,18 +828,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
-					 task_slice(p), task_dl(p, tctx), enq_flags);
+					 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		return;
-	}
-
-	/*
-	 * If the task is marked as sticky, force it to stay on the same
-	 * CPU.
-	 */
-	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
 
@@ -848,7 +847,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
-						 task_slice(p), task_dl(p, tctx), enq_flags);
+						 task_slice(p), task_dl(p, cpu, tctx), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			if (prev_cpu != cpu || !scx_bpf_task_running(p))
@@ -862,7 +861,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * scheduling.
 	 */
 	scx_bpf_dsq_insert_vtime(p, node_dsq(prev_cpu),
-				 task_slice(p), task_dl(p, tctx), enq_flags);
+				 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
@@ -1045,7 +1044,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = bpf_ktime_get_ns(), slice, delta_runtime;
+	u64 now = bpf_ktime_get_ns(), slice, delta_vtime, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
@@ -1057,16 +1056,22 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	/*
-	 * Evaluate the used time slice.
+	 * Evaluate the used time slice and actual runtime.
 	 */
-	slice = scale_by_task_weight_inverse(p, bpf_ktime_get_ns() - tctx->last_run_at);
+	slice = now - tctx->last_run_at;
+
+	/*
+	 * Update average runtime per scheduling cycle for sticky task detection.
+	 */
+	tctx->avg_runtime = calc_avg(tctx->avg_runtime, slice);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
 	 * sleep.
 	 */
-	p->scx.dsq_vtime += slice;
-	tctx->awake_vtime += slice;
+	delta_vtime = scale_by_task_weight_inverse(p, slice);
+	p->scx.dsq_vtime += delta_vtime;
+	tctx->awake_vtime += delta_vtime;
 
 	/*
 	 * Update CPU runtime.
@@ -1364,5 +1369,5 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .init_task		= (void *)bpfland_init_task,
 	       .init			= (void *)bpfland_init,
 	       .exit			= (void *)bpfland_exit,
-	       .timeout_ms		= 5000,
+	       .timeout_ms		= STARVATION_MS,
 	       .name			= "bpfland");

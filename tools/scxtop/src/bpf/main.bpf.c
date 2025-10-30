@@ -179,6 +179,7 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 		new_tctx.dsq_insert_time = 0;
 		new_tctx.wakeup_ts	 = 0;
 		new_tctx.last_waker_pid	 = 0;
+		new_tctx.is_sampled	 = false;
 		__builtin_memset(new_tctx.last_waker_comm, 0, MAX_COMM);
 
 		if (!bpf_map_update_elem(&task_data, &tptr, &new_tctx, BPF_ANY))
@@ -472,23 +473,45 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	struct task_ctx	   *tctx;
 	struct bpf_event   *event;
 	struct task_struct *waker;
+	bool		    sample_this_thread;
 
-	if (!enable_bpf_events || !p || !should_sample())
+	if (!enable_bpf_events || !p)
 		return 0;
 
 	u64 now = bpf_ktime_get_ns();
 	tctx	= try_lookup_task_ctx(p);
 
+	if (!tctx)
+		return 0;
+
+	// Cohort sampling: Decide whether to sample this wakeup->run cycle
+	// UNLESS thread was already sampled and hasn't run yet
+	if (tctx->is_sampled && tctx->last_run_ns == 0) {
+		// Thread was already sampled but woke up again before running
+		// Keep it sampled and update wakeup_ts to measure from LAST wakeup
+		// This excludes voluntary blocking time from latency measurement
+		sample_this_thread = true;
+	} else {
+		// New sampling decision: either thread wasn't sampled before,
+		// or it already ran (completed previous cycle)
+		sample_this_thread = should_sample();
+		tctx->is_sampled   = sample_this_thread;
+	}
+
+	// Only send event to userspace if this thread is being sampled
+	if (!sample_this_thread)
+		return 0;
+
 	// Get the current task (the waker)
 	waker = (struct task_struct *)bpf_get_current_task_btf();
 
-	// Record waker information in the target task's context
-	if (tctx && waker) {
-		tctx->wakeup_ts	     = now;
+	// Record waker information and wakeup timestamp in the task context
+	// Update wakeup_ts even if already sampled to measure from LAST wakeup
+	// This gives us actual scheduler latency, not including voluntary blocking
+	tctx->wakeup_ts = now;
+	if (waker) {
 		tctx->last_waker_pid = waker->pid;
 		record_real_comm(tctx->last_waker_comm, waker);
-	} else if (tctx) {
-		tctx->wakeup_ts = now;
 	}
 
 	if (!(event = try_reserve_event()))
@@ -534,24 +557,46 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 	struct task_ctx	   *tctx;
 	struct bpf_event   *event;
 	struct task_struct *waker;
+	bool		    sample_this_thread;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events || !p)
 		return 0;
 
 	u64 now = bpf_ktime_get_ns();
 	tctx	= try_lookup_task_ctx(p);
 
+	if (!tctx)
+		return 0;
+
+	// Cohort sampling: same logic as sched_wakeup to handle already-sampled threads
+	// UNLESS thread was already sampled and hasn't run yet
+	if (tctx->is_sampled && tctx->last_run_ns == 0) {
+		// Thread was already sampled but waking again before running
+		// Keep it sampled and update wakeup_ts to measure from LAST waking event
+		sample_this_thread = true;
+	} else {
+		// New sampling decision
+		sample_this_thread = should_sample();
+		tctx->is_sampled   = sample_this_thread;
+	}
+
+	// Only send event to userspace if this thread is being sampled
+	if (!sample_this_thread)
+		return 0;
+
 	// Get the current task (the waker)
 	waker = (struct task_struct *)bpf_get_current_task_btf();
 
-	// Record waker information in the target task's context
-	if (tctx && waker) {
+	// Record waker information and wakeup timestamp in the task context
+	// Update wakeup_ts even if already sampled to measure from LAST waking event
+	tctx->wakeup_ts = now;
+	if (waker) {
 		tctx->last_waker_pid = waker->pid;
 		record_real_comm(tctx->last_waker_comm, waker);
 	}
 
 	if (!(event = try_reserve_event()))
-		return -ENOMEM;
+		return 0;
 
 	event->type		 = SCHED_WAKING;
 	event->ts		 = now;
@@ -580,11 +625,22 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 {
 	struct task_ctx	 *next_tctx, *prev_tctx;
 	struct bpf_event *event;
+	bool		  should_send_event = false;
 
-	prev_tctx = try_lookup_task_ctx(prev);
+	prev_tctx			    = try_lookup_task_ctx(prev);
+	next_tctx			    = try_lookup_task_ctx(next);
 
-	// We need to check if this is the tail end of a sample
+	// Cohort sampling: Send event if EITHER:
+	// 1. PREV task was sampled (completing a sampled running period)
+	// 2. NEXT task was sampled at wakeup (need to calculate latency)
 	if (prev && prev_tctx && prev_tctx->last_run_ns > 0) {
+		should_send_event = true;
+	} else if (next_tctx && next_tctx->is_sampled &&
+		   next_tctx->wakeup_ts > 0) {
+		should_send_event = true;
+	}
+
+	if (should_send_event) {
 		u32 *lctx;
 
 		if (!(event = try_reserve_event()))
@@ -606,17 +662,30 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		event->event.sched_switch.prev_tgid  = prev->tgid;
 		event->event.sched_switch.prev_prio  = (int)prev->prio;
 		event->event.sched_switch.prev_state = prev_state;
-		event->event.sched_switch.prev_used_slice_ns =
-			now - prev_tctx->last_run_ns;
-		event->event.sched_switch.prev_dsq_id	= prev_tctx->dsq_id;
-		event->event.sched_switch.prev_slice_ns = prev_tctx->slice_ns;
 		record_real_comm(event->event.sched_switch.prev_comm, prev);
 
-		prev_tctx->dsq_id	   = SCX_DSQ_INVALID;
-		prev_tctx->dsq_vtime	   = 0;
-		prev_tctx->wakeup_ts	   = 0;
-		prev_tctx->dsq_insert_time = 0;
-		prev_tctx->last_run_ns	   = 0;
+		// Only fill in PREV details if prev_tctx is valid and was running
+		if (prev_tctx && prev_tctx->last_run_ns > 0) {
+			event->event.sched_switch.prev_used_slice_ns =
+				now - prev_tctx->last_run_ns;
+			event->event.sched_switch.prev_dsq_id =
+				prev_tctx->dsq_id;
+			event->event.sched_switch.prev_slice_ns =
+				prev_tctx->slice_ns;
+
+			// Clear PREV task context after completing sampled run
+			prev_tctx->dsq_id	   = SCX_DSQ_INVALID;
+			prev_tctx->dsq_vtime	   = 0;
+			prev_tctx->wakeup_ts	   = 0;
+			prev_tctx->dsq_insert_time = 0;
+			prev_tctx->last_run_ns	   = 0;
+			prev_tctx->is_sampled = false; // Clear sampling flag
+		} else {
+			// PREV wasn't being tracked (event sent for NEXT's latency)
+			event->event.sched_switch.prev_used_slice_ns = 0;
+			event->event.sched_switch.prev_dsq_id = SCX_DSQ_INVALID;
+			event->event.sched_switch.prev_slice_ns = 0;
+		}
 
 		/*
 		 * Tracking vtime **and** the dsq a task was inserted to is kind of
@@ -635,7 +704,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 			else
 				event->event.sched_switch.next_layer_id = -1;
 
-			next_tctx = try_lookup_task_ctx(next);
+			// next_tctx already looked up at the beginning of this function
 			event->event.sched_switch.next_pid  = next->pid;
 			event->event.sched_switch.next_tgid = next->tgid;
 			event->event.sched_switch.next_prio = (int)next->prio;
@@ -667,6 +736,12 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 				event->event.sched_switch.next_dsq_nr	  = 0;
 				event->event.sched_switch.next_dsq_vtime  = 0;
 			}
+
+			// If NEXT task was sampled during wakeup, mark it as starting to run
+			// This begins tracking when it will be switched out
+			if (next_tctx && next_tctx->is_sampled) {
+				next_tctx->last_run_ns = now;
+			}
 		} else {
 			event->event.sched_switch.next_dsq_lat_us = 0;
 			event->event.sched_switch.next_pid	  = 0;
@@ -676,15 +751,25 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		bpf_ringbuf_submit(event, 0);
 	}
 
-	// Here, we'll determine if we should kick off the next sample
-	if (!enable_bpf_events || !should_sample())
+	// Cohort sampling: If NEXT task wasn't already marked as sampled at wakeup,
+	// check if we should start sampling it now (for tasks that were already runnable)
+	if (!enable_bpf_events)
 		return 0;
 
-	if ((next_tctx = try_lookup_task_ctx(next))) {
+	// Re-lookup next_tctx if we haven't already (shouldn't happen, but be defensive)
+	if (!next_tctx)
+		next_tctx = try_lookup_task_ctx(next);
+	if (next_tctx && !next_tctx->is_sampled && should_sample()) {
+		// Start sampling this task even though we didn't catch its wakeup
+		next_tctx->is_sampled	   = true;
 		next_tctx->last_run_ns	   = bpf_ktime_get_ns();
 		next_tctx->dsq_vtime	   = 0;
 		next_tctx->dsq_insert_time = 0;
 		next_tctx->wakeup_ts	   = 0;
+	} else if (next_tctx && next_tctx->is_sampled &&
+		   next_tctx->last_run_ns == 0) {
+		// Task was sampled at wakeup but hasn't been marked as running yet
+		next_tctx->last_run_ns = bpf_ktime_get_ns();
 	}
 
 	return 0;
