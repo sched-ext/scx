@@ -66,10 +66,5 @@ for manifest in "$MESON_SOURCE_ROOT"/tools/*/Cargo.toml; do
         echo "Found multiple binaries for $name under $target_dir, installing the latest which may not be what you want" 1>&2
     fi
 
-    # Install bus spec for scx_loader
-    if [ "$name" = "scx_loader" ]; then
-        install -D -m 0644 "${source_dir}/org.scx.Loader.conf" "${DESTDIR}/usr/share/dbus-1/system.d/org.scx.Loader.conf"
-    fi
-
     install -D "${bins[0]}" "${DESTDIR}/${MESON_INSTALL_PREFIX}/bin/${name}"
 done

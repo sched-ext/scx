@@ -98,18 +98,6 @@ cargo build --profile=release-tiny -p scx_flash
 
 Besides schedulers, the workspace includes several tools:
 
-- **scxctl** – CLI for managing schedulers:
-
-  ```bash
-  cargo build --release -p scxctl
-  ```
-
-- **scx_loader** – Scheduler loader:
-
-  ```bash
-  cargo build --release -p scx_loader
-  ```
-
 - **scxtop** – Monitoring tool:
 
   ```bash
@@ -138,9 +126,7 @@ Some schedulers and tools may also be available directly from [crates.io](https:
 
 | Crate name   | Install command            |
 |--------------|----------------------------|
-| `scxctl`     | `cargo install scxctl`     |
 | `scxtop`     | `cargo install scxtop`     |
-| `scx_loader` | `cargo install scx_loader` |
 | `scx_flash`  | `cargo install scx_flash`  |
 
 This will place the binary in `~/.cargo/bin`, which you should add to your `PATH` if it is not already included.
@@ -154,7 +140,7 @@ To make a scheduler or tool available system-wide, you can either:
 1. Copy the installed binary from `~/.cargo/bin` into a system directory, e.g.:
 
    ```bash
-   sudo cp ~/.cargo/bin/scxctl /usr/local/bin/
+   sudo cp ~/.cargo/bin/scxtop /usr/local/bin/
    ```
 
 2. Or add `~/.cargo/bin` to your system `PATH`, for example by adding this line to `~/.bashrc` or `~/.zshrc`:
