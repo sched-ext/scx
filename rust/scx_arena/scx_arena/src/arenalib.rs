@@ -95,7 +95,7 @@ impl<'a> ArenaLib<'a> {
         Ok(())
     }
 
-    fn setup_topology_node(&self, mask: &[u64]) -> Result<()> {
+    fn setup_topology_node(&self, mask: &[u64], id: usize) -> Result<()> {
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
         };
@@ -127,7 +127,7 @@ impl<'a> ArenaLib<'a> {
         let mut args = types::arena_topology_node_init_args {
             bitmap: args.bitmap as c_ulong,
             data_size: 0 as c_ulong,
-            id: 0 as c_ulong,
+            id: id as c_ulong,
         };
 
         let input = ProgramInput {
@@ -151,33 +151,37 @@ impl<'a> ArenaLib<'a> {
     fn setup_topology(&self) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
-        self.setup_topology_node(topo.span.as_raw_slice())?;
+        // Top level - ID 0 is fine as there's only one top-level node
+        self.setup_topology_node(topo.span.as_raw_slice(), 0)?;
 
-        for (_, node) in topo.nodes {
-            self.setup_topology_node(node.span.as_raw_slice())?;
+        for (node_id, node) in topo.nodes {
+            self.setup_topology_node(node.span.as_raw_slice(), node_id)?;
         }
 
-        for (_, llc) in topo.all_llcs {
+        // LLCs need to use their actual LLC ID for proper indexing in topo_nodes
+        for (llc_id, llc) in topo.all_llcs {
             self.setup_topology_node(
                 Arc::<Llc>::into_inner(llc)
                     .expect("missing llc")
                     .span
                     .as_raw_slice(),
+                llc_id,
             )?;
         }
 
-        for (_, core) in topo.all_cores {
+        for (core_id, core) in topo.all_cores {
             self.setup_topology_node(
                 Arc::<Core>::into_inner(core)
                     .expect("missing core")
                     .span
                     .as_raw_slice(),
+                core_id,
             )?;
         }
         for (_, cpu) in topo.all_cpus {
             let mut mask = [0; Self::MAX_CPU_ARRSZ - 1];
             mask[cpu.id / 64] |= 1 << (cpu.id % 64);
-            self.setup_topology_node(&mask)?;
+            self.setup_topology_node(&mask, cpu.id)?;
         }
 
         Ok(())
