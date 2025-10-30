@@ -18,6 +18,7 @@ fn main() {
         .add_source("src/bpf/lib/sdt_task.bpf.c")
         .add_source("src/bpf/lib/topology.bpf.c")
         .add_source("src/bpf/lib/selftests/selftest.bpf.c")
+        .add_source("src/bpf/lib/selftests/st_arena_topology_timer.bpf.c")
         .add_source("src/bpf/lib/selftests/st_atq.bpf.c")
         .add_source("src/bpf/lib/selftests/st_bitmap.bpf.c")
         .add_source("src/bpf/lib/selftests/st_btree.bpf.c")
