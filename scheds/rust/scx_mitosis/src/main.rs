@@ -101,6 +101,12 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
+    /// Split vtime updates between running() and stopping() instead of unifying them in stopping().
+    /// Enabling this flag restores the legacy behavior of vtime updates, which we've observed to
+    /// cause "vtime too far ahead" errors.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    split_vtime_updates: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -197,6 +203,7 @@ impl<'a> Scheduler<'a> {
             .as_mut()
             .unwrap()
             .exiting_task_workaround_enabled = opts.exiting_task_workaround;
+        skel.maps.rodata_data.as_mut().unwrap().split_vtime_updates = opts.split_vtime_updates;
 
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
