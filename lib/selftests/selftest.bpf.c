@@ -12,6 +12,12 @@ int arena_selftest(void)
 {
 	int ret;
 
+	ret = scx_selftest_arena_topology_timer();
+	if (ret) {
+		bpf_printk("scx_selftest_topology failed with %d", ret);
+		return ret;
+	}
+
 	ret = scx_selftest_atq();
 	if (ret) {
 		bpf_printk("scx_selftest_atq failed with %d", ret);

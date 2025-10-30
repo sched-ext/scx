@@ -3,7 +3,7 @@ BPF_SOURCES = $(wildcard ../*.bpf.c) $(wildcard *.bpf.c)
 BPF_OBJECTS = $(notdir $(BPF_SOURCES:.bpf.c=.bpf.o))
 BPFTOOL=bpftool
 
-INCLUDES=-I../../scheds/include -I../../scheds/include/arch -I ../../scheds/include/arch/bpf-compat
+INCLUDES=-I../../scheds/include -I ../../scheds/vmlinux -I../../scheds/include/arch -I ../../scheds/include/arch/bpf-compat
 
 BPF_CFLAGS=-O2 -g -target bpf -D__TARGET_ARCH_x86 -mcpu=v3 -Wall
 BPF_CFLAGS+=-I/usr/include/bpf -I/usr/include/$(shell uname -m)-linux-gnu 
