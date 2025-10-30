@@ -268,12 +268,6 @@ $ scx_rustland --monitor 5
 [RustLand] tasks -> r:  1/4  w: 1 /1  | pf: 0     | dispatch -> u: 33178 k: 0     c: 0     b: 0     f: 0     | cg: 0
 ```
 
-## systemd services
-
-See: [scx_loader](tools/scx_loader/README.md) and [scxctl](tools/scxctl/README.md)
-
-See also migration guide from `scx.service` to `scx_loader.service`: [GUIDE](services/systemd/README.md)
-
 ## Kernel Feature Status
 
 The kernel feature is not yet upstream and can be found in the
