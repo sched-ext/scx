@@ -226,7 +226,7 @@ struct task_ctx {
 	u64 last_run_at;
 	u64 wakeup_freq;
 	u64 last_woke_at;
-	u64 pinned_at;
+	u64 avg_runtime;
 };
 
 /* Map that contains task-local storage. */
@@ -752,48 +752,12 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 }
 
 /*
- * Tasks that frequently perform short sleeps, whether due to read
- * operations or explicit sleep calls, can generate a high rate of
- * rescheduling events, leading to excessive lock contention in the
- * global/node DSQs.
- *
- * To mitigate this, force such tasks to be dispatched to the local DSQ for
- * a cooldown period (@slice_lag).
- */
-static void set_task_sticky(void)
-{
-	const struct task_struct *p = (void *)bpf_get_current_task_btf();
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	/*
-	 * This will decay after @slice_lag ns, see ops.enqueue().
-	 */
-	tctx->pinned_at = bpf_ktime_get_ns();
-}
-
-SEC("?kprobe/do_nanosleep")
-void kprobe_do_nanosleep(void)
-{
-	set_task_sticky();
-}
-
-SEC("?kprobe/ksys_read")
-void kprobe_ksys_read(void)
-{
-	set_task_sticky();
-}
-
-/*
- * Return true if the task is forced to stay on the same CPU, false
+ * Return true if the task should be forced to stay on the same CPU, false
  * otherwise.
  */
 static bool is_task_sticky(const struct task_ctx *tctx)
 {
-	return sticky_tasks && time_after(tctx->pinned_at + slice_lag, bpf_ktime_get_ns());
+	return sticky_tasks && tctx->avg_runtime < 10 * NSEC_PER_USEC;
 }
 
 /*
@@ -837,6 +801,17 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
+	 * If the task is marked as sticky due to excessive rescheduling
+	 * activity, dispatch it directly to the same CPU to reduce the
+	 * locking pressure on the per-CPU and per-node DSQs.
+	 */
+	if (is_task_sticky(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
+	}
+
+	/*
 	 * If @local_pcpu is enabled always dispatch tasks that can
 	 * only run on one CPU directly.
 	 */
@@ -855,16 +830,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
 					 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		return;
-	}
-
-	/*
-	 * If the task is marked as sticky, force it to stay on the same
-	 * CPU.
-	 */
-	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
 
@@ -1079,7 +1044,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = bpf_ktime_get_ns(), slice, delta_runtime;
+	u64 now = bpf_ktime_get_ns(), slice, delta_vtime, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
@@ -1091,16 +1056,22 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	/*
-	 * Evaluate the used time slice.
+	 * Evaluate the used time slice and actual runtime.
 	 */
-	slice = scale_by_task_weight_inverse(p, bpf_ktime_get_ns() - tctx->last_run_at);
+	slice = now - tctx->last_run_at;
+
+	/*
+	 * Update average runtime per scheduling cycle for sticky task detection.
+	 */
+	tctx->avg_runtime = calc_avg(tctx->avg_runtime, slice);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
 	 * sleep.
 	 */
-	p->scx.dsq_vtime += slice;
-	tctx->awake_vtime += slice;
+	delta_vtime = scale_by_task_weight_inverse(p, slice);
+	p->scx.dsq_vtime += delta_vtime;
+	tctx->awake_vtime += delta_vtime;
 
 	/*
 	 * Update CPU runtime.
