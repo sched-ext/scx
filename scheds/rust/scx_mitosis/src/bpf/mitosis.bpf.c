@@ -36,6 +36,7 @@ const volatile u64	     slice_ns;
 const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
+const volatile bool	     split_vtime_updates	     = false;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -1130,19 +1131,24 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	struct task_ctx *tctx;
 	struct cell	*cell;
 
-	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
-	    !(cell = lookup_cell(cctx->cell)))
+	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
 	/*
-	 * Update both the CPU's cell and the cpu's vtime so the vtime's are
-	 * comparable at dispatch time.
+	 * Legacy approach: Update vtime_now before task runs.
+	 * Only used when split vtime updates is enabled.
 	 */
-	if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
-		WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
+	if (split_vtime_updates) {
+		if (!(cctx = lookup_cpu_ctx(-1)) ||
+		    !(cell = lookup_cell(cctx->cell)))
+			return;
 
-	if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
-		WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+		if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
+			WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
+
+		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
+			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+	}
 
 	tctx->started_running_at = scx_bpf_now();
 }
@@ -1171,6 +1177,18 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+
+	/*
+	 * Default approach: Update cell and cpu dsq vtime after updating task's vtime
+	 * to keep them in sync and prevent "vtime too far ahead" errors.
+	 */
+	if (!split_vtime_updates) {
+		if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
+			WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
+
+		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
+			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+	}
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
 		u64 *cell_cycles = MEMBER_VPTR(cctx->cell_cycles, [cidx]);
