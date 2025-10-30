@@ -596,8 +596,12 @@ static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
 	/*
 	 * If the chosen CPU is idle and there is nothing to do
 	 * in the domain, we can safely choose the fast track.
+	 *
+	 * When per_cpu_dsq is false, we only check if the CPU is idle.
+	 * When per_cpu_dsq is true, we also need to check if the per-CPU
+	 * DSQ is empty.
 	 */
-	return is_idle && cpu >= 0 && !scx_bpf_dsq_nr_queued(dsq_id);
+	return is_idle && cpu >= 0 && (!per_cpu_dsq || !scx_bpf_dsq_nr_queued(dsq_id));
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
