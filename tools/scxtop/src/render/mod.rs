@@ -10,7 +10,12 @@ pub mod memory;
 
 // Network rendering
 pub mod network;
+// Scheduler rendering
+pub mod scheduler;
 
 pub use memory::MemoryRenderer;
 pub use network::NetworkRenderer;
 pub use process::ProcessRenderer;
+pub use scheduler::{
+    SchedulerRenderConfig, SchedulerRenderer, SchedulerStatsConfig, SchedulerViewContext,
+};
