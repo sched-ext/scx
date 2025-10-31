@@ -918,29 +918,6 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 }
 
 /*
- * NOTE: drop this when a proper scx_bpf_dsq_peek() helper is added.
- */
-struct task_struct *scx_bpf_dsq_peek(u64 dsq_id) __ksym __weak;
-
-/*
- * NOTE: drop this when a proper scx_bpf_dsq_peek() helper is added.
- */
-static inline struct task_struct *dsq_first_task(u64 dsq_id)
-{
-	struct task_struct *p = NULL;
-	struct bpf_iter_scx_dsq it;
-
-	if (bpf_ksym_exists(scx_bpf_dsq_peek))
-		return scx_bpf_dsq_peek(dsq_id);
-
-	if (!bpf_iter_scx_dsq_new(&it, dsq_id, 0))
-		p = bpf_iter_scx_dsq_next(&it);
-	bpf_iter_scx_dsq_destroy(&it);
-
-	return p;
-}
-
-/*
  * Consume and dispatch the first task from @dsq_id. If the first task can't be
  * dispatched on the corresponding DSQ, redirect the task to a proper CPU.
  */
@@ -954,8 +931,8 @@ static bool consume_first_task(u64 dsq_id, struct task_struct *p)
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	struct task_struct *p = dsq_first_task(cpu_dsq(cpu));
-	struct task_struct *q = dsq_first_task(node_dsq(cpu));
+	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq(cpu));
+	struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(node_dsq(cpu));
 
 	/*
 	 * Let the CPU go idle if the system is throttled.
