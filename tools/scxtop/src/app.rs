@@ -17,9 +17,10 @@ use crate::columns::{
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
+use crate::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
+use crate::render::scheduler::{SchedulerStatsParams, SchedulerViewParams};
 use crate::render::{
-    MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderConfig, SchedulerRenderer,
-    SchedulerStatsConfig, SchedulerViewContext,
+    BpfProgramRenderer, MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderer,
 };
 use crate::search;
 use crate::symbol_data::SymbolData;
@@ -1020,7 +1021,6 @@ impl<'a> App<'a> {
     }
 
     /// resizes existing sched event data based on new max value.
-    /// resizes existing events based on new max value.
     fn resize_events(&mut self, max_events: usize) {
         for node in self.topo.nodes.keys() {
             let node_data = self
@@ -2533,102 +2533,91 @@ impl<'a> App<'a> {
                     .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
                     .unwrap_or(0);
 
-                // First view with sample rate displayed
-                let new_max = {
-                    let theme = self.theme();
-                    let render_config_first =
-                        SchedulerRenderConfig::new(self.localize, &self.locale, theme, false, true);
-                    let ctx = SchedulerViewContext {
-                        event: "dsq_lat_us",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        left_top,
-                        &ctx,
-                        &render_config_first,
-                    )?
+                let params1 = SchedulerViewParams {
+                    event: "dsq_lat_us",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: true,
                 };
+                let new_max = SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_top,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params1,
+                )?;
                 self.max_sched_events = new_max;
 
-                // Remaining views
-                {
-                    let theme = self.theme();
-                    let render_config_rest = SchedulerRenderConfig::new(
-                        self.localize,
-                        &self.locale,
-                        theme,
-                        false,
-                        false,
-                    );
+                let params2 = SchedulerViewParams {
+                    event: "dsq_slice_consumed",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_center,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params2,
+                )?;
 
-                    let ctx_slice = SchedulerViewContext {
-                        event: "dsq_slice_consumed",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        left_center,
-                        &ctx_slice,
-                        &render_config_rest,
-                    )?;
+                let params3 = SchedulerViewParams {
+                    event: "dsq_vtime",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_bottom,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params3,
+                )?;
 
-                    let ctx_vtime = SchedulerViewContext {
-                        event: "dsq_vtime",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        left_bottom,
-                        &ctx_vtime,
-                        &render_config_rest,
-                    )?;
-
-                    let ctx_nr_queued = SchedulerViewContext {
-                        event: "dsq_nr_queued",
-                        view_state: &self.view_state,
-                        scheduler_name: &self.scheduler,
-                        dsq_data: &self.dsq_data,
-                        sample_rate,
-                        max_sched_events: self.max_sched_events,
-                    };
-                    SchedulerRenderer::render_scheduler_view(
-                        frame,
-                        right_bottom,
-                        &ctx_nr_queued,
-                        &render_config_rest,
-                    )?;
-                }
-
-                // Stats view
-                {
-                    let theme = self.theme();
-                    let stats_config = SchedulerStatsConfig::new(
-                        self.config.tick_rate_ms(),
-                        self.scx_stats.dispatch_keep_last,
-                        self.scx_stats.select_cpu_fallback,
-                    );
-                    SchedulerRenderer::render_scheduler_stats(
-                        frame,
-                        right_top,
-                        &self.scheduler,
-                        &self.sched_stats_raw,
-                        &stats_config,
-                        theme,
-                    )
-                }
+                let params4 = SchedulerViewParams {
+                    event: "dsq_nr_queued",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    right_bottom,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params4,
+                )?;
+                let stats_params = SchedulerStatsParams {
+                    scheduler_name: &self.scheduler,
+                    sched_stats_raw: &self.sched_stats_raw,
+                    tick_rate_ms: self.config.tick_rate_ms(),
+                    dispatch_keep_last: self.scx_stats.dispatch_keep_last,
+                    select_cpu_fallback: self.scx_stats.select_cpu_fallback,
+                    theme: self.theme(),
+                };
+                SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
             }
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
@@ -3174,40 +3163,42 @@ impl<'a> App<'a> {
             .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
             .unwrap_or(0);
 
-        let theme = self.theme();
-        let render_config_first =
-            SchedulerRenderConfig::new(self.localize, &self.locale, theme, false, true);
-        let render_config_rest =
-            SchedulerRenderConfig::new(self.localize, &self.locale, theme, false, false);
-
-        let ctx_lat = SchedulerViewContext {
+        let params1 = SchedulerViewParams {
             event: "dsq_lat_us",
-            view_state: &self.view_state,
             scheduler_name: &self.scheduler,
             dsq_data: &self.dsq_data,
             sample_rate,
-            max_sched_events: self.max_sched_events,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: true,
         };
         SchedulerRenderer::render_scheduler_view(
             frame,
             left_areas[1],
-            &ctx_lat,
-            &render_config_first,
+            &self.view_state,
+            self.max_sched_events,
+            &params1,
         )?;
 
-        let ctx_slice = SchedulerViewContext {
+        let params2 = SchedulerViewParams {
             event: "dsq_slice_consumed",
-            view_state: &self.view_state,
             scheduler_name: &self.scheduler,
             dsq_data: &self.dsq_data,
             sample_rate,
-            max_sched_events: self.max_sched_events,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: false,
         };
         SchedulerRenderer::render_scheduler_view(
             frame,
             left_areas[2],
-            &ctx_slice,
-            &render_config_rest,
+            &self.view_state,
+            self.max_sched_events,
+            &params2,
         )?;
 
         Ok(())
@@ -3816,38 +3807,6 @@ impl<'a> App<'a> {
 
     /// Renders the BPF programs view
     fn render_bpf_programs(&mut self, frame: &mut Frame) -> Result<()> {
-        // Split screen: table on top, sparkline on bottom
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(10),   // Table area
-                Constraint::Length(5), // Sparkline section
-            ])
-            .split(frame.area());
-
-        if self.filtering && !self.event_input_buffer.is_empty() {
-            // Further split table area for filter input
-            let table_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(3)])
-                .split(main_chunks[0]);
-
-            self.render_bpf_programs_table(frame, table_chunks[0])?;
-            self.render_filter_input(frame, table_chunks[1])?;
-        } else {
-            self.render_bpf_programs_table(frame, main_chunks[0])?;
-        }
-
-        // Render overhead sparkline
-        self.render_bpf_overhead_sparkline(frame, main_chunks[1])?;
-
-        Ok(())
-    }
-
-    /// Renders the BPF programs table
-    fn render_bpf_programs_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let theme = self.theme();
-
         // Use filtered programs if filtering is active, otherwise use all programs
         let programs_to_display: Vec<(u32, BpfProgData)> = if self.filtering {
             self.filtered_bpf_programs.clone()
@@ -3869,266 +3828,26 @@ impl<'a> App<'a> {
             programs
         };
 
-        // Build table rows with sched_ext highlighting
-        let rows: Vec<Row> = programs_to_display
-            .iter()
-            .map(|(id, data)| {
-                let cols = self.bpf_program_columns.visible_columns();
-                let cells: Vec<Cell> = cols
-                    .map(|col| {
-                        let mut value = (col.value_fn)(*id, data);
-                        // Special handling for runtime percentage column
-                        if col.header == "Runtime %" {
-                            let percentage =
-                                data.runtime_percentage(self.bpf_program_stats.total_runtime_ns);
-                            value = format!("{:.2}%", percentage);
-                        }
-                        Cell::from(value)
-                    })
-                    .collect();
-
-                // Apply sched_ext highlighting
-                let row = Row::new(cells);
-                if data.is_sched_ext {
-                    row.style(
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    row
-                }
-            })
-            .collect();
-
-        // Create header
-        let header = Row::new(
-            self.bpf_program_columns
-                .visible_columns()
-                .map(|col| Cell::from(col.header))
-                .collect::<Vec<_>>(),
-        )
-        .style(theme.title_style())
-        .height(1);
-
-        // Get constraints for visible columns
-        let constraints: Vec<Constraint> = self
-            .bpf_program_columns
-            .visible_columns()
-            .map(|col| col.constraint)
-            .collect();
-
-        // Create title with filter information
-        let title = if self.filtering {
-            format!(
-                "BPF Programs ({}/{} programs) - Filtering: {} - Press Enter for details, Esc to clear filter",
-                programs_to_display.len(),
-                self.bpf_program_stats.programs.len(),
-                self.event_input_buffer
-            )
-        } else {
-            format!(
-                "BPF Programs ({} programs) - Press f to filter, Enter for details",
-                self.bpf_program_stats.programs.len()
-            )
+        let list_params = ProgramsListParams {
+            bpf_program_stats: &self.bpf_program_stats,
+            filtered_programs: &programs_to_display,
+            bpf_program_columns: &self.bpf_program_columns,
+            bpf_overhead_history: &self.bpf_overhead_history,
+            filtering: self.filtering,
+            filter_input: &self.event_input_buffer,
+            event_input_buffer: &self.event_input_buffer,
+            theme: self.config.theme(),
+            tick_rate_ms: self.config.tick_rate_ms(),
         };
-
-        // Create table widget
-        let table = Table::new(rows, constraints)
-            .header(header)
-            .block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(theme.border_style())
-                    .title_top(
-                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                            .style(self.config.theme().text_important_color())
-                            .right_aligned(),
-                    ),
-            )
-            .style(Style::default().fg(theme.text_color()))
-            .row_highlight_style(Style::default().fg(theme.text_enabled_color()))
-            .highlight_symbol(">> ");
-
-        // Render the table
-        frame.render_stateful_widget(table, area, &mut self.bpf_program_table_state);
-        Ok(())
-    }
-
-    /// Renders the filter input area
-    fn render_filter_input(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let theme = self.theme();
-
-        let input = Paragraph::new(self.event_input_buffer.as_str())
-            .style(Style::default().fg(theme.text_color()))
-            .block(
-                Block::bordered()
-                    .title("Filter")
-                    .border_style(theme.border_style()),
-            );
-
-        frame.render_widget(input, area);
-        Ok(())
-    }
-
-    /// Render BPF overhead sparkline showing trend over time
-    fn render_bpf_overhead_sparkline(&self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let theme = self.theme();
-
-        if self.bpf_overhead_history.is_empty() {
-            // No data yet, show empty sparkline
-            let sparkline = Sparkline::default()
-                .block(
-                    Block::bordered()
-                        .title("BPF CPU Overhead: No data yet")
-                        .border_style(theme.border_style()),
-                )
-                .style(Style::default().fg(Color::Cyan));
-
-            frame.render_widget(sparkline, area);
-            return Ok(());
-        }
-
-        // Calculate the number of data points needed to fill the width
-        // Subtract 2 for borders
-        let available_width = area.width.saturating_sub(2) as usize;
-
-        // Prepare data to fill the entire width
-        let mut data: Vec<u64> = Vec::with_capacity(available_width);
-
-        if self.bpf_overhead_history.len() >= available_width {
-            // We have enough data, take the most recent points
-            data = self
-                .bpf_overhead_history
-                .iter()
-                .rev()
-                .take(available_width)
-                .rev()
-                .map(|v| (*v * 100.0) as u64)
-                .collect();
-        } else {
-            // Not enough data yet, pad with zeros at the beginning
-            let padding = available_width - self.bpf_overhead_history.len();
-            data.extend(std::iter::repeat_n(0, padding));
-            data.extend(
-                self.bpf_overhead_history
-                    .iter()
-                    .map(|v| (*v * 100.0) as u64),
-            );
-        }
-
-        let current_overhead = self.bpf_overhead_history.back().unwrap_or(&0.0);
-
-        let sparkline = Sparkline::default()
-            .block(
-                Block::bordered()
-                    .title(format!("BPF CPU Overhead: {:.2}%", current_overhead))
-                    .border_style(theme.border_style()),
-            )
-            .data(&data)
-            .style(Style::default().fg(Color::Cyan));
-
-        frame.render_widget(sparkline, area);
-        Ok(())
-    }
-
-    /// Render per-operation breakdown for sched_ext programs
-    fn render_operation_breakdown(&self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let theme = self.theme();
-
-        // Sort operations by runtime descending
-        let mut ops: Vec<(
-            &crate::bpf_prog_data::SchedExtOpType,
-            &crate::bpf_prog_data::OperationStats,
-        )> = self.bpf_program_stats.operation_stats.iter().collect();
-        ops.sort_by(|a, b| b.1.total_runtime_ns.cmp(&a.1.total_runtime_ns));
-
-        let mut text = vec![
-            Line::from(Span::styled(
-                "sched_ext Callback Statistics:",
-                Style::default().fg(theme.title_style().fg.unwrap_or(Color::Yellow)),
-            )),
-            Line::from(""),
-            // Header row
-            Line::from(vec![
-                Span::styled(
-                    format!("{:>12}  ", "Operation"),
-                    Style::default()
-                        .fg(theme.text_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>10}       ", "Calls"),
-                    Style::default()
-                        .fg(theme.text_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>8}       ", "Avg Time"),
-                    Style::default()
-                        .fg(theme.text_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:>8}", "% Runtime"),
-                    Style::default()
-                        .fg(theme.text_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
-
-        // Show top 8 operations
-        for (op_type, stats) in ops.iter().take(8) {
-            let avg_ns = if stats.total_calls > 0 {
-                stats.total_runtime_ns / stats.total_calls
-            } else {
-                0
-            };
-
-            let pct = if self.bpf_program_stats.total_runtime_ns > 0 {
-                (stats.total_runtime_ns as f64 / self.bpf_program_stats.total_runtime_ns as f64)
-                    * 100.0
-            } else {
-                0.0
-            };
-
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:>12}: ", op_type.display_name()),
-                    Style::default().fg(theme.text_color()),
-                ),
-                Span::styled(
-                    format!("{:>10} calls  ", stats.total_calls),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-                Span::styled(
-                    format!("{:>8.2}μs avg  ", avg_ns as f64 / 1000.0),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-                Span::styled(
-                    format!("{:>5.1}%", pct),
-                    Style::default().fg(if pct > 50.0 { Color::Red } else { Color::Green }),
-                ),
-            ]);
-            text.push(line);
-        }
-
-        let paragraph = Paragraph::new(text).block(
-            Block::bordered()
-                .title("sched_ext Callback Operations")
-                .border_style(theme.border_style()),
-        );
-
-        frame.render_widget(paragraph, area);
-        Ok(())
+        BpfProgramRenderer::render_programs_list(
+            frame,
+            &mut self.bpf_program_table_state,
+            &list_params,
+        )
     }
 
     /// Renders the BPF program detail view using real BPF_ENABLE_STATS data
     fn render_bpf_program_detail(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        let theme = self.theme();
-
         // Get the selected program data and clone it to avoid borrowing issues
         let selected_program_data = if let Some(prog_id) = self.selected_bpf_program_id {
             self.bpf_program_stats.programs.get(&prog_id).cloned()
@@ -4136,473 +3855,22 @@ impl<'a> App<'a> {
             None
         };
 
-        if let Some(prog_data) = selected_program_data {
-            // Split the area based on whether this is a sched_ext program
-            let chunks = if prog_data.is_sched_ext {
-                // For sched_ext programs, include operation breakdown section
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(10), // Program info
-                        Constraint::Length(8),  // Runtime stats
-                        Constraint::Min(15),    // Historical sparklines (fills remaining space)
-                        Constraint::Length(12), // Operation breakdown
-                        Constraint::Min(10),    // Symbol table
-                    ])
-                    .split(area)
-            } else {
-                // For non-sched_ext programs, use original layout
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(10), // Program info
-                        Constraint::Length(8),  // Runtime stats
-                        Constraint::Min(15),    // Historical sparklines (fills remaining space)
-                        Constraint::Min(10),    // Symbol table
-                    ])
-                    .split(area)
-            };
+        let active_event_name = self.active_event.event_name();
 
-            // Render program information with BPF_ENABLE_STATS emphasis
-            self.render_bpf_program_info_with_stats(frame, chunks[0], &prog_data)?;
-
-            // Render runtime statistics collected via BPF_ENABLE_STATS
-            self.render_bpf_runtime_stats(frame, chunks[1], &prog_data)?;
-
-            // Render historical sparklines
-            self.render_bpf_program_sparklines(frame, chunks[2], &prog_data)?;
-
-            if prog_data.is_sched_ext {
-                // Render operation breakdown for sched_ext programs
-                self.render_operation_breakdown(frame, chunks[3])?;
-                // Render symbol table in the last chunk
-                self.render_bpf_program_symbol_table(frame, chunks[4])?;
-            } else {
-                // Render symbol table (perf top style)
-                self.render_bpf_program_symbol_table(frame, chunks[3])?;
-            }
-        } else {
-            // No program selected, show message
-            let paragraph = Paragraph::new("No BPF program selected")
-                .block(
-                    Block::bordered()
-                        .title("BPF Program Detail")
-                        .border_style(theme.border_style()),
-                )
-                .style(Style::default().fg(theme.text_color()));
-
-            frame.render_widget(paragraph, area);
-        }
-
-        Ok(())
-    }
-
-    /// Renders BPF program information with emphasis on BPF_ENABLE_STATS data collection
-    fn render_bpf_program_info_with_stats(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        prog_data: &BpfProgData,
-    ) -> Result<()> {
-        let theme = self.theme();
-
-        let info_text = vec![
-            Line::from(vec![
-                Span::styled("Program ID: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    prog_data.id.to_string(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-                Span::styled("  Type: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    prog_data.prog_type.clone(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Name: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    if prog_data.name.is_empty() {
-                        format!("<unnamed-{}>", prog_data.id)
-                    } else {
-                        prog_data.name.clone()
-                    },
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Instructions: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    prog_data.verified_insns.to_string(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-                Span::styled("  BTF ID: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    if prog_data.btf_id == 0 {
-                        "-".to_string()
-                    } else {
-                        prog_data.btf_id.to_string()
-                    },
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("UID: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    prog_data.uid.to_string(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-                Span::styled(
-                    "  GPL Compatible: ",
-                    Style::default().fg(theme.text_color()),
-                ),
-                Span::styled(
-                    if prog_data.gpl_compatible {
-                        "Yes"
-                    } else {
-                        "No"
-                    }
-                    .to_string(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-            ]),
-            Line::from(""),
-        ];
-
-        // Create title with perf sampling status
-        let title = if self.bpf_perf_sampling_active {
-            format!(
-                "BPF Program {} Details - Perf Sampling ACTIVE ({}) - Press 'p' to stop",
-                prog_data.id,
-                self.active_event.event_name()
-            )
-        } else {
-            format!(
-                "BPF Program {} Details - Press 'p' to enable perf sampling",
-                prog_data.id
-            )
+        let detail_params = ProgramDetailParams {
+            selected_program_data: selected_program_data.as_ref(),
+            bpf_program_stats: &self.bpf_program_stats,
+            filtered_symbols: &self.bpf_program_filtered_symbols,
+            bpf_perf_sampling_active: self.bpf_perf_sampling_active,
+            active_event_name,
+            theme: self.config.theme(),
+            tick_rate_ms: self.config.tick_rate_ms(),
         };
-
-        let paragraph = Paragraph::new(info_text)
-            .block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(theme.border_style())
-                    .title_top(
-                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                            .style(self.config.theme().text_important_color())
-                            .right_aligned(),
-                    ),
-            )
-            .style(Style::default().fg(theme.text_color()));
-
-        frame.render_widget(paragraph, area);
-        Ok(())
-    }
-
-    /// Renders BPF runtime statistics collected via BPF_ENABLE_STATS
-    fn render_bpf_runtime_stats(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        prog_data: &BpfProgData,
-    ) -> Result<()> {
-        let theme = self.theme();
-
-        let avg_runtime_ns = if prog_data.run_cnt > 0 {
-            prog_data.run_time_ns / prog_data.run_cnt
-        } else {
-            0
-        };
-
-        let runtime_percentage =
-            prog_data.runtime_percentage(self.bpf_program_stats.total_runtime_ns);
-
-        let stats_text = vec![
-            Line::from(vec![
-                Span::styled("Total Runtime: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    if prog_data.run_time_ns > 1_000_000_000 {
-                        format!("{:.2}s", prog_data.run_time_ns as f64 / 1_000_000_000.0)
-                    } else if prog_data.run_time_ns > 1_000_000 {
-                        format!("{:.2}ms", prog_data.run_time_ns as f64 / 1_000_000.0)
-                    } else if prog_data.run_time_ns > 1_000 {
-                        format!("{:.2}μs", prog_data.run_time_ns as f64 / 1_000.0)
-                    } else {
-                        format!("{}ns", prog_data.run_time_ns)
-                    },
-                    Style::default()
-                        .fg(theme.text_enabled_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  Runtime %: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    format!("{:.2}%", runtime_percentage),
-                    Style::default()
-                        .fg(theme.text_enabled_color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Run Count: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    prog_data.run_cnt.to_string(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-                Span::styled("  Avg Runtime: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    if avg_runtime_ns > 1_000_000 {
-                        format!("{:.2}ms", avg_runtime_ns as f64 / 1_000_000.0)
-                    } else if avg_runtime_ns > 1_000 {
-                        format!("{:.2}μs", avg_runtime_ns as f64 / 1_000.0)
-                    } else {
-                        format!("{}ns", avg_runtime_ns)
-                    },
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Maps: ", Style::default().fg(theme.text_color())),
-                Span::styled(
-                    prog_data.nr_map_ids.to_string(),
-                    Style::default().fg(theme.text_enabled_color()),
-                ),
-            ]),
-            Line::from(""),
-        ];
-
-        let paragraph = Paragraph::new(stats_text)
-            .block(
-                Block::bordered()
-                    .title("Runtime Statistics")
-                    .border_style(theme.border_style()),
-            )
-            .style(Style::default().fg(theme.text_color()));
-
-        frame.render_widget(paragraph, area);
-        Ok(())
-    }
-
-    /// Renders historical sparklines for BPF program metrics
-    fn render_bpf_program_sparklines(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        prog_data: &BpfProgData,
-    ) -> Result<()> {
-        let theme = self.theme();
-
-        // Split area into three horizontal sparklines (side by side)
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Ratio(1, 3),
-                Constraint::Ratio(1, 3),
-                Constraint::Ratio(1, 3),
-            ])
-            .spacing(0)
-            .split(area);
-
-        // Calculate available width for data (subtract 2 for borders)
-        let available_width = chunks[0].width.saturating_sub(2) as usize;
-
-        // Convert runtime_history to Vec<u64> for Sparkline, trimming to available width
-        let runtime_data: Vec<u64> = prog_data
-            .runtime_history
-            .iter()
-            .rev()
-            .take(available_width)
-            .rev()
-            .copied()
-            .collect();
-
-        // Convert calls_history deltas to calls per second, trimming to available width
-        let mut calls_per_sec_data: Vec<u64> = Vec::new();
-        if prog_data.calls_history.len() >= 2 && prog_data.timestamp_history.len() >= 2 {
-            let start_idx = prog_data
-                .calls_history
-                .len()
-                .saturating_sub(available_width + 1);
-            for i in (start_idx + 1)..prog_data.calls_history.len() {
-                let call_delta =
-                    prog_data.calls_history[i].saturating_sub(prog_data.calls_history[i - 1]);
-                let time_delta_ns = prog_data.timestamp_history[i]
-                    .saturating_sub(prog_data.timestamp_history[i - 1]);
-
-                if time_delta_ns > 0 {
-                    let calls_per_sec =
-                        (call_delta as f64 / time_delta_ns as f64) * 1_000_000_000.0;
-                    calls_per_sec_data.push(calls_per_sec as u64);
-                } else {
-                    calls_per_sec_data.push(0);
-                }
-            }
-        }
-
-        // Calculate percentile data for sparkline (p50, p90, p99 over time), trimming to available width
-        // For simplicity, we'll use a rolling window approach
-        let mut p99_data: Vec<u64> = Vec::new();
-        if prog_data.runtime_history.len() >= 10 {
-            let start_idx = 9.max(
-                prog_data
-                    .runtime_history
-                    .len()
-                    .saturating_sub(available_width),
-            );
-            for i in start_idx..prog_data.runtime_history.len() {
-                let window_start = i.saturating_sub(9);
-                let window: Vec<u64> = prog_data
-                    .runtime_history
-                    .iter()
-                    .skip(window_start)
-                    .take(i - window_start + 1)
-                    .copied()
-                    .collect();
-                let mut sorted = window.clone();
-                sorted.sort_unstable();
-                let idx = ((sorted.len() - 1) as f64 * 0.99) as usize;
-                p99_data.push(sorted[idx]);
-            }
-        }
-
-        // Helper function to calculate min/max/avg
-        let calc_stats = |data: &[u64]| -> (u64, u64, u64) {
-            if data.is_empty() {
-                return (0, 0, 0);
-            }
-            let min = *data.iter().min().unwrap_or(&0);
-            let max = *data.iter().max().unwrap_or(&0);
-            let sum: u64 = data.iter().sum();
-            let avg = sum / data.len() as u64;
-            (min, max, avg)
-        };
-
-        // Calculate stats for each dataset
-        let (runtime_min, runtime_max, runtime_avg) = calc_stats(&runtime_data);
-        let (calls_min, calls_max, calls_avg) = calc_stats(&calls_per_sec_data);
-        let (p99_min, p99_max, p99_avg) = calc_stats(&p99_data);
-
-        // Runtime sparkline with min/max/avg labels
-        let runtime_sparkline = Sparkline::default()
-            .block(
-                Block::bordered()
-                    .title(format!(
-                        "Runtime (ns/call) Min:{} Avg:{} Max:{}",
-                        runtime_min, runtime_avg, runtime_max
-                    ))
-                    .border_style(theme.border_style()),
-            )
-            .data(&runtime_data)
-            .max(runtime_max.max(1))
-            .bar_set(NINE_LEVELS)
-            .style(Style::default().fg(theme.text_important_color()));
-
-        // Calls per second sparkline with min/max/avg labels
-        let calls_sparkline = Sparkline::default()
-            .block(
-                Block::bordered()
-                    .title(format!(
-                        "Calls/sec Min:{} Avg:{} Max:{}",
-                        calls_min, calls_avg, calls_max
-                    ))
-                    .border_style(theme.border_style()),
-            )
-            .data(&calls_per_sec_data)
-            .max(calls_max.max(1))
-            .bar_set(NINE_LEVELS)
-            .style(Style::default().fg(theme.positive_value_color()));
-
-        // P99 sparkline with min/max/avg labels
-        let p99_sparkline = Sparkline::default()
-            .block(
-                Block::bordered()
-                    .title(format!(
-                        "P99 Runtime Min:{} Avg:{} Max:{}",
-                        p99_min, p99_avg, p99_max
-                    ))
-                    .border_style(theme.border_style()),
-            )
-            .data(&p99_data)
-            .max(p99_max.max(1))
-            .bar_set(NINE_LEVELS)
-            .style(Style::default().fg(theme.userspace_symbol_color()));
-
-        frame.render_widget(runtime_sparkline, chunks[0]);
-        frame.render_widget(calls_sparkline, chunks[1]);
-        frame.render_widget(p99_sparkline, chunks[2]);
-
-        Ok(())
-    }
-
-    /// Renders BPF program symbol table (perf top style)
-    fn render_bpf_program_symbol_table(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let theme = self.theme();
-
-        // Build table rows from filtered symbols with module name and source location
-        let rows: Vec<Row> = self
-            .bpf_program_filtered_symbols
-            .iter()
-            .map(|symbol| {
-                let source_location = if let (Some(file), Some(line)) = (
-                    &symbol.symbol_info.file_name,
-                    symbol.symbol_info.line_number,
-                ) {
-                    format!("{}:{}", file, line)
-                } else {
-                    "-".to_string()
-                };
-
-                Row::new(vec![
-                    Cell::from(format!("{:.2}%", symbol.percentage)),
-                    Cell::from(symbol.count.to_string()),
-                    Cell::from(format!("0x{:x}", symbol.symbol_info.address)),
-                    Cell::from(symbol.symbol_info.symbol_name.clone()),
-                    Cell::from(symbol.symbol_info.module_name.clone()),
-                    Cell::from(source_location),
-                ])
-            })
-            .collect();
-
-        // Create header
-        let header = Row::new(vec![
-            Cell::from("Overhead"),
-            Cell::from("Samples"),
-            Cell::from("Address"),
-            Cell::from("Symbol"),
-            Cell::from("Module"),
-            Cell::from("Source"),
-        ])
-        .style(theme.title_style())
-        .height(1);
-
-        // Define column constraints
-        let constraints = vec![
-            Constraint::Length(10), // Overhead
-            Constraint::Length(10), // Samples
-            Constraint::Length(16), // Address
-            Constraint::Fill(1),    // Symbol (with line number included in name)
-            Constraint::Length(10), // Module
-            Constraint::Length(20), // Source location
-        ];
-
-        // Create table widget
-        let table = Table::new(rows, constraints)
-            .header(header)
-            .block(
-                Block::bordered()
-                    .title(format!(
-                        "BPF Program Symbols ({} symbols) - Line numbers from jited_line_info",
-                        self.bpf_program_filtered_symbols.len()
-                    ))
-                    .border_style(theme.border_style()),
-            )
-            .style(Style::default().fg(theme.text_color()))
-            .row_highlight_style(Style::default().fg(theme.text_enabled_color()))
-            .highlight_symbol(">> ");
-
-        // Render the table
-        frame.render_stateful_widget(table, area, &mut self.bpf_program_symbol_table_state);
-        Ok(())
+        BpfProgramRenderer::render_program_detail(
+            frame,
+            &mut self.bpf_program_symbol_table_state,
+            &detail_params,
+        )
     }
 
     /// Updates app state when the down arrow or mapped key is pressed.

@@ -6,12 +6,8 @@
 use num_format::SystemLocale;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use scxtop::{
-    render::{
-        SchedulerRenderConfig, SchedulerRenderer, SchedulerStatsConfig, SchedulerViewContext,
-    },
-    AppTheme, EventData, ViewState,
-};
+use scxtop::render::scheduler::{SchedulerStatsParams, SchedulerViewParams};
+use scxtop::{render::SchedulerRenderer, AppTheme, EventData, ViewState};
 use std::collections::BTreeMap;
 
 // Helper function to create test DSQ data
@@ -49,16 +45,24 @@ fn test_render_scheduler_view_sparkline() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let ctx = SchedulerViewContext {
+            let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                view_state: &ViewState::Sparkline,
                 scheduler_name: "scx_rustland",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
-                max_sched_events: 60,
+                localize: false,
+                locale: &locale,
+                theme: &theme,
+                render_title: true,
+                render_sample_rate: true,
             };
-            let config = SchedulerRenderConfig::new(false, &locale, &theme, true, true);
-            let result = SchedulerRenderer::render_scheduler_view(frame, area, &ctx, &config);
+            let result = SchedulerRenderer::render_scheduler_view(
+                frame,
+                area,
+                &ViewState::Sparkline,
+                60,
+                &params,
+            );
 
             assert!(
                 result.is_ok(),
@@ -78,16 +82,24 @@ fn test_render_scheduler_view_barchart() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let ctx = SchedulerViewContext {
+            let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                view_state: &ViewState::BarChart,
                 scheduler_name: "scx_rustland",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
-                max_sched_events: 60,
+                localize: false,
+                locale: &locale,
+                theme: &theme,
+                render_title: true,
+                render_sample_rate: true,
             };
-            let config = SchedulerRenderConfig::new(false, &locale, &theme, true, true);
-            let result = SchedulerRenderer::render_scheduler_view(frame, area, &ctx, &config);
+            let result = SchedulerRenderer::render_scheduler_view(
+                frame,
+                area,
+                &ViewState::BarChart,
+                60,
+                &params,
+            );
 
             assert!(
                 result.is_ok(),
@@ -107,16 +119,24 @@ fn test_render_scheduler_view_no_scheduler() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let ctx = SchedulerViewContext {
+            let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                view_state: &ViewState::Sparkline,
                 scheduler_name: "", // Empty scheduler name
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
-                max_sched_events: 60,
+                localize: false,
+                locale: &locale,
+                theme: &theme,
+                render_title: true,
+                render_sample_rate: true,
             };
-            let config = SchedulerRenderConfig::new(false, &locale, &theme, true, true);
-            let result = SchedulerRenderer::render_scheduler_view(frame, area, &ctx, &config);
+            let result = SchedulerRenderer::render_scheduler_view(
+                frame,
+                area,
+                &ViewState::Sparkline,
+                60,
+                &params,
+            );
 
             assert!(
                 result.is_ok(),
@@ -136,16 +156,24 @@ fn test_render_scheduler_view_no_dsqs() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let ctx = SchedulerViewContext {
+            let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                view_state: &ViewState::Sparkline,
                 scheduler_name: "scx_rustland",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
-                max_sched_events: 60,
+                localize: false,
+                locale: &locale,
+                theme: &theme,
+                render_title: true,
+                render_sample_rate: true,
             };
-            let config = SchedulerRenderConfig::new(false, &locale, &theme, true, true);
-            let result = SchedulerRenderer::render_scheduler_view(frame, area, &ctx, &config);
+            let result = SchedulerRenderer::render_scheduler_view(
+                frame,
+                area,
+                &ViewState::Sparkline,
+                60,
+                &params,
+            );
 
             assert!(
                 result.is_ok(),
@@ -165,16 +193,24 @@ fn test_render_scheduler_view_with_localization() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let ctx = SchedulerViewContext {
+            let params = SchedulerViewParams {
                 event: "dsq_lat_us",
-                view_state: &ViewState::BarChart,
                 scheduler_name: "scx_rustland",
                 dsq_data: &dsq_data,
                 sample_rate: 1000,
-                max_sched_events: 60,
+                localize: true, // localize enabled
+                locale: &locale,
+                theme: &theme,
+                render_title: true,
+                render_sample_rate: true,
             };
-            let config = SchedulerRenderConfig::new(true, &locale, &theme, true, true);
-            let result = SchedulerRenderer::render_scheduler_view(frame, area, &ctx, &config);
+            let result = SchedulerRenderer::render_scheduler_view(
+                frame,
+                area,
+                &ViewState::BarChart,
+                60,
+                &params,
+            );
 
             assert!(
                 result.is_ok(),
@@ -192,15 +228,15 @@ fn test_render_scheduler_stats() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let stats_config = SchedulerStatsConfig::new(1000, 100, 50);
-            let result = SchedulerRenderer::render_scheduler_stats(
-                frame,
-                area,
-                "scx_rustland",
-                "dispatch_count: 12345\nlocal: 98%\nglobal: 2%",
-                &stats_config,
-                &theme,
-            );
+            let params = SchedulerStatsParams {
+                scheduler_name: "scx_rustland",
+                sched_stats_raw: "dispatch_count: 12345\nlocal: 98%\nglobal: 2%",
+                tick_rate_ms: 1000,
+                dispatch_keep_last: 100,
+                select_cpu_fallback: 50,
+                theme: &theme,
+            };
+            let result = SchedulerRenderer::render_scheduler_stats(frame, area, &params);
 
             assert!(result.is_ok(), "render_scheduler_stats should succeed");
         })
@@ -219,15 +255,15 @@ fn test_render_scheduler_stats_different_themes() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let stats_config = SchedulerStatsConfig::new(1000, 100, 50);
-                let result = SchedulerRenderer::render_scheduler_stats(
-                    frame,
-                    area,
-                    "scx_rustland",
-                    "test stats",
-                    &stats_config,
-                    &theme,
-                );
+                let params = SchedulerStatsParams {
+                    scheduler_name: "scx_rustland",
+                    sched_stats_raw: "test stats",
+                    tick_rate_ms: 1000,
+                    dispatch_keep_last: 100,
+                    select_cpu_fallback: 50,
+                    theme: &theme,
+                };
+                let result = SchedulerRenderer::render_scheduler_stats(frame, area, &params);
 
                 assert!(
                     result.is_ok(),
@@ -255,16 +291,24 @@ fn test_render_scheduler_view_different_events() {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let ctx = SchedulerViewContext {
+                let params = SchedulerViewParams {
                     event,
-                    view_state: &ViewState::Sparkline,
                     scheduler_name: "scx_rustland",
                     dsq_data: &dsq_data,
                     sample_rate: 1000,
-                    max_sched_events: 60,
+                    localize: false,
+                    locale: &locale,
+                    theme: &theme,
+                    render_title: true,
+                    render_sample_rate: true,
                 };
-                let config = SchedulerRenderConfig::new(false, &locale, &theme, true, true);
-                let result = SchedulerRenderer::render_scheduler_view(frame, area, &ctx, &config);
+                let result = SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    area,
+                    &ViewState::Sparkline,
+                    60,
+                    &params,
+                );
 
                 assert!(
                     result.is_ok(),

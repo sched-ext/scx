@@ -39,6 +39,7 @@ pub mod util;
 
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
+pub use bpf_prog_data::{BpfProgData, BpfProgStats};
 pub use bpf_skel::*;
 pub use columns::{Column, Columns};
 pub use cpu_data::CpuData;
