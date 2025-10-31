@@ -8,5 +8,9 @@ pub mod process;
 // Memory rendering
 pub mod memory;
 
+// Network rendering
+pub mod network;
+
 pub use memory::MemoryRenderer;
+pub use network::NetworkRenderer;
 pub use process::ProcessRenderer;
