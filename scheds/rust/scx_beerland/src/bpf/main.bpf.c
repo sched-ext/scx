@@ -111,8 +111,7 @@ struct task_ctx {
 	u64 last_woke_at;
 	u64 wakeup_freq;
 	u64 awake_vtime;
-	u64 stime;
-	u64 utime;
+	u64 avg_runtime;
 };
 
 struct {
@@ -132,14 +131,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
- * Return true if the target task @p is a kernel thread.
- */
-static inline bool is_kthread(const struct task_struct *p)
-{
-	return p->flags & PF_KTHREAD;
-}
-
-/*
  * Return true if @p still wants to run, false otherwise.
  */
 static bool is_task_queued(const struct task_struct *p)
@@ -156,21 +147,12 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 }
 
 /*
- * Return true if @p is a regular (non-kthread) task that is doing mostly
- * system time (likely I/O-bound), false otherwise.
+ * Return true if the task should be forced to stay on the same CPU, false
+ * otherwise.
  */
-static bool is_sys_task(const struct task_struct *p)
+static bool is_task_sticky(const struct task_ctx *tctx)
 {
-	struct task_ctx *tctx;
-
-	if (is_kthread(p))
-		return false;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return false;
-
-	return p->stime - tctx->stime >= p->utime - tctx->utime;
+	return tctx->avg_runtime < 10 * NSEC_PER_USEC;
 }
 
 /*
@@ -682,8 +664,10 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 		 * don't migrate.
 		 */
 		if (cpus_share_cache(this_cpu, prev_cpu) &&
-		    (!is_smt_contended(prev_cpu)) && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			return prev_cpu;
+		    (!is_smt_contended(prev_cpu)) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
+			goto out_insert;
+		}
 
 		prev_cpu = this_cpu;
 	}
@@ -696,6 +680,7 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	if (cpu < 0)
 		cpu = prev_cpu;
 
+out_insert:
 	/*
 	 * Always dispatch directly to the target CPU, since the task will
 	 * always use its assigned per-CPU DSQ and we can save some
@@ -704,7 +689,10 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	 * The target CPU is automatically kicked when returning from this
 	 * callback.
 	 */
-	scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, cpu), task_dl(p, tctx), 0);
+	if (is_task_sticky(tctx))
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, cpu), 0);
+	else
+		scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, cpu), task_dl(p, tctx), 0);
 
 	return cpu;
 }
@@ -722,25 +710,29 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	/*
-	 * Attempt a migration to an idle CPU if possible.
-	 */
-	if (try_migrate(p, prev_cpu, enq_flags)) {
-		cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
-		if (cpu >= 0) {
-			scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, prev_cpu),
-						 task_dl(p, tctx), enq_flags);
-			if (prev_cpu != cpu || !scx_bpf_task_running(p))
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return;
+	if (is_task_sticky(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
+	} else {
+		/*
+		 * Attempt a migration to an idle CPU if possible.
+		 */
+		if (try_migrate(p, prev_cpu, enq_flags)) {
+			cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
+			if (cpu >= 0) {
+				scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, prev_cpu),
+							 task_dl(p, tctx), enq_flags);
+				if (prev_cpu != cpu || !scx_bpf_task_running(p))
+					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				return;
+			}
 		}
-	}
 
-	/*
-	 * Keep running on the same CPU.
-	 */
-	scx_bpf_dsq_insert_vtime(p, prev_cpu, task_slice(p, prev_cpu),
-				 task_dl(p, tctx), enq_flags);
+		/*
+		 * Keep running on the same CPU.
+		 */
+		scx_bpf_dsq_insert_vtime(p, prev_cpu, task_slice(p, prev_cpu),
+					 task_dl(p, tctx), enq_flags);
+	}
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
@@ -778,21 +770,6 @@ static bool dispatch_from_any_cpu(s32 from_cpu)
  */
 void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(cpu);
-
-	/*
-	 * Regular (non-kthread) tasks that spend significant time in
-	 * system mode are likely I/O bound. These tasks typically benefit
-	 * from CPU locality, so if the first task in the local DSQ falls
-	 * into this category, prefer to keep it running on the same CPU.
-	 */
-	if (p && is_sys_task(p)) {
-		if (scx_bpf_dsq_move_to_local(cpu)) {
-			__sync_fetch_and_add(&nr_local_dispatch, 1);
-			return;
-		}
-	}
-
 	/*
 	 * Try to consume a task from a remote CPU.
 	 *
@@ -807,7 +784,7 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume from the local DSQ.
 	 */
-	if (p && scx_bpf_dsq_move_to_local(cpu)) {
+	if (scx_bpf_dsq_move_to_local(cpu)) {
 		__sync_fetch_and_add(&nr_local_dispatch, 1);
 		return;
 	}
@@ -841,15 +818,6 @@ void BPF_STRUCT_OPS(beerland_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->wakeup_freq = update_freq(tctx->wakeup_freq, delta_t);
 	tctx->wakeup_freq = MIN(tctx->wakeup_freq, MAX_WAKEUP_FREQ);
 	tctx->last_woke_at = now;
-
-	/*
-	 * Update the system and user time counters. These will be compared
-	 * against the corresponding fields in task_struct to determine the
-	 * amount of user and system time consumed during this run to
-	 * determine if the task is I/O bound or not.
-	 */
-	tctx->utime = p->utime;
-	tctx->stime = p->stime;
 }
 
 void BPF_STRUCT_OPS(beerland_running, struct task_struct *p)
@@ -876,7 +844,7 @@ void BPF_STRUCT_OPS(beerland_running, struct task_struct *p)
 void BPF_STRUCT_OPS(beerland_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *tctx;
-	u64 slice;
+	u64 slice, vslice;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -885,14 +853,20 @@ void BPF_STRUCT_OPS(beerland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the used time slice.
 	 */
-	slice = scale_by_task_weight_inverse(p, bpf_ktime_get_ns() - tctx->last_run_at);
+	slice = bpf_ktime_get_ns() - tctx->last_run_at;
+
+	/*
+	 * Update average runtime per scheduling cycle for sticky task detection.
+	 */
+	tctx->avg_runtime = calc_avg(tctx->avg_runtime, slice);
 
 	/*
 	 * Update the vruntime and the total accumulated runtime since last
 	 * sleep.
 	 */
-	p->scx.dsq_vtime += slice;
-	tctx->awake_vtime += slice;
+	vslice = scale_by_task_weight_inverse(p, slice);
+	p->scx.dsq_vtime += vslice;
+	tctx->awake_vtime += vslice;
 }
 
 void BPF_STRUCT_OPS(beerland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
