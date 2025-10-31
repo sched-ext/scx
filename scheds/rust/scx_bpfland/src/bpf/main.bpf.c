@@ -706,9 +706,16 @@ static u64 task_dl(struct task_struct *p, s32 cpu, struct task_ctx *tctx)
 /*
  * Return a time slice scaled by the task's weight.
  */
-static u64 task_slice(const struct task_struct *p)
+static u64 task_slice(const struct task_struct *p, s32 cpu)
 {
-	return scale_by_task_weight(p, slice_max);
+	u64 nr_wait = scx_bpf_dsq_nr_queued(cpu_dsq(cpu)) +
+		      scx_bpf_dsq_nr_queued(node_dsq(cpu));
+
+	/*
+	 * Adjust time slice in function of the task's priority and the
+	 * amount of tasks waiting to be dispatched.
+	 */
+	return scale_by_task_weight(p, slice_max) / MAX(nr_wait, 1);
 }
 
 /*
@@ -742,7 +749,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		tctx = try_lookup_task_ctx(p);
 		if (tctx) {
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
-						 task_slice(p), task_dl(p, cpu, tctx), 0);
+						 task_slice(p, cpu), task_dl(p, cpu, tctx), 0);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		}
 		return cpu;
@@ -806,7 +813,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * locking pressure on the per-CPU and per-node DSQs.
 	 */
 	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -817,7 +824,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * per-node DSQs.
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -837,10 +844,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_pcpu_task(p)) {
 		if (local_pcpu)
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
 		else
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(prev_cpu),
-						 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
+						 task_slice(p, prev_cpu), task_dl(p, prev_cpu, tctx), enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
@@ -859,7 +866,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert_vtime(p, cpu_dsq(cpu),
-						 task_slice(p), task_dl(p, cpu, tctx), enq_flags);
+						 task_slice(p, cpu), task_dl(p, cpu, tctx), enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			if (prev_cpu != cpu || !scx_bpf_task_running(p))
@@ -873,7 +880,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * scheduling.
 	 */
 	scx_bpf_dsq_insert_vtime(p, node_dsq(prev_cpu),
-				 task_slice(p), task_dl(p, prev_cpu, tctx), enq_flags);
+				 task_slice(p, prev_cpu), task_dl(p, prev_cpu, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
@@ -975,7 +982,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU.
 	 */
 	if (prev && keep_running(prev, cpu))
-		prev->scx.slice = task_slice(prev);
+		prev->scx.slice = task_slice(prev, cpu);
 }
 
 /*
