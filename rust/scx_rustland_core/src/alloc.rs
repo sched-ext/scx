@@ -107,21 +107,25 @@ struct Node {
 impl Node {
     fn init(list: *mut Node) {
         unsafe {
-            (*list).next = list;
-            (*list).prev = list;
+            list.write(Node {
+                next: list,
+                prev: list,
+            });
         }
     }
 
     fn remove(list: *mut Node) {
         unsafe {
-            (*(*list).prev).next = (*list).next;
-            (*(*list).next).prev = (*list).prev;
+            // To prevent the compiler from optimizing alias potiners
+            // details https://github.com/jjyr/buddy-alloc/issues/16
+            core::ptr::write_volatile(&mut (*(*list).prev).next, (*list).next);
+            core::ptr::write_volatile(&mut (*(*list).next).prev, (*list).prev);
         }
     }
 
     fn pop(list: *mut Node) -> *mut Node {
         debug_assert!(!Self::is_empty(list));
-        let n_list = unsafe { (*list).next };
+        let n_list: *mut Node = unsafe { (*list).next };
         Self::remove(n_list);
         n_list
     }
@@ -135,8 +139,10 @@ impl Node {
             };
             // pointer aligned to 16 bytes(MIN_LEAF_SIZE_ALIGN), so it's safe to use write
             p.write(n_list);
-            (*(*list).next).prev = p;
-            (*list).next = p;
+            // To prevent the compiler from optimizing alias potiners
+            // details https://github.com/jjyr/buddy-alloc/issues/16
+            core::ptr::write_volatile(&mut (*(*list).next).prev, p);
+            core::ptr::write_volatile(&mut (*list).next, p);
         }
     }
 
@@ -210,96 +216,94 @@ impl BuddyAlloc {
     /// and must guarantee no others write to the memory range, to avoid undefined behaviors.
     /// The new function panic if memory space not enough for initialize BuddyAlloc.
     pub unsafe fn new(param: BuddyAllocParam) -> Self {
-        unsafe {
-            let BuddyAllocParam {
-                base_addr,
-                len,
-                leaf_size,
-                zero_filled,
-            } = param;
-            let mut base_addr = base_addr as usize;
-            let end_addr = base_addr + len;
-            assert!(
-                leaf_size % MIN_LEAF_SIZE_ALIGN == 0 && leaf_size != 0,
-                "{}",
-                LEAF_ALIGN_ERROR_MSG
-            );
-            let leaf2base = log2(leaf_size);
-            base_addr = roundup(base_addr, leaf2base);
-            // we use (k + 1)-th entry's split flag to test existence of k-th entry's blocks;
-            // to accoding this convention, we make a dummy (entries_size - 1)-th entry.
-            // so we plus 2 on entries_size.
-            let entries_size = log2((end_addr - base_addr) >> leaf2base) + 2;
+        let BuddyAllocParam {
+            base_addr,
+            len,
+            leaf_size,
+            zero_filled,
+        } = param;
+        let mut base_addr = base_addr as usize;
+        let end_addr = base_addr + len;
+        assert!(
+            leaf_size % MIN_LEAF_SIZE_ALIGN == 0 && leaf_size != 0,
+            "{}",
+            LEAF_ALIGN_ERROR_MSG
+        );
+        let leaf2base = log2(leaf_size);
+        base_addr = roundup(base_addr, leaf2base);
+        // we use (k + 1)-th entry's split flag to test existence of k-th entry's blocks;
+        // to accoding this convention, we make a dummy (entries_size - 1)-th entry.
+        // so we plus 2 on entries_size.
+        let entries_size = log2((end_addr - base_addr) >> leaf2base) + 2;
 
-            // alloc buddy allocator memory
-            let used_bytes = core::mem::size_of::<Entry>() * entries_size;
-            debug_assert!(end_addr >= base_addr + used_bytes, "{}", OOM_MSG);
-            let entries = base_addr as *mut Entry;
-            base_addr += used_bytes;
+        // alloc buddy allocator memory
+        let used_bytes = core::mem::size_of::<Entry>() * entries_size;
+        debug_assert!(end_addr >= base_addr + used_bytes, "{}", OOM_MSG);
+        let entries = base_addr as *mut Entry;
+        base_addr += used_bytes;
 
-            let buddy_list_size = core::mem::size_of::<Node>();
-            // init entries free
-            for k in 0..entries_size {
-                // use one bit for per memory block
-                debug_assert!(end_addr >= base_addr + buddy_list_size, "{}", OOM_MSG);
-                let entry = entries.add(k).as_mut().expect("entry");
-                entry.free = base_addr as *mut Node;
-                if !zero_filled {
-                    core::ptr::write_bytes(entry.free, 0, buddy_list_size);
-                }
-                Node::init(entry.free);
-                base_addr += buddy_list_size;
+        let buddy_list_size = core::mem::size_of::<Node>();
+        // init entries free
+        for k in 0..entries_size {
+            // use one bit for per memory block
+            debug_assert!(end_addr >= base_addr + buddy_list_size, "{}", OOM_MSG);
+            let entry = entries.add(k).as_mut().expect("entry");
+            entry.free = base_addr as *mut Node;
+            if !zero_filled {
+                core::ptr::write_bytes(entry.free, 0, buddy_list_size);
             }
-
-            // init alloc
-            for k in 0..entries_size {
-                // use one bit for per memory block
-                // use shift instead `/`, 8 == 1 << 3
-                let used_bytes = roundup(nblock(k, entries_size), 3) >> 3;
-                debug_assert!(end_addr >= base_addr + used_bytes, "{}", OOM_MSG);
-                let entry = entries.add(k).as_mut().expect("entry");
-                entry.alloc = base_addr as *mut u8;
-                // mark all blocks as allocated
-                if !zero_filled {
-                    core::ptr::write_bytes(entry.alloc, 0, used_bytes);
-                }
-                base_addr += used_bytes;
-            }
-
-            // init split
-            for k in 1..entries_size {
-                // use one bit for per memory block
-                // use shift instead `/`, 8 == 1 << 3
-                let used_bytes = roundup(nblock(k, entries_size), 3) >> 3;
-                debug_assert!(end_addr >= base_addr + used_bytes, "{}", OOM_MSG);
-                let entry = entries.add(k).as_mut().expect("entry");
-                entry.split = base_addr as *mut u8;
-                if !zero_filled {
-                    core::ptr::write_bytes(entry.split, 0, used_bytes);
-                }
-                base_addr += used_bytes;
-            }
-
-            // align base_addr to leaf size
-            base_addr = roundup(base_addr, leaf2base);
-            assert!(end_addr >= base_addr, "{}", OOM_MSG);
-            debug_assert_eq!(
-                (base_addr >> leaf2base) << leaf2base,
-                base_addr,
-                "misalignment"
-            );
-
-            let mut allocator = BuddyAlloc {
-                base_addr,
-                end_addr,
-                entries,
-                entries_size,
-                leaf2base,
-                unavailable: 0,
-            };
-            allocator.init_free_list();
-            allocator
+            Node::init(entry.free);
+            base_addr += buddy_list_size;
         }
+
+        // init alloc
+        for k in 0..entries_size {
+            // use one bit for per memory block
+            // use shift instead `/`, 8 == 1 << 3
+            let used_bytes = roundup(nblock(k, entries_size), 3) >> 3;
+            debug_assert!(end_addr >= base_addr + used_bytes, "{}", OOM_MSG);
+            let entry = entries.add(k).as_mut().expect("entry");
+            entry.alloc = base_addr as *mut u8;
+            // mark all blocks as allocated
+            if !zero_filled {
+                core::ptr::write_bytes(entry.alloc, 0, used_bytes);
+            }
+            base_addr += used_bytes;
+        }
+
+        // init split
+        for k in 1..entries_size {
+            // use one bit for per memory block
+            // use shift instead `/`, 8 == 1 << 3
+            let used_bytes = roundup(nblock(k, entries_size), 3) >> 3;
+            debug_assert!(end_addr >= base_addr + used_bytes, "{}", OOM_MSG);
+            let entry = entries.add(k).as_mut().expect("entry");
+            entry.split = base_addr as *mut u8;
+            if !zero_filled {
+                core::ptr::write_bytes(entry.split, 0, used_bytes);
+            }
+            base_addr += used_bytes;
+        }
+
+        // align base_addr to leaf size
+        base_addr = roundup(base_addr, leaf2base);
+        assert!(end_addr >= base_addr, "{}", OOM_MSG);
+        debug_assert_eq!(
+            (base_addr >> leaf2base) << leaf2base,
+            base_addr,
+            "misalignment"
+        );
+
+        let mut allocator = BuddyAlloc {
+            base_addr,
+            end_addr,
+            entries,
+            entries_size,
+            leaf2base,
+            unavailable: 0,
+        };
+        allocator.init_free_list();
+        allocator
     }
 
     fn init_free_list(&mut self) {
