@@ -71,6 +71,7 @@ const LSTAT_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_MIGRATION as usize;
 const LSTAT_XNUMA_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XNUMA_MIGRATION as usize;
 const LSTAT_XLLC_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION as usize;
 const LSTAT_XLLC_MIGRATION_SKIP: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP as usize;
+const LSTAT_LLC_STICKY_SKIP: usize = bpf_intf::layer_stat_id_LSTAT_LLC_STICKY_SKIP as usize;
 const LSTAT_XLAYER_WAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE as usize;
 const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE as usize;
 const LSTAT_LLC_DRAIN_TRY: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN_TRY as usize;
@@ -184,6 +185,8 @@ pub struct LayerStats {
     pub xllc_migration: f64,
     #[stat(desc = "% migration skipped across LLCs due to xllc_mig_min_us")]
     pub xllc_migration_skip: f64,
+    #[stat(desc = "% migration skipped across LLCs due to llc_sticky_runs")]
+    pub llc_sticky_skip: f64,
     #[stat(desc = "% wakers across layers")]
     pub xlayer_wake: f64,
     #[stat(desc = "% rewakers across layers where waker has waken the task previously")]
@@ -306,6 +309,7 @@ impl LayerStats {
             xlayer_rewake: lstat_pct(LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(LSTAT_XLLC_MIGRATION),
             xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
+            llc_sticky_skip: lstat_pct(LSTAT_LLC_STICKY_SKIP),
             llc_drain_try: lstat_pct(LSTAT_LLC_DRAIN_TRY),
             llc_drain: lstat_pct(LSTAT_LLC_DRAIN),
             skip_remote_node: lstat_pct(LSTAT_SKIP_REMOTE_NODE),
@@ -378,13 +382,14 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip={}/{} affn_viol={}",
+            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip/sticky_skip={}/{}/{} affn_viol={}",
             "",
             fmt_pct(self.open_idle),
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
             fmt_pct(self.xllc_migration_skip),
+            fmt_pct(self.llc_sticky_skip),
             fmt_pct(self.affn_viol),
             width = header_width,
         )?;
