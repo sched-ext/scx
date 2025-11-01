@@ -197,6 +197,22 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 #endif /* HAVE_SCX_ENQ_CPU_SELECTED */
 }
 
+/*
+ * v6.18: Add a helper to retrieve the current task running on a CPU.
+ *
+ * Keep this helper available until v6.20 for compatibility.
+ */
+static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
+{
+	struct rq *rq;
+
+	if (bpf_ksym_exists(scx_bpf_cpu_curr))
+		return scx_bpf_cpu_curr(cpu);
+
+	rq = scx_bpf_cpu_rq(cpu);
+
+	return rq ? rq->curr : NULL;
+}
 
 #define scx_bpf_now()								\
 	(bpf_ksym_exists(scx_bpf_now) ?						\
