@@ -1606,21 +1606,21 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 
 	if (!saturated) {
 		// First search affinitized DSQ
-		bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+		p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
+		if (p) {
 			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
 				min_vtime = p->scx.dsq_vtime;
 				dsq_id = cpuc->affn_dsq;
 			}
-			break;
 		}
 
 		// LLC DSQ
-		bpf_for_each(scx_dsq, p, cpuc->llc_dsq, 0) {
+		p = __COMPAT_scx_bpf_dsq_peek(cpuc->llc_dsq);
+		if (p) {
 			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
 				min_vtime = p->scx.dsq_vtime;
 				dsq_id = cpuc->llc_dsq;
 			}
-			break;
 		}
 
 		// Migration eligible
@@ -1648,13 +1648,13 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 					bpf_task_release(p);
 				}
 			} else {
-				bpf_for_each(scx_dsq, p, cpuc->mig_dsq, 0) {
+				p = __COMPAT_scx_bpf_dsq_peek(cpuc->mig_dsq);
+				if (p) {
 					if (p->scx.dsq_vtime < min_vtime ||
 					    min_vtime == 0) {
 						min_vtime = p->scx.dsq_vtime;
 						dsq_id = cpuc->mig_dsq;
 					}
-					break;
 				}
 			}
 		}
