@@ -10,6 +10,7 @@ members = [
     "rust/scx_stats/scx_stats_derive",
     "rust/scx_userspace_arena",
     "rust/scx_utils",
+    "scheds/rust/scx_beerland",
     "scheds/rust/scx_bpfland",
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
