@@ -773,7 +773,7 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Try to consume a task from a remote CPU.
 	 *
-	 * Do no trigger any rebalance unless the system is completely
+	 * Do not trigger any rebalance unless the system is completely
 	 * saturated.
 	 */
 	if (is_system_busy() && dispatch_from_any_cpu(cpu)) {
