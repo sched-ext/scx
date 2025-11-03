@@ -119,7 +119,11 @@ impl<'a> ArenaLib<'a> {
             );
         }
 
-        let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; MAX_CPU_SUPPORTED]>(args.bitmap) };
+        let ptr = unsafe {
+            &mut *std::ptr::with_exposed_provenance_mut::<[u64; 640]>(
+                args.bitmap.try_into().unwrap(),
+            )
+        };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
         valid_mask.clone_from_slice(mask);
