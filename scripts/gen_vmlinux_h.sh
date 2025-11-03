@@ -12,9 +12,9 @@ set -euo pipefail
 # ./scripts/gen_vmlinux_h.sh /path/to/linux "$PWD/scheds/include/arch/"
 
 BASEDIR=$(cd "$(dirname "$0")" && pwd)
-LINUX_REPO="$1" # where the linux repo is located
+LINUX_REPO=$(realpath "$1") # where the linux repo is located
+INCLUDE_TARGET=$(realpath "$2") # target directory, e.g., /path/to/scx/sched/include/arch/
 pushd ${LINUX_REPO}
-INCLUDE_TARGET=$2 # target directory, e.g., /path/to/scx/sched/include/arch/
 HASH=$(git rev-parse HEAD)
 SHORT_SHA=${HASH:0:12} # full SHA of the commit truncated to 12 chars
 LINUX_VER=$(git describe --tags --abbrev=0 --match="v*")
@@ -31,7 +31,7 @@ ARCHS=(
     [x86]="x86_64-linux-gnu-"
 )
 if grep ^ID=fedora /etc/os-release &> /dev/null; then
-    ARCHS[arm]=arm-linux-gnu-
+    ARCHS[arm]="arm-linux-gnu-"
 fi
 
 # Detect and install cross-compile toolchains based on the package manager
@@ -105,6 +105,9 @@ generate_vmlinux_for_arch() {
     echo CONFIG_SCHED_CLASS_EXT=y >>.config
     echo CONFIG_CGROUP_SCHED=y >>.config
     echo CONFIG_FTRACE=y >>.config
+    echo CONFIG_NUMA=y >>.config
+    echo CONFIG_NUMA_BALANCING=y >>.config
+    echo CONFIG_CPUSETS=y >>.config
 
     make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error olddefconfig &>> ${LOG}
     make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error -j$(nproc) vmlinux &>> ${LOG}
@@ -148,5 +151,5 @@ tar \
     --owner=0 --group=0 --numeric-owner \
     --format=ustar \
     --mtime='1970-01-01 00:00:00 UTC' \
-    -cf "$BASEDIR/rust/scx_utils/vmlinux.tar.zst" \
-    -C "$BASEDIR/scheds" vmlinux
+    -cf "$BASEDIR/../rust/scx_utils/vmlinux.tar.zst" \
+    -C "$BASEDIR/../scheds" vmlinux
