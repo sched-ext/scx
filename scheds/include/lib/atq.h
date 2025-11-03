@@ -51,4 +51,16 @@ int scx_atq_nr_queued(scx_atq_t *atq);
 int scx_atq_remove(scx_atq_t *atq, scx_task_common *taskc);
 u64 scx_atq_pop(scx_atq_t *atq);
 u64 scx_atq_peek(scx_atq_t *atq);
+
+static __always_inline
+int scx_atq_lock(scx_atq_t __arg_arena *atq)
+{
+	return arena_spin_lock(&atq->lock);
+}
+
+static __always_inline
+void scx_atq_unlock(scx_atq_t __arg_arena *atq)
+{
+	arena_spin_unlock(&atq->lock);
+}
 #endif /* __BPF__ */
