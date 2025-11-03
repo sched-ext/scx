@@ -48,8 +48,8 @@ install_toolchains() {
         sudo dnf install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
             gcc-arm-linux-gnu gcc-mips64-linux-gnu \
-            gcc-powerpc64-linux-gnu gcc-riscv64-linux-gnu \
-            gcc-s390x-linux-gnu gcc-x86_64-linux-gnu
+            gcc-powerpc64le-linux-gnu gcc-riscv64-linux-gnu \
+            gcc-s390x-linux-gnu
     elif command -v yum &> /dev/null; then
         sudo yum install -y \
             gcc-aarch64-linux-gnu gcc-x86_64-linux-gnu \
@@ -92,18 +92,20 @@ generate_vmlinux_for_arch() {
         cp .config .config.orig
     else
         make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error defconfig &>> ${LOG}
-        echo CONFIG_DEBUG_INFO_REDUCED=n >>.config
-        echo CONFIG_DEBUG_INFO_DWARF4=y >>.config
-        echo CONFIG_BPF_SYSCALL=y >>.config
-        echo CONFIG_DEBUG_INFO_BTF=y >>.config
-        echo CONFIG_GROUP_SCHED_BANDWIDTH=y >> .config
-        echo CONFIG_GROUP_SCHED_WEIGHT=y >> .config
-        echo CONFIG_CFS_BANDWIDTH=y >> .config
-        echo CONFIG_BPF_JIT=y >>.config
-        echo CONFIG_SCHED_CLASS_EXT=y >>.config
-        echo CONFIG_CGROUP_SCHED=y >>.config
-        echo CONFIG_FTRACE=y >>.config
     fi
+
+    echo CONFIG_DEBUG_INFO_REDUCED=n >>.config
+    echo CONFIG_DEBUG_INFO_DWARF4=y >>.config
+    echo CONFIG_BPF_SYSCALL=y >>.config
+    echo CONFIG_DEBUG_INFO_BTF=y >>.config
+    echo CONFIG_GROUP_SCHED_BANDWIDTH=y >> .config
+    echo CONFIG_GROUP_SCHED_WEIGHT=y >> .config
+    echo CONFIG_CFS_BANDWIDTH=y >> .config
+    echo CONFIG_BPF_JIT=y >>.config
+    echo CONFIG_SCHED_CLASS_EXT=y >>.config
+    echo CONFIG_CGROUP_SCHED=y >>.config
+    echo CONFIG_FTRACE=y >>.config
+
     make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error olddefconfig &>> ${LOG}
     make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} KCFLAGS=-Wno-error -j$(nproc) vmlinux &>> ${LOG}
     if [ -e .config.orig ]; then
