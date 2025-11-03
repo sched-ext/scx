@@ -775,10 +775,62 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 let skel = builder.open(&mut open_object)?;
                 let mut skel = skel.load()?;
 
+                // Create ALL analyzers BEFORE setting up event handlers
+                use scxtop::mcp::{
+                    WakerWakeeAnalyzer, LatencyTracker, CpuHotspotAnalyzer, MigrationAnalyzer,
+                    ProcessEventHistory, DsqMonitor, EventRateMonitor, WakeupChainTracker, EventBuffer,
+                };
+                use std::sync::Mutex;
+
+                // 1. Waker/Wakee Analyzer
+                let mut waker_wakee = WakerWakeeAnalyzer::new();
+                waker_wakee.set_topology(topo_arc.clone());
+                let waker_wakee_arc = Arc::new(Mutex::new(waker_wakee));
+
+                // 2. Latency Tracker
+                let latency_tracker = LatencyTracker::new(1000); // 1 second window
+                let latency_tracker_arc = Arc::new(Mutex::new(latency_tracker));
+
+                // 3. CPU Hotspot Analyzer
+                let cpu_hotspot = CpuHotspotAnalyzer::new(100); // 100ms window
+                let cpu_hotspot_arc = Arc::new(Mutex::new(cpu_hotspot));
+
+                // 4. Migration Analyzer
+                let migration_analyzer = MigrationAnalyzer::new(1000); // 1 second window
+                let migration_analyzer_arc = Arc::new(Mutex::new(migration_analyzer));
+
+                // 5. Process Event History
+                let process_history = ProcessEventHistory::new(100); // 100 events per process
+                let process_history_arc = Arc::new(Mutex::new(process_history));
+
+                // 6. DSQ Monitor
+                let dsq_monitor = DsqMonitor::new();
+                let dsq_monitor_arc = Arc::new(Mutex::new(dsq_monitor));
+
+                // 7. Event Rate Monitor
+                let rate_monitor = EventRateMonitor::new(1000, 10); // 1s window, 10 baselines
+                let rate_monitor_arc = Arc::new(Mutex::new(rate_monitor));
+
+                // 8. Wakeup Chain Tracker
+                let wakeup_tracker = WakeupChainTracker::new(10); // max 10 chain length
+                let wakeup_tracker_arc = Arc::new(Mutex::new(wakeup_tracker));
+
+                // 9. Event Buffer
+                let event_buffer = EventBuffer::new();
+                let event_buffer_arc = Arc::new(Mutex::new(event_buffer));
+
                 // Set up event dispatch manager
                 let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
                 let mut edm = EventDispatchManager::new(None, None);
                 edm.register_bpf_handler(Box::new(bpf_publisher));
+
+                // Clone all analyzers for event handler
+                let waker_wakee_for_events = waker_wakee_arc.clone();
+                let cpu_hotspot_for_events = cpu_hotspot_arc.clone();
+                let migration_analyzer_for_events = migration_analyzer_arc.clone();
+                let process_history_for_events = process_history_arc.clone();
+                let rate_monitor_for_events = rate_monitor_arc.clone();
+                let wakeup_tracker_for_events = wakeup_tracker_arc.clone();
 
                 // Set up ring buffer
                 let mut event_rbb = RingBufferBuilder::new();
@@ -791,6 +843,142 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                     if let Ok(mut stats) = shared_stats_for_event_handler.write() {
                         stats.update_from_event(&event);
                     }
+
+                    // Feed events to all analyzers
+                    use scxtop::bpf_intf;
+                    let event_type = event.r#type as u32;
+
+                    // 1. Waker/Wakee Analyzer - tracks wakeup relationships
+                    if let Ok(mut analyzer) = waker_wakee_for_events.try_lock() {
+                        match event_type {
+                            bpf_intf::event_type_SCHED_WAKEUP => {
+                                let wakeup = unsafe { &event.event.wakeup };
+                                analyzer.record_wakeup(
+                                    wakeup.pid,
+                                    wakeup.waker_pid,
+                                    &String::from_utf8_lossy(&wakeup.waker_comm),
+                                    event.cpu,
+                                    event.ts,
+                                );
+                            }
+                            bpf_intf::event_type_SCHED_WAKING => {
+                                let waking = unsafe { &event.event.waking };
+                                analyzer.record_wakeup(
+                                    waking.pid,
+                                    waking.waker_pid,
+                                    &String::from_utf8_lossy(&waking.waker_comm),
+                                    event.cpu,
+                                    event.ts,
+                                );
+                            }
+                            bpf_intf::event_type_SCHED_SWITCH => {
+                                let switch = unsafe { &event.event.sched_switch };
+                                analyzer.record_wakee_run(
+                                    switch.next_pid,
+                                    &String::from_utf8_lossy(&switch.next_comm),
+                                    event.cpu,
+                                    event.ts,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // 2. CPU Hotspot Analyzer - tracks CPU activity
+                    if let Ok(mut analyzer) = cpu_hotspot_for_events.try_lock() {
+                        // Build simplified JSON for CPU hotspot tracking
+                        let json = serde_json::json!({
+                            "cpu": event.cpu,
+                            "ts": event.ts,
+                            "event_type": event_type
+                        });
+                        analyzer.record_event(&json);
+                    }
+
+                    // 3. Migration Analyzer - tracks process migrations
+                    if let Ok(mut analyzer) = migration_analyzer_for_events.try_lock() {
+                        if event_type == bpf_intf::event_type_SCHED_MIGRATE {
+                            let migrate = unsafe { &event.event.migrate };
+                            let json = serde_json::json!({
+                                "pid": migrate.pid,
+                                "from_cpu": event.cpu, // source CPU is the current CPU
+                                "to_cpu": migrate.dest_cpu,
+                                "ts": event.ts
+                            });
+                            analyzer.record_migration(&json, event.ts);
+                        }
+                    }
+
+                    // 4. Process Event History - records all events per process
+                    if let Ok(mut history) = process_history_for_events.try_lock() {
+                        let event_type_str = match event_type {
+                            bpf_intf::event_type_SCHED_SWITCH => "sched_switch",
+                            bpf_intf::event_type_SCHED_WAKEUP => "sched_wakeup",
+                            bpf_intf::event_type_SCHED_WAKING => "sched_waking",
+                            bpf_intf::event_type_SCHED_MIGRATE => "sched_migrate",
+                            bpf_intf::event_type_EXIT => "exit",
+                            bpf_intf::event_type_EXEC => "exec",
+                            _ => "other",
+                        };
+
+                        // Extract PID from event
+                        let pid = match event_type {
+                            bpf_intf::event_type_SCHED_SWITCH => unsafe { event.event.sched_switch.next_pid },
+                            bpf_intf::event_type_SCHED_WAKEUP => unsafe { event.event.wakeup.pid },
+                            bpf_intf::event_type_SCHED_WAKING => unsafe { event.event.waking.pid },
+                            _ => 0,
+                        };
+
+                        if pid > 0 {
+                            history.record_event(
+                                pid,
+                                event_type_str.to_string(),
+                                Some(event.cpu),
+                                serde_json::json!({"ts": event.ts}),
+                                event.ts,
+                            );
+                        }
+                    }
+
+                    // 5. DSQ Monitor - tracks dispatch queue operations
+                    // Note: DSQ events are scheduler-specific, only available with sched_ext schedulers
+
+                    // 6. Event Rate Monitor - tracks event rates for anomaly detection
+                    if let Ok(mut monitor) = rate_monitor_for_events.try_lock() {
+                        let event_type_str = match event_type {
+                            bpf_intf::event_type_SCHED_SWITCH => "sched_switch",
+                            bpf_intf::event_type_SCHED_WAKEUP => "sched_wakeup",
+                            bpf_intf::event_type_SCHED_WAKING => "sched_waking",
+                            bpf_intf::event_type_SCHED_MIGRATE => "sched_migrate",
+                            _ => "other",
+                        };
+                        monitor.record_event(event_type_str.to_string(), event.ts);
+                    }
+
+                    // 7. Wakeup Chain Tracker - tracks cascading wakeup chains
+                    if let Ok(mut tracker) = wakeup_tracker_for_events.try_lock() {
+                        if event_type == bpf_intf::event_type_SCHED_WAKEUP {
+                            let wakeup = unsafe { &event.event.wakeup };
+                            let json = serde_json::json!({
+                                "pid": wakeup.pid,
+                                "waker_pid": wakeup.waker_pid,
+                                "ts": event.ts,
+                                "cpu": event.cpu
+                            });
+                            tracker.record_wakeup(&json, event.ts);
+                        } else if event_type == bpf_intf::event_type_SCHED_WAKING {
+                            let waking = unsafe { &event.event.waking };
+                            let json = serde_json::json!({
+                                "pid": waking.pid,
+                                "waker_pid": waking.waker_pid,
+                                "ts": event.ts,
+                                "cpu": event.cpu
+                            });
+                            tracker.record_wakeup(&json, event.ts);
+                        }
+                    }
+
+                    // Note: Latency Tracker is updated by shared_stats which already handles it above
 
                     let _ = edm.on_event(&event);
                     0
@@ -871,6 +1059,26 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                     skel,
                 )?;
 
+                // Create analyzer control and register ALL analyzers
+                use scxtop::mcp::AnalyzerControl;
+
+                let mut analyzer_control = AnalyzerControl::new();
+                analyzer_control.set_event_control(event_control.clone());
+
+                // Register all analyzers
+                analyzer_control.set_event_buffer(event_buffer_arc.clone());
+                analyzer_control.set_latency_tracker(latency_tracker_arc.clone());
+                analyzer_control.set_cpu_hotspot_analyzer(cpu_hotspot_arc.clone());
+                analyzer_control.set_migration_analyzer(migration_analyzer_arc.clone());
+                analyzer_control.set_process_history(process_history_arc.clone());
+                analyzer_control.set_dsq_monitor(dsq_monitor_arc.clone());
+                analyzer_control.set_rate_monitor(rate_monitor_arc.clone());
+                analyzer_control.set_wakeup_tracker(wakeup_tracker_arc.clone());
+                analyzer_control.set_waker_wakee_analyzer(waker_wakee_arc.clone());
+
+                // Wrap analyzer control in Arc<Mutex<>>
+                let analyzer_control = Arc::new(Mutex::new(analyzer_control));
+
                 // Create MCP server
                 let mut server = McpServer::new(mcp_config)
                     .with_topology(topo_arc)
@@ -880,6 +1088,7 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                     .with_shared_stats(shared_stats.clone())
                     .with_stats_client(None)
                     .with_event_control(event_control.clone())
+                    .with_analyzer_control(analyzer_control.clone())
                     .setup_stats_resources();
 
                 // Enable event streaming

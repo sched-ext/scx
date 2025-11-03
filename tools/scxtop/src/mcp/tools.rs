@@ -5,6 +5,7 @@
 
 use super::perf_profiling::{PerfProfilingConfig, SharedPerfProfiler};
 use super::protocol::McpTool;
+use super::SharedAnalyzerControl;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub struct McpTools {
     topo: Option<Arc<scx_utils::Topology>>,
     perf_profiler: Option<SharedPerfProfiler>,
     event_control: Option<super::SharedEventControl>,
+    analyzer_control: Option<SharedAnalyzerControl>,
 }
 
 impl Default for McpTools {
@@ -27,6 +29,7 @@ impl McpTools {
             topo: None,
             perf_profiler: None,
             event_control: None,
+            analyzer_control: None,
         }
     }
 
@@ -40,6 +43,10 @@ impl McpTools {
 
     pub fn set_event_control(&mut self, control: super::SharedEventControl) {
         self.event_control = Some(control);
+    }
+
+    pub fn set_analyzer_control(&mut self, control: SharedAnalyzerControl) {
+        self.analyzer_control = Some(control);
     }
 
     pub fn list(&self) -> Value {
@@ -82,9 +89,9 @@ impl McpTools {
                 }),
             },
             McpTool {
-                name: "list_events".to_string(),
+                name: "list_event_subsystems".to_string(),
                 description:
-                    "List available profiling events (kprobes and perf events) that can be traced"
+                    "List available event subsystems and types without returning all events"
                         .to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -92,14 +99,48 @@ impl McpTools {
                         "event_type": {
                             "type": "string",
                             "enum": ["kprobe", "perf", "all"],
-                            "description": "Type of events to list"
+                            "description": "Type of events to get subsystems for (default: all)",
+                            "default": "all"
+                        }
+                    }
+                }),
+            },
+            McpTool {
+                name: "list_events".to_string(),
+                description:
+                    "List available profiling events (kprobes and perf events) that can be traced with pagination and filtering"
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "event_type": {
+                            "type": "string",
+                            "enum": ["kprobe", "perf"],
+                            "description": "Type of events to list (required)"
                         },
                         "subsystem": {
                             "type": "string",
-                            "description": "Filter perf events by subsystem (e.g., 'sched', 'irq', 'power'). Required when event_type is 'perf' or not specified."
+                            "description": "Filter perf events by subsystem (e.g., 'sched', 'irq', 'power'). Required when event_type is 'perf'."
+                        },
+                        "filter": {
+                            "type": "string",
+                            "description": "Regex pattern to filter event names (case-insensitive)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of events to return (default: 100, max: 1000)",
+                            "default": 100,
+                            "minimum": 1,
+                            "maximum": 1000
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Number of events to skip for pagination (default: 0)",
+                            "default": 0,
+                            "minimum": 0
                         }
                     },
-                    "required": ["subsystem"]
+                    "required": ["event_type"]
                 }),
             },
             McpTool {
@@ -212,6 +253,58 @@ impl McpTools {
                     "required": ["action"]
                 }),
             },
+            McpTool {
+                name: "control_analyzers".to_string(),
+                description:
+                    "Control event analyzers (start, stop, reset, or get status). Analyzers include: waker_wakee_analyzer, latency_tracker, cpu_hotspot_analyzer, migration_analyzer, process_history, dsq_monitor, rate_monitor, wakeup_tracker, event_buffer."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "reset", "status"],
+                            "description": "Action to perform on the analyzer(s)"
+                        },
+                        "analyzer": {
+                            "type": "string",
+                            "enum": ["waker_wakee_analyzer", "latency_tracker", "cpu_hotspot_analyzer", "migration_analyzer", "process_history", "dsq_monitor", "rate_monitor", "wakeup_tracker", "event_buffer", "all"],
+                            "description": "Which analyzer to control (use 'all' to control all analyzers)",
+                            "default": "all"
+                        }
+                    },
+                    "required": ["action"]
+                }),
+            },
+            McpTool {
+                name: "analyze_waker_wakee".to_string(),
+                description:
+                    "Analyze waker/wakee relationships to find critical task dependencies, latencies, and scheduler behavior. Returns tasks with most impactful wakeup relationships."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["critical", "frequency", "latency", "bidirectional", "for_pid", "summary"],
+                            "description": "Analysis mode: 'critical' (by criticality score), 'frequency' (most frequent), 'latency' (highest latency), 'bidirectional' (mutex/semaphore patterns), 'for_pid' (relationships for specific PID), 'summary' (overview)",
+                            "default": "critical"
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "description": "Specific PID to analyze (required for 'for_pid' mode)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of relationships to return",
+                            "default": 20,
+                            "minimum": 1,
+                            "maximum": 1000
+                        }
+                    },
+                    "required": []
+                }),
+            },
         ];
 
         json!({ "tools": tools })
@@ -229,12 +322,15 @@ impl McpTools {
         match name {
             "query_stats" => self.tool_query_stats(arguments),
             "get_topology" => self.tool_get_topology(arguments),
+            "list_event_subsystems" => self.tool_list_event_subsystems(arguments),
             "list_events" => self.tool_list_events(arguments),
             "start_perf_profiling" => self.tool_start_perf_profiling(arguments),
             "stop_perf_profiling" => self.tool_stop_perf_profiling(arguments),
             "get_perf_results" => self.tool_get_perf_results(arguments),
             "control_event_tracking" => self.tool_control_event_tracking(arguments),
             "control_stats_collection" => self.tool_control_stats_collection(arguments),
+            "control_analyzers" => self.tool_control_analyzers(arguments),
+            "analyze_waker_wakee" => self.tool_analyze_waker_wakee(arguments),
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
     }
@@ -470,61 +566,144 @@ impl McpTools {
         }))
     }
 
-    fn tool_list_events(&self, args: &Value) -> Result<Value> {
-        let subsystem = args
-            .get("subsystem")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("subsystem parameter is required"))?;
-
+    fn tool_list_event_subsystems(&self, args: &Value) -> Result<Value> {
         let event_type = args
             .get("event_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("perf");
+            .unwrap_or("all");
 
         let mut result = json!({});
 
-        if event_type == "kprobe" || event_type == "all" {
-            let kprobe_events = crate::available_kprobe_events().unwrap_or_default();
-            result["kprobe_events"] = json!({
-                "count": kprobe_events.len(),
-                "events": kprobe_events,
-            });
-        }
-
         if event_type == "perf" || event_type == "all" {
             let perf_events = crate::available_perf_events().unwrap_or_default();
-
-            // Filter by subsystem
-            let filtered_events: std::collections::BTreeMap<
-                String,
-                std::collections::HashSet<String>,
-            > = perf_events
-                .into_iter()
-                .filter(|(sub, _)| sub == subsystem)
+            let subsystems: Vec<String> = perf_events.keys().cloned().collect();
+            let subsystem_counts: std::collections::HashMap<String, usize> = perf_events
+                .iter()
+                .map(|(k, v)| (k.clone(), v.len()))
                 .collect();
 
-            if filtered_events.is_empty() {
-                // List available subsystems if the requested one doesn't exist
-                let available_subsystems: Vec<String> = crate::available_perf_events()
-                    .unwrap_or_default()
-                    .keys()
-                    .cloned()
-                    .collect();
-
-                return Err(anyhow!(
-                    "Subsystem '{}' not found. Available subsystems: {}",
-                    subsystem,
-                    available_subsystems.join(", ")
-                ));
-            }
-
-            let events_in_subsystem = filtered_events.get(subsystem).map(|s| s.len()).unwrap_or(0);
-            result["perf_events"] = json!({
-                "subsystem": subsystem,
-                "count": events_in_subsystem,
-                "events": filtered_events.get(subsystem),
+            result["perf_subsystems"] = json!({
+                "count": subsystems.len(),
+                "subsystems": subsystems,
+                "event_counts": subsystem_counts,
             });
         }
+
+        if event_type == "kprobe" || event_type == "all" {
+            let kprobe_events = crate::available_kprobe_events().unwrap_or_default();
+            result["kprobe_info"] = json!({
+                "total_functions": kprobe_events.len(),
+                "note": "Use list_events with event_type='kprobe' and a filter to search for specific functions"
+            });
+        }
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "Failed to serialize subsystems".to_string())
+            }]
+        }))
+    }
+
+    fn tool_list_events(&self, args: &Value) -> Result<Value> {
+        let event_type = args
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("event_type parameter is required"))?;
+
+        let filter = args.get("filter").and_then(|v| v.as_str());
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100)
+            .min(1000) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        // Compile regex if filter is provided
+        let regex_filter = if let Some(pattern) = filter {
+            Some(
+                regex::RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| anyhow!("Invalid regex pattern: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        let result = match event_type {
+            "kprobe" => {
+                let mut kprobe_events = crate::available_kprobe_events().unwrap_or_default();
+
+                // Apply regex filter if provided
+                if let Some(ref re) = regex_filter {
+                    kprobe_events.retain(|event| re.is_match(event));
+                }
+
+                let total_count = kprobe_events.len();
+                let paginated_events: Vec<String> =
+                    kprobe_events.into_iter().skip(offset).take(limit).collect();
+
+                json!({
+                    "event_type": "kprobe",
+                    "total_count": total_count,
+                    "returned_count": paginated_events.len(),
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": offset + paginated_events.len() < total_count,
+                    "events": paginated_events,
+                    "filter_applied": filter,
+                })
+            }
+            "perf" => {
+                let subsystem = args
+                    .get("subsystem")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("subsystem parameter is required for perf events"))?;
+
+                let perf_events = crate::available_perf_events().unwrap_or_default();
+
+                if !perf_events.contains_key(subsystem) {
+                    let available_subsystems: Vec<String> = perf_events.keys().cloned().collect();
+                    return Err(anyhow!(
+                        "Subsystem '{}' not found. Use list_event_subsystems to see available subsystems. Available: {}",
+                        subsystem,
+                        available_subsystems.join(", ")
+                    ));
+                }
+
+                let mut events: Vec<String> = perf_events
+                    .get(subsystem)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default();
+
+                // Apply regex filter if provided
+                if let Some(ref re) = regex_filter {
+                    events.retain(|event| re.is_match(event));
+                }
+
+                // Sort for consistent pagination
+                events.sort();
+
+                let total_count = events.len();
+                let paginated_events: Vec<String> =
+                    events.into_iter().skip(offset).take(limit).collect();
+
+                json!({
+                    "event_type": "perf",
+                    "subsystem": subsystem,
+                    "total_count": total_count,
+                    "returned_count": paginated_events.len(),
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": offset + paginated_events.len() < total_count,
+                    "events": paginated_events,
+                    "filter_applied": filter,
+                })
+            }
+            _ => return Err(anyhow!("Invalid event_type: {}", event_type)),
+        };
 
         Ok(json!({
             "content": [{
@@ -749,5 +928,203 @@ impl McpTools {
             }
             _ => Err(anyhow!("Invalid action: {}", action)),
         }
+    }
+
+    fn tool_control_analyzers(&self, args: &Value) -> Result<Value> {
+        let control = self
+            .analyzer_control
+            .as_ref()
+            .ok_or_else(|| anyhow!("Analyzer control not available (daemon mode required)"))?;
+
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing action parameter"))?;
+
+        let analyzer = args
+            .get("analyzer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("all");
+
+        let control_lock = control.lock().unwrap();
+
+        match action {
+            "start" => {
+                control_lock
+                    .start_analyzer(analyzer)
+                    .map_err(|e| anyhow!(e))?;
+                Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Analyzer '{}' started.\n\nEvent tracking will begin collecting data. Use control_analyzers with action='status' to check analyzer states.",
+                            analyzer
+                        )
+                    }]
+                }))
+            }
+            "stop" => {
+                control_lock
+                    .stop_analyzer(analyzer)
+                    .map_err(|e| anyhow!(e))?;
+                Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Analyzer '{}' stopped.\n\nData collection paused. Existing data is retained. Use control_analyzers with action='status' to check analyzer states.",
+                            analyzer
+                        )
+                    }]
+                }))
+            }
+            "reset" => {
+                control_lock
+                    .reset_analyzer(analyzer)
+                    .map_err(|e| anyhow!(e))?;
+                Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Analyzer '{}' reset.\n\nAll collected data has been cleared. Use control_analyzers with action='status' to check analyzer states.",
+                            analyzer
+                        )
+                    }]
+                }))
+            }
+            "status" => {
+                let status = control_lock.get_status();
+                let status_json = serde_json::to_value(&status)
+                    .unwrap_or_else(|_| json!({"error": "Failed to serialize status"}));
+
+                let enabled_list = status.enabled_analyzers();
+                let summary = if enabled_list.is_empty() {
+                    "All analyzers are currently STOPPED (zero overhead)".to_string()
+                } else {
+                    format!("Currently enabled: {}", enabled_list.join(", "))
+                };
+
+                Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "Analyzer Status:\n\n{}\n\nDetails:\n{}",
+                            summary,
+                            serde_json::to_string_pretty(&status_json)
+                                .unwrap_or_else(|_| "Failed to format status".to_string())
+                        )
+                    }]
+                }))
+            }
+            _ => Err(anyhow!("Invalid action: {}", action)),
+        }
+    }
+
+    fn tool_analyze_waker_wakee(&self, args: &Value) -> Result<Value> {
+        let control = self
+            .analyzer_control
+            .as_ref()
+            .ok_or_else(|| anyhow!("Analyzer control not available (daemon mode required)"))?;
+
+        let control_lock = control.lock().unwrap();
+
+        // Check if waker_wakee_analyzer is registered and enabled
+        let status = control_lock.get_status();
+        if status.waker_wakee_analyzer != Some(true) {
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Waker/wakee analyzer is not enabled.\n\nTo enable it, use:\n  control_analyzers action=start analyzer=waker_wakee_analyzer\n\nNote: You must also enable BPF event tracking:\n  control_event_tracking action=enable"
+                }]
+            }));
+        }
+
+        // Get the waker_wakee_analyzer reference
+        let analyzer_arc = control_lock
+            .get_waker_wakee_analyzer()
+            .ok_or_else(|| anyhow!("Waker/wakee analyzer not registered"))?;
+
+        drop(control_lock); // Release control lock before accessing analyzer
+
+        let analyzer = analyzer_arc.lock().unwrap();
+
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("critical");
+
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+        let result = match mode {
+            "critical" => {
+                let relationships = analyzer.get_critical_relationships(limit);
+                json!({
+                    "mode": "critical",
+                    "description": "Tasks with most critical waker/wakee relationships (frequency × latency)",
+                    "count": relationships.len(),
+                    "relationships": relationships,
+                })
+            }
+            "frequency" => {
+                let relationships = analyzer.get_top_by_frequency(limit);
+                json!({
+                    "mode": "frequency",
+                    "description": "Most frequent waker/wakee relationships",
+                    "count": relationships.len(),
+                    "relationships": relationships,
+                })
+            }
+            "latency" => {
+                let relationships = analyzer.get_top_by_latency(limit);
+                json!({
+                    "mode": "latency",
+                    "description": "Waker/wakee relationships with highest average latency",
+                    "count": relationships.len(),
+                    "relationships": relationships,
+                })
+            }
+            "bidirectional" => {
+                let relationships = analyzer.get_bidirectional_relationships();
+                json!({
+                    "mode": "bidirectional",
+                    "description": "Bidirectional wakeup patterns (mutex/semaphore/condvar)",
+                    "count": relationships.len(),
+                    "relationships": relationships,
+                })
+            }
+            "for_pid" => {
+                let pid = args
+                    .get("pid")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| anyhow!("Missing 'pid' parameter for 'for_pid' mode"))?
+                    as u32;
+
+                let relationships = analyzer.get_relationships_for_pid(pid);
+                json!({
+                    "mode": "for_pid",
+                    "description": format!("All waker/wakee relationships for PID {}", pid),
+                    "pid": pid,
+                    "as_waker_count": relationships.as_waker.len(),
+                    "as_wakee_count": relationships.as_wakee.len(),
+                    "relationships": relationships,
+                })
+            }
+            "summary" => {
+                let summary = analyzer.get_summary();
+                json!({
+                    "mode": "summary",
+                    "description": "Overview of waker/wakee relationship tracking",
+                    "summary": summary,
+                })
+            }
+            _ => return Err(anyhow!("Invalid mode: {}", mode)),
+        };
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "Failed to serialize results".to_string())
+            }]
+        }))
     }
 }
