@@ -37,7 +37,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 __hidden
 int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	rbnode_t *node = &taskc->atq;
+	rbnode_t *node = &taskc->node;
 	int ret;
 
 	ret = arena_spin_lock(&atq->lock);
@@ -66,6 +66,7 @@ int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena
 	if (ret)
 		goto done;
 
+	taskc->atq = atq;
 	atq->size += 1;
 
 done:
@@ -80,17 +81,33 @@ int scx_atq_insert(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 	return scx_atq_insert_vtime(atq, taskc, SCX_ATQ_FIFO);
 }
 
-/*
- * XXXETSAL: There is a mismatch between insert and pop here: We are inserting
- * rbnodes, but returning a key/value pair. This is deliberate: We can use CO:RE
- * to find the rbnode from any scheduler's task_ctx in a generic way, but there is
- * no container_of equivalent that lets us go rbnode -> task_ctx (especially since
- * the actual layout of task_ctx varies by scheduler. For now, pass the task_ctx 
- * as a value to the node and use it to find the original rbonde.
- */
+__hidden
+int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
+       int ret;
+
+       ret = arena_spin_lock(&atq->lock);
+       if (ret)
+               return ret;
+
+       /* Are we in this ATQ in the first place? */
+       if (taskc->atq != atq) {
+	       arena_spin_unlock(&atq->lock);
+	       return -EINVAL;
+       }
+
+       ret = rb_remove_node(atq->tree, &taskc->node);
+       taskc->atq = NULL;
+
+       arena_spin_unlock(&atq->lock);
+
+       return ret;
+}
+
 __hidden
 u64 scx_atq_pop(scx_atq_t *atq)
 {
+	scx_task_common *taskc;
 	u64 vtime, taskc_ptr;
 	int ret;
 
@@ -106,6 +123,9 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	ret = rb_pop(atq->tree, &vtime, &taskc_ptr);
 	if (!ret)
 		atq->size -= 1;
+
+	taskc = (scx_task_common *)taskc_ptr;
+	taskc->atq = NULL;
 
 	arena_spin_unlock(&atq->lock);
 
