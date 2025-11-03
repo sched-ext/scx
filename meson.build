@@ -378,7 +378,7 @@ if enable_rust
 
   rust_scheds = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
                  'scx_flash', 'scx_cosmos', 'scx_rusty', 'scx_p2dq',
-                 'scx_layered', 'scx_mitosis', 'scx_tickless', 'scx_chaos']
+                 'scx_layered', 'scx_mitosis', 'scx_tickless', 'scx_chaos', 'scx_beerland']
   rust_misc = ['scx_stats', 'scx_stats_derive', 'scx_utils',
                'scx_rustland_core']
 
