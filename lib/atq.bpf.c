@@ -35,8 +35,9 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
  */
 
 __hidden
-int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, rbnode_t __arg_arena *node, u64 taskc_ptr, u64 vtime)
+int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
+	rbnode_t *node = &taskc->atq;
 	int ret;
 
 	ret = arena_spin_lock(&atq->lock);
@@ -59,7 +60,7 @@ int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, rbnode_t __arg_arena *node,
 	 * consecutive.
 	 */
 	node->key = (vtime == SCX_ATQ_FIFO) ? atq->seq++ : vtime;
-	node->value = taskc_ptr;
+	node->value = (u64)taskc;
 
 	ret = rb_insert_node(atq->tree, node);
 	if (ret)
@@ -74,9 +75,9 @@ done:
 }
 
 __hidden
-int scx_atq_insert(scx_atq_t *atq, rbnode_t __arg_arena *node, u64 taskc_ptr)
+int scx_atq_insert(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
-	return scx_atq_insert_vtime(atq, node, taskc_ptr, SCX_ATQ_FIFO);
+	return scx_atq_insert_vtime(atq, taskc, SCX_ATQ_FIFO);
 }
 
 /*

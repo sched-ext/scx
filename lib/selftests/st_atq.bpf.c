@@ -69,13 +69,13 @@ int scx_selftest_atq_common(bool isfifo)
 		pids[i] = ind;
 
 		if (isfifo) {
-			ret = scx_atq_insert(atq, &tasks[ind]->rbnode, (u64)tasks[ind]);
+			ret = scx_atq_insert(atq, &tasks[ind]->common);
 			if (ret) {
 				bpf_printk("fifo atq insert failed with %d", ret);
 				return ret;
 			}
 		} else {
-			ret = scx_atq_insert_vtime(atq, &tasks[ind]->rbnode, (u64)tasks[ind], tasks[ind]->vtime);
+			ret = scx_atq_insert_vtime(atq, &tasks[ind]->common, tasks[ind]->vtime);
 			if (ret) {
 				bpf_printk("vtime atq insert failed with %d", ret);
 				return ret;
@@ -129,7 +129,7 @@ int scx_selftest_atq_fifo(u64 unused)
 __weak
 int scx_selftest_atq_fail_fifo_with_weight(u64 unused)
 {
-	if (!scx_atq_insert_vtime(fifo, &tasks[0]->rbnode, 0, 0)) {
+	if (!scx_atq_insert_vtime(fifo, (scx_task_common *)tasks[0], 0)) {
 		bpf_printk("atq PRIO insert on FIFO atq succeeded");
 		return -EINVAL;
 	}
@@ -146,7 +146,7 @@ int scx_selftest_atq_vtime(u64 unused)
 __weak
 int scx_selftest_atq_fail_vtime_without_weight(u64 unused)
 {
-	if (!scx_atq_insert(prio, &tasks[0]->rbnode, 0)) {
+	if (!scx_atq_insert(prio, (scx_task_common *)tasks[0])) {
 		bpf_printk("atq FIFO insert on PRIO atq succeeded");
 		return -EINVAL;
 	}
@@ -157,14 +157,14 @@ int scx_selftest_atq_fail_vtime_without_weight(u64 unused)
 __weak
 int scx_selftest_atq_nr_queued(u64 unused)
 {
+	scx_task_common *taskc = NULL;
 	const int PUSHES_PER_TEST = 5;
 	const int POPS_PER_TEST = 2;
 	const int TEST_CYCLES = 32;
 	int expected, found;
 	scx_atq_t *atq;
-	rbnode_t *node;
-	u64 taskc;
 	int i, j;
+	u64 ctx;
 	int ret;
 
 	atq = prio;
@@ -172,12 +172,12 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	for (i = 0; i < TEST_CYCLES && can_loop; i++ ) {
 
 		for (j = 0; j < PUSHES_PER_TEST && can_loop; j++ ) {
-			node = rb_node_alloc(atq->tree, 0, 0);
-			if (!node)
+			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			if (!taskc)
 				return -ENOMEM;
 
 			/* Also a nice way to check if we handle identical keys. */
-			ret = scx_atq_insert_vtime(atq, node, i, i);
+			ret = scx_atq_insert_vtime(atq, taskc, i);
 			if (ret) {
 				bpf_printk("atq insert failed with %d", ret);
 				return ret;
@@ -210,8 +210,8 @@ int scx_selftest_atq_nr_queued(u64 unused)
 
 	found = scx_atq_nr_queued(atq);
 	for (i = 0; i < found && can_loop; i++) {
-		taskc = scx_atq_pop(atq);
-		if (!taskc) {
+		ctx = scx_atq_pop(atq);
+		if (!ctx) {
 			bpf_printk("scx_atq_pop retrieved (%d)", taskc);
 			return -EINVAL;
 		}
@@ -231,9 +231,8 @@ int scx_selftest_atq_nr_queued(u64 unused)
 __weak
 int scx_selftest_atq_peek_nodestruct(u64 unused)
 {
-	const u64 elem = 5;
+	scx_task_common *taskc;
 	const int iters = 10;
-	rbnode_t *node;
 	u64 found;
 	int i;
 
@@ -243,17 +242,17 @@ int scx_selftest_atq_peek_nodestruct(u64 unused)
 		return -EINVAL;
 	}
 
-	node = rb_node_alloc(fifo->tree, 0, 0);
-	if (!node)
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
 		return -ENOMEM;
 
-	if (scx_atq_insert(fifo, node, elem)) {
+	if (scx_atq_insert(fifo, taskc)) {
 		bpf_printk("ATQ insert failed");
 		return -EINVAL;
 	}
 
 	for (i = 0; i < iters && can_loop; i++) {
-		if (scx_atq_peek(fifo) == elem)
+		if (scx_atq_peek(fifo) == (u64)taskc)
 			continue;
 
 		found = scx_atq_nr_queued(fifo);
@@ -300,7 +299,7 @@ __weak
 int scx_selftest_atq_sized(u64 unused)
 {
 	scx_atq_t *sized_fifo, *sized_vtime;
-	rbnode_t *node;
+	scx_task_common *taskc;
 	int ret;
 
 	sized_fifo = (scx_atq_t *)scx_atq_create_size(true, 1);
@@ -315,41 +314,41 @@ int scx_selftest_atq_sized(u64 unused)
 		return -ENOMEM;
 	}
 
-	node = rb_node_alloc(sized_fifo->tree, 0, 0);
-	if (!node)
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
 		return -ENOMEM;
 
-	ret = scx_atq_insert(sized_fifo, node, 1234);
+	ret = scx_atq_insert(sized_fifo, taskc);
 	if (ret) {
 		bpf_printk("ATQ failed to insert into sized fifo ATQ");
 		return -EINVAL;
 	}
 
-	/* Doesn't matter which rbtree we're allocating from. */
-	node = rb_node_alloc(sized_vtime->tree, 1234, 0);
-	if (!node)
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
 		return -ENOMEM;
 
-	ret = scx_atq_insert(sized_fifo, node, 5678);
+	ret = scx_atq_insert(sized_fifo, taskc);
 	if (!ret) {
 		bpf_printk("ATQ too many inserts into sized fifo ATQ");
 		return -EINVAL;
 	}
 
-	/* Reusing the already allocated rbnode. */
-
-	ret = scx_atq_insert_vtime(sized_vtime, node, 0, 7890);
+	/* 
+	 * Reusing the already allocated rbnode. We won't be able to 
+	 * do the operation so we won't corrupt the tree.
+	 */
+	ret = scx_atq_insert_vtime(sized_vtime, taskc, 7890);
 	if (ret) {
 		bpf_printk("ATQ failed to insert into sized vtime ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert_vtime(sized_vtime, node, 0, 2222);
+	ret = scx_atq_insert_vtime(sized_vtime, taskc, 2222);
 	if (!ret) {
 		bpf_printk("ATQ too many inserts into sized vtime ATQ");
 		return -EINVAL;
 	}
-
 
 	return 0;
 }
