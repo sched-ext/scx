@@ -35,6 +35,7 @@ pub struct McpServer {
     topology: Option<Arc<scx_utils::Topology>>,
     stats_client: Option<SharedStatsClient>,
     event_control: Option<super::SharedEventControl>,
+    analyzer_control: Option<super::SharedAnalyzerControl>,
 }
 
 impl McpServer {
@@ -51,6 +52,7 @@ impl McpServer {
             topology: None,
             stats_client: None,
             event_control: None,
+            analyzer_control: None,
         }
     }
 
@@ -530,6 +532,18 @@ impl McpServer {
 
     pub fn get_event_control(&self) -> Option<super::SharedEventControl> {
         self.event_control.clone()
+    }
+
+    pub fn with_analyzer_control(mut self, analyzer_control: super::SharedAnalyzerControl) -> Self {
+        // Pass analyzer control to tools
+        self.tools.set_analyzer_control(analyzer_control.clone());
+
+        self.analyzer_control = Some(analyzer_control);
+        self
+    }
+
+    pub fn get_analyzer_control(&self) -> Option<super::SharedAnalyzerControl> {
+        self.analyzer_control.clone()
     }
 
     /// Run the MCP server in blocking mode (reads from stdin, writes to stdout)
