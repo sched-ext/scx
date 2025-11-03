@@ -566,7 +566,339 @@ pub struct CpuSnapshot {
     pub frequency: Option<u64>,
 }
 
-// Helper function
+/// Softirq analyzer for tracking interrupt processing
+pub struct SoftirqAnalyzer {
+    softirq_stats: HashMap<i32, SoftirqTypeStats>,
+    cpu_softirq_stats: HashMap<(u32, i32), Vec<u64>>, // (cpu, softirq_nr) -> durations
+    process_softirq_stats: HashMap<(u32, i32), Vec<u64>>, // (pid, softirq_nr) -> durations
+    window_start: u64,
+    window_duration_ms: u64,
+    enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SoftirqTypeStats {
+    count: u64,
+    durations_ns: Vec<u64>,
+    total_duration_ns: u64,
+}
+
+impl SoftirqAnalyzer {
+    pub fn new(window_duration_ms: u64) -> Self {
+        Self {
+            softirq_stats: HashMap::new(),
+            cpu_softirq_stats: HashMap::new(),
+            process_softirq_stats: HashMap::new(),
+            window_start: now_ms(),
+            window_duration_ms,
+            enabled: false, // Disabled by default
+        }
+    }
+
+    /// Enable softirq tracking
+    pub fn start(&mut self) {
+        self.enabled = true;
+        self.window_start = now_ms();
+    }
+
+    /// Disable softirq tracking
+    pub fn stop(&mut self) {
+        self.enabled = false;
+    }
+
+    /// Check if analyzer is actively collecting
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Clear all tracked data
+    pub fn reset(&mut self) {
+        self.softirq_stats.clear();
+        self.cpu_softirq_stats.clear();
+        self.process_softirq_stats.clear();
+        self.window_start = now_ms();
+    }
+
+    /// Map softirq number to name
+    fn softirq_name(nr: i32) -> &'static str {
+        match nr {
+            0 => "HI",
+            1 => "TIMER",
+            2 => "NET_TX",
+            3 => "NET_RX",
+            4 => "BLOCK",
+            5 => "IRQ_POLL",
+            6 => "TASKLET",
+            7 => "SCHED",
+            8 => "HRTIMER",
+            9 => "RCU",
+            _ => "UNKNOWN",
+        }
+    }
+
+    /// Record a softirq event
+    pub fn record_event(&mut self, json: &Value) {
+        if !self.enabled {
+            return;
+        }
+
+        if json.get("type").and_then(|v| v.as_str()) != Some("softirq") {
+            return;
+        }
+
+        let softirq_nr = json
+            .get("softirq_nr")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let entry_ts = json.get("entry_ts").and_then(|v| v.as_u64());
+        let exit_ts = json.get("exit_ts").and_then(|v| v.as_u64());
+        let cpu = json.get("cpu").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let pid = json.get("pid").and_then(|v| v.as_u64()).map(|v| v as u32);
+
+        if let (Some(softirq_nr), Some(entry_ts), Some(exit_ts)) = (softirq_nr, entry_ts, exit_ts) {
+            let duration_ns = exit_ts.saturating_sub(entry_ts);
+
+            // Update overall stats for this softirq type
+            let stats = self
+                .softirq_stats
+                .entry(softirq_nr)
+                .or_insert_with(|| SoftirqTypeStats {
+                    count: 0,
+                    durations_ns: Vec::new(),
+                    total_duration_ns: 0,
+                });
+
+            stats.count += 1;
+            stats.durations_ns.push(duration_ns);
+            stats.total_duration_ns += duration_ns;
+
+            // Update CPU-level stats
+            if let Some(cpu) = cpu {
+                self.cpu_softirq_stats
+                    .entry((cpu, softirq_nr))
+                    .or_default()
+                    .push(duration_ns);
+            }
+
+            // Update process-level stats
+            if let Some(pid) = pid {
+                self.process_softirq_stats
+                    .entry((pid, softirq_nr))
+                    .or_default()
+                    .push(duration_ns);
+            }
+        }
+    }
+
+    /// Get overall statistics for all softirq types
+    pub fn get_overall_stats(&self) -> Vec<SoftirqStats> {
+        let window_duration_sec = self.window_duration_ms as f64 / 1000.0;
+
+        let mut stats: Vec<_> = self
+            .softirq_stats
+            .iter()
+            .map(|(nr, type_stats)| {
+                let mut sorted_durations = type_stats.durations_ns.clone();
+                sorted_durations.sort_unstable();
+
+                let duration_us: Vec<_> = sorted_durations.iter().map(|&d| d / 1000).collect();
+
+                SoftirqStats {
+                    softirq_nr: *nr,
+                    softirq_name: Self::softirq_name(*nr).to_string(),
+                    count: type_stats.count,
+                    rate_per_sec: type_stats.count as f64 / window_duration_sec,
+                    total_time_us: type_stats.total_duration_ns / 1000,
+                    avg_duration_us: if type_stats.count > 0 {
+                        (type_stats.total_duration_ns / type_stats.count) / 1000
+                    } else {
+                        0
+                    },
+                    min_duration_us: duration_us.first().copied().unwrap_or(0),
+                    max_duration_us: duration_us.last().copied().unwrap_or(0),
+                    p50_duration_us: percentile_u64(&duration_us, 50.0),
+                    p95_duration_us: percentile_u64(&duration_us, 95.0),
+                    p99_duration_us: percentile_u64(&duration_us, 99.0),
+                }
+            })
+            .collect();
+
+        stats.sort_by(|a, b| b.count.cmp(&a.count));
+        stats
+    }
+
+    /// Get per-CPU breakdown for a specific softirq type
+    pub fn get_cpu_breakdown(&self, softirq_nr: Option<i32>, top_n: usize) -> Vec<CpuSoftirqStats> {
+        let mut stats: Vec<_> = self
+            .cpu_softirq_stats
+            .iter()
+            .filter(|((_, nr), _)| softirq_nr.is_none_or(|target| *nr == target))
+            .map(|((cpu, nr), durations)| {
+                let mut sorted = durations.clone();
+                sorted.sort_unstable();
+
+                let duration_us: Vec<_> = sorted.iter().map(|&d| d / 1000).collect();
+
+                CpuSoftirqStats {
+                    cpu: *cpu,
+                    softirq_nr: *nr,
+                    softirq_name: Self::softirq_name(*nr).to_string(),
+                    count: sorted.len() as u64,
+                    avg_duration_us: if !sorted.is_empty() {
+                        (sorted.iter().sum::<u64>() / sorted.len() as u64) / 1000
+                    } else {
+                        0
+                    },
+                    p99_duration_us: percentile_u64(&duration_us, 99.0),
+                    max_duration_us: duration_us.last().copied().unwrap_or(0),
+                }
+            })
+            .collect();
+
+        stats.sort_by(|a, b| b.count.cmp(&a.count));
+        stats.truncate(top_n);
+        stats
+    }
+
+    /// Get process breakdown for softirq handling
+    pub fn get_process_breakdown(
+        &self,
+        softirq_nr: Option<i32>,
+        top_n: usize,
+    ) -> Vec<ProcessSoftirqStats> {
+        let mut stats: Vec<_> = self
+            .process_softirq_stats
+            .iter()
+            .filter(|((_, nr), _)| softirq_nr.is_none_or(|target| *nr == target))
+            .map(|((pid, nr), durations)| {
+                let mut sorted = durations.clone();
+                sorted.sort_unstable();
+
+                let duration_us: Vec<_> = sorted.iter().map(|&d| d / 1000).collect();
+
+                ProcessSoftirqStats {
+                    pid: *pid,
+                    softirq_nr: *nr,
+                    softirq_name: Self::softirq_name(*nr).to_string(),
+                    count: sorted.len() as u64,
+                    total_time_us: sorted.iter().sum::<u64>() / 1000,
+                    avg_duration_us: if !sorted.is_empty() {
+                        (sorted.iter().sum::<u64>() / sorted.len() as u64) / 1000
+                    } else {
+                        0
+                    },
+                    max_duration_us: duration_us.last().copied().unwrap_or(0),
+                }
+            })
+            .collect();
+
+        stats.sort_by(|a, b| b.total_time_us.cmp(&a.total_time_us));
+        stats.truncate(top_n);
+        stats
+    }
+
+    /// Get summary statistics
+    pub fn get_summary(&self) -> SoftirqSummary {
+        let window_duration_sec = self.window_duration_ms as f64 / 1000.0;
+        let total_events: u64 = self.softirq_stats.values().map(|s| s.count).sum();
+        let total_time_ns: u64 = self
+            .softirq_stats
+            .values()
+            .map(|s| s.total_duration_ns)
+            .sum();
+
+        let mut all_durations: Vec<u64> = self
+            .softirq_stats
+            .values()
+            .flat_map(|s| s.durations_ns.iter().copied())
+            .collect();
+        all_durations.sort_unstable();
+
+        let duration_us: Vec<_> = all_durations.iter().map(|&d| d / 1000).collect();
+
+        SoftirqSummary {
+            total_events,
+            event_rate_per_sec: total_events as f64 / window_duration_sec,
+            total_time_us: total_time_ns / 1000,
+            avg_duration_us: if total_events > 0 {
+                (total_time_ns / total_events) / 1000
+            } else {
+                0
+            },
+            p50_duration_us: percentile_u64(&duration_us, 50.0),
+            p95_duration_us: percentile_u64(&duration_us, 95.0),
+            p99_duration_us: percentile_u64(&duration_us, 99.0),
+            max_duration_us: duration_us.last().copied().unwrap_or(0),
+            unique_softirq_types: self.softirq_stats.len() as u64,
+        }
+    }
+}
+
+impl Default for SoftirqAnalyzer {
+    fn default() -> Self {
+        Self::new(10000) // 10 second default window
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SoftirqStats {
+    pub softirq_nr: i32,
+    pub softirq_name: String,
+    pub count: u64,
+    pub rate_per_sec: f64,
+    pub total_time_us: u64,
+    pub avg_duration_us: u64,
+    pub min_duration_us: u64,
+    pub max_duration_us: u64,
+    pub p50_duration_us: u64,
+    pub p95_duration_us: u64,
+    pub p99_duration_us: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CpuSoftirqStats {
+    pub cpu: u32,
+    pub softirq_nr: i32,
+    pub softirq_name: String,
+    pub count: u64,
+    pub avg_duration_us: u64,
+    pub p99_duration_us: u64,
+    pub max_duration_us: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProcessSoftirqStats {
+    pub pid: u32,
+    pub softirq_nr: i32,
+    pub softirq_name: String,
+    pub count: u64,
+    pub total_time_us: u64,
+    pub avg_duration_us: u64,
+    pub max_duration_us: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SoftirqSummary {
+    pub total_events: u64,
+    pub event_rate_per_sec: f64,
+    pub total_time_us: u64,
+    pub avg_duration_us: u64,
+    pub p50_duration_us: u64,
+    pub p95_duration_us: u64,
+    pub p99_duration_us: u64,
+    pub max_duration_us: u64,
+    pub unique_softirq_types: u64,
+}
+
+// Helper functions
+fn percentile_u64(sorted_values: &[u64], p: f64) -> u64 {
+    if sorted_values.is_empty() {
+        return 0;
+    }
+    let idx = ((p / 100.0) * (sorted_values.len() - 1) as f64).round() as usize;
+    sorted_values[idx]
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -12,7 +12,7 @@ use super::analyzers::{CpuHotspotAnalyzer, LatencyTracker, MigrationAnalyzer};
 use super::event_buffer::EventBuffer;
 use super::event_control::SharedEventControl;
 use super::extended_analyzers::{
-    DsqMonitor, EventRateMonitor, ProcessEventHistory, WakeupChainTracker,
+    DsqMonitor, EventRateMonitor, ProcessEventHistory, SoftirqAnalyzer, WakeupChainTracker,
 };
 use super::waker_wakee_analyzer::WakerWakeeAnalyzer;
 use log::{info, warn};
@@ -30,6 +30,7 @@ pub struct AnalyzerControl {
     rate_monitor: Option<Arc<Mutex<EventRateMonitor>>>,
     wakeup_tracker: Option<Arc<Mutex<WakeupChainTracker>>>,
     waker_wakee_analyzer: Option<Arc<Mutex<WakerWakeeAnalyzer>>>,
+    softirq_analyzer: Option<Arc<Mutex<SoftirqAnalyzer>>>,
     /// Optional EventControl for automatic BPF program attach/detach
     event_control: Option<SharedEventControl>,
 }
@@ -46,6 +47,7 @@ impl AnalyzerControl {
             rate_monitor: None,
             wakeup_tracker: None,
             waker_wakee_analyzer: None,
+            softirq_analyzer: None,
             event_control: None,
         }
     }
@@ -61,6 +63,123 @@ impl AnalyzerControl {
         self.event_control = Some(event_control);
     }
 
+    /// Get list of BPF programs needed by currently enabled analyzers
+    fn get_required_bpf_programs(&self) -> Vec<&'static str> {
+        let mut programs = std::collections::HashSet::new();
+
+        // event_buffer needs all events - don't specify any to attach all
+        if self
+            .event_buffer
+            .as_ref()
+            .is_some_and(|b| b.lock().unwrap().is_enabled())
+        {
+            return vec![]; // Empty list means attach all
+        }
+
+        // latency_tracker needs wakeup + switch
+        if self
+            .latency_tracker
+            .as_ref()
+            .is_some_and(|t| t.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_wakeup");
+            programs.insert("on_sched_waking");
+            programs.insert("on_sched_switch");
+        }
+
+        // cpu_hotspot_analyzer needs switch
+        if self
+            .cpu_hotspot_analyzer
+            .as_ref()
+            .is_some_and(|a| a.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_switch");
+        }
+
+        // migration_analyzer needs migrate
+        if self
+            .migration_analyzer
+            .as_ref()
+            .is_some_and(|a| a.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_migrate_task");
+        }
+
+        // process_history needs multiple events
+        if self
+            .process_history
+            .as_ref()
+            .is_some_and(|h| h.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_switch");
+            programs.insert("on_sched_wakeup");
+            programs.insert("on_sched_waking");
+            programs.insert("on_sched_migrate_task");
+        }
+
+        // dsq_monitor needs dispatch events
+        if self
+            .dsq_monitor
+            .as_ref()
+            .is_some_and(|m| m.lock().unwrap().is_enabled())
+        {
+            // Note: Actual programs depend on kernel version, handled by attach_progs
+            programs.insert("scx_insert");
+            programs.insert("scx_insert_vtime");
+            programs.insert("scx_dispatch");
+            programs.insert("scx_dispatch_vtime");
+            programs.insert("scx_dispatch_from_dsq");
+            programs.insert("scx_dispatch_from_dsq_set_vtime");
+            programs.insert("scx_dispatch_from_dsq_set_slice");
+            programs.insert("scx_dsq_move");
+            programs.insert("scx_dsq_move_set_vtime");
+            programs.insert("scx_dsq_move_set_slice");
+        }
+
+        // rate_monitor needs common events
+        if self
+            .rate_monitor
+            .as_ref()
+            .is_some_and(|m| m.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_switch");
+            programs.insert("on_sched_wakeup");
+            programs.insert("on_sched_waking");
+            programs.insert("on_sched_migrate_task");
+        }
+
+        // wakeup_tracker needs wakeup
+        if self
+            .wakeup_tracker
+            .as_ref()
+            .is_some_and(|t| t.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_wakeup");
+        }
+
+        // waker_wakee_analyzer needs wakeup events
+        if self
+            .waker_wakee_analyzer
+            .as_ref()
+            .is_some_and(|a| a.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_sched_wakeup");
+            programs.insert("on_sched_waking");
+        }
+
+        // softirq_analyzer needs softirq events
+        if self
+            .softirq_analyzer
+            .as_ref()
+            .is_some_and(|a| a.lock().unwrap().is_enabled())
+        {
+            programs.insert("on_softirq_entry");
+            programs.insert("on_softirq_exit");
+        }
+
+        programs.into_iter().collect()
+    }
+
     /// Check if BPF event tracking should be enabled/disabled
     /// Returns true if state changed
     fn manage_bpf_state(&self, enable: bool) -> bool {
@@ -68,8 +187,12 @@ impl AnalyzerControl {
             let currently_enabled = ec.is_event_tracking_enabled();
 
             if enable && !currently_enabled {
+                // Get required programs based on enabled analyzers
+                let required_progs = self.get_required_bpf_programs();
+                let prog_refs: Vec<&str> = required_progs.to_vec();
+
                 // Need to enable BPF tracking
-                match ec.enable_event_tracking() {
+                match ec.enable_event_tracking(&prog_refs) {
                     Ok(()) => {
                         info!("BPF event tracking enabled (first analyzer started)");
                         return true;
@@ -137,6 +260,11 @@ impl AnalyzerControl {
     /// Register a waker/wakee relationship analyzer
     pub fn set_waker_wakee_analyzer(&mut self, analyzer: Arc<Mutex<WakerWakeeAnalyzer>>) {
         self.waker_wakee_analyzer = Some(analyzer);
+    }
+
+    /// Register a softirq analyzer
+    pub fn set_softirq_analyzer(&mut self, analyzer: Arc<Mutex<SoftirqAnalyzer>>) {
+        self.softirq_analyzer = Some(analyzer);
     }
 
     /// Start a specific analyzer with automatic BPF control
@@ -217,6 +345,14 @@ impl AnalyzerControl {
                     Ok(())
                 } else {
                     Err("Waker/wakee analyzer not registered".to_string())
+                }
+            }
+            "softirq_analyzer" => {
+                if let Some(ref analyzer) = self.softirq_analyzer {
+                    analyzer.lock().unwrap().start();
+                    Ok(())
+                } else {
+                    Err("Softirq analyzer not registered".to_string())
                 }
             }
             "all" => {
@@ -308,6 +444,14 @@ impl AnalyzerControl {
                     Ok(())
                 } else {
                     Err("Waker/wakee analyzer not registered".to_string())
+                }
+            }
+            "softirq_analyzer" => {
+                if let Some(ref analyzer) = self.softirq_analyzer {
+                    analyzer.lock().unwrap().stop();
+                    Ok(())
+                } else {
+                    Err("Softirq analyzer not registered".to_string())
                 }
             }
             "all" => {
@@ -402,6 +546,14 @@ impl AnalyzerControl {
                     Err("Waker/wakee analyzer not registered".to_string())
                 }
             }
+            "softirq_analyzer" => {
+                if let Some(ref analyzer) = self.softirq_analyzer {
+                    analyzer.lock().unwrap().reset();
+                    Ok(())
+                } else {
+                    Err("Softirq analyzer not registered".to_string())
+                }
+            }
             "all" => {
                 self.reset_all();
                 Ok(())
@@ -444,6 +596,9 @@ impl AnalyzerControl {
         if let Some(ref analyzer) = self.waker_wakee_analyzer {
             analyzer.lock().unwrap().start();
         }
+        if let Some(ref analyzer) = self.softirq_analyzer {
+            analyzer.lock().unwrap().start();
+        }
 
         // If no analyzers were running before, enable BPF tracking
         if !was_any_enabled {
@@ -481,6 +636,9 @@ impl AnalyzerControl {
         if let Some(ref analyzer) = self.waker_wakee_analyzer {
             analyzer.lock().unwrap().stop();
         }
+        if let Some(ref analyzer) = self.softirq_analyzer {
+            analyzer.lock().unwrap().stop();
+        }
 
         // All analyzers are now stopped - disable BPF tracking
         self.manage_bpf_state(false);
@@ -513,6 +671,9 @@ impl AnalyzerControl {
             tracker.lock().unwrap().reset();
         }
         if let Some(ref analyzer) = self.waker_wakee_analyzer {
+            analyzer.lock().unwrap().reset();
+        }
+        if let Some(ref analyzer) = self.softirq_analyzer {
             analyzer.lock().unwrap().reset();
         }
     }
@@ -556,12 +717,21 @@ impl AnalyzerControl {
                 .waker_wakee_analyzer
                 .as_ref()
                 .map(|a| a.lock().unwrap().is_enabled()),
+            softirq_analyzer: self
+                .softirq_analyzer
+                .as_ref()
+                .map(|a| a.lock().unwrap().is_enabled()),
         }
     }
 
     /// Get waker/wakee analyzer reference for querying data
     pub fn get_waker_wakee_analyzer(&self) -> Option<Arc<Mutex<WakerWakeeAnalyzer>>> {
         self.waker_wakee_analyzer.clone()
+    }
+
+    /// Get softirq analyzer reference for querying data
+    pub fn get_softirq_analyzer(&self) -> Option<Arc<Mutex<SoftirqAnalyzer>>> {
+        self.softirq_analyzer.clone()
     }
 }
 
@@ -583,6 +753,7 @@ pub struct AnalyzerStatus {
     pub rate_monitor: Option<bool>,
     pub wakeup_tracker: Option<bool>,
     pub waker_wakee_analyzer: Option<bool>,
+    pub softirq_analyzer: Option<bool>,
 }
 
 impl AnalyzerStatus {
@@ -597,6 +768,7 @@ impl AnalyzerStatus {
             || self.rate_monitor.unwrap_or(false)
             || self.wakeup_tracker.unwrap_or(false)
             || self.waker_wakee_analyzer.unwrap_or(false)
+            || self.softirq_analyzer.unwrap_or(false)
     }
 
     /// Get list of enabled analyzers
@@ -628,6 +800,9 @@ impl AnalyzerStatus {
         }
         if self.waker_wakee_analyzer.unwrap_or(false) {
             enabled.push("waker_wakee_analyzer".to_string());
+        }
+        if self.softirq_analyzer.unwrap_or(false) {
+            enabled.push("softirq_analyzer".to_string());
         }
         enabled
     }

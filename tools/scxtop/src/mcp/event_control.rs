@@ -18,7 +18,8 @@ pub enum StatsControlCommand {
 }
 
 /// Callback to reattach BPF programs when enabling event tracking
-pub type AttachCallback = Box<dyn Fn() -> Result<Vec<Link>> + Send + Sync>;
+/// Takes a list of program names to attach
+pub type AttachCallback = Box<dyn Fn(&[&str]) -> Result<Vec<Link>> + Send + Sync>;
 
 /// Control handle for BPF event tracking and stats collection
 /// This allows dynamically starting/stopping collection to minimize overhead
@@ -74,8 +75,11 @@ impl EventControl {
         self.stats_control_tx = Some(tx);
     }
 
-    /// Enable BPF event tracking by reattaching programs
-    pub fn enable_event_tracking(&self) -> Result<()> {
+    /// Enable BPF event tracking by reattaching specified programs
+    ///
+    /// # Arguments
+    /// * `program_names` - List of BPF program names to attach. If empty, attaches all programs.
+    pub fn enable_event_tracking(&self, program_names: &[&str]) -> Result<()> {
         let mut links_guard = self.bpf_links.lock().unwrap();
 
         // Already enabled
@@ -87,8 +91,16 @@ impl EventControl {
         // Reattach programs using callback
         let callback_guard = self.attach_callback.lock().unwrap();
         if let Some(ref callback) = *callback_guard {
-            info!("Reattaching BPF programs...");
-            match callback() {
+            if program_names.is_empty() {
+                info!("Reattaching all BPF programs...");
+            } else {
+                info!(
+                    "Reattaching {} BPF programs: {:?}",
+                    program_names.len(),
+                    program_names
+                );
+            }
+            match callback(program_names) {
                 Ok(new_links) => {
                     let count = new_links.len();
                     *links_guard = Some(new_links);
