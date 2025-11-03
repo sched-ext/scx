@@ -36,7 +36,8 @@ pub use event_control::{
 };
 pub use event_filter::EventFilter;
 pub use extended_analyzers::{
-    DsqMonitor, DsqMonitorStats, EventRateMonitor, ProcessEventHistory, RateAnomaly,
+    CpuSoftirqStats, DsqMonitor, DsqMonitorStats, EventRateMonitor, ProcessEventHistory,
+    ProcessSoftirqStats, RateAnomaly, SoftirqAnalyzer, SoftirqStats, SoftirqSummary,
     SystemSnapshot, WakeupChainTracker,
 };
 pub use perf_profiling::{

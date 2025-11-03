@@ -256,7 +256,7 @@ impl McpTools {
             McpTool {
                 name: "control_analyzers".to_string(),
                 description:
-                    "Control event analyzers (start, stop, reset, or get status). Analyzers include: waker_wakee_analyzer, latency_tracker, cpu_hotspot_analyzer, migration_analyzer, process_history, dsq_monitor, rate_monitor, wakeup_tracker, event_buffer."
+                    "Control event analyzers (start, stop, reset, or get status). Analyzers include: waker_wakee_analyzer, latency_tracker, cpu_hotspot_analyzer, migration_analyzer, process_history, dsq_monitor, rate_monitor, wakeup_tracker, event_buffer, softirq_analyzer."
                         .to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -268,7 +268,7 @@ impl McpTools {
                         },
                         "analyzer": {
                             "type": "string",
-                            "enum": ["waker_wakee_analyzer", "latency_tracker", "cpu_hotspot_analyzer", "migration_analyzer", "process_history", "dsq_monitor", "rate_monitor", "wakeup_tracker", "event_buffer", "all"],
+                            "enum": ["waker_wakee_analyzer", "latency_tracker", "cpu_hotspot_analyzer", "migration_analyzer", "process_history", "dsq_monitor", "rate_monitor", "wakeup_tracker", "event_buffer", "softirq_analyzer", "all"],
                             "description": "Which analyzer to control (use 'all' to control all analyzers)",
                             "default": "all"
                         }
@@ -305,6 +305,35 @@ impl McpTools {
                     "required": []
                 }),
             },
+            McpTool {
+                name: "analyze_softirq".to_string(),
+                description:
+                    "Analyze software interrupt (softirq) processing to identify performance bottlenecks, high-latency handlers, and CPU hotspots. Returns statistics on softirq types, durations, and system impact."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["summary", "by_type", "by_cpu", "by_process"],
+                            "description": "Analysis mode: 'summary' (overall stats), 'by_type' (per softirq type), 'by_cpu' (per-CPU breakdown), 'by_process' (which processes handle softirqs)",
+                            "default": "summary"
+                        },
+                        "softirq_nr": {
+                            "type": "integer",
+                            "description": "Specific softirq number to analyze (0=HI, 1=TIMER, 2=NET_TX, 3=NET_RX, 4=BLOCK, 5=IRQ_POLL, 6=TASKLET, 7=SCHED, 8=HRTIMER, 9=RCU). Optional, applies to by_cpu and by_process modes."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of results to return (for by_cpu and by_process modes)",
+                            "default": 20,
+                            "minimum": 1,
+                            "maximum": 100
+                        }
+                    },
+                    "required": []
+                }),
+            },
         ];
 
         json!({ "tools": tools })
@@ -331,6 +360,7 @@ impl McpTools {
             "control_stats_collection" => self.tool_control_stats_collection(arguments),
             "control_analyzers" => self.tool_control_analyzers(arguments),
             "analyze_waker_wakee" => self.tool_analyze_waker_wakee(arguments),
+            "analyze_softirq" => self.tool_analyze_softirq(arguments),
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
     }
@@ -838,7 +868,9 @@ impl McpTools {
 
         match action {
             "enable" => {
-                control.enable_event_tracking()?;
+                // Note: Program selection is managed automatically by AnalyzerControl based on
+                // which analyzers are enabled. Passing empty slice attaches all programs.
+                control.enable_event_tracking(&[])?;
                 Ok(json!({
                     "content": [{
                         "type": "text",
@@ -1114,6 +1146,107 @@ impl McpTools {
                     "mode": "summary",
                     "description": "Overview of waker/wakee relationship tracking",
                     "summary": summary,
+                })
+            }
+            _ => return Err(anyhow!("Invalid mode: {}", mode)),
+        };
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "Failed to serialize results".to_string())
+            }]
+        }))
+    }
+
+    fn tool_analyze_softirq(&self, args: &Value) -> Result<Value> {
+        let control = self
+            .analyzer_control
+            .as_ref()
+            .ok_or_else(|| anyhow!("Analyzer control not available (daemon mode required)"))?;
+
+        let control_lock = control.lock().unwrap();
+
+        // Check if softirq_analyzer is registered and enabled
+        let status = control_lock.get_status();
+        if status.softirq_analyzer != Some(true) {
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Softirq analyzer is not enabled.\n\nTo enable it, use:\n  control_analyzers action=start analyzer=softirq_analyzer\n\nNote: You must also enable BPF event tracking:\n  control_event_tracking action=enable"
+                }]
+            }));
+        }
+
+        // Get the softirq_analyzer reference
+        let analyzer_arc = control_lock
+            .get_softirq_analyzer()
+            .ok_or_else(|| anyhow!("Softirq analyzer not registered"))?;
+
+        drop(control_lock); // Release control lock before accessing analyzer
+
+        let analyzer = analyzer_arc.lock().unwrap();
+
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("summary");
+
+        let softirq_nr = args
+            .get("softirq_nr")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+        let result = match mode {
+            "summary" => {
+                let summary = analyzer.get_summary();
+                json!({
+                    "mode": "summary",
+                    "description": "Overall softirq processing statistics",
+                    "summary": summary,
+                    "note": "Softirq types: 0=HI, 1=TIMER, 2=NET_TX, 3=NET_RX, 4=BLOCK, 5=IRQ_POLL, 6=TASKLET, 7=SCHED, 8=HRTIMER, 9=RCU"
+                })
+            }
+            "by_type" => {
+                let stats = analyzer.get_overall_stats();
+                json!({
+                    "mode": "by_type",
+                    "description": "Softirq statistics by type (sorted by frequency)",
+                    "count": stats.len(),
+                    "stats": stats,
+                })
+            }
+            "by_cpu" => {
+                let stats = analyzer.get_cpu_breakdown(softirq_nr, limit);
+                let desc = if let Some(nr) = softirq_nr {
+                    format!("CPU breakdown for softirq type {} (top {})", nr, limit)
+                } else {
+                    format!("CPU breakdown for all softirq types (top {})", limit)
+                };
+                json!({
+                    "mode": "by_cpu",
+                    "description": desc,
+                    "softirq_nr": softirq_nr,
+                    "count": stats.len(),
+                    "stats": stats,
+                })
+            }
+            "by_process" => {
+                let stats = analyzer.get_process_breakdown(softirq_nr, limit);
+                let desc = if let Some(nr) = softirq_nr {
+                    format!("Process breakdown for softirq type {} (top {})", nr, limit)
+                } else {
+                    format!("Process breakdown for all softirq types (top {})", limit)
+                };
+                json!({
+                    "mode": "by_process",
+                    "description": desc,
+                    "softirq_nr": softirq_nr,
+                    "count": stats.len(),
+                    "stats": stats,
                 })
             }
             _ => return Err(anyhow!("Invalid mode: {}", mode)),

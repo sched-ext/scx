@@ -848,7 +848,7 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 	struct bpf_event       *event;
 	struct __softirq_event *softirq_event;
 
-	if (!enable_bpf_events || !should_sample())
+	if (!enable_bpf_events)
 		return 0;
 
 	u64 exit_ts   = bpf_ktime_get_ns();

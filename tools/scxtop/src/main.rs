@@ -110,6 +110,15 @@ fn handle_input_entry(app: &App, s: String) -> Option<Action> {
 
 /// Attaches BPF programs to the skel, handling non-root scenarios gracefully
 fn attach_progs(skel: &mut BpfSkel) -> Result<(Vec<Link>, Vec<String>)> {
+    attach_progs_selective(skel, &[])
+}
+
+/// Attaches specified BPF programs to the skel
+/// If program_names is empty, attaches all programs
+fn attach_progs_selective(
+    skel: &mut BpfSkel,
+    program_names: &[&str],
+) -> Result<(Vec<Link>, Vec<String>)> {
     let mut links = Vec::new();
     let mut warnings = Vec::new();
 
@@ -123,23 +132,30 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<(Vec<Link>, Vec<String>)> {
         return Ok((links, warnings));
     }
 
+    let attach_all = program_names.is_empty();
+
+    // Helper function to check if a program should be attached
+    let should_attach = |name: &str| -> bool { attach_all || program_names.contains(&name) };
+
     // Helper macro to safely attach programs and collect warnings
     macro_rules! safe_attach {
         ($prog:expr, $name:literal) => {
-            match $prog.attach() {
-                Ok(link) => {
-                    links.push(link);
-                }
-                Err(e) => {
-                    if is_root() {
-                        // If running as root and still failing, it's a real error
-                        return Err(anyhow!(
-                            "Failed to attach {} (running as root): {}",
-                            $name,
-                            e
-                        ));
-                    } else {
-                        warnings.push(format!("Failed to attach {}: {}", $name, e));
+            if should_attach($name) {
+                match $prog.attach() {
+                    Ok(link) => {
+                        links.push(link);
+                    }
+                    Err(e) => {
+                        if is_root() {
+                            // If running as root and still failing, it's a real error
+                            return Err(anyhow!(
+                                "Failed to attach {} (running as root): {}",
+                                $name,
+                                e
+                            ));
+                        } else {
+                            warnings.push(format!("Failed to attach {}: {}", $name, e));
+                        }
                     }
                 }
             }
@@ -150,11 +166,11 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<(Vec<Link>, Vec<String>)> {
     safe_attach!(skel.progs.on_sched_cpu_perf, "sched_cpu_perf");
     safe_attach!(skel.progs.scx_sched_reg, "scx_sched_reg");
     safe_attach!(skel.progs.scx_sched_unreg, "scx_sched_unreg");
-    safe_attach!(skel.progs.on_sched_switch, "sched_switch");
-    safe_attach!(skel.progs.on_sched_wakeup, "sched_wakeup");
+    safe_attach!(skel.progs.on_sched_switch, "on_sched_switch");
+    safe_attach!(skel.progs.on_sched_wakeup, "on_sched_wakeup");
     safe_attach!(skel.progs.on_sched_wakeup_new, "sched_wakeup_new");
-    safe_attach!(skel.progs.on_sched_waking, "sched_waking");
-    safe_attach!(skel.progs.on_sched_migrate_task, "sched_migrate_task");
+    safe_attach!(skel.progs.on_sched_waking, "on_sched_waking");
+    safe_attach!(skel.progs.on_sched_migrate_task, "on_sched_migrate_task");
     safe_attach!(skel.progs.on_sched_fork, "sched_fork");
     safe_attach!(skel.progs.on_sched_exec, "sched_exec");
     safe_attach!(skel.progs.on_sched_exit, "sched_exit");
@@ -183,6 +199,8 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<(Vec<Link>, Vec<String>)> {
     // Optional probes
     safe_attach!(skel.progs.on_cpuhp_enter, "cpuhp_enter");
     safe_attach!(skel.progs.on_cpuhp_exit, "cpuhp_exit");
+    safe_attach!(skel.progs.on_softirq_entry, "on_softirq_entry");
+    safe_attach!(skel.progs.on_softirq_exit, "on_softirq_exit");
 
     // If no links were successfully attached and we're not root, provide helpful guidance
     if links.is_empty() && !is_root() {
@@ -301,6 +319,12 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
                 links.push(link);
             }
             if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
+                links.push(link);
+            }
+            if let Ok(link) = skel.progs.on_softirq_entry.attach() {
+                links.push(link);
+            }
+            if let Ok(link) = skel.progs.on_softirq_exit.attach() {
                 links.push(link);
             }
 
@@ -779,6 +803,7 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 use scxtop::mcp::{
                     WakerWakeeAnalyzer, LatencyTracker, CpuHotspotAnalyzer, MigrationAnalyzer,
                     ProcessEventHistory, DsqMonitor, EventRateMonitor, WakeupChainTracker, EventBuffer,
+                    SoftirqAnalyzer,
                 };
                 use std::sync::Mutex;
 
@@ -819,6 +844,10 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 let event_buffer = EventBuffer::new();
                 let event_buffer_arc = Arc::new(Mutex::new(event_buffer));
 
+                // 10. Softirq Analyzer
+                let softirq_analyzer = SoftirqAnalyzer::new(10000); // 10 second window
+                let softirq_analyzer_arc = Arc::new(Mutex::new(softirq_analyzer));
+
                 // Set up event dispatch manager
                 let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
                 let mut edm = EventDispatchManager::new(None, None);
@@ -831,6 +860,7 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 let process_history_for_events = process_history_arc.clone();
                 let rate_monitor_for_events = rate_monitor_arc.clone();
                 let wakeup_tracker_for_events = wakeup_tracker_arc.clone();
+                let softirq_analyzer_for_events = softirq_analyzer_arc.clone();
 
                 // Set up ring buffer
                 let mut event_rbb = RingBufferBuilder::new();
@@ -980,6 +1010,22 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
 
                     // Note: Latency Tracker is updated by shared_stats which already handles it above
 
+                    // 8. Softirq Analyzer - tracks software interrupt processing
+                    if let Ok(mut analyzer) = softirq_analyzer_for_events.try_lock() {
+                        if event_type == bpf_intf::event_type_SOFTIRQ {
+                            let softirq = unsafe { &event.event.softirq };
+                            let json = serde_json::json!({
+                                "type": "softirq",
+                                "pid": softirq.pid,
+                                "softirq_nr": softirq.softirq_nr,
+                                "entry_ts": softirq.entry_ts,
+                                "exit_ts": softirq.exit_ts,
+                                "cpu": event.cpu,
+                            });
+                            analyzer.record_event(&json);
+                        }
+                    }
+
                     let _ = edm.on_event(&event);
                     0
                 };
@@ -1025,10 +1071,10 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 // Create attach callback using skeleton pointer (similar to perf attacher)
                 // SAFETY: Skeleton is kept alive in App until daemon shutdown
                 let skel_ptr = &mut skel as *mut _ as usize;
-                let attach_callback: AttachCallback = Box::new(move || {
+                let attach_callback: AttachCallback = Box::new(move |program_names: &[&str]| {
                     unsafe {
                         let skel_ref = &mut *(skel_ptr as *mut BpfSkel);
-                        attach_progs(skel_ref).map(|(links, _)| links)
+                        attach_progs_selective(skel_ref, program_names).map(|(links, _)| links)
                     }
                 });
 
@@ -1075,6 +1121,7 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 analyzer_control.set_rate_monitor(rate_monitor_arc.clone());
                 analyzer_control.set_wakeup_tracker(wakeup_tracker_arc.clone());
                 analyzer_control.set_waker_wakee_analyzer(waker_wakee_arc.clone());
+                analyzer_control.set_softirq_analyzer(softirq_analyzer_arc.clone());
 
                 // Wrap analyzer control in Arc<Mutex<>>
                 let analyzer_control = Arc::new(Mutex::new(analyzer_control));
