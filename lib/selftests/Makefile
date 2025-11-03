@@ -1,5 +1,6 @@
 .PHONY: clean test
-BPF_SOURCES = $(wildcard ../*.bpf.c) $(wildcard *.bpf.c)
+BPF_ALL_SOURCES = $(wildcard ../*.bpf.c) $(wildcard *.bpf.c)
+BPF_SOURCES = $(filter-out ../cgroup_bw.bpf.c, $(BPF_ALL_SOURCES))
 BPF_OBJECTS = $(notdir $(BPF_SOURCES:.bpf.c=.bpf.o))
 BPFTOOL=bpftool
 
