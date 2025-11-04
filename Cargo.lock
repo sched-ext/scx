@@ -3256,6 +3256,7 @@ dependencies = [
  "protobuf",
  "rand",
  "ratatui",
+ "rayon",
  "regex",
  "scx_cargo",
  "scx_stats",

@@ -105,7 +105,7 @@ Options:
   -h, --help             Print help
 ```
 
-## Trace Mode - Perfetto Trace Generation
+## Trace Mode - Perfetto Trace Generation and Analysis
 
 `scxtop` can generate [Perfetto](https://perfetto.dev/) compatible traces for detailed
 offline analysis. The trace data includes:
@@ -130,6 +130,40 @@ sudo scxtop trace --duration 60 --output scheduler-trace.proto
 **View traces at:** https://ui.perfetto.dev/
 
 ![scxtop](https://github.com/user-attachments/assets/1be4ace4-e153-48ad-b63e-16f2b4e4c756)
+
+### Analyzing Perfetto Traces (MCP Mode)
+
+`scxtop` can also **analyze** perfetto trace files through its MCP server interface, providing detailed scheduling analysis and bottleneck detection with comprehensive percentile statistics.
+
+**Key Features:**
+- Query scheduling events with flexible filtering (time range, CPU, PID, event type)
+- Analyze CPU utilization and process runtime with percentile breakdowns
+- Measure wakeup latency distributions (p50/p95/p99/p999)
+- Detect migration patterns and cross-NUMA/LLC migrations
+- Identify scheduling bottlenecks automatically
+- Extract sched_ext DSQ metadata from traces
+- Correlate wakeup→schedule events to find critical paths
+- Export comprehensive analysis to JSON
+
+**Quick Example:**
+```bash
+# 1. Generate trace
+sudo scxtop trace -d 5000 -o trace.proto -s
+
+# 2. Start MCP server
+sudo scxtop mcp --daemon
+
+# 3. Via MCP client (e.g., Claude):
+#    - load_perfetto_trace(file_path="trace.proto")
+#    - analyze_trace_scheduling(analysis_type="cpu_utilization")
+#    - find_scheduling_bottlenecks(limit=10)
+```
+
+**Performance:** Analyzes 40MB traces with 700K+ events in ~500ms (multi-threaded).
+
+See **[docs/PERFETTO_TRACE_ANALYSIS.md](docs/PERFETTO_TRACE_ANALYSIS.md)** for complete documentation and examples.
+
+For task/thread-level debugging, see **[docs/TASK_THREAD_DEBUGGING_GUIDE.md](docs/TASK_THREAD_DEBUGGING_GUIDE.md)**.
 
 ### Aggregating Across Hardware Boundaries
 
@@ -226,7 +260,7 @@ claude --mcp scxtop "Summarize my system's scheduler"
 
 ### Features
 
-**17 Resource URIs** - Read-only data endpoints:
+**Resource URIs** - Read-only data endpoints:
 - `scheduler://current` - Active scheduler identification
 - `topology://info` - Hardware topology (CPUs, cores, LLCs, NUMA)
 - `stats://aggregated/{cpu,llc,node,dsq,process}` - Aggregated metrics
@@ -239,9 +273,31 @@ claude --mcp scxtop "Summarize my system's scheduler"
 - `profiling://perf/results` - Symbolized stack traces (kernel and userspace)
 - `events://stream` - Real-time BPF event stream (daemon mode only)
 
-**6 Tools** - Interactive query and profiling tools:
+**Tools** - Interactive query, profiling, and analysis:
+
+*Live Monitoring Tools:*
 - `query_stats` - Discover available statistics by category
 - `get_topology` - Get hardware topology with configurable detail level
+- `list_event_subsystems` - List available tracing event subsystems
+- `list_events` - List specific kprobe or perf events with pagination
+- `start_perf_profiling` - Start CPU profiling with stack traces
+- `stop_perf_profiling` - Stop profiling and prepare results
+- `get_perf_results` - Get symbolized flamegraph data
+- `control_event_tracking` - Enable/disable BPF event collection
+- `control_stats_collection` - Control BPF statistics sampling
+- `control_analyzers` - Start/stop event analyzers
+- `analyze_waker_wakee` - Analyze task wakeup relationships
+- `analyze_softirq` - Analyze software interrupt processing
+
+*Perfetto Trace Analysis Tools:*
+- `load_perfetto_trace` - Load trace file for analysis
+- `query_trace_events` - Query events with filtering (type, time, CPU, PID)
+- `analyze_trace_scheduling` - Run scheduling analysis (5 types: CPU util, process runtime, wakeup latency, migration, DSQ)
+- `get_process_timeline` - Get chronological event timeline for process
+- `get_cpu_timeline` - Get chronological event timeline for CPU
+- `find_scheduling_bottlenecks` - Auto-detect performance issues
+- `correlate_wakeup_to_schedule` - Analyze wakeup→schedule latencies
+- `export_trace_analysis` - Export comprehensive analysis to JSON
 - `list_events` - List available kprobes and perf events (requires subsystem parameter)
 - `start_perf_profiling` - Start perf sampling with stack trace collection
 - `stop_perf_profiling` - Stop profiling and finalize results
@@ -325,3 +381,18 @@ This enables AI assistants to perform continuous monitoring and proactive analys
 ### Documentation
 
 See [CLAUDE_INTEGRATION.md](CLAUDE_INTEGRATION.md) for detailed examples and usage patterns.
+
+## Documentation
+
+### User Guides
+- **[docs/PERFETTO_TRACE_ANALYSIS.md](docs/PERFETTO_TRACE_ANALYSIS.md)** - Complete perfetto trace analysis guide
+- **[docs/TASK_THREAD_DEBUGGING_GUIDE.md](docs/TASK_THREAD_DEBUGGING_GUIDE.md)** - Task/thread debugging workflows  
+- **[docs/PROTOBUF_LOADING_VERIFIED.md](docs/PROTOBUF_LOADING_VERIFIED.md)** - Protobuf loading verification
+- **[docs/README.md](docs/README.md)** - Documentation index
+
+### Implementation Documentation
+- **[COMPLETE_IMPLEMENTATION_SUMMARY.md](COMPLETE_IMPLEMENTATION_SUMMARY.md)** - Full implementation overview
+- **[PERFETTO_MCP_IMPLEMENTATION.md](PERFETTO_MCP_IMPLEMENTATION.md)** - Core implementation (Phases 1-5)
+- **[EXTENDED_ANALYSIS_COMPLETE.md](EXTENDED_ANALYSIS_COMPLETE.md)** - Extended analyses (Phase 6)
+- **[PERFETTO_ANALYSIS_ROADMAP.md](PERFETTO_ANALYSIS_ROADMAP.md)** - Future enhancements roadmap
+- **[CLAUDE_INTEGRATION.md](CLAUDE_INTEGRATION.md)** - Claude Desktop/Code setup guide

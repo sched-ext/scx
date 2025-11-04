@@ -13,6 +13,9 @@ pub mod event_filter;
 pub mod events;
 pub mod extended_analyzers;
 mod perf_profiling;
+pub mod perfetto_analyzers;
+pub mod perfetto_analyzers_extended;
+pub mod perfetto_parser;
 mod prompts;
 mod protocol;
 mod resources;
@@ -43,6 +46,22 @@ pub use extended_analyzers::{
 pub use perf_profiling::{
     BpfPerfEventAttacher, PerfEventAttacher, PerfProfiler, PerfProfilingConfig, ProfilingStatus,
     RawSample, SharedPerfProfiler,
+};
+pub use perfetto_analyzers::{
+    BottleneckType, ContextSwitchAnalyzer, CorrelationAnalyzer, CpuUtilStats, DsqAnalysisSummary,
+    DsqAnalyzer, LatencyStatsPerCpu, PerfettoMigrationAnalyzer, PerfettoMigrationStats,
+    ProcessRuntimeStats, SchedulingBottleneck, WakeupChainAnalyzer, WakeupLatencyStats,
+    WakeupScheduleCorrelation,
+};
+pub use perfetto_analyzers_extended::{
+    LatencyBreakdownStats, LatencyStageStats, PreemptionAnalyzer, PreemptionStats, PreemptorInfo,
+    SchedulingLatencyBreakdown, TaskStateAnalyzer, TaskStateStats, WakeupChain,
+    WakeupChainDetector, WakeupChainEvent,
+};
+pub use perfetto_parser::{
+    CpuEventType, CpuTimeline, CpuTimelineEvent, DsqDescriptor, DsqEvent, FtraceEventWithIndex,
+    Percentiles, PerfettoTrace, ProcessInfo, ProcessTimeline, ProcessTimelineEvent,
+    SchedExtEventData, SchedExtMetadata, ThreadInfo,
 };
 pub use prompts::McpPrompts;
 pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
