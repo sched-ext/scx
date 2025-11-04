@@ -362,6 +362,28 @@ topo_iter_level_internal(struct topo_iter *iter, enum topo_level lvl)
 	return (u64)iter->topo;
 }
 
+__weak int
+topo_cpu_to_llc_id(u32 cpu)
+{
+	topo_ptr topo;
+	u32 id;
+
+	if (cpu >= nr_cpu_ids) {
+		bpf_printk("invalid cpu id: %u", cpu);
+		return -EINVAL;
+	}
+
+	topo = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
+	if (!topo) {
+		bpf_printk("cpu %u has no topology node set", cpu);
+		return -EINVAL;
+	}
+
+	/* TOPO_CPU -> TOPO_CORE -> TOPO_LLC */
+	id = topo->parent->parent->id;
+	return id;
+}
+
 volatile u64 a;
 
 __weak __maybe_unused
