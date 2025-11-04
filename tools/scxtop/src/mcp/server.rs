@@ -546,6 +546,23 @@ impl McpServer {
         self.analyzer_control.clone()
     }
 
+    pub fn with_trace_cache(
+        mut self,
+        cache: std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::HashMap<String, std::sync::Arc<super::PerfettoTrace>>,
+            >,
+        >,
+    ) -> Self {
+        // Pass trace cache to tools
+        self.tools.set_trace_cache(cache);
+        self
+    }
+
+    pub fn tools_mut(&mut self) -> &mut McpTools {
+        &mut self.tools
+    }
+
     /// Run the MCP server in blocking mode (reads from stdin, writes to stdout)
     pub fn run_blocking(&mut self) -> Result<()> {
         let stdin = std::io::stdin();

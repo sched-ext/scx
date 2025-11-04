@@ -1126,6 +1126,10 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                 // Wrap analyzer control in Arc<Mutex<>>
                 let analyzer_control = Arc::new(Mutex::new(analyzer_control));
 
+                // Create trace cache for perfetto analysis
+                use std::collections::HashMap;
+                let trace_cache = Arc::new(Mutex::new(HashMap::new()));
+
                 // Create MCP server
                 let mut server = McpServer::new(mcp_config)
                     .with_topology(topo_arc)
@@ -1136,6 +1140,7 @@ fn run_mcp(mcp_args: &scxtop::cli::McpArgs) -> Result<()> {
                     .with_stats_client(None)
                     .with_event_control(event_control.clone())
                     .with_analyzer_control(analyzer_control.clone())
+                    .with_trace_cache(trace_cache)
                     .setup_stats_resources();
 
                 // Enable event streaming

@@ -7,14 +7,19 @@ use super::perf_profiling::{PerfProfilingConfig, SharedPerfProfiler};
 use super::protocol::McpTool;
 use super::SharedAnalyzerControl;
 use anyhow::{anyhow, Result};
+use perfetto_protos::ftrace_event::ftrace_event;
 use serde_json::{json, Value};
 use std::sync::Arc;
+
+type TraceCache =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<super::PerfettoTrace>>>>;
 
 pub struct McpTools {
     topo: Option<Arc<scx_utils::Topology>>,
     perf_profiler: Option<SharedPerfProfiler>,
     event_control: Option<super::SharedEventControl>,
     analyzer_control: Option<SharedAnalyzerControl>,
+    trace_cache: Option<TraceCache>,
 }
 
 impl Default for McpTools {
@@ -30,7 +35,15 @@ impl McpTools {
             perf_profiler: None,
             event_control: None,
             analyzer_control: None,
+            trace_cache: None,
         }
+    }
+
+    pub fn set_trace_cache(
+        &mut self,
+        cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<super::PerfettoTrace>>>>,
+    ) {
+        self.trace_cache = Some(cache);
     }
 
     pub fn set_topology(&mut self, topo: Arc<scx_utils::Topology>) {
@@ -334,6 +347,222 @@ impl McpTools {
                     "required": []
                 }),
             },
+            McpTool {
+                name: "load_perfetto_trace".to_string(),
+                description: "Load a perfetto trace file for analysis".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Absolute path to perfetto trace file (.proto)"
+                        },
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Optional ID to reference this trace (defaults to filename)"
+                        }
+                    },
+                    "required": ["file_path"]
+                }),
+            },
+            McpTool {
+                name: "query_trace_events".to_string(),
+                description: "Query events from a loaded perfetto trace".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "event_type": {
+                            "type": "string",
+                            "enum": ["sched_switch", "sched_wakeup", "sched_waking", "sched_migrate", "softirq", "all"],
+                            "description": "Type of events to query",
+                            "default": "all"
+                        },
+                        "start_time_ns": {
+                            "type": "integer",
+                            "description": "Start of time range (nanoseconds, optional)"
+                        },
+                        "end_time_ns": {
+                            "type": "integer",
+                            "description": "End of time range (nanoseconds, optional)"
+                        },
+                        "cpu": {
+                            "type": "integer",
+                            "description": "Filter by CPU (optional)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of events to return",
+                            "default": 1000,
+                            "minimum": 1,
+                            "maximum": 10000
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
+                name: "analyze_trace_scheduling".to_string(),
+                description: "Analyze scheduling patterns in a perfetto trace with full percentile statistics".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "analysis_type": {
+                            "type": "string",
+                            "enum": ["cpu_utilization", "process_runtime", "wakeup_latency", "migration_patterns", "dsq_summary", "task_states", "preemptions", "wakeup_chains", "latency_breakdown"],
+                            "description": "Type of analysis to perform"
+                        },
+                        "use_parallel": {
+                            "type": "boolean",
+                            "description": "Use multi-threaded analysis for better performance",
+                            "default": true
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Limit results (for ranked analyses)",
+                            "default": 20,
+                            "minimum": 1,
+                            "maximum": 1000
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "description": "Optional PID filter for process-specific analysis"
+                        }
+                    },
+                    "required": ["trace_id", "analysis_type"]
+                }),
+            },
+            McpTool {
+                name: "get_process_timeline".to_string(),
+                description: "Get chronological timeline of all events for a specific process".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "description": "Process ID to get timeline for"
+                        },
+                        "start_time_ns": {
+                            "type": "integer",
+                            "description": "Start of time range (optional, defaults to trace start)"
+                        },
+                        "end_time_ns": {
+                            "type": "integer",
+                            "description": "End of time range (optional, defaults to trace end)"
+                        }
+                    },
+                    "required": ["trace_id", "pid"]
+                }),
+            },
+            McpTool {
+                name: "get_cpu_timeline".to_string(),
+                description: "Get chronological timeline of all events for a specific CPU".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "cpu": {
+                            "type": "integer",
+                            "description": "CPU ID to get timeline for"
+                        },
+                        "start_time_ns": {
+                            "type": "integer",
+                            "description": "Start of time range (optional, defaults to trace start)"
+                        },
+                        "end_time_ns": {
+                            "type": "integer",
+                            "description": "End of time range (optional, defaults to trace end)"
+                        }
+                    },
+                    "required": ["trace_id", "cpu"]
+                }),
+            },
+            McpTool {
+                name: "find_scheduling_bottlenecks".to_string(),
+                description: "Automatically detect scheduling bottlenecks including high switch rates, long latencies, and excessive migration".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of bottlenecks to return",
+                            "default": 10,
+                            "minimum": 1,
+                            "maximum": 100
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
+                name: "correlate_wakeup_to_schedule".to_string(),
+                description: "Correlate wakeup events to schedule events, showing waker→wakee latencies".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID returned from load_perfetto_trace"
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "description": "Optional PID filter (shows correlations for specific process)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of correlations to return (sorted by latency)",
+                            "default": 100,
+                            "minimum": 1,
+                            "maximum": 10000
+                        }
+                    },
+                    "required": ["trace_id"]
+                }),
+            },
+            McpTool {
+                name: "export_trace_analysis".to_string(),
+                description: "Export comprehensive trace analysis to JSON file".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "trace_id": {
+                            "type": "string",
+                            "description": "Trace ID to export"
+                        },
+                        "output_path": {
+                            "type": "string",
+                            "description": "Output file path for JSON export"
+                        },
+                        "analysis_types": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["cpu_utilization", "process_runtime", "wakeup_latency", "migration", "dsq", "bottlenecks"]
+                            },
+                            "description": "Types of analysis to include in export (defaults to all)"
+                        }
+                    },
+                    "required": ["trace_id", "output_path"]
+                }),
+            },
         ];
 
         json!({ "tools": tools })
@@ -361,6 +590,14 @@ impl McpTools {
             "control_analyzers" => self.tool_control_analyzers(arguments),
             "analyze_waker_wakee" => self.tool_analyze_waker_wakee(arguments),
             "analyze_softirq" => self.tool_analyze_softirq(arguments),
+            "load_perfetto_trace" => self.tool_load_perfetto_trace(arguments),
+            "query_trace_events" => self.tool_query_trace_events(arguments),
+            "analyze_trace_scheduling" => self.tool_analyze_trace_scheduling(arguments),
+            "get_process_timeline" => self.tool_get_process_timeline(arguments),
+            "get_cpu_timeline" => self.tool_get_cpu_timeline(arguments),
+            "find_scheduling_bottlenecks" => self.tool_find_scheduling_bottlenecks(arguments),
+            "correlate_wakeup_to_schedule" => self.tool_correlate_wakeup_to_schedule(arguments),
+            "export_trace_analysis" => self.tool_export_trace_analysis(arguments),
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
     }
@@ -1257,6 +1494,730 @@ impl McpTools {
                 "type": "text",
                 "text": serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "Failed to serialize results".to_string())
+            }]
+        }))
+    }
+
+    fn tool_load_perfetto_trace(&mut self, args: &Value) -> Result<Value> {
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let file_path = args
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing file_path parameter"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                std::path::Path::new(file_path)
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            });
+
+        // Parse trace file
+        let trace = Arc::new(super::PerfettoTrace::from_file(std::path::Path::new(
+            file_path,
+        ))?);
+
+        // Store in cache
+        let mut cache_lock = cache.lock().unwrap();
+        cache_lock.insert(trace_id.clone(), trace.clone());
+
+        // Get metadata
+        let (start_ts, end_ts) = trace.time_range();
+        let duration_ms = (end_ts - start_ts) / 1_000_000;
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Loaded perfetto trace: {}\n\
+                     Trace ID: {}\n\
+                     Time range: {} - {} ns ({} ms)\n\
+                     Processes: {}\n\
+                     CPUs: {}\n\
+                     Total events: {}\n\
+                     sched_ext trace: {}\n\
+                     {}",
+                    file_path,
+                    trace_id,
+                    start_ts,
+                    end_ts,
+                    duration_ms,
+                    trace.get_processes().len(),
+                    trace.num_cpus(),
+                    trace.total_events(),
+                    if trace.is_scx_trace() { "yes" } else { "no" },
+                    if let Some(scx_meta) = trace.get_scx_metadata() {
+                        format!("DSQs: {} ({:?})", scx_meta.dsq_ids.len(), &scx_meta.dsq_ids[..scx_meta.dsq_ids.len().min(10)])
+                    } else {
+                        "".to_string()
+                    }
+                )
+            }]
+        }))
+    }
+
+    fn tool_query_trace_events(&self, args: &Value) -> Result<Value> {
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        // Get trace from cache
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Trace '{}' not found. Use load_perfetto_trace first.",
+                    trace_id
+                )
+            })?
+            .clone();
+        drop(cache_lock);
+
+        let event_type = args
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("all");
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
+
+        // Apply filters
+        let events = if let Some(cpu) = args.get("cpu").and_then(|v| v.as_u64()) {
+            // CPU-specific query
+            trace
+                .get_events_by_cpu(cpu as u32)
+                .iter()
+                .map(|e| &e.event)
+                .collect()
+        } else if let (Some(start), Some(end)) = (
+            args.get("start_time_ns").and_then(|v| v.as_u64()),
+            args.get("end_time_ns").and_then(|v| v.as_u64()),
+        ) {
+            // Time range query
+            trace.get_events_by_time_range(start, end)
+        } else if event_type != "all" {
+            // Type-specific query
+            trace.get_events_by_type(event_type)
+        } else {
+            // All events
+            trace.get_events_by_time_range(0, u64::MAX)
+        };
+
+        let limited_events: Vec<_> = events.into_iter().take(limit).collect();
+
+        // Format events for display
+        let event_summaries: Vec<_> = limited_events
+            .iter()
+            .take(100) // Show max 100 for readability
+            .map(|event| {
+                let event_type_str = match &event.event {
+                    Some(ftrace_event::Event::SchedSwitch(_)) => "sched_switch",
+                    Some(ftrace_event::Event::SchedWakeup(_)) => "sched_wakeup",
+                    Some(ftrace_event::Event::SchedWaking(_)) => "sched_waking",
+                    Some(ftrace_event::Event::SchedMigrateTask(_)) => "sched_migrate",
+                    Some(ftrace_event::Event::SoftirqEntry(_)) => "softirq_entry",
+                    Some(ftrace_event::Event::SoftirqExit(_)) => "softirq_exit",
+                    _ => "other",
+                };
+
+                json!({
+                    "type": event_type_str,
+                    "timestamp": event.timestamp,
+                    "pid": event.pid,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Trace Query Results:\n\
+                     Trace ID: {}\n\
+                     Event type filter: {}\n\
+                     Total matching events: {}\n\
+                     Returned: {} (limit: {})\n\n\
+                     Sample events (first 100):\n{}",
+                    trace_id,
+                    event_type,
+                    limited_events.len(),
+                    limited_events.len().min(limit),
+                    limit,
+                    serde_json::to_string_pretty(&event_summaries)
+                        .unwrap_or_else(|_| "Failed to serialize events".to_string())
+                )
+            }]
+        }))
+    }
+
+    fn tool_analyze_trace_scheduling(&self, args: &Value) -> Result<Value> {
+        use super::perfetto_analyzers::{
+            ContextSwitchAnalyzer, DsqAnalyzer, PerfettoMigrationAnalyzer, WakeupChainAnalyzer,
+        };
+
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        let analysis_type = args
+            .get("analysis_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing analysis_type parameter"))?;
+
+        let use_parallel = args
+            .get("use_parallel")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+        let pid = args.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
+
+        // Get trace from cache
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Trace '{}' not found. Use load_perfetto_trace first.",
+                    trace_id
+                )
+            })?
+            .clone();
+        drop(cache_lock);
+
+        let start_time = std::time::Instant::now();
+
+        let result = match analysis_type {
+            "cpu_utilization" => {
+                let analyzer = ContextSwitchAnalyzer::new(trace);
+                let stats = if use_parallel {
+                    analyzer.analyze_cpu_utilization_parallel()
+                } else {
+                    analyzer.analyze_cpu_utilization()
+                };
+
+                json!({
+                    "analysis_type": "cpu_utilization",
+                    "cpus_analyzed": stats.len(),
+                    "multi_threaded": use_parallel,
+                    "cpus": stats,
+                })
+            }
+            "process_runtime" => {
+                let analyzer = ContextSwitchAnalyzer::new(trace);
+                let stats = if use_parallel {
+                    analyzer.analyze_process_runtime_parallel(pid)
+                } else {
+                    analyzer.analyze_process_runtime(pid)
+                };
+
+                let limited_stats: Vec<_> = stats.into_iter().take(limit).collect();
+
+                json!({
+                    "analysis_type": "process_runtime",
+                    "processes_analyzed": limited_stats.len(),
+                    "multi_threaded": use_parallel,
+                    "pid_filter": pid,
+                    "processes": limited_stats,
+                })
+            }
+            "wakeup_latency" => {
+                let analyzer = WakeupChainAnalyzer::new(trace);
+                let stats = analyzer.analyze_wakeup_latency();
+
+                json!({
+                    "analysis_type": "wakeup_latency",
+                    "stats": stats,
+                })
+            }
+            "migration_patterns" => {
+                let analyzer = PerfettoMigrationAnalyzer::new(trace);
+                let stats = analyzer.analyze_migration_patterns();
+
+                json!({
+                    "analysis_type": "migration_patterns",
+                    "stats": stats,
+                })
+            }
+            "dsq_summary" => {
+                let analyzer = DsqAnalyzer::new(trace);
+
+                if !analyzer.has_scx_data() {
+                    return Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "This trace does not contain sched_ext (DSQ) data.\n\nDSQ analysis is only available for traces generated while a sched_ext scheduler is active."
+                        }]
+                    }));
+                }
+
+                let summary = analyzer.get_summary().unwrap();
+
+                json!({
+                    "analysis_type": "dsq_summary",
+                    "summary": summary,
+                })
+            }
+            "task_states" => {
+                use super::perfetto_analyzers_extended::TaskStateAnalyzer;
+                let analyzer = TaskStateAnalyzer::new(trace);
+                let stats = analyzer.analyze_task_states(pid);
+                let limited_stats: Vec<_> = stats.into_iter().take(limit).collect();
+
+                json!({
+                    "analysis_type": "task_states",
+                    "processes_analyzed": limited_stats.len(),
+                    "pid_filter": pid,
+                    "processes": limited_stats,
+                })
+            }
+            "preemptions" => {
+                use super::perfetto_analyzers_extended::PreemptionAnalyzer;
+                let analyzer = PreemptionAnalyzer::new(trace);
+                let stats = analyzer.analyze_preemptions(pid);
+                let limited_stats: Vec<_> = stats.into_iter().take(limit).collect();
+
+                json!({
+                    "analysis_type": "preemptions",
+                    "processes_analyzed": limited_stats.len(),
+                    "pid_filter": pid,
+                    "processes": limited_stats,
+                })
+            }
+            "wakeup_chains" => {
+                use super::perfetto_analyzers_extended::WakeupChainDetector;
+                let analyzer = WakeupChainDetector::new(trace);
+                let chains = analyzer.find_wakeup_chains(limit);
+
+                json!({
+                    "analysis_type": "wakeup_chains",
+                    "chains_found": chains.len(),
+                    "chains": chains,
+                })
+            }
+            "latency_breakdown" => {
+                use super::perfetto_analyzers_extended::SchedulingLatencyBreakdown;
+                let analyzer = SchedulingLatencyBreakdown::new(trace);
+                let stats = analyzer.analyze_latency_stages();
+
+                json!({
+                    "analysis_type": "latency_breakdown",
+                    "stats": stats,
+                })
+            }
+            _ => return Err(anyhow!("Unknown analysis_type: {}", analysis_type)),
+        };
+
+        let analysis_time = start_time.elapsed();
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Analysis completed in {:?}\n\n{}",
+                    analysis_time,
+                    serde_json::to_string_pretty(&result)
+                        .unwrap_or_else(|_| "Failed to serialize results".to_string())
+                )
+            }]
+        }))
+    }
+
+    fn tool_get_process_timeline(&self, args: &Value) -> Result<Value> {
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        let pid = args
+            .get("pid")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| anyhow!("Missing pid parameter"))? as i32;
+
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| anyhow!("Trace '{}' not found", trace_id))?
+            .clone();
+        drop(cache_lock);
+
+        let (default_start, default_end) = trace.time_range();
+        let start_ns = args
+            .get("start_time_ns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_start);
+        let end_ns = args
+            .get("end_time_ns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_end);
+
+        let timeline = trace.get_timeline_for_process(pid, start_ns, end_ns);
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Process Timeline for PID {} ({})\n\
+                     Time range: {} - {} ns\n\
+                     Total events: {}\n\n\
+                     Timeline:\n{}",
+                    timeline.pid,
+                    timeline.comm,
+                    start_ns,
+                    end_ns,
+                    timeline.events.len(),
+                    serde_json::to_string_pretty(&timeline.events)
+                        .unwrap_or_else(|_| "Failed to serialize timeline".to_string())
+                )
+            }]
+        }))
+    }
+
+    fn tool_get_cpu_timeline(&self, args: &Value) -> Result<Value> {
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        let cpu = args
+            .get("cpu")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow!("Missing cpu parameter"))? as u32;
+
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| anyhow!("Trace '{}' not found", trace_id))?
+            .clone();
+        drop(cache_lock);
+
+        let (default_start, default_end) = trace.time_range();
+        let start_ns = args
+            .get("start_time_ns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_start);
+        let end_ns = args
+            .get("end_time_ns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_end);
+
+        let timeline = trace.get_cpu_timeline(cpu, start_ns, end_ns);
+
+        // Limit output for readability
+        let limited_events: Vec<_> = timeline.events.iter().take(100).collect();
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "CPU Timeline for CPU {}\n\
+                     Time range: {} - {} ns\n\
+                     Total events: {}\n\n\
+                     Timeline (first 100 events):\n{}",
+                    timeline.cpu,
+                    start_ns,
+                    end_ns,
+                    timeline.events.len(),
+                    serde_json::to_string_pretty(&limited_events)
+                        .unwrap_or_else(|_| "Failed to serialize timeline".to_string())
+                )
+            }]
+        }))
+    }
+
+    fn tool_find_scheduling_bottlenecks(&self, args: &Value) -> Result<Value> {
+        use super::perfetto_analyzers::CorrelationAnalyzer;
+
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| anyhow!("Trace '{}' not found", trace_id))?
+            .clone();
+        drop(cache_lock);
+
+        let start_time = std::time::Instant::now();
+        let analyzer = CorrelationAnalyzer::new(trace);
+        let bottlenecks = analyzer.find_scheduling_bottlenecks(limit);
+        let analysis_time = start_time.elapsed();
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Scheduling Bottlenecks (analyzed in {:?})\n\n\
+                     Found {} bottleneck(s):\n\n{}",
+                    analysis_time,
+                    bottlenecks.len(),
+                    serde_json::to_string_pretty(&bottlenecks)
+                        .unwrap_or_else(|_| "Failed to serialize bottlenecks".to_string())
+                )
+            }]
+        }))
+    }
+
+    fn tool_correlate_wakeup_to_schedule(&self, args: &Value) -> Result<Value> {
+        use super::perfetto_analyzers::CorrelationAnalyzer;
+
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        let pid = args.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
+
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| anyhow!("Trace '{}' not found", trace_id))?
+            .clone();
+        drop(cache_lock);
+
+        let start_time = std::time::Instant::now();
+        let analyzer = CorrelationAnalyzer::new(trace);
+        let correlations = analyzer.correlate_wakeup_to_schedule(pid);
+        let analysis_time = start_time.elapsed();
+
+        let limited_correlations: Vec<_> = correlations.into_iter().take(limit).collect();
+
+        // Calculate latency percentiles
+        let latencies: Vec<u64> = limited_correlations
+            .iter()
+            .map(|c| c.wakeup_latency_ns)
+            .collect();
+        let percentiles = super::PerfettoTrace::calculate_percentiles(&latencies);
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Wakeup→Schedule Correlations (analyzed in {:?})\n\n\
+                     Total correlations: {}\n\
+                     Showing top {} by latency\n\n\
+                     Latency percentiles:\n\
+                       min:  {} ns\n\
+                       p50:  {} ns\n\
+                       p95:  {} ns\n\
+                       p99:  {} ns\n\
+                       p999: {} ns\n\
+                       max:  {} ns\n\n\
+                     Correlations:\n{}",
+                    analysis_time,
+                    limited_correlations.len(),
+                    limit,
+                    percentiles.min,
+                    percentiles.median,
+                    percentiles.p95,
+                    percentiles.p99,
+                    percentiles.p999,
+                    percentiles.max,
+                    serde_json::to_string_pretty(&limited_correlations)
+                        .unwrap_or_else(|_| "Failed to serialize correlations".to_string())
+                )
+            }]
+        }))
+    }
+
+    fn tool_export_trace_analysis(&self, args: &Value) -> Result<Value> {
+        use super::perfetto_analyzers::{
+            ContextSwitchAnalyzer, CorrelationAnalyzer, DsqAnalyzer, PerfettoMigrationAnalyzer,
+            WakeupChainAnalyzer,
+        };
+
+        let cache = self
+            .trace_cache
+            .as_ref()
+            .ok_or_else(|| anyhow!("Trace cache not available"))?;
+
+        let trace_id = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing trace_id parameter"))?;
+
+        let output_path = args
+            .get("output_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("Missing output_path parameter"))?;
+
+        let analysis_types = args
+            .get("analysis_types")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    "cpu_utilization".to_string(),
+                    "process_runtime".to_string(),
+                    "wakeup_latency".to_string(),
+                    "migration".to_string(),
+                    "dsq".to_string(),
+                    "bottlenecks".to_string(),
+                    "task_states".to_string(),
+                    "preemptions".to_string(),
+                    "wakeup_chains".to_string(),
+                    "latency_breakdown".to_string(),
+                ]
+            });
+
+        let cache_lock = cache.lock().unwrap();
+        let trace = cache_lock
+            .get(trace_id)
+            .ok_or_else(|| anyhow!("Trace '{}' not found", trace_id))?
+            .clone();
+        drop(cache_lock);
+
+        let mut export_data = json!({
+            "trace_id": trace_id,
+            "time_range": trace.time_range(),
+            "num_cpus": trace.num_cpus(),
+            "num_processes": trace.get_processes().len(),
+            "total_events": trace.total_events(),
+            "is_scx_trace": trace.is_scx_trace(),
+            "export_timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        });
+
+        let start_time = std::time::Instant::now();
+
+        // Run requested analyses
+        for analysis_type in &analysis_types {
+            match analysis_type.as_str() {
+                "cpu_utilization" => {
+                    let analyzer = ContextSwitchAnalyzer::new(trace.clone());
+                    let stats = analyzer.analyze_cpu_utilization_parallel();
+                    export_data["cpu_utilization"] = json!(stats);
+                }
+                "process_runtime" => {
+                    let analyzer = ContextSwitchAnalyzer::new(trace.clone());
+                    let stats = analyzer.analyze_process_runtime_parallel(None);
+                    let top_20: Vec<_> = stats.into_iter().take(20).collect();
+                    export_data["process_runtime"] = json!(top_20);
+                }
+                "wakeup_latency" => {
+                    let analyzer = WakeupChainAnalyzer::new(trace.clone());
+                    let stats = analyzer.analyze_wakeup_latency();
+                    export_data["wakeup_latency"] = json!(stats);
+                }
+                "migration" => {
+                    let analyzer = PerfettoMigrationAnalyzer::new(trace.clone());
+                    let stats = analyzer.analyze_migration_patterns();
+                    export_data["migration"] = json!(stats);
+                }
+                "dsq" => {
+                    let analyzer = DsqAnalyzer::new(trace.clone());
+                    if analyzer.has_scx_data() {
+                        export_data["dsq"] = json!(analyzer.get_summary());
+                    }
+                }
+                "bottlenecks" => {
+                    let analyzer = CorrelationAnalyzer::new(trace.clone());
+                    let bottlenecks = analyzer.find_scheduling_bottlenecks(10);
+                    export_data["bottlenecks"] = json!(bottlenecks);
+                }
+                "task_states" => {
+                    use super::perfetto_analyzers_extended::TaskStateAnalyzer;
+                    let analyzer = TaskStateAnalyzer::new(trace.clone());
+                    let stats = analyzer.analyze_task_states(None);
+                    let top_20: Vec<_> = stats.into_iter().take(20).collect();
+                    export_data["task_states"] = json!(top_20);
+                }
+                "preemptions" => {
+                    use super::perfetto_analyzers_extended::PreemptionAnalyzer;
+                    let analyzer = PreemptionAnalyzer::new(trace.clone());
+                    let stats = analyzer.analyze_preemptions(None);
+                    let top_20: Vec<_> = stats.into_iter().take(20).collect();
+                    export_data["preemptions"] = json!(top_20);
+                }
+                "wakeup_chains" => {
+                    use super::perfetto_analyzers_extended::WakeupChainDetector;
+                    let analyzer = WakeupChainDetector::new(trace.clone());
+                    let chains = analyzer.find_wakeup_chains(10);
+                    export_data["wakeup_chains"] = json!(chains);
+                }
+                "latency_breakdown" => {
+                    use super::perfetto_analyzers_extended::SchedulingLatencyBreakdown;
+                    let analyzer = SchedulingLatencyBreakdown::new(trace.clone());
+                    let stats = analyzer.analyze_latency_stages();
+                    export_data["latency_breakdown"] = json!(stats);
+                }
+                _ => {}
+            }
+        }
+
+        let analysis_time = start_time.elapsed();
+
+        // Write to file
+        let json_str = serde_json::to_string_pretty(&export_data)?;
+        std::fs::write(output_path, json_str)?;
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Trace analysis exported successfully\n\n\
+                     Output file: {}\n\
+                     Analysis types: {}\n\
+                     Analysis time: {:?}\n\
+                     File size: {} bytes",
+                    output_path,
+                    analysis_types.join(", "),
+                    analysis_time,
+                    std::fs::metadata(output_path)?.len()
+                )
             }]
         }))
     }
