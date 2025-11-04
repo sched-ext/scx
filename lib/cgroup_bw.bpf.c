@@ -1621,7 +1621,7 @@ bool cbw_transit_replenish_stat(int from, int to)
  *   inserting non-scx tasks into a DSQ is a no-op, we would like our
  *   accounting to be as accurate as possible.
  *
- * Return 0 always.
+ * Return 0 for success, -errno for failure.
  */
 __hidden
 int scx_cgroup_bw_cancel(u64 ctx)
@@ -1639,27 +1639,25 @@ int scx_cgroup_bw_cancel(u64 ctx)
 	if (!atq)
 		return 0;
 
-	if (scx_atq_lock(atq)) {
+	if ((ret = scx_atq_lock(atq))) {
 		cbw_err("Failed to lock ATQ for task.");
-		return 0;
+		return ret;
 	}
 
 	/* We lost the race, assume whoever popped the task will handle it. */
-	if (taskc->atq != atq)
-		goto done;
-
-	/* Protected from races by the */
-	ret = scx_atq_remove_unlocked(taskc->atq, taskc);
-	if (ret) {
-		/* There is an unavoidable race with scx_atq_pop. */
-		cbw_dbg("Failed to remove node from task");
-		goto done;
+	if (taskc->atq != atq) {
+		scx_atq_unlock(atq);
+		return 0;
 	}
 
-done:
-	scx_atq_unlock(atq);
+	/* Protected from races by the lock. */
+	if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
+		/* There is an unavoidable race with scx_atq_pop. */
+		cbw_dbg("Failed to remove node from task");
+	}
 
-	return 0;
+	scx_atq_unlock(atq);
+	return ret;
 }
 
 /*

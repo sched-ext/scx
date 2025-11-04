@@ -137,7 +137,7 @@ int scx_cgroup_bw_reenqueue(void);
  *   inserting non-scx tasks into a DSQ is a no-op, we would like our
  *   accounting to be as accurate as possible.
  *
- * Return 0 always.
+ * Return 0 for success, -errno for failure.
  */
 int scx_cgroup_bw_cancel(u64 taskc);
 
