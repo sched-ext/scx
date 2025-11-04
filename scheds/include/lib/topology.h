@@ -81,3 +81,6 @@ static inline int topo_iter_start(struct topo_iter *iter)
 #define TOPO_FOR_EACH_CPU(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_CPU)
 
 extern u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
+extern int nr_topo_nodes[TOPO_MAX_LEVEL];
+
+#define TOPO_NR(type) nr_topo_nodes[TOPO_##type - 1]

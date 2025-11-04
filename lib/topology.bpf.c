@@ -16,6 +16,8 @@ volatile topo_ptr topo_all;
  */
 u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 
+int nr_topo_nodes[TOPO_MAX_LEVEL];
+
 __hidden
 int topo_contains(topo_ptr topo, u32 cpu)
 {
@@ -131,6 +133,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 		 */
 		if (j == topo->nr_children) {
 			topo_add(topo, mask, id);
+			nr_topo_nodes[i]++;
 			return 0;
 		}
 
