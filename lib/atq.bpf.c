@@ -28,31 +28,17 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	return (u64)atq;
 }
 
-/* 
- * XXXETSAL: We are using the __hidden antipattern for API functions because some
- * older kernels do not allow function calls with preemption disabled. We will replace
- * these annotations with the proper ones (__weak) at some point in the future.
- */
-
-__hidden
-int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
+__hidden __inline
+int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
 	rbnode_t *node = &taskc->node;
 	int ret;
 
-	ret = arena_spin_lock(&atq->lock);
-	if (ret)
-		return ret;
+	if (unlikely(atq->size == atq->capacity))
+		return -ENOSPC;
 
-	if (unlikely(atq->size == atq->capacity)) {
-		ret = -ENOSPC;
-		goto done;
-	}
-
-	if ((vtime == SCX_ATQ_FIFO) != atq->fifo) {
-		ret = -EINVAL;
-		goto done;
-	}
+	if ((vtime == SCX_ATQ_FIFO) != atq->fifo)
+		return -EINVAL;
 
 	/*
 	 * For FIFO, "Leak" the seq on error. We only want
@@ -64,21 +50,61 @@ int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena
 
 	ret = rb_insert_node(atq->tree, node);
 	if (ret)
-		goto done;
+		return ret;
 
 	taskc->atq = atq;
 	atq->size += 1;
 
-done:
+	return 0;
+}
+
+/* 
+ * XXXETSAL: We are using the __hidden antipattern for API functions because some
+ * older kernels do not allow function calls with preemption disabled. We will replace
+ * these annotations with the proper ones (__weak) at some point in the future.
+ */
+
+__hidden
+int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
+{
+	int ret;
+
+	ret = arena_spin_lock(&atq->lock);
+	if (ret)
+		return ret;
+
+	ret = scx_atq_insert_vtime_unlocked(atq, taskc, vtime);
+
 	arena_spin_unlock(&atq->lock);
 
 	return ret;
 }
 
 __hidden
+int scx_atq_insert_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
+	return scx_atq_insert_vtime_unlocked(atq, taskc, SCX_ATQ_FIFO);
+}
+
+__hidden
 int scx_atq_insert(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
 	return scx_atq_insert_vtime(atq, taskc, SCX_ATQ_FIFO);
+}
+
+__hidden
+int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
+	int ret;
+
+       /* Are we in this ATQ in the first place? */
+       if (taskc->atq != atq)
+	       return -EINVAL;
+
+       ret = rb_remove_node(atq->tree, &taskc->node);
+       taskc->atq = NULL;
+
+       return ret;
 }
 
 __hidden
@@ -90,14 +116,7 @@ int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
        if (ret)
                return ret;
 
-       /* Are we in this ATQ in the first place? */
-       if (taskc->atq != atq) {
-	       arena_spin_unlock(&atq->lock);
-	       return -EINVAL;
-       }
-
-       ret = rb_remove_node(atq->tree, &taskc->node);
-       taskc->atq = NULL;
+       ret = scx_atq_remove_unlocked(atq, taskc);
 
        arena_spin_unlock(&atq->lock);
 
