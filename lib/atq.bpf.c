@@ -143,7 +143,8 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	arena_spin_unlock(&atq->lock);
 
 	if (ret) {
-		bpf_printk("%s: error %d", __func__, ret);
+		if (ret != -ENOENT)
+			bpf_printk("%s: error %d", __func__, ret);
 		return (u64)NULL;
 	}
 
