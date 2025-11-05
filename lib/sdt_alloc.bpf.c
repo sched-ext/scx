@@ -148,6 +148,8 @@ int scx_alloc_attempt(struct scx_alloc_stack __arena *stack)
 {
 	int i;
 
+	scx_arena_subprog_init();
+
 	/*
 	 * Use can_loop to help with verification. The can_loop macro was
 	 * introduced in kernel commit ba39486 and wraps around the may_goto
