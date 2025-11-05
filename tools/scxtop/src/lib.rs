@@ -52,7 +52,9 @@ pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
 pub use network_stats::NetworkStatSnapshot;
 pub use node_data::NodeData;
-pub use perf_stat_data::{DerivedMetrics, PerfStatCollector, PerfStatCounters, PerfStatHistory};
+pub use perf_stat_data::{
+    DerivedMetrics, PerfStatCollector, PerfStatCounters, PerfStatHistory, SharedPerfStatCollector,
+};
 pub use perfetto_trace::PerfettoTraceManager;
 pub use power_data::{
     CStateInfo, CorePowerData, PowerDataCollector, PowerSnapshot, SystemPowerData,

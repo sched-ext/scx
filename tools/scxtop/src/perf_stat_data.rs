@@ -600,3 +600,87 @@ impl Default for PerfStatCollector {
         Self::new()
     }
 }
+
+/// Thread-safe wrapper for PerfStatCollector
+#[derive(Clone)]
+pub struct SharedPerfStatCollector {
+    inner: Arc<Mutex<PerfStatCollector>>,
+}
+
+impl SharedPerfStatCollector {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PerfStatCollector::new())),
+        }
+    }
+
+    pub fn set_topology(
+        &self,
+        cpu_to_llc: BTreeMap<usize, usize>,
+        cpu_to_node: BTreeMap<usize, usize>,
+    ) {
+        self.inner
+            .lock()
+            .unwrap()
+            .set_topology(cpu_to_llc, cpu_to_node);
+    }
+
+    pub fn init_system_wide_with_history_size(
+        &self,
+        num_cpus: usize,
+        history_size: usize,
+    ) -> Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .init_system_wide_with_history_size(num_cpus, history_size)
+    }
+
+    pub fn init_process(&self, pid: i32) -> Result<()> {
+        self.inner.lock().unwrap().init_process(pid)
+    }
+
+    pub fn update(&self, timestamp_ms: u128, duration_ms: u128) -> Result<()> {
+        self.inner.lock().unwrap().update(timestamp_ms, duration_ms)
+    }
+
+    pub fn cleanup(&self) {
+        self.inner.lock().unwrap().cleanup();
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.inner.lock().unwrap().is_active()
+    }
+
+    pub fn get_system_counters(&self) -> PerfStatCounters {
+        self.inner.lock().unwrap().system_counters.clone()
+    }
+
+    pub fn get_per_cpu_counters(&self) -> BTreeMap<usize, PerfStatCounters> {
+        self.inner.lock().unwrap().per_cpu_counters.clone()
+    }
+
+    pub fn get_per_llc_counters(&self) -> BTreeMap<usize, PerfStatCounters> {
+        self.inner.lock().unwrap().per_llc_counters.clone()
+    }
+
+    pub fn get_per_node_counters(&self) -> BTreeMap<usize, PerfStatCounters> {
+        self.inner.lock().unwrap().per_node_counters.clone()
+    }
+
+    pub fn get_process_counters(&self) -> Option<PerfStatCounters> {
+        self.inner.lock().unwrap().process_counters.clone()
+    }
+
+    pub fn filter_pid(&self) -> Option<i32> {
+        self.inner.lock().unwrap().filter_pid()
+    }
+}
+
+impl Default for SharedPerfStatCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+use std::sync::{Arc, Mutex};
