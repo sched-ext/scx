@@ -81,6 +81,12 @@ fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
                 match (app.state(), c) {
                     // In BPF program detail view, 'p' toggles perf sampling
                     (AppState::BpfProgramDetail, 'p') => Action::ToggleBpfPerfSampling,
+                    // In PerfStat view, 'p' applies process filter
+                    (AppState::PerfStat, 'p') => Action::ApplyPerfStatProcessFilter,
+                    // In PerfStat view, 'c' clears process filter
+                    (AppState::PerfStat, 'c') => Action::ClearPerfStatFilter,
+                    // In PerfStat view, 'a' toggles aggregation level (System/LLC/NUMA)
+                    (AppState::PerfStat, 'a') => Action::TogglePerfStatAggregation,
                     // Fall back to global keymap for all other cases
                     _ => keymap.action(&Key::Char(c)),
                 }
