@@ -164,6 +164,21 @@ impl CpuPool {
         Ok(())
     }
 
+    pub fn mark_allocated(&mut self, cpus_to_alloc: &Cpumask) -> Result<()> {
+        let cores = self.cpus_to_cores(cpus_to_alloc)?;
+        // Check if all requested cores are available
+        let unavailable_cores = cores.clone() & !self.available_cores.clone();
+        if unavailable_cores.any() {
+            bail!(
+                "Some of CPUs {} are not available to allocate",
+                cpus_to_alloc
+            );
+        }
+        self.available_cores &= !cores;
+        self.update_fallback_cpu();
+        Ok(())
+    }
+
     pub fn next_to_free<'a>(
         &'a self,
         cands: &Cpumask,
