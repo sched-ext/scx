@@ -1606,10 +1606,60 @@ bool cbw_transit_replenish_stat(int from, int to)
 	return __sync_bool_compare_and_swap(&cbw_replenish_stat.s, from, to);
 }
 
+/**
+ * scx_cgroup_bw_cancel - Cancel throttling for a task.
+ *
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ *
+ * Tasks may be dequeued from the BPF side by the scx core during system
+ * calls like sched_setaffinity(2). In that case, we must cancel any
+ * throttling-related ATQ insert operations for the task:
+ * - We must avoid double inserts caused by the dequeued task being
+ *   reenqueed and throttled again while still in an ATQ.
+ * - We want to remove tasks not in scx anymore from throttling. While
+ *   inserting non-scx tasks into a DSQ is a no-op, we would like our
+ *   accounting to be as accurate as possible.
+ *
+ * Return 0 always.
+ */
 __hidden
-int scx_cgroup_bw_cancel(u64 taskc)
+int scx_cgroup_bw_cancel(u64 ctx)
 {
-	return -ENOTSUP;
+	scx_task_common *taskc = (scx_task_common *)ctx;
+	scx_atq_t *atq;
+	int ret;
+
+	/*
+	 * Copy the ATQ pointer over to the stack and use it to avoid
+	 * a racing scx_atq_pop() from overwriting it. Check the
+	 * pointer is valid, as expected by the caller.
+	 */
+	atq = taskc->atq;
+	if (!atq)
+		return 0;
+
+	if (scx_atq_lock(atq)) {
+		cbw_err("Failed to lock ATQ for task.");
+		return 0;
+	}
+
+	/* We lost the race, assume whoever popped the task will handle it. */
+	if (taskc->atq != atq)
+		goto done;
+
+	/* Protected from races by the */
+	ret = scx_atq_remove_unlocked(taskc->atq, taskc);
+	if (ret) {
+		/* There is an unavoidable race with scx_atq_pop. */
+		cbw_dbg("Failed to remove node from task");
+		goto done;
+	}
+
+done:
+	scx_atq_unlock(atq);
+
+	return 0;
 }
 
 /*

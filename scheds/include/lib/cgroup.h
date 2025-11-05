@@ -123,9 +123,21 @@ int scx_cgroup_bw_put_aside(struct task_struct *p __arg_trusted, u64 taskc, u64 
 int scx_cgroup_bw_reenqueue(void);
 
 /**
- * scx_cgroup_bw_cancel -
+ * scx_cgroup_bw_cancel - Cancel throttling for a task.
  *
- * Returns
+ * @taskc: Pointer to the scx_task_common task context. Passed as a u64
+ * to avoid exposing the scx_task_common type to the scheduler.
+ *
+ * Tasks may be dequeued from the BPF side by the scx core during system
+ * calls like sched_setaffinity(2). In that case, we must cancel any
+ * throttling-related ATQ insert operations for the task:
+ * - We must avoid double inserts caused by the dequeued task being
+ *   reenqueed and throttled again while still in an ATQ.
+ * - We want to remove tasks not in scx anymore from throttling. While
+ *   inserting non-scx tasks into a DSQ is a no-op, we would like our
+ *   accounting to be as accurate as possible.
+ *
+ * Return 0 always.
  */
 int scx_cgroup_bw_cancel(u64 taskc);
 
