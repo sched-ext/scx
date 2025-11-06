@@ -28,9 +28,10 @@ struct p2dq_timer {
 };
 
 /* cpu_ctx flag bits */
-#define CPU_CTX_F_INTERACTIVE	(1 << 0)
-#define CPU_CTX_F_IS_BIG	(1 << 1)
-#define CPU_CTX_F_NICE_TASK	(1 << 2)
+#define CPU_CTX_F_INTERACTIVE		(1 << 0)
+#define CPU_CTX_F_IS_BIG		(1 << 1)
+#define CPU_CTX_F_NICE_TASK		(1 << 2)
+#define CPU_CTX_F_CLEAN_AFFN_DSQ	(1 << 3)
 
 /* Helper macros for cpu_ctx flags */
 #define cpu_ctx_set_flag(cpuc, flag)	((cpuc)->flags |= (flag))

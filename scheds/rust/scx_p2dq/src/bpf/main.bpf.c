@@ -945,7 +945,11 @@ static s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_fl
 
 	if (likely(is_idle)) {
 		stat_inc(P2DQ_STAT_IDLE);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns, 0);
+		// Only direct dispatch non-affinitized tasks
+		// Affinitized tasks will be queued by enqueue to prevent livelock
+		if (task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns, 0);
+		}
 	}
 	trace("SELECT [%d][%s] %i->%i idle %i",
 	      p->pid, p->comm, prev_cpu, cpu, is_idle);
@@ -987,11 +991,9 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	    (p->flags & PF_KTHREAD) &&
 	    p->nr_cpus_allowed == 1)) {
 		stat_inc(P2DQ_STAT_DIRECT);
-		u64 slice_ns = clamp_slice(scale_by_task_weight(p,
-					   min_dsq_time_slice()));
 		scx_bpf_dsq_insert(p,
 				   SCX_DSQ_LOCAL,
-				   slice_ns,
+				   min_dsq_time_slice(),
 				   enq_flags);
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -1004,7 +1006,8 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	// Handle affinitized tasks separately
+	// Handle affinitized tasks: always use per-CPU affn_dsq
+	// All affinitized tasks queued to affn_dsq regardless of affinity breadth
 	if (!task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS) ||
 	    (p->cpus_ptr == &p->cpus_mask &&
 	     p->nr_cpus_allowed != topo_config.nr_cpus)) {
@@ -1031,33 +1034,87 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		}
 
 		stat_inc(P2DQ_STAT_ENQ_CPU);
+
+		// Select target CPU for affn_dsq with priority:
+		// 1. prev_cpu if in affinity
+		// 2. CPU in last LLC if any match affinity
+		// 3. Random CPU from affinity mask
+		s32 target_cpu = cpu;
+
+		// If selected CPU not in affinity, find a better one
+		if (!bpf_cpumask_test_cpu(target_cpu, p->cpus_ptr)) {
+			// Try prev_cpu first
+			s32 prev_cpu = scx_bpf_task_cpu(p);
+			if (prev_cpu >= 0 && prev_cpu < NR_CPUS &&
+			    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+				target_cpu = prev_cpu;
+			} else {
+				// Try to find CPU in same LLC as prev_cpu
+				struct cpu_ctx *prev_cpuc;
+				struct llc_ctx *prev_llcx;
+				if (prev_cpu >= 0 && prev_cpu < NR_CPUS &&
+				    (prev_cpuc = lookup_cpu_ctx(prev_cpu)) &&
+				    (prev_llcx = lookup_llc_ctx(prev_cpuc->llc_id)) &&
+				    prev_llcx->cpumask) {
+					// Check if any CPU in prev LLC matches affinity
+					s32 llc_cpu = scx_bpf_pick_idle_cpu(cast_mask(prev_llcx->cpumask), 0);
+					if (llc_cpu >= 0 && bpf_cpumask_test_cpu(llc_cpu, p->cpus_ptr)) {
+						target_cpu = llc_cpu;
+					} else {
+						// Fallback to random CPU in affinity mask
+						target_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+					}
+				} else {
+					// Fallback to random CPU in affinity mask
+					target_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+				}
+			}
+
+			// Update cpuc and llcx to match target_cpu
+			if (!(cpuc = lookup_cpu_ctx(target_cpu)) ||
+			    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
+				scx_bpf_error("invalid lookup for target_cpu %d", target_cpu);
+				return;
+			}
+			ret->cpu = target_cpu;
+		}
+
+		// All affinitized tasks use affn_dsq
 		taskc->dsq_id = cpuc->affn_dsq;
 		update_vtime(p, cpuc, taskc, llcx);
 		if (timeline_config.deadline)
 			set_deadline_slice(p, taskc, llcx);
 
+		// Penalize slice for single-CPU tasks based on queue depth
+		// This prevents monopolization when many tasks are pinned to one CPU
+		if (p->nr_cpus_allowed == 1) {
+			u64 nr_queued = scx_bpf_dsq_nr_queued(cpuc->affn_dsq);
+			if (nr_queued > 0) {
+				u64 old_slice = taskc->slice_ns;
+				// Scale slice inversely with queue depth
+				// Add 1 to account for the task we're about to enqueue
+				taskc->slice_ns = clamp_slice(taskc->slice_ns / (nr_queued + 1));
+				trace("PENALIZE [%d][%s] cpu=%d nr_queued=%llu old_slice=%llu new_slice=%llu",
+				      p->pid, p->comm, target_cpu, nr_queued, old_slice, taskc->slice_ns);
+			}
+		}
+
 		if (cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK))
 			enq_flags |= SCX_ENQ_PREEMPT;
 
-		// Idle affinitized tasks can be direct dispatched.
-		if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE) ||
-		    cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK)) {
-			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
-			ret->fifo.slice_ns = taskc->slice_ns;
-			ret->fifo.enq_flags = enq_flags;
-			if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE))
-				enqueue_promise_set_flag(ret, ENQUEUE_PROMISE_F_KICK_IDLE);
-			return;
-		}
-
+		// Always queue affinitized tasks to affn_dsq (no direct dispatch)
+		// This prevents tight wakeup loops and allows proper idle state
 		ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 		ret->vtime.dsq_id = taskc->dsq_id;
 		ret->vtime.slice_ns = taskc->slice_ns;
 		ret->vtime.enq_flags = enq_flags;
 		ret->vtime.vtime = p->scx.dsq_vtime;
 
-		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
+		// Kick target CPU if we cleared idle state
+		if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE))
+			enqueue_promise_set_flag(ret, ENQUEUE_PROMISE_F_KICK_IDLE);
+
+		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu affn_dsq",
 		      p->comm, p->scx.weight, taskc->slice_ns,
 		      p->scx.dsq_vtime, llcx->vtime);
 
@@ -1091,8 +1148,9 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK))
 			enq_flags |= SCX_ENQ_PREEMPT;
 
-		if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE) ||
-		    cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK)) {
+		if ((enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE) ||
+		     cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK)) &&
+		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
 			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
 			ret->fifo.slice_ns = taskc->slice_ns;
@@ -1102,7 +1160,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		bool migrate = likely(!lb_config.single_llc_mode) && can_migrate(taskc, llcx);
+		// Only allow tasks with full CPU affinity into migration DSQs
+		// Affinitized tasks stay in LLC DSQ to prevent cross-LLC livelock
+		bool migrate = likely(!lb_config.single_llc_mode) &&
+		               can_migrate(taskc, llcx) &&
+		               task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS);
 		if (migrate) {
 			taskc->dsq_id = llcx->mig_dsq;
 			if (p2dq_config.atq_enabled) {
@@ -1157,10 +1219,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	else
 		enqueue_promise_clear_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE);
 
-	if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE) ||
-	    cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK)) {
+	if ((enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE) ||
+	     cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK)) &&
+	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-		ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+		ret->fifo.dsq_id = SCX_DSQ_LOCAL;
 		ret->fifo.slice_ns = taskc->slice_ns;
 		ret->fifo.enq_flags = enq_flags;
 		if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE))
@@ -1168,7 +1231,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	bool migrate = likely(!lb_config.single_llc_mode) && can_migrate(taskc, llcx);
+	// Only allow tasks with full CPU affinity into migration DSQs
+	// Affinitized tasks stay in LLC DSQ to prevent cross-LLC livelock
+	bool migrate = likely(!lb_config.single_llc_mode) &&
+	               can_migrate(taskc, llcx) &&
+	               task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS);
 	if (migrate) {
 		taskc->dsq_id = llcx->mig_dsq;
 		stat_inc(P2DQ_STAT_ENQ_MIG);
@@ -1396,9 +1463,19 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 
 	if (!runnable) {
 		used = now - taskc->last_run_started;
+
+		// Affinitized tasks need stricter thresholds to prevent monopolization
+		bool is_affinitized = !task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS);
+		u64 inc_threshold = is_affinitized ?
+			((19 * last_dsq_slice_ns) / 20) :  // 95% for affinitized
+			((9 * last_dsq_slice_ns) / 10);     // 90% for normal
+		u64 dec_threshold = is_affinitized ?
+			(last_dsq_slice_ns / 4) :           // 25% for affinitized
+			(last_dsq_slice_ns / 2);            // 50% for normal
+
 		// On stopping determine if the task can move to a longer DSQ by
 		// comparing the used time to the scaled DSQ slice.
-		if (used >= ((9 * last_dsq_slice_ns) / 10)) {
+		if (used >= inc_threshold) {
 			if (taskc->dsq_index < p2dq_config.nr_dsqs_per_llc - 1 &&
 			    p->scx.weight >= 100) {
 				taskc->dsq_index += 1;
@@ -1408,8 +1485,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 			} else {
 				stat_inc(P2DQ_STAT_DSQ_SAME);
 			}
-		// If under half the slice was consumed move the task back down.
-		} else if (used < last_dsq_slice_ns / 2) {
+		// If under threshold, move the task back down.
+		} else if (used < dec_threshold) {
 			if (taskc->dsq_index > 0) {
 				taskc->dsq_index -= 1;
 				stat_inc(P2DQ_STAT_DSQ_CHANGE);
@@ -1597,65 +1674,92 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 	u64 pid, peeked_pid, dsq_id = 0;
 	scx_atq_t *min_atq = NULL;
 
-	if (unlikely(!(cpuc = lookup_cpu_ctx(cpu)))) {
-		scx_bpf_error("can't happen");
+	cpuc = lookup_cpu_ctx(cpu);
+	if (unlikely(!cpuc)) {
+		scx_bpf_error("no valid CPU contexts in dispatch");
 		return;
 	}
 
 	u64 min_vtime = 0;
 
-	if (!saturated) {
-		// First search affinitized DSQ
-		p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
-		if (p) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->affn_dsq;
-			}
-		}
-
-		// LLC DSQ
-		p = __COMPAT_scx_bpf_dsq_peek(cpuc->llc_dsq);
-		if (p) {
-			if (p->scx.dsq_vtime < min_vtime || min_vtime == 0) {
-				min_vtime = p->scx.dsq_vtime;
-				dsq_id = cpuc->llc_dsq;
-			}
-		}
-
-		// Migration eligible
-		if (topo_config.nr_llcs > 1) {
-			if (p2dq_config.atq_enabled) {
-				pid = scx_atq_peek(cpuc->mig_atq);
-				if ((p = bpf_task_from_pid((s32)pid))) {
-					if (p->scx.dsq_vtime < min_vtime ||
-					    min_vtime == 0) {
-						min_vtime = p->scx.dsq_vtime;
-						min_atq = cpuc->mig_atq;
-						/*
-						 * Normally doing these peeks would be
-						 * racy with scx_bpf_dsq_move_to_local.
-						 * However, with ATQs we can peek and
-						 * pop so we can check that the popped
-						 * task is the same as the peeked task.
-						 * This gives slightly better
-						 * prioritization with the potential
-						 * cost of having to reenqueue popped
-						 * tasks.
-						 */
-						peeked_pid = p->pid;
+	// start with affn_dsq (local cpu dsq)
+	p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
+	if (p) {
+		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+			min_vtime = p->scx.dsq_vtime;
+			dsq_id = cpuc->affn_dsq;
+		} else {
+			// Task at head of affn_dsq can't run here - move it to correct affn_dsq
+			// This prevents livelock where mismatched tasks block the queue
+			s32 target_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+			if (target_cpu >= 0 && target_cpu < NR_CPUS) {
+				struct cpu_ctx *target_cpuc = lookup_cpu_ctx(target_cpu);
+				if (target_cpuc) {
+					bpf_for_each(scx_dsq, p, cpuc->affn_dsq, 0) {
+						if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+							// Found a task that belongs here, stop cleanup
+							break;
+						}
+						// Move mismatched task to its target CPU's affn_dsq
+						target_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+						if (target_cpu >= 0 && target_cpu < NR_CPUS) {
+							target_cpuc = lookup_cpu_ctx(target_cpu);
+							if (target_cpuc) {
+								__COMPAT_scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER,
+												p,
+												target_cpuc->affn_dsq,
+												0);
+								trace("DISPATCH cpu[%d] moved affn task %d to cpu[%d] affn_dsq",
+								      cpu, p->pid, target_cpu);
+							}
+						}
 					}
-					bpf_task_release(p);
-				}
-			} else {
-				p = __COMPAT_scx_bpf_dsq_peek(cpuc->mig_dsq);
-				if (p) {
-					if (p->scx.dsq_vtime < min_vtime ||
-					    min_vtime == 0) {
+					// Re-peek after cleanup
+					p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
+					if (p && bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 						min_vtime = p->scx.dsq_vtime;
-						dsq_id = cpuc->mig_dsq;
+						dsq_id = cpuc->affn_dsq;
 					}
 				}
+			}
+		}
+	}
+
+	// LLC DSQ for vtime comparison
+	p = __COMPAT_scx_bpf_dsq_peek(cpuc->llc_dsq);
+	if (p && (p->scx.dsq_vtime < min_vtime || min_vtime == 0) &&
+	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		min_vtime = p->scx.dsq_vtime;
+		dsq_id = cpuc->llc_dsq;
+	}
+
+	// Migration eligible vtime
+	if (topo_config.nr_llcs > 1) {
+		if (p2dq_config.atq_enabled) {
+			pid = scx_atq_peek(cpuc->mig_atq);
+			if ((p = bpf_task_from_pid((s32)pid))) {
+				if (likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
+				    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+					min_vtime = p->scx.dsq_vtime;
+					min_atq = cpuc->mig_atq;
+					/*
+					 * With ATQs we can peek and pop to check that
+					 * the popped task is the same as the peeked task.
+					 * This gives slightly better prioritization with
+					 * the potential cost of having to reenqueue
+					 * popped tasks if they don't match.
+					 */
+					peeked_pid = p->pid;
+				}
+				bpf_task_release(p);
+			}
+		} else {
+			// Peek migration DSQ - only consider tasks that can run here
+			p = __COMPAT_scx_bpf_dsq_peek(cpuc->mig_dsq);
+			if (p && likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
+			    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = cpuc->mig_dsq;
 			}
 		}
 	}
@@ -1706,11 +1810,6 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 		if (likely(valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id)))
 			return;
 	}
-
-	// Try affinitized DSQ (less common, affinitized tasks are a minority)
-	if (unlikely(dsq_id != cpuc->affn_dsq &&
-	    scx_bpf_dsq_move_to_local(cpuc->affn_dsq)))
-		return;
 
 	// Handle sharded LLC DSQs, try to dispatch from all shards if sharding
 	// is enabled (common on large systems)
@@ -1780,15 +1879,46 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
 	task_ctx *taskc;
+	struct cpu_ctx *cpuc;
+	struct llc_ctx *llcx;
+	bool was_all_cpus, is_all_cpus;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+
+	// Track if affinity narrowed
+	was_all_cpus = task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS);
 
 	if (p->cpus_ptr == &p->cpus_mask &&
 	    p->nr_cpus_allowed == topo_config.nr_cpus)
 		task_ctx_set_flag(taskc, TASK_CTX_F_ALL_CPUS);
 	else
 		task_ctx_clear_flag(taskc, TASK_CTX_F_ALL_CPUS);
+
+	is_all_cpus = task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS);
+
+	// If affinity narrowed from all CPUs to restricted, and task is in
+	// migration DSQ, move it to LLC DSQ to prevent cross-LLC livelock
+	if (was_all_cpus && !is_all_cpus &&
+	    valid_dsq(taskc->dsq_id) &&
+	    (taskc->dsq_id & P2DQ_MIG_DSQ)) {
+		s32 cpu = scx_bpf_task_cpu(p);
+		if (cpu < 0 || cpu >= topo_config.nr_cpus)
+			return;
+
+		if (!(cpuc = lookup_cpu_ctx(cpu)) ||
+		    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+			return;
+
+		// Move task from mig_dsq to LLC DSQ
+		// The task will be naturally moved during next dispatch via
+		// scx_bpf_dsq_move_to_local() which respects affinity
+		taskc->dsq_id = cpuc->llc_dsq;
+		task_refresh_llc_runs(taskc);
+
+		trace("AFFINITY_NARROW [%d][%s] moved from mig_dsq to llc_dsq %llu",
+		      p->pid, p->comm, taskc->dsq_id);
+	}
 }
 
 void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
@@ -2461,6 +2591,6 @@ SCX_OPS_DEFINE(p2dq,
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .init			= (void *)p2dq_init,
 	       .exit			= (void *)p2dq_exit,
-	       .timeout_ms		= 20000,
+	       .timeout_ms		= 25000,
 	       .name			= "p2dq");
 #endif
