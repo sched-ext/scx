@@ -4,10 +4,6 @@
 // GNU General Public License version 2.
 
 use indoc::formatdoc;
-use object::read::archive::ArchiveFile;
-use object::Object;
-use object::ObjectSection;
-use object::ObjectSymbol;
 
 use std::env;
 use std::fs;
@@ -31,23 +27,7 @@ fn main() {
             .into(),
     ];
 
-    // Build the C tests
-    cc::Build::new()
-        .compiler(env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into()))
-        .files(&[root_dir.join("scheds/rust/scx_p2dq/src/bpf/main.test.bpf.c")])
-        .warnings(false)
-        .define("SCX_BPF_UNITTEST", None)
-        .flags(&[
-            "-Wno-attributes",
-            "-Wno-unknown-pragmas",
-            "-Wno-incompatible-pointer-types",
-            "-Wno-unused-variable",
-        ])
-        .includes(include_path)
-        .compile("p2dq_tests");
-
-    // Build the support library - this has to come after p2dq_tests, and is a good reason to
-    // separate the crates.
+    // Build the support library
     cc::Build::new()
         .compiler(env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into()))
         .files(&[
@@ -61,41 +41,7 @@ fn main() {
         .compile("scxtest");
 
     // Extract test names
-    let mut tests: Vec<String> = vec![];
-
-    let archive_data = fs::read(&out_dir.join("libp2dq_tests.a")).unwrap();
-    let archive = ArchiveFile::parse(&*archive_data).unwrap();
-    for member in archive.members() {
-        let member = member.unwrap();
-
-        let obj_data = member.data(&*archive_data).unwrap();
-        let obj = object::File::parse(obj_data).unwrap();
-
-        let test_section_index = if let Some(s) = obj.section_by_name(".scxtest") {
-            s.index()
-        } else {
-            continue;
-        };
-
-        for symbol in obj.symbols() {
-            if let Some(i) = symbol.section_index() {
-                if i != test_section_index {
-                    continue;
-                }
-
-                let name = if let Ok(n) = symbol.name() {
-                    n.to_string()
-                } else {
-                    continue;
-                };
-
-                // unclear where the empty name comes from, filter it out
-                if symbol.is_definition() {
-                    tests.push(name);
-                }
-            }
-        }
-    }
+    let tests: Vec<String> = vec![];
 
     // Generate Rust wrappers for the tests
     let mut test_content = fs::File::create(out_dir.join("gen_tests.rs")).unwrap();
@@ -120,5 +66,4 @@ fn main() {
 
     // Rebuild directives
     println!("cargo:rerun-if-changed=../../lib/scxtest");
-    println!("cargo:rerun-if-changed=../../scheds/rust/scx_p2dq/src/bpf");
 }
