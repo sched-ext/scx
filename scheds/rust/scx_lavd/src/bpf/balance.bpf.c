@@ -115,7 +115,7 @@ int plan_x_cpdom_migration(void)
 		return 0;
 	}
 	if ((stealee_threshold <= max_sc_load || overflow_running) &&
-	    (stealer_threshold < min_sc_load)) {
+		(stealer_threshold < min_sc_load)) {
 		/*
 		 * If there is a overloaded domain, always try to steal.
 		 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
@@ -138,7 +138,7 @@ int plan_x_cpdom_migration(void)
 		 * Under-loaded active domains become a stealer.
 		 */
 		if (cpdomc->nr_active_cpus &&
-		    cpdomc->sc_load <= stealer_threshold) {
+			cpdomc->sc_load <= stealer_threshold) {
 			WRITE_ONCE(cpdomc->is_stealer, true);
 			WRITE_ONCE(cpdomc->is_stealee, false);
 			continue;
@@ -148,7 +148,7 @@ int plan_x_cpdom_migration(void)
 		 * Over-loaded or non-active domains become a stealee.
 		 */
 		if (!cpdomc->nr_active_cpus ||
-		    cpdomc->sc_load >= stealee_threshold) {
+			cpdomc->sc_load >= stealee_threshold) {
 			WRITE_ONCE(cpdomc->is_stealer, false);
 			WRITE_ONCE(cpdomc->is_stealee, true);
 			nr_stealee++;
@@ -189,11 +189,21 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 }
 
 /*
- * For simplicity, try to just steal from the CPU with
- * the highest number of queued_tasks in this domain.
+ * Attempts to peek the vtime of the task at the head of the DSQ, or returns U64_MAX if the DSQ is empty.
  */
-static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
-	u64 highest_queued = 0;
+static int peek_vtime(u64 dsq_id)
+{
+	struct task_struct *task;
+	task = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	return task ? task->scx.dsq_vtime : U64_MAX;
+}
+
+/*
+ * Racy operation that returns the cpu that which appears to have the lowest vtime at its head.
+ */
+static int pick_cpu_with_lowest_vtime(struct cpdom_ctx *cpdomc)
+{
+	u64 lowest_vtime = U64_MAX;
 	int pick_cpu = -ENOENT;
 	int cpu, i, j;
 
@@ -204,13 +214,13 @@ static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
 		u64 cpumask = cpdomc->__cpumask[i];
 		bpf_for(j, 0, 64) {
 			if (cpumask & 0x1LLU << j) {
-				u64 queued;
+				u64 vtime;
 				cpu = (i * 64) + j;
 				if (cpu >= __nr_cpu_ids)
 					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-				if (queued > highest_queued) {
-					highest_queued = queued;
+				vtime = peek_vtime(cpu_to_dsq(cpu));
+				if (vtime < lowest_vtime) {
+					lowest_vtime = vtime;
 					pick_cpu = cpu;
 				}
 			}
@@ -271,7 +281,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
+			pick_cpu = pick_cpu_with_lowest_vtime(cpdomc_pick);
 			if (pick_cpu >= 0)
 				dsq_id = cpu_to_dsq(pick_cpu);
 			else
@@ -348,7 +358,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
+			pick_cpu = pick_cpu_with_lowest_vtime(cpdomc_pick);
 			if (pick_cpu >= 0)
 				dsq_id = cpu_to_dsq(pick_cpu);
 			else
@@ -365,7 +375,6 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
-	struct task_struct *p;
 	u64 vtime = U64_MAX, dsq_id = cpu_dsq_id;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
@@ -379,7 +388,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * a task from any of stealee domains probabilistically.
 	 */
 	if (nr_cpdoms > 1 && READ_ONCE(cpdomc->is_stealer) &&
-	    try_to_steal_task(cpdomc))
+		try_to_steal_task(cpdomc))
 		goto x_domain_migration_out;
 
 	/*
@@ -387,16 +396,9 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
 	 */
 	if (per_cpu_dsq) {
-		bpf_for_each(scx_dsq, p, cpu_dsq_id, 0) {
-			vtime = p->scx.dsq_vtime;
-			break;
-		}
-
-		bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
-			if (p->scx.dsq_vtime < vtime)
-				dsq_id = cpdom_dsq_id;
-			break;
-		}
+		vtime = peek_vtime(cpu_dsq_id);
+		if (peek_vtime(cpdom_dsq_id) < vtime)
+			dsq_id = cpdom_dsq_id;
 	} else {
 		dsq_id = cpdom_dsq_id;
 	}
