@@ -1798,6 +1798,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
 
 [[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2921,7 +2930,6 @@ dependencies = [
  "itertools 0.13.0",
  "libbpf-rs",
  "libc",
- "log",
  "nix 0.30.1",
  "ordered-float",
  "plain",
@@ -2932,8 +2940,9 @@ dependencies = [
  "scx_stats_derive",
  "scx_utils",
  "serde",
- "simplelog",
  "static_assertions",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2953,7 +2962,6 @@ dependencies = [
  "lazy_static",
  "libbpf-rs",
  "libc",
- "log",
  "nix 0.30.1",
  "nvml-wrapper",
  "once_cell",
@@ -2966,8 +2974,9 @@ dependencies = [
  "scx_utils",
  "serde",
  "serde_json",
- "simplelog",
  "sysinfo",
+ "tracing",
+ "tracing-subscriber",
  "walkdir",
 ]
 
@@ -2986,7 +2995,6 @@ dependencies = [
  "lazy_static",
  "libbpf-rs",
  "libc",
- "log",
  "maplit",
  "scx_cargo",
  "scx_stats",
@@ -2994,7 +3002,8 @@ dependencies = [
  "scx_utils",
  "serde",
  "serde_json",
- "simplelog",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3010,7 +3019,6 @@ dependencies = [
  "lazy_static",
  "libbpf-rs",
  "libc",
- "log",
  "ordered-float",
  "scx_arena",
  "scx_cargo",
@@ -3018,9 +3026,10 @@ dependencies = [
  "scx_stats_derive",
  "scx_utils",
  "serde",
- "simplelog",
  "sorted-vec",
  "static_assertions",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3923,10 +3932,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
 dependencies = [
  "chrono",
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "parking_lot",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]

@@ -25,13 +25,13 @@ ctrlc = { version = "3.1", features = ["termination"] }
 lazy_static = "1.5.0"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
-log = "0.4.17"
 ordered-float = "3.4.0"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.19" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.19" }
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.24" }
 serde = { version = "1.0.215", features = ["derive"] }
-simplelog = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
 sorted-vec = "0.8.3"
 static_assertions = "1.1.0"
 

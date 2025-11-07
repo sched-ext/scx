@@ -41,8 +41,6 @@ use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
 use libc::c_char;
-use log::debug;
-use log::info;
 use plain::Plain;
 use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
@@ -65,6 +63,8 @@ use stats::SchedSamples;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
+use tracing::{debug, info};
+use tracing_subscriber::filter::EnvFilter;
 
 const SCHEDULER_NAME: &str = "scx_lavd";
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
@@ -216,10 +216,10 @@ struct Opts {
     #[clap(long)]
     monitor_sched_samples: Option<u64>,
 
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    log_level: String,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
@@ -398,8 +398,15 @@ impl<'a> Scheduler<'a> {
         try_set_rlimit_infinity();
 
         // Open the BPF prog first for verification.
+        let debug_level = if opts.log_level.contains("trace") {
+            2
+        } else if opts.log_level.contains("debug") {
+            1
+        } else {
+            0
+        };
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 0);
+        skel_builder.obj_builder.debug(debug_level > 1);
         init_libbpf_logging(Some(PrintLevel::Debug));
 
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
@@ -422,7 +429,7 @@ impl<'a> Scheduler<'a> {
         Self::init_cpdoms(&mut skel, &order);
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts, &order);
+        Self::init_globals(&mut skel, &opts, &order, debug_level);
 
         // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
@@ -584,7 +591,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
+    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder, debug_level: u8) {
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.no_preemption = opts.no_preemption;
         bss_data.no_core_compaction = opts.no_core_compaction;
@@ -595,7 +602,7 @@ impl<'a> Scheduler<'a> {
         rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         rodata.is_smt_active = order.smt_enabled;
         rodata.is_autopilot_on = opts.autopilot;
-        rodata.verbose = opts.verbose;
+        rodata.verbose = debug_level;
         rodata.slice_max_ns = opts.slice_max_us * 1000;
         rodata.slice_min_ns = opts.slice_min_us * 1000;
         rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
@@ -893,25 +900,30 @@ impl Drop for Scheduler<'_> {
 }
 
 fn init_log(opts: &Opts) {
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )
-    .unwrap();
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
 }
 
 #[clap_main::clap_main]

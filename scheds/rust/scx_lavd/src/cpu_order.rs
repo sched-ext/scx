@@ -9,7 +9,6 @@
 use anyhow::Result;
 use combinations::Combinations;
 use itertools::iproduct;
-use log::debug;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::EnergyModel;
@@ -24,6 +23,7 @@ use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct CpuId {

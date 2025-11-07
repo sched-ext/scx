@@ -19,13 +19,13 @@ pub use config::LayerMatch;
 pub use config::LayerPlacement;
 pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
-use log::info;
 use scx_utils::Core;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::NR_CPU_IDS;
 use std::sync::Arc;
+use tracing::info;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
