@@ -38,7 +38,7 @@ impl ProfilingEvent {
         match self {
             ProfilingEvent::Perf(p) => {
                 let mut p = p.clone();
-                p.cpu = cpu;
+                p.cpu = cpu as i32;
                 p.attach(process)?;
                 Ok(ProfilingEvent::Perf(p))
             }

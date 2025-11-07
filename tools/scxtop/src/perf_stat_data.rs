@@ -314,7 +314,7 @@ impl PerfStatCollector {
             ];
 
             for (subsystem, event_name) in event_specs {
-                let mut event = PerfEvent::new(subsystem.to_string(), event_name.to_string(), cpu);
+                let mut event = PerfEvent::new(subsystem.to_string(), event_name.to_string(), cpu as i32);
                 // Attach in counting mode (no sampling)
                 if let Err(e) = event.attach(-1) {
                     log::warn!("Failed to attach {} for CPU {}: {}", event_name, cpu, e);
@@ -363,7 +363,8 @@ impl PerfStatCollector {
         let total_events = event_specs.len();
 
         for (subsystem, event_name) in &event_specs {
-            let mut event = PerfEvent::new(subsystem.to_string(), event_name.to_string(), 0);
+            // CPU -1 means monitor on all CPUs
+            let mut event = PerfEvent::new(subsystem.to_string(), event_name.to_string(), -1);
             if let Err(e) = event.attach(pid) {
                 log::warn!("Failed to attach {} for PID {}: {}", event_name, pid, e);
                 failed_events.push(*event_name);
@@ -392,6 +393,7 @@ impl PerfStatCollector {
         self.process_events = Some(events);
         self.process_counters = Some(PerfStatCounters::default());
         self.filter_pid = Some(pid);
+        self.is_active = true;
 
         Ok(())
     }
@@ -404,6 +406,39 @@ impl PerfStatCollector {
 
         // Track if any counters succeeded
         let mut any_success = false;
+
+        // Read process counters first if filtering by PID
+        if let Some(events) = &mut self.process_events {
+            let mut proc_counters = PerfStatCounters::default();
+            let mut proc_success = false;
+
+            for event in events {
+                if let Ok(value) = event.value(false) {
+                    proc_success = true;
+                    match event.event_name() {
+                        "cycles" | "cpu-cycles" => proc_counters.cycles = value,
+                        "instructions" => proc_counters.instructions = value,
+                        "branches" => proc_counters.branches = value,
+                        "branch-misses" => proc_counters.branch_misses = value,
+                        "cache-references" => proc_counters.cache_references = value,
+                        "cache-misses" => proc_counters.cache_misses = value,
+                        "stalled-cycles-frontend" => proc_counters.stalled_cycles_frontend = value,
+                        "stalled-cycles-backend" => proc_counters.stalled_cycles_backend = value,
+                        "context-switches" => proc_counters.context_switches = value,
+                        "cpu-migrations" => proc_counters.cpu_migrations = value,
+                        "page-faults" => proc_counters.page_faults = value,
+                        _ => {}
+                    }
+                }
+            }
+
+            if proc_success {
+                any_success = true;
+                if let Some(prev) = &mut self.process_counters {
+                    prev.update(&proc_counters, timestamp_ms);
+                }
+            }
+        }
 
         // Read system-wide counters
         let mut system_total = PerfStatCounters::default();
@@ -543,34 +578,6 @@ impl PerfStatCollector {
         let metrics = self.system_counters.derived_metrics();
         self.system_history
             .push(&metrics, &self.system_counters, duration_ms);
-
-        // Read process counters if filtering
-        if let Some(events) = &mut self.process_events {
-            let mut proc_counters = PerfStatCounters::default();
-
-            for event in events {
-                if let Ok(value) = event.value(false) {
-                    match event.event_name() {
-                        "cycles" | "cpu-cycles" => proc_counters.cycles = value,
-                        "instructions" => proc_counters.instructions = value,
-                        "branches" => proc_counters.branches = value,
-                        "branch-misses" => proc_counters.branch_misses = value,
-                        "cache-references" => proc_counters.cache_references = value,
-                        "cache-misses" => proc_counters.cache_misses = value,
-                        "stalled-cycles-frontend" => proc_counters.stalled_cycles_frontend = value,
-                        "stalled-cycles-backend" => proc_counters.stalled_cycles_backend = value,
-                        "context-switches" => proc_counters.context_switches = value,
-                        "cpu-migrations" => proc_counters.cpu_migrations = value,
-                        "page-faults" => proc_counters.page_faults = value,
-                        _ => {}
-                    }
-                }
-            }
-
-            if let Some(prev) = &mut self.process_counters {
-                prev.update(&proc_counters, timestamp_ms);
-            }
-        }
 
         Ok(())
     }

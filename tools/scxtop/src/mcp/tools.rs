@@ -1185,11 +1185,13 @@ impl McpTools {
 
         // Initialize collection
         let num_cpus = topo.all_cpus.len();
-        collector.init_system_wide_with_history_size(num_cpus, history_size)?;
 
-        // Add process filter if requested
         if pid > 0 {
+            // Per-process monitoring: only initialize process events to avoid exhausting hardware PMU counters
             collector.init_process(pid)?;
+        } else {
+            // System-wide monitoring: initialize per-CPU events
+            collector.init_system_wide_with_history_size(num_cpus, history_size)?;
         }
 
         Ok(json!({
@@ -1246,6 +1248,14 @@ impl McpTools {
                 }]
             }));
         }
+
+        // Update counters to get current values
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let duration_ms = 100; // Default polling interval
+        collector.update(now, duration_ms)?;
 
         let aggregation = args
             .get("aggregation")
