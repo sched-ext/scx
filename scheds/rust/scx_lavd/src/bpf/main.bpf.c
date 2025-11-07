@@ -1580,7 +1580,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
 	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
-	int cpu, i, j, err = 0;
+	int cpu, i, j, k, err = 0;
 	u64 cpdom_id;
 	u32 sum_capacity = 0, big_capacity = 0;
 
@@ -1702,26 +1702,27 @@ static s32 init_per_cpu_ctx(u64 now)
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 			u64 cpumask = cpdomc->__cpumask[i];
-			bpf_for(j, 0, 64) {
-				if (cpumask & 0x1LLU << j) {
-			 		cpu = (i * 64) + j;
-					cpuc = get_cpu_ctx_id(cpu);
-					if (!cpuc) {
-						scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-						err = -ESRCH;
-						goto unlock_out;
-					}
-					cpuc->llc_id = cpdomc->llc_id;
-					cpuc->cpdom_id = cpdomc->id;
-					cpuc->cpdom_alt_id = cpdomc->alt_id;
-
-					if (bpf_cpumask_test_cpu(cpu, online_cpumask)) {
-						bpf_cpumask_set_cpu(cpu, cd_cpumask);
-						cpdomc->nr_active_cpus++;
-						cpdomc->cap_sum_active_cpus += cpuc->capacity;
-					}
-					cpdomc->nr_cpus++;
+			bpf_for(k, 0, 64) {
+				j = cpumask_next_set_bit(&cpumask);
+				if (j < 0)
+					break;
+				cpu = (i * 64) + j;
+				cpuc = get_cpu_ctx_id(cpu);
+				if (!cpuc) {
+					scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+					err = -ESRCH;
+					goto unlock_out;
 				}
+				cpuc->llc_id = cpdomc->llc_id;
+				cpuc->cpdom_id = cpdomc->id;
+				cpuc->cpdom_alt_id = cpdomc->alt_id;
+
+				if (bpf_cpumask_test_cpu(cpu, online_cpumask)) {
+					bpf_cpumask_set_cpu(cpu, cd_cpumask);
+					cpdomc->nr_active_cpus++;
+					cpdomc->cap_sum_active_cpus += cpuc->capacity;
+				}
+				cpdomc->nr_cpus++;
 			}
 		}
 	}

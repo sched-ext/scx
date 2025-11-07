@@ -263,6 +263,31 @@ extern const volatile u8	verbose;
 u64 calc_avg(u64 old_val, u64 new_val);
 u64 calc_asym_avg(u64 old_val, u64 new_val);
 
+/* Bitmask helpers. */
+static __always_inline int cpumask_next_set_bit(u64 *cpumask)
+{
+	/*
+	 * Check the cpumask is not empty. __builtin_ctzll(x) is only
+	 * well-defined for nonzero x; that's why we check for zero earlier to
+	 * avoid undefined behavior.
+	 */
+	if (!*cpumask)
+		return -ENOENT;
+
+	/* Find the next set bit. */
+	int bit = __builtin_ctzll(*cpumask);
+
+	/*
+	 * This is equivalent to finding and clearing the least significant set
+	 * bit.  The statement works because subtracting one from a nonzero bit
+	 * flips all bits from the lowest set bit (inclusive) to the rightmost
+	 * position; Then, The logic here ANDing it with the original value
+	 * clears the lowest set bit.
+	 */
+	*cpumask &= *cpumask - 1;
+	return bit;
+}
+
 /* System statistics module .*/
 extern struct sys_stat		sys_stat;
 
