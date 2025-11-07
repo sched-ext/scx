@@ -225,6 +225,10 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
+
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
@@ -910,9 +914,8 @@ fn init_log(opts: &Opts) {
     .unwrap();
 }
 
-fn main() -> Result<()> {
-    let mut opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(mut opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_lavd {}",
@@ -933,6 +936,10 @@ fn main() -> Result<()> {
     }
 
     init_log(&opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_lavd run_id: {}", run_id);
+    }
 
     if opts.monitor.is_none() && opts.monitor_sched_samples.is_none() {
         opts.proc().unwrap();

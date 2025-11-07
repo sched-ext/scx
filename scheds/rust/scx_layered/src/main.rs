@@ -721,6 +721,10 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
+
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
@@ -4245,9 +4249,8 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     Ok(config)
 }
 
-fn main() -> Result<()> {
-    let opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_layered {}",
@@ -4294,6 +4297,10 @@ fn main() -> Result<()> {
     )?;
 
     debug!("opts={:?}", &opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_layered run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

@@ -87,6 +87,10 @@ struct CliOpts {
     #[clap(long)]
     pub version: bool,
 
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    pub run_id: Option<u64>,
+
     #[clap(flatten)]
     pub sched: SchedulerOpts,
 
@@ -249,9 +253,8 @@ impl Drop for Scheduler<'_> {
     }
 }
 
-fn main() -> Result<()> {
-    let opts = CliOpts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: CliOpts) -> Result<()> {
     if opts.version {
         println!(
             "scx_p2dq: {}",
@@ -278,6 +281,10 @@ fn main() -> Result<()> {
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     )?;
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_p2dq run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

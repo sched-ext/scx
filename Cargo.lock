@@ -689,6 +689,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
+name = "clap_main"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5b74f40adfa7021415c0448aef1a3e4202addee1f41e98da63b8dd315f848d1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2901,6 +2912,7 @@ dependencies = [
  "bitvec",
  "clap",
  "clap-num",
+ "clap_main",
  "combinations",
  "crossbeam",
  "ctrlc",
@@ -2932,6 +2944,7 @@ dependencies = [
  "bitvec",
  "chrono",
  "clap",
+ "clap_main",
  "crossbeam",
  "ctrlc",
  "fastrand",
@@ -2966,6 +2979,7 @@ dependencies = [
  "bitvec",
  "cgroupfs",
  "clap",
+ "clap_main",
  "crossbeam",
  "ctrlc",
  "itertools 0.13.0",
@@ -2990,6 +3004,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap_main",
  "crossbeam",
  "ctrlc",
  "lazy_static",

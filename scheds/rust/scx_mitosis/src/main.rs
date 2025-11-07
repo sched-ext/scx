@@ -90,6 +90,10 @@ struct Opts {
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
+
     /// Enable debug event tracking for cgroup_init, init_task, and cgroup_exit.
     /// Events are recorded in a ring buffer and output in dump().
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -553,9 +557,8 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
-fn main() -> Result<()> {
-    let opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_mitosis {}",
@@ -584,6 +587,10 @@ fn main() -> Result<()> {
     )?;
 
     debug!("opts={:?}", &opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_mitosis run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

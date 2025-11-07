@@ -16,6 +16,7 @@ scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.1" }
 anyhow = "1.0.65"
 bitvec = { version = "1.0", features = ["serde"] }
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
+clap_main = "0.2.9"
 clap-num = { version = "1.2.0" }
 crossbeam = "0.8.4"
 ctrlc = { version = "3.1", features = ["termination"] }
