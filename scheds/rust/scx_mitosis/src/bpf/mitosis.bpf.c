@@ -1164,7 +1164,12 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
-	cidx = tctx->cell;
+	/*
+	 * Use CPU's cell (not task's cell) to match dispatch() logic.
+	 * Prevents starvation when a task is pinned outside its cell.
+	 * E.g. a cell 0 kworker pinned to a cell 1 CPU.
+	 */
+	cidx = cctx->cell;
 	if (!(cell = lookup_cell(cidx)))
 		return;
 
