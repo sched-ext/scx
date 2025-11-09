@@ -52,6 +52,8 @@ static void read_stats(struct scx_prev *skel, __u64 *stats)
 
 	for (idx = 0; idx < 4; idx++) {
 		int ret, cpu;
+		for (cpu = 0; cpu < nr_cpus; cpu++)
+			cnts[idx][cpu] = 0;
 
 		ret = bpf_map_lookup_elem(bpf_map__fd(skel->maps.stats),
 					  &idx, cnts[idx]);
