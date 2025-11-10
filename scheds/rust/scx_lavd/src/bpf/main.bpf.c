@@ -533,7 +533,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct task_ctx *taskc = get_task_ctx(p);
 	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
 	struct cpu_ctx *cpuc;
-	u64 dsq_id;
+	u64 dsq_id, nr_queued = 0;
 	s32 cpu_id;
 	struct pick_ctx ictx = {
 		.p = p,
@@ -573,12 +573,12 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 
-		if (per_cpu_dsq)
-			dsq_id = cpu_to_dsq(cpu_id);
-		else
-			dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
+		dsq_id = (per_cpu_dsq || pinned_slice_ns) ? cpu_to_dsq(cpu_id) : cpdom_to_dsq(cpuc->cpdom_id);
+		nr_queued = scx_bpf_dsq_nr_queued(dsq_id);
+		if (pinned_slice_ns)
+			nr_queued += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
 
-		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+		if (!nr_queued) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
@@ -605,8 +605,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
-	u64 cpdom_id;
-	bool is_idle = false;
+	u64 cpdom_id, dsq_id;
+	bool is_idle = false, can_direct;
 
 	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
@@ -677,14 +677,17 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	if (can_direct_dispatch(cpu_to_dsq(cpu), cpu, is_idle)) {
+	dsq_id = (per_cpu_dsq || (pinned_slice_ns && is_pinned(p))) ? cpu_to_dsq(cpu) : cpdom_to_dsq(cpdom_id);
+
+	can_direct = can_direct_dispatch(dsq_id, cpu, is_idle);
+	if (can_direct && pinned_slice_ns && is_pinned(p))
+		can_direct &= can_direct_dispatch(cpdom_to_dsq(cpdom_id), cpu, is_idle);
+
+	if (can_direct) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
-	} else if (per_cpu_dsq) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
-					 p->scx.dsq_vtime, enq_flags);
 	} else {
-		scx_bpf_dsq_insert_vtime(p, cpdom_to_dsq(cpdom_id), p->scx.slice,
+		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
 
@@ -1032,12 +1035,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	}
 
 	/*
-	 * Increase the number of pinned tasks waiting for execution.
-	 */
-	if (is_pinned(p))
-		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
-
-	/*
 	 * If the sched_ext core directly dispatched a task, calculating the
 	 * task's deadline and time slice was also skipped. In this case, we
 	 * set the deadline to the current logical lock.
@@ -1105,7 +1102,10 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	 */
 	if (pinned_slice_ns && cpuc->nr_pinned_tasks &&
 	    p->scx.slice > pinned_slice_ns) {
-		p->scx.slice = pinned_slice_ns;
+		if (taskc->acc_runtime > pinned_slice_ns)
+			p->scx.slice = 0;
+		else
+			p->scx.slice = pinned_slice_ns;
 		return;
 	}
 
@@ -1168,6 +1168,13 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
 		taskc->last_quiescent_clk = now;
 	}
+
+	/*
+	 * Decrease the number of pinned tasks waiting for execution.
+	 */
+	if (is_pinned(p))
+		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
+
 }
 
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
@@ -1813,7 +1820,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * Per-CPU DSQs are created when per_cpu_dsq is enabled OR when
 	 * pinned_slice_ns is enabled (for pinned task handling).
 	 */
-	if (per_cpu_dsq) {
+	if (per_cpu_dsq || pinned_slice_ns) {
 		err = init_per_cpu_dsqs();
 		if (err)
 			return err;

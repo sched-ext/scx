@@ -366,7 +366,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
 	struct task_struct *p;
-	u64 vtime = U64_MAX, dsq_id = cpu_dsq_id;
+	u64 vtime = U64_MAX;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
 	if (!cpdomc) {
@@ -386,26 +386,35 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * When per_cpu_dsq or pinned_slice_ns is enabled, compare vtimes
 	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
 	 */
-	if (per_cpu_dsq) {
-		bpf_for_each(scx_dsq, p, cpu_dsq_id, 0) {
+	if (per_cpu_dsq || pinned_slice_ns) {
+		u64 dsq_id = cpu_dsq_id;
+		u64 backup_dsq_id = cpdom_dsq_id;
+
+		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq_id);
+		if (p)
 			vtime = p->scx.dsq_vtime;
-			break;
+
+		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq_id);
+		if (p && p->scx.dsq_vtime < vtime) {
+			dsq_id = cpdom_dsq_id;
+			backup_dsq_id = cpu_dsq_id;
 		}
 
-		bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
-			if (p->scx.dsq_vtime < vtime)
-				dsq_id = cpdom_dsq_id;
-			break;
-		}
+		/*
+		 * There is a scenario where the task on the Cpdom DSQ has a
+		 * lower vtime, but this CPU fails to win the race and causes
+		 * the pinned task to stall and wait on the Per-CPU DSQ for the
+		 * next scheduling round. Always try consuming from the other DSQ
+		 * to prevent this scenario.
+		 */
+		if (consume_dsq(cpdomc, dsq_id))
+			return true;
+		if (consume_dsq(cpdomc, backup_dsq_id))
+			return true;
 	} else {
-		dsq_id = cpdom_dsq_id;
+		if (consume_dsq(cpdomc, cpdom_dsq_id))
+			return true;
 	}
-
-	/*
-	 * Try to consume a task from selected DSQ.
-	 */
-	if (consume_dsq(cpdomc, dsq_id))
-		return true;
 
 	/*
 	 * If there is no task in the assssociated DSQ, traverse neighbor
