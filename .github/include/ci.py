@@ -332,7 +332,7 @@ async def run_tests():
             sys.argv[0],
             "test-in-vm",
         ],
-        memory=10 * 1024 * 1024 * 1024,
+        memory=16 * 1024 * 1024 * 1024,
         cpus=cpu_count,
         no_capture=True,
     )
