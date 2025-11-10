@@ -2986,7 +2986,7 @@ impl<'a> Scheduler<'a> {
     // first free LLCs from layers that shrunk from last recomputation, then
     // distribute freed LLCs to growing layers, and then spill over remaining
     // cores in free LLCs.
-    fn recompute_layer_core_order(&mut self, layer_targets: &Vec<(usize, usize)>) {
+    fn recompute_layer_core_order(&mut self, layer_targets: &Vec<(usize, usize)>) -> Result<bool> {
         // Collect freed LLCs from shrinking layers.
         debug!(
             " free: before pass: free_llcs={:?}",
@@ -3089,6 +3089,7 @@ impl<'a> Scheduler<'a> {
                 let avail = cpus_per_llc - free_vec[i].1;
                 // The amount we'll use.
                 let mut used = extra.min(avail);
+                let cores_to_add = used;
 
                 let shift = free_vec[i].1;
                 free_vec[i].1 += used;
@@ -3097,14 +3098,14 @@ impl<'a> Scheduler<'a> {
                 let llc = self.topo.all_llcs.get(&llc_id).unwrap();
 
                 for core in llc.cores.iter().skip(shift) {
-                    core_order.push(core.1.id);
                     if used == 0 {
                         break;
                     }
+                    core_order.push(core.1.id);
                     used -= 1;
                 }
 
-                extra -= used;
+                extra -= cores_to_add;
                 if extra == 0 {
                     break;
                 }
@@ -3140,6 +3141,105 @@ impl<'a> Scheduler<'a> {
                 layer.name, layer.core_order
             );
         }
+
+        // Apply CPU changes directly for StickyDynamic layers
+        // Do this in two phases: first free all CPUs, then allocate all CPUs
+        // This ensures freed CPUs are available for reallocation
+        let mut updated = false;
+
+        // Calculate target CPUs for all layers and free excess CPUs
+        for &(idx, _) in layer_targets.iter() {
+            let layer = &mut self.layers[idx];
+
+            if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
+                continue;
+            }
+
+            // Calculate new cpumask based on core_order (which includes both assigned LLCs and spillover cores)
+            let mut new_cpus = Cpumask::new();
+            for &core_id in &layer.core_order {
+                if let Some(core) = self.topo.all_cores.get(&core_id) {
+                    new_cpus |= &core.span;
+                }
+            }
+
+            // Intersect with allowed_cpus
+            new_cpus &= &layer.allowed_cpus;
+
+            // Determine CPUs to free (old cpus not in new cpus)
+            let cpus_to_free = layer.cpus.clone().and(&new_cpus.clone().not());
+
+            if cpus_to_free.weight() > 0 {
+                debug!(
+                    " apply: layer={} freeing CPUs: {}",
+                    layer.name, cpus_to_free
+                );
+                // Update layer state and free
+                layer.cpus &= &cpus_to_free.not();
+                layer.nr_cpus -= cpus_to_free.weight();
+                for cpu in cpus_to_free.iter() {
+                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                }
+                self.cpu_pool.free(&cpus_to_free)?;
+                updated = true;
+            }
+        }
+
+        // Allocate needed CPUs to all layers
+        for &(idx, _) in layer_targets.iter() {
+            let layer = &mut self.layers[idx];
+
+            if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
+                continue;
+            }
+
+            // Recalculate target CPUs
+            let mut new_cpus = Cpumask::new();
+            for &core_id in &layer.core_order {
+                if let Some(core) = self.topo.all_cores.get(&core_id) {
+                    new_cpus |= &core.span;
+                }
+            }
+            new_cpus &= &layer.allowed_cpus;
+
+            // Determine CPUs to allocate (new cpus not in old cpus, and whether they are available)
+            let available_cpus = self.cpu_pool.available_cpus();
+            let desired_to_alloc = new_cpus.clone().and(&layer.cpus.clone().not());
+            let cpus_to_alloc = desired_to_alloc.clone().and(&available_cpus);
+
+            if desired_to_alloc.weight() > cpus_to_alloc.weight() {
+                debug!(
+                    " apply: layer={} wanted to alloc {} CPUs but only {} available",
+                    layer.name,
+                    desired_to_alloc.weight(),
+                    cpus_to_alloc.weight()
+                );
+            }
+
+            if cpus_to_alloc.weight() > 0 {
+                debug!(
+                    " apply: layer={} allocating CPUs: {}",
+                    layer.name, cpus_to_alloc
+                );
+                // Update layer state and free
+                layer.cpus |= &cpus_to_alloc;
+                layer.nr_cpus += cpus_to_alloc.weight();
+                for cpu in cpus_to_alloc.iter() {
+                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+                }
+                self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
+                updated = true;
+            }
+
+            debug!(
+                " apply: layer={} final cpus.weight()={} nr_cpus={}",
+                layer.name,
+                layer.cpus.weight(),
+                layer.nr_cpus
+            );
+        }
+
+        Ok(updated)
     }
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
@@ -3152,7 +3252,20 @@ impl<'a> Scheduler<'a> {
         let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
-        self.recompute_layer_core_order(&ascending);
+        let sticky_dynamic_updated = self.recompute_layer_core_order(&ascending)?;
+        updated |= sticky_dynamic_updated;
+
+        // Update BPF cpumasks for StickyDynamic layers if they were updated
+        if sticky_dynamic_updated {
+            for (idx, layer) in self.layers.iter().enumerate() {
+                if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
+                    Self::update_bpf_layer_cpumask(
+                        layer,
+                        &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                    );
+                }
+            }
+        }
 
         // If any layer is growing, guarantee that the largest layer that is
         // freeing CPUs frees at least one CPU.
@@ -3168,6 +3281,11 @@ impl<'a> Scheduler<'a> {
         for &(idx, target) in ascending.iter().rev() {
             let layer = &mut self.layers[idx];
             if layer_is_open(layer) {
+                continue;
+            }
+
+            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
@@ -3224,6 +3342,11 @@ impl<'a> Scheduler<'a> {
             let layer = &mut self.layers[idx];
 
             if layer_is_open(layer) {
+                continue;
+            }
+
+            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
