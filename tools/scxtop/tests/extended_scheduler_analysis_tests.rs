@@ -24,7 +24,7 @@ fn test_task_state_analysis() {
     let analyzer = TaskStateAnalyzer::new(trace);
 
     let start = std::time::Instant::now();
-    let stats = analyzer.analyze_task_states(None);
+    let stats = analyzer.analyze_task_states(None, AggregationMode::PerThread);
     let duration = start.elapsed();
 
     println!("\n=== Task State Analysis Test ===");
@@ -262,7 +262,7 @@ fn test_all_extended_analyses() {
     // Task state analysis
     let start = std::time::Instant::now();
     let task_analyzer = TaskStateAnalyzer::new(trace.clone());
-    let task_stats = task_analyzer.analyze_task_states(None);
+    let task_stats = task_analyzer.analyze_task_states(None, AggregationMode::PerThread);
     println!(
         "✓ Task state analysis: {} processes in {:?}",
         task_stats.len(),
