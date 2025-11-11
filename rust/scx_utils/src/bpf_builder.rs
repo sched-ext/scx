@@ -253,10 +253,14 @@ impl BpfBuilder {
         let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
         let clang = ClangInfo::new()?;
-        let cflags = match env::var("BPF_CFLAGS") {
+        let mut cflags = match env::var("BPF_CFLAGS") {
             Ok(v) => v.split_whitespace().map(|x| x.into()).collect(),
             _ => Self::determine_cflags(&clang, &out_dir)?,
         };
+
+        // Add a target architecture definition (e.g., __SCX_TARGET_ARCH_x86)
+        // for target architecture-specific optimizations in BPF code.
+        cflags.push(format!("-D__SCX_TARGET_ARCH_{}", clang.kernel_target()?));
 
         println!("scx_utils:clang={:?} {:?}", &clang, &cflags);
 
