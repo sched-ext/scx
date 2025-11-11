@@ -1,6 +1,6 @@
 [package]
 name = "scx_cargo"
-version = "1.0.23"
+version = "1.0.24"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -8,4 +8,4 @@ repository = "https://github.com/sched-ext/scx"
 description = "Build time utilities for sched_ext schedulers"
 
 [dependencies]
-scx_utils = { path = "../scx_utils", version = "1.0.23" }
+scx_utils = { path = "../scx_utils", version = "1.0.24" }
