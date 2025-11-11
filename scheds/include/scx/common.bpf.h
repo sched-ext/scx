@@ -749,6 +749,70 @@ static inline u64 __sqrt_u64(u64 x)
 }
 
 /*
+ * ctzll -- Counts trailing zeros in an unsigned long long. If the input value
+ * is zero, the return value is undefined.
+ */
+static inline int ctzll(u64 v)
+{
+#ifdef __SCX_TARGET_ARCH_x86
+	/*
+	 * If the target architecture and tool chains support ctzll,
+	 * let's use a single instruction.
+	 */
+	return __builtin_ctzll(v);
+#else
+	/*
+	 * If neither the target architecture nor the toolchains support ctzll,
+	 * use software-based emulation. Let's use the De Bruijn sequence-based
+	 * approach to find LSB fastly. See the details of De Bruijn sequence:
+	 *
+	 * https://en.wikipedia.org/wiki/De_Bruijn_sequence
+	 * https://www.chessprogramming.org/BitScan#De_Bruijn_Multiplication
+	 */
+	const int lookup_table[64] = {
+		 0,  1, 48,  2, 57, 49, 28,  3, 61, 58, 50, 42, 38, 29, 17,  4,
+		62, 55, 59, 36, 53, 51, 43, 22, 45, 39, 33, 30, 24, 18, 12,  5,
+		63, 47, 56, 27, 60, 41, 37, 16, 54, 35, 52, 21, 44, 32, 23, 11,
+		46, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19,  9, 13,  8,  7,  6,
+	};
+	const u64 DEBRUIJN_CONSTANT = 0x03f79d71b4cb0a89ULL;
+	unsigned int index;
+	u64 lowest_bit;
+	const int *lt;
+
+	if (v == 0)
+		return -1;
+
+	/*
+	 * Isolate the least significant bit (LSB).
+	 * For example, if v = 0b...10100, then v & -v = 0b...00100
+	 */
+	lowest_bit = v & -v;
+
+	/*
+	 * Each isolated bit produces a unique 6-bit value, guaranteed by the
+	 * De Bruijn property. Calculate a unique index into the lookup table
+	 * using the magic constant and a right shift.
+	 *
+	 * Multiplying by the 64-bit constant “spreads out” that 1-bit into a
+	 * unique pattern in the top 6 bits. This uniqueness property is
+	 * exactly what a De Bruijn sequence guarantees: Every possible 6-bit
+	 * pattern (in top bits) occurs exactly once for each LSB position. So,
+	 * the constant 0x03f79d71b4cb0a89ULL is carefully chosen to be a
+	 * De Bruijn sequence, ensuring no collisions in the table index.
+	 */
+	index = (lowest_bit * DEBRUIJN_CONSTANT) >> 58;
+
+	/*
+	 * Lookup in a precomputed table. No collision is guaranteed by the
+	 * De Bruijn property.
+	 */
+	lt = MEMBER_VPTR(lookup_table, [index]);
+	return (lt)? *lt : -1;
+#endif
+}
+
+/*
  * Return a value proportionally scaled to the task's weight.
  */
 static inline u64 scale_by_task_weight(const struct task_struct *p, u64 value)
