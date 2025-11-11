@@ -195,24 +195,25 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
 	u64 highest_queued = 0;
 	int pick_cpu = -ENOENT;
-	int cpu, i, j;
+	int cpu, i, j, k;
 
 	if (!per_cpu_dsq)
 		return -ENOENT;
 
 	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 		u64 cpumask = cpdomc->__cpumask[i];
-		bpf_for(j, 0, 64) {
-			if (cpumask & 0x1LLU << j) {
-				u64 queued;
-				cpu = (i * 64) + j;
-				if (cpu >= __nr_cpu_ids)
-					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-				if (queued > highest_queued) {
-					highest_queued = queued;
-					pick_cpu = cpu;
-				}
+		bpf_for(k, 0, 64) {
+			u64 queued;
+			j = cpumask_next_set_bit(&cpumask);
+			if (j < 0)
+				break;
+			cpu = (i * 64) + j;
+			if (cpu >= __nr_cpu_ids)
+				break;
+			queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+			if (queued > highest_queued) {
+				highest_queued = queued;
+				pick_cpu = cpu;
 			}
 		}
 	}
