@@ -2544,6 +2544,18 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	complete_p2dq_enqueue(&pro, p);
 }
 
+void BPF_STRUCT_OPS(p2dq_dequeue, struct task_struct *p __arg_trusted, u64 deq_flags)
+{
+	task_ctx *taskc = lookup_task_ctx(p);
+	int ret;
+
+	ret = scx_atq_cancel(&taskc->common);
+	if (ret)
+		scx_bpf_error("scx_atq_cancel returned %d", ret);
+
+	return;
+}
+
 void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 {
 	return p2dq_dispatch_impl(cpu, prev);
@@ -2564,6 +2576,7 @@ SCX_OPS_DEFINE(p2dq,
 	       .select_cpu		= (void *)p2dq_select_cpu,
 	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .enqueue			= (void *)p2dq_enqueue,
+	       .dequeue			= (void *)p2dq_dequeue,
 	       .dispatch		= (void *)p2dq_dispatch,
 	       .running			= (void *)p2dq_running,
 	       .stopping		= (void *)p2dq_stopping,

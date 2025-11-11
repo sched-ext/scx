@@ -1626,38 +1626,7 @@ bool cbw_transit_replenish_stat(int from, int to)
 __hidden
 int scx_cgroup_bw_cancel(u64 ctx)
 {
-	scx_task_common *taskc = (scx_task_common *)ctx;
-	scx_atq_t *atq;
-	int ret;
-
-	/*
-	 * Copy the ATQ pointer over to the stack and use it to avoid
-	 * a racing scx_atq_pop() from overwriting it. Check the
-	 * pointer is valid, as expected by the caller.
-	 */
-	atq = taskc->atq;
-	if (!atq)
-		return 0;
-
-	if ((ret = scx_atq_lock(atq))) {
-		cbw_err("Failed to lock ATQ for task.");
-		return ret;
-	}
-
-	/* We lost the race, assume whoever popped the task will handle it. */
-	if (taskc->atq != atq) {
-		scx_atq_unlock(atq);
-		return 0;
-	}
-
-	/* Protected from races by the lock. */
-	if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
-		/* There is an unavoidable race with scx_atq_pop. */
-		cbw_dbg("Failed to remove node from task");
-	}
-
-	scx_atq_unlock(atq);
-	return ret;
+	return scx_atq_cancel((scx_task_common *)ctx);
 }
 
 /*
