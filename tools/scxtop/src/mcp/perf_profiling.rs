@@ -470,7 +470,8 @@ impl PerfProfiler {
         self.samples.push(sample);
         self.samples_collected += 1;
 
-        if self.samples_collected.is_multiple_of(100) {
+        #[allow(clippy::manual_is_multiple_of)]
+        if self.samples_collected % 100 == 0 {
             log::debug!("Collected {} samples so far", self.samples_collected);
         }
 
