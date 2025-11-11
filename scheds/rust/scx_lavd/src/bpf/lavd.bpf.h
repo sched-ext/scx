@@ -6,6 +6,8 @@
 #ifndef __LAVD_H
 #define __LAVD_H
 
+#include <scx/common.bpf.h>
+
 /*
  * common macros
  */
@@ -267,15 +269,15 @@ u64 calc_asym_avg(u64 old_val, u64 new_val);
 static __always_inline int cpumask_next_set_bit(u64 *cpumask)
 {
 	/*
-	 * Check the cpumask is not empty. __builtin_ctzll(x) is only
-	 * well-defined for nonzero x; that's why we check for zero earlier to
-	 * avoid undefined behavior.
+	 * Check the cpumask is not empty. ctzll(x) is only well-defined
+	 * for nonzero x; that's why we check for zero earlier to avoid
+	 * undefined behavior.
 	 */
 	if (!*cpumask)
 		return -ENOENT;
 
 	/* Find the next set bit. */
-	int bit = __builtin_ctzll(*cpumask);
+	int bit = ctzll(*cpumask);
 
 	/*
 	 * This is equivalent to finding and clearing the least significant set
