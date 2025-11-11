@@ -1008,9 +1008,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 	// Handle affinitized tasks: always use per-CPU affn_dsq
 	// All affinitized tasks queued to affn_dsq regardless of affinity breadth
+	// Also handle interactive tasks when interactive_sticky is enabled
 	if (!task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS) ||
 	    (p->cpus_ptr == &p->cpus_mask &&
-	     p->nr_cpus_allowed != topo_config.nr_cpus)) {
+	     p->nr_cpus_allowed != topo_config.nr_cpus) ||
+	    (p2dq_config.interactive_sticky && task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE))) {
 		bool has_cleared_idle = false;
 		if (!__COMPAT_is_enq_cpu_selected(enq_flags) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
@@ -1033,7 +1035,11 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		stat_inc(P2DQ_STAT_ENQ_CPU);
+		// Track whether this is an interactive sticky enqueue or regular affinity enqueue
+		if (p2dq_config.interactive_sticky && task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE))
+			stat_inc(P2DQ_STAT_ENQ_INTR);
+		else
+			stat_inc(P2DQ_STAT_ENQ_CPU);
 
 		// Select target CPU for affn_dsq with priority:
 		// 1. prev_cpu if in affinity
