@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Result};
 use perfetto_protos::{
     ftrace_event::{ftrace_event, FtraceEvent},
+    ftrace_event_bundle::ftrace_event_bundle::CompactSched,
     sys_stats::SysStats,
     trace::Trace,
     trace_packet::{trace_packet, TracePacket},
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Core structure for a parsed perfetto trace file
 #[derive(Clone)]
@@ -40,6 +42,20 @@ pub struct PerfettoTrace {
     time_range: (u64, u64),
     /// sched_ext scheduler metadata (if trace contains sched_ext events)
     scx_metadata: Option<SchedExtMetadata>,
+
+    /// NEW: Track events parsed from wprof traces (ONCPU, WAKER, etc.)
+    track_events: Vec<super::perfetto_track_event_types::ParsedTrackEvent>,
+    /// Track events indexed by PID for efficient per-process queries
+    track_events_by_pid: HashMap<i32, Vec<usize>>, // Maps PID -> indices into track_events
+    /// Track events indexed by category for efficient type queries
+    track_events_by_category: HashMap<String, Vec<usize>>, // Maps category -> indices into track_events
+
+    /// NEW: Trace capabilities (what data is available)
+    #[allow(dead_code)]
+    capabilities: Option<super::perfetto_parser_enhanced::TraceCapabilities>,
+    /// NEW: Generic event index (lazy-loaded on demand)
+    #[allow(dead_code)]
+    event_index: Option<Arc<super::perfetto_parser_enhanced::EventTypeIndex>>,
 }
 
 /// Information about a process
@@ -120,6 +136,104 @@ pub struct Percentiles {
     pub p999: u64,
 }
 
+/// Helper function to expand CompactSched format into individual FtraceEvents
+fn expand_compact_sched(
+    compact: &CompactSched,
+    _cpu: u32,
+    packet_idx: usize,
+) -> Vec<FtraceEventWithIndex> {
+    use perfetto_protos::sched::{SchedSwitchFtraceEvent, SchedWakingFtraceEvent};
+
+    let mut events = Vec::new();
+
+    // Expand sched_waking events
+    let mut waking_ts = 0u64;
+    let waking_count = compact.waking_timestamp.len();
+    for i in 0..waking_count {
+        // Reconstruct absolute timestamp from delta-encoded values
+        waking_ts += compact.waking_timestamp[i];
+
+        // Get command name from intern table
+        let comm = if let Some(&comm_idx) = compact.waking_comm_index.get(i) {
+            compact
+                .intern_table
+                .get(comm_idx as usize)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Create SchedWakingFtraceEvent
+        let waking = SchedWakingFtraceEvent {
+            pid: compact.waking_pid.get(i).copied(),
+            target_cpu: compact.waking_target_cpu.get(i).copied(),
+            prio: compact.waking_prio.get(i).copied(),
+            comm: Some(comm),
+            ..Default::default()
+        };
+
+        // Create FtraceEvent wrapper
+        let ftrace_event = FtraceEvent {
+            timestamp: Some(waking_ts),
+            event: Some(ftrace_event::Event::SchedWaking(waking)),
+            ..Default::default()
+        };
+
+        events.push(FtraceEventWithIndex {
+            event: ftrace_event,
+            packet_index: packet_idx,
+        });
+    }
+
+    // Expand sched_switch events
+    let mut switch_ts = 0u64;
+    let switch_count = compact.switch_timestamp.len();
+    for i in 0..switch_count {
+        // Reconstruct absolute timestamp from delta-encoded values
+        switch_ts += compact.switch_timestamp[i];
+
+        // Get command name from intern table
+        let next_comm = if let Some(&comm_idx) = compact.switch_next_comm_index.get(i) {
+            compact
+                .intern_table
+                .get(comm_idx as usize)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Create SchedSwitchFtraceEvent
+        // Note: CompactSched doesn't include prev_pid/prev_comm in systing's format
+        // These would need to be inferred from previous next_pid/next_comm
+        let switch = SchedSwitchFtraceEvent {
+            prev_state: compact.switch_prev_state.get(i).copied(),
+            next_pid: compact.switch_next_pid.get(i).copied(),
+            next_prio: compact.switch_next_prio.get(i).copied(),
+            next_comm: Some(next_comm),
+            ..Default::default()
+        };
+
+        // Create FtraceEvent wrapper
+        let ftrace_event = FtraceEvent {
+            timestamp: Some(switch_ts),
+            event: Some(ftrace_event::Event::SchedSwitch(switch)),
+            ..Default::default()
+        };
+
+        events.push(FtraceEventWithIndex {
+            event: ftrace_event,
+            packet_index: packet_idx,
+        });
+    }
+
+    // Sort all events by timestamp
+    events.sort_by_key(|e| e.event.timestamp.unwrap_or(0));
+
+    events
+}
+
 impl PerfettoTrace {
     /// Parse a perfetto trace file from disk
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -147,6 +261,11 @@ impl PerfettoTrace {
         // Track DSQ descriptors as we parse
         let mut dsq_descriptors: HashMap<u64, DsqDescriptor> = HashMap::new();
         let mut has_scx_events = false;
+
+        // Track events storage
+        let mut track_events: Vec<super::perfetto_track_event_types::ParsedTrackEvent> = Vec::new();
+        let mut track_events_by_pid: HashMap<i32, Vec<usize>> = HashMap::new();
+        let mut track_events_by_category: HashMap<String, Vec<usize>> = HashMap::new();
 
         // First pass: Extract processes, threads, and track descriptors
         for (packet_idx, packet) in trace.packet.iter().enumerate() {
@@ -225,6 +344,7 @@ impl PerfettoTrace {
                     trace_packet::Data::FtraceEvents(ftrace_bundle) => {
                         let cpu = ftrace_bundle.cpu.unwrap_or(0);
 
+                        // Process individual FtraceEvents
                         for event in &ftrace_bundle.event {
                             // Track timestamp range
                             if let Some(ts) = event.timestamp {
@@ -240,9 +360,68 @@ impl PerfettoTrace {
                                 },
                             );
                         }
+
+                        // Process CompactSched format (used by systing and other tools)
+                        if let Some(compact_sched) = ftrace_bundle.compact_sched.as_ref() {
+                            let expanded_events =
+                                expand_compact_sched(compact_sched, cpu, packet_idx);
+
+                            // Track timestamp range from expanded events
+                            for event_with_idx in &expanded_events {
+                                if let Some(ts) = event_with_idx.event.timestamp {
+                                    min_ts = min_ts.min(ts);
+                                    max_ts = max_ts.max(ts);
+                                }
+                            }
+
+                            // Add expanded events to per-CPU index
+                            ftrace_events_by_cpu
+                                .entry(cpu)
+                                .or_default()
+                                .extend(expanded_events);
+                        }
                     }
                     trace_packet::Data::TrackEvent(track_event) => {
-                        // Extract DSQ events from track events
+                        // Get timestamp from packet or track event
+                        let timestamp_ns = if let Some(ts) = packet.timestamp {
+                            ts
+                        } else if let Some(ts_us) = extract_track_event_timestamp(track_event) {
+                            ts_us * 1000 // Convert microseconds to nanoseconds
+                        } else {
+                            0 // No timestamp available
+                        };
+
+                        // Parse track event using helper function
+                        if let Some(parsed_event) =
+                            super::perfetto_track_event_types::parse_track_event(
+                                track_event,
+                                timestamp_ns,
+                            )
+                        {
+                            let event_idx = track_events.len();
+
+                            // Index by PID if available
+                            if let Some(pid) = parsed_event.metadata.pid {
+                                track_events_by_pid.entry(pid).or_default().push(event_idx);
+                            }
+
+                            // Index by category
+                            if let Some(ref category) = parsed_event.category {
+                                track_events_by_category
+                                    .entry(category.clone())
+                                    .or_default()
+                                    .push(event_idx);
+                            }
+
+                            // Update time range
+                            min_ts = min_ts.min(timestamp_ns);
+                            max_ts = max_ts.max(timestamp_ns);
+
+                            // Store the parsed event
+                            track_events.push(parsed_event);
+                        }
+
+                        // Also extract DSQ events from track events (legacy behavior)
                         if let Some(_uuid) = track_event.track_uuid {
                             // Check if this is a DSQ track by looking for it in descriptors
                             for (&dsq_id, desc) in dsq_descriptors.iter_mut() {
@@ -265,9 +444,6 @@ impl PerfettoTrace {
                                         latency_us: value,
                                         nr_queued: None, // Would be filled from separate track
                                     });
-
-                                    min_ts = min_ts.min(ts_ns);
-                                    max_ts = max_ts.max(ts_ns);
                                 }
                             }
                         }
@@ -308,6 +484,11 @@ impl PerfettoTrace {
             system_stats,
             time_range: (min_ts, max_ts),
             scx_metadata,
+            track_events,
+            track_events_by_pid,
+            track_events_by_category,
+            capabilities: None, // Lazy-loaded on demand
+            event_index: None,  // Lazy-loaded on demand
         })
     }
 
@@ -413,6 +594,63 @@ impl PerfettoTrace {
         Vec::new()
     }
 
+    /// Get all track events
+    pub fn get_track_events(&self) -> &[super::perfetto_track_event_types::ParsedTrackEvent] {
+        &self.track_events
+    }
+
+    /// Get track events by category (e.g., "ONCPU", "WAKER", "WAKEE")
+    pub fn get_track_events_by_category(
+        &self,
+        category: &str,
+    ) -> Vec<&super::perfetto_track_event_types::ParsedTrackEvent> {
+        self.track_events_by_category
+            .get(category)
+            .map(|indices| indices.iter().map(|&idx| &self.track_events[idx]).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get track events for a specific PID
+    pub fn get_track_events_by_pid(
+        &self,
+        pid: i32,
+    ) -> Vec<&super::perfetto_track_event_types::ParsedTrackEvent> {
+        self.track_events_by_pid
+            .get(&pid)
+            .map(|indices| indices.iter().map(|&idx| &self.track_events[idx]).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get track events within a time range
+    pub fn get_track_events_by_time_range(
+        &self,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> Vec<&super::perfetto_track_event_types::ParsedTrackEvent> {
+        self.track_events
+            .iter()
+            .filter(|e| e.timestamp_ns >= start_ns && e.timestamp_ns <= end_ns)
+            .collect()
+    }
+
+    /// Get count of track events by category
+    pub fn get_track_event_counts_by_category(&self) -> HashMap<String, usize> {
+        self.track_events_by_category
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect()
+    }
+
+    /// Get total number of track events
+    pub fn total_track_events(&self) -> usize {
+        self.track_events.len()
+    }
+
+    /// Get list of available track event categories
+    pub fn get_track_event_categories(&self) -> Vec<String> {
+        self.track_events_by_category.keys().cloned().collect()
+    }
+
     /// Calculate percentiles from a set of values
     pub fn calculate_percentiles(values: &[u64]) -> Percentiles {
         if values.is_empty() {
@@ -466,8 +704,13 @@ impl PerfettoTrace {
     }
 
     /// Get total number of ftrace events
-    pub fn total_events(&self) -> usize {
+    pub fn total_ftrace_events(&self) -> usize {
         self.ftrace_events_by_cpu.values().map(|v| v.len()).sum()
+    }
+
+    /// Get total number of events (ftrace + track events)
+    pub fn total_events(&self) -> usize {
+        self.total_ftrace_events() + self.track_events.len()
     }
 
     /// Get timeline of events for a specific process
@@ -597,6 +840,64 @@ impl PerfettoTrace {
         }
 
         CpuTimeline { cpu, events }
+    }
+
+    /// Build capabilities from trace data
+    pub fn build_capabilities(&self) -> super::perfetto_parser_enhanced::TraceCapabilities {
+        super::perfetto_parser_enhanced::TraceCapabilities::from_trace(self)
+    }
+
+    /// Check if analyzer requirements are met
+    pub fn supports_analysis(&self, required_events: &[&str]) -> bool {
+        let caps = self.build_capabilities();
+        caps.supports_analyzer(required_events)
+    }
+
+    /// Get available event types as list
+    pub fn list_event_types(&self) -> Vec<String> {
+        let caps = self.build_capabilities();
+        caps.list_event_types()
+    }
+
+    /// Build generic event index
+    pub fn build_event_index(&self) -> Arc<super::perfetto_parser_enhanced::EventTypeIndex> {
+        Arc::new(super::perfetto_parser_enhanced::EventTypeIndex::build_from_trace(self))
+    }
+
+    /// Get thread information by TID
+    pub fn get_thread_info(&self, tid: i32) -> Option<&ThreadInfo> {
+        // Try to find the thread in the threads map
+        // We don't know the PID, so we need to search
+        self.threads
+            .values()
+            .find(|&thread_info| thread_info.tid == tid)
+    }
+
+    /// Get TGID (process ID) for a given TID (thread ID)
+    /// Returns None if thread info not found, or tid if it's likely the main thread
+    pub fn get_tgid_for_tid(&self, tid: i32) -> Option<i32> {
+        self.get_thread_info(tid).map(|info| info.pid)
+    }
+
+    /// Get all threads for a given TGID (process ID)
+    pub fn get_threads_for_tgid(&self, tgid: i32) -> Vec<&ThreadInfo> {
+        self.threads
+            .values()
+            .filter(|info| info.pid == tgid)
+            .collect()
+    }
+
+    /// Get all unique TGIDs (process IDs) in the trace
+    pub fn get_all_tgids(&self) -> Vec<i32> {
+        let mut tgids: Vec<i32> = self
+            .threads
+            .values()
+            .map(|info| info.pid)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        tgids.sort_unstable();
+        tgids
     }
 }
 
