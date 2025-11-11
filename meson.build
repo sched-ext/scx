@@ -1,6 +1,6 @@
 project('sched_ext schedulers', 'c',
         default_options : ['c_std=gnu11'], # Use gnu11 as the C standard to compile vmlinux.h without errors.
-        version: '1.0.17',
+        version: '1.0.18',
         license: 'GPL-2.0',
         meson_version : '>= 1.2.0',)
 
