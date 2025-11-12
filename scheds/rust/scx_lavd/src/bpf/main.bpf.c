@@ -529,27 +529,23 @@ static void update_stat_for_refill(struct task_struct *p,
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	bool found_idle = false;
-	struct task_ctx *taskc = get_task_ctx(p);
-	struct cpu_ctx *cpuc_cur = get_cpu_ctx();
-	struct cpu_ctx *cpuc;
-	u64 dsq_id, nr_queued = 0;
-	s32 cpu_id;
 	struct pick_ctx ictx = {
 		.p = p,
-		.taskc = taskc,
+		.taskc = get_task_ctx(p),
 		.prev_cpu = prev_cpu,
-		.cpuc_cur = cpuc_cur,
+		.cpuc_cur = get_cpu_ctx(),
 		.wake_flags = wake_flags,
 	};
+	bool found_idle = false;
+	s32 cpu_id;
 
-	if (!taskc || !cpuc_cur)
+	if (!ictx.taskc || !ictx.cpuc_cur)
 		return prev_cpu;
 
 	if (wake_flags & SCX_WAKE_SYNC)
-		set_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
+		set_task_flag(ictx.taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	else
-		reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
+		reset_task_flag(ictx.taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 
 	/*
 	 * Find an idle cpu and reserve it since the task @p will run
@@ -558,10 +554,13 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	cpu_id = pick_idle_cpu(&ictx, &found_idle);
 	cpu_id = cpu_id >= 0 ? cpu_id : prev_cpu;
-	taskc->suggested_cpu_id = cpu_id;
+	ictx.taskc->suggested_cpu_id = cpu_id;
 
 	if (found_idle) {
-		set_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+		u64 dsq_id, nr_queued = 0;
+		struct cpu_ctx *cpuc;
+
+		set_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 
 		/*
 		 * If there is an idle cpu and its associated DSQ is empty,
@@ -579,13 +578,13 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			nr_queued += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
 
 		if (!nr_queued) {
-			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			goto out;
 		}
 	} else {
-		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
+		reset_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
 out:
 	return cpu_id;
