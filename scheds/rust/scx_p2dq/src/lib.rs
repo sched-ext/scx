@@ -201,6 +201,17 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub atq_enabled: bool,
 
+    /// Use a double helix queue (DHQ) for LLC migration. DHQ provides two-strand
+    /// queue structure for cache-aware task migration between LLCs.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub dhq_enabled: bool,
+
+    /// Maximum imbalance allowed between DHQ strands. Controls how far one strand
+    /// can dequeue ahead of the other. Lower values maintain tighter balance,
+    /// higher values allow more asymmetric cross-LLC migration (0 = unlimited).
+    #[clap(long, default_value = "3", value_parser = clap::value_parser!(u64).range(0..=100))]
+    pub dhq_max_imbalance: u64,
+
     /// Schedule based on preferred core values available on some x86 systems with the appropriate
     /// CPU frequency governor (ex: amd-pstate).
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
@@ -411,6 +422,12 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
             );
+
+            rodata.p2dq_config.dhq_enabled = MaybeUninit::new(
+                opts.dhq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
+            );
+
+            rodata.p2dq_config.dhq_max_imbalance = opts.dhq_max_imbalance;
 
             // Check if cpu_priority is supported by the kernel
             let cpu_priority_supported = compat::ksym_exists("sched_core_priority").unwrap_or(false);

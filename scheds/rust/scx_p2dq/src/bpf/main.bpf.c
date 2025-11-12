@@ -14,6 +14,7 @@
 #include "../../../../include/scx/percpu.bpf.h"
 #include "../../../../include/lib/atq.h"
 #include "../../../../include/lib/cpumask.h"
+#include "../../../../include/lib/dhq.h"
 #include "../../../../include/lib/minheap.h"
 #include "../../../../include/lib/percpu.h"
 #include "../../../../include/lib/sdt_task.h"
@@ -24,6 +25,7 @@
 #include <scx/percpu.bpf.h>
 #include <lib/atq.h>
 #include <lib/cpumask.h>
+#include <lib/dhq.h>
 #include <lib/minheap.h>
 #include <lib/percpu.h>
 #include <lib/sdt_task.h>
@@ -117,8 +119,10 @@ const volatile struct {
 	u32 saturated_percent;
 	u32 sched_mode;
 	u32 llc_shards;
+	u64 dhq_max_imbalance;
 
 	bool atq_enabled;
+	bool dhq_enabled;
 	bool cpu_priority;
 	bool task_slice;
 	bool freq_control;
@@ -133,8 +137,10 @@ const volatile struct {
 	.interactive_ratio = 10,
 	.saturated_percent = 5,
 	.llc_shards = 0,
+	.dhq_max_imbalance = 3,
 
 	.atq_enabled = false,
+	.dhq_enabled = false,
 	.cpu_priority = false,
 	.task_slice = true,
 	.freq_control = false,
@@ -160,6 +166,13 @@ u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
 u64 dsq_time_slices[MAX_DSQS_PER_LLC];
+
+/* DHQ per LLC pair for migration (MAX_LLCS / 2 DHQs) */
+scx_dhq_t *llc_pair_dhqs[MAX_LLCS / 2];
+/* Track number of LLCs per NUMA node for strand assignment */
+u32 llcs_per_node[MAX_NUMA_NODES];
+/* Global DHQ counter for unique indexing */
+u32 global_dhq_count = 0;
 
 u64 min_slice_ns = 500;
 
@@ -301,7 +314,9 @@ static u64 llc_nr_queued(struct llc_ctx *llcx)
 	u64 nr_queued = scx_bpf_dsq_nr_queued(llcx->dsq);
 
 	if (topo_config.nr_llcs > 1) {
-		if (p2dq_config.atq_enabled)
+		if (p2dq_config.dhq_enabled)
+			nr_queued += scx_dhq_nr_queued(llcx->mig_dhq);
+		else if (p2dq_config.atq_enabled)
 			nr_queued += scx_atq_nr_queued(llcx->mig_atq);
 		else
 			nr_queued += scx_bpf_dsq_nr_queued(llcx->mig_dsq);
@@ -329,6 +344,90 @@ static int llc_create_atqs(struct llc_ctx *llcx)
 
 	return 0;
 }
+
+/*
+ * Create DHQ for LLC pair migration.
+ * DHQs are shared between pairs of LLCs in the same NUMA node.
+ * Each LLC is assigned to a strand (A or B) based on its order in the node.
+ * Number of DHQs = number of LLCs per node / 2
+ */
+static int llc_create_dhqs(struct llc_ctx *llcx)
+{
+	u32 node_id = llcx->node_id;
+	u32 node_llc_count;
+	u32 dhq_index;
+	u64 strand;
+
+	if (!p2dq_config.dhq_enabled)
+		return 0;
+
+	if (topo_config.nr_llcs <= 1)
+		return 0;
+
+	if (node_id >= MAX_NUMA_NODES) {
+		scx_bpf_error("DHQ: node_id %u >= MAX_NUMA_NODES", node_id);
+		return -EINVAL;
+	}
+
+	/* Get current LLC count for this NUMA node */
+	node_llc_count = llcs_per_node[node_id];
+
+	/* Strand: A for first LLC in pair, B for second */
+	strand = (node_llc_count % 2 == 0) ? SCX_DHQ_STRAND_A : SCX_DHQ_STRAND_B;
+
+	/* First LLC in a pair: create a new DHQ */
+	if (strand == SCX_DHQ_STRAND_A) {
+		dhq_index = global_dhq_count;
+		if (dhq_index >= (MAX_LLCS / 2)) {
+			scx_bpf_error("DHQ: dhq_index %u >= MAX_LLCS/2", dhq_index);
+			return -EINVAL;
+		}
+
+		/* Create fixed-size DHQ with priority mode for lowest vtime selection.
+		 * Capacity scales with system size: 4x CPUs ensures enough headroom
+		 * for queued tasks under load without excessive memory usage.
+		 * Max imbalance controls strand balance for cross-LLC load balancing.
+		 */
+		u64 dhq_capacity = topo_config.nr_cpus * 4;
+		llc_pair_dhqs[dhq_index] = (scx_dhq_t *)scx_dhq_create_balanced(
+			false,                          /* vtime mode */
+			dhq_capacity,                   /* fixed capacity */
+			SCX_DHQ_MODE_PRIORITY,          /* lowest vtime wins */
+			p2dq_config.dhq_max_imbalance   /* max_imbalance from config */
+		);
+		if (!llc_pair_dhqs[dhq_index]) {
+			scx_bpf_error("DHQ failed to create DHQ %u for node %u",
+				      dhq_index, node_id);
+			return -ENOMEM;
+		}
+		trace("DHQ %u created for node %u (LLC %u, strand A) capacity=%llu",
+		      dhq_index, node_id, llcx->id, dhq_capacity);
+
+		/* Assign DHQ and strand to this LLC */
+		llcx->mig_dhq = llc_pair_dhqs[dhq_index];
+		llcx->dhq_strand = strand;
+		global_dhq_count++;
+	} else {
+		/* Second LLC in pair: use the most recently created DHQ */
+		dhq_index = global_dhq_count - 1;
+		if (dhq_index >= (MAX_LLCS / 2) || !llc_pair_dhqs[dhq_index]) {
+			scx_bpf_error("DHQ: DHQ %u not available for second LLC %u",
+				      dhq_index, llcx->id);
+			return -EINVAL;
+		}
+		trace("DHQ %u assigned to LLC %u (node %u, strand B)",
+		      dhq_index, llcx->id, node_id);
+
+		/* Assign DHQ and strand to this LLC */
+		llcx->mig_dhq = llc_pair_dhqs[dhq_index];
+		llcx->dhq_strand = strand;
+	}
+
+	llcs_per_node[node_id]++;
+
+	return 0;
+}
+
 
 struct p2dq_timer p2dq_timers[MAX_TIMERS] = {
 	{lb_timer_intvl_ns,
@@ -1110,11 +1209,13 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 		// Always queue affinitized tasks to affn_dsq (no direct dispatch)
 		// This prevents tight wakeup loops and allows proper idle state
+		u64 task_vtime_affn = p->scx.dsq_vtime;
+
 		ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 		ret->vtime.dsq_id = taskc->dsq_id;
 		ret->vtime.slice_ns = taskc->slice_ns;
 		ret->vtime.enq_flags = enq_flags;
-		ret->vtime.vtime = p->scx.dsq_vtime;
+		ret->vtime.vtime = task_vtime_affn;
 
 		// Kick target CPU if we cleared idle state
 		if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE))
@@ -1122,7 +1223,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu affn_dsq",
 		      p->comm, p->scx.weight, taskc->slice_ns,
-		      p->scx.dsq_vtime, llcx->vtime);
+		      task_vtime_affn, llcx->vtime);
 
 		return;
 	}
@@ -1177,21 +1278,33 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		bool migrate = likely(!lb_config.single_llc_mode) &&
 		               can_migrate(taskc, llcx) &&
 		               task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS);
+
+		u64 task_vtime_early = p->scx.dsq_vtime;
+
 		if (migrate) {
 			taskc->dsq_id = llcx->mig_dsq;
-			if (p2dq_config.atq_enabled) {
+			if (p2dq_config.dhq_enabled) {
+				taskc->enq_flags = enq_flags;
+				ret->kind = P2DQ_ENQUEUE_PROMISE_DHQ_VTIME;
+				ret->dhq.dsq_id = cpuc->llc_dsq;
+				ret->dhq.dhq = llcx->mig_dhq;
+				ret->dhq.strand = llcx->dhq_strand;
+				ret->dhq.slice_ns = taskc->slice_ns;
+				ret->dhq.vtime = task_vtime_early;
+				ret->dhq.enq_flags = enq_flags;
+			} else if (p2dq_config.atq_enabled) {
 				taskc->enq_flags = enq_flags;
 				ret->kind = P2DQ_ENQUEUE_PROMISE_ATQ_VTIME;
 				ret->vtime.dsq_id = cpuc->llc_dsq;
 				ret->vtime.atq = llcx->mig_atq;
 				ret->vtime.slice_ns = taskc->slice_ns;
-				ret->vtime.vtime = p->scx.dsq_vtime;
+				ret->vtime.vtime = task_vtime_early;
 			} else {
 				ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 				ret->vtime.dsq_id = taskc->dsq_id;
 				ret->vtime.slice_ns = taskc->slice_ns;
 				ret->vtime.enq_flags = enq_flags;
-				ret->vtime.vtime = p->scx.dsq_vtime;
+				ret->vtime.vtime = task_vtime_early;
 			}
 			stat_inc(P2DQ_STAT_ENQ_MIG);
 		} else {
@@ -1200,13 +1313,13 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			ret->vtime.dsq_id = taskc->dsq_id;
 			ret->vtime.slice_ns = taskc->slice_ns;
 			ret->vtime.enq_flags = enq_flags;
-			ret->vtime.vtime = p->scx.dsq_vtime;
+			ret->vtime.vtime = task_vtime_early;
 			stat_inc(P2DQ_STAT_ENQ_LLC);
 		}
 
 		trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
 		      p->comm, p->scx.weight, taskc->slice_ns,
-		      p->scx.dsq_vtime, llcx->vtime);
+		      task_vtime_early, llcx->vtime);
 
 		return;
 	}
@@ -1251,13 +1364,27 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if (migrate) {
 		taskc->dsq_id = llcx->mig_dsq;
 		stat_inc(P2DQ_STAT_ENQ_MIG);
-		if (p2dq_config.atq_enabled) {
+
+		u64 task_vtime_mig = p->scx.dsq_vtime;
+
+		if (p2dq_config.dhq_enabled) {
+			taskc->enq_flags = enq_flags;
+			ret->kind = P2DQ_ENQUEUE_PROMISE_DHQ_VTIME;
+			ret->dhq.dsq_id = cpuc->llc_dsq;
+			ret->dhq.dhq = llcx->mig_dhq;
+			ret->dhq.strand = llcx->dhq_strand;
+			ret->dhq.slice_ns = taskc->slice_ns;
+			ret->dhq.vtime = task_vtime_mig;
+			ret->dhq.enq_flags = enq_flags;
+
+			return;
+		} else if (p2dq_config.atq_enabled) {
 			taskc->enq_flags = enq_flags;
 			ret->kind = P2DQ_ENQUEUE_PROMISE_ATQ_VTIME;
 			ret->vtime.dsq_id = cpuc->llc_dsq;
 			ret->vtime.atq = llcx->mig_atq;
 			ret->vtime.slice_ns = taskc->slice_ns;
-			ret->vtime.vtime = p->scx.dsq_vtime;
+			ret->vtime.vtime = task_vtime_mig;
 
 			return;
 		}
@@ -1266,15 +1393,17 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		stat_inc(P2DQ_STAT_ENQ_LLC);
 	}
 
+	u64 task_vtime = p->scx.dsq_vtime;
+
 	trace("ENQUEUE %s weight %d slice %llu vtime %llu llc vtime %llu",
 	      p->comm, p->scx.weight, taskc->slice_ns,
-	      p->scx.dsq_vtime, llcx->vtime);
+	      task_vtime, llcx->vtime);
 
 	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 	ret->vtime.dsq_id = taskc->dsq_id;
 	ret->vtime.enq_flags = enq_flags;
 	ret->vtime.slice_ns = taskc->slice_ns;
-	ret->vtime.vtime = p->scx.dsq_vtime;
+	ret->vtime.vtime = task_vtime;
 }
 
 static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struct *p)
@@ -1327,6 +1456,28 @@ static void complete_p2dq_enqueue(struct enqueue_promise *pro, struct task_struc
 		if (ret) {
 			scx_bpf_error("error %d on scx_atq_insert", ret);
 			break;
+		}
+		break;
+	case P2DQ_ENQUEUE_PROMISE_DHQ_VTIME:
+		if (!pro->dhq.dhq) {
+			scx_bpf_error("invalid DHQ");
+			break;
+		}
+		ret = scx_dhq_insert_vtime(pro->dhq.dhq,
+					   (u64)p->pid,
+					   pro->dhq.vtime,
+					   pro->dhq.strand);
+		if (ret) {
+			// The DHQ insert failed (EAGAIN if imbalanced, ENOSPC if full)
+			// Fallback to the DSQ
+			scx_bpf_dsq_insert_vtime(p,
+						 pro->dhq.dsq_id,
+						 pro->dhq.slice_ns,
+						 pro->dhq.vtime,
+						 pro->dhq.enq_flags);
+			stat_inc(P2DQ_STAT_ATQ_REENQ);
+		} else {
+			stat_inc(P2DQ_STAT_ATQ_ENQ);
 		}
 		break;
 	case P2DQ_ENQUEUE_PROMISE_FAILED:
@@ -1533,11 +1684,52 @@ static bool consume_llc(struct llc_ctx *llcx)
 {
 	struct task_struct *p;
 	task_ctx *taskc;
+	struct cpu_ctx *cpuc;
+	s32 cpu;
+	u64 pid;
 
 	if (!llcx)
 		return false;
 
-	if (p2dq_config.atq_enabled &&
+	cpu = bpf_get_smp_processor_id();
+	if (!(cpuc = lookup_cpu_ctx(cpu)))
+		return false;
+
+	if (p2dq_config.dhq_enabled &&
+	    scx_dhq_nr_queued(llcx->mig_dhq) > 0) {
+		pid = scx_dhq_pop_strand(llcx->mig_dhq, llcx->dhq_strand);
+		if (!pid) {
+			trace("DHQ pop returned NULL");
+			goto try_dsq;
+		}
+
+		p = bpf_task_from_pid((s32)pid);
+		if (!p) {
+			trace("DHQ failed to get pid %llu", pid);
+			goto try_dsq;
+		}
+
+		if (!(taskc = lookup_task_ctx(p))) {
+			bpf_task_release(p);
+			goto try_dsq;
+		}
+
+		/* Insert to LLC DSQ and let move_to_local handle affinity atomically */
+		trace("DHQ %llu insert %s[%d] to LLC DSQ",
+		      llcx->mig_dhq, p->comm, p->pid);
+		scx_bpf_dsq_insert_vtime(p,
+					 cpuc->llc_dsq,
+					 taskc->slice_ns,
+					 p->scx.dsq_vtime,
+					 taskc->enq_flags);
+		bpf_task_release(p);
+
+		/* Try to dispatch from LLC DSQ (handles affinity check atomically) */
+		if (scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
+			return true;
+
+		goto try_dsq;
+	} else if (p2dq_config.atq_enabled &&
 	    scx_atq_nr_queued(llcx->mig_atq) > 0) {
 		taskc = (task_ctx *)scx_atq_pop(llcx->mig_atq);
 		p = bpf_task_from_pid((s32)taskc->pid);
@@ -1546,17 +1738,20 @@ static bool consume_llc(struct llc_ctx *llcx)
 			return false;
 		}
 
-		trace("ATQ %llu insert %s->%d",
+/* Insert to LLC DSQ and let move_to_local handle affinity atomically */
+		trace("ATQ %llu insert %s[%d] to LLC DSQ",
 		      llcx->mig_atq, p->comm, p->pid);
-		scx_bpf_dsq_insert(p,
-				   SCX_DSQ_LOCAL,
-				   taskc->slice_ns,
-				   taskc->enq_flags);
+		scx_bpf_dsq_insert_vtime(p,
+					 cpuc->llc_dsq,
+					 taskc->slice_ns,
+					 p->scx.dsq_vtime,
+					 taskc->enq_flags);
 		bpf_task_release(p);
 
-		return false;
+		/* Try to dispatch from LLC DSQ (handles affinity check atomically) */
+		return scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
 	}
-
+try_dsq:
 	if (likely(scx_bpf_dsq_move_to_local(llcx->mig_dsq))) {
 		stat_inc(P2DQ_STAT_DISPATCH_PICK2);
 		return true;
@@ -1672,8 +1867,9 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
-	u64 peeked_pid, dsq_id = 0;
+	u64 pid, dsq_id = 0;
 	scx_atq_t *min_atq = NULL;
+	scx_dhq_t *min_dhq = NULL;
 
 	cpuc = lookup_cpu_ctx(cpu);
 	if (unlikely(!cpuc)) {
@@ -1736,9 +1932,19 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 
 	// Migration eligible vtime
 	if (topo_config.nr_llcs > 1) {
-		if (p2dq_config.atq_enabled) {
-			taskc = (task_ctx *)scx_atq_peek(cpuc->mig_atq);
-			if ((p = bpf_task_from_pid((s32)taskc->pid))) {
+		if (p2dq_config.dhq_enabled) {
+			pid = scx_dhq_peek_strand(cpuc->mig_dhq, cpuc->dhq_strand);
+			if (pid && (p = bpf_task_from_pid((s32)pid))) {
+				if (likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
+				    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+					min_vtime = p->scx.dsq_vtime;
+					min_dhq = cpuc->mig_dhq;
+				}
+				bpf_task_release(p);
+			}
+		} else if (p2dq_config.atq_enabled) {
+			pid = scx_atq_peek(cpuc->mig_atq);
+			if ((p = bpf_task_from_pid((s32)pid))) {
 				if (likely(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) &&
 				    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
 					min_vtime = p->scx.dsq_vtime;
@@ -1750,7 +1956,6 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 					 * the potential cost of having to reenqueue
 					 * popped tasks if they don't match.
 					 */
-					peeked_pid = p->pid;
 				}
 				bpf_task_release(p);
 			}
@@ -1766,36 +1971,60 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 	}
 
 	if (dsq_id != 0)
-		trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu atq %llu",
-		      cpu, min_vtime, dsq_id, min_atq);
+		trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu atq %llu dhq %llu",
+		      cpu, min_vtime, dsq_id, min_atq, min_dhq);
 
-	// First try the DSQ with the lowest vtime for fairness.
-	if (unlikely(min_atq)) {
-		trace("ATQ dispatching %llu with min vtime %llu", min_atq, min_vtime);
-		taskc = (task_ctx *)scx_atq_pop(min_atq);
-		if (likely((p = bpf_task_from_pid((s32)taskc->pid)))) {
-			if (p->pid == peeked_pid) {
-				scx_bpf_dsq_insert(p,
-						   SCX_DSQ_LOCAL,
-						   taskc->slice_ns,
-						   taskc->enq_flags);
+	// First try the DHQ/ATQ with the lowest vtime for fairness.
+	if (unlikely(min_dhq)) {
+		trace("DHQ dispatching %llu with min vtime %llu", min_dhq, min_vtime);
+		pid = scx_dhq_pop_strand(min_dhq, cpuc->dhq_strand);
+		if (likely(pid && (p = bpf_task_from_pid((s32)pid)))) {
+			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
 				bpf_task_release(p);
+				scx_bpf_error("DHQ failed to get task ctx");
 				return;
-			} else {
-				/*
-				 * The task that was popped was already
-				 * consumed. The next task that was popped
-				 * might have a higher vtime so reenqueue it
-				 * back to the LLC DSQ.
-				 */
-				scx_bpf_dsq_insert_vtime(p,
-						   cpuc->llc_dsq,
-						   taskc->slice_ns,
-						   p->scx.dsq_vtime,
-						   taskc->enq_flags);
-				bpf_task_release(p);
-				stat_inc(P2DQ_STAT_ATQ_REENQ);
 			}
+
+			/* Check if task can still run on current CPU */
+
+			/* Insert to LLC DSQ for atomic affinity handling */
+			scx_bpf_dsq_insert_vtime(p,
+						 cpuc->llc_dsq,
+						 taskc->slice_ns,
+						 p->scx.dsq_vtime,
+						 taskc->enq_flags);
+			bpf_task_release(p);
+
+			/* Try to dispatch - move_to_local handles affinity atomically */
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+			return;
+		}
+	} else if (unlikely(min_atq)) {
+		trace("ATQ dispatching %llu with min vtime %llu", min_atq, min_vtime);
+		pid = scx_atq_pop(min_atq);
+		if (likely((p = bpf_task_from_pid((s32)pid)))) {
+			/*
+			 * the ATQ. Otherwise there may be priority inversions.
+			 * This probably needs to be done for the DSQs as well.
+			 */
+			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
+				bpf_task_release(p);
+				scx_bpf_error("failed to get task ctx");
+				return;
+			}
+
+
+			/* Insert to LLC DSQ for atomic affinity handling */
+			scx_bpf_dsq_insert_vtime(p,
+						 cpuc->llc_dsq,
+						 taskc->slice_ns,
+						 p->scx.dsq_vtime,
+						 taskc->enq_flags);
+			bpf_task_release(p);
+
+			/* Try to dispatch - move_to_local handles affinity atomically */
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+			return;
 		}
 	} else {
 		if (likely(valid_dsq(dsq_id) && scx_bpf_dsq_move_to_local(dsq_id)))
@@ -1831,14 +2060,49 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 			return;
 	}
 
-	if (unlikely(p2dq_config.atq_enabled)) {
-		taskc = (task_ctx *)scx_atq_pop(cpuc->mig_atq);
-		if (likely((p = bpf_task_from_pid((s32)taskc->pid)))) {
-			scx_bpf_dsq_insert(p,
-					   SCX_DSQ_LOCAL,
-					   taskc->slice_ns,
-					   taskc->enq_flags);
+	if (unlikely(p2dq_config.dhq_enabled)) {
+		pid = scx_dhq_pop_strand(cpuc->mig_dhq, cpuc->dhq_strand);
+		if (likely(pid && (p = bpf_task_from_pid((s32)pid)))) {
+			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
+				bpf_task_release(p);
+				scx_bpf_error("DHQ failed to get task ctx");
+				return;
+			}
+
+			/* Check if task can still run on current CPU */
+
+			/* Insert to LLC DSQ for atomic affinity handling */
+			scx_bpf_dsq_insert_vtime(p,
+						 cpuc->llc_dsq,
+						 taskc->slice_ns,
+						 p->scx.dsq_vtime,
+						 taskc->enq_flags);
 			bpf_task_release(p);
+
+			/* Try to dispatch - move_to_local handles affinity atomically */
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
+		}
+	} else if (unlikely(p2dq_config.atq_enabled)) {
+		pid = scx_atq_pop(cpuc->mig_atq);
+		if (likely((p = bpf_task_from_pid((s32)pid)))) {
+			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
+				bpf_task_release(p);
+				scx_bpf_error("failed to get task ctx");
+				return;
+			}
+
+			/* Check if task can still run on current CPU */
+
+			/* Insert to LLC DSQ for atomic affinity handling */
+			scx_bpf_dsq_insert_vtime(p,
+						 cpuc->llc_dsq,
+						 taskc->slice_ns,
+						 p->scx.dsq_vtime,
+						 taskc->enq_flags);
+			bpf_task_release(p);
+
+			/* Try to dispatch - move_to_local handles affinity atomically */
+			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
 			return;
 		}
 	} else {
@@ -2088,6 +2352,11 @@ static int init_llc(u32 llc_index)
 		return ret;
 	}
 
+	ret = llc_create_dhqs(llcx);
+	if (ret) {
+		return ret;
+	}
+
 	llcx->dsq = llcx->id | MAX_LLCS;
 	ret = scx_bpf_create_dsq(llcx->dsq, llcx->node_id);
 	if (ret) {
@@ -2218,6 +2487,8 @@ static s32 init_cpu(int cpu)
 	llcx->node_id = cpu_node_ids[cpu];
 	nodec->id = cpu_node_ids[cpu];
 	cpuc->mig_atq = llcx->mig_atq;
+	cpuc->mig_dhq = llcx->mig_dhq;
+	cpuc->dhq_strand = llcx->dhq_strand;
 
 	if (cpu_ctx_test_flag(cpuc, CPU_CTX_F_IS_BIG)) {
 		trace("CPU[%d] is big", cpu);
@@ -2491,6 +2762,7 @@ static s32 p2dq_init_impl()
 
 		cpuc->llc_dsq = llcx->dsq;
 		cpuc->mig_atq = llcx->mig_atq;
+		cpuc->mig_dhq = llcx->mig_dhq;
 
 		if (p2dq_config.llc_shards > 1 && llcx->nr_shards > 1) {
 			int shard_id = cpuc->core_id % llcx->nr_shards;
