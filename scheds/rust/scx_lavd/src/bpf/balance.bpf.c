@@ -192,12 +192,13 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
  * For simplicity, try to just steal from the CPU with
  * the highest number of queued_tasks in this domain.
  */
-static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
+int __attribute__((noinline)) pick_most_loaded_cpu(struct cpdom_ctx *cpdomc)
+{
 	u64 highest_queued = 0;
 	int pick_cpu = -ENOENT;
 	int cpu, i, j, k;
 
-	if (!per_cpu_dsq)
+	if (!per_cpu_dsq || !cpdomc)
 		return -ENOENT;
 
 	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
