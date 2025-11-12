@@ -31,13 +31,10 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
 	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	bool a_empty;
-	bool o_empty;
 	/*
 	 * Additional input arguments for find_sticky_cpu_and_cpdom().
 	 */
 	s32 sync_waker_cpu;
-	bool is_task_big;
 	/*
 	 * Additional input arguments for test_cpu_stickable().
 	 */
@@ -51,7 +48,6 @@ struct pick_ctx {
 	 * Additional input arguments for init_idle_i_mask().
 	 */
 	const struct cpumask *i_mask;
-	bool i_empty;
 	/*
 	 * Additional input arguments for init_idle_ato_masks().
 	 * Additional input arguments for pick_idle_cpu_at_cpdom().
@@ -61,12 +57,15 @@ struct pick_ctx {
 	struct bpf_cpumask *io_mask;
 	struct bpf_cpumask *temp_mask;
 	/*
-	 * Additional output arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
+	 * Flags.
 	 */
-	bool ia_empty;
-	bool iat_empty;
-	bool io_empty;
+	bool a_empty:1;
+	bool o_empty:1;
+	bool is_task_big:1;
+	bool i_empty:1;
+	bool ia_empty:1;
+	bool iat_empty:1;
+	bool io_empty:1;
 };
 
 static __always_inline
