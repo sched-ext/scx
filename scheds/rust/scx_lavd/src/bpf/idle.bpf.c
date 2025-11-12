@@ -13,8 +13,12 @@ struct pick_ctx {
 	 */
 	const struct task_struct *p;
 	struct task_ctx *taskc;
-	s32 prev_cpu;
 	u64 wake_flags;
+	s32 prev_cpu;
+	/*
+	 * Additional input arguments for find_sticky_cpu_and_cpdom().
+	 */
+	s32 sync_waker_cpu;
 	/*
 	 * Additional output arguments for pick_idle_cpu().
 	 */
@@ -31,10 +35,6 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
 	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	/*
-	 * Additional input arguments for find_sticky_cpu_and_cpdom().
-	 */
-	s32 sync_waker_cpu;
 	/*
 	 * Additional input arguments for init_idle_i_mask().
 	 */
