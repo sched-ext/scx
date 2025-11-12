@@ -735,6 +735,9 @@ async def run_veristat_debug(kernel_name: str, scheduler_name: str, symbol_name:
 async def run_tests_in_vm():
     """Run tests when already inside the VM."""
 
+    # Create extract directory if it doesn't exist
+    os.makedirs("target/nextest-extract", exist_ok=True)
+
     subprocess.run(
         [
             "cargo-nextest",
@@ -742,6 +745,8 @@ async def run_tests_in_vm():
             "run",
             "--archive-file",
             "target/nextest-archive.tar.zst",
+            "--extract-to",
+            "target/nextest-extract",
             "--workspace-remap",
             ".",
             "--no-fail-fast",
