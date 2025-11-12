@@ -795,6 +795,21 @@ static u64 update_freq(u64 freq, u64 interval)
 }
 
 /*
+ * Return true if the task should attempt a migration, false otherwise.
+ */
+static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
+{
+	/*
+	 * If @sticky_tasks is enabled, attempt a migration only on wakeup
+	 * (task was not running) and only if ops.select_cpu() has not been
+	 * called. Otherwise, always attempt a migration unless
+	 * ops.select_cpu() already handled it.
+	 */
+	return !__COMPAT_is_enq_cpu_selected(enq_flags) &&
+	       (!sticky_tasks || !scx_bpf_task_running(p));
+}
+
+/*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
@@ -856,7 +871,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if ops.select_cpu() was
 	 * skipped.
 	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if (task_should_migrate(p, enq_flags)) {
 		s32 cpu;
 
 		if (is_pcpu_task(p))
@@ -886,7 +901,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * No need to kick the CPU if ops.select_cpu() has been called.
 	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+	if (task_should_migrate(p, enq_flags))
 		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
