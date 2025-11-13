@@ -22,6 +22,7 @@
 #include "selftest.h"
 
 #include <lib/atq.h>
+#include <lib/dhq.h>
 #include <lib/arena.h>
 #include <lib/sdt_task.h>
 
