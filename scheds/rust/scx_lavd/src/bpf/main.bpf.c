@@ -1485,11 +1485,13 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 			 * timer already took the idle_time duration. Hence the
 			 * idle duration should not be accumulated.
 			 */
-			u64 duration = time_delta(now, old_clk);
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, 0);
-			if (ret)
-				cpuc->idle_total += duration;
+			if (ret) {
+				u64 duration = time_delta(now, old_clk);
+
+				__sync_fetch_and_add(&cpuc->idle_total, duration);
+			}
 		}
 	}
 }
