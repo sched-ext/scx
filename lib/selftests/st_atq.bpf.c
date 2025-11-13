@@ -68,17 +68,16 @@ int scx_selftest_atq_common(bool isfifo)
 
 		pids[i] = ind;
 
-
 		if (isfifo) {
-			ret = scx_atq_insert(atq, (u64)tasks[ind]);
+			ret = scx_atq_insert(atq, &tasks[ind]->common);
 			if (ret) {
 				bpf_printk("fifo atq insert failed with %d", ret);
 				return ret;
 			}
 		} else {
-			ret = scx_atq_insert_vtime(atq, (u64)tasks[ind], tasks[ind]->vtime);
+			ret = scx_atq_insert_vtime(atq, &tasks[ind]->common, tasks[ind]->vtime);
 			if (ret) {
-				bpf_printk("fifo atq insert failed with %d", ret);
+				bpf_printk("vtime atq insert failed with %d", ret);
 				return ret;
 			}
 		}
@@ -88,11 +87,18 @@ int scx_selftest_atq_common(bool isfifo)
 		 * guarantees we don't revisit indices.
 		 */
 		ind = (ind + step) % NTASKS_IN_QUEUE;
+		if (rb_integrity_check(atq->tree))
+			return -EINVAL;
 	}
 
 	vtime = 0;
 	for (i = 0; i < NTASKS_IN_QUEUE && can_loop; i++ ) {
 		taskc = (task_ctx *)scx_atq_pop(atq);
+		if (!taskc) {
+			bpf_printk("NULL pointer on iteration %d", i);
+			return -EINVAL;
+		}
+
 		if (isfifo && taskc->pid != i) {
 			bpf_printk("Popped out unexpected element from FIFO atq (pid %ld, vtime %ld), expected %d", taskc->pid, taskc->vtime, i);
 			return -EINVAL;
@@ -102,9 +108,14 @@ int scx_selftest_atq_common(bool isfifo)
 		}
 
 		vtime = taskc->vtime;
+
+		if (rb_integrity_check(atq->tree))
+			return -EINVAL;
 	}
 
 #undef NTASKS_IN_QUEUE
+	if (rb_integrity_check(atq->tree))
+		return -EINVAL;
 
 	return 0;
 }
@@ -118,7 +129,7 @@ int scx_selftest_atq_fifo(u64 unused)
 __weak
 int scx_selftest_atq_fail_fifo_with_weight(u64 unused)
 {
-	if (!scx_atq_insert_vtime(fifo, 0, 0)) {
+	if (!scx_atq_insert_vtime(fifo, (scx_task_common *)tasks[0], 0)) {
 		bpf_printk("atq PRIO insert on FIFO atq succeeded");
 		return -EINVAL;
 	}
@@ -135,7 +146,7 @@ int scx_selftest_atq_vtime(u64 unused)
 __weak
 int scx_selftest_atq_fail_vtime_without_weight(u64 unused)
 {
-	if (!scx_atq_insert(prio, 0)) {
+	if (!scx_atq_insert(prio, (scx_task_common *)tasks[0])) {
 		bpf_printk("atq FIFO insert on PRIO atq succeeded");
 		return -EINVAL;
 	}
@@ -146,13 +157,14 @@ int scx_selftest_atq_fail_vtime_without_weight(u64 unused)
 __weak
 int scx_selftest_atq_nr_queued(u64 unused)
 {
+	scx_task_common *taskc = NULL;
 	const int PUSHES_PER_TEST = 5;
 	const int POPS_PER_TEST = 2;
 	const int TEST_CYCLES = 32;
-	scx_atq_t *atq;
 	int expected, found;
-	u64 taskc;
+	scx_atq_t *atq;
 	int i, j;
+	u64 ctx;
 	int ret;
 
 	atq = prio;
@@ -160,8 +172,12 @@ int scx_selftest_atq_nr_queued(u64 unused)
 	for (i = 0; i < TEST_CYCLES && can_loop; i++ ) {
 
 		for (j = 0; j < PUSHES_PER_TEST && can_loop; j++ ) {
+			taskc = scx_static_alloc(sizeof(*taskc), 1);
+			if (!taskc)
+				return -ENOMEM;
+
 			/* Also a nice way to check if we handle identical keys. */
-			ret = scx_atq_insert_vtime(atq, i, i);
+			ret = scx_atq_insert_vtime(atq, taskc, i);
 			if (ret) {
 				bpf_printk("atq insert failed with %d", ret);
 				return ret;
@@ -176,6 +192,10 @@ int scx_selftest_atq_nr_queued(u64 unused)
 		}
 
 		for (j = 0; j < POPS_PER_TEST && can_loop; j++ ) {
+			/* 
+			 * XXX We're leaking rbnodes by design here, ATQs nodes are normally embedded
+			 * into task contexts and get cleaned up with the task.
+			 */
 			scx_atq_pop(atq);
 
 			expected = (PUSHES_PER_TEST - POPS_PER_TEST) * i  + (PUSHES_PER_TEST - 1 - j);
@@ -190,8 +210,8 @@ int scx_selftest_atq_nr_queued(u64 unused)
 
 	found = scx_atq_nr_queued(atq);
 	for (i = 0; i < found && can_loop; i++) {
-		taskc = scx_atq_pop(atq);
-		if (!taskc) {
+		ctx = scx_atq_pop(atq);
+		if (!ctx) {
 			bpf_printk("scx_atq_pop retrieved (%d)", taskc);
 			return -EINVAL;
 		}
@@ -211,7 +231,7 @@ int scx_selftest_atq_nr_queued(u64 unused)
 __weak
 int scx_selftest_atq_peek_nodestruct(u64 unused)
 {
-	const u64 elem = 5;
+	scx_task_common *taskc;
 	const int iters = 10;
 	u64 found;
 	int i;
@@ -222,13 +242,17 @@ int scx_selftest_atq_peek_nodestruct(u64 unused)
 		return -EINVAL;
 	}
 
-	if (scx_atq_insert(fifo, elem)) {
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
+		return -ENOMEM;
+
+	if (scx_atq_insert(fifo, taskc)) {
 		bpf_printk("ATQ insert failed");
 		return -EINVAL;
 	}
 
 	for (i = 0; i < iters && can_loop; i++) {
-		if (scx_atq_peek(fifo) == elem)
+		if (scx_atq_peek(fifo) == (u64)taskc)
 			continue;
 
 		found = scx_atq_nr_queued(fifo);
@@ -275,6 +299,7 @@ __weak
 int scx_selftest_atq_sized(u64 unused)
 {
 	scx_atq_t *sized_fifo, *sized_vtime;
+	scx_task_common *taskc;
 	int ret;
 
 	sized_fifo = (scx_atq_t *)scx_atq_create_size(true, 1);
@@ -289,30 +314,41 @@ int scx_selftest_atq_sized(u64 unused)
 		return -ENOMEM;
 	}
 
-	ret = scx_atq_insert(sized_fifo, 1234);
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
+		return -ENOMEM;
+
+	ret = scx_atq_insert(sized_fifo, taskc);
 	if (ret) {
 		bpf_printk("ATQ failed to insert into sized fifo ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert(sized_fifo, 5678);
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
+		return -ENOMEM;
+
+	ret = scx_atq_insert(sized_fifo, taskc);
 	if (!ret) {
 		bpf_printk("ATQ too many inserts into sized fifo ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert_vtime(sized_vtime, 1234, 7890);
+	/* 
+	 * Reusing the already allocated rbnode. We won't be able to 
+	 * do the operation so we won't corrupt the tree.
+	 */
+	ret = scx_atq_insert_vtime(sized_vtime, taskc, 7890);
 	if (ret) {
 		bpf_printk("ATQ failed to insert into sized vtime ATQ");
 		return -EINVAL;
 	}
 
-	ret = scx_atq_insert_vtime(sized_vtime, 1111, 2222);
+	ret = scx_atq_insert_vtime(sized_vtime, taskc, 2222);
 	if (!ret) {
 		bpf_printk("ATQ too many inserts into sized vtime ATQ");
 		return -EINVAL;
 	}
-
 
 	return 0;
 }
@@ -331,10 +367,10 @@ int scx_selftest_atq(void)
 	}
 
 	SCX_ATQ_SELFTEST(create);
-	SCX_ATQ_SELFTEST(fifo);
-	SCX_ATQ_SELFTEST(fail_fifo_with_weight);
 	SCX_ATQ_SELFTEST(vtime);
 	SCX_ATQ_SELFTEST(fail_vtime_without_weight);
+	SCX_ATQ_SELFTEST(fifo);
+	SCX_ATQ_SELFTEST(fail_fifo_with_weight);
 	SCX_ATQ_SELFTEST(nr_queued);
 	SCX_ATQ_SELFTEST(peek_nodestruct);
 	SCX_ATQ_SELFTEST(peek_empty);

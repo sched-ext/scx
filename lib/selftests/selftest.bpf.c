@@ -5,6 +5,8 @@
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.bpf.h>
 
+#include <lib/rbtree.h>
+
 #include "selftest.h"
 
 SEC("syscall")

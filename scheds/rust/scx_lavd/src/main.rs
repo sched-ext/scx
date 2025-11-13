@@ -36,6 +36,7 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
+use libbpf_rs::skel::Skel;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
@@ -43,6 +44,7 @@ use libc::c_char;
 use log::debug;
 use log::info;
 use plain::Plain;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
@@ -179,6 +181,11 @@ struct Opts {
     /// highly experimental feature.
     #[clap(long = "per-cpu-dsq", action = clap::ArgAction::SetTrue)]
     per_cpu_dsq: bool,
+
+    /// Enable CPU bandwidth control using cpu.max in cgroup v2.
+    /// This is a highly experimental feature.
+    #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
+    enable_cpu_bw: bool,
 
     ///
     /// Disable core compaction so the scheduler uses all the online CPUs.
@@ -413,8 +420,13 @@ impl<'a> Scheduler<'a> {
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &order);
 
-        // Attach.
+        // Initialize arena
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
+        let task_size = std::mem::size_of::<types::task_ctx>();
+        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
+        arenalib.setup()?;
+
+        // Attach.
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
         let stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64)).launch()?;
 
@@ -576,7 +588,7 @@ impl<'a> Scheduler<'a> {
         bss_data.is_powersave_mode = opts.powersave;
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.nr_llcs = order.nr_llcs as u64;
-        rodata.__nr_cpu_ids = *NR_CPU_IDS as u64;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         rodata.is_smt_active = order.smt_enabled;
         rodata.is_autopilot_on = opts.autopilot;
         rodata.verbose = opts.verbose;
@@ -589,6 +601,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
+        rodata.enable_cpu_bw = opts.enable_cpu_bw;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
@@ -630,7 +643,7 @@ impl<'a> Scheduler<'a> {
 
         match intrspc_tx.try_send(SchedSample {
             mseq,
-            pid: tx.pid,
+            pid: tc.pid,
             comm: tx_comm.into(),
             stat: tx_stat.into(),
             cpu_id: tc.cpu_id,

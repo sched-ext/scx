@@ -8,7 +8,7 @@
  * To be included to the main.bpf.c
  */
 
-static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 {
 	u64 weight_boost = 1;
 
@@ -63,19 +63,19 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	return p->scx.weight * weight_boost + 1;
 }
 
-static u64 calc_wait_factor(struct task_ctx *taskc)
+static u64 calc_wait_factor(task_ctx *taskc)
 {
 	u64 freq = min(taskc->wait_freq, LAVD_LC_FREQ_MAX);
 	return freq + 1;
 }
 
-static u64 calc_wake_factor(struct task_ctx *taskc)
+static u64 calc_wake_factor(task_ctx *taskc)
 {
 	u64 freq = min(taskc->wake_freq, LAVD_LC_FREQ_MAX);
 	return freq + 1;
 }
 
-static inline u64 calc_runtime_factor(struct task_ctx *taskc)
+static inline u64 calc_runtime_factor(task_ctx *taskc)
 {
 	u64 ft = 1, delta;
 
@@ -86,7 +86,7 @@ static inline u64 calc_runtime_factor(struct task_ctx *taskc)
 	return ft;
 }
 
-static u64 calc_sum_runtime_factor(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_sum_runtime_factor(struct task_struct *p, task_ctx *taskc)
 {
 	u64 sum = max(taskc->run_freq, 1) * max(taskc->avg_runtime, 1);
 	return (sum >> LAVD_SHIFT) * p->scx.weight;
@@ -97,7 +97,7 @@ u32 __attribute__ ((noinline)) log2x(u64 v)
 	return log2_u64(v);
 }
 
-static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
+static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 {
 	u64 weight_ft, wait_ft, wake_ft, runtime_ft, sum_runtime_ft;
 	u64 log_wwf, lat_cri, perf_cri = LAVD_SCALE;
@@ -171,7 +171,7 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	taskc->perf_cri = perf_cri;
 }
 
-static u64 calc_greedy_penalty(struct task_ctx *taskc)
+static u64 calc_greedy_penalty(task_ctx *taskc)
 {
 	u64 ratio, penalty;
 
@@ -198,7 +198,7 @@ static u64 calc_greedy_penalty(struct task_ctx *taskc)
 	return penalty;
 }
 
-static u64 calc_adjusted_runtime(struct task_ctx *taskc)
+static u64 calc_adjusted_runtime(task_ctx *taskc)
 {
 	u64 runtime;
 
@@ -214,7 +214,7 @@ static u64 calc_adjusted_runtime(struct task_ctx *taskc)
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
-				       struct task_ctx *taskc)
+				       task_ctx *taskc)
 {
 	u64 deadline, adjusted_runtime;
 	u32 greedy_penalty;
@@ -231,7 +231,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	return deadline >> LAVD_SHIFT;
 }
 
-static u64 calc_when_to_run(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc)
 {
 	u64 dl_delta, clc;
 

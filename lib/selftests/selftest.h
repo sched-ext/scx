@@ -1,5 +1,8 @@
 #pragma once
 
+#include <lib/atq.h>
+#include <lib/rbtree.h>
+
 #define SCX_SELFTEST(func, ...)		\
 	do {				\
 		int ret = func(__VA_ARGS__);	\
@@ -11,8 +14,11 @@
 
 /* Each scheduler defines their own task_ctx. */
 struct task_ctx_nonarena {
+	struct scx_task_common common;
 	u64 pid;
 	u64 vtime;
+	struct rbnode rbnode;
+	struct task_ctx_nonarena __arena *next;
 };
 
 typedef struct task_ctx_nonarena __arena task_ctx;
@@ -29,7 +35,6 @@ int scx_selftest_topology(void);
 #ifndef __BPF__
 
 /* Dummy "definition" for userspace. */
-#define arena_spinlock_t u64
 #define topo_ptr void *
 
 #endif /* __BPF__ */

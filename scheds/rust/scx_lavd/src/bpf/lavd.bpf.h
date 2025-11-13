@@ -7,6 +7,7 @@
 #define __LAVD_H
 
 #include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
 
 /*
  * common macros
@@ -125,7 +126,11 @@ extern struct cpdom_ctx		cpdom_ctxs[LAVD_CPDOM_MAX_NR];
 extern struct bpf_cpumask	cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 extern int			nr_cpdoms;
 
-struct task_ctx *get_task_ctx(struct task_struct *p);
+typedef struct task_ctx __arena task_ctx;
+
+u64 get_task_ctx_internal(struct task_struct *p);
+#define get_task_ctx(p) ((task_ctx *)get_task_ctx_internal((p)))
+
 struct cpu_ctx *get_cpu_ctx(void);
 struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id);
 struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
@@ -221,7 +226,7 @@ struct cpu_ctx {
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
-extern const volatile u64	__nr_cpu_ids;	/* maximum CPU IDs */
+const extern volatile u32	nr_cpu_ids;
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
 extern const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX];
@@ -313,19 +318,19 @@ bool test_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
 void set_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
 void reset_cpu_flag(struct cpu_ctx *cpuc, u64 flag);
 
-bool is_lock_holder(struct task_ctx *taskc);
+bool is_lock_holder(task_ctx *taskc);
 bool is_lock_holder_running(struct cpu_ctx *cpuc);
-bool have_scheduled(struct task_ctx *taskc);
+bool have_scheduled(task_ctx *taskc);
 bool have_pending_tasks(struct cpu_ctx *cpuc);
 bool can_boost_slice(void);
-bool is_lat_cri(struct task_ctx *taskc);
+bool is_lat_cri(task_ctx *taskc);
 u16 get_nice_prio(struct task_struct *p);
 u32 cpu_to_dsq(u32 cpu);
 
-void set_task_flag(struct task_ctx *taskc, u64 flag);
-void reset_task_flag(struct task_ctx *taskc, u64 flag);
-bool test_task_flag(struct task_ctx *taskc, u64 flag);
-void reset_task_flag(struct task_ctx *taskc, u64 flag);
+void set_task_flag(task_ctx *taskc, u64 flag);
+void reset_task_flag(task_ctx *taskc, u64 flag);
+bool test_task_flag(task_ctx *taskc, u64 flag);
+void reset_task_flag(task_ctx *taskc, u64 flag);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
@@ -337,7 +342,7 @@ extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs 
 int do_core_compaction(void);
 int update_thr_perf_cri(void);
 int reinit_active_cpumask_for_performance(void);
-bool is_perf_cri(struct task_ctx *taskc);
+bool is_perf_cri(task_ctx *taskc);
 
 extern bool			have_little_core;
 extern bool			have_turbo_core;
@@ -371,18 +376,19 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
 
 /* Futex lock-related helpers. */
 
-void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc);
+void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc);
 
 /* Scheduler introspection-related helpers. */
 
-u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now);
-void try_proc_introspec_cmd(struct task_struct *p, struct task_ctx *taskc);
+u64 get_est_stopping_clk(task_ctx *taskc, u64 now);
+void try_proc_introspec_cmd(struct task_struct *p, task_ctx *taskc);
 void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released);
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
 void shrink_boosted_slice_at_tick(struct task_struct *p,
 					 struct cpu_ctx *cpuc, u64 now);
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc);
 void try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc,
+					 task_ctx *taskc,
 					 s32 preferred_cpu,
 					 u64 dsq_id);
 

@@ -122,7 +122,7 @@ u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 	return duration;
 }
 
-bool is_perf_cri(struct task_ctx *taskc)
+bool is_perf_cri(task_ctx __arg_arena *taskc)
 {
 	if (unlikely(!taskc))
 		return false;
@@ -207,7 +207,7 @@ static int calc_nr_active_cpus(void)
 		else
 			WRITE_ONCE(pco_idx, nr_pco_states - 1);
 
-		bpf_for(i, 0, __nr_cpu_ids) {
+		bpf_for(i, 0, nr_cpu_ids) {
 			if (i >= LAVD_CPU_ID_MAX)
 				break;
 
@@ -239,7 +239,7 @@ static int calc_nr_active_cpus(void)
 	}
 
 	/* Should not be here. */
-	return __nr_cpu_ids;
+	return nr_cpu_ids;
 }
 
 __weak
@@ -277,7 +277,7 @@ int do_core_compaction(void)
 	/*
 	 * Assign active and overflow cores.
 	 */
-	bpf_for(i, 0, __nr_cpu_ids) {
+	bpf_for(i, 0, nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -620,7 +620,7 @@ int reinit_active_cpumask_for_performance(void)
 	 * In a symmetric system, all online CPUs belong to the active set.
 	 */
 	if (have_little_core) {
-		bpf_for(cpu, 0, __nr_cpu_ids) {
+		bpf_for(cpu, 0, nr_cpu_ids) {
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc)
 				continue;
@@ -653,7 +653,7 @@ int reinit_active_cpumask_for_performance(void)
 
 		bpf_cpumask_clear(ovrflw);
 
-		bpf_for(cpu, 0, __nr_cpu_ids) {
+		bpf_for(cpu, 0, nr_cpu_ids) {
 			cpuc = get_cpu_ctx_id(cpu);
 			if (!cpuc || !cpuc->is_online)
 				continue;

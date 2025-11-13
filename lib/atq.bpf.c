@@ -17,7 +17,7 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	if (!atq)
 		return (u64)NULL;
 
-	atq->tree = rb_create();
+	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
 	if (!atq->tree)
 		return (u64)NULL;
 
@@ -28,102 +28,105 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	return (u64)atq;
 }
 
-__hidden
-int scx_atq_insert(scx_atq_t *atq, u64 taskc_ptr)
+__hidden __inline
+int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
-	rbnode_t *node;
+	rbnode_t *node = &taskc->node;
 	int ret;
 
-	if (!atq->fifo)
+	if (unlikely(atq->size == atq->capacity))
+		return -ENOSPC;
+
+	if ((vtime == SCX_ATQ_FIFO) != atq->fifo)
 		return -EINVAL;
 
 	/*
-	 * Use dummy sequence number because we're
-	 * outside of the critical section.
-	 */
-	node = rb_node_alloc(atq->tree, 0, taskc_ptr);
-	if (!node)
-		return -ENOMEM;
-
-	ret = arena_spin_lock(&atq->lock);
-	if (ret) {
-		rb_node_free(atq->tree, node);
-		return ret;
-	}
-
-	if (unlikely(atq->size == atq->capacity)) {
-		ret = -ENOSPC;
-		goto error;
-	}
-
-	/*
-	 * "Leak" the seq on error. We only want
+	 * For FIFO, "Leak" the seq on error. We only want
 	 * sequence numbers to be monotonic, not
 	 * consecutive.
 	 */
-	node->key = atq->seq++;
+	node->key = (vtime == SCX_ATQ_FIFO) ? atq->seq++ : vtime;
+	node->value = (u64)taskc;
 
-	ret = rb_insert_node(atq->tree, node, RB_DUPLICATE);
+	ret = rb_insert_node(atq->tree, node);
 	if (ret)
-		goto error;
+		return ret;
 
+	taskc->atq = atq;
 	atq->size += 1;
 
-	arena_spin_unlock(&atq->lock);
-
 	return 0;
+}
 
-error:
+/* 
+ * XXXETSAL: We are using the __hidden antipattern for API functions because some
+ * older kernels do not allow function calls with preemption disabled. We will replace
+ * these annotations with the proper ones (__weak) at some point in the future.
+ */
+
+__hidden
+int scx_atq_insert_vtime(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
+{
+	int ret;
+
+	ret = arena_spin_lock(&atq->lock);
+	if (ret)
+		return ret;
+
+	ret = scx_atq_insert_vtime_unlocked(atq, taskc, vtime);
+
 	arena_spin_unlock(&atq->lock);
-	rb_node_free(atq->tree, node);
 
 	return ret;
 }
 
 __hidden
-int scx_atq_insert_vtime(scx_atq_t *atq, u64 taskc_ptr, u64 vtime)
+int scx_atq_insert_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
 {
-	rbnode_t *node;
+	return scx_atq_insert_vtime_unlocked(atq, taskc, SCX_ATQ_FIFO);
+}
+
+__hidden
+int scx_atq_insert(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
+	return scx_atq_insert_vtime(atq, taskc, SCX_ATQ_FIFO);
+}
+
+__hidden
+int scx_atq_remove_unlocked(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
 	int ret;
 
-	if (atq->fifo)
-		return -EINVAL;
+       /* Are we in this ATQ in the first place? */
+       if (taskc->atq != atq)
+	       return -EINVAL;
 
-	node = rb_node_alloc(atq->tree, vtime, taskc_ptr);
-	if (!node)
-		return -ENOMEM;
+       ret = rb_remove_node(atq->tree, &taskc->node);
+       taskc->atq = NULL;
 
-	ret = arena_spin_lock(&atq->lock);
-	if (ret) {
-		rb_node_free(atq->tree, node);
-		return ret;
-	}
+       return ret;
+}
 
-	if (unlikely(atq->size == atq->capacity)) {
-		ret = -ENOSPC;
-		goto error;
-	}
+__hidden
+int scx_atq_remove(scx_atq_t *atq, scx_task_common __arg_arena *taskc)
+{
+       int ret;
 
-	ret = rb_insert_node(atq->tree, node, RB_DUPLICATE);
-	if (ret)
-		goto error;
+       ret = arena_spin_lock(&atq->lock);
+       if (ret)
+               return ret;
 
-	atq->size += 1;
+       ret = scx_atq_remove_unlocked(atq, taskc);
 
-	arena_spin_unlock(&atq->lock);
+       arena_spin_unlock(&atq->lock);
 
-	return 0;
-
-error:
-	arena_spin_unlock(&atq->lock);
-	rb_node_free(atq->tree, node);
-
-	return ret;
+       return ret;
 }
 
 __hidden
 u64 scx_atq_pop(scx_atq_t *atq)
 {
+	scx_task_common *taskc;
 	u64 vtime, taskc_ptr;
 	int ret;
 
@@ -139,6 +142,9 @@ u64 scx_atq_pop(scx_atq_t *atq)
 	ret = rb_pop(atq->tree, &vtime, &taskc_ptr);
 	if (!ret)
 		atq->size -= 1;
+
+	taskc = (scx_task_common *)taskc_ptr;
+	taskc->atq = NULL;
 
 	arena_spin_unlock(&atq->lock);
 

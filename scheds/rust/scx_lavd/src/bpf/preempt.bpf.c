@@ -19,7 +19,7 @@ struct preemption_info {
 };
 
 __hidden
-u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
+u64 get_est_stopping_clk(task_ctx *taskc, u64 now)
 {
 	return now + min(taskc->avg_runtime, taskc->slice);
 }
@@ -65,14 +65,14 @@ static bool can_x_kick_cpu2(struct preemption_info *prm_x,
 }
 
 static void init_prm_by_task(struct preemption_info *prm_task,
-			     struct task_ctx *taskc, u64 now)
+			     task_ctx *taskc, u64 now)
 {
 	prm_task->est_stopping_clk = get_est_stopping_clk(taskc, now);
 	prm_task->lat_cri = taskc->lat_cri;
 	prm_task->cpuc = NULL;
 }
 
-static bool is_worth_kick_other_task(struct task_ctx *taskc)
+static bool is_worth_kick_other_task(task_ctx *taskc)
 {
 	/*
 	 * Preemption is not free. It is expensive involving context switching,
@@ -84,7 +84,7 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 				       s32 preferred_cpu,
-				       struct task_ctx *taskc, u64 now)
+				       task_ctx *taskc, u64 now)
 {
 	/*
 	 * We see preemption as a load-balancing problem. In a system with N
@@ -133,7 +133,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
-		if (cpu >= __nr_cpu_ids || cpu == preferred_cpu)
+		if (cpu >= nr_cpu_ids || cpu == preferred_cpu)
 			continue;
 
 		/*
@@ -303,8 +303,17 @@ void shrink_boosted_slice_at_tick(struct task_struct *p,
 }
 
 __hidden
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc)
+{
+	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
+	p->scx.slice = 0;
+
+	cpuc->nr_preempt++;
+}
+
+__hidden
 void try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc,
+					 task_ctx *taskc,
 					 s32 preferred_cpu,
 					 u64 dsq_id)
 {
