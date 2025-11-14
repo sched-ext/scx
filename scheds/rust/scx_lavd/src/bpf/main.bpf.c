@@ -826,15 +826,12 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
-	struct cpu_ctx *cpuc;
-	task_ctx *taskc_prev = NULL;
 	struct bpf_cpumask *active, *ovrflw;
+	u64 cpu_dsq_id, cpdom_dsq_id;
+	task_ctx *taskc_prev = NULL;
+	bool try_consume = false;
 	struct task_struct *p;
-	u32 dsq_type;
-	s32 new_cpu;
-	bool try_consume;
-	u64 dsq_ids[LAVD_DSQ_NR_TYPES];
-	int dsq_start = LAVD_DSQ_TYPE_CPDOM;
+	struct cpu_ctx *cpuc;
 	int ret;
 
 	cpuc = get_cpu_ctx_id(cpu);
@@ -843,8 +840,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	dsq_ids[LAVD_DSQ_TYPE_CPU] = cpu_to_dsq(cpu);
-	dsq_ids[LAVD_DSQ_TYPE_CPDOM] = cpdom_to_dsq(cpuc->cpdom_id);
+	cpu_dsq_id = cpu_to_dsq(cpu);
+	cpdom_dsq_id = cpdom_to_dsq(cpuc->cpdom_id);
 
 	/*
 	 * When the CPU bandwidth control is enabled, check if there are
@@ -870,13 +867,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		goto consume_out;
 
 	/*
-	 * If there is something to run on a per-CPU DSQ,
-	 * directly consume without checking CPU masks.
-	 */
-	if (per_cpu_dsq && scx_bpf_dsq_nr_queued(dsq_ids[LAVD_DSQ_TYPE_CPU]))
-		goto consume_out;
-
-	/*
 	 * Prepare cpumasks.
 	 */
 	bpf_rcu_read_lock();
@@ -885,7 +875,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	ovrflw = ovrflw_cpumask;
 	if (!active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
-		try_consume = false;
 		goto unlock_out;
 	}
 
@@ -899,6 +888,21 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		goto consume_out;
 	}
 	/* NOTE: This CPU belongs to neither active nor overflow set. */
+
+	/*
+	 * Fast path when using per-CPU DSQ.
+	 *
+	 * If there is something to run on a per-CPU DSQ,
+	 * directly consume without checking CPU masks.
+	 *
+	 * Since this CPU is neither active nor overflow set,
+	 * add this CPU to the overflow set.
+	 */
+	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_dsq_id)) {
+		bpf_cpumask_set_cpu(cpu, ovrflw);
+		bpf_rcu_read_unlock();
+		goto consume_out;
+	}
 
 	if (prev) {
 		/*
@@ -931,91 +935,92 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * Refactor this later to use some mapping to check if certain
-	 * dsq types are enabled.
+	 * If there is nothing to run on per-CPU DSQ and we do not use
+	 * per-domain DSQ, there is nothing to do. So, stop here.
 	 */
-	if (per_cpu_dsq)
-		dsq_start = LAVD_DSQ_TYPE_CPU;
+	if (!use_cpdom_dsq())
+		goto unlock_out;
+	/* NOTE: We use per-domain DSQ. */
+
 	/*
 	 * If this CPU is neither in active nor overflow CPUs,
-	 * try to find and run the task affinitized on this CPU.
+	 * try to find and run the task affinitized on this CPU
+	 * from the per-domain DSQ.
+	 *
+	 * Note that we don't need to traverse the per-CPU DSQ,
+	 * as it is already handled by the fast path above.
 	 */
-	try_consume = false;
-	bpf_for(dsq_type, dsq_start, LAVD_DSQ_NR_TYPES) {
-		u64 dsq_id = dsq_ids[dsq_type];
-		bpf_for_each(scx_dsq, p, dsq_id, 0) {
-			task_ctx *taskc;
+	bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
+		task_ctx *taskc;
+		s32 new_cpu;
 
-			/*
-			 * note that this is a hack to bypass the restriction of the
-			 * current bpf not trusting the pointer p. once the bpf
-			 * verifier gets smarter, we can remove bpf_task_from_pid().
-			 */
-			p = bpf_task_from_pid(p->pid);
-			if (!p)
+		/*
+		 * note that this is a hack to bypass the restriction of the
+		 * current bpf not trusting the pointer p. once the bpf
+		 * verifier gets smarter, we can remove bpf_task_from_pid().
+		 */
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			break;
+
+		/*
+		 * if the task is pinned to this cpu,
+		 * extend the overflow set and go.
+		 * but not on this cpu, try another task.
+		 */
+		if (is_pinned(p)) {
+			new_cpu = scx_bpf_task_cpu(p);
+			if (new_cpu == cpu) {
+				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				bpf_task_release(p);
+				try_consume = true;
 				break;
-
-			/*
-			 * if the task is pinned to this cpu,
-			 * extend the overflow set and go.
-			 * but not on this cpu, try another task.
-			 */
-			if (is_pinned(p)) {
-				new_cpu = scx_bpf_task_cpu(p);
-				if (new_cpu == cpu) {
-					bpf_cpumask_set_cpu(new_cpu, ovrflw);
-					bpf_task_release(p);
-					try_consume = true;
-					break;
-				}
-				if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
-					scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
-				bpf_task_release(p);
-				continue;
-			} else if (is_migration_disabled(p)) {
-				new_cpu = scx_bpf_task_cpu(p);
-				if (new_cpu == cpu) {
-					bpf_task_release(p);
-					try_consume = true;
-					break;
-				}
-				bpf_task_release(p);
-				continue;
 			}
-
-			/*
-			 * if the task can run on either active or overflow set,
-			 * try another task.
-			 */
-			taskc = get_task_ctx(p);
-			if(taskc &&
-			(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
-			bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-			bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+			if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			bpf_task_release(p);
+			continue;
+		} else if (is_migration_disabled(p)) {
+			new_cpu = scx_bpf_task_cpu(p);
+			if (new_cpu == cpu) {
 				bpf_task_release(p);
-				continue;
-			}
-
-			/*
-			 * now, we know that the task cannot run on either active
-			 * or overflow set. then, let's consider to extend the
-			 * overflow set.
-			 */
-			new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
-			if (new_cpu >= 0) {
-				if (new_cpu == cpu) {
-					bpf_cpumask_set_cpu(new_cpu, ovrflw);
-					bpf_task_release(p);
-					try_consume = true;
-					break;
-				}
-				else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
-					scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+				try_consume = true;
+				break;
 			}
 			bpf_task_release(p);
+			continue;
 		}
-		if (try_consume)
-			break;
+
+		/*
+		 * if the task can run on either active or overflow set,
+		 * try another task.
+		 */
+		taskc = get_task_ctx(p);
+		if(taskc &&
+		(!test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED) ||
+		bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
+			bpf_task_release(p);
+			continue;
+		}
+
+		/*
+		 * now, we know that the task cannot run on either active
+		 * or overflow set. then, let's consider to extend the
+		 * overflow set.
+		 */
+		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
+		if (new_cpu >= 0) {
+			if (new_cpu == cpu) {
+				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				bpf_task_release(p);
+				try_consume = true;
+				break;
+			}
+			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+		}
+		bpf_task_release(p);
 	}
 
 unlock_out:
@@ -1031,7 +1036,7 @@ consume_out:
 	/*
 	 * Otherwise, consume a task.
 	 */
-	if (consume_task(dsq_ids[LAVD_DSQ_TYPE_CPU], dsq_ids[LAVD_DSQ_TYPE_CPDOM]))
+	if (consume_task(cpu_dsq_id, cpdom_dsq_id))
 		return;
 
 	/*
