@@ -9,6 +9,7 @@ use scx_utils::Core;
 use scx_utils::Topology;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::debug;
 
 use crate::bpf_intf;
 use crate::CpuPool;
@@ -377,12 +378,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                         .map(|(core_id, core)| {
                             // this debug information is important.
                             for (cpu_id, _) in core.cpus.iter() {
-                                log::debug!(
+                                debug!(
                                     "NODE_ID: {} LLC_ID: {} CORE_ID: {} CPU_ID: {}",
-                                    node_id,
-                                    llc_id,
-                                    core_id,
-                                    cpu_id
+                                    node_id, llc_id, core_id, cpu_id
                                 );
                             }
                             core_id.clone()

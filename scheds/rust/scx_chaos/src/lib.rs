@@ -9,6 +9,8 @@ pub mod stats;
 use bpf_skel::BpfSkel;
 use stats::Metrics;
 
+use log::warn;
+
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;

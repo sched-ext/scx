@@ -10,6 +10,7 @@ use scx_utils::cli::TopologyArgs;
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
+use tracing::info;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -119,7 +120,7 @@ impl HardwareProfile {
             opts.wakeup_llc_migrations = false;
             // For single LLC, set min_llc_runs_pick2 to 0 (effectively disable)
             opts.min_llc_runs_pick2 = 0;
-            log::info!("Single LLC detected - disabling multi-LLC optimizations");
+            info!("Single LLC detected - disabling multi-LLC optimizations");
         }
 
         if self.is_neoverse_v2 && self.single_llc && self.core_count >= 64 {
@@ -127,16 +128,15 @@ impl HardwareProfile {
             let optimal_shards = (self.core_count / 8).min(16) as u32;
             if opts.llc_shards == get_default_llc_shards() {
                 opts.llc_shards = optimal_shards;
-                log::info!(
+                info!(
                     "Large single-LLC system ({} cores) - using {} shards",
-                    self.core_count,
-                    opts.llc_shards
+                    self.core_count, opts.llc_shards
                 );
             }
         }
 
         if self.is_neoverse_v2 {
-            log::info!("ARM64 Neoverse-V2 detected - ARM-specific optimizations available");
+            info!("ARM64 Neoverse-V2 detected - ARM-specific optimizations available");
         }
     }
 }
@@ -346,14 +346,14 @@ macro_rules! init_open_skel {
                     }
                 }
                 for (i, slice) in opts.dsq_time_slices.iter().enumerate() {
-                    ::log::info!("DSQ[{}] slice_ns {}", i, slice * 1000);
+                    info!("DSQ[{}] slice_ns {}", i, slice * 1000);
                     skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice * 1000;
                 }
             } else {
                 for i in 0..=opts.dumb_queues - 1 {
                     let slice_ns =
                         $crate::dsq_slice_ns(i as u64, opts.min_slice_us, opts.dsq_shift);
-                    ::log::info!("DSQ[{}] slice_ns {}", i, slice_ns);
+                    info!("DSQ[{}] slice_ns {}", i, slice_ns);
                     skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice_ns;
                 }
             }
@@ -415,9 +415,9 @@ macro_rules! init_open_skel {
             // Check if cpu_priority is supported by the kernel
             let cpu_priority_supported = compat::ksym_exists("sched_core_priority").unwrap_or(false);
             if opts.cpu_priority && !cpu_priority_supported {
-                ::log::warn!("CPU priority scheduling requested but kernel doesn't support sched_core_priority");
-                ::log::warn!("Feature disabled - requires kernel with hybrid CPU support and appropriate CPU governor (e.g., amd-pstate)");
-                ::log::warn!("See README for kernel requirements");
+                warn!("CPU priority scheduling requested but kernel doesn't support sched_core_priority");
+                warn!("Feature disabled - requires kernel with hybrid CPU support and appropriate CPU governor (e.g., amd-pstate)");
+                warn!("See README for kernel requirements");
             }
             rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority && cpu_priority_supported);
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
