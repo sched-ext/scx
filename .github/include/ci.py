@@ -309,30 +309,29 @@ async def run_tests():
 
     print("Running tests...", flush=True)
 
-    # Make sure the selftest is built in case the build was not already run.
-    await run_command(["cargo", "build", "-p", "scx_arena_selftests"], no_capture=True)
-
+    # Run nextest directly on the host
     await run_command(
         [
             "cargo",
             "nextest",
-            "archive",
-            "--archive-file",
-            "target/nextest-archive.tar.zst",
+            "run",
+            "--workspace",
+            "--no-fail-fast",
         ],
         no_capture=True,
     )
 
+    # Build the arena selftest
+    await run_command(["cargo", "build", "-p", "scx_arena_selftests"], no_capture=True)
+
     # Get CPU count
     cpu_count = min(os.cpu_count() or 16, 16)
 
+    # Run arena selftests in VM (requires BPF capabilities)
     await run_command_in_vm(
         "sched_ext/for-next",
-        [
-            sys.argv[0],
-            "test-in-vm",
-        ],
-        memory=16 * 1024 * 1024 * 1024,
+        ["target/debug/scx_arena_selftests"],
+        memory=2 * 1024 * 1024 * 1024,
         cpus=cpu_count,
         no_capture=True,
     )
@@ -732,24 +731,6 @@ async def run_veristat_debug(kernel_name: str, scheduler_name: str, symbol_name:
         )
 
 
-async def run_tests_in_vm():
-    """Run tests when already inside the VM."""
-
-    subprocess.run(
-        [
-            "cargo-nextest",
-            "nextest",
-            "run",
-            "--archive-file",
-            "target/nextest-archive.tar.zst",
-            "--workspace-remap",
-            ".",
-            "--no-fail-fast",
-        ],
-        check=True,
-    )
-
-    subprocess.run(["target/debug/scx_arena_selftests"], check=True)
 
 
 async def run_all():
@@ -790,11 +771,6 @@ async def main():
 
     parser_all = subparsers.add_parser("all", help="Run all commands")
 
-    parser_test_in_vm = subparsers.add_parser(
-        "test-in-vm",
-        help="Run Rust tests in VM (intended to be invoked by this script)",
-    )
-
     args = parser.parse_args()
 
     if args.command == "format":
@@ -820,8 +796,6 @@ async def main():
             )
         else:
             await run_veristat()
-    elif args.command == "test-in-vm":
-        await run_tests_in_vm()
     elif args.command == "all":
         await run_all()
 
