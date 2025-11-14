@@ -181,6 +181,14 @@ impl McpServer {
 
         self.bpf_stats = Some(bpf_stats);
         self.perf_profiler = Some(perf_profiler);
+
+        // Create perf stat collector
+        let perf_stat_collector = crate::SharedPerfStatCollector::new();
+
+        // Set perf stat collector in tools
+        self.tools
+            .set_perf_stat_collector(perf_stat_collector.clone());
+
         self
     }
 

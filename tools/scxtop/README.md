@@ -185,6 +185,44 @@ vtime delta should remain rather stable as DSQs are consumed. If a scheduler is 
 scheduling this field may be blank.
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/34b645d0-afd9-4b8c-a2e3-db2118d87dfd" />
 
+### Performance Counters (Perf Stat View)
+
+The Perf Stat view (press **C**) provides real-time hardware and software performance counters,
+similar to `perf stat -add`. This view shows:
+
+**Counter Collection:**
+- Hardware: cycles, instructions, branches, cache references/misses, pipeline stalls
+- Software: context-switches, cpu-migrations, page-faults
+- All counters update in real-time at the configured tick rate
+
+**Derived Metrics (Automatically Calculated):**
+- **IPC** (Instructions Per Cycle): Indicates CPU efficiency
+- **Cache Miss Rate**: Shows cache effectiveness
+- **Branch Miss Rate**: Indicates branch prediction performance
+- **Frontend/Backend Stalls**: Shows pipeline bottlenecks
+
+**Aggregation Levels** (toggle with 'a' key):
+- **LLC**: Per-cache-domain view (default) - Best for understanding cache locality
+- **NUMA**: Per-NUMA-node view - Best for memory locality analysis
+- **System**: System-wide totals - Best for overall performance overview
+
+**Visualization Modes** (toggle with 'v' key):
+- **Table Mode**: Detailed counter values, rates/sec, and contextual notes
+- **Chart Mode**: 6 sparkline charts showing historical trends with min/max/avg statistics
+
+**Process Filtering:**
+- Press 'p' to filter by currently selected process
+- Press 'c' to clear filter and return to system-wide view
+
+**Key Features:**
+- Color-coded metrics (green/yellow/red) based on performance quality
+- Full-width sparklines that adapt to terminal size
+- Per-LLC and per-NUMA views show grid of panels for quick comparison
+- Comprehensive statistics: Current, Average, Min, Max values
+
+This view is invaluable for top-down performance analysis, identifying whether workloads
+are CPU-bound, memory-bound, or experiencing cache/branch prediction issues.
+
 ## MCP Mode - AI-Assisted Scheduler Analysis
 
 `scxtop` includes a Model Context Protocol (MCP) server that exposes scheduler observability
@@ -280,9 +318,12 @@ claude --mcp scxtop "Summarize my system's scheduler"
 - `get_topology` - Get hardware topology with configurable detail level
 - `list_event_subsystems` - List available tracing event subsystems
 - `list_events` - List specific kprobe or perf events with pagination
-- `start_perf_profiling` - Start CPU profiling with stack traces
+- `start_perf_profiling` - Start CPU profiling with stack traces (sampling mode)
 - `stop_perf_profiling` - Stop profiling and prepare results
 - `get_perf_results` - Get symbolized flamegraph data
+- `start_perf_stat` - Start performance counter collection (counting mode)
+- `stop_perf_stat` - Stop counter collection
+- `get_perf_stat_results` - Get counter statistics with derived metrics (IPC, cache miss rates, etc.)
 - `control_event_tracking` - Enable/disable BPF event collection
 - `control_stats_collection` - Control BPF statistics sampling
 - `control_analyzers` - Start/stop event analyzers
@@ -332,6 +373,15 @@ claude --mcp scxtop "Summarize my system's scheduler"
 
 "What kernel functions are consuming the most CPU?"
 → Claude starts profiling, collects samples, and analyzes results
+
+"Show me performance counters aggregated by LLC"
+→ Claude uses start_perf_stat with llc aggregation and retrieves metrics
+
+"What's the IPC and cache miss rate for each NUMA node?"
+→ Claude starts perf stat collection and queries with node aggregation
+
+"Is this workload CPU-bound or memory-bound?"
+→ Claude analyzes perf stat metrics (IPC, cache miss rate, stalls)
 ```
 
 **Claude Code CLI** - Direct command line usage:
@@ -382,13 +432,16 @@ This enables AI assistants to perform continuous monitoring and proactive analys
 
 See [CLAUDE_INTEGRATION.md](CLAUDE_INTEGRATION.md) for detailed examples and usage patterns.
 
+See [MCP_PERF_STAT.md](MCP_PERF_STAT.md) for complete performance counter API reference.
+
 ## Documentation
 
 ### User Guides
 - **[docs/PERFETTO_TRACE_ANALYSIS.md](docs/PERFETTO_TRACE_ANALYSIS.md)** - Complete perfetto trace analysis guide
-- **[docs/TASK_THREAD_DEBUGGING_GUIDE.md](docs/TASK_THREAD_DEBUGGING_GUIDE.md)** - Task/thread debugging workflows  
+- **[docs/TASK_THREAD_DEBUGGING_GUIDE.md](docs/TASK_THREAD_DEBUGGING_GUIDE.md)** - Task/thread debugging workflows
 - **[docs/PROTOBUF_LOADING_VERIFIED.md](docs/PROTOBUF_LOADING_VERIFIED.md)** - Protobuf loading verification
 - **[docs/README.md](docs/README.md)** - Documentation index
+- **[MCP_PERF_STAT.md](MCP_PERF_STAT.md)** - Performance counter collection MCP API
 
 ### Implementation Documentation
 - **[COMPLETE_IMPLEMENTATION_SUMMARY.md](COMPLETE_IMPLEMENTATION_SUMMARY.md)** - Full implementation overview

@@ -282,6 +282,11 @@ pub fn action_to_mcp_event(action: &Action) -> Option<Value> {
         | Action::ToggleLocalization
         | Action::ToggleHwPressure
         | Action::ToggleUncoreFreq
+        | Action::TogglePerfStatViewMode
+        | Action::TogglePerfStatAggregation
+        | Action::SetPerfStatFilter(_)
+        | Action::ApplyPerfStatProcessFilter
+        | Action::ClearPerfStatFilter
         | Action::Up => None,
     }
 }

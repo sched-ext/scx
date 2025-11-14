@@ -9,6 +9,7 @@ use super::SharedAnalyzerControl;
 use anyhow::{anyhow, Result};
 use perfetto_protos::ftrace_event::ftrace_event;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 type TraceCache =
@@ -17,6 +18,7 @@ type TraceCache =
 pub struct McpTools {
     topo: Option<Arc<scx_utils::Topology>>,
     perf_profiler: Option<SharedPerfProfiler>,
+    perf_stat_collector: Option<crate::SharedPerfStatCollector>,
     event_control: Option<super::SharedEventControl>,
     analyzer_control: Option<SharedAnalyzerControl>,
     trace_cache: Option<TraceCache>,
@@ -33,6 +35,7 @@ impl McpTools {
         Self {
             topo: None,
             perf_profiler: None,
+            perf_stat_collector: None,
             event_control: None,
             analyzer_control: None,
             trace_cache: None,
@@ -52,6 +55,10 @@ impl McpTools {
 
     pub fn set_perf_profiler(&mut self, profiler: SharedPerfProfiler) {
         self.perf_profiler = Some(profiler);
+    }
+
+    pub fn set_perf_stat_collector(&mut self, collector: crate::SharedPerfStatCollector) {
+        self.perf_stat_collector = Some(collector);
     }
 
     pub fn set_event_control(&mut self, control: super::SharedEventControl) {
@@ -221,6 +228,61 @@ impl McpTools {
                             "type": "boolean",
                             "description": "Include full symbolized stack traces",
                             "default": true
+                        }
+                    }
+                }),
+            },
+            McpTool {
+                name: "start_perf_stat".to_string(),
+                description: "Start performance counter collection (counting mode, not sampling)"
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "aggregation": {
+                            "type": "string",
+                            "enum": ["system", "llc", "node"],
+                            "description": "Aggregation level: 'system' (total), 'llc' (per-LLC), or 'node' (per-NUMA node)",
+                            "default": "llc"
+                        },
+                        "pid": {
+                            "type": "integer",
+                            "description": "Process ID to monitor (-1 for system-wide)",
+                            "default": -1
+                        },
+                        "history_size": {
+                            "type": "integer",
+                            "description": "Number of samples to keep in history for trend analysis",
+                            "default": 100
+                        }
+                    }
+                }),
+            },
+            McpTool {
+                name: "stop_perf_stat".to_string(),
+                description: "Stop performance counter collection".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "get_perf_stat_results".to_string(),
+                description: "Get performance counter statistics with derived metrics (IPC, cache miss rates, etc.)"
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "aggregation": {
+                            "type": "string",
+                            "enum": ["system", "cpu", "llc", "node", "process"],
+                            "description": "Aggregation level to retrieve: 'system', 'cpu', 'llc', 'node', or 'process'",
+                            "default": "system"
+                        },
+                        "include_history": {
+                            "type": "boolean",
+                            "description": "Include historical data for trend analysis",
+                            "default": false
                         }
                     }
                 }),
@@ -585,6 +647,9 @@ impl McpTools {
             "start_perf_profiling" => self.tool_start_perf_profiling(arguments),
             "stop_perf_profiling" => self.tool_stop_perf_profiling(arguments),
             "get_perf_results" => self.tool_get_perf_results(arguments),
+            "start_perf_stat" => self.tool_start_perf_stat(arguments),
+            "stop_perf_stat" => self.tool_stop_perf_stat(arguments),
+            "get_perf_stat_results" => self.tool_get_perf_stat_results(arguments),
             "control_event_tracking" => self.tool_control_event_tracking(arguments),
             "control_stats_collection" => self.tool_control_stats_collection(arguments),
             "control_analyzers" => self.tool_control_analyzers(arguments),
@@ -1090,6 +1155,246 @@ impl McpTools {
                     .unwrap_or_else(|_| "Failed to serialize results".to_string())
             }]
         }))
+    }
+
+    fn tool_start_perf_stat(&self, args: &Value) -> Result<Value> {
+        let collector = self
+            .perf_stat_collector
+            .as_ref()
+            .ok_or_else(|| anyhow!("Perf stat collector not available"))?;
+
+        let topo = self
+            .topo
+            .as_ref()
+            .ok_or_else(|| anyhow!("Topology not available"))?;
+
+        let pid = args.get("pid").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+        let history_size = args
+            .get("history_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as usize;
+
+        // Build topology mappings
+        let mut cpu_to_llc = BTreeMap::new();
+        let mut cpu_to_node = BTreeMap::new();
+        for (cpu_id, cpu) in &topo.all_cpus {
+            cpu_to_llc.insert(*cpu_id, cpu.llc_id);
+            cpu_to_node.insert(*cpu_id, cpu.node_id);
+        }
+        collector.set_topology(cpu_to_llc, cpu_to_node);
+
+        // Initialize collection
+        let num_cpus = topo.all_cpus.len();
+
+        if pid > 0 {
+            // Per-process monitoring: only initialize process events to avoid exhausting hardware PMU counters
+            collector.init_process(pid)?;
+        } else {
+            // System-wide monitoring: initialize per-CPU events
+            collector.init_system_wide_with_history_size(num_cpus, history_size)?;
+        }
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Performance counter collection started:\n\n• CPUs: {}\n• LLCs: {}\n• NUMA nodes: {}\n• Process filter: {}\n• History size: {}\n\nCollecting: cycles, instructions, branches, cache, context-switches, migrations, page-faults, stalls",
+                    num_cpus,
+                    topo.all_llcs.len(),
+                    topo.nodes.len(),
+                    if pid > 0 { format!("PID {}", pid) } else { "None (system-wide)".to_string() },
+                    history_size
+                )
+            }]
+        }))
+    }
+
+    fn tool_stop_perf_stat(&self, _args: &Value) -> Result<Value> {
+        let collector = self
+            .perf_stat_collector
+            .as_ref()
+            .ok_or_else(|| anyhow!("Perf stat collector not available"))?;
+
+        if !collector.is_active() {
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Performance counter collection is not active."
+                }]
+            }));
+        }
+
+        collector.cleanup();
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": "Performance counter collection stopped.\n\nUse get_perf_stat_results to retrieve final statistics."
+            }]
+        }))
+    }
+
+    fn tool_get_perf_stat_results(&self, args: &Value) -> Result<Value> {
+        let collector = self
+            .perf_stat_collector
+            .as_ref()
+            .ok_or_else(|| anyhow!("Perf stat collector not available"))?;
+
+        if !collector.is_active() {
+            return Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Performance counter collection is not active. Use start_perf_stat to begin collection."
+                }]
+            }));
+        }
+
+        // Update counters to get current values
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let duration_ms = 100; // Default polling interval
+        collector.update(now, duration_ms)?;
+
+        let aggregation = args
+            .get("aggregation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("system");
+        let include_history = args
+            .get("include_history")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let result;
+
+        match aggregation {
+            "system" => {
+                let counters = collector.get_system_counters();
+                let metrics = counters.derived_metrics();
+                result =
+                    Self::format_counters_json(&counters, &metrics, "System-Wide", include_history);
+            }
+            "cpu" => {
+                let per_cpu = collector.get_per_cpu_counters();
+                let mut cpu_results = Vec::new();
+                for (cpu_id, counters) in per_cpu {
+                    let metrics = counters.derived_metrics();
+                    cpu_results.push(json!({
+                        "cpu_id": cpu_id,
+                        "counters": Self::counters_to_json(&counters),
+                        "metrics": Self::metrics_to_json(&metrics),
+                    }));
+                }
+                result = json!({
+                    "per_cpu": cpu_results,
+                    "total_cpus": cpu_results.len(),
+                });
+            }
+            "llc" => {
+                let per_llc = collector.get_per_llc_counters();
+                let mut llc_results = Vec::new();
+                for (llc_id, counters) in per_llc {
+                    let metrics = counters.derived_metrics();
+                    llc_results.push(json!({
+                        "llc_id": llc_id,
+                        "counters": Self::counters_to_json(&counters),
+                        "metrics": Self::metrics_to_json(&metrics),
+                    }));
+                }
+                result = json!({
+                    "per_llc": llc_results,
+                    "total_llcs": llc_results.len(),
+                });
+            }
+            "node" => {
+                let per_node = collector.get_per_node_counters();
+                let mut node_results = Vec::new();
+                for (node_id, counters) in per_node {
+                    let metrics = counters.derived_metrics();
+                    node_results.push(json!({
+                        "node_id": node_id,
+                        "counters": Self::counters_to_json(&counters),
+                        "metrics": Self::metrics_to_json(&metrics),
+                    }));
+                }
+                result = json!({
+                    "per_node": node_results,
+                    "total_nodes": node_results.len(),
+                });
+            }
+            "process" => {
+                if let Some(counters) = collector.get_process_counters() {
+                    let metrics = counters.derived_metrics();
+                    let pid = collector.filter_pid().unwrap_or(-1);
+                    result = json!({
+                        "pid": pid,
+                        "counters": Self::counters_to_json(&counters),
+                        "metrics": Self::metrics_to_json(&metrics),
+                    });
+                } else {
+                    return Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "No process filter is active. Use start_perf_stat with pid parameter to filter by process."
+                        }]
+                    }));
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "Invalid aggregation level: {}. Use 'system', 'cpu', 'llc', 'node', or 'process'",
+                    aggregation
+                ));
+            }
+        }
+
+        Ok(json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "Failed to serialize results".to_string())
+            }]
+        }))
+    }
+
+    fn counters_to_json(counters: &crate::PerfStatCounters) -> Value {
+        json!({
+            "cycles": counters.cycles_delta,
+            "instructions": counters.instructions_delta,
+            "branches": counters.branches_delta,
+            "branch_misses": counters.branch_misses_delta,
+            "cache_references": counters.cache_references_delta,
+            "cache_misses": counters.cache_misses_delta,
+            "stalled_cycles_frontend": counters.stalled_cycles_frontend_delta,
+            "stalled_cycles_backend": counters.stalled_cycles_backend_delta,
+            "context_switches": counters.context_switches_delta,
+            "cpu_migrations": counters.cpu_migrations_delta,
+            "page_faults": counters.page_faults_delta,
+        })
+    }
+
+    fn metrics_to_json(metrics: &crate::DerivedMetrics) -> Value {
+        json!({
+            "ipc": format!("{:.3}", metrics.ipc),
+            "cache_miss_rate": format!("{:.2}%", metrics.cache_miss_rate),
+            "branch_miss_rate": format!("{:.2}%", metrics.branch_miss_rate),
+            "stalled_frontend_pct": format!("{:.2}%", metrics.stalled_frontend_pct),
+            "stalled_backend_pct": format!("{:.2}%", metrics.stalled_backend_pct),
+        })
+    }
+
+    fn format_counters_json(
+        counters: &crate::PerfStatCounters,
+        metrics: &crate::DerivedMetrics,
+        label: &str,
+        _include_history: bool,
+    ) -> Value {
+        json!({
+            "label": label,
+            "counters": Self::counters_to_json(counters),
+            "metrics": Self::metrics_to_json(metrics),
+        })
     }
 
     fn tool_control_event_tracking(&self, args: &Value) -> Result<Value> {

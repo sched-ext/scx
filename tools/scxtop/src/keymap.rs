@@ -59,6 +59,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('w'), Action::SetState(AppState::Power));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
         bindings.insert(Key::Char('S'), Action::SaveConfig);
+        bindings.insert(Key::Char('C'), Action::SetState(AppState::PerfStat));
         bindings.insert(Key::Char('a'), Action::RequestTrace);
         bindings.insert(Key::Char('x'), Action::ClearEvent);
         bindings.insert(Key::Char('j'), Action::PrevEvent);
