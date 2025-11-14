@@ -15,6 +15,8 @@ stdenv.mkDerivation {
   pname = "veristat";
   inherit version src;
 
+  patches = [ ../patches/veristat-increase-log-buf.patch ];
+
   buildInputs = [
     elfutils
     zlib
