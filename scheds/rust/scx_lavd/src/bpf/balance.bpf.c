@@ -399,7 +399,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * When per_cpu_dsq or pinned_slice_ns is enabled, compare vtimes
 	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
 	 */
-	if (use_per_cpu_dsq()) {
+	if (use_per_cpu_dsq() && use_cpdom_dsq()) {
 		u64 dsq_id = cpu_dsq_id;
 		u64 backup_dsq_id = cpdom_dsq_id;
 
@@ -424,8 +424,11 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 			return true;
 		if (consume_dsq(cpdomc, backup_dsq_id))
 			return true;
-	} else {
+	} else if (use_cpdom_dsq()) {
 		if (consume_dsq(cpdomc, cpdom_dsq_id))
+			return true;
+	} else if (use_per_cpu_dsq()) {
+		if (consume_dsq(cpdomc, cpu_dsq_id))
 			return true;
 	}
 
