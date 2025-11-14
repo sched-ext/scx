@@ -767,10 +767,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 static
 int enqueue_cb(struct task_struct __arg_trusted *p)
 {
-	task_ctx *taskc;
 	struct cpu_ctx *cpuc, *cpuc_cur;
+	task_ctx *taskc;
+	u64 dsq_id;
 	s32 cpu;
-	u64 cpdom_id;
 
 	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
@@ -788,7 +788,6 @@ int enqueue_cb(struct task_struct __arg_trusted *p)
 	 * Fetch the chosen CPU and DSQ for the task.
 	 */
 	cpu = taskc->suggested_cpu_id;
-	cpdom_id = taskc->cpdom_id;
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
@@ -804,13 +803,8 @@ int enqueue_cb(struct task_struct __arg_trusted *p)
 	/*
 	 * Enqueue the task to a DSQ.
 	 */
-	if (per_cpu_dsq) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), p->scx.slice,
-					 p->scx.dsq_vtime, 0);
-	} else {
-		scx_bpf_dsq_insert_vtime(p, cpdom_to_dsq(cpdom_id), p->scx.slice,
-					 p->scx.dsq_vtime, 0);
-	}
+	dsq_id = get_target_dsq_id(p, cpuc);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 
 	return 0;
 }
