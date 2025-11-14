@@ -9,6 +9,11 @@ license = "GPL-2.0-only"
 [package.metadata.scx]
 ci.use_clippy = true
 
+[package.metadata.scx.ci.kernel]
+blocklist = [
+  "stable/6_12" # https://github.com/sched-ext/scx/issues/3047
+]
+
 [dependencies]
 scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.2" }
 anyhow = "1.0.65"
