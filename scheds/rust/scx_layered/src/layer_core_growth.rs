@@ -265,6 +265,10 @@ struct LayerCoreOrderGenerator<'a> {
 }
 
 impl<'a> LayerCoreOrderGenerator<'a> {
+    fn has_topology_preference(&self) -> bool {
+        self.spec.nodes().len() > 0 || self.spec.llcs().len() > 0
+    }
+
     fn rotate_layer_offset(&self, vec: &'a mut Vec<usize>) -> &Vec<usize> {
         let num_cores = self.topo.all_cores.len();
         let chunk = num_cores.div_ceil(self.layer_specs.len());
@@ -306,7 +310,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
 
     fn grow_linear(&self) -> Vec<usize> {
         let mut order = (0..self.topo.all_cores.len()).collect::<Vec<usize>>();
-        self.rotate_layer_offset(&mut order);
+        // Only rotate if no LLC/node preferences - preserve topology order otherwise
+        if !self.has_topology_preference() {
+            self.rotate_layer_offset(&mut order);
+        }
         order
     }
 
@@ -514,7 +521,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     });
                 });
             });
-            self.rotate_layer_offset(&mut core_order);
+            // Don't rotate when LLC/node preferences are specified - preserve the
+            // explicit topology order built above to respect LLC/node affinity
+            // self.rotate_layer_offset(&mut core_order);
             core_order
         }
     }
