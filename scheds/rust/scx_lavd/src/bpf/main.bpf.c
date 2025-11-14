@@ -656,7 +656,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	task_ctx *taskc;
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
-	u64 cpdom_id, dsq_id;
+	u64 dsq_id;
 	bool is_idle = false, can_direct;
 
 	taskc = get_task_ctx(p);
@@ -693,26 +693,28 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		cpdom_id = pick_proper_dsq(p, taskc, task_cpu, &cpu,
-					 &is_idle, cpuc_cur);
-		taskc->suggested_cpu_id = cpu;
-		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
-			return;
-		}
+		struct pick_ctx ictx = {
+			.p = p,
+			.taskc = taskc,
+			.prev_cpu = task_cpu,
+			.cpuc_cur = cpuc_cur,
+			.wake_flags = 0,
+		};
+
+		cpu = pick_idle_cpu(&ictx, &is_idle);
 	} else {
 		cpu = scx_bpf_task_cpu(p);
-		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
-			return;
-		}
-		cpdom_id = cpuc->cpdom_id;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
-	taskc->cpdom_id = cpdom_id;
+
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		return;
+	}
+	taskc->suggested_cpu_id = cpu;
+	taskc->cpdom_id = cpuc->cpdom_id;
 
 	/*
 	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
@@ -747,11 +749,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	dsq_id = (per_cpu_dsq || (pinned_slice_ns && is_pinned(p))) ? cpu_to_dsq(cpu) : cpdom_to_dsq(cpdom_id);
+	dsq_id = (per_cpu_dsq || (pinned_slice_ns && is_pinned(p))) ? cpu_to_dsq(cpuc->cpu_id) : cpdom_to_dsq(cpuc->cpdom_id);
 
 	can_direct = can_direct_dispatch(dsq_id, cpu, is_idle);
 	if (can_direct && pinned_slice_ns && is_pinned(p))
-		can_direct &= can_direct_dispatch(cpdom_to_dsq(cpdom_id), cpu, is_idle);
+		can_direct &= can_direct_dispatch(cpdom_to_dsq(cpuc->cpdom_id), cpuc->cpu_id, is_idle);
 
 	if (can_direct) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
@@ -779,7 +781,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * since it is a batch of bulk enqueues.
 	 */
 	if (!no_preemption)
-		try_find_and_kick_victim_cpu(p, taskc, cpu, cpdom_to_dsq(cpdom_id));
+		try_find_and_kick_victim_cpu(p, taskc, cpu, cpdom_to_dsq(cpuc->cpdom_id));
 }
 
 static
