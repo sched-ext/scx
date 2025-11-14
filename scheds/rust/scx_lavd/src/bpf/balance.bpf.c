@@ -188,38 +188,59 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 	return ret;
 }
 
-/*
- * For simplicity, try to just steal from the CPU with
- * the highest number of queued_tasks in this domain.
- */
-int __attribute__((noinline)) pick_most_loaded_cpu(struct cpdom_ctx *cpdomc)
+u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 {
-	u64 highest_queued = 0;
-	int pick_cpu = -ENOENT;
-	int cpu, i, j, k;
+	u64 pick_dsq_id = -ENOENT;
+	s32 highest_queued = 0;
 
-	if (!per_cpu_dsq || !cpdomc)
+	if (!cpdomc) {
+		scx_bpf_error("Invalid cpdom context");
 		return -ENOENT;
+	}
 
-	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-		u64 cpumask = cpdomc->__cpumask[i];
-		bpf_for(k, 0, 64) {
-			u64 queued;
-			j = cpumask_next_set_bit(&cpumask);
-			if (j < 0)
-				break;
-			cpu = (i * 64) + j;
-			if (cpu >= nr_cpu_ids)
-				break;
-			queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-			if (queued > highest_queued) {
-				highest_queued = queued;
-				pick_cpu = cpu;
+	/*
+	 * For simplicity, try to just steal from the (either per-CPU or
+	 * per-domain) DSQs with the highest number of queued_tasks
+	 * in this domain.
+	 */
+	if (use_cpdom_dsq()) {
+		pick_dsq_id = cpdom_to_dsq(cpdomc->id);
+		highest_queued = scx_bpf_dsq_nr_queued(pick_dsq_id);
+	}
+
+	if (use_per_cpu_dsq()) {
+		int pick_cpu = -ENOENT, cpu, i, j, k;
+
+		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+			u64 cpumask = cpdomc->__cpumask[i];
+			bpf_for(k, 0, 64) {
+				u64 queued;
+				j = cpumask_next_set_bit(&cpumask);
+				if (j < 0)
+					break;
+				cpu = (i * 64) + j;
+				if (cpu >= nr_cpu_ids)
+					break;
+				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+				if (queued > highest_queued) {
+					highest_queued = queued;
+					pick_cpu = cpu;
+				}
 			}
+		}
+
+		if (pick_cpu != -ENOENT) {
+			struct cpu_ctx *pick_cpuc = get_cpu_ctx_id(pick_cpu);
+			if (!pick_cpuc) {
+				scx_bpf_error("Failed to lookup cpu_ctx: %d", pick_cpu);
+				return -ENOENT;
+			}
+
+			pick_dsq_id = cpdom_to_dsq(pick_cpuc->cpdom_id);
 		}
 	}
 
-	return pick_cpu;
+	return pick_dsq_id;
 }
 
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
@@ -255,7 +276,6 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
 		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
-			int pick_cpu;
 			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
@@ -273,11 +293,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
-			if (pick_cpu >= 0)
-				dsq_id = cpu_to_dsq(pick_cpu);
-			else
-				dsq_id = cpdom_to_dsq(cpdom_id);
+			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			/*
 			 * If task stealing is successful, mark the stealer
@@ -332,7 +348,6 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
 		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
-			int pick_cpu;
 			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
@@ -350,11 +365,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
-			if (pick_cpu >= 0)
-				dsq_id = cpu_to_dsq(pick_cpu);
-			else
-				dsq_id = cpdom_to_dsq(cpdom_id);
+			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			if (consume_dsq(cpdomc_pick, dsq_id))
 				return true;
