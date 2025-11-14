@@ -167,7 +167,7 @@ static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	const struct cpumask *online_mask;
 	struct bpf_cpumask *online_src_mask;
 	s32 cpu;
-	int i;
+	unsigned int i;
 
 	/*
 	 * online_src_mask = src_mask ∩ online_mask

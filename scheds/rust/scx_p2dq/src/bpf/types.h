@@ -138,6 +138,12 @@ struct node_ctx {
 #define task_ctx_test_flag(taskc, flag)		((taskc)->flags & (flag))
 
 struct task_p2dq {
+	/*
+	 * Do NOT change the position of common. It should be at the beginning
+	 * of the task_ctx.
+	 */
+	struct scx_task_common	common;
+	s32			pid;
 	u64			dsq_id;
 	u64			slice_ns;
 	int			dsq_index;

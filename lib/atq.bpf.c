@@ -184,3 +184,44 @@ int scx_atq_nr_queued(scx_atq_t *atq)
 {
 	return atq->size;
 }
+
+/*
+ * Cancel ATQ membership for the task. Find any ATQs it is
+ * in and pop it out.
+ */
+__weak
+int scx_atq_cancel(scx_task_common __arg_arena *taskc)
+{
+	scx_atq_t *atq;
+	int ret;
+
+	/*
+	 * Copy the ATQ pointer over to the stack and use it to avoid
+	 * a racing scx_atq_pop() from overwriting it. Check the
+	 * pointer is valid, as expected by the caller.
+	 */
+	atq = taskc->atq;
+	if (!atq)
+		return 0;
+
+	if ((ret = scx_atq_lock(atq))) {
+		bpf_printk("Failed to lock ATQ for task");
+		return ret;
+	}
+
+	/* We lost the race, assume whoever popped the task will handle it. */
+	if (taskc->atq != atq) {
+		scx_atq_unlock(atq);
+		return 0;
+	}
+
+	/* Protected from races by the lock. */
+	if ((ret = scx_atq_remove_unlocked(taskc->atq, taskc))) {
+		/* There is an unavoidable race with scx_atq_pop. */
+		bpf_printk("Failed to remove node from task");
+	}
+
+	scx_atq_unlock(atq);
+	return ret;
+}
+
