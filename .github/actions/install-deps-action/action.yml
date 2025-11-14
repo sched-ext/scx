@@ -13,7 +13,6 @@ runs:
     ### OTHER REPOS ####
     # turn off interactive, refresh pkgs
     - run: |
-        sudo rm /var/lib/man-db/auto-update
         sudo apt-get update
         sudo apt-get install -y tasksel
         sudo tasksel remove ubuntu-desktop
