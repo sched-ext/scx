@@ -576,13 +576,12 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	ictx.taskc->suggested_cpu_id = cpu_id;
 
 	if (found_idle) {
-		u64 dsq_id, nr_queued = 0;
 		struct cpu_ctx *cpuc;
 
 		set_task_flag(ictx.taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 
 		/*
-		 * If there is an idle cpu and its associated DSQ is empty,
+		 * If there is an idle cpu and its associated DSQs are empty,
 		 * disptach the task to the idle cpu right now.
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
@@ -591,12 +590,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 
-		dsq_id = (per_cpu_dsq || pinned_slice_ns) ? cpu_to_dsq(cpu_id) : cpdom_to_dsq(cpuc->cpdom_id);
-		nr_queued = scx_bpf_dsq_nr_queued(dsq_id);
-		if (pinned_slice_ns)
-			nr_queued += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
-
-		if (!nr_queued) {
+		if (!nr_queued_on_cpu(cpuc)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
@@ -607,15 +601,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 out:
 	return cpu_id;
-}
-
-static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
-{
-	/*
-	 * If the chosen CPU is idle and there is nothing to do
-	 * in the domain, we can safely choose the fast track.
-	 */
-	return is_idle && cpu >= 0 && !scx_bpf_dsq_nr_queued(dsq_id);
 }
 
 static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_aside)
@@ -653,11 +638,11 @@ static int cgroup_throttled(struct task_struct *p, task_ctx *taskc, bool put_asi
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	task_ctx *taskc;
 	struct cpu_ctx *cpuc, *cpuc_cur;
 	s32 task_cpu, cpu = -ENOENT;
+	bool is_idle = false;
+	task_ctx *taskc;
 	u64 dsq_id;
-	bool is_idle = false, can_direct;
 
 	taskc = get_task_ctx(p);
 	cpuc_cur = get_cpu_ctx();
@@ -749,16 +734,11 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	dsq_id = (per_cpu_dsq || (pinned_slice_ns && is_pinned(p))) ? cpu_to_dsq(cpuc->cpu_id) : cpdom_to_dsq(cpuc->cpdom_id);
-
-	can_direct = can_direct_dispatch(dsq_id, cpu, is_idle);
-	if (can_direct && pinned_slice_ns && is_pinned(p))
-		can_direct &= can_direct_dispatch(cpdom_to_dsq(cpuc->cpdom_id), cpuc->cpu_id, is_idle);
-
-	if (can_direct) {
+	if (is_idle && !nr_queued_on_cpu(cpuc)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {
+		dsq_id = get_target_dsq_id(p, cpuc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
@@ -2075,7 +2055,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * Per-CPU DSQs are created when per_cpu_dsq is enabled OR when
 	 * pinned_slice_ns is enabled (for pinned task handling).
 	 */
-	if (per_cpu_dsq || pinned_slice_ns) {
+	if (use_per_cpu_dsq()) {
 		err = init_per_cpu_dsqs();
 		if (err)
 			return err;
