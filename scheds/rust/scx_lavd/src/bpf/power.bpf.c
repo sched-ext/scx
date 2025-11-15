@@ -312,11 +312,11 @@ int do_core_compaction(void)
 		} else {
 			bpf_cpumask_clear_cpu(cpu, active);
 
-			if (cpuc->nr_pinned_tasks || (per_cpu_dsq &&
+			if (cpuc->nr_pinned_tasks || (use_per_cpu_dsq() &&
 			    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)))) {
 				/*
 				 * If there is something to run on this CPU,
-				 * add this CPU{ to the overflow set.
+				 * add this CPU to the overflow set.
 				 */
 				bpf_cpumask_set_cpu(cpu, ovrflw);
 			} else if ((bpf_get_prandom_u32() %

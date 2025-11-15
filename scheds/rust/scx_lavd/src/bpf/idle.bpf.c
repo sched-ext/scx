@@ -20,10 +20,6 @@ struct pick_ctx {
 	 */
 	s32 sync_waker_cpu;
 	/*
-	 * Additional output arguments for pick_idle_cpu().
-	 */
-	u64 cpdom_id;
-	/*
 	 * Additional output arguments for init_active_ovrflw_masks().
 	 */
 	struct bpf_cpumask *active; /* global active mask */
@@ -844,18 +840,17 @@ skip_fully_idle_neighbor:
 	 */
 err_out:
 	cpu = -ENOENT;
-unlock_out:
-	if (sticky_cpdom < 0) {
-		struct cpu_ctx *cpuc;
-		cpuc = get_cpu_ctx_id(cpu >= 0 ? cpu : ctx->prev_cpu);
-		if (cpuc)
-			ctx->cpdom_id = cpuc->cpdom_id;
-	} else
-		ctx->cpdom_id = sticky_cpdom;
 
-	if (cpu == -ENOENT)
+unlock_out:
+	/*
+	 * For non-error cases, cpu should be chosen, so it cannot be negative.
+	 */
+	if (cpu < 0)
 		cpu = pick_random_cpu(ctx);
 
+	/*
+	 * Clean up.
+	 */
 	if (idle_smtmask)
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 	if (idle_cpumask)
@@ -863,22 +858,4 @@ unlock_out:
 	bpf_rcu_read_unlock();
 
 	return cpu;
-}
-
-static
-s64 pick_proper_dsq(const struct task_struct *p, task_ctx *taskc,
-		    s32 task_cpu, s32 *cpu, bool *is_idle,
-		    struct cpu_ctx *cpuc_cur)
-{
-	struct pick_ctx ictx = {
-		.p = p,
-		.taskc = taskc,
-		.prev_cpu = task_cpu,
-		.cpuc_cur = cpuc_cur,
-		.wake_flags = 0,
-		.cpdom_id = -ENOMEM,
-	};
-
-	*cpu = pick_idle_cpu(&ictx, is_idle);
-	return ictx.cpdom_id;
 }
