@@ -288,7 +288,7 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * all tasks to ensure pinned tasks can run promptly.
 	 */
 	if (pinned_slice_ns && cpuc->nr_pinned_tasks) {
-		taskc->slice = pinned_slice_ns;
+		taskc->slice = min(pinned_slice_ns, sys_stat.slice);
 		reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
 		return taskc->slice;
 	}
