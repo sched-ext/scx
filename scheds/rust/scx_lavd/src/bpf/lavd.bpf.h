@@ -332,6 +332,19 @@ void reset_task_flag(task_ctx *taskc, u64 flag);
 bool test_task_flag(task_ctx *taskc, u64 flag);
 void reset_task_flag(task_ctx *taskc, u64 flag);
 
+static __always_inline bool use_per_cpu_dsq(void)
+{
+	return per_cpu_dsq || pinned_slice_ns;
+}
+
+static __always_inline bool use_cpdom_dsq(void)
+{
+	return !per_cpu_dsq;
+}
+
+s32 nr_queued_on_cpu(struct cpu_ctx *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 extern struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
