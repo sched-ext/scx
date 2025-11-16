@@ -673,19 +673,19 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	if (!idle_cpumask || !idle_smtmask)
 		goto found_cpu;
 
+	if (bpf_cpumask_test_cpu(prev_cpu, idle_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		*is_idle = true;
+		goto found_cpu;
+	}
+
 	if (p2dq_config.interactive_sticky && task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE)) {
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
 		goto found_cpu;
 	}
 
-	// First check if last CPU is idle (common case - CPU cache warm)
-	if (likely(bpf_cpumask_test_cpu(prev_cpu,
-				 (topo_config.smt_enabled && !task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE)) ?
-				 idle_smtmask : idle_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))) {
-		*is_idle = true;
+	if (idle_cpumask && bpf_cpumask_empty(idle_cpumask))
 		goto found_cpu;
-	}
 
 	if (!(llcx = lookup_llc_ctx(taskc->llc_id)) ||
 	    !llcx->cpumask)
@@ -1008,11 +1008,9 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 	// Handle affinitized tasks: always use per-CPU affn_dsq
 	// All affinitized tasks queued to affn_dsq regardless of affinity breadth
-	// Also handle interactive tasks when interactive_sticky is enabled
 	if (!task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS) ||
 	    (p->cpus_ptr == &p->cpus_mask &&
-	     p->nr_cpus_allowed != topo_config.nr_cpus) ||
-	    (p2dq_config.interactive_sticky && task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE))) {
+	     p->nr_cpus_allowed != topo_config.nr_cpus)) {
 		bool has_cleared_idle = false;
 		if (!__COMPAT_is_enq_cpu_selected(enq_flags) ||
 		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
@@ -1035,11 +1033,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		// Track whether this is an interactive sticky enqueue or regular affinity enqueue
-		if (p2dq_config.interactive_sticky && task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE))
-			stat_inc(P2DQ_STAT_ENQ_INTR);
-		else
-			stat_inc(P2DQ_STAT_ENQ_CPU);
+		stat_inc(P2DQ_STAT_ENQ_CPU);
 
 		// Select target CPU for affn_dsq with priority:
 		// 1. prev_cpu if in affinity
