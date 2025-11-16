@@ -247,7 +247,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				cpuc->idle_total += time_delta(c->now, old_clk);
+				u64 duration = time_delta(c->now, old_clk);
+
+				__sync_fetch_and_add(&cpuc->idle_total, duration);
 				break;
 			}
 		}

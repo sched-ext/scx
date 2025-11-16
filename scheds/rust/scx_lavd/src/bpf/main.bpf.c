@@ -1453,24 +1453,38 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	 * The CPU is exiting from the idle state.
 	 */
 	else {
-		/*
-		 * If idle_start_clk is zero, that means entering into the idle
-		 * is not captured by the scx (i.e., the scx scheduler is
-		 * loaded when this CPU is in an idle state).
-		 */
-		u64 old_clk = cpuc->idle_start_clk;
-		if (old_clk != 0) {
+		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
+			/*
+			 * If idle_start_clk is zero, that means entering into
+			 * the idle is not captured by the scx (i.e., the scx
+			 * scheduler is loaded when this CPU is in an idle
+			 * state).
+			 */
+			u64 old_clk = cpuc->idle_start_clk;
+
+			if (old_clk == 0)
+				break;
+
 			/*
 			 * The CAS failure happens when idle_start_clk is
 			 * updated by the update timer. That means the update
-			 * timer already took the idle_time duration. Hence the
-			 * idle duration should not be accumulated.
+			 * timer already took the idle_time duration. However,
+			 * instead of dropping out, the logic here still needs
+			 * to retry to ensure the cpuc->idle_start_clk is
+			 * updated to 0 or the timer will continute accumulating
+			 * the idle_time for an already activated CPU.
 			 */
-			u64 duration = time_delta(now, old_clk);
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, 0);
-			if (ret)
-				cpuc->idle_total += duration;
+			if (ret) {
+				if (time_after(old_clk, now))
+					break;
+
+				u64 duration = time_delta(now, old_clk);
+
+				__sync_fetch_and_add(&cpuc->idle_total, duration);
+				break;
+			}
 		}
 	}
 }
