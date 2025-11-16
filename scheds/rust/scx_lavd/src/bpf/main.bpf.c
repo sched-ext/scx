@@ -722,8 +722,13 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Increase the number of pinned tasks waiting for execution.
 	 */
-	if (is_pinned(p)) {
+	if (is_pinned(p) && (taskc->pinned_cpu_id == -ENOENT)) {
+		taskc->pinned_cpu_id = cpu;
 		__sync_fetch_and_add(&cpuc->nr_pinned_tasks, 1);
+
+		debugln("cpu%d [%d] -- %s:%d -- %s:%d", cpuc->cpu_id,
+			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__,
+			__LINE__);
 	}
 
 	/*
@@ -1301,6 +1306,18 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	cpuc->flags = 0;
 
 	/*
+	 * Decrease the number of pinned tasks waiting for execution.
+	 */
+	if (is_pinned(p) && (taskc->pinned_cpu_id != -ENOENT)) {
+		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
+		taskc->pinned_cpu_id = -ENOENT;
+
+		debugln("%d [%d] -- %s:%d -- %s:%d", cpuc->cpu_id,
+			cpuc->nr_pinned_tasks, p->comm, p->pid, __func__,
+			__LINE__);
+	}
+
+	/*
 	 * If a task @p is dequeued from a run queue for some other reason
 	 * other than going to sleep, it is an implementation-level side
 	 * effect. Hence, we don't care this spurious dequeue.
@@ -1317,13 +1334,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 		taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
 		taskc->last_quiescent_clk = now;
 	}
-
-	/*
-	 * Decrease the number of pinned tasks waiting for execution.
-	 */
-	if (is_pinned(p))
-		__sync_fetch_and_sub(&cpuc->nr_pinned_tasks, 1);
-
 }
 
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
@@ -1640,6 +1650,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->last_quiescent_clk = now;
 	taskc->avg_runtime = sys_stat.slice;
 	taskc->svc_time = sys_stat.avg_svc_time;
+	taskc->pinned_cpu_id = -ENOENT;
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
 

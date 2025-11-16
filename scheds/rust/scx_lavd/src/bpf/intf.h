@@ -156,19 +156,20 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
-	u32	prev_cpu_id;		/* where a task ran last time */
 
 	/*
 	 * Task deadline and time slice
 	 */
+	u64	slice;			/* time slice */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
-	u64	slice;			/* time slice */
 
 	/*
-	 * Task cgroup and id
+	 * IDs
 	 */
+	u32	prev_cpu_id;		/* where a task ran last time */
+	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	pid_t	pid;			/* pid for this task */
 	u64	cgrp_id;		/* cgroup id of this task */
 
