@@ -40,10 +40,6 @@ use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::info;
-use log::trace;
-use log::warn;
-use log::{debug, error};
 use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
@@ -81,6 +77,8 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::filter::EnvFilter;
 use walkdir::WalkDir;
 
 const SCHEDULER_NAME: &str = "scx_layered";
@@ -572,6 +570,10 @@ lazy_static! {
 #[derive(Debug, Parser)]
 #[command(verbatim_doc_comment)]
 struct Opts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Scheduling slice duration in microseconds.
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
@@ -596,10 +598,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    log_level: String,
 
     /// Disable topology awareness. When enabled, the "nodes" and "llcs" settings on
     /// a layer are ignored. Defaults to false on topologies with multiple NUMA nodes
@@ -720,6 +722,10 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -2403,8 +2409,16 @@ impl<'a> Scheduler<'a> {
         }
 
         // Open the BPF prog first for verification.
+        let debug_level = if opts.log_level.contains("trace") {
+            2
+        } else if opts.log_level.contains("debug") {
+            1
+        } else {
+            0
+        };
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 1);
+        skel_builder.obj_builder.debug(debug_level > 1);
+
         info!(
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
@@ -2470,7 +2484,7 @@ impl<'a> Scheduler<'a> {
         rodata.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
         rodata.percpu_kthread_preempt_all =
             !opts.disable_percpu_kthread_preempt && opts.percpu_kthread_preempt_all;
-        rodata.debug = opts.verbose as u32;
+        rodata.debug = debug_level as u32;
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
@@ -4245,9 +4259,8 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     Ok(config)
 }
 
-fn main() -> Result<()> {
-    let opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_layered {}",
@@ -4259,6 +4272,35 @@ fn main() -> Result<()> {
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
+    }
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
     }
 
     if opts.no_load_frac_limit {
@@ -4274,26 +4316,11 @@ fn main() -> Result<()> {
         warn!("--local_llc_iteration is deprecated and noop");
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
-
     debug!("opts={:?}", &opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_layered run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
