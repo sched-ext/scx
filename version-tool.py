@@ -22,36 +22,6 @@ def dbg(line):
 def underline(string):
     return f'\033[4m{string}\033[0m'
 
-def do_meson_ver(new_ver):
-    path = 'meson.build'
-    with open(path, 'r') as f:
-        lines = f.readlines()
-
-    ver_lineno = -1
-    for lineno, line in enumerate(lines):
-        ver_re = r"(^.*version:\s*')([0-9.]*)('.*$)"
-        m = re.match(ver_re, line.rstrip())
-        if m:
-            ver_lineno = lineno
-            pre = m.group(1)
-            ver = m.group(2)
-            post = m.group(3)
-            dbg(f'[{path}:{lineno+1}] {pre}{underline(ver)}{post}')
-            break
-
-    if ver_lineno < 0:
-        err(f'[{path}] Failed to find verion')
-
-    if new_ver is None or ver == new_ver:
-        return ver
-
-    print(f'[{path}:{ver_lineno+1}] Updating from {ver} to {new_ver}')
-    lines[ver_lineno] = f'{pre}{new_ver}{post}\n'
-    with open(path, 'w') as f:
-        f.writelines(lines)
-
-    return ver
-
 def get_rust_paths():
     result = subprocess.run(['git', 'ls-files'], stdout=subprocess.PIPE)
     lines = result.stdout.decode('utf-8').splitlines()
@@ -255,9 +225,6 @@ def main():
             new_vers = parsed[vers_key]
             new_rust_vers = parsed[rust_vers_key]
             new_rust_deps = parsed[rust_deps_key]
-
-    # package version
-    vers['meson'] = do_meson_ver(new_vers.get('meson'))
 
     # rust crates implemented in the tree
     rust_paths = get_rust_paths()
