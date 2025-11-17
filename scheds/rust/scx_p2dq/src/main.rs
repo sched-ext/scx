@@ -70,6 +70,10 @@ const SCHEDULER_NAME: &str = "scx_p2dq";
 ///
 #[derive(Debug, Parser)]
 struct CliOpts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Specify the logging level. Accepts rust's envfilter syntax for modular
     /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
     #[clap(long, default_value = "info")]
@@ -300,6 +304,10 @@ fn main(opts: CliOpts) -> Result<()> {
     {
         Ok(()) => {}
         Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
     }
 
     if let Some(run_id) = opts.run_id {

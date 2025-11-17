@@ -63,7 +63,7 @@ use stats::SchedSamples;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter::EnvFilter;
 
 const SCHEDULER_NAME: &str = "scx_lavd";
@@ -74,6 +74,10 @@ const SCHEDULER_NAME: &str = "scx_lavd";
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Automatically decide the scheduler's power mode (performance vs.
     /// powersave vs. balanced), CPU preference order, etc, based on system
     /// load. The options affecting the power mode and the use of core compaction
@@ -948,6 +952,10 @@ fn main(mut opts: Opts) -> Result<()> {
     }
 
     init_log(&opts);
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+    }
 
     if let Some(run_id) = opts.run_id {
         info!("scx_lavd run_id: {}", run_id);

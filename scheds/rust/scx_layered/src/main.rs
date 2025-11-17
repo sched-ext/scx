@@ -570,6 +570,10 @@ lazy_static! {
 #[derive(Debug, Parser)]
 #[command(verbatim_doc_comment)]
 struct Opts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Scheduling slice duration in microseconds.
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
@@ -4270,19 +4274,6 @@ fn main(opts: Opts) -> Result<()> {
         return Ok(());
     }
 
-    if opts.no_load_frac_limit {
-        warn!("--no-load-frac-limit is deprecated and noop");
-    }
-    if opts.layer_preempt_weight_disable != 0.0 {
-        warn!("--layer-preempt-weight-disable is deprecated and noop");
-    }
-    if opts.layer_growth_weight_disable != 0.0 {
-        warn!("--layer-growth-weight-disable is deprecated and noop");
-    }
-    if opts.local_llc_iteration {
-        warn!("--local_llc_iteration is deprecated and noop");
-    }
-
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
             Ok(filter) => Ok(filter),
@@ -4306,6 +4297,23 @@ fn main(opts: Opts) -> Result<()> {
     {
         Ok(()) => {}
         Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+    }
+
+    if opts.no_load_frac_limit {
+        warn!("--no-load-frac-limit is deprecated and noop");
+    }
+    if opts.layer_preempt_weight_disable != 0.0 {
+        warn!("--layer-preempt-weight-disable is deprecated and noop");
+    }
+    if opts.layer_growth_weight_disable != 0.0 {
+        warn!("--layer-growth-weight-disable is deprecated and noop");
+    }
+    if opts.local_llc_iteration {
+        warn!("--local_llc_iteration is deprecated and noop");
     }
 
     debug!("opts={:?}", &opts);

@@ -29,6 +29,7 @@ if [ $# -ge 3 ] ; then
 fi
 
 # enable running tests on individual schedulers
+export RUST_LOG=debug
 if [ $# -ge 2 ] ; then
     SCHEDS[$2]="-v"
 else
