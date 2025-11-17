@@ -288,7 +288,7 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * all tasks to ensure pinned tasks can run promptly.
 	 */
 	if (pinned_slice_ns && cpuc->nr_pinned_tasks) {
-		taskc->slice = pinned_slice_ns;
+		taskc->slice = min(pinned_slice_ns, sys_stat.slice);
 		reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
 		return taskc->slice;
 	}
@@ -1245,27 +1245,10 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 	}
 
 	/*
-	 * If pinned_slice_ns is enabled and there are pinned tasks waiting
-	 * to run on this CPU, unconditionally reduce the time slice for
-	 * all tasks to ensure pinned tasks can run promptly.
+	 * If there is a pinned task on this CPU, shrink its time slice.
 	 */
-	if (pinned_slice_ns && cpuc->nr_pinned_tasks &&
-	    p->scx.slice > pinned_slice_ns) {
-		if (taskc->acc_runtime > pinned_slice_ns)
-			p->scx.slice = 0;
-		else
-			p->scx.slice = pinned_slice_ns;
-		return;
-	}
-
-	/*
-	 * If this task is slice-boosted and there is a pinned task that
-	 * must run on this, shrink its time slice to the regular one.
-	 */
-	if (cpuc->nr_pinned_tasks &&
-	    test_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST)) {
-		shrink_boosted_slice_at_tick(p, cpuc, now);
-	}
+	if (cpuc->nr_pinned_tasks)
+		shrink_slice_at_tick(p, cpuc, now);
 }
 
 void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)

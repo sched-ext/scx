@@ -384,8 +384,7 @@ const volatile u16 *get_cpu_order(void);
 int plan_x_cpdom_migration(void);
 
 /* Preemption management helpers. */
-
-int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now);
+void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now);
 
 /* Futex lock-related helpers. */
 
