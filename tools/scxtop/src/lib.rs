@@ -23,6 +23,7 @@ pub mod mcp;
 mod mem_stats;
 pub mod network_stats;
 mod node_data;
+mod perf_stat_data;
 mod perfetto_trace;
 mod power_data;
 mod proc_data;
@@ -51,6 +52,9 @@ pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
 pub use network_stats::NetworkStatSnapshot;
 pub use node_data::NodeData;
+pub use perf_stat_data::{
+    DerivedMetrics, PerfStatCollector, PerfStatCounters, PerfStatHistory, SharedPerfStatCollector,
+};
 pub use perfetto_trace::PerfettoTraceManager;
 pub use power_data::{
     CStateInfo, CorePowerData, PowerDataCollector, PowerSnapshot, SystemPowerData,
@@ -113,6 +117,8 @@ pub enum AppState {
     PerfEvent,
     /// Application is in the perf top view state.
     PerfTop,
+    /// Application is in the perf stat view state.
+    PerfStat,
     /// Application is in the Power state.
     Power,
     /// Application is in the Process state.
@@ -178,6 +184,57 @@ impl std::fmt::Display for ComponentViewState {
             ComponentViewState::Hidden => write!(f, "hidden"),
             ComponentViewState::Default => write!(f, "default"),
             ComponentViewState::Detail => write!(f, "detail"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PerfStatViewMode {
+    Table,
+    Chart,
+}
+
+impl PerfStatViewMode {
+    pub fn next(&self) -> Self {
+        match self {
+            PerfStatViewMode::Table => PerfStatViewMode::Chart,
+            PerfStatViewMode::Chart => PerfStatViewMode::Table,
+        }
+    }
+}
+
+impl std::fmt::Display for PerfStatViewMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            PerfStatViewMode::Table => write!(f, "table"),
+            PerfStatViewMode::Chart => write!(f, "chart"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PerfStatAggregationLevel {
+    System,
+    Llc,
+    Node,
+}
+
+impl PerfStatAggregationLevel {
+    pub fn next(&self) -> Self {
+        match self {
+            PerfStatAggregationLevel::System => PerfStatAggregationLevel::Llc,
+            PerfStatAggregationLevel::Llc => PerfStatAggregationLevel::Node,
+            PerfStatAggregationLevel::Node => PerfStatAggregationLevel::System,
+        }
+    }
+}
+
+impl std::fmt::Display for PerfStatAggregationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            PerfStatAggregationLevel::System => write!(f, "system"),
+            PerfStatAggregationLevel::Llc => write!(f, "LLC"),
+            PerfStatAggregationLevel::Node => write!(f, "NUMA"),
         }
     }
 }
@@ -504,6 +561,12 @@ pub enum Action {
     Up,
     UpdateColVisibility(UpdateColVisibilityAction),
     Wait(WaitAction),
+    // Perf Stat actions
+    TogglePerfStatViewMode,
+    TogglePerfStatAggregation,
+    SetPerfStatFilter(Option<i32>),
+    ApplyPerfStatProcessFilter,
+    ClearPerfStatFilter,
     None,
 }
 

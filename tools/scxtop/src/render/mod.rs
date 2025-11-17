@@ -10,6 +10,8 @@ pub mod memory;
 
 // Network rendering
 pub mod network;
+// Perf stat rendering
+pub mod perf_stat;
 // Scheduler rendering
 pub mod scheduler;
 // BPF program rendering
@@ -18,5 +20,6 @@ pub mod bpf_programs;
 pub use bpf_programs::BpfProgramRenderer;
 pub use memory::MemoryRenderer;
 pub use network::NetworkRenderer;
+pub use perf_stat::PerfStatRenderer;
 pub use process::ProcessRenderer;
 pub use scheduler::SchedulerRenderer;

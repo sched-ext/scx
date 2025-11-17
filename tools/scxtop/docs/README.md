@@ -6,6 +6,7 @@
 - **[PERFETTO_TRACE_ANALYSIS.md](PERFETTO_TRACE_ANALYSIS.md)** - Complete guide to perfetto trace analysis
 - **[TASK_THREAD_DEBUGGING_GUIDE.md](TASK_THREAD_DEBUGGING_GUIDE.md)** - Task/thread debugging workflows
 - **[PROTOBUF_LOADING_VERIFIED.md](PROTOBUF_LOADING_VERIFIED.md)** - Protobuf file loading verification
+- **[../MCP_PERF_STAT.md](../MCP_PERF_STAT.md)** - Performance counter collection API and usage
 
 ### Main README
 - **[../README.md](../README.md)** - scxtop main documentation with MCP integration
@@ -19,6 +20,7 @@ Located in `tools/scxtop/` root:
 ### MCP Integration
 - **[CLAUDE_INTEGRATION.md](../CLAUDE_INTEGRATION.md)** - Setting up Claude with scxtop MCP
 - **[MCP_INTEGRATIONS.md](../MCP_INTEGRATIONS.md)** - MCP protocol details
+- **[MCP_PERF_STAT.md](../MCP_PERF_STAT.md)** - Performance counter collection MCP API
 
 ## Documentation Structure
 
@@ -32,7 +34,8 @@ tools/scxtop/
 │   └── PROTOBUF_LOADING_VERIFIED.md   # Protobuf verification
 ├── examples/
 │   └── perfetto_trace_analysis_examples.json
-└── CLAUDE_INTEGRATION.md              # Claude setup
+├── CLAUDE_INTEGRATION.md               # Claude setup
+└── MCP_PERF_STAT.md                    # Performance counter API
 
 ```
 
@@ -40,7 +43,8 @@ tools/scxtop/
 
 1. **New to perfetto analysis?** → Read [PERFETTO_TRACE_ANALYSIS.md](PERFETTO_TRACE_ANALYSIS.md)
 2. **Need to debug a task?** → Read [TASK_THREAD_DEBUGGING_GUIDE.md](TASK_THREAD_DEBUGGING_GUIDE.md)
-3. **Verify protobuf loading?** → Read [PROTOBUF_LOADING_VERIFIED.md](PROTOBUF_LOADING_VERIFIED.md)
+3. **Want performance counters?** → Read [MCP_PERF_STAT.md](../MCP_PERF_STAT.md)
+4. **Verify protobuf loading?** → Read [PROTOBUF_LOADING_VERIFIED.md](PROTOBUF_LOADING_VERIFIED.md)
 
 ## Features Summary
 
@@ -60,6 +64,13 @@ tools/scxtop/
 13. Wakeup→Schedule Correlation
 
 ### MCP Tools
+
+#### Performance Counter Tools
+1. start_perf_stat - **Start counter collection**
+2. stop_perf_stat - **Stop collection**
+3. get_perf_stat_results - **Get metrics with LLC/NUMA/CPU/System aggregation**
+
+#### Perfetto Trace Analysis Tools
 1. load_perfetto_trace - **Load protobuf files**
 2. query_trace_events
 3. analyze_trace_scheduling
@@ -68,3 +79,8 @@ tools/scxtop/
 6. find_scheduling_bottlenecks
 7. correlate_wakeup_to_schedule
 8. export_trace_analysis
+
+#### Live Profiling Tools
+1. start_perf_profiling - **Start sampling profiler**
+2. stop_perf_profiling - **Stop profiler**
+3. get_perf_results - **Get symbolized stack traces**

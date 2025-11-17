@@ -214,6 +214,12 @@ pub struct App<'a> {
     perf_top_filtered_symbols: Vec<(String, crate::symbol_data::SymbolSample)>,
     has_perf_cap: bool,
 
+    // perf stat related
+    perf_stat_collector: crate::PerfStatCollector,
+    perf_stat_view_mode: crate::PerfStatViewMode,
+    perf_stat_aggregation: crate::PerfStatAggregationLevel,
+    perf_stat_filter_pid: Option<i32>,
+
     // capability warnings for non-root users
     capability_warnings: Vec<String>,
 }
@@ -444,6 +450,10 @@ impl<'a> App<'a> {
             current_sampling_event: None,
             perf_top_table_state: TableState::default(),
             perf_top_filtered_symbols: Vec::new(),
+            perf_stat_collector: crate::PerfStatCollector::new(),
+            perf_stat_view_mode: crate::PerfStatViewMode::Table,
+            perf_stat_aggregation: crate::PerfStatAggregationLevel::Llc,
+            perf_stat_filter_pid: None,
             capability_warnings: Vec::new(),
         };
 
@@ -690,6 +700,10 @@ impl<'a> App<'a> {
             current_sampling_event: None,
             perf_top_table_state: TableState::default(),
             perf_top_filtered_symbols: Vec::new(),
+            perf_stat_collector: crate::PerfStatCollector::new(),
+            perf_stat_view_mode: crate::PerfStatViewMode::Table,
+            perf_stat_aggregation: crate::PerfStatAggregationLevel::Llc,
+            perf_stat_filter_pid: None,
             capability_warnings: Vec::new(),
         };
 
@@ -742,6 +756,16 @@ impl<'a> App<'a> {
                 if self.has_perf_cap {
                     self.detach_perf_sampling();
                 }
+            }
+            (prev, AppState::PerfStat) if prev != AppState::PerfStat => {
+                // Entering PerfStat view - start counter collection
+                if let Err(e) = self.start_perf_stat_collection() {
+                    log::error!("Failed to start perf stat collection: {}", e);
+                }
+            }
+            (AppState::PerfStat, new) if new != AppState::PerfStat => {
+                // Leaving PerfStat view - stop counter collection
+                self.stop_perf_stat_collection();
             }
             _ => {}
         }
@@ -1084,6 +1108,7 @@ impl<'a> App<'a> {
             AppState::Node => self.on_tick_node(),
             AppState::PerfEvent | AppState::KprobeEvent => self.on_tick_events(),
             AppState::PerfTop => self.on_tick_perf_top(),
+            AppState::PerfStat => self.on_tick_perf_stat(),
             AppState::Power => self.on_tick_power(),
             AppState::Process => self.on_tick_process(),
             AppState::Scheduler => self.on_tick_scheduler(),
@@ -2510,6 +2535,7 @@ impl<'a> App<'a> {
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
             AppState::PerfTop => self.render_perf_top(frame),
+            AppState::PerfStat => self.render_perf_stat(frame),
             AppState::Power => self.render_power(frame),
             AppState::Scheduler => {
                 if self.has_capability_warnings() {
@@ -2858,6 +2884,31 @@ impl<'a> App<'a> {
                         .active_keymap
                         .action_keys_string(Action::SetState(AppState::PerfTop))
                 ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display perf stat view (performance counters)",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::PerfStat))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                "  v: toggle table/chart view (in Perf Stat)",
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                "  a: toggle aggregation (System/LLC/NUMA) (in Perf Stat)",
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                "  p: filter by selected process (in Perf Stat)",
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                "  c: clear process filter, return to system-wide (in Perf Stat)",
                 Style::default(),
             )),
             Line::from(Span::styled(
@@ -3790,6 +3841,25 @@ impl<'a> App<'a> {
             self.config.tick_rate_ms(),
             theme,
         )
+    }
+
+    /// Renders the perf stat view with performance counters.
+    fn render_perf_stat(&mut self, frame: &mut Frame) -> Result<()> {
+        use crate::render::perf_stat::{PerfStatRenderer, PerfStatViewParams};
+
+        let params = PerfStatViewParams {
+            collector: &self.perf_stat_collector,
+            view_mode: &self.perf_stat_view_mode,
+            aggregation: &self.perf_stat_aggregation,
+            filter_pid: self.perf_stat_filter_pid,
+            proc_data: &self.proc_data,
+            tick_rate_ms: self.config.tick_rate_ms(),
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+        };
+
+        PerfStatRenderer::render_perf_stat_view(frame, frame.area(), &params)
     }
 
     /// Renders the network application state.
@@ -5463,7 +5533,13 @@ impl<'a> App<'a> {
                     // XXX handle error
                 }
             }
-            Action::NextViewState => self.next_view_state(),
+            Action::NextViewState => {
+                if self.state == AppState::PerfStat {
+                    self.toggle_perf_stat_view_mode();
+                } else {
+                    self.next_view_state();
+                }
+            }
             Action::SchedReg => {
                 self.on_scheduler_load()?;
             }
@@ -5707,6 +5783,35 @@ impl<'a> App<'a> {
             }
             Action::Esc => {
                 self.on_escape()?;
+            }
+            Action::TogglePerfStatViewMode => {
+                if self.state == AppState::PerfStat {
+                    self.toggle_perf_stat_view_mode();
+                }
+            }
+            Action::TogglePerfStatAggregation => {
+                if self.state == AppState::PerfStat {
+                    self.toggle_perf_stat_aggregation();
+                }
+            }
+            Action::SetPerfStatFilter(pid) => {
+                if self.state == AppState::PerfStat {
+                    self.set_perf_stat_filter(*pid)?;
+                }
+            }
+            Action::ApplyPerfStatProcessFilter => {
+                if self.state == AppState::PerfStat {
+                    if let Err(e) = self.apply_process_filter_to_perf_stat() {
+                        log::error!("Failed to apply process filter: {}", e);
+                    }
+                }
+            }
+            Action::ClearPerfStatFilter => {
+                if self.state == AppState::PerfStat {
+                    if let Err(e) = self.clear_perf_stat_filter() {
+                        log::error!("Failed to clear process filter: {}", e);
+                    }
+                }
             }
             _ => {}
         };
@@ -7430,6 +7535,120 @@ impl<'a> App<'a> {
             self.filter_events();
         }
 
+        Ok(())
+    }
+
+    /// Perf Stat view: update performance counters
+    fn on_tick_perf_stat(&mut self) -> Result<()> {
+        if !self.perf_stat_collector.is_active() {
+            return Ok(());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+
+        let duration = self.config.tick_rate_ms() as u128;
+
+        self.perf_stat_collector.update(now, duration)?;
+
+        Ok(())
+    }
+
+    /// Start perf stat collection (called when entering PerfStat view)
+    pub fn start_perf_stat_collection(&mut self) -> Result<()> {
+        if self.perf_stat_collector.is_active() {
+            return Ok(());
+        }
+
+        // Build CPU to LLC/Node mappings from topology
+        let mut cpu_to_llc = BTreeMap::new();
+        let mut cpu_to_node = BTreeMap::new();
+        for (cpu_id, cpu) in &self.topo.all_cpus {
+            cpu_to_llc.insert(*cpu_id, cpu.llc_id);
+            cpu_to_node.insert(*cpu_id, cpu.node_id);
+        }
+        self.perf_stat_collector
+            .set_topology(cpu_to_llc, cpu_to_node);
+
+        let num_cpus = self.cpu_data.len();
+
+        // Use terminal width for history sizing (like scheduler view does)
+        let history_size = self.terminal_width.saturating_sub(2) as usize;
+        self.perf_stat_collector
+            .init_system_wide_with_history_size(num_cpus, history_size)?;
+
+        // If a process is selected, also collect for it
+        if let Some(pid) = self.perf_stat_filter_pid {
+            self.perf_stat_collector.init_process(pid)?;
+        }
+
+        Ok(())
+    }
+
+    /// Stop perf stat collection (called when exiting PerfStat view)
+    pub fn stop_perf_stat_collection(&mut self) {
+        self.perf_stat_collector.cleanup();
+    }
+
+    /// Set process filter for perf stat
+    pub fn set_perf_stat_filter(&mut self, pid: Option<i32>) -> Result<()> {
+        self.perf_stat_filter_pid = pid;
+
+        if self.perf_stat_collector.is_active() {
+            // Reinitialize with new filter
+            self.stop_perf_stat_collection();
+            self.start_perf_stat_collection()?;
+        }
+
+        Ok(())
+    }
+
+    /// Toggle perf stat view mode (table <-> chart)
+    pub fn toggle_perf_stat_view_mode(&mut self) {
+        self.perf_stat_view_mode = self.perf_stat_view_mode.next();
+    }
+
+    /// Toggle perf stat aggregation level (System -> LLC -> NUMA -> System)
+    pub fn toggle_perf_stat_aggregation(&mut self) {
+        self.perf_stat_aggregation = self.perf_stat_aggregation.next();
+    }
+
+    /// Get currently selected process PID (from Process view or current selection)
+    pub fn get_selected_process_pid(&self) -> Option<i32> {
+        // First try to get from selected_process field
+        if let Some(pid) = self.selected_process {
+            return Some(pid);
+        }
+
+        // Fall back to filtered state
+        if let Ok(filtered) = self.filtered_state.lock() {
+            if filtered.selected < filtered.list.len() {
+                if let Some(pid) = filtered.list[filtered.selected].as_int() {
+                    return Some(pid);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Apply current process selection as perf stat filter
+    pub fn apply_process_filter_to_perf_stat(&mut self) -> Result<()> {
+        if let Some(pid) = self.get_selected_process_pid() {
+            log::info!("Applying perf stat filter to PID {}", pid);
+            self.set_perf_stat_filter(Some(pid))?;
+        } else {
+            log::warn!("No process selected to filter by");
+        }
+        Ok(())
+    }
+
+    /// Clear perf stat filter (return to system-wide)
+    pub fn clear_perf_stat_filter(&mut self) -> Result<()> {
+        log::info!("Clearing perf stat filter - returning to system-wide view");
+        self.set_perf_stat_filter(None)?;
         Ok(())
     }
 
