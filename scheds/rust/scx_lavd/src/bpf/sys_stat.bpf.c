@@ -100,8 +100,12 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_sum = 0;
 		cpdomc->avg_util_sum = 0;
-		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
-		if (per_cpu_dsq) {
+		cpdomc->nr_queued_task = 0;
+
+		if (use_cpdom_dsq())
+			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
+
+		if (use_per_cpu_dsq()) {
 			bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 				u64 cpumask = cpdomc->__cpumask[i];
 				bpf_for(k, 0, 64) {
@@ -243,7 +247,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				cpuc->idle_total += time_delta(c->now, old_clk);
+				u64 duration = time_delta(c->now, old_clk);
+
+				__sync_fetch_and_add(&cpuc->idle_total, duration);
 				break;
 			}
 		}

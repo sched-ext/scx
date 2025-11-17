@@ -24,10 +24,6 @@ use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
-use log::debug;
-use log::info;
-use log::trace;
-use log::warn;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -43,6 +39,8 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
+use tracing::{debug, info, trace, warn};
+use tracing_subscriber::filter::EnvFilter;
 
 use stats::CellMetrics;
 use stats::Metrics;
@@ -60,10 +58,14 @@ const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    log_level: String,
 
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
@@ -89,6 +91,10 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
 
     /// Enable debug event tracking for cgroup_init, init_task, and cgroup_exit.
     /// Events are recorded in a ring buffer and output in dump().
@@ -184,7 +190,9 @@ impl<'a> Scheduler<'a> {
         let topology = Topology::new()?;
 
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 1);
+        skel_builder
+            .obj_builder
+            .debug(opts.log_level.contains("trace"));
         init_libbpf_logging(None);
         info!(
             "Running scx_mitosis (build ID: {})",
@@ -553,9 +561,8 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
-fn main() -> Result<()> {
-    let opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_mitosis {}",
@@ -564,26 +571,40 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+    }
 
     debug!("opts={:?}", &opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_mitosis run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
