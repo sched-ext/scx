@@ -21,7 +21,7 @@ headers=($(
 
 scheds=()
 for rust_sched in ${rust_scheds[@]}; do
-    scheds+=($(git ls-files rust/${rust_sched} | grep -Ev 'meson.build|LICENSE'))
+    scheds+=($(git ls-files rust/${rust_sched} | grep -Ev 'LICENSE'))
 done
 for c_sched in ${c_scheds[@]}; do
     scheds+=($(git ls-files c/${c_sched}*))
