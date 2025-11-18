@@ -578,7 +578,7 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	struct cpdom_ctx *cpdc, *mig_cpdc;
 	s32 cpu = -ENOENT, sticky_cpu;
 	bool i_smt_empty;
-	s64 sticky_cpdom = -ENOENT, mig_cpdom, nr_nbr, nuance;
+	s64 sticky_cpdom = -ENOENT, mig_cpdom, nr_nbr;
 	int i, j;
 
 	/*
@@ -772,7 +772,6 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	if (!cpdc || !READ_ONCE(cpdc->is_stealee))
 		goto skip_fully_idle_neighbor;
 
-	nuance = bpf_get_prandom_u32();
 	mig_cpdom = sticky_cpdom;
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
@@ -781,8 +780,7 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
 			if (j >= nr_nbr)
 				break;
-			nuance = mig_cpdom + 1;
-			mig_cpdom  = pick_any_bit(cpdc->neighbor_bits[i], nuance);
+			mig_cpdom = get_neighbor_id(cpdc, i, j);
 			if (mig_cpdom < 0)
 				continue;
 
