@@ -374,10 +374,10 @@ impl CpuOrderCtx {
         let mut d = 0;
         // core type > numa node > llc
         if from.is_big != to.is_big {
-            d += 3;
+            d += 100;
         }
         if from.numa_adx != to.numa_adx {
-            d += 2;
+            d += 10;
         } else {
             if from.llc_rdx != to.llc_rdx {
                 d += 1;
