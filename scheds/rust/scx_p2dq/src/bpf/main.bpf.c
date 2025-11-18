@@ -594,6 +594,12 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 	struct llc_ctx *llcx;
 	s32 cpu = prev_cpu;
 
+	// Migration-disabled tasks must stay on their current CPU
+	if (is_migration_disabled(p)) {
+		*is_idle = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
+		return prev_cpu;
+	}
+
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 
@@ -1140,6 +1146,7 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
+		s32 task_cpu = scx_bpf_task_cpu(p);
 		ret->cpu = cpu;
 		update_vtime(p, cpuc, taskc, llcx);
 		if (timeline_config.deadline)
@@ -1149,10 +1156,15 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 			enq_flags |= SCX_ENQ_PREEMPT;
 
 		if ((enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE) ||
-		     cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK)) &&
-		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		     cpu_ctx_test_flag(cpuc, CPU_CTX_F_NICE_TASK))) {
 			ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-			ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+			// For migration-disabled tasks, use SCX_DSQ_LOCAL to dispatch
+			// to the task's current CPU, not SCX_DSQ_LOCAL_ON|cpu
+			if (cpu != task_cpu && !is_migration_disabled(p)) {
+				ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON|cpu;
+			} else {
+				ret->fifo.dsq_id = SCX_DSQ_LOCAL;
+			}
 			ret->fifo.slice_ns = taskc->slice_ns;
 			ret->fifo.enq_flags = enq_flags;
 			if (enqueue_promise_test_flag(ret, ENQUEUE_PROMISE_F_HAS_CLEARED_IDLE))
