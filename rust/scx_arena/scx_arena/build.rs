@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 fn main() {
-    scx_utils::BpfBuilder::new()
+    scx_cargo::BpfBuilder::new()
         .unwrap()
         .enable_skel("src/bpf/main.bpf.c", "bpf")
         .add_source("src/bpf/lib/arena.bpf.c")

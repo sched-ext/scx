@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 
-use scx_utils::BpfBuilder;
+use scx_cargo::BpfBuilder;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
