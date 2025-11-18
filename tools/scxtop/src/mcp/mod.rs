@@ -12,10 +12,21 @@ mod event_control;
 pub mod event_filter;
 pub mod events;
 pub mod extended_analyzers;
+pub mod memory_aware_limits;
+pub mod outlier_detection;
 mod perf_profiling;
+pub mod perfetto_analyzer_registry;
 pub mod perfetto_analyzers;
 pub mod perfetto_analyzers_extended;
+pub mod perfetto_analyzers_io;
+pub mod perfetto_analyzers_irq;
+pub mod perfetto_analyzers_power;
+pub mod perfetto_event_types;
+pub mod perfetto_outlier_analyzer;
 pub mod perfetto_parser;
+pub mod perfetto_parser_enhanced;
+pub mod perfetto_query;
+pub mod perfetto_track_event_types;
 mod prompts;
 mod protocol;
 mod resources;
@@ -43,9 +54,17 @@ pub use extended_analyzers::{
     ProcessSoftirqStats, RateAnomaly, SoftirqAnalyzer, SoftirqStats, SoftirqSummary,
     SystemSnapshot, WakeupChainTracker,
 };
+pub use outlier_detection::{
+    CpuOutlier, EventOutlier, Outlier, OutlierDetector, OutlierMethod, OutlierResult,
+    OutlierSummary, OutlierThresholds, ProcessOutlier,
+};
 pub use perf_profiling::{
     BpfPerfEventAttacher, PerfEventAttacher, PerfProfiler, PerfProfilingConfig, ProfilingStatus,
     RawSample, SharedPerfProfiler,
+};
+pub use perfetto_analyzer_registry::{
+    AnalyzerCategory, AnalyzerMetadata, AnalyzerRegistry, AnalyzerResult, TraceAnalyzer,
+    TraceSummary,
 };
 pub use perfetto_analyzers::{
     BottleneckType, ContextSwitchAnalyzer, CorrelationAnalyzer, CpuUtilStats, DsqAnalysisSummary,
@@ -58,10 +77,43 @@ pub use perfetto_analyzers_extended::{
     SchedulingLatencyBreakdown, TaskStateAnalyzer, TaskStateStats, WakeupChain,
     WakeupChainDetector, WakeupChainEvent,
 };
+pub use perfetto_analyzers_io::{
+    BlockIoAnalyzer, BlockIoEvent, BlockIoResult, FileIoAnalyzer, FileIoResult, FileSyncEvent,
+    MemoryPressureAnalyzer, MemoryPressureResult, NetworkEvent, NetworkIoAnalyzer, NetworkIoResult,
+    ReclaimEvent,
+};
+pub use perfetto_analyzers_irq::{
+    IpiAnalysisResult, IpiAnalyzer, IpiEvent, IpiReasonSummary, IrqAnalysisResult, IrqEvent,
+    IrqHandlerAnalyzer, IrqSummary,
+};
+pub use perfetto_analyzers_power::{
+    CpuFrequencyAnalyzer, CpuFrequencyResult, CpuFrequencyStats, CpuIdleResult,
+    CpuIdleStateAnalyzer, CpuIdleStats, FrequencyEvent, IdleEvent, PowerStateAnalyzer,
+    PowerStateResult, SuspendResumeEvent,
+};
+pub use perfetto_event_types::{
+    event_category, event_type_name, events_in_category, softirq_type_name, EventCategory,
+};
+pub use perfetto_outlier_analyzer::{
+    CpuUtilizationOutliers, LatencyOutliers, PerfettoOutlierAnalyzer, RuntimeOutliers,
+    TraceOutlierAnalysis,
+};
 pub use perfetto_parser::{
     CpuEventType, CpuTimeline, CpuTimelineEvent, DsqDescriptor, DsqEvent, FtraceEventWithIndex,
     Percentiles, PerfettoTrace, ProcessInfo, ProcessTimeline, ProcessTimelineEvent,
     SchedExtEventData, SchedExtMetadata, ThreadInfo,
+};
+pub use perfetto_parser_enhanced::{
+    ClockType, CompatibilityDetector, EventTypeIndex, TraceCapabilities, TraceSource,
+};
+pub use perfetto_query::{
+    Aggregator, FieldFilter, FilterOperator, FilterValue, QueryBuilder, QueryEvent, QueryResult,
+};
+pub use perfetto_track_event_types::{
+    get_annotation_int, get_annotation_string, get_annotation_uint, Annotation, AnnotationValue,
+    InterruptEventType, InterruptTrackEvent, OncpuSliceEvent, ParsedTrackEvent,
+    PreemptionInstantEvent, ProcessLifecycleEvent, ProcessLifecycleType, TrackEventMetadata,
+    TrackEventType, WakeupInstantEvent,
 };
 pub use prompts::McpPrompts;
 pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
