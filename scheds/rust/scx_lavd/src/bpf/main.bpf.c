@@ -819,6 +819,13 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 	task_ctx *taskc;
 	int ret;
 
+	/*
+	 * ATQ is used only when enable_cpu_bw is on.
+	 * So, we don't need to cancel an ATQ operation if it is not on.
+	 */
+	if (!enable_cpu_bw)
+		return;
+
 	taskc = get_task_ctx(p);
 	if (!taskc) {
 		debugln("Failed to lookup task_ctx for task %d", p->pid);
