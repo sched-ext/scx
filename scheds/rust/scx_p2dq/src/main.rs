@@ -17,6 +17,7 @@ use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::Skel;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -167,6 +168,16 @@ impl<'a> Scheduler<'a> {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
         open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+
+        // Disable autoattach for the struct_ops map since we attach it manually via
+        // attach_struct_ops() in scx_ops_attach!(). This prevents libbpf from warning
+        // about uninitialized skeleton link during attach().
+        unsafe {
+            libbpf_rs::libbpf_sys::bpf_map__set_autoattach(
+                open_skel.maps.p2dq.as_libbpf_object().as_ptr(),
+                false,
+            );
+        }
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
         scx_p2dq::init_skel!(&mut skel, topo);
