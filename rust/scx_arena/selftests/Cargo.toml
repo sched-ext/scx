@@ -13,4 +13,3 @@ scx_utils = { path = "../../scx_utils", version = "1.0.24" }
 
 [build-dependencies]
 scx_cargo = { path = "../../scx_cargo", version = "1.0.24" }
-scx_utils = { path = "../../scx_utils", version = "1.0.24" }

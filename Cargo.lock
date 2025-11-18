@@ -2774,6 +2774,7 @@ dependencies = [
  "anyhow",
  "libbpf-rs",
  "libbpf-sys",
+ "scx_cargo",
  "scx_utils",
  "simplelog",
 ]
@@ -2851,7 +2852,21 @@ dependencies = [
 name = "scx_cargo"
 version = "1.0.24"
 dependencies = [
- "scx_utils",
+ "anyhow",
+ "bindgen 0.72.0",
+ "glob",
+ "lazy_static",
+ "libbpf-cargo",
+ "libbpf-rs",
+ "regex",
+ "ruzstd 0.8.1",
+ "sscanf",
+ "tar",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "version-compare",
+ "walkdir",
 ]
 
 [[package]]
@@ -3092,7 +3107,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "plain",
- "scx_utils",
+ "scx_cargo",
  "seccomp",
 ]
 
@@ -3200,6 +3215,7 @@ dependencies = [
  "paste",
  "regex",
  "ruzstd 0.8.1",
+ "scx_cargo",
  "scx_stats",
  "serde",
  "sscanf",

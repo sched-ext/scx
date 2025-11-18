@@ -3,10 +3,9 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::clang_info::ClangInfo;
-use anyhow::anyhow;
-use anyhow::Context;
-use anyhow::Result;
+use crate::ClangInfo;
+
+use anyhow::{anyhow, Context, Result};
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
@@ -489,7 +488,7 @@ mod tests {
     use regex::Regex;
     use sscanf::sscanf;
 
-    use crate::builder::ClangInfo;
+    use crate::ClangInfo;
 
     #[test]
     fn test_bpf_builder_new() {
