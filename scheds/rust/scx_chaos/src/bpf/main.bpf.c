@@ -730,7 +730,6 @@ SCX_OPS_DEFINE(chaos,
 	       .tick 		    	= (void *)chaos_tick,
 
 	       .update_idle		= (void *)p2dq_update_idle,
-	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
 	       .running			= (void *)chaos_running,

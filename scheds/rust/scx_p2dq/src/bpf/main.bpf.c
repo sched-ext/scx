@@ -1895,11 +1895,6 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 	}
 }
 
-void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
-{
-	scx_bpf_reenqueue_local();
-}
-
 void BPF_STRUCT_OPS(p2dq_update_idle, s32 cpu, bool idle)
 {
 	const struct cpumask *idle_cpumask;
@@ -2568,7 +2563,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
 
 SCX_OPS_DEFINE(p2dq,
 	       .select_cpu		= (void *)p2dq_select_cpu,
-	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .enqueue			= (void *)p2dq_enqueue,
 	       .dequeue			= (void *)p2dq_dequeue,
 	       .dispatch		= (void *)p2dq_dispatch,
