@@ -247,7 +247,6 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
-	s64 nuance;
 
 	/*
 	 * Only active domains steal the tasks from other domains.
@@ -266,21 +265,20 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
-	nuance = bpf_get_prandom_u32();
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 
 		/*
-		 * Traverse neighbor in the same distance in arbitrary order.
+		 * Traverse neighbors in the same distance in circular distance order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
 			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
 
-			cpdom_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
+			cpdom_id = get_neighbor_id(cpdomc, i, j);
 			if (cpdom_id < 0)
 				continue;
 
@@ -333,26 +331,24 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
-	s64 nuance;
 
 	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
-	nuance = bpf_get_prandom_u32();
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 
 		/*
-		 * Traverse neighbor in the same distance in arbitrary order.
+		 * Traverse neighbors in the same distance in circular distance order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
 			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
 
-			cpdom_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
+			cpdom_id = get_neighbor_id(cpdomc, i, j);
 			if (cpdom_id < 0)
 				continue;
 

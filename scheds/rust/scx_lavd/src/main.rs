@@ -587,9 +587,10 @@ impl<'a> Scheduler<'a> {
                 }
                 skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
                     nr_neighbors;
-                for n in neighbors.borrow().iter() {
-                    skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].neighbor_bits[k] |=
-                        0x1 << n;
+                for (i, &id) in neighbors.borrow().iter().enumerate() {
+                    let idx = (k * LAVD_CPDOM_MAX_NR as usize) + i;
+                    skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].neighbor_ids[idx] =
+                        id as u8;
                 }
             }
         }

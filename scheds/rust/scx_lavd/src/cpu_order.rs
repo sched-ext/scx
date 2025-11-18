@@ -328,6 +328,32 @@ impl CpuOrderCtx {
             }
         }
 
+        // Circular sort compute domains within the same distance to preserve
+        // proximity between domains.
+        //
+        // Suppose that domains 0, 1, 2, 3, 4, 5, 6, 7 are at the same distance.
+        //            0
+        //         7     1
+        //       6         2
+        //         5     3
+        //            4
+        //
+        // We want to traverse the domains from 0. The circular-sorted order
+        // starting from domain 0 is 0, 1, 7, 2, 6, 3, 5, 4. Similarly,
+        // the order starting from domain 1 is 1, 0, 2, 3, 7, 4, 6, 5.
+        // The one from 7 is 7, 0, 6, 1, 5, 2, 4, 3. As follows, circularly
+        // sorted orders in task stealing preserve proximity between domains
+        // (e.g., 0, 1, 7 in the example), so we can achieve less cacheline
+        // bouncing than with random-ordered task stealing.
+        for (_, cpdom) in cpdom_map.iter() {
+            for (_, neighbors) in cpdom.neighbor_map.borrow_mut().iter() {
+                let mut neighbors_csorted =
+                    Self::circular_sort(cpdom.cpdom_id, &neighbors.borrow_mut().to_vec());
+                neighbors.borrow_mut().clear();
+                neighbors.borrow_mut().append(&mut neighbors_csorted);
+            }
+        }
+
         // Fill up cpdom_alt_id for each compute domain.
         for (k, v) in cpdom_map.iter() {
             let mut key = k.clone();
@@ -360,6 +386,35 @@ impl CpuOrderCtx {
         Some(cpdom_map)
     }
 
+    /// Circular sorting of a list from a starting point
+    fn circular_sort(start: usize, the_rest: &Vec<usize>) -> Vec<usize> {
+        // Create a full list including 'start'
+        let mut list = the_rest.clone();
+        list.push(start);
+        list.sort();
+
+        // Get the index of 'start'
+        let s = list
+            .binary_search(&start)
+            .expect("start must appear exactly once");
+
+        // Get the circularly sorted index list.
+        let n = list.len();
+        let dist = |x: usize| {
+            let d = (x + n - s) % n;
+            d.min(n - d)
+        };
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&x| (dist(x), x));
+
+        // Rearrange the full list
+        // according to the circularly sorted index list.
+        let list_csorted: Vec<_> = order.iter().map(|&i| list[i]).collect();
+
+        // Drop 'start' from the rearranged full list.
+        list_csorted[1..].to_vec()
+    }
+
     /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
     /// If the energy model is not available, use LLC ID instead.
     fn get_pd_id(em: &Result<EnergyModel>, cpu_adx: usize, llc_adx: usize) -> usize {
@@ -374,10 +429,10 @@ impl CpuOrderCtx {
         let mut d = 0;
         // core type > numa node > llc
         if from.is_big != to.is_big {
-            d += 3;
+            d += 100;
         }
         if from.numa_adx != to.numa_adx {
-            d += 2;
+            d += 10;
         } else {
             if from.llc_rdx != to.llc_rdx {
                 d += 1;
