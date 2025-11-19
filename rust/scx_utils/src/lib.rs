@@ -52,6 +52,7 @@ pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
 
 pub mod build_id;
 pub mod compat;
+pub use compat::ksym_exists;
 pub use compat::ROOT_PREFIX;
 
 mod libbpf_logger;
