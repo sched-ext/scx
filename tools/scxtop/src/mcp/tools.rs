@@ -723,6 +723,13 @@ impl McpTools {
                             "enum": ["latency", "runtime", "cpu", "all"],
                             "description": "Category of outliers to detect (default: all)",
                             "default": "all"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of outliers to return per sub-category (e.g., wakeup_latency, excessive_runtime, etc.). Default: 20",
+                            "default": 20,
+                            "minimum": 1,
+                            "maximum": 1000
                         }
                     },
                     "required": ["trace_id"]
@@ -3414,18 +3421,22 @@ impl McpTools {
             .and_then(|v| v.as_str())
             .unwrap_or("all");
 
+        // Get limit parameter (default: 20)
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
         let start_time = std::time::Instant::now();
         let analyzer = PerfettoOutlierAnalyzer::with_method(trace, method);
         let analysis = analyzer.analyze();
         let analysis_time = start_time.elapsed();
 
-        // Filter by category if specified
+        // Filter by category if specified and apply limits
         let output = match category {
             "latency" => json!({
                 "trace_id": trace_id,
                 "detection_method": method_str,
                 "category": "latency",
                 "analysis_time_ms": analysis_time.as_millis(),
+                "limit_per_subcategory": limit,
                 "summary": {
                     "total_outliers": analysis.latency_outliers.outlier_count,
                     "wakeup_latency": analysis.latency_outliers.wakeup_latency.len(),
@@ -3433,9 +3444,9 @@ impl McpTools {
                     "blocked_time": analysis.latency_outliers.blocked_time.len(),
                 },
                 "outliers": {
-                    "wakeup_latency": analysis.latency_outliers.wakeup_latency,
-                    "schedule_latency": analysis.latency_outliers.schedule_latency,
-                    "blocked_time": analysis.latency_outliers.blocked_time,
+                    "wakeup_latency": analysis.latency_outliers.wakeup_latency.into_iter().take(limit).collect::<Vec<_>>(),
+                    "schedule_latency": analysis.latency_outliers.schedule_latency.into_iter().take(limit).collect::<Vec<_>>(),
+                    "blocked_time": analysis.latency_outliers.blocked_time.into_iter().take(limit).collect::<Vec<_>>(),
                 },
                 "detection_result": analysis.latency_outliers.detection_result,
             }),
@@ -3444,6 +3455,7 @@ impl McpTools {
                 "detection_method": method_str,
                 "category": "runtime",
                 "analysis_time_ms": analysis_time.as_millis(),
+                "limit_per_subcategory": limit,
                 "summary": {
                     "total_outliers": analysis.runtime_outliers.outlier_count,
                     "excessive_runtime": analysis.runtime_outliers.excessive_runtime.len(),
@@ -3451,9 +3463,9 @@ impl McpTools {
                     "high_context_switches": analysis.runtime_outliers.high_context_switches.len(),
                 },
                 "outliers": {
-                    "excessive_runtime": analysis.runtime_outliers.excessive_runtime,
-                    "minimal_runtime": analysis.runtime_outliers.minimal_runtime,
-                    "high_context_switches": analysis.runtime_outliers.high_context_switches,
+                    "excessive_runtime": analysis.runtime_outliers.excessive_runtime.into_iter().take(limit).collect::<Vec<_>>(),
+                    "minimal_runtime": analysis.runtime_outliers.minimal_runtime.into_iter().take(limit).collect::<Vec<_>>(),
+                    "high_context_switches": analysis.runtime_outliers.high_context_switches.into_iter().take(limit).collect::<Vec<_>>(),
                 },
                 "detection_result": analysis.runtime_outliers.detection_result,
             }),
@@ -3462,6 +3474,7 @@ impl McpTools {
                 "detection_method": method_str,
                 "category": "cpu",
                 "analysis_time_ms": analysis_time.as_millis(),
+                "limit_per_subcategory": limit,
                 "summary": {
                     "total_outliers": analysis.cpu_outliers.outlier_count,
                     "overutilized_cpus": analysis.cpu_outliers.overutilized_cpus.len(),
@@ -3469,22 +3482,47 @@ impl McpTools {
                     "high_contention_cpus": analysis.cpu_outliers.high_contention_cpus.len(),
                 },
                 "outliers": {
-                    "overutilized_cpus": analysis.cpu_outliers.overutilized_cpus,
-                    "underutilized_cpus": analysis.cpu_outliers.underutilized_cpus,
-                    "high_contention_cpus": analysis.cpu_outliers.high_contention_cpus,
+                    "overutilized_cpus": analysis.cpu_outliers.overutilized_cpus.into_iter().take(limit).collect::<Vec<_>>(),
+                    "underutilized_cpus": analysis.cpu_outliers.underutilized_cpus.into_iter().take(limit).collect::<Vec<_>>(),
+                    "high_contention_cpus": analysis.cpu_outliers.high_contention_cpus.into_iter().take(limit).collect::<Vec<_>>(),
                 },
                 "detection_result": analysis.cpu_outliers.detection_result,
             }),
-            _ => json!({
-                "trace_id": trace_id,
-                "detection_method": method_str,
-                "category": "all",
-                "analysis_time_ms": analysis_time.as_millis(),
-                "summary": analysis.summary,
-                "latency_outliers": analysis.latency_outliers,
-                "runtime_outliers": analysis.runtime_outliers,
-                "cpu_outliers": analysis.cpu_outliers,
-            }),
+            _ => {
+                // "all" category - apply limits to all sub-categories
+                json!({
+                    "trace_id": trace_id,
+                    "detection_method": method_str,
+                    "category": "all",
+                    "analysis_time_ms": analysis_time.as_millis(),
+                    "limit_per_subcategory": limit,
+                    "summary": {
+                        "total_outliers": analysis.summary.total_outliers,
+                        "latency_outliers_total": analysis.latency_outliers.outlier_count,
+                        "runtime_outliers_total": analysis.runtime_outliers.outlier_count,
+                        "cpu_outliers_total": analysis.cpu_outliers.outlier_count,
+                        "by_metric": analysis.summary.by_metric,
+                    },
+                    "latency_outliers": {
+                        "wakeup_latency": analysis.latency_outliers.wakeup_latency.into_iter().take(limit).collect::<Vec<_>>(),
+                        "schedule_latency": analysis.latency_outliers.schedule_latency.into_iter().take(limit).collect::<Vec<_>>(),
+                        "blocked_time": analysis.latency_outliers.blocked_time.into_iter().take(limit).collect::<Vec<_>>(),
+                        "detection_result": analysis.latency_outliers.detection_result,
+                    },
+                    "runtime_outliers": {
+                        "excessive_runtime": analysis.runtime_outliers.excessive_runtime.into_iter().take(limit).collect::<Vec<_>>(),
+                        "minimal_runtime": analysis.runtime_outliers.minimal_runtime.into_iter().take(limit).collect::<Vec<_>>(),
+                        "high_context_switches": analysis.runtime_outliers.high_context_switches.into_iter().take(limit).collect::<Vec<_>>(),
+                        "detection_result": analysis.runtime_outliers.detection_result,
+                    },
+                    "cpu_outliers": {
+                        "overutilized_cpus": analysis.cpu_outliers.overutilized_cpus.into_iter().take(limit).collect::<Vec<_>>(),
+                        "underutilized_cpus": analysis.cpu_outliers.underutilized_cpus.into_iter().take(limit).collect::<Vec<_>>(),
+                        "high_contention_cpus": analysis.cpu_outliers.high_contention_cpus.into_iter().take(limit).collect::<Vec<_>>(),
+                        "detection_result": analysis.cpu_outliers.detection_result,
+                    },
+                })
+            }
         };
 
         Ok(json!({

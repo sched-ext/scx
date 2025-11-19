@@ -365,3 +365,100 @@ fn test_set_topology() {
     let result = tools.call(&params);
     assert!(result.is_ok());
 }
+
+// ============================================================================
+// Tests for detect_outliers limit parameter
+// ============================================================================
+
+#[test]
+fn test_detect_outliers_has_limit_parameter() {
+    let tools = McpTools::new();
+    let result = tools.list();
+
+    let tools_array = result["tools"].as_array().unwrap();
+    let detect_outliers_tool = tools_array
+        .iter()
+        .find(|t| t["name"] == "detect_outliers")
+        .expect("detect_outliers tool should exist");
+
+    // Verify limit parameter exists in schema
+    let schema = &detect_outliers_tool["inputSchema"];
+    assert!(schema["properties"]["limit"].is_object());
+
+    let limit_schema = &schema["properties"]["limit"];
+    assert_eq!(limit_schema["type"], "integer");
+    assert_eq!(limit_schema["default"], 20);
+    assert_eq!(limit_schema["minimum"], 1);
+    assert_eq!(limit_schema["maximum"], 1000);
+}
+
+#[test]
+fn test_detect_outliers_without_trace() {
+    let mut tools = McpTools::new();
+
+    // Set up trace cache (but don't add any traces)
+    let trace_cache = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    tools.set_trace_cache(trace_cache);
+
+    let params = json!({
+        "name": "detect_outliers",
+        "arguments": {
+            "trace_id": "nonexistent"
+        }
+    });
+
+    let result = tools.call(&params);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn test_detect_outliers_schema_categories() {
+    let tools = McpTools::new();
+    let result = tools.list();
+
+    let tools_array = result["tools"].as_array().unwrap();
+    let detect_outliers_tool = tools_array
+        .iter()
+        .find(|t| t["name"] == "detect_outliers")
+        .expect("detect_outliers tool should exist");
+
+    let schema = &detect_outliers_tool["inputSchema"];
+    let category_enum = &schema["properties"]["category"]["enum"];
+
+    // Verify all category options are present
+    assert!(category_enum
+        .as_array()
+        .unwrap()
+        .contains(&json!("latency")));
+    assert!(category_enum
+        .as_array()
+        .unwrap()
+        .contains(&json!("runtime")));
+    assert!(category_enum.as_array().unwrap().contains(&json!("cpu")));
+    assert!(category_enum.as_array().unwrap().contains(&json!("all")));
+}
+
+#[test]
+fn test_detect_outliers_schema_methods() {
+    let tools = McpTools::new();
+    let result = tools.list();
+
+    let tools_array = result["tools"].as_array().unwrap();
+    let detect_outliers_tool = tools_array
+        .iter()
+        .find(|t| t["name"] == "detect_outliers")
+        .expect("detect_outliers tool should exist");
+
+    let schema = &detect_outliers_tool["inputSchema"];
+    let method_enum = &schema["properties"]["method"]["enum"];
+
+    // Verify all detection methods are present
+    assert!(method_enum.as_array().unwrap().contains(&json!("IQR")));
+    assert!(method_enum.as_array().unwrap().contains(&json!("MAD")));
+    assert!(method_enum.as_array().unwrap().contains(&json!("StdDev")));
+    assert!(method_enum
+        .as_array()
+        .unwrap()
+        .contains(&json!("Percentile")));
+}
