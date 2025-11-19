@@ -6,11 +6,6 @@ edition = "2021"
 description = "A Latency-criticality Aware Virtual Deadline (LAVD) scheduler based on sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
-[package.metadata.scx.ci.kernel]
-blocklist = [
-  "stable/6_12" # https://github.com/sched-ext/scx/issues/3046
-]
-
 [dependencies]
 scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.1" }
 anyhow = "1.0.65"
