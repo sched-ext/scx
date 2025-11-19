@@ -172,19 +172,7 @@
 
           virtme-ng = pkgs.virtme-ng;
 
-          list-integration-tests = pkgs.python3Packages.buildPythonApplication rec {
-            pname = "list-integration-tests";
-            version = "git";
-
-            pyproject = false;
-            dontUnpack = true;
-
-            propagatedBuildInputs = [
-              rust-toolchain # requires cargo, use the toolchain to match version exactly
-            ];
-
-            installPhase = "install -Dm755 ${../.github/include/list-integration-tests.py} $out/bin/list-integration-tests";
-          };
+          xtask = cranePackages.xtask;
 
           ci = pkgs.python3Packages.buildPythonApplication rec {
             pname = "ci";

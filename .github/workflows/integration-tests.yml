@@ -23,7 +23,7 @@ jobs:
 
       - name: List tests
         id: output
-        run: nix run ./.nix#list-integration-tests -- "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
+        run: nix run ./.nix#xtask -- ci list-integration-tests "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
 
   integration-test:
     runs-on: ubuntu-24.04

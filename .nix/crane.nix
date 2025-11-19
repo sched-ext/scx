@@ -83,4 +83,18 @@ in
         platforms = platforms.linux;
       };
     });
+
+  xtask = craneLib.buildPackage (individualCrateArgs // {
+    pname = "xtask";
+    version = "git";
+    cargoExtraArgs = "-p xtask";
+
+    meta = with lib; {
+      description = "SCX repository task runner";
+      homepage = "https://github.com/sched-ext/scx";
+      license = licenses.gpl2Only;
+      maintainers = [ ];
+      platforms = platforms.linux;
+    };
+  });
 }

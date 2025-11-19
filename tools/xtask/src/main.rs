@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use once_cell::sync::OnceCell;
 
 mod bump_versions;
+mod ci;
 mod versions;
 
 #[derive(Parser)]
@@ -42,6 +43,18 @@ enum Commands {
         #[command(flatten)]
         target: BumpTarget,
     },
+    Ci {
+        #[command(subcommand)]
+        command: CiCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CiCommands {
+    ListIntegrationTests {
+        #[arg(help = "Default kernel to use for testing")]
+        default_kernel: String,
+    },
 }
 
 fn main() {
@@ -66,6 +79,11 @@ fn main() {
         Commands::BumpVersions { target } => {
             bump_versions::bump_versions_command(target.packages, target.all)
         }
+        Commands::Ci { command } => match command {
+            CiCommands::ListIntegrationTests { default_kernel } => {
+                ci::list_integration_tests::list_integration_tests_command(default_kernel)
+            }
+        },
     };
 
     if let Err(e) = res {
