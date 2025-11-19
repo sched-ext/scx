@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lib/atq.h>
+#include <lib/dhq.h>
 #include <lib/minheap.h>
 
 /*
@@ -54,6 +55,8 @@ struct cpu_ctx {
 	u64				max_load_dsq;
 
 	scx_atq_t			*mig_atq;
+	scx_dhq_t			*mig_dhq;
+	u64				dhq_strand;  /* Which DHQ strand (A or B) for this CPU's LLC */
 };
 
 /* llc_ctx state flag bits */
@@ -117,6 +120,8 @@ struct llc_ctx {
 	struct bpf_cpumask __kptr	*tmp_cpumask;
 
 	scx_atq_t			*mig_atq;
+	scx_dhq_t			*mig_dhq;
+	u64				dhq_strand;  /* Which DHQ strand (A or B) for this LLC */
 	scx_minheap_t			*idle_cpu_heap;
 };
 
@@ -167,6 +172,7 @@ enum enqueue_promise_kind {
 	P2DQ_ENQUEUE_PROMISE_FIFO,
 	P2DQ_ENQUEUE_PROMISE_ATQ_VTIME,
 	P2DQ_ENQUEUE_PROMISE_ATQ_FIFO,
+	P2DQ_ENQUEUE_PROMISE_DHQ_VTIME,
 	P2DQ_ENQUEUE_PROMISE_FAILED,
 };
 
@@ -185,6 +191,16 @@ struct enqueue_promise_fifo {
 	u64	slice_ns;
 
 	scx_atq_t	*atq;
+};
+
+struct enqueue_promise_dhq {
+	u64	dsq_id;
+	u64	enq_flags;
+	u64	slice_ns;
+	u64	vtime;
+	u64	strand;
+
+	scx_dhq_t	*dhq;
 };
 
 /* enqueue_promise flag bits */
@@ -207,5 +223,6 @@ struct enqueue_promise {
 	union {
 		struct enqueue_promise_vtime	vtime;
 		struct enqueue_promise_fifo	fifo;
+		struct enqueue_promise_dhq	dhq;
 	};
 };

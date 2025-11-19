@@ -505,7 +505,8 @@ complete_p2dq_enqueue_move(struct enqueue_promise  *pro,
 		break;
 	case P2DQ_ENQUEUE_PROMISE_ATQ_FIFO:
 	case P2DQ_ENQUEUE_PROMISE_ATQ_VTIME:
-		scx_bpf_error("chaos: ATQs not supported");
+	case P2DQ_ENQUEUE_PROMISE_DHQ_VTIME:
+		scx_bpf_error("chaos: ATQs/DHQs not supported");
 		break;
 	case P2DQ_ENQUEUE_PROMISE_FAILED:
 		scx_bpf_error("chaos: delayed async_p2dq_enqueue failed");
