@@ -191,7 +191,7 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 {
 	u64 pick_dsq_id = -ENOENT;
-	s32 highest_queued = 0;
+	s32 highest_queued = -1;
 
 	if (!cpdomc) {
 		scx_bpf_error("Invalid cpdom context");
@@ -214,7 +214,7 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 			u64 cpumask = cpdomc->__cpumask[i];
 			bpf_for(k, 0, 64) {
-				u64 queued;
+				s32 queued;
 				j = cpumask_next_set_bit(&cpumask);
 				if (j < 0)
 					break;
@@ -229,15 +229,8 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 			}
 		}
 
-		if (pick_cpu != -ENOENT) {
-			struct cpu_ctx *pick_cpuc = get_cpu_ctx_id(pick_cpu);
-			if (!pick_cpuc) {
-				scx_bpf_error("Failed to lookup cpu_ctx: %d", pick_cpu);
-				return -ENOENT;
-			}
-
-			pick_dsq_id = cpdom_to_dsq(pick_cpuc->cpdom_id);
-		}
+		if (pick_cpu != -ENOENT)
+			pick_dsq_id = cpu_to_dsq(pick_cpu);
 	}
 
 	return pick_dsq_id;
