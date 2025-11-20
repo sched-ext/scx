@@ -1922,6 +1922,42 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 		}
 	}
 
+	// Check other CPUs' affn_dsq in same LLC for affinitized work stealing
+	// This prevents high wakeup latency when tasks are queued on busy CPUs
+	// but other CPUs in the affinity mask are idle
+	if (!(llcx = lookup_llc_ctx(cpuc->llc_id)))
+		goto check_llc_dsq;
+
+	if (llcx && llcx->cpumask) {
+		s32 other_cpu;
+		bpf_for(other_cpu, 0, topo_config.nr_cpus) {
+			struct bpf_cpumask *llc_cpumask;
+
+			if (other_cpu == cpu)
+				continue;
+
+			llc_cpumask = llcx->cpumask;
+			if (!llc_cpumask)
+				continue;
+
+			if (!bpf_cpumask_test_cpu(other_cpu, cast_mask(llc_cpumask)))
+				continue;
+
+			struct cpu_ctx *other_cpuc = lookup_cpu_ctx(other_cpu);
+			if (!other_cpuc)
+				continue;
+
+			// Peek at the other CPU's affn_dsq
+			p = __COMPAT_scx_bpf_dsq_peek(other_cpuc->affn_dsq);
+			if (p && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+			    (p->scx.dsq_vtime < min_vtime || min_vtime == 0)) {
+				min_vtime = p->scx.dsq_vtime;
+				dsq_id = other_cpuc->affn_dsq;
+			}
+		}
+	}
+
+check_llc_dsq:
 	// LLC DSQ for vtime comparison
 	p = __COMPAT_scx_bpf_dsq_peek(cpuc->llc_dsq);
 	if (p && (p->scx.dsq_vtime < min_vtime || min_vtime == 0) &&
