@@ -642,7 +642,6 @@ impl<'a> Scheduler<'a> {
     fn relay_introspec(data: &[u8], intrspc_tx: &Sender<SchedSample>) -> i32 {
         let mt = msg_task_ctx::from_bytes(data);
         let tx = mt.taskc_x;
-        let tc = mt.taskc;
 
         // No idea how to print other types than LAVD_MSG_TASKC
         if mt.hdr.kind != LAVD_MSG_TASKC {
@@ -655,7 +654,7 @@ impl<'a> Scheduler<'a> {
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
-        let c_waker_cm: *const c_char = (&tc.waker_comm as *const [c_char; 17]) as *const c_char;
+        let c_waker_cm: *const c_char = (&tx.waker_comm as *const [c_char; 17]) as *const c_char;
         let c_waker_cm_str: &CStr = unsafe { CStr::from_ptr(c_waker_cm) };
         let waker_comm: &str = c_waker_cm_str.to_str().unwrap();
 
@@ -665,25 +664,25 @@ impl<'a> Scheduler<'a> {
 
         match intrspc_tx.try_send(SchedSample {
             mseq,
-            pid: tc.pid,
+            pid: tx.pid,
             comm: tx_comm.into(),
             stat: tx_stat.into(),
-            cpu_id: tc.cpu_id,
-            prev_cpu_id: tc.prev_cpu_id,
-            suggested_cpu_id: tc.suggested_cpu_id,
-            waker_pid: tc.waker_pid,
+            cpu_id: tx.cpu_id,
+            prev_cpu_id: tx.prev_cpu_id,
+            suggested_cpu_id: tx.suggested_cpu_id,
+            waker_pid: tx.waker_pid,
             waker_comm: waker_comm.into(),
-            slice: tc.slice,
-            lat_cri: tc.lat_cri,
+            slice: tx.slice,
+            lat_cri: tx.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,
             rerunnable_interval: tx.rerunnable_interval,
-            resched_interval: tc.resched_interval,
-            run_freq: tc.run_freq,
-            avg_runtime: tc.avg_runtime,
-            wait_freq: tc.wait_freq,
-            wake_freq: tc.wake_freq,
-            perf_cri: tc.perf_cri,
+            resched_interval: tx.resched_interval,
+            run_freq: tx.run_freq,
+            avg_runtime: tx.avg_runtime,
+            wait_freq: tx.wait_freq,
+            wake_freq: tx.wake_freq,
+            perf_cri: tx.perf_cri,
             thr_perf_cri: tx.thr_perf_cri,
             cpuperf_cur: tx.cpuperf_cur,
             cpu_util: tx.cpu_util,
@@ -691,7 +690,7 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
-            slice_used: tc.last_slice_used,
+            slice_used: tx.last_slice_used,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
             Err(e) => panic!("failed to send on intrspc_tx ({})", e),

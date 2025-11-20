@@ -190,8 +190,6 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <lib/cgroup.h>
-#include <lib/sdt_task.h>
-#include <lib/atq.h>
 
 char _license[] SEC("license") = "GPL";
 
@@ -2038,10 +2036,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
 	u64 now = scx_bpf_now();
 	int err;
-
-	_Static_assert(
-		sizeof(struct atq_ctx) >= sizeof(struct scx_task_common),
-		"atq_ctx should be equal or larger than scx_task_common");
 
 	/*
 	 * Create compute domains.
