@@ -625,8 +625,7 @@ void cbw_update_budget_tx(struct scx_cgroup_ctx *subroot_cgx,
 }
 
 static
-int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted,
-			 struct scx_cgroup_ctx *cgx)
+int cbw_update_nquota_ub(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
 	struct scx_cgroup_ctx *parentx, *subroot_cgx;
 	struct cgroup *parent, *subroot_cgrp;
@@ -677,8 +676,7 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted,
 }
 
 static
-int cbw_update_nr_taskable_descendents(struct cgroup *cgrp __arg_trusted,
-				       int delta)
+int cbw_update_nr_taskable_descendents(struct cgroup *cgrp, int delta)
 {
 	struct cgroup_subsys_state *subroot_css, *pos;
 	struct scx_cgroup_ctx *subroot_cgx, *cur_cgx;
@@ -914,8 +912,7 @@ bool is_llc_id_valid(int llc_id)
 }
 
 static
-s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp __arg_trusted,
-			       struct scx_cgroup_ctx *cgx)
+s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
 	struct scx_cgroup_llc_ctx *llcx;
 	s64 sum;
@@ -948,7 +945,7 @@ struct tree_levels *get_clean_tree_levels(void)
 }
 
 static
-int cbw_update_runtime_total_sloppy(struct cgroup *cgrp __arg_trusted)
+int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
 	struct cgroup *cur_cgrp;
 	struct scx_cgroup_ctx *cur_cgx = NULL;
@@ -1898,8 +1895,8 @@ int cbw_drain_btq_until_throttled(struct scx_cgroup_ctx *cgx,
 }
 
 static
-int cbw_reenqueue_cgroup(struct cgroup *cgrp __arg_trusted,
-			 struct scx_cgroup_ctx *cgx, u64 cgrp_id, u64 nuance)
+int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
+			 u64 cgrp_id, u64 nuance)
 {
 	struct scx_cgroup_llc_ctx *llcx;
 	int i, idx, nr_enq = 0;
