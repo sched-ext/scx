@@ -624,12 +624,14 @@ void cbw_update_budget_tx(struct scx_cgroup_ctx *subroot_cgx,
 		cgx->budget_c2l = CBW_RUNTUME_INF;
 }
 
-static
-int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted,
-			 struct scx_cgroup_ctx *cgx)
+__noinline
+int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_ctx *cgx)
 {
 	struct scx_cgroup_ctx *parentx, *subroot_cgx;
 	struct cgroup *parent, *subroot_cgrp;
+
+	if (!cgx || !cgrp)
+		return -EINVAL;
 
 	/*
 	 * We assume that all its ancestors' nquota_ub are already updated
@@ -677,8 +679,7 @@ int cbw_update_nquota_ub(struct cgroup *cgrp __arg_trusted,
 }
 
 static
-int cbw_update_nr_taskable_descendents(struct cgroup *cgrp __arg_trusted,
-				       int delta)
+int cbw_update_nr_taskable_descendents(struct cgroup *cgrp, int delta)
 {
 	struct cgroup_subsys_state *subroot_css, *pos;
 	struct scx_cgroup_ctx *subroot_cgx, *cur_cgx;
@@ -864,7 +865,7 @@ int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 __hidden
 int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quota_us, u64 burst_us)
 {
-	struct cgroup *cur_cgrp;
+	struct cgroup *cur_cgrp, *cur_cgrp_trusted;
 	struct scx_cgroup_ctx *cgx, *cur_cgx;
 	struct cgroup_subsys_state *subroot_css, *pos;
 	int ret = 0;
@@ -889,16 +890,22 @@ int scx_cgroup_bw_set(struct cgroup *cgrp __arg_trusted, u64 period_us, u64 quot
 	subroot_css = &cgrp->self;
 	bpf_for_each(css, pos, subroot_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
 		cur_cgrp = pos->cgroup;
-		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
+		cur_cgrp_trusted = bpf_cgroup_from_id(cgroup_get_id(cur_cgrp));
+		if (!cur_cgrp_trusted)
+			continue;
+	
+		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp_trusted);
 		if (!cur_cgx) {
 			/*
 			 * The CPU controller is not enabled for this cgroup.
 			 * Let's move on.
 			 */
+			bpf_cgroup_release(cur_cgrp_trusted);
 			continue;
 		}
 
-		ret = cbw_update_nquota_ub(cur_cgrp, cur_cgx);
+		ret = cbw_update_nquota_ub(cur_cgrp_trusted, cur_cgx);
+		bpf_cgroup_release(cur_cgrp_trusted);
 		if (ret)
 			goto unlock_out;
 	}
@@ -914,8 +921,7 @@ bool is_llc_id_valid(int llc_id)
 }
 
 static
-s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp __arg_trusted,
-			       struct scx_cgroup_ctx *cgx)
+s64 cbw_sum_rumtime_total_llcx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
 	struct scx_cgroup_llc_ctx *llcx;
 	s64 sum;
@@ -948,7 +954,7 @@ struct tree_levels *get_clean_tree_levels(void)
 }
 
 static
-int cbw_update_runtime_total_sloppy(struct cgroup *cgrp __arg_trusted)
+int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
 	struct cgroup *cur_cgrp;
 	struct scx_cgroup_ctx *cur_cgx = NULL;
@@ -1898,8 +1904,8 @@ int cbw_drain_btq_until_throttled(struct scx_cgroup_ctx *cgx,
 }
 
 static
-int cbw_reenqueue_cgroup(struct cgroup *cgrp __arg_trusted,
-			 struct scx_cgroup_ctx *cgx, u64 cgrp_id, u64 nuance)
+int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
+			 u64 cgrp_id, u64 nuance)
 {
 	struct scx_cgroup_llc_ctx *llcx;
 	int i, idx, nr_enq = 0;
