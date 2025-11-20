@@ -28,9 +28,19 @@ char		    _license[] SEC("license")	     = "GPL";
 const volatile u64  long_tail_tracing_min_latency_ns = 0;
 const volatile bool layered			     = false;
 
-u64		    trace_duration_ns		     = 1000000000;
-u64		    trace_warmup_ns		     = 500000000;
-u64		    last_trace_end_time		     = 0;
+// Multi-ringbuffer support
+const volatile u64 rb_cpu_map_mask;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u32);
+} data_rb_cpu_map SEC(".maps");
+
+u64		  trace_duration_ns   = 1000000000;
+u64		  trace_warmup_ns     = 500000000;
+u64		  last_trace_end_time = 0;
 
 // dummy for generating types
 struct bpf_event _event		   = { 0 };
@@ -60,9 +70,16 @@ struct {
 	__type(value, struct timer_wrapper);
 } timers SEC(".maps");
 
+// Hash-of-maps containing multiple ringbuffers for scalability on large systems
 struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 10 * 1024 * 1024 /* 10Mib */);
+	__uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
+	__type(key, u32);
+	__array(
+		values, struct {
+			__uint(type, BPF_MAP_TYPE_RINGBUF);
+			// max_entries doesn't matter for inner map proto, just needs to be set
+			__uint(max_entries, 10 * 1024 * 1024);
+		});
 } events SEC(".maps");
 
 struct {
@@ -82,9 +99,25 @@ static __always_inline void stat_inc(u32 idx)
 static __always_inline struct bpf_event *try_reserve_event()
 {
 	struct bpf_event *event = NULL;
+	void		 *rb;
+	u32		  cpu	     = bpf_get_smp_processor_id();
+	u32		  cpu_masked = cpu & rb_cpu_map_mask;
+	u32		 *rb_slot_ptr;
 
-	if (!(event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event),
-					  0)))
+	rb_slot_ptr = bpf_map_lookup_elem(&data_rb_cpu_map, &cpu_masked);
+	if (!rb_slot_ptr) {
+		stat_inc(STAT_DROPPED_EVENTS);
+		return NULL;
+	}
+
+	rb = bpf_map_lookup_elem(&events, rb_slot_ptr);
+	if (!rb) {
+		stat_inc(STAT_DROPPED_EVENTS);
+		return NULL;
+	}
+
+	event = bpf_ringbuf_reserve(rb, sizeof(struct bpf_event), 0);
+	if (!event)
 		stat_inc(STAT_DROPPED_EVENTS);
 
 	return event;
@@ -243,6 +276,8 @@ int BPF_KPROBE(scx_sched_reg)
 		return -ENOMEM;
 
 	event->type = SCHED_REG;
+	event->ts   = bpf_ktime_get_ns();
+	event->cpu  = bpf_get_smp_processor_id();
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -260,6 +295,8 @@ int BPF_KPROBE(scx_sched_unreg)
 		return -ENOMEM;
 
 	event->type = SCHED_UNREG;
+	event->ts   = bpf_ktime_get_ns();
+	event->cpu  = bpf_get_smp_processor_id();
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -277,6 +314,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 		return -ENOMEM;
 
 	event->type	       = CPU_PERF_SET;
+	event->ts	       = bpf_ktime_get_ns();
 	event->cpu	       = cpu;
 	event->event.perf.perf = perf;
 	bpf_ringbuf_submit(event, 0);
