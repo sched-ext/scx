@@ -50,27 +50,38 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 		return -ENOMEM;
 
 	m->hdr.kind = LAVD_MSG_TASKC;
+	m->taskc_x.pid = taskc->pid;
 	__builtin_memcpy_inline(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
-	m->taskc_x.static_prio = get_nice_prio(p);
-	m->taskc_x.cpu_util = s2p(cpuc->avg_util);
-	m->taskc_x.cpu_sutil = s2p(cpuc->avg_sc_util);
-	m->taskc_x.rerunnable_interval = time_delta(taskc->last_quiescent_clk, taskc->last_runnable_clk);
-	m->taskc_x.avg_lat_cri = sys_stat.avg_lat_cri;
-	m->taskc_x.thr_perf_cri = sys_stat.thr_perf_cri;
-	m->taskc_x.nr_active = sys_stat.nr_active;
-	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
-	/* Refactor this when per-cpu DSQs are added */
-	m->taskc_x.dsq_id = cpdomc->id;
-	m->taskc_x.dsq_consume_lat = cpdomc->dsq_consume_lat;
-
 	m->taskc_x.stat[0] = is_lat_cri(taskc) ? 'L' : 'R';
 	m->taskc_x.stat[1] = is_perf_cri(taskc) ? 'H' : 'I';
 	m->taskc_x.stat[2] = cpuc->big_core ? 'B' : 'T';
 	m->taskc_x.stat[3] = test_task_flag(taskc, LAVD_FLAG_IS_GREEDY)? 'G' : 'E';
 	m->taskc_x.stat[4] = '\0';
-
-	for (i = 0; i < sizeof(m->taskc) && can_loop; i++)
-		((char *) &m->taskc)[i] = ((char __arena *) taskc)[i];
+	m->taskc_x.cpu_id = taskc->cpu_id;
+	m->taskc_x.prev_cpu_id = taskc->prev_cpu_id;
+	m->taskc_x.suggested_cpu_id = taskc->suggested_cpu_id;
+	m->taskc_x.waker_pid = taskc->waker_pid;
+	for (i = 0; i < sizeof(m->taskc_x.waker_comm) && can_loop; i++)
+		((char *)m->taskc_x.waker_comm)[i] = ((char __arena *)taskc->waker_comm)[i];
+	m->taskc_x.slice = taskc->slice;
+	m->taskc_x.lat_cri = taskc->lat_cri;
+	m->taskc_x.avg_lat_cri = sys_stat.avg_lat_cri;
+	m->taskc_x.static_prio = get_nice_prio(p);
+	m->taskc_x.rerunnable_interval = time_delta(taskc->last_quiescent_clk, taskc->last_runnable_clk);
+	m->taskc_x.resched_interval = taskc->resched_interval;
+	m->taskc_x.run_freq = taskc->run_freq;
+	m->taskc_x.avg_runtime = taskc->avg_runtime;
+	m->taskc_x.wait_freq = taskc->wait_freq;
+	m->taskc_x.wake_freq = taskc->wake_freq;
+	m->taskc_x.perf_cri = taskc->perf_cri;
+	m->taskc_x.thr_perf_cri = sys_stat.thr_perf_cri;
+	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
+	m->taskc_x.cpu_util = s2p(cpuc->avg_util);
+	m->taskc_x.cpu_sutil = s2p(cpuc->avg_sc_util);
+	m->taskc_x.nr_active = sys_stat.nr_active;
+	m->taskc_x.dsq_id = cpdomc->id;
+	m->taskc_x.dsq_consume_lat = cpdomc->dsq_consume_lat;
+	m->taskc_x.last_slice_used = taskc->last_slice_used;
 
 	bpf_ringbuf_submit(m, 0);
 
