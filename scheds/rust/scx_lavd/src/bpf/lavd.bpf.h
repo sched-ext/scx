@@ -433,6 +433,18 @@ static __always_inline bool use_per_cpu_dsq(void)
 	return per_cpu_dsq || pinned_slice_ns;
 }
 
+static __always_inline  bool is_per_cpu_dsq_migratable(void)
+{
+	/*
+	 * When per_cpu-dsq is on, all tasks go to the per-CPU DSQ.
+	 * So a task on a per-CPU DSQ can be migrated to another CPU.
+	 * However, when pinned_slice_ns is on but per_cpu-dsq is not,
+	 * only pinned tasks go to the per-CPU DSQ.
+	 * Hence, tasks in a per-CPU DSQ are not migratable.
+	 */
+	return per_cpu_dsq;
+}
+
 static __always_inline bool use_cpdom_dsq(void)
 {
 	return !per_cpu_dsq;
