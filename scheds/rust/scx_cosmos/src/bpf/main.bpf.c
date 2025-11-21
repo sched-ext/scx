@@ -91,6 +91,11 @@ const volatile bool cpufreq_enabled = true;
 const volatile bool numa_enabled;
 
 /*
+ * Enable automatic GPU affinity.
+ */
+const volatile bool gpu_enabled = true;
+
+/*
  * Aggressively try to avoid SMT contention.
  *
  * Default to true here, so veristat takes the more complicated path.
@@ -163,6 +168,7 @@ volatile u64 cpu_util;
  */
 volatile u64 nr_event_dispatches;
 volatile u64 nr_ev_sticky_dispatches;
+volatile u64 nr_gpu_dispatches;
 
 /*
  * Scheduler's exit status.
@@ -188,6 +194,7 @@ static u64 vtime_now;
  * Per-task context.
  */
 struct task_ctx {
+	struct bpf_cpumask __kptr *cpumask;
 	u64 last_run_at;
 	u64 exec_runtime;
 	u64 wakeup_freq;
@@ -244,6 +251,48 @@ static int cpu_node(s32 cpu)
 		return -ENOENT;
 
 	return *id;
+}
+
+/*
+ * GPU -> node mapping.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_GPUS);
+	__type(key, u32);	/* nvml_id */
+	__type(value, u32);	/* node_id */
+} gpu_node_map SEC(".maps");
+
+/*
+ * PID -> NUMA node mapping for GPU tasks (updated from userspace via NVML).
+ * Key is the task's pid (thread id). Entries are removed when the task
+ * is no longer using a GPU.
+ */
+#define MAX_GPU_PIDS	8192
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_GPU_PIDS);
+	__type(key, u32);	/* pid (task/thread id) */
+	__type(value, u32);	/* node_id */
+} gpu_pid_map SEC(".maps");
+
+/*
+ * Look up preferred NUMA node for a PID from userspace-provided GPU process
+ * list (NVML). Returns node id or negative error.
+ */
+static int gpu_node_by_pid(u32 pid)
+{
+	u32 *node;
+
+	if (!gpu_enabled || !numa_enabled)
+		return -ENOENT;
+
+	node = bpf_map_lookup_elem(&gpu_pid_map, &pid);
+	if (!node)
+		return -ENOENT;
+
+	return *node;
 }
 
 /*
@@ -430,6 +479,55 @@ struct {
 static inline u64 shared_dsq(s32 cpu)
 {
 	return numa_enabled ? cpu_node(cpu) : SHARED_DSQ;
+}
+
+/*
+ * Return true if task @p can run on NUMA node @node, false otherwise.
+ */
+static bool can_use_node(const struct task_struct *p, int node)
+{
+	struct node_ctx *nctx;
+
+	if (!numa_enabled)
+		return true;
+
+	if (p->nr_cpus_allowed == nr_cpu_ids)
+		return true;
+
+	nctx = try_lookup_node_ctx(node);
+	if (!nctx || !nctx->cpumask ||
+	    !bpf_cpumask_intersects(cast_mask(nctx->cpumask), p->cpus_ptr))
+		return false;
+
+	return true;
+}
+
+/*
+ * If the task is in gpu_pid_map and should run on a different node, pick a CPU
+ * on the preferred GPU node. Returns the CPU id (>= 0) on success, or a
+ * negative value if the task is not GPU-bound, is already on the right node,
+ * or no suitable CPU was found.
+ */
+static s32 pick_cpu_on_gpu_node(const struct task_struct *p, int node,
+				struct task_ctx *tctx)
+{
+	struct node_ctx *nctx;
+	struct bpf_cpumask *mask;
+	int target_node;
+
+	target_node = gpu_node_by_pid(p->pid);
+	if (target_node < 0 || target_node == node || !can_use_node(p, target_node))
+		return -ENOENT;
+
+	nctx = try_lookup_node_ctx(target_node);
+	if (!nctx || !nctx->cpumask)
+		return -ENOENT;
+
+	mask = tctx->cpumask;
+	if (!mask || !bpf_cpumask_and(mask, cast_mask(nctx->cpumask), p->cpus_ptr))
+		return -ENOENT;
+
+	return scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
 }
 
 /*
@@ -965,10 +1063,15 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu,
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+	struct task_ctx *tctx;
 	bool is_busy = is_system_busy();
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
 	int new_cpu;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
 
 	/*
 	 * Make sure @prev_cpu is usable, otherwise try to move close to
@@ -994,17 +1097,24 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	}
 
 	/*
+	 * If GPU affinity is enabled and the task's pid is in gpu_pid_map
+	 * but not on the GPU's node, try to pick a CPU on the GPU node.
+	 */
+	if (gpu_enabled && numa_enabled) {
+		cpu = pick_cpu_on_gpu_node(p, cpu_node(prev_cpu), tctx);
+		if (cpu >= 0) {
+			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+			return cpu;
+		}
+	}
+
+	/*
 	 * Pick an event free CPU: if task exceeds sticky threshold, keep
 	 * on same CPU, if it exceeds migration threshold, move to least
 	 * event-busy CPU.
 	 */
 	if (perf_config || perf_sticky) {
-		struct task_ctx *tctx;
-
-		tctx = try_lookup_task_ctx(p);
-		if (!tctx)
-			return prev_cpu;
-
 		if (is_sticky_event_heavy(tctx)) {
 			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
@@ -1048,6 +1158,7 @@ static inline void wakeup_cpu(s32 cpu)
 	 */
 	if (deferred_wakeups)
 		return;
+
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
@@ -1085,6 +1196,7 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
+	int node = cpu_node(prev_cpu);
 	struct task_ctx *tctx;
 	int new_cpu;
 
@@ -1095,6 +1207,24 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	/*
+	 * If the task's pid is in gpu_pid_map (NVML GPU task), prefer the
+	 * GPU NUMA node. If we're on a different node, migrate to the GPU
+	 * node.
+	 */
+	if (gpu_enabled && numa_enabled && !is_migration_disabled(p) &&
+	    task_should_migrate(p, enq_flags)) {
+		cpu = pick_cpu_on_gpu_node(p, node, tctx);
+		if (cpu >= 0) {
+			__sync_fetch_and_add(&nr_gpu_dispatches, 1);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+					   task_slice(p), enq_flags);
+			if (cpu != prev_cpu || !scx_bpf_task_running(p))
+				wakeup_cpu(cpu);
+			return;
+		}
+	}
 
 	/*
 	 * Immediately dispatch sticky event-heavy tasks to the same CPU.
@@ -1146,7 +1276,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Keep using the same CPU if the system is not busy.
 	 */
 	if (!is_system_busy()) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
 			wakeup_cpu(prev_cpu);
 		return;
@@ -1292,6 +1422,10 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 		return -ENOMEM;
 
 	if ((ret = scx_pmu_task_init(p)))
+		return ret;
+
+	ret = init_cpumask(&tctx->cpumask);
+	if (ret)
 		return ret;
 
 	return 0;

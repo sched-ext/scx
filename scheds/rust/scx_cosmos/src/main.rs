@@ -11,11 +11,13 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, c_ulong};
+use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -31,6 +33,8 @@ use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
+use nvml_wrapper::bitmasks::InitFlags;
+use nvml_wrapper::Nvml;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -42,6 +46,7 @@ use scx_utils::try_set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
+use scx_utils::GpuIndex;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -186,6 +191,17 @@ struct Opts {
     /// Sticky perf threshold; task is kept on same CPU when its count for -y event exceeds this.
     #[clap(short = 'Y', default_value = "0", long)]
     perf_sticky_threshold: u64,
+
+    /// Enable GPU-aware scheduling.
+    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    gpu: bool,
+
+    /// Only treat a process as GPU-bound if its GPU utilization is at least this percentage (0–100).
+    ///
+    /// Uses NVML process utilization (SM + memory). 0 = no filter (all processes on the GPU are
+    /// considered GPU-bound). Requires driver support (Maxwell or newer).
+    #[clap(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..=100))]
+    gpu_util_threshold: u32,
 
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
@@ -407,6 +423,10 @@ const DYNAMIC_THRESHOLD_SLOPE_HIGH: f64 = 0.35;
 /// Slope for "too low" case: scale grows with deficit so we step harder when rate is near zero.
 const DYNAMIC_THRESHOLD_SLOPE_LOW: f64 = 0.58;
 
+/// Minimum interval between NVML GPU PID syncs. Kept separate from CPU polling so that fast
+/// polling (e.g. 100 ms) does not trigger expensive NVML calls every tick.
+const GPU_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+
 fn dynamic_threshold_scale(rate_per_sec: f64, too_high: bool) -> f64 {
     if too_high {
         let excess = ((rate_per_sec / DYNAMIC_THRESHOLD_RATE_HIGH) - 1.0).max(0.0);
@@ -464,6 +484,12 @@ struct Scheduler<'a> {
     opts: &'a Opts,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
+    /// GPU device index -> NUMA node (for NVML PID sync). Only set when --gpu and NUMA enabled.
+    gpu_index_to_node: Option<HashMap<u32, u32>>,
+    /// Previous (pid, node) set so we can remove PIDs that stopped using the GPU.
+    previous_gpu_pids: Option<HashMap<u32, u32>>,
+    /// Reused NVML handle to avoid re-initializing on every sync (expensive).
+    nvml: Option<Nvml>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -564,6 +590,31 @@ impl<'a> Scheduler<'a> {
             rodata.primary_all = true;
         }
 
+        // Enable GPU support and build GPU index -> node for NVML PID sync. Init NVML once here
+        // so we reuse the handle in the run loop (re-initing every sync is very expensive).
+        let (gpu_index_to_node, previous_gpu_pids, nvml) = if opts.gpu && numa_enabled {
+            match Nvml::init_with_flags(InitFlags::NO_GPUS) {
+                Ok(nvml) => {
+                    info!("NVIDIA GPU-aware scheduling enabled (NVML PID sync)");
+                    rodata.gpu_enabled = true;
+                    let mut idx_to_node = HashMap::new();
+                    for (id, gpu) in topo.gpus() {
+                        let GpuIndex::Nvidia { nvml_id } = id;
+                        idx_to_node.insert(nvml_id, gpu.node_id as u32);
+                    }
+                    (Some(idx_to_node), Some(HashMap::new()), Some(nvml))
+                }
+                Err(e) => {
+                    warn!("NVML init failed, disabling GPU-aware scheduling: {}", e);
+                    rodata.gpu_enabled = false;
+                    (None, None, None)
+                }
+            }
+        } else {
+            rodata.gpu_enabled = false;
+            (None, None, None)
+        };
+
         // Set scheduler flags.
         skel.struct_ops.cosmos_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
@@ -655,6 +706,21 @@ impl<'a> Scheduler<'a> {
             info!("Performance counters configured successfully for all CPUs");
         }
 
+        // Configure GPU->node mapping.
+        if opts.gpu && numa_enabled {
+            for (id, gpu) in topo.gpus() {
+                let GpuIndex::Nvidia { nvml_id } = id;
+                if opts.verbose {
+                    info!("GPU{} -> node{}", nvml_id, gpu.node_id);
+                }
+                skel.maps.gpu_node_map.update(
+                    &(nvml_id as u32).to_ne_bytes(),
+                    &(gpu.node_id as u32).to_ne_bytes(),
+                    MapFlags::ANY,
+                )?;
+            }
+        }
+
         // Enable primary scheduling domain, if defined.
         if primary_cpus.len() < *NR_CPU_IDS {
             for cpu in primary_cpus {
@@ -678,7 +744,110 @@ impl<'a> Scheduler<'a> {
             opts,
             struct_ops,
             stats_server,
+            gpu_index_to_node,
+            previous_gpu_pids,
+            nvml,
         })
+    }
+
+    /// Sync PID -> GPU (node) map from NVML. When gpu_util_threshold > 0, only PIDs with
+    /// GPU utilization (SM or memory) >= threshold are added. Map is keyed by task pid.
+    /// Only processes using a single GPU are added; multi-GPU processes are excluded.
+    fn sync_gpu_pids(&mut self) -> Result<()> {
+        let gpu_index_to_node = match &self.gpu_index_to_node {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        let nvml = match &self.nvml {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+        let threshold = self.opts.gpu_util_threshold;
+        let previous = self.previous_gpu_pids.as_ref().unwrap();
+        // First collect pid -> set of nodes (GPUs) per process.
+        let mut pid_to_nodes: HashMap<u32, HashSet<u32>> = HashMap::new();
+
+        let count = nvml.device_count().context("NVML device count")?;
+        for i in 0..count {
+            let node = match gpu_index_to_node.get(&i) {
+                Some(&n) => n,
+                None => continue,
+            };
+            let device = nvml.device_by_index(i).context("NVML device_by_index")?;
+
+            if threshold > 0 {
+                // Use process utilization; only add PIDs above threshold.
+                match device.process_utilization_stats(None::<u64>) {
+                    Ok(samples) => {
+                        for sample in samples {
+                            let util = sample.sm_util.max(sample.mem_util);
+                            if util >= threshold {
+                                pid_to_nodes.entry(sample.pid).or_default().insert(node);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // NotSupported or other: fall back to all running processes.
+                        Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes);
+                    }
+                }
+            } else {
+                Self::add_running_gpu_processes_to_set(&device, node, &mut pid_to_nodes);
+            }
+        }
+
+        // Only add PIDs that use exactly one GPU to the map.
+        let mut current: HashMap<u32, u32> = HashMap::new();
+        for (tgid, nodes) in pid_to_nodes {
+            if nodes.len() == 1 {
+                let node = nodes.into_iter().next().unwrap();
+                current.insert(tgid, node);
+                for tid in Self::task_tids(tgid) {
+                    current.insert(tid, node);
+                }
+            }
+        }
+
+        let map = &self.skel.maps.gpu_pid_map;
+        for (pid, node) in &current {
+            map.update(&pid.to_ne_bytes(), &node.to_ne_bytes(), MapFlags::ANY)
+                .context("gpu_pid_map update")?;
+        }
+        for pid in previous.keys() {
+            if !current.contains_key(pid) {
+                let _ = map.delete(&pid.to_ne_bytes());
+            }
+        }
+        *self.previous_gpu_pids.as_mut().unwrap() = current;
+        Ok(())
+    }
+
+    /// Record running compute/graphics process PIDs and the GPU node in pid_to_nodes.
+    fn add_running_gpu_processes_to_set(
+        device: &nvml_wrapper::Device<'_>,
+        node: u32,
+        pid_to_nodes: &mut HashMap<u32, HashSet<u32>>,
+    ) {
+        for proc in device
+            .running_compute_processes()
+            .unwrap_or_default()
+            .into_iter()
+            .chain(device.running_graphics_processes().unwrap_or_default())
+        {
+            pid_to_nodes.entry(proc.pid).or_default().insert(node);
+        }
+    }
+
+    /// Return all thread IDs (tids) of the process with the given pid (tgid).
+    fn task_tids(pid: u32) -> Vec<u32> {
+        let task_dir = format!("/proc/{}/task", pid);
+        let Ok(entries) = fs::read_dir(Path::new(&task_dir)) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()))
+            .collect()
     }
 
     fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
@@ -748,6 +917,7 @@ impl<'a> Scheduler<'a> {
             cpu_util: self.skel.maps.bss_data.as_ref().unwrap().cpu_util,
             nr_event_dispatches: bss_data.nr_event_dispatches,
             nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
+            nr_gpu_dispatches: bss_data.nr_gpu_dispatches,
         }
     }
 
@@ -809,13 +979,14 @@ impl<'a> Scheduler<'a> {
         let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
         let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let mut last_update = Instant::now();
+        let mut last_gpu_sync = Instant::now();
 
         // Dynamic perf thresholds: scale based on migration and sticky dispatch rates.
         let mut prev_nr_event_dispatches: u64 = 0;
         let mut prev_nr_ev_sticky_dispatches: u64 = 0;
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            // Update CPU utilization.
+            // Update CPU utilization and GPU PID -> node map (NVML).
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
                 if let Some(curr_cputime) = Self::read_cpu_times() {
                     Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
@@ -879,6 +1050,15 @@ impl<'a> Scheduler<'a> {
 
                     prev_nr_event_dispatches = nr_event;
                     prev_nr_ev_sticky_dispatches = nr_sticky;
+                }
+
+                // GPU PID sync is throttled to GPU_SYNC_INTERVAL (NVML is expensive).
+                if self.gpu_index_to_node.is_some() && last_gpu_sync.elapsed() >= GPU_SYNC_INTERVAL
+                {
+                    if let Err(e) = self.sync_gpu_pids() {
+                        debug!("GPU PID sync: {}", e);
+                    }
+                    last_gpu_sync = Instant::now();
                 }
 
                 last_update = Instant::now();
