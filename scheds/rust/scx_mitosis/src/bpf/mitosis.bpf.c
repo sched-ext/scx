@@ -21,6 +21,9 @@
 #include <scx/common.bpf.h>
 #endif
 
+#define FAKE_FLAT_CELL_LLC 0
+#include "dsq.bpf.h"
+
 char _license[] SEC("license") = "GPL";
 
 /*
@@ -80,20 +83,6 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
  * We store per-cpu values along with per-cell values. Helper functions to
  * translate.
  */
-static inline u32 cpu_dsq(u32 cpu)
-{
-	return PCPU_BASE | cpu;
-}
-
-static inline u32 cell_dsq(u32 cell)
-{
-	return cell;
-}
-
-static inline u32 dsq_to_cpu(u32 dsq)
-{
-	return dsq & ~PCPU_BASE;
-}
 
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 						  u32		 ancestor)
@@ -177,7 +166,7 @@ struct task_ctx {
 	u32 cell;
 	/* For the sake of scheduling, a task is exclusively owned by either a cell
 	 * or a cpu */
-	u32 dsq;
+	dsq_id_t dsq;
 	/* latest configuration that was applied for this task */
 	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
@@ -430,7 +419,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 	 * needs to be supported.
 	 */
 	if (tctx->all_cell_cpus_allowed) {
-		tctx->dsq = cell_dsq(tctx->cell);
+		tctx->dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
 		if (!(cell = lookup_cell(tctx->cell)))
 			return -ENOENT;
 		p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
@@ -438,7 +427,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
-		tctx->dsq	 = cpu_dsq(cpu);
+		tctx->dsq	 = get_cpu_dsq_id(cpu);
 		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
 	}
 
@@ -616,7 +605,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-		cpu = dsq_to_cpu(tctx->dsq);
+		cpu = get_cpu_from_dsq(tctx->dsq);
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		return cpu;
@@ -665,7 +654,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 
 	if (!tctx->all_cell_cpus_allowed) {
-		cpu = dsq_to_cpu(tctx->dsq);
+		cpu = get_cpu_from_dsq(tctx->dsq);
 	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
@@ -723,7 +712,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
 
-	scx_bpf_dsq_insert_vtime(p, tctx->dsq, slice_ns, vtime, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
@@ -741,19 +730,20 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	cell			  = READ_ONCE(cctx->cell);
 
 	bool		    found = false;
-	u64		    min_vtime_dsq;
+	dsq_id_t	    min_vtime_dsq;
 	u64		    min_vtime;
 
 	struct task_struct *p;
-	bpf_for_each(scx_dsq, p, cell, 0) {
+	bpf_for_each(scx_dsq, p,
+		     get_cell_llc_dsq_id(cell, FAKE_FLAT_CELL_LLC).raw, 0) {
 		min_vtime     = p->scx.dsq_vtime;
-		min_vtime_dsq = cell;
+		min_vtime_dsq = get_cell_llc_dsq_id(cell, FAKE_FLAT_CELL_LLC);
 		found	      = true;
 		break;
 	}
 
-	u64 dsq = cpu_dsq(cpu);
-	bpf_for_each(scx_dsq, p, dsq, 0) {
+	dsq_id_t dsq = get_cpu_dsq_id(cpu);
+	bpf_for_each(scx_dsq, p, dsq.raw, 0) {
 		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
 			min_vtime     = p->scx.dsq_vtime;
 			min_vtime_dsq = dsq;
@@ -775,8 +765,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * we might never wakeup.
 	 */
 
-	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq) && min_vtime_dsq != dsq)
-		scx_bpf_dsq_move_to_local(dsq);
+	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq.raw) &&
+	    min_vtime_dsq.raw != dsq.raw)
+		scx_bpf_dsq_move_to_local(dsq.raw);
 }
 
 /*
@@ -1601,7 +1592,7 @@ static void dump_cell_cpumask(int id)
 
 void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 {
-	u64		dsq_id;
+	dsq_id_t	dsq_id;
 	int		i;
 	struct cell    *cell;
 	struct cpu_ctx *cpu_ctx;
@@ -1619,9 +1610,11 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CELL[%d] CPUS=", i);
 		dump_cell_cpumask(i);
 		scx_bpf_dump("\n");
-		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->vtime_now),
-			     scx_bpf_dsq_nr_queued(i));
+		scx_bpf_dump(
+			"CELL[%d] vtime=%llu nr_queued=%d\n", i,
+			READ_ONCE(cell->vtime_now),
+			scx_bpf_dsq_nr_queued(
+				get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC).raw));
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
@@ -1629,10 +1622,10 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		if (!(cpu_ctx = lookup_cpu_ctx(i)))
 			return;
 
-		dsq_id = cpu_dsq(i);
+		dsq_id = get_cpu_dsq_id(i);
 		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
 			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
-			     scx_bpf_dsq_nr_queued(dsq_id));
+			     scx_bpf_dsq_nr_queued(dsq_id.raw));
 	}
 
 	if (!debug_events_enabled)
@@ -1694,9 +1687,9 @@ void BPF_STRUCT_OPS(mitosis_dump_task, struct scx_dump_ctx *dctx,
 		return;
 
 	scx_bpf_dump(
-		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u dsq=%x all_cell_cpus_allowed=%d\n",
+		"Task[%d] vtime=%llu basis_vtime=%llu cell=%u dsq=%llu all_cell_cpus_allowed=%d\n",
 		p->pid, p->scx.dsq_vtime, tctx->basis_vtime, tctx->cell,
-		tctx->dsq, tctx->all_cell_cpus_allowed);
+		tctx->dsq.raw, tctx->all_cell_cpus_allowed);
 	scx_bpf_dump("Task[%d] CPUS=", p->pid);
 	dump_cpumask(p->cpus_ptr);
 	scx_bpf_dump("\n");
@@ -1738,7 +1731,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
-				ret = scx_bpf_create_dsq(cpu_dsq(i), -1);
+				ret = scx_bpf_create_dsq(get_cpu_dsq_id(i).raw,
+							 -1);
 				if (ret < 0) {
 					bpf_cpumask_release(cpumask);
 					return ret;
@@ -1801,7 +1795,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
 
-		ret = scx_bpf_create_dsq(i, -1);
+		ret = scx_bpf_create_dsq(
+			get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC).raw, -1);
 		if (ret < 0)
 			return ret;
 
