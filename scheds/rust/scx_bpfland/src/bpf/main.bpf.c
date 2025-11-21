@@ -336,7 +336,9 @@ static inline const struct cpumask *get_idle_smtmask(s32 cpu)
  */
 static inline bool is_cpu_valid(s32 cpu)
 {
-	if (cpu < 0 || cpu >= MAX_CPUS) {
+	u64 max_cpu = MIN(nr_cpu_ids, MAX_CPUS);
+
+	if (cpu < 0 || cpu >= max_cpu) {
 		scx_bpf_error("invalid CPU id: %d", cpu);
 		return false;
 	}
