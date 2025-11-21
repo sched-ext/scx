@@ -204,6 +204,25 @@ struct {
 } task_ctx_stor SEC(".maps");
 
 /*
+ * NUMA node context.
+ */
+struct node_ctx {
+        struct bpf_cpumask __kptr *cpumask;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct node_ctx);
+	__uint(max_entries, MAX_NODES);
+} node_ctx_stor SEC(".maps");
+
+struct node_ctx *try_lookup_node_ctx(int node)
+{
+	return bpf_map_lookup_elem(&node_ctx_stor, &node);
+}
+
+/*
  * CPU -> NUMA node mapping.
  */
 struct {
@@ -1284,6 +1303,39 @@ void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
 	scx_pmu_task_fini(p);
 }
 
+/*
+ * Initialize a NUMA node context.
+ */
+static int init_node(int node)
+{
+	struct bpf_cpumask *cpumask;
+	struct node_ctx *nctx;
+	u32 cpu;
+	int ret;
+
+	nctx = try_lookup_node_ctx(node);
+	if (!nctx)
+		return -ENOENT;
+
+	ret = init_cpumask(&nctx->cpumask);
+	if (ret)
+		return ret;
+
+	bpf_rcu_read_lock();
+	cpumask = nctx->cpumask;
+	if (!cpumask) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	bpf_for(cpu, 0, nr_cpu_ids)
+		if (cpu_node(cpu) == node)
+			bpf_cpumask_set_cpu(cpu, cpumask);
+out_unlock:
+	bpf_rcu_read_unlock();
+
+	return ret;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
 	struct bpf_timer *timer;
@@ -1305,6 +1357,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 			err = scx_bpf_create_dsq(node, node);
 			if (err) {
 				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
+				return err;
+			}
+			err = init_node(node);
+			if (err) {
+				scx_bpf_error("failed to initialize NUMA node %d: %d", node, err);
 				return err;
 			}
 		}
