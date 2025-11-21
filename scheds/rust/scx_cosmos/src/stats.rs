@@ -19,13 +19,15 @@ pub struct Metrics {
     pub cpu_util: u64,
     #[stat(desc = "Busy utilization threshold %")]
     pub cpu_thresh: u64,
+    #[stat(desc = "Direct dispatch due to high perf events")]
+    pub nr_event_dispatches: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] CPUs {:>5.1}% {}",
+            "[{}] CPUs {:>5.1}% {} ev_dispatches={}",
             crate::SCHEDULER_NAME,
             (self.cpu_util as f64) * 100.0 / 1024.0,
             if self.cpu_util >= self.cpu_thresh {
@@ -33,12 +35,16 @@ impl Metrics {
             } else {
                 "[round-robin]"
             },
+            self.nr_event_dispatches,
         )?;
         Ok(())
     }
 
-    fn delta(&self, _: &Self) -> Self {
-        Self { ..self.clone() }
+    fn delta(&self, rhs: &Self) -> Self {
+        Self {
+            nr_event_dispatches: self.nr_event_dispatches - rhs.nr_event_dispatches,
+            ..self.clone()
+        }
     }
 }
 
