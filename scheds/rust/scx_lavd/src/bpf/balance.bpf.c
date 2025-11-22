@@ -208,7 +208,12 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 		highest_queued = scx_bpf_dsq_nr_queued(pick_dsq_id);
 	}
 
-	if (use_per_cpu_dsq()) {
+	/*
+	 * When tasks on a per-CPU DSQ are not migratable
+	 * (e.g., pinned_slice_ns is on but per_cpu_dsq is not),
+	 * there is no need to check per-CPU DSQs.
+	 */
+	if (is_per_cpu_dsq_migratable()) {
 		int pick_cpu = -ENOENT, cpu, i, j, k;
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
