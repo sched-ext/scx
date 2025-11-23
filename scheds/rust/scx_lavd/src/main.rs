@@ -140,8 +140,10 @@ struct Opts {
     /// are running on a CPU. Must be between slice-min-us and slice-max-us.
     /// When this option is enabled, pinned tasks are always enqueued to per-CPU DSQs
     /// and the dispatch logic compares vtimes across all DSQs to select the lowest
-    /// vtime task. This helps improve responsiveness for pinned tasks.
-    #[clap(long = "pinned-slice-us")]
+    /// vtime task. This helps improve responsiveness for pinned tasks. By default,
+    /// this option is on with a default value of 5000 (5 msec). To turn off the option,
+    /// explicitly set the value to 0.
+    #[clap(long = "pinned-slice-us", default_value = "5000")]
     pinned_slice_us: Option<u64>,
 
     /// Limit the ratio of preemption to the roughly top P% of latency-critical
@@ -340,17 +342,20 @@ impl Opts {
         }
 
         if let Some(pinned_slice) = self.pinned_slice_us {
-            if pinned_slice < self.slice_min_us || pinned_slice > self.slice_max_us {
+            if pinned_slice == 0 {
+                info!("Pinned task slice mode is disabled. Pinned tasks will use per-domain DSQs.");
+            } else if pinned_slice < self.slice_min_us || pinned_slice > self.slice_max_us {
                 info!(
                     "pinned-slice-us ({}) must be between slice-min-us ({}) and slice-max-us ({})",
                     pinned_slice, self.slice_min_us, self.slice_max_us
                 );
                 return None;
-            }
-            info!(
+            } else {
+                info!(
                 "Pinned task slice mode is enabled ({} us). Pinned tasks will use per-CPU DSQs.",
                 pinned_slice
             );
+            }
         }
 
         Some(self)
