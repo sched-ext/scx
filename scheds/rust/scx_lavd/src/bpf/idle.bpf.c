@@ -61,10 +61,8 @@ struct sticky_ctx {
 	 */
 	unsigned int i_m;
 	unsigned int i_nm;
-	s32 cpus_match[2];
-	s32 cpus_not_match[2];
-	s64 cpdoms_match[2];
-	s64 cpdoms_not_match[2];
+	struct cpu_ctx *cpuc_match[2];
+	struct cpu_ctx *cpuc_not_match[2];
 };
 
 static __always_inline
@@ -366,35 +364,14 @@ bool test_cpu_stickable(struct pick_ctx *ctx, struct sticky_ctx *sctx,
 {
 	if (can_run_on_cpu(ctx, cpu)) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
-		/*
-		 * Note that we use temporary stack pointers to avoid the
-		 * verifier error on clang-18 on ARM64 ("R2 bitwise operator
-		 * |= on pointer prohibited ").
-		 */
-		volatile s64 *cpdoms;
-		volatile s32 *cpus;
 
 		if (!cpuc || sctx->i_m >= 2 || sctx->i_nm >= 2)
 			return false;
 
-		if (is_task_big == cpuc->big_core) {
-			cpdoms = &sctx->cpdoms_match[sctx->i_m];
-			*cpdoms = cpuc->cpdom_id;
-		
-			cpus = &sctx->cpus_match[sctx->i_m];
-			*cpus = cpu;
-
-			sctx->i_m++;
-		}
-		else {
-			cpdoms = &sctx->cpdoms_not_match[sctx->i_nm];
-			*cpdoms = cpuc->cpdom_alt_id;
-
-			cpus = &sctx->cpus_not_match[sctx->i_nm];
-			*cpus = cpu;
-
-			sctx->i_nm++;
-		}
+		if (is_task_big == cpuc->big_core)
+			sctx->cpuc_match[sctx->i_m++] = cpuc;
+		else
+			sctx->cpuc_not_match[sctx->i_nm++] = cpuc;
 		return true;
 	}
 	return false;
@@ -428,12 +405,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	/*
 	 * Check if a task can stick on either previous CPU or a waker CPU.
 	 */
-	sctx.cpus_match[0] = -ENOENT;
-	sctx.cpus_match[1] = -ENOENT;
-	sctx.cpus_not_match[0] = -ENOENT;
-	sctx.cpus_not_match[1] = -ENOENT;
-	sctx.i_m = 0;
-	sctx.i_nm = 0;
+	__builtin_memset(&sctx, 0, sizeof(sctx));
 	test_cpu_stickable(ctx, &sctx, ctx->prev_cpu, ctx->is_task_big);
 	if (is_sync_wakeup(ctx)) {
 		s32 waker_cpu = bpf_get_smp_processor_id();
@@ -449,11 +421,12 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 * Note that when the loads are equal, prefer @p's prev_cpu.
 	 */
 	if (sctx.i_m == 1) {
-		*sticky_cpdom = sctx.cpdoms_match[0];
-		return sctx.cpus_match[0];
+		*sticky_cpdom = sctx.cpuc_match[0]->cpdom_id;
+		return sctx.cpuc_match[0]->cpu_id;
 	} else if (sctx.i_m == 2) {
-		q0 = sctx.cpdoms_match[0]; /* prev_cpu */
-		q1 = sctx.cpdoms_match[1]; /* sync_waker_cpu */
+		/* TODO: need to check both of per-CPU DSQ and per-domain DSQ. */
+		q0 = sctx.cpuc_match[0]->cpdom_id; /* prev_cpu */
+		q1 = sctx.cpuc_match[1]->cpdom_id; /* sync_waker_cpu */
 		if (q0 != q1 &&
 		    (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1))) {
 			/*
@@ -468,7 +441,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 			return -ENOENT;
 		} else {
 			*sticky_cpdom = q0;
-			return sctx.cpus_match[0]; /* prev_cpu */
+			return sctx.cpuc_match[0]->cpu_id; /* prev_cpu */
 		}
 	}
 
@@ -478,14 +451,14 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 * Note that when the loads are equal, prefer @p's prev_cpu domain.
 	 */
 	if (sctx.i_nm == 1) {
-		q0 = sctx.cpdoms_not_match[0];
+		q0 = sctx.cpuc_not_match[0]->cpdom_id;
 		if (can_run_on_domain(ctx, q0)) {
 			*sticky_cpdom = q0;
 			return -ENOENT;
 		}
 	} else if (sctx.i_nm == 2) {
-		q0 = sctx.cpdoms_not_match[0];
-		q1 = sctx.cpdoms_not_match[1];
+		q0 = sctx.cpuc_not_match[0]->cpdom_id;
+		q1 = sctx.cpuc_not_match[1]->cpdom_id;
 
 		if (q0 != q1 && can_run_on_domain(ctx, q0) &&
 		    can_run_on_domain(ctx, q1)) {
