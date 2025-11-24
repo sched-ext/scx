@@ -6,6 +6,7 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 mod stats;
+mod mitosis_topology_utils;
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -113,6 +114,15 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     split_vtime_updates: bool,
 
+    /// Enable L3-awareness. This will populate the Scheduler's L3 maps and cause it
+    /// to use L3-aware scheduling.
+    #[clap(long, default_value = "false", action = clap::ArgAction::SetFalse)]
+    enable_l3_awareness: bool,
+
+    /// Enable work stealing. This is only relevant when L3-awareness is enabled.
+    #[clap(long, default_value = "false", action = clap::ArgAction::SetFalse)]
+    enable_work_stealing: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -186,8 +196,21 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
+  fn validate_args(opts: &Opts) -> Result<()> {
+      if opts.enable_work_stealing && !opts.enable_l3_awareness {
+          bail!("Work stealing requires L3-aware mode (--l3-awareness)");
+      }
+
+      Ok(())
+  }
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        Self::validate_args(opts)?;
+
         let topology = Topology::new()?;
+
+        let nr_l3 = topology.all_llcs.len().max(1);
+        info!("Detected {} L3 cache domains", nr_l3);
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -218,12 +241,22 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
+        // Set nr_l3 in rodata
+        skel.maps.rodata_data.as_mut().unwrap().nr_l3 = nr_l3 as u32;
+        skel.maps.rodata_data.as_mut().unwrap().enable_l3_awareness = opts.enable_l3_awareness;
+        skel.maps.rodata_data.as_mut().unwrap().enable_work_stealing = opts.enable_work_stealing;
+
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
         }
 
-        let skel = scx_ops_load!(skel, mitosis, uei)?;
+        let mut skel = scx_ops_load!(skel, mitosis, uei)?;
+        // Populate CPU to L3 map
+        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::CpuToL3, None)?;
+
+        // Populate L3 to CPUs map
+        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::L3ToCpus, None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

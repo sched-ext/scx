@@ -12,8 +12,6 @@
  * cgroups belonging to the cell.
  */
 
-#include "intf.h"
-
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
@@ -21,6 +19,7 @@
 #include <scx/common.bpf.h>
 #endif
 
+#include "intf.h"
 #define DUMMY_L3 0
 #include "dsq.bpf.h"
 
@@ -38,7 +37,29 @@ const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     split_vtime_updates	     = false;
+const volatile bool	     enable_l3_awareness			     = false;
+const volatile bool	     enable_work_stealing	     = false;
+const volatile u32	     nr_l3			     = 1;
 
+/*
+ * Maps populated by userspace for use by LLC aware scheduling.
+*/
+struct cpu_to_l3_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_CPUS);
+};
+
+struct l3_to_cpus_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpumask);
+	__uint(max_entries, MAX_L3S);
+};
+
+struct cpu_to_l3_map cpu_to_l3	 SEC(".maps");
+struct l3_to_cpus_map l3_to_cpus SEC(".maps");
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
  * configuration_seq is bumped on each assignment change
@@ -1113,6 +1134,18 @@ out:
 	return 0;
 }
 
+void advance_cell_and_cpu_vtime(struct cell *cell, struct cpu_ctx *cctx,
+				u64 task_vtime)
+{
+	// If the cell DSQ's vtime is behind the task's, advance it.
+	if (time_before(READ_ONCE(cell->vtime_now), task_vtime))
+		WRITE_ONCE(cell->vtime_now, task_vtime);
+
+	// If the CPU DSQ's vtime is behind the task's, advance it.
+	if (time_before(READ_ONCE(cctx->vtime_now), task_vtime))
+		WRITE_ONCE(cctx->vtime_now, task_vtime);
+}
+
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx	*cctx;
@@ -1125,17 +1158,14 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	/*
 	 * Legacy approach: Update vtime_now before task runs.
 	 * Only used when split vtime updates is enabled.
+	 * Expect "vtime too far ahead" errors if this is enabled.
 	 */
 	if (split_vtime_updates) {
 		if (!(cctx = lookup_cpu_ctx(-1)) ||
 		    !(cell = lookup_cell(cctx->cell)))
 			return;
 
-		if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
-			WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
-
-		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
-			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+		advance_cell_and_cpu_vtime(cell, cctx, p->scx.dsq_vtime);
 	}
 
 	tctx->started_running_at = scx_bpf_now();
@@ -1176,11 +1206,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 * to keep them in sync and prevent "vtime too far ahead" errors.
 	 */
 	if (!split_vtime_updates) {
-		if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
-			WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
-
-		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
-			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+		advance_cell_and_cpu_vtime(cell, cctx, p->scx.dsq_vtime);
 	}
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
@@ -1309,6 +1335,46 @@ void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p,
 	}
 
 	update_task_cpumask(p, tctx);
+}
+
+s32 validate_flags()
+{
+	/* Certain flags are included for rollback purposes
+	 * Even though we expect them to produce issues in the wild.
+	 * We will warn when they are use.
+	*/
+	if (split_vtime_updates) {
+		bpf_printk(
+			"WARNING: split_vtime_updates enabled - expect 'vtime too far ahead' errors");
+	}
+
+	if (!exiting_task_workaround_enabled) {
+		bpf_printk(
+			"WARNING: exiting_task_workaround disabled - may see cgrp_ctx lookup failures during scheduler load");
+	}
+
+	/* Work stealing only makes sense when enable_l3_awareness. */
+	if (enable_work_stealing && (!enable_l3_awareness)) {
+		scx_bpf_error(
+			"Work stealing requires L3-aware mode to be enabled");
+		return -EINVAL;
+	}
+
+	/* Need valid l3 */
+	if (enable_l3_awareness && (nr_l3 < 1 || nr_l3 > MAX_L3S)) {
+		scx_bpf_error(
+			"L3-aware mode requires nr_l3 between 1 and %d inclusive, got %d",
+			MAX_L3S, nr_l3);
+		return -EINVAL;
+	}
+
+	/* Slice must be initialized. */
+	if (slice_ns == 0) {
+		scx_bpf_error("slice_ns must be non-zero");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
@@ -1493,6 +1559,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	s32		    ret;
 
 	u32		    key = 0;
+
+	/* Sanity check the flags we get from userspace. */
+	if ((ret = validate_flags()))
+		return ret;
 
 	struct cgroup	   *rootcg;
 	if (!(rootcg = bpf_cgroup_from_id(root_cgid)))
