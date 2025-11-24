@@ -398,14 +398,15 @@ bool is_sync_wakeup(struct pick_ctx *ctx)
 static 
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
+	struct cpu_ctx *p0, *p1, *cpuc;
+	struct cpdom_ctx *d0, *d1;
 	struct sticky_ctx sctx;
-	struct cpu_ctx *cpuc;
-	u64 q0, q1;
+
+	__builtin_memset(&sctx, 0, sizeof(sctx));
 
 	/*
 	 * Check if a task can stick on either previous CPU or a waker CPU.
 	 */
-	__builtin_memset(&sctx, 0, sizeof(sctx));
 	test_cpu_stickable(ctx, &sctx, ctx->prev_cpu, ctx->is_task_big);
 	if (is_sync_wakeup(ctx)) {
 		s32 waker_cpu = bpf_get_smp_processor_id();
@@ -424,11 +425,12 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 		*sticky_cpdom = sctx.cpuc_match[0]->cpdom_id;
 		return sctx.cpuc_match[0]->cpu_id;
 	} else if (sctx.i_m == 2) {
-		/* TODO: need to check both of per-CPU DSQ and per-domain DSQ. */
-		q0 = sctx.cpuc_match[0]->cpdom_id; /* prev_cpu */
-		q1 = sctx.cpuc_match[1]->cpdom_id; /* sync_waker_cpu */
-		if (q0 != q1 &&
-		    (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1))) {
+		p0 = sctx.cpuc_match[0]; /* prev_cpu */
+		p1 = sctx.cpuc_match[1]; /* sync_waker_cpu */
+		d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
+		d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
+
+		if ((p0 != p1) && (d0 && d1) && (d0->sc_load > d1->sc_load)) {
 			/*
 			 * When a waker's compute domain is chosen, let's just
 			 * stick to the waker's domain. Let's not decide to
@@ -437,11 +439,11 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 			 * always moving to the waker's CPU could introduce a
 			 * thundering herd problem. So return -ENOENT.
 			 */
-			*sticky_cpdom = q1;
+			*sticky_cpdom = p1->cpdom_id;
 			return -ENOENT;
 		} else {
-			*sticky_cpdom = q0;
-			return sctx.cpuc_match[0]->cpu_id; /* prev_cpu */
+			*sticky_cpdom = p0->cpdom_id;
+			return p0->cpu_id; /* prev_cpu */
 		}
 	}
 
@@ -451,30 +453,34 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 * Note that when the loads are equal, prefer @p's prev_cpu domain.
 	 */
 	if (sctx.i_nm == 1) {
-		q0 = sctx.cpuc_not_match[0]->cpdom_id;
-		if (can_run_on_domain(ctx, q0)) {
-			*sticky_cpdom = q0;
+		p0 = sctx.cpuc_not_match[0];
+		if (can_run_on_domain(ctx, p0->cpdom_id)) {
+			*sticky_cpdom = p0->cpdom_id;
 			return -ENOENT;
 		}
 	} else if (sctx.i_nm == 2) {
-		q0 = sctx.cpuc_not_match[0]->cpdom_id;
-		q1 = sctx.cpuc_not_match[1]->cpdom_id;
+		p0 = sctx.cpuc_not_match[0];
+		p1 = sctx.cpuc_not_match[1];
 
-		if (q0 != q1 && can_run_on_domain(ctx, q0) &&
-		    can_run_on_domain(ctx, q1)) {
-			if (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1)) {
-				*sticky_cpdom = q1;
-				return -ENOENT;
+		if ((p0 != p1) && can_run_on_domain(ctx, p0->cpdom_id) &&
+		    can_run_on_domain(ctx, p1->cpdom_id)) {
+			d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
+			d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
+			if (d0 && d1) {
+				if (d0->sc_load > d1->sc_load) {
+					*sticky_cpdom = p1->cpdom_id;
+					return -ENOENT;
+				}
+				else {
+					*sticky_cpdom = p0->cpdom_id;
+					return -ENOENT;
+				}
 			}
-			else {
-				*sticky_cpdom = q0;
-				return -ENOENT;
-			}
-		} else if (can_run_on_domain(ctx, q0)) {
-			*sticky_cpdom = q0;
+		} else if (can_run_on_domain(ctx, p0->cpdom_id)) {
+			*sticky_cpdom = p0->cpdom_id;
 			return -ENOENT;
-		} else if (can_run_on_domain(ctx, q1)) {
-			*sticky_cpdom = q1;
+		} else if (can_run_on_domain(ctx, p1->cpdom_id)) {
+			*sticky_cpdom = p1->cpdom_id;
 			return -ENOENT;
 		}
 
