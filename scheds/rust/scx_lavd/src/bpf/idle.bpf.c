@@ -532,11 +532,8 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	if (!can_run_on_cpu(ctx, ctx->sync_waker_cpu))
 		return false;
 
-	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | ctx->sync_waker_cpu))
-		return false;
-
 	cpuc_waker = get_cpu_ctx_id(ctx->sync_waker_cpu);
-	if (!cpuc_waker || scx_bpf_dsq_nr_queued(cpuc_waker->cpdom_id))
+	if (!cpuc_waker || nr_queued_on_cpu(cpuc_waker))
 		return false;
 
 	if (nr_cpdoms > 1) {
