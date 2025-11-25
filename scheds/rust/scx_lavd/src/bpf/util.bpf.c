@@ -312,10 +312,12 @@ u32 cpu_to_dsq(u32 cpu)
 
 s32 nr_queued_on_cpu(struct cpu_ctx *cpuc)
 {
-	s32 nr_queued = 0;
+	s32 nr_queued;
+
+	nr_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
 
 	if (use_per_cpu_dsq())
-		nr_queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id));
+		nr_queued += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id));
 
 	if (use_cpdom_dsq())
 		nr_queued += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
