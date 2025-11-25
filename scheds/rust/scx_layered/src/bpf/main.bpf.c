@@ -2689,6 +2689,21 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 
 		return layer_dsq_insert_ewma[layer->id] < info->dsq_insert_below;
 	}
+	case MATCH_NUMA_NODE: {
+		struct node_ctx *nodec;
+		const struct cpumask *node_cpumask;
+
+		/* Get the NUMA node context */
+		if (!(nodec = lookup_node_ctx(match->numa_node_id)))
+			return false;
+
+		/* Get the node's CPU mask */
+		if (!(node_cpumask = cast_mask(nodec->cpumask)))
+			return false;
+
+		/* Check if task's affinity is a subset of the NUMA node's CPUs */
+		return bpf_cpumask_subset(p->cpus_ptr, node_cpumask);
+	}
 
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
@@ -3906,6 +3921,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_DSQ_INSERT_BELOW:
 				dbg("%s DSQ_INSERT_BELOW %llu", header, match->dsq_insert_below);
+				break;
+			case MATCH_NUMA_NODE:
+				dbg("%s MATCH_NUMA_NODE %llu", header, match->numa_node_id);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
