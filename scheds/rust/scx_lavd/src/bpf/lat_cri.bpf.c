@@ -30,6 +30,12 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
 
 	/*
+	 * Further prioritize ksoftirqd.
+	 */
+	if (test_task_flag(taskc, LAVD_FLAG_KSOFTIRQD))
+		weight_boost += 4 * LAVD_LC_WEIGHT_BOOST;
+
+	/*
 	 * Further prioritize kworkers.
 	 */
 	if (is_kernel_worker(p))
