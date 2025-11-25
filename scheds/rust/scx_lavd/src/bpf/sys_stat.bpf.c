@@ -105,18 +105,19 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (use_cpdom_dsq())
 			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
 
-		if (use_per_cpu_dsq()) {
-			bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-				u64 cpumask = cpdomc->__cpumask[i];
-				bpf_for(k, 0, 64) {
-					j = cpumask_next_set_bit(&cpumask);
-					if (j < 0)
-						break;
-					cpu = (i * 64) + j;
-					if (cpu >= nr_cpu_ids)
-						break;
+		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+			u64 cpumask = cpdomc->__cpumask[i];
+			bpf_for(k, 0, 64) {
+				j = cpumask_next_set_bit(&cpumask);
+				if (j < 0)
+					break;
+				cpu = (i * 64) + j;
+				if (cpu >= nr_cpu_ids)
+					break;
+
+				cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+				if (use_per_cpu_dsq())
 					cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-				}
 			}
 		}
 

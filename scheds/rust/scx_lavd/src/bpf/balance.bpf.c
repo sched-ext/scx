@@ -226,7 +226,8 @@ u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
 				cpu = (i * 64) + j;
 				if (cpu >= nr_cpu_ids)
 					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
+					 scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
 				if (queued > highest_queued) {
 					highest_queued = queued;
 					pick_cpu = cpu;
