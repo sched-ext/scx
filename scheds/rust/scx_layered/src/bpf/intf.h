@@ -274,6 +274,7 @@ enum layer_match_kind {
 	MATCH_HINT_EQUALS,
 	MATCH_SYSTEM_CPU_UTIL_BELOW,
 	MATCH_DSQ_INSERT_BELOW,
+	MATCH_NUMA_NODE,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -303,6 +304,7 @@ struct layer_match {
 	u64		hint;
 	u64		system_cpu_util_below;	/* ratio * 10000 */
 	u64		dsq_insert_below;	/* ratio * 10000 */
+	u32		numa_node_id;
 };
 
 struct layer_match_ands {
