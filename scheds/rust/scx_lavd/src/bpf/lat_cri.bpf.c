@@ -75,20 +75,19 @@ static u64 calc_wake_factor(task_ctx *taskc)
 	return freq + 1;
 }
 
-static inline u64 calc_runtime_factor(task_ctx *taskc)
+static inline u64 calc_reverse_runtime_factor(task_ctx *taskc)
 {
-	u64 ft = 1, delta;
-
 	if (LAVD_LC_RUNTIME_MAX > taskc->avg_runtime) {
-		delta = LAVD_LC_RUNTIME_MAX - taskc->avg_runtime;
+		u64 delta = LAVD_LC_RUNTIME_MAX - taskc->avg_runtime;
 		return delta / LAVD_SLICE_MIN_NS_DFL;
 	}
-	return ft;
+	return 1;
 }
 
 static u64 calc_sum_runtime_factor(struct task_struct *p, task_ctx *taskc)
 {
-	u64 sum = max(taskc->run_freq, 1) * max(taskc->avg_runtime, 1);
+	u64 runtime = max(taskc->avg_runtime, taskc->acc_runtime);
+	u64 sum = max(taskc->run_freq, 1) * max(runtime, 1);
 	return (sum >> LAVD_SHIFT) * p->scx.weight;
 }
 
@@ -109,7 +108,7 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 	 */
 	wait_ft = calc_wait_factor(taskc);
 	wake_ft = calc_wake_factor(taskc);
-	runtime_ft = calc_runtime_factor(taskc);
+	runtime_ft = calc_reverse_runtime_factor(taskc);
 
 	/*
 	 * Adjust task's weight based on the scheduling context, such as

@@ -131,7 +131,7 @@ bool is_perf_cri(task_ctx __arg_arena *taskc)
 		return true;
 
 	if (test_task_flag(taskc, LAVD_FLAG_ON_BIG | LAVD_FLAG_ON_LITTLE))
-		return taskc->perf_cri >= sys_stat.thr_perf_cri;
+		return taskc->perf_cri > sys_stat.thr_perf_cri;
 
 	return test_task_flag(taskc, LAVD_FLAG_ON_BIG);
 }
@@ -513,8 +513,14 @@ int update_thr_perf_cri(void)
 
 	/*
 	 * If all active cores are big, all tasks should run on the big cores.
+	 * On the other hand, if all active cores are small, all tasks should
+	 * run on the little cores.
 	 */
-	if (cur_big_core_scale == LAVD_SCALE) {
+	switch (cur_big_core_scale) {
+	case 0:
+		sys_stat.thr_perf_cri = sys_stat.max_perf_cri;
+		return 0;
+	case LAVD_SCALE:
 		sys_stat.thr_perf_cri = 0;
 		return 0;
 	}
@@ -547,16 +553,23 @@ int update_thr_perf_cri(void)
 		 *   |         |                       max_perf_cri
 		 *   |         |                       |
 		 *   <--------><----------------------->
-		 *
-		 *   <-///-><-------------------------->
-		 *   |     |                           |
-		 *   |     |                           1024
+		 *   |         \                       |
+		 *   |          \                      |
+		 *   |           \                     |
+		 *   |            \                    |
+		 *   |             \                   |
+		 *   |              \                  |
+		 *   <-///-><--------+----------------->
+		 *   |     |         |                 |
+		 *   |     |         512               1024
 		 *   |     little_core_scale
 		 *   0
+		 *
+		 * thr = min + (((avg - min) / 512) * little_core_scale)
 		 */
-		delta = (sys_stat.avg_perf_cri - sys_stat.min_perf_cri) >> 1;
-		diff = (delta * little_core_scale) >> LAVD_SHIFT;
-		thr = diff + sys_stat.min_perf_cri;
+		delta = (sys_stat.avg_perf_cri - sys_stat.min_perf_cri);
+		diff = (delta * little_core_scale) / (LAVD_SCALE >> 1);
+		thr = sys_stat.min_perf_cri + diff;
 	}
 	else {
 		/*
@@ -565,19 +578,26 @@ int update_thr_perf_cri(void)
 		 *   |         |                       max_perf_cri
 		 *   |         |                       |
 		 *   <--------><----------------------->
-		 *
-		 *   <---------------------><-////////->
-		 *   |                     |           |
-		 *   |                     |           1024
+		 *   |         \                       |
+		 *   |          \                      |
+		 *   |           \                     |
+		 *   |            \                    |
+		 *   |             \                   |
+		 *   |              \                  |
+		 *   <---------------+-----><-////////->
+		 *   |               |     |           |
+		 *   |               512   |           1024
 		 *   |                     little_core_scale
 		 *   0
 		 *
 		 *  Note that half of the little core capacity is taken by the
 		 *  [min_perf_cri, avg_perf_cri] range, so only another half
 		 *  can serve for the [avg_perf_cri, max_perf_cri range.
+		 *
+		 * thr = avg + (((max - avg) / 512) * (little_core_scale - 512))
 		 */
-		delta = (sys_stat.max_perf_cri - sys_stat.avg_perf_cri) >> 1;
-		diff = (delta * (little_core_scale >> 1)) >> LAVD_SHIFT;
+		delta = (sys_stat.max_perf_cri - sys_stat.avg_perf_cri);
+		diff = (delta * (little_core_scale - p2s(50))) / (LAVD_SCALE >> 1);
 		thr = diff + sys_stat.avg_perf_cri;
 	}
 
