@@ -1887,6 +1887,18 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_DSQ_INSERT_BELOW as i32;
                             mt.dsq_insert_below = (*threshold * 10000.0) as u64;
                         }
+                        LayerMatch::NumaNode(node_id) => {
+                            if *node_id as usize >= topo.nodes.len() {
+                                bail!(
+                                    "Spec {:?} has invalid NUMA node ID {} (available nodes: 0-{})",
+                                    spec.name,
+                                    node_id,
+                                    topo.nodes.len() - 1
+                                );
+                            }
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_NUMA_NODE as i32;
+                            mt.numa_node_id = *node_id;
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;
