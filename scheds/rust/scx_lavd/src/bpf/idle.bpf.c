@@ -657,7 +657,11 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	if (!init_idle_i_mask(ctx, idle_cpumask))
 		goto err_out;
 	if (ctx->i_empty) {
-		cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
+		cpu = sticky_cpu;
+		if (cpu == -ENOENT) {
+			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
+						       sticky_cpdom);
+		}
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU. */
@@ -723,7 +727,11 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	if (!init_idle_ato_masks(ctx, ctx->i_mask))
 		goto err_out;
 	if (ctx->ia_empty && ctx->io_empty) {
-		cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
+		cpu = sticky_cpu;
+		if (cpu == -ENOENT) {
+			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
+						       sticky_cpdom);
+		}
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU in either active or overflow set. */
