@@ -100,6 +100,7 @@ pub enum LayerMatch {
     HintEquals(u64),
     SystemCpuUtilBelow(f64),
     DsqInsertBelow(f64),
+    NumaNode(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
