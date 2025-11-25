@@ -22,11 +22,8 @@ enum consts {
 	TIMER_INTERVAL_NS     = 100000000, /* 100 ms */
 	CLOCK_BOOTTIME	      = 7,
 
-	PCPU_BASE	      = 0x80000000,
 	MAX_CG_DEPTH	      = 256,
 	MAX_L3S		      = 16,
-
-	MITOSIS_ENABLE_STEALING = 1,
 
 	DEBUG_EVENTS_BUF_SIZE = 4096,
 };
@@ -63,6 +60,14 @@ enum cell_stat_idx {
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
 	NR_CSTATS,
+};
+
+/* Function invocation counters */
+enum fn_counter_idx {
+	COUNTER_SELECT_CPU,
+	COUNTER_ENQUEUE,
+	COUNTER_DISPATCH,
+	NR_COUNTERS,
 };
 
 struct cpu_ctx {

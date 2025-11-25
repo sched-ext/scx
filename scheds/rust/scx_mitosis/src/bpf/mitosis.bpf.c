@@ -19,9 +19,10 @@
 #include <scx/common.bpf.h>
 #endif
 
-#include "intf.h"
 #define DUMMY_L3 0
+#include "mitosis.bpf.h"
 #include "dsq.bpf.h"
+#include "l3_aware.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -43,23 +44,11 @@ const volatile u32	     nr_l3			     = 1;
 
 /*
  * Maps populated by userspace for use by LLC aware scheduling.
+ * Declared in l3_aware.bpf.h
 */
-struct cpu_to_l3_map {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, MAX_CPUS);
-};
-
-struct l3_to_cpus_map {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpumask);
-	__uint(max_entries, MAX_L3S);
-};
-
 struct cpu_to_l3_map cpu_to_l3	 SEC(".maps");
 struct l3_to_cpus_map l3_to_cpus SEC(".maps");
+
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
  * configuration_seq is bumped on each assignment change
@@ -95,6 +84,8 @@ private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
+
+struct cell_map cells SEC(".maps");
 
 /*
  * We store per-cpu values along with per-cell values. Helper functions to
@@ -153,28 +144,6 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 	return cgrp;
 }
 
-/*
- * task_ctx is the per-task information kept by scx_mitosis
- */
-struct task_ctx {
-	/* cpumask is the set of valid cpus this task can schedule on */
-	/* (tasks cpumask anded with its cell cpumask) */
-	struct bpf_cpumask __kptr *cpumask;
-	/* started_running_at for recording runtime */
-	u64 started_running_at;
-	u64 basis_vtime;
-	/* For the sake of monitoring, each task is owned by a cell */
-	u32 cell;
-	/* For the sake of scheduling, a task is exclusively owned by either a cell
-	 * or a cpu */
-	dsq_id_t dsq;
-	/* latest configuration that was applied for this task */
-	/* (to know if it has to be re-applied) */
-	u32 configuration_seq;
-	/* Is this task allowed on all cores of its cell? */
-	bool all_cell_cpus_allowed;
-};
-
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -217,20 +186,6 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cctx;
-}
-
-struct cell		   cells[MAX_CELLS];
-
-static inline struct cell *lookup_cell(int idx)
-{
-	struct cell *cell;
-
-	cell = MEMBER_VPTR(cells, [idx]);
-	if (!cell) {
-		scx_bpf_error("Invalid cell %d", idx);
-		return NULL;
-	}
-	return cell;
 }
 
 /*
@@ -387,7 +342,7 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 	cstat_add(idx, cell, cctx, 1);
 }
 
-static inline int update_task_cpumask(struct task_struct *p,
+inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx	 *tctx)
 {
 	const struct cpumask *cell_cpumask;
@@ -1134,7 +1089,7 @@ out:
 	return 0;
 }
 
-void advance_cell_and_cpu_vtime(struct cell *cell, struct cpu_ctx *cctx,
+void advance_cell_and_cpu_vtime(struct cell *cell, struct cpu_ctx *cctx, struct task_ctx *tctx,
 				u64 task_vtime)
 {
 	// If the cell DSQ's vtime is behind the task's, advance it.
@@ -1155,6 +1110,11 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
+	/* Handle stolen task retag (L3-aware mode only) */
+	if (enable_l3_awareness && enable_work_stealing) {
+		apply_pending_l3_retag(p, tctx);
+	}
+
 	/*
 	 * Legacy approach: Update vtime_now before task runs.
 	 * Only used when split vtime updates is enabled.
@@ -1165,7 +1125,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 		    !(cell = lookup_cell(cctx->cell)))
 			return;
 
-		advance_cell_and_cpu_vtime(cell, cctx, p->scx.dsq_vtime);
+		advance_cell_and_cpu_vtime(cell, cctx, tctx, p->scx.dsq_vtime);
 	}
 
 	tctx->started_running_at = scx_bpf_now();
@@ -1206,7 +1166,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 * to keep them in sync and prevent "vtime too far ahead" errors.
 	 */
 	if (!split_vtime_updates) {
-		advance_cell_and_cpu_vtime(cell, cctx, p->scx.dsq_vtime);
+		advance_cell_and_cpu_vtime(cell, cctx, tctx, p->scx.dsq_vtime);
 	}
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
@@ -1648,7 +1608,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		}
 	}
 
-	cells[0].in_use		= true;
+	{
+		struct cell *cell = lookup_cell(0);
+		if (!cell) {
+			scx_bpf_error("Failed to lookup cell 0");
+			return -ENOENT;
+		}
+		cell->in_use = true;
+	}
+
 	struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
 	if (!timer) {
 		scx_bpf_error("Failed to lookup update timer");

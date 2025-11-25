@@ -130,7 +130,6 @@ struct task_ctx {
 	// Which L3 this task is assigned to
 	s32 l3;
 
-#if MITOSIS_ENABLE_STEALING
 	/* When a task is stolen, dispatch() marks the destination L3 here.
 	 * running() applies the retag and recomputes cpumask (vtime preserved).
 	*/
@@ -138,7 +137,6 @@ struct task_ctx {
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 	u32 steals_prevented; /* how many times this task has been prevented from being stolen */
-#endif
 };
 
 // These could go in mitosis.bpf.h, but we'll cross that bridge when we get
@@ -205,3 +203,5 @@ static inline void cpumask_guard_release(struct cpumask_guard *guard)
 	struct cpumask_guard var_name                                 \
 		__attribute__((__cleanup__(cpumask_guard_release))) = \
 			cpumask_create_guard()
+
+extern inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);

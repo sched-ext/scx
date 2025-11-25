@@ -61,12 +61,10 @@ static inline void init_task_l3(struct task_ctx *tctx)
 {
 	tctx->l3 = L3_INVALID;
 
-#if MITOSIS_ENABLE_STEALING
 	tctx->pending_l3 = L3_INVALID;
 	tctx->steal_count = 0;
 	tctx->last_stolen_at = 0;
 	tctx->steals_prevented = 0;
-#endif
 }
 
 static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
@@ -211,7 +209,37 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 	return ret;
 }
 
-#if MITOSIS_ENABLE_STEALING
+  /**
+   * Apply pending L3 retag if task was stolen across L3 domains.
+   * Called from running() when a task starts executing.
+   * Preserves vtime to maintain fairness after cross-L3 migration.
+   *
+   * Caller must ensure enable_l3_awareness is true.
+   */
+ static inline void apply_pending_l3_retag(struct task_struct *p,
+                                            struct task_ctx *tctx) {
+	/* This is the normal do nothing path */
+	if (tctx->pending_l3 == L3_INVALID)
+		return;
+
+	if (!l3_is_valid(tctx->pending_l3)) {
+		scx_bpf_error("apply_pending_l3_retag: bad pending_l3");
+		return;
+	}
+
+	u64 save_v = p->scx.dsq_vtime;
+
+	/* Assign task to new L3 */
+	tctx->l3 = tctx->pending_l3;
+	tctx->pending_l3 = L3_INVALID;
+
+	/* New L3, need new cpumask */
+	update_task_cpumask(p, tctx);
+
+	/* Restore old vtime */
+	/* XXX This seems like it could be trouble. */
+	p->scx.dsq_vtime = save_v;
+}
 
 static inline bool try_stealing_this_task(struct task_ctx *task_ctx,
 					  s32 local_l3, u64 candidate_dsq)
@@ -307,4 +335,3 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 	}
 	return false;
 }
-#endif
