@@ -1631,6 +1631,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	bpf_rcu_read_unlock();
 
+	if (is_ksoftirqd(p))
+		set_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
+	else
+		reset_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
+
 	now = scx_bpf_now();
 	taskc->last_runnable_clk = now;
 	taskc->last_running_clk = now; /* for avg_runtime */
@@ -1643,6 +1648,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->cgrp_id = args->cgroup->kn->id;
 
 	set_on_core_type(taskc, p->cpus_ptr);
+
 	return 0;
 }
 

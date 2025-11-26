@@ -75,7 +75,7 @@ enum consts_internal {
 	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 16), /* assuming task's latency
 									    criticality is around 1000. */
 
-	LAVD_LC_FREQ_MAX                = 400000,
+	LAVD_LC_FREQ_MAX                = 100000, /* shortest interval: 10usec */
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
 	LAVD_LC_GREEDY_SHIFT		= 3, /* 12.5% */
@@ -118,6 +118,7 @@ enum consts_flags {
 	LAVD_FLAG_ON_LITTLE		= (0x1 << 7), /* can a task run on a little core? */
 	LAVD_FLAG_SLICE_BOOST		= (0x1 << 8), /* task's time slice is boosted. */
 	LAVD_FLAG_IDLE_CPU_PICKED	= (0x1 << 9), /* an idle CPU is picked at ops.select_cpu() */
+	LAVD_FLAG_KSOFTIRQD		= (0x1 << 10), /* ksoftirqd/%u thread */
 };
 
 /*

@@ -131,6 +131,11 @@ static bool is_kernel_worker(struct task_struct *p)
 	return !!(p->flags & (PF_WQ_WORKER | PF_IO_WORKER));
 }
 
+static bool is_ksoftirqd(struct task_struct *p)
+{
+	return is_kernel_task(p) && !__builtin_memcmp(p->comm, "ksoftirqd/", 10);
+}
+
 static bool is_pinned(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1;
