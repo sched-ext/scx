@@ -53,9 +53,6 @@ enum mitosis_constants {
 	/* Root cell index */
 	ROOT_CELL_ID = 0,
 
-	/* Invalid/unset L3 value */
-	// INVALID_L3_ID = -1,
-
 	/* Default weight divisor for vtime calculation */
 	DEFAULT_WEIGHT_MULTIPLIER = 100,
 
@@ -68,6 +65,14 @@ enum mitosis_constants {
 	/* No NUMA constraint for DSQ creation */
 	ANY_NUMA = -1,
 };
+
+/*
+ * Variables populated by userspace
+ */
+const volatile bool	     enable_l3_awareness			     = false;
+const volatile bool	     enable_work_stealing	     = false;
+const volatile u32	     nr_l3			     = 1;
+
 
 static inline void copy_cell_skip_lock(struct cell *dst, const struct cell *src)
 {
@@ -204,4 +209,4 @@ static inline void cpumask_guard_release(struct cpumask_guard *guard)
 		__attribute__((__cleanup__(cpumask_guard_release))) = \
 			cpumask_create_guard()
 
-extern inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
+static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);

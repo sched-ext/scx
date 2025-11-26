@@ -38,9 +38,6 @@ const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     split_vtime_updates	     = false;
-const volatile bool	     enable_l3_awareness			     = false;
-const volatile bool	     enable_work_stealing	     = false;
-const volatile u32	     nr_l3			     = 1;
 
 /*
  * Maps populated by userspace for use by LLC aware scheduling.
@@ -48,6 +45,22 @@ const volatile u32	     nr_l3			     = 1;
 */
 struct cpu_to_l3_map cpu_to_l3	 SEC(".maps");
 struct l3_to_cpus_map l3_to_cpus SEC(".maps");
+
+/*
+ * Maps for statistics
+*/
+struct function_counters_map function_counters SEC(".maps");
+struct steal_stats_map steal_stats SEC(".maps");
+
+static inline void increment_counter(enum fn_counter_idx idx)
+{
+	u64 *counter;
+	u32 key = idx;
+
+	counter = bpf_map_lookup_elem(&function_counters, &key);
+	if (counter)
+		(*counter)++;
+}
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -342,7 +355,8 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 	cstat_add(idx, cell, cctx, 1);
 }
 
-inline int update_task_cpumask(struct task_struct *p,
+// I made this static to
+static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx	 *tctx)
 {
 	const struct cpumask *cell_cpumask;
@@ -372,18 +386,29 @@ inline int update_task_cpumask(struct task_struct *p,
 	 * Revisit if high frequency dynamic cell switching
 	 * needs to be supported.
 	 */
-	if (tctx->all_cell_cpus_allowed) {
-		tctx->dsq = get_cell_l3_dsq_id(tctx->cell, DUMMY_L3);
-		if (!(cell = lookup_cell(tctx->cell)))
-			return -ENOENT;
-		p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
-	} else {
+
+	// Per-CPU pinned path
+	if(!tctx->all_cell_cpus_allowed) {
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
 		tctx->dsq	 = get_cpu_dsq_id(cpu);
 		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
+		return 0;
 	}
+
+	// Cell-wide path
+	if (!(cell = lookup_cell(tctx->cell)))
+		return -ENOENT;
+
+	// L3 aware version
+	if (enable_l3_awareness){
+		return update_task_l3_assignment(p, tctx, cell);
+	}
+
+	// Non-L3 aware version
+	tctx->dsq = get_cell_l3_dsq_id(tctx->cell, DUMMY_L3);
+	p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
 
 	return 0;
 }
@@ -524,6 +549,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
 
+	increment_counter(COUNTER_SELECT_CPU);
+
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
 
@@ -571,6 +598,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	s32		 cpu = -1;
 	u64		 basis_vtime;
 
+	increment_counter(COUNTER_ENQUEUE);
+
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
 
@@ -609,7 +638,12 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		/* Task can use any CPU in its cell, so use the cell DSQ */
 		if (!(cell = lookup_cell(tctx->cell)))
 			return;
-		basis_vtime = READ_ONCE(cell->vtime_now);
+
+		if (enable_l3_awareness) {
+			basis_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
+		} else {
+			basis_vtime = READ_ONCE(cell->vtime_now);
+		}
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
 
@@ -625,7 +659,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	tctx->basis_vtime = basis_vtime;
 
-	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
+	if (time_after(vtime, basis_vtime + VTIME_MAX_FUTURE_MULTIPLIER * slice_ns)) {
 		scx_bpf_error(
 			"vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
 			p->pid, p->scx.dsq_vtime, basis_vtime,
@@ -651,6 +685,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	struct cpu_ctx *cctx;
 	u32		cell;
 
+	increment_counter(COUNTER_DISPATCH);
+
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
@@ -659,11 +695,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	bool		    found = false;
 	dsq_id_t	    min_vtime_dsq;
 	u64		    min_vtime;
-
 	struct task_struct *p;
-	bpf_for_each(scx_dsq, p, get_cell_l3_dsq_id(cell, DUMMY_L3).raw, 0) {
+
+	// Get this CPU's L3 (only matters if L3-aware)
+	s32 l3 = DUMMY_L3;  // Default for non-L3-aware
+	if (enable_l3_awareness) {
+		u32 *l3_ptr = bpf_map_lookup_elem(&cpu_to_l3, &cpu);
+		if (!l3_ptr) {
+			scx_bpf_error("CPU %d not in cpu_to_l3 map - this shouldn't happen!", cpu);
+			return;
+		}
+		l3 = (s32)*l3_ptr;
+	}
+
+	// Check the cell (cell-l3) dsq
+	bpf_for_each(scx_dsq, p, get_cell_l3_dsq_id(cell, l3).raw, 0) {
 		min_vtime     = p->scx.dsq_vtime;
-		min_vtime_dsq = get_cell_l3_dsq_id(cell, DUMMY_L3);
+		min_vtime_dsq = get_cell_l3_dsq_id(cell, l3);
 		found	      = true;
 		break;
 	}
@@ -683,8 +731,14 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * prev->scx.flags & SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and
 	 * otherwise go idle.
 	 */
-	if (!found)
+	if (!found) {
+		// Try work stealing if enabled
+		if (enable_l3_awareness && enable_work_stealing) {
+			try_stealing_work(cell, l3);
+		}
 		return;
+	}
+
 	/*
 	 * The move_to_local can fail if we raced with some other cpu in the cell
 	 * and now the cell is empty. We have to ensure to try the cpu_dsq or else
@@ -695,27 +749,6 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	    min_vtime_dsq.raw != dsq.raw)
 		scx_bpf_dsq_move_to_local(dsq.raw);
 }
-
-/*
- * A couple of tricky things about checking a cgroup's cpumask:
- *
- * First, we need an RCU pointer to pass to cpumask kfuncs. The only way to get
- * this right now is to copy the cpumask to a map entry. Given that cgroup init
- * could be re-entrant we have a few per-cpu entries in a map to make this
- * doable.
- *
- * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
- * and with different lengths. Some bpf_core_type_matches finagling can make
- * this all work.
- */
-#define MAX_CPUMASK_ENTRIES (4)
-
-/*
- * We don't know how big struct cpumask is at compile time, so just allocate a
- * large space and check that it is big enough at runtime
- */
-#define CPUMASK_LONG_ENTRIES (128)
-#define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
 
 struct cpumask_entry {
 	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
@@ -1077,6 +1110,16 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	barrier();
 	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
 
+  // Recalculate L3 counts for all active cells now that CPU assignments are complete
+  if (enable_l3_awareness) {
+      int i;
+      bpf_for(i, 0, MAX_CELLS) {
+          struct cell *c = lookup_cell(i);
+          if (c && c->in_use)
+              recalc_cell_l3_counts(i);
+      }
+  }
+
 	bpf_rcu_read_unlock();
 	bpf_cgroup_release(root_cgrp_ref);
 	return 0;
@@ -1089,16 +1132,26 @@ out:
 	return 0;
 }
 
-void advance_cell_and_cpu_vtime(struct cell *cell, struct cpu_ctx *cctx, struct task_ctx *tctx,
+void advance_dsq_vtimes(struct cell *cell, struct cpu_ctx *cctx, struct task_ctx *tctx,
 				u64 task_vtime)
 {
-	// If the cell DSQ's vtime is behind the task's, advance it.
-	if (time_before(READ_ONCE(cell->vtime_now), task_vtime))
-		WRITE_ONCE(cell->vtime_now, task_vtime);
-
 	// If the CPU DSQ's vtime is behind the task's, advance it.
 	if (time_before(READ_ONCE(cctx->vtime_now), task_vtime))
 		WRITE_ONCE(cctx->vtime_now, task_vtime);
+
+	if (!enable_l3_awareness) {
+		// If the cell DSQ's vtime is behind the task's, advance it.
+		if (time_before(READ_ONCE(cell->vtime_now), task_vtime))
+			WRITE_ONCE(cell->vtime_now, task_vtime);
+		return;
+	}
+
+	/* We are in the l3 aware case  */
+	// XXX I dropped tctx->all_cell_cpus_allowed from the condition here.
+	if (l3_is_valid(tctx->l3)) {
+		if (time_before(READ_ONCE(cell->l3_vtime_now[tctx->l3]), task_vtime))
+			WRITE_ONCE(cell->l3_vtime_now[tctx->l3], task_vtime);
+	}
 }
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
@@ -1125,7 +1178,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 		    !(cell = lookup_cell(cctx->cell)))
 			return;
 
-		advance_cell_and_cpu_vtime(cell, cctx, tctx, p->scx.dsq_vtime);
+		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
 	}
 
 	tctx->started_running_at = scx_bpf_now();
@@ -1159,14 +1212,14 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		scx_bpf_error("Task %d has zero weight", p->pid);
 		return;
 	}
-	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+	p->scx.dsq_vtime += used * DEFAULT_WEIGHT_MULTIPLIER / p->scx.weight;
 
 	/*
 	 * Default approach: Update cell and cpu dsq vtime after updating task's vtime
 	 * to keep them in sync and prevent "vtime too far ahead" errors.
 	 */
 	if (!split_vtime_updates) {
-		advance_cell_and_cpu_vtime(cell, cctx, tctx, p->scx.dsq_vtime);
+		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
 	}
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
@@ -1206,7 +1259,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 	}
 
 	if (cgrp->kn->id == root_cgid) {
-		WRITE_ONCE(cgc->cell, 0);
+		WRITE_ONCE(cgc->cell, ROOT_CELL_ID);
 		return 0;
 	}
 
@@ -1369,6 +1422,10 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
+	/* Initialize L3 assignment fields */
+	if (enable_l3_awareness)
+		init_task_l3(tctx);
+
 	return update_task_cell(p, tctx, args->cgroup);
 }
 
@@ -1376,9 +1433,9 @@ __hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
 {
 	u32 u, v = 0;
 
-	bpf_for(u, 0, 32)
+	bpf_for(u, 0, BITS_PER_U32)
 	{
-		s32 cpu = 32 * word + u;
+		s32 cpu = BITS_PER_U32 * word + u;
 		if (cpu < nr_possible_cpus &&
 		    bpf_cpumask_test_cpu(cpu, cpumask))
 			v |= 1 << u;
@@ -1553,7 +1610,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
 				ret = scx_bpf_create_dsq(get_cpu_dsq_id(i).raw,
-							 -1);
+							 ANY_NUMA);
 				if (ret < 0) {
 					bpf_cpumask_release(cpumask);
 					return ret;
@@ -1568,14 +1625,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
+	if (enable_l3_awareness)
+		recalc_cell_l3_counts(ROOT_CELL_ID);
+
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
+		if (enable_l3_awareness) {
+			u32 l3;
+			bpf_for(l3, 0, nr_l3) {
+				ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, l3).raw, ANY_NUMA);
+				if (ret < 0)
+					return ret;
+			}
+		} else {
+			ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, DUMMY_L3).raw,
+							ANY_NUMA);
+			if (ret < 0)
+				return ret;
 
-		ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, DUMMY_L3).raw,
-					 -1);
-		if (ret < 0)
-			return ret;
+		}
+
 
 		if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &i)))
 			return -ENOENT;

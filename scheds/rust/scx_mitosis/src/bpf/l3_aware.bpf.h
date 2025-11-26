@@ -61,6 +61,8 @@ static inline void init_task_l3(struct task_ctx *tctx)
 {
 	tctx->l3 = L3_INVALID;
 
+	if (!enable_work_stealing)
+		return;
 	tctx->pending_l3 = L3_INVALID;
 	tctx->steal_count = 0;
 	tctx->last_stolen_at = 0;
@@ -227,7 +229,7 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 		return;
 	}
 
-	u64 save_v = p->scx.dsq_vtime;
+	// u64 save_v = p->scx.dsq_vtime;
 
 	/* Assign task to new L3 */
 	tctx->l3 = tctx->pending_l3;
@@ -238,7 +240,7 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 
 	/* Restore old vtime */
 	/* XXX This seems like it could be trouble. */
-	p->scx.dsq_vtime = save_v;
+	// p->scx.dsq_vtime = save_v;
 }
 
 static inline bool try_stealing_this_task(struct task_ctx *task_ctx,
@@ -334,4 +336,60 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 		return true;
 	}
 	return false;
+}
+
+static inline int update_task_l3_assignment(struct task_struct *p, struct task_ctx *tctx, struct cell *cell)
+{
+	const struct cpumask *cell_cpumask = lookup_cell_cpumask(tctx->cell);
+	const struct cpumask *l3_mask = NULL;
+	if (tctx->l3 != L3_INVALID) {
+		l3_mask = lookup_l3_cpumask((u32)tctx->l3);
+		/* If the L3 no longer intersects the cell's cpumask, invalidate it */
+		if (!l3_mask ||
+			!bpf_cpumask_intersects(cell_cpumask, l3_mask))
+			tctx->l3 = L3_INVALID;
+	}
+
+	/* --- Pick a new L3 if needed --- */
+	if (tctx->l3 == L3_INVALID) {
+		s32 new_l3 = pick_l3_for_task(tctx->cell);
+		if (new_l3 < 0) {
+			scx_bpf_error("bad L3: %d", new_l3);
+			return -ENODEV;
+		}
+		tctx->l3 = new_l3;
+		l3_mask = lookup_l3_cpumask((u32)tctx->l3);
+		if (!l3_mask)
+			return -ENOENT;
+	}
+
+	/* --- Narrow the effective cpumask by the chosen L3 --- */
+	/* tctx->cpumask already contains (task_affinity ∧ cell_mask) */
+	if (tctx->cpumask)
+		bpf_cpumask_and(tctx->cpumask,
+				(const struct cpumask *)tctx->cpumask,
+				l3_mask);
+
+	/* If empty after intersection, nothing can run here */
+	if (tctx->cpumask &&
+		bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
+		scx_bpf_error("Empty cpumask after intersection");
+		return -ENODEV;
+	}
+
+	/* --- Point to the correct (cell,L3) DSQ and set vtime baseline --- */
+	tctx->dsq = get_cell_l3_dsq_id(tctx->cell, tctx->l3);
+
+	if (!cell) {
+		scx_bpf_error("Invalid cell");
+		return -ENOENT;
+	}
+
+	if (!l3_is_valid(tctx->l3)) {
+		scx_bpf_error("Invalid L3 %d", tctx->l3);
+		return -EINVAL;
+	}
+
+	p->scx.dsq_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
+	return 0;
 }
