@@ -86,6 +86,11 @@ const volatile bool avoid_smt = true;
 const volatile bool mm_affinity;
 
 /*
+ * Enable perf-event scheduling.
+ */
+const volatile bool perf_enabled;
+
+/*
  * Performance counter threshold to classify a task as event heavy.
  */
 const volatile u64 perf_threshold;
@@ -94,6 +99,12 @@ const volatile u64 perf_threshold;
  * Enable deferred wakeup.
  */
 const volatile bool deferred_wakeups = true;
+
+/*
+ * Do we want to keep the tasks sticky or distribute them on being event
+ * heavy
+ */
+const volatile bool perf_sticky;
 
 /*
  * Ignore synchronous wakeup events.
@@ -178,6 +189,7 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 struct cpu_ctx {
 	u64 last_update;
 	u64 perf_lvl;
+	u64 perf_events;
 };
 
 struct {
@@ -236,15 +248,13 @@ static void start_counters(s32 cpu)
 static void stop_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
 {
 	struct bpf_perf_event_value current, *start;
-	u32 i;
-	u64 delta_events = 0;
-	u64 now = scx_bpf_now(), delta;
+	struct cpu_ctx *cctx;
+	u64 delta_events = 0, delta = 0;
+	u32 i = 0;
 
-	i = 0;
 	start = bpf_map_lookup_elem(&start_readings, &i);
 	if (start && start->counter != 0) {
 		if (read_perf_counter(cpu, i, &current) == 0) {
-			delta = 0;
 			if (current.counter >= start->counter)
 				delta = current.counter - start->counter;
 			delta_events = delta;
@@ -252,7 +262,11 @@ static void stop_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
 	}
 
 	tctx->perf_events = delta_events;
-	tctx->perf_delta_t = now > tctx->last_run_at ? now - tctx->last_run_at : 1;
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+	cctx->perf_events += delta;
+
 }
 
 /*
@@ -260,7 +274,7 @@ static void stop_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
  */
 static inline bool is_event_heavy(const struct task_ctx *tctx)
 {
-	return (tctx->perf_events * NSEC_PER_MSEC / tctx->perf_delta_t) > perf_threshold;
+	return tctx->perf_events > perf_threshold;
 }
 
 /*
@@ -774,12 +788,36 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 		!(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
 }
 
+static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu)
+{
+	struct cpu_ctx *cctx;
+	u64 min = ~0UL;
+	int cpu, ret_cpu = -EBUSY;
+
+	if (perf_sticky)
+		return prev_cpu;
+
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx)
+			continue;
+		if (cctx->perf_events < min && is_cpu_idle(cpu) &&
+		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+			min = cctx->perf_events;
+			ret_cpu = cpu;
+		}
+	}
+
+	return ret_cpu;
+}
+
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
 	bool is_busy = is_system_busy();
-	s32 cpu, this_cpu = bpf_get_smp_processor_id();;
+	s32 cpu, this_cpu = bpf_get_smp_processor_id();
+	int new_cpu;
 
 	/*
 	 * When the waker and wakee share the same address space and were previously
@@ -797,14 +835,16 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	}
 
 	/*
-	 * Force perf event-heavy tasks to stay on the same CPU.
+	 * Pick an event free CPU?
 	 */
-	if (perf_threshold) {
+	if (perf_enabled) {
 		tctx = try_lookup_task_ctx(p);
 		if (tctx && is_event_heavy(tctx)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 			__sync_fetch_and_add(&nr_event_dispatches, 1);
-			return prev_cpu;
+			new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
+
+			return new_cpu < 0 ? prev_cpu : new_cpu;
 		}
 	}
 
@@ -841,6 +881,31 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
 	struct task_ctx *tctx;
+	int new_cpu;
+
+	/*
+	 * Dispatch the task to the shared DSQ, using the deadline-based
+	 * scheduling.
+	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Immediately dispatch perf event-heavy tasks to a new CPU.
+	 */
+	if (perf_enabled && !is_migration_disabled(p) &&
+	    is_event_heavy(tctx)) {
+		new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
+		if (new_cpu >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu, task_slice(p), 0);
+			__sync_fetch_and_add(&nr_event_dispatches, 1);
+
+			if (new_cpu != prev_cpu || !scx_bpf_task_running(p))
+				wakeup_cpu(new_cpu);
+			return;
+		}
+	}
 
 	/*
 	 * Attempt to dispatch directly to an idle CPU if the task can
@@ -862,25 +927,6 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_system_busy()) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-		if (!__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p))
-			wakeup_cpu(prev_cpu);
-		return;
-	}
-
-	/*
-	 * Dispatch the task to the shared DSQ, using the deadline-based
-	 * scheduling.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	/*
-	 * Immediately dispatch perf event-heavy tasks to the same CPU.
-	 */
-	if (perf_threshold && is_event_heavy(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
-		__sync_fetch_and_add(&nr_event_dispatches, 1);
 		if (!__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p))
 			wakeup_cpu(prev_cpu);
 		return;
@@ -975,7 +1021,7 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	/*
 	 * Capture performance counter baseline when task starts running.
 	 */
-	if (perf_threshold)
+	if (perf_enabled)
 		start_counters(cpu);
 }
 
@@ -990,7 +1036,7 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	/* Update task's performance counters */
-	if (perf_threshold)
+	if (perf_enabled)
 		stop_counters(p, tctx, cpu);
 
 	/*
@@ -1037,6 +1083,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	struct bpf_timer *timer;
 	u32 key = 0;
 	int err;
+	int cpu;
+	struct cpu_ctx *cctx;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
@@ -1077,6 +1125,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 			scx_bpf_error("Failed to arm wakeup timer");
 			return err;
 		}
+	}
+
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx)
+			continue;
+		cctx->perf_events = 0;
 	}
 
 	return 0;

@@ -182,6 +182,14 @@ struct Opts {
     #[clap(short = 'E', default_value = "0", long)]
     perf_threshold: u64,
 
+    /// Enable sticky perf scheduling.
+    ///
+    /// When enabled, a task that generates a large number of perf events is forced to stay on the
+    /// same CPU. When disabled, the scheduler will move the task to the CPU with the smallest
+    /// amount of tracked perf events.
+    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
+    perf_sticky: bool,
+
     /// Enable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     enable_numa: bool,
@@ -430,7 +438,15 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
         rodata.mm_affinity = opts.mm_affinity;
-        rodata.perf_threshold = opts.perf_threshold;
+
+        // Enable perf event scheduling settings.
+        if opts.perf_config > 0 {
+            rodata.perf_enabled = true;
+            rodata.perf_sticky = opts.perf_sticky;
+            rodata.perf_threshold = opts.perf_threshold;
+        } else {
+            rodata.perf_enabled = false;
+        }
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
