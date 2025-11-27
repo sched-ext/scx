@@ -18,7 +18,7 @@ axes where `sched_ext` is specifically designed to provide significant value:
 
 We'll begin by doing a deeper dive into the motivation of `sched_ext` in the
 following [Motivation](#motivation) section. Following that, we'll provide some
-deatils on the overall architecture of `sched_ext` in the [How](#how) section
+details on the overall architecture of `sched_ext` in the [How](#how) section
 below.
 
 # Motivation<a name="motivation"></a>
@@ -430,7 +430,7 @@ The following briefly shows how a waking task is scheduled and executed.
      rather than performing them immediately. There can be up to
      `ops.dispatch_max_batch` pending tasks.
 
-   * `scx_bpf_consume()` tranfers a task from the specified non-local DSQ
+   * `scx_bpf_consume()` transfers a task from the specified non-local DSQ
      to the dispatching DSQ. This function cannot be called with any BPF
      locks held. `scx_bpf_consume()` flushes the pending dispatched tasks
      before trying to consume the specified DSQ.

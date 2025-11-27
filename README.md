@@ -189,7 +189,7 @@ C schedulers only:
 # Use specific clang version for C schedulers
 $ BPF_CLANG=clang-17 make all
 
-# Use specific clang version for Rust schedulers  
+# Use specific clang version for Rust schedulers
 $ BPF_CLANG=clang-17 cargo build --release
 
 # Use clang for C compilation and system bpftool
@@ -319,7 +319,7 @@ channel on `Discord` for details.
 ## Additional Resources
 
 There are articles and videos about `sched_ext`, which helps you to explore
-`sched_ext` in various ways. Followings are some examples:
+`sched_ext` in various ways. Following are some examples:
 
 - [`Sched_ext` YT playlist](https://youtube.com/playlist?list=PLLLT4NxU7U1TnhgFH6k57iKjRu6CXJ3yB&si=DETiqpfwMoj8Anvl)
 - [LWN: The extensible scheduler class (February, 2023)](https://lwn.net/Articles/922405/)
