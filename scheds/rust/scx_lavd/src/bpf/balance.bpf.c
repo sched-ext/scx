@@ -402,7 +402,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		if (p)
 			vtime = p->scx.dsq_vtime;
 
-		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq_id);
+		p = __COMPAT_scx_bpf_dsq_peek(cpdom_dsq_id);
 		if (p && p->scx.dsq_vtime < vtime) {
 			dsq_id = cpdom_dsq_id;
 			backup_dsq_id = cpu_dsq_id;
