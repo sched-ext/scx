@@ -956,12 +956,13 @@ struct tree_levels *get_clean_tree_levels(void)
 static
 int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 {
-	struct cgroup *cur_cgrp;
-	struct scx_cgroup_ctx *cur_cgx = NULL;
+	u32 cur_level, prev_level = CBW_CGRP_TREE_HEIGHT_MAX;
 	struct cgroup_subsys_state *subroot_css, *pos;
+	struct scx_cgroup_ctx *cur_cgx = NULL;
 	struct tree_levels *tree;
+	struct cgroup *cur_cgrp;
 	s64 rt_llcx;
-	int cur_level, prev_level = -EINVAL, ret = 0;
+	int ret = 0;
 
 
 	tree = get_clean_tree_levels();
@@ -1006,17 +1007,11 @@ int cbw_update_runtime_total_sloppy(struct cgroup *cgrp)
 		cur_level = cur_cgrp->level;
 		if (cur_level == 0 && can_loop) /* cgroup_root */
 			break;
-		if (cur_level >= CBW_CGRP_TREE_HEIGHT_MAX || ret == -E2BIG) {
-			/*
-			 * Note that to make the verifier happy, the 'break'
-			 * was replaced with 'continue' and necessary changes
-			 * were made.
-			 */
-			cbw_err("The cgroup tree is too tall: %d", cur_level);
+		if (cur_level >= CBW_CGRP_TREE_HEIGHT_MAX) {
 			ret = -E2BIG;
-			continue;
+			break;
 		}
-		if (prev_level == -EINVAL)
+		if (prev_level == CBW_CGRP_TREE_HEIGHT_MAX)
 			prev_level = cur_level;
 
 		cur_cgx = cbw_get_cgroup_ctx(cur_cgrp);
