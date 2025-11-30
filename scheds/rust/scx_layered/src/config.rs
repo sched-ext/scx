@@ -98,6 +98,8 @@ pub enum LayerMatch {
     UsedGpuPid(bool),
     AvgRuntime(u64, u64),
     HintEquals(u64),
+    SystemCpuUtilBelow(f64),
+    DsqInsertBelow(f64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,6 +146,8 @@ pub struct LayerCommon {
     pub llcs: Vec<usize>,
     #[serde(default)]
     pub placement: LayerPlacement,
+    #[serde(default)]
+    pub member_expire_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

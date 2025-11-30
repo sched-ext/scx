@@ -154,6 +154,8 @@ use crate::stats::DomainStats;
 use crate::stats::NodeStats;
 use crate::DomainGroup;
 
+use crate::types::dom_ctx;
+
 const DEFAULT_WEIGHT: f64 = bpf_intf::consts_LB_DEFAULT_WEIGHT as f64;
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 
@@ -629,7 +631,9 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         let types::topo_level(index) = types::topo_level::TOPO_LLC;
         let ptr = self.skel.maps.bss_data.as_ref().unwrap().topo_nodes[index as usize][dom.id];
-        let dom_ctx = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+        let dom_ctx = unsafe {
+            &mut *std::ptr::with_exposed_provenance_mut::<dom_ctx>(ptr.try_into().unwrap())
+        };
         let active_tasks = &mut dom_ctx.active_tasks;
 
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);

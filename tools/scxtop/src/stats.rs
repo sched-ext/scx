@@ -214,7 +214,7 @@ mod tests {
 
         // P50 of [1,2,3,4,5,6,7,8,9,10] should be around 5-6
         let p50 = *percentile_map.get(&StatAggregation::P50).unwrap();
-        assert!(p50 >= 5 && p50 <= 6);
+        assert!((5..=6).contains(&p50));
 
         // P90 should be around 9-10
         let p90 = *percentile_map.get(&StatAggregation::P90).unwrap();
@@ -370,7 +370,7 @@ mod tests {
         let p50 = *percentile_map.get(&StatAggregation::P50).unwrap();
 
         // For 4 elements [1,2,3,4], P50 should be between 2 and 3
-        assert!(p50 >= 2 && p50 <= 3);
+        assert!((2..=3).contains(&p50));
     }
 
     #[test]
@@ -415,6 +415,6 @@ mod tests {
 
         let percentile_map = stats.percentiles.unwrap();
         let p50 = *percentile_map.get(&StatAggregation::P50).unwrap();
-        assert!(p50 >= 10 && p50 <= 20);
+        assert!((10..=20).contains(&p50));
     }
 }

@@ -2,23 +2,20 @@
 
 ## Ubuntu
 
-`sched_ext` support for Ubuntu is currently provided by the linux-unstable
-kernel, available at
-[ppa:canonical-kernel-team/unstable](https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/unstable).
-
-#### Upgrading to 25.04 (Plucky Puffin) - recommended
+#### Upgrading to 25.10 (Questing Quokka) - recommended
 
 Currently, only release 25.04 and newer are supported. If you're using an
-earlier release, upgrade using the command below:
+earlier release, upgrade to the latest release (25.10) using the command
+below:
 
 ```
-$ sudo do-release-upgrade -d
+$ sudo do-release-upgrade
 ```
 
 #### Setting up Dev Environment
 
 ```
-$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev
+$ sudo apt install -y build-essential cmake cargo rustc clang llvm pkg-config libelf-dev protobuf-compiler libseccomp-dev libbpf-dev pahole
 ```
 
 #### Build the scx schedulers from source

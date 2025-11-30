@@ -10,6 +10,7 @@ use scx_utils::cli::TopologyArgs;
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
+use tracing::info;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -78,7 +79,69 @@ impl SchedMode {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone)]
+pub struct HardwareProfile {
+    pub single_llc: bool,
+    pub core_count: usize,
+    pub is_arm64: bool,
+    pub is_neoverse_v2: bool,
+}
+
+impl HardwareProfile {
+    pub fn detect() -> Self {
+        let single_llc = TOPO.all_llcs.len() == 1;
+        let core_count = TOPO.all_cpus.len();
+
+        let is_arm64 = cfg!(target_arch = "aarch64");
+        let is_neoverse_v2 = is_arm64 && Self::detect_neoverse_v2();
+
+        Self {
+            single_llc,
+            core_count,
+            is_arm64,
+            is_neoverse_v2,
+        }
+    }
+
+    fn detect_neoverse_v2() -> bool {
+        // Read /proc/cpuinfo to detect Neoverse-V2
+        if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+            cpuinfo.contains("Neoverse-V2")
+        } else {
+            false
+        }
+    }
+
+    pub fn optimize_scheduler_opts(&self, opts: &mut SchedulerOpts) {
+        if self.single_llc {
+            // Disable pick2 dispatch since there's only one LLC
+            opts.dispatch_pick2_disable = true;
+            // Disable wakeup LLC migrations
+            opts.wakeup_llc_migrations = false;
+            // For single LLC, set min_llc_runs_pick2 to 0 (effectively disable)
+            opts.min_llc_runs_pick2 = 0;
+            info!("Single LLC detected - disabling multi-LLC optimizations");
+        }
+
+        if self.is_neoverse_v2 && self.single_llc && self.core_count >= 64 {
+            // Optimize shard count for large single-LLC systems
+            let optimal_shards = (self.core_count / 8).min(16) as u32;
+            if opts.llc_shards == get_default_llc_shards() {
+                opts.llc_shards = optimal_shards;
+                info!(
+                    "Large single-LLC system ({} cores) - using {} shards",
+                    self.core_count, opts.llc_shards
+                );
+            }
+        }
+
+        if self.is_neoverse_v2 {
+            info!("ARM64 Neoverse-V2 detected - ARM-specific optimizations available");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Parser)]
 pub struct SchedulerOpts {
     /// Disables per-cpu kthreads directly dispatched into local dsqs.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
@@ -137,6 +200,17 @@ pub struct SchedulerOpts {
     /// Use a arena based queues (ATQ) for task queueing.
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub atq_enabled: bool,
+
+    /// Use a double helix queue (DHQ) for LLC migration. DHQ provides two-strand
+    /// queue structure for cache-aware task migration between LLCs.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub dhq_enabled: bool,
+
+    /// Maximum imbalance allowed between DHQ strands. Controls how far one strand
+    /// can dequeue ahead of the other. Lower values maintain tighter balance,
+    /// higher values allow more asymmetric cross-LLC migration (0 = unlimited).
+    #[clap(long, default_value = "3", value_parser = clap::value_parser!(u64).range(0..=100))]
+    pub dhq_max_imbalance: u64,
 
     /// Schedule based on preferred core values available on some x86 systems with the appropriate
     /// CPU frequency governor (ex: amd-pstate).
@@ -232,6 +306,14 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub virt_llc_enabled: bool,
 
+    /// Enable hardware-specific optimizations automatically
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub hw_auto_optimize: bool,
+
+    /// Force single-LLC fast path optimizations
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub single_llc_fast_path: bool,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
 }
@@ -246,11 +328,12 @@ pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
 
 #[macro_export]
 macro_rules! init_open_skel {
-    ($skel: expr, $topo: expr, $opts: expr, $verbose: expr) => {
+    ($skel: expr, $topo: expr, $opts: expr, $verbose: expr, $hw_profile: expr) => {
         'block: {
-            let skel = $skel;
+            let skel = &mut *$skel;
             let opts: &$crate::SchedulerOpts = $opts;
             let verbose: u8 = $verbose;
+            let hw_profile: &$crate::HardwareProfile = $hw_profile;
 
             if opts.init_dsq_index > opts.dumb_queues - 1 {
                 break 'block ::anyhow::Result::Err(::anyhow::anyhow!(
@@ -274,14 +357,14 @@ macro_rules! init_open_skel {
                     }
                 }
                 for (i, slice) in opts.dsq_time_slices.iter().enumerate() {
-                    ::log::info!("DSQ[{}] slice_ns {}", i, slice * 1000);
+                    info!("DSQ[{}] slice_ns {}", i, slice * 1000);
                     skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice * 1000;
                 }
             } else {
                 for i in 0..=opts.dumb_queues - 1 {
                     let slice_ns =
                         $crate::dsq_slice_ns(i as u64, opts.min_slice_us, opts.dsq_shift);
-                    ::log::info!("DSQ[{}] slice_ns {}", i, slice_ns);
+                    info!("DSQ[{}] slice_ns {}", i, slice_ns);
                     skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice_ns;
                 }
             }
@@ -321,6 +404,9 @@ macro_rules! init_open_skel {
                 MaybeUninit::new(opts.dispatch_lb_interactive);
             rodata.lb_config.wakeup_lb_busy = opts.wakeup_lb_busy;
             rodata.lb_config.wakeup_llc_migrations = MaybeUninit::new(opts.wakeup_llc_migrations);
+            rodata.lb_config.single_llc_mode = MaybeUninit::new(
+                opts.single_llc_fast_path || (opts.hw_auto_optimize && hw_profile.single_llc),
+            );
 
             // p2dq config
             rodata.p2dq_config.interactive_ratio = opts.interactive_ratio as u32;
@@ -336,7 +422,21 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.atq_enabled = MaybeUninit::new(
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
             );
-            rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority);
+
+            rodata.p2dq_config.dhq_enabled = MaybeUninit::new(
+                opts.dhq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
+            );
+
+            rodata.p2dq_config.dhq_max_imbalance = opts.dhq_max_imbalance;
+
+            // Check if cpu_priority is supported by the kernel
+            let cpu_priority_supported = compat::ksym_exists("sched_core_priority").unwrap_or(false);
+            if opts.cpu_priority && !cpu_priority_supported {
+                warn!("CPU priority scheduling requested but kernel doesn't support sched_core_priority");
+                warn!("Feature disabled - requires kernel with hybrid CPU support and appropriate CPU governor (e.g., amd-pstate)");
+                warn!("See README for kernel requirements");
+            }
+            rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority && cpu_priority_supported);
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);

@@ -12,13 +12,13 @@ struct pick_ctx {
 	 * Input arguments for pick_idle_cpu().
 	 */
 	const struct task_struct *p;
-	struct task_ctx *taskc;
-	s32 prev_cpu;
+	task_ctx *taskc;
 	u64 wake_flags;
+	s32 prev_cpu;
 	/*
-	 * Additional output arguments for pick_idle_cpu().
+	 * Additional input arguments for find_sticky_cpu_and_cpdom().
 	 */
-	u64 cpdom_id;
+	s32 sync_waker_cpu;
 	/*
 	 * Additional output arguments for init_active_ovrflw_masks().
 	 */
@@ -31,27 +31,10 @@ struct pick_ctx {
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
 	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	bool a_empty;
-	bool o_empty;
-	/*
-	 * Additional input arguments for find_sticky_cpu_and_cpdom().
-	 */
-	s32 sync_waker_cpu;
-	bool is_task_big;
-	/*
-	 * Additional input arguments for test_cpu_stickable().
-	 */
-	unsigned int i_m;
-	unsigned int i_nm;
-	s32 cpus_match[2];
-	s32 cpus_not_match[2];
-	s64 cpdoms_match[2];
-	s64 cpdoms_not_match[2];
 	/*
 	 * Additional input arguments for init_idle_i_mask().
 	 */
 	const struct cpumask *i_mask;
-	bool i_empty;
 	/*
 	 * Additional input arguments for init_idle_ato_masks().
 	 * Additional input arguments for pick_idle_cpu_at_cpdom().
@@ -61,12 +44,25 @@ struct pick_ctx {
 	struct bpf_cpumask *io_mask;
 	struct bpf_cpumask *temp_mask;
 	/*
-	 * Additional output arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
+	 * Flags.
 	 */
-	bool ia_empty;
-	bool iat_empty;
-	bool io_empty;
+	bool a_empty:1;
+	bool o_empty:1;
+	bool is_task_big:1;
+	bool i_empty:1;
+	bool ia_empty:1;
+	bool iat_empty:1;
+	bool io_empty:1;
+};
+
+struct sticky_ctx {
+	/*
+	 * For test_cpu_stickable().
+	 */
+	unsigned int i_m;
+	unsigned int i_nm;
+	struct cpu_ctx *cpuc_match[2];
+	struct cpu_ctx *cpuc_not_match[2];
 };
 
 static __always_inline
@@ -165,7 +161,7 @@ static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	const struct cpumask *online_mask;
 	struct bpf_cpumask *online_src_mask;
 	s32 cpu;
-	int i;
+	unsigned int i;
 
 	/*
 	 * online_src_mask = src_mask ∩ online_mask
@@ -181,7 +177,7 @@ static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	/*
 	 * Find a proper CPU in the preferred CPU order.
 	 */
-	bpf_for(i, sys_stat.nr_active, __nr_cpu_ids) {
+	bpf_for(i, sys_stat.nr_active, nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -246,11 +242,11 @@ s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
 	s32 cpu;
 
 	mask = cast_mask(ctx->a_mask);
-	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < __nr_cpu_ids))
+	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < nr_cpu_ids))
 		return cpu;
 
 	mask = cast_mask(ctx->o_mask);
-	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < __nr_cpu_ids))
+	if (mask && ((cpu = bpf_cpumask_any_distribute(mask)) < nr_cpu_ids))
 		return cpu;
 
 	return -ENOENT;
@@ -294,14 +290,14 @@ s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cp
 		if (ctx->a_mask) {
 			cpu = bpf_cpumask_any_and_distribute(
 				cast_mask(cpd_mask), cast_mask(ctx->a_mask));
-			if (cpu < __nr_cpu_ids)
+			if (cpu < nr_cpu_ids)
 					return cpu;
 		}
 
 		if (ctx->o_mask) {
 			cpu = bpf_cpumask_any_and_distribute(
 				cast_mask(cpd_mask), cast_mask(ctx->o_mask));
-			if (cpu < __nr_cpu_ids)
+			if (cpu < nr_cpu_ids)
 				return cpu;
 		}
 
@@ -363,23 +359,19 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 }
 
 static __always_inline
-bool test_cpu_stickable(struct pick_ctx *ctx, s32 cpu, bool is_task_big)
+bool test_cpu_stickable(struct pick_ctx *ctx, struct sticky_ctx *sctx,
+			s32 cpu, bool is_task_big)
 {
 	if (can_run_on_cpu(ctx, cpu)) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc || ctx->i_m >= 2 || ctx->i_nm >= 2)
+
+		if (!cpuc || sctx->i_m >= 2 || sctx->i_nm >= 2)
 			return false;
 
-		if (is_task_big == cpuc->big_core) {
-			ctx->cpdoms_match[ctx->i_m] = cpuc->cpdom_id;
-			ctx->cpus_match[ctx->i_m] = cpu;
-			ctx->i_m++;
-		}
-		else {
-			ctx->cpdoms_not_match[ctx->i_m] = cpuc->cpdom_alt_id;
-			ctx->cpus_not_match[ctx->i_nm] = cpu;
-			ctx->i_nm++;
-		}
+		if (is_task_big == cpuc->big_core)
+			sctx->cpuc_match[sctx->i_m++] = cpuc;
+		else
+			sctx->cpuc_not_match[sctx->i_nm++] = cpuc;
 		return true;
 	}
 	return false;
@@ -406,24 +398,21 @@ bool is_sync_wakeup(struct pick_ctx *ctx)
 static 
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
-	struct cpu_ctx *cpuc;
-	u64 q0, q1;
+	struct cpu_ctx *p0, *p1, *cpuc;
+	struct cpdom_ctx *d0, *d1;
+	struct sticky_ctx sctx;
+
+	__builtin_memset(&sctx, 0, sizeof(sctx));
 
 	/*
 	 * Check if a task can stick on either previous CPU or a waker CPU.
 	 */
-	ctx->cpus_match[0] = -ENOENT;
-	ctx->cpus_match[1] = -ENOENT;
-	ctx->cpus_not_match[0] = -ENOENT;
-	ctx->cpus_not_match[1] = -ENOENT;
-	ctx->i_m = 0;
-	ctx->i_nm = 0;
-	test_cpu_stickable(ctx, ctx->prev_cpu, ctx->is_task_big);
+	test_cpu_stickable(ctx, &sctx, ctx->prev_cpu, ctx->is_task_big);
 	if (is_sync_wakeup(ctx)) {
 		s32 waker_cpu = bpf_get_smp_processor_id();
 		if (waker_cpu != ctx->prev_cpu) {
 			ctx->sync_waker_cpu = waker_cpu;
-			test_cpu_stickable(ctx, ctx->sync_waker_cpu, ctx->is_task_big);
+			test_cpu_stickable(ctx, &sctx, ctx->sync_waker_cpu, ctx->is_task_big);
 		}
 	}
 
@@ -432,14 +421,16 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 * where a task can run on.
 	 * Note that when the loads are equal, prefer @p's prev_cpu.
 	 */
-	if (ctx->i_m == 1) {
-		*sticky_cpdom = ctx->cpdoms_match[0];
-		return ctx->cpus_match[0];
-	} else if (ctx->i_m == 2) {
-		q0 = ctx->cpdoms_match[0]; /* prev_cpu */
-		q1 = ctx->cpdoms_match[1]; /* sync_waker_cpu */
-		if (q0 != q1 &&
-		    (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1))) {
+	if (sctx.i_m == 1) {
+		*sticky_cpdom = sctx.cpuc_match[0]->cpdom_id;
+		return sctx.cpuc_match[0]->cpu_id;
+	} else if (sctx.i_m == 2) {
+		p0 = sctx.cpuc_match[0]; /* prev_cpu */
+		p1 = sctx.cpuc_match[1]; /* sync_waker_cpu */
+		d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
+		d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
+
+		if ((p0 != p1) && (d0 && d1) && (d0->sc_load > d1->sc_load)) {
 			/*
 			 * When a waker's compute domain is chosen, let's just
 			 * stick to the waker's domain. Let's not decide to
@@ -448,11 +439,11 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 			 * always moving to the waker's CPU could introduce a
 			 * thundering herd problem. So return -ENOENT.
 			 */
-			*sticky_cpdom = q1;
+			*sticky_cpdom = p1->cpdom_id;
 			return -ENOENT;
 		} else {
-			*sticky_cpdom = q0;
-			return ctx->cpus_match[0]; /* prev_cpu */
+			*sticky_cpdom = p0->cpdom_id;
+			return p0->cpu_id; /* prev_cpu */
 		}
 	}
 
@@ -461,31 +452,35 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 * active alternative domain where @p can run on.
 	 * Note that when the loads are equal, prefer @p's prev_cpu domain.
 	 */
-	if (ctx->i_nm == 1) {
-		q0 = ctx->cpdoms_not_match[0];
-		if (can_run_on_domain(ctx, q0)) {
-			*sticky_cpdom = q0;
+	if (sctx.i_nm == 1) {
+		p0 = sctx.cpuc_not_match[0];
+		if (can_run_on_domain(ctx, p0->cpdom_id)) {
+			*sticky_cpdom = p0->cpdom_id;
 			return -ENOENT;
 		}
-	} else if (ctx->i_nm == 2) {
-		q0 = ctx->cpdoms_not_match[0];
-		q1 = ctx->cpdoms_not_match[1];
+	} else if (sctx.i_nm == 2) {
+		p0 = sctx.cpuc_not_match[0];
+		p1 = sctx.cpuc_not_match[1];
 
-		if (q0 != q1 && can_run_on_domain(ctx, q0) &&
-		    can_run_on_domain(ctx, q1)) {
-			if (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1)) {
-				*sticky_cpdom = q1;
-				return -ENOENT;
+		if ((p0 != p1) && can_run_on_domain(ctx, p0->cpdom_id) &&
+		    can_run_on_domain(ctx, p1->cpdom_id)) {
+			d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
+			d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
+			if (d0 && d1) {
+				if (d0->sc_load > d1->sc_load) {
+					*sticky_cpdom = p1->cpdom_id;
+					return -ENOENT;
+				}
+				else {
+					*sticky_cpdom = p0->cpdom_id;
+					return -ENOENT;
+				}
 			}
-			else {
-				*sticky_cpdom = q0;
-				return -ENOENT;
-			}
-		} else if (can_run_on_domain(ctx, q0)) {
-			*sticky_cpdom = q0;
+		} else if (can_run_on_domain(ctx, p0->cpdom_id)) {
+			*sticky_cpdom = p0->cpdom_id;
 			return -ENOENT;
-		} else if (can_run_on_domain(ctx, q1)) {
-			*sticky_cpdom = q1;
+		} else if (can_run_on_domain(ctx, p1->cpdom_id)) {
+			*sticky_cpdom = p1->cpdom_id;
 			return -ENOENT;
 		}
 
@@ -537,11 +532,8 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	if (!can_run_on_cpu(ctx, ctx->sync_waker_cpu))
 		return false;
 
-	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | ctx->sync_waker_cpu))
-		return false;
-
 	cpuc_waker = get_cpu_ctx_id(ctx->sync_waker_cpu);
-	if (!cpuc_waker || scx_bpf_dsq_nr_queued(cpuc_waker->cpdom_id))
+	if (!cpuc_waker || nr_queued_on_cpu(cpuc_waker))
 		return false;
 
 	if (nr_cpdoms > 1) {
@@ -556,13 +548,13 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 }
 
 static
-s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
+s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
 	struct cpdom_ctx *cpdc, *mig_cpdc;
 	s32 cpu = -ENOENT, sticky_cpu;
 	bool i_smt_empty;
-	s64 sticky_cpdom = -ENOENT, mig_cpdom, nr_nbr, nuance;
+	s64 sticky_cpdom = -ENOENT, mig_cpdom, nr_nbr;
 	int i, j;
 
 	/*
@@ -662,7 +654,11 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!init_idle_i_mask(ctx, idle_cpumask))
 		goto err_out;
 	if (ctx->i_empty) {
-		cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
+		cpu = sticky_cpu;
+		if (cpu == -ENOENT) {
+			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
+						       sticky_cpdom);
+		}
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU. */
@@ -728,7 +724,11 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!init_idle_ato_masks(ctx, ctx->i_mask))
 		goto err_out;
 	if (ctx->ia_empty && ctx->io_empty) {
-		cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
+		cpu = sticky_cpu;
+		if (cpu == -ENOENT) {
+			cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu,
+						       sticky_cpdom);
+		}
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU in either active or overflow set. */
@@ -756,16 +756,15 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!cpdc || !READ_ONCE(cpdc->is_stealee))
 		goto skip_fully_idle_neighbor;
 
-	nuance = bpf_get_prandom_u32();
 	mig_cpdom = sticky_cpdom;
-	for (i = 0; i < LAVD_CPDOM_MAX_DIST && cpdc; i++) {
+	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
-		for (j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = mig_cpdom + 1) {
+		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
 			if (j >= nr_nbr)
 				break;
-			mig_cpdom  = pick_any_bit(cpdc->neighbor_bits[i], nuance);
+			mig_cpdom = get_neighbor_id(cpdc, i, j);
 			if (mig_cpdom < 0)
 				continue;
 
@@ -814,6 +813,7 @@ skip_fully_idle_neighbor:
 	if (can_run_on_cpu(ctx, ctx->prev_cpu)) {
 		cpu = ctx->prev_cpu;
 		sticky_cpdom = -ENOENT;
+		goto unlock_out;
 	}
 
 	/*
@@ -822,18 +822,17 @@ skip_fully_idle_neighbor:
 	 */
 err_out:
 	cpu = -ENOENT;
-unlock_out:
-	if (sticky_cpdom < 0) {
-		struct cpu_ctx *cpuc;
-		cpuc = get_cpu_ctx_id(cpu >= 0 ? cpu : ctx->prev_cpu);
-		if (cpuc)
-			ctx->cpdom_id = cpuc->cpdom_id;
-	} else
-		ctx->cpdom_id = sticky_cpdom;
 
-	if (cpu == -ENOENT)
+unlock_out:
+	/*
+	 * For non-error cases, cpu should be chosen, so it cannot be negative.
+	 */
+	if (cpu < 0)
 		cpu = pick_random_cpu(ctx);
 
+	/*
+	 * Clean up.
+	 */
 	if (idle_smtmask)
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 	if (idle_cpumask)
@@ -841,22 +840,4 @@ unlock_out:
 	bpf_rcu_read_unlock();
 
 	return cpu;
-}
-
-static
-s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
-		    s32 task_cpu, s32 *cpu, bool *is_idle,
-		    struct cpu_ctx *cpuc_cur)
-{
-	struct pick_ctx ictx = {
-		.p = p,
-		.taskc = taskc,
-		.prev_cpu = task_cpu,
-		.cpuc_cur = cpuc_cur,
-		.wake_flags = 0,
-		.cpdom_id = -ENOMEM,
-	};
-
-	*cpu = pick_idle_cpu(&ictx, is_idle);
-	return ictx.cpdom_id;
 }

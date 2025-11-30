@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import csv
+import fnmatch
 import glob
 import io
 import itertools
@@ -16,6 +17,19 @@ import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional
+
+
+def rglob_no_symlinks(pattern):
+    for base, dirs, files in os.walk(".", followlinks=False):
+        for name in files:
+            path = os.path.join(base, name)
+            # skip symlinked files too (optional)
+            if not os.path.islink(path):
+                # Convert to relative path and normalize separators
+                rel_path = os.path.relpath(path, ".")
+                # Match against the full relative path using fnmatch
+                if fnmatch.fnmatch(rel_path, pattern):
+                    yield rel_path
 
 
 async def run_command(
@@ -54,7 +68,7 @@ async def get_kernel_path(kernel_name: str) -> str:
             "build",
             "--no-link",
             "--print-out-paths",
-            f"./.github/include#kernel_{kernel_name}",
+            f"./.nix#kernel_{kernel_name}",
         ]
     )
     return stdout.strip() + "/bzImage"
@@ -204,28 +218,34 @@ async def run_format():
     """Format all targets."""
     print("Running format...", flush=True)
 
-    py_files = glob.glob(".github/include/**/*.py", recursive=True)
+    py_files = list(rglob_no_symlinks(".github/include/**/*.py"))
     if py_files:
         await run_command(["black"] + py_files, no_capture=True)
         await run_command(["isort"] + py_files, no_capture=True)
 
     await run_command(["cargo", "fmt"], no_capture=True)
 
-    nix_files = glob.glob("**/*.nix", root_dir=".github/include/", recursive=True)
+    nix_files = list(rglob_no_symlinks("**/*.nix"))
     if nix_files:
         await run_command(
             ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"]
-            + nix_files,
-            cwd=".github/include",
+            + [os.path.join("../", x) for x in nix_files],
+            cwd=".nix",
             no_capture=True,
         )
 
-    c_files = files = list(
-        itertools.chain.from_iterable(
-            glob.glob(p, recursive=True)
-            for p in ["tools/scxtop/**/*.h", "tools/scxtop/**/*.c"]
-        )
-    )
+    c_patterns = [
+        "tools/scxtop/**/*.h",
+        "tools/scxtop/**/*.c",
+        "scheds/rust/scx_chaos/**/*.c",
+        "scheds/rust/scx_chaos/**/*.h",
+        "scheds/rust/scx_mitosis/**/*.c",
+        "scheds/rust/scx_mitosis/**/*.h",
+    ]
+    c_files = []
+    for pattern in c_patterns:
+        c_files.extend(list(rglob_no_symlinks(pattern)))
+
     if c_files:
         await run_command(["clang-format", "-i"] + c_files, no_capture=True)
 
@@ -239,10 +259,18 @@ async def run_build():
 
     print("Building C schedulers...", flush=True)
     await run_command(["make", "all"], no_capture=True)
-    print("Building Rust schedulers...", flush=True)
-    await run_command(["cargo", "build", "--all-targets", "--locked"], no_capture=True)
 
-    print("✓ Build completed successfully", flush=True)
+    # Run Cargo and Nix builds in parallel
+    print("Building Rust schedulers and scx_chaos with Nix in parallel...", flush=True)
+
+    # Start both builds concurrently
+    cargo_coro = run_command(["cargo", "build", "--all-targets", "--locked"], no_capture=True)
+    nix_coro = run_command(["nix", "build", "--print-build-logs", "--no-link", "./.nix#scx_chaos"])
+
+    # Wait for both to complete (nix output will only appear on failure)
+    await asyncio.gather(cargo_coro, nix_coro)
+
+    print("✓ All builds completed successfully", flush=True)
 
 
 async def run_clippy():
@@ -281,30 +309,29 @@ async def run_tests():
 
     print("Running tests...", flush=True)
 
-    # Make sure the selftest is built in case the build was not already run.
-    await run_command(["cargo", "build", "-p", "arenalib_selftests"], no_capture=True)
-
+    # Run nextest directly on the host
     await run_command(
         [
             "cargo",
             "nextest",
-            "archive",
-            "--archive-file",
-            "target/nextest-archive.tar.zst",
+            "run",
+            "--workspace",
+            "--no-fail-fast",
         ],
         no_capture=True,
     )
 
+    # Build the arena selftest
+    await run_command(["cargo", "build", "-p", "scx_arena_selftests"], no_capture=True)
+
     # Get CPU count
     cpu_count = min(os.cpu_count() or 16, 16)
 
+    # Run arena selftests in VM (requires BPF capabilities)
     await run_command_in_vm(
         "sched_ext/for-next",
-        [
-            sys.argv[0],
-            "test-in-vm",
-        ],
-        memory=10 * 1024 * 1024 * 1024,
+        ["target/debug/scx_arena_selftests"],
+        memory=2 * 1024 * 1024 * 1024,
         cpus=cpu_count,
         no_capture=True,
     )
@@ -596,7 +623,7 @@ async def run_veristat():
                     if verdict != "success":
                         prog_name = cleaned_row.get("prog_name", "")
                         if prog_name:
-                            reproduction_cmd = f"nix run \".github/include#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
+                            reproduction_cmd = f"nix run \".nix#ci\" veristat {result['kernel']} {result['scheduler']} {prog_name}"
                             reproduction_cmds.add(reproduction_cmd)
 
             for cmd in sorted(reproduction_cmds):
@@ -623,10 +650,25 @@ async def run_veristat():
 async def extract_bpf_objects(scheduler_name: str, output_dir: str) -> List[str]:
     """Extract BPF objects from scheduler binary using existing script."""
 
-    # Find the scheduler binary in target/debug
-    binary_path = f"target/debug/{scheduler_name}"
-    if not os.path.exists(binary_path):
-        raise Exception(f"Warning: Scheduler binary {binary_path} not found")
+    if scheduler_name == "scx_chaos":
+        # Use Nix-built binary for scx_chaos
+        print(f"Building {scheduler_name} with Nix for BPF extraction...", flush=True)
+        stdout = await run_command(
+            [
+                "nix",
+                "build",
+                "--no-link",
+                "--print-out-paths",
+                f"./.nix#{scheduler_name}",
+            ]
+        )
+        nix_store_path = stdout.strip()
+        binary_path = f"{nix_store_path}/bin/{scheduler_name}"
+    else:
+        # Find the scheduler binary in target/debug for other schedulers
+        binary_path = f"target/debug/{scheduler_name}"
+        if not os.path.exists(binary_path):
+            raise Exception(f"Warning: Scheduler binary {binary_path} not found")
 
     result = await run_command(
         ["./scripts/extract_bpf_objects.sh", binary_path, output_dir]
@@ -653,7 +695,11 @@ async def run_veristat_debug(kernel_name: str, scheduler_name: str, symbol_name:
     )
 
     # Build the specific scheduler first
-    await run_command(["cargo", "build", "-p", scheduler_name], no_capture=True)
+    if scheduler_name == "scx_chaos":
+        # For scx_chaos, building is handled in extract_bpf_objects using Nix
+        pass
+    else:
+        await run_command(["cargo", "build", "-p", scheduler_name], no_capture=True)
 
     # Create temporary directory for BPF object extraction
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -685,24 +731,6 @@ async def run_veristat_debug(kernel_name: str, scheduler_name: str, symbol_name:
         )
 
 
-async def run_tests_in_vm():
-    """Run tests when already inside the VM."""
-
-    subprocess.run(
-        [
-            "cargo-nextest",
-            "nextest",
-            "run",
-            "--archive-file",
-            "target/nextest-archive.tar.zst",
-            "--workspace-remap",
-            ".",
-            "--no-fail-fast",
-        ],
-        check=True,
-    )
-
-    subprocess.run(["target/debug/arenalib_selftests"], check=True)
 
 
 async def run_all():
@@ -743,11 +771,6 @@ async def main():
 
     parser_all = subparsers.add_parser("all", help="Run all commands")
 
-    parser_test_in_vm = subparsers.add_parser(
-        "test-in-vm",
-        help="Run Rust tests in VM (intended to be invoked by this script)",
-    )
-
     args = parser.parse_args()
 
     if args.command == "format":
@@ -773,8 +796,6 @@ async def main():
             )
         else:
             await run_veristat()
-    elif args.command == "test-in-vm":
-        await run_tests_in_vm()
     elif args.command == "all":
         await run_all()
 

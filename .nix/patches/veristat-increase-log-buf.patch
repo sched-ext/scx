@@ -1,0 +1,13 @@
+diff --git a/src/veristat.c b/src/veristat.c
+index d532dd8..d2240c5 100644
+--- a/src/veristat.c
++++ b/src/veristat.c
+@@ -970,7 +970,7 @@ static void free_verif_stats(struct verif_stats *stats, size_t stat_cnt)
+ 	free(stats);
+ }
+ 
+-static char verif_log_buf[64 * 1024];
++static char verif_log_buf[1024  * 1024];
+ 
+ #define MAX_PARSED_LOG_LINES 100
+ 

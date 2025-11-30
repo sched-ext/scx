@@ -125,6 +125,35 @@ pub struct TraceArgs {
     pub system_stats: bool,
 }
 
+#[derive(Clone, Parser, Debug)]
+#[command(about = "Runs the MCP server for scheduler data access")]
+pub struct McpArgs {
+    /// Run in daemon mode (persistent, continuously collecting data).
+    /// Without this flag, the server runs in one-shot mode (query-response per invocation).
+    #[arg(short = 'd', long)]
+    pub daemon: bool,
+
+    /// Enable MCP logging capability (sends logs to client).
+    #[arg(short = 'l', long)]
+    pub enable_logging: bool,
+
+    /// Enable verbose output for debugging MCP protocol.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Stats unix socket path for scx_stats integration.
+    #[arg(long, default_value = STATS_SOCKET_PATH)]
+    pub stats_socket_path: String,
+
+    /// Process ID to monitor (or -1 for all processes).
+    #[arg(long, default_value_t = -1)]
+    pub process_id: i32,
+
+    /// Show scx_layered data (process level layer_id's).
+    #[arg(long)]
+    pub layered: bool,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
@@ -133,6 +162,9 @@ pub enum Commands {
 
     /// Collects a trace.
     Trace(TraceArgs),
+
+    /// Runs the MCP (Model Context Protocol) server.
+    Mcp(McpArgs),
 
     #[clap(hide = true)]
     GenerateCompletions {

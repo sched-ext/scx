@@ -19,7 +19,7 @@ struct preemption_info {
 };
 
 __hidden
-u64 get_est_stopping_clk(struct task_ctx *taskc, u64 now)
+u64 get_est_stopping_clk(task_ctx *taskc, u64 now)
 {
 	return now + min(taskc->avg_runtime, taskc->slice);
 }
@@ -65,14 +65,14 @@ static bool can_x_kick_cpu2(struct preemption_info *prm_x,
 }
 
 static void init_prm_by_task(struct preemption_info *prm_task,
-			     struct task_ctx *taskc, u64 now)
+			     task_ctx *taskc, u64 now)
 {
 	prm_task->est_stopping_clk = get_est_stopping_clk(taskc, now);
 	prm_task->lat_cri = taskc->lat_cri;
 	prm_task->cpuc = NULL;
 }
 
-static bool is_worth_kick_other_task(struct task_ctx *taskc)
+static bool is_worth_kick_other_task(task_ctx *taskc)
 {
 	/*
 	 * Preemption is not free. It is expensive involving context switching,
@@ -84,7 +84,7 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 				       s32 preferred_cpu,
-				       struct task_ctx *taskc, u64 now)
+				       task_ctx *taskc, u64 now)
 {
 	/*
 	 * We see preemption as a load-balancing problem. In a system with N
@@ -133,7 +133,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
-		if (cpu >= __nr_cpu_ids || cpu == preferred_cpu)
+		if (cpu >= nr_cpu_ids || cpu == preferred_cpu)
 			continue;
 
 		/*
@@ -246,6 +246,7 @@ __hidden
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
 	u64 dur, new_slice = 0;
+	u64 target_slice;
 
 	/*
 	 * Shrink the time slice of the slice-boosted task into a regular
@@ -255,9 +256,16 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 	 */
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 
+	/*
+	 * If pinned_slice_ns is enabled and there are pinned tasks
+	 * waiting on this CPU, use pinned slice instead of regular slice.
+	 */
+	target_slice = (pinned_slice_ns && cpuc->nr_pinned_tasks) ?
+		       pinned_slice_ns : sys_stat.slice;
+
 	dur = time_delta(now, cpuc->running_clk);
-	if (sys_stat.slice > dur)
-		new_slice = time_delta(sys_stat.slice, dur);
+	if (target_slice > dur)
+		new_slice = time_delta(target_slice, dur);
 
 	if (!new_slice)
 		scx_bpf_kick_cpu(cpuc->cpu_id, SCX_KICK_PREEMPT);
@@ -270,33 +278,59 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 }
 
 __hidden
-void shrink_boosted_slice_at_tick(struct task_struct *p,
-					 struct cpu_ctx *cpuc, u64 now)
+void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
 {
-	u64 dur, new_slice = 0;
+	u64 ub, duration, new_slice;
 
 	/*
-	 * Shrink the time slice of the slice-boosted task into a regular
-	 * slice by reducing the remaining time slice to the regular one.
+	 * Calculate the upper bound of running this task
+	 * since it is scheduled this time.
 	 */
-	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
-
-	dur = time_delta(now, cpuc->running_clk);
-	if (sys_stat.slice > dur)
-		new_slice = time_delta(sys_stat.slice, dur);
+	if (pinned_slice_ns)
+		ub = min(pinned_slice_ns, sys_stat.slice);
+	else
+		ub = sys_stat.slice;
 
 	/*
-	 * It is okay to set p->scx.slice to zero since this is supposed to
-	 * be called by ops.tick(), which is the scheduling point.
+	 * Calculate how long the task has been running
+	 * since it was scheduled.
 	 */
+	duration = time_delta(now, cpuc->running_clk);
+
+	/* Limit the task's time slice. */
+	if (duration >= ub) {
+		/*
+		 * If the task is running beyond the current upper bound,
+		 * stop it right now. Note that it is okay to set p->scx.slice
+		 * to zero since this is supposed to be called by ops.tick(),
+		 * which is the scheduling point.
+		 */
+		new_slice = 0;
+	} else {
+		/*
+		 * When pinned tasks are waiting to run, any task should not
+		 * go beyond the current upper bound.
+		 */
+		new_slice = time_delta(ub, duration);
+	}
+
 	p->scx.slice = new_slice;
+	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
+	cpuc->nr_preempt++;
+}
+
+__hidden
+void preempt_at_tick(struct task_struct *p, struct cpu_ctx *cpuc)
+{
+	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
+	p->scx.slice = 0;
 
 	cpuc->nr_preempt++;
 }
 
 __hidden
 void try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc,
+					 task_ctx *taskc,
 					 s32 preferred_cpu,
 					 u64 dsq_id)
 {

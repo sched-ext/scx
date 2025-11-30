@@ -37,7 +37,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use arenalib::ArenaLib;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::Skel;
@@ -45,6 +44,7 @@ use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::info;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -60,6 +60,8 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
+
+use crate::types::dom_ctx;
 
 const SCHEDULER_NAME: &str = "scx_wd40";
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -477,7 +479,9 @@ impl<'a> Scheduler<'a> {
             for dom in node_domains.iter() {
                 // XXX Remove this by using the topo node's cpumask.
                 let ptr = bss_data.topo_nodes[index as usize][dom.id()];
-                let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+                let domc = unsafe {
+                    &mut *std::ptr::with_exposed_provenance_mut::<dom_ctx>(ptr.try_into().unwrap())
+                };
                 update_bpf_mask(domc.cpumask, &dom.mask())?;
 
                 bss_data.dom_numa_id_map[dom.id()] =
@@ -495,7 +499,9 @@ impl<'a> Scheduler<'a> {
             let mut ctx = dom.ctx.lock().unwrap();
 
             let ptr = skel.maps.bss_data.as_mut().unwrap().topo_nodes[index as usize][*id];
-            let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+            let domc = unsafe {
+                &mut *std::ptr::with_exposed_provenance_mut::<dom_ctx>(ptr.try_into().unwrap())
+            };
             *ctx = Some(domc);
         }
 

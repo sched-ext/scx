@@ -123,7 +123,7 @@ static inline u32 cpu_to_dom_id(u32 cpu)
 
 	topo = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
 	if (!topo) {
-		scx_bpf_error("cpu is offline");
+		scx_bpf_error("cpu %u has no topology node set", cpu);
 		return MAX_DOMS;
 	}
 

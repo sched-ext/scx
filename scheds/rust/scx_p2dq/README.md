@@ -81,7 +81,12 @@ options for gaming:
    utilization of interactive tasks.
  - `--freq-control` for controling CPU frequency with certain drivers.
  - `--cpu-priority` uses a min-heap to schedule on CPUs based on a score of
-   most recently used and preferred core value.
+   most recently used and preferred core value. **Requires kernel support for
+   `sched_core_priority` symbol** - typically available on systems with hybrid
+   CPU architectures (e.g., Intel Alder Lake P/E-cores, AMD with preferred cores)
+   when using appropriate CPU frequency governors (e.g., `amd-pstate`, Intel HWP).
+   The scheduler will automatically disable this feature and warn if kernel support
+   is unavailable.
  - `--sched-mode` can use the performance mode to schedule on Big cores.
  - `--idle-resume-us` how long a CPU stays idle before dropping to a lower C-state.
 
@@ -105,6 +110,23 @@ known in advance. `scxtop` can be used to get an understanding of time slice
 utilization so that DSQs can be properly configured. For desktop systems keeping
 the interactive ratio small (ex: <5) and using a small number of queues will
 give a general performance with autoslice enabled.
+
+### Kernel Requirements
+
+Some features require specific kernel support:
+
+- **`--cpu-priority`**: Requires kernel with `sched_core_priority` symbol, typically
+  available on:
+  - Kernels with hybrid CPU support (`CONFIG_SCHED_MC`)
+  - Systems with Intel HWP (Hardware P-states) or AMD P-state support
+  - Appropriate CPU frequency governor loaded (e.g., `amd-pstate`)
+  - Recent kernel versions (check with: `grep sched_core_priority /proc/kallsyms`)
+
+  Not available on: older kernels, virtual machines, or systems without hybrid CPU
+  support. The scheduler will automatically detect and disable this feature with a
+  warning if unavailable.
+
+- **`--atq-enabled`**: Requires BPF arena support (kernel 6.12+)
 
 ## Things you probably shouldn't use `p2dq` for
 

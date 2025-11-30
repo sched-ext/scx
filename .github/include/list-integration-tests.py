@@ -122,6 +122,7 @@ def main():
     for kernel in kernels_to_test:
 
         for scheduler in [
+            "scx_beerland",
             "scx_bpfland",
             "scx_chaos",
             "scx_cosmos",

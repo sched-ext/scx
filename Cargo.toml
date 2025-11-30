@@ -1,6 +1,7 @@
 [workspace]
-members = [ "rust/arenalib/arenalib",
-    "rust/arenalib/selftests",
+members = [
+    "rust/scx_arena/scx_arena",
+    "rust/scx_arena/selftests",
     "rust/scx_bpf_unittests",
     "rust/scx_cargo",
     "rust/scx_raw_pmu",
@@ -9,6 +10,7 @@ members = [ "rust/arenalib/arenalib",
     "rust/scx_stats/scx_stats_derive",
     "rust/scx_userspace_arena",
     "rust/scx_utils",
+    "scheds/rust/scx_beerland",
     "scheds/rust/scx_bpfland",
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
@@ -22,9 +24,7 @@ members = [ "rust/arenalib/arenalib",
     "scheds/rust/scx_rusty",
     "scheds/rust/scx_tickless",
     "scheds/rust/scx_wd40",
-    "tools/scx_loader",
     "tools/scxcash",
-    "tools/scxctl",
     "tools/scxtop",
     "tools/vmlinux_docify",
     "tools/xtask",
@@ -42,6 +42,5 @@ incremental = true
 
 [profile.release-fast]
 inherits = "release"
-target-cpu = "native"
 lto = false
 incremental = true

@@ -5,6 +5,7 @@
 
 mod app;
 pub mod bpf_intf;
+mod bpf_prog_data;
 pub mod bpf_skel;
 mod bpf_stats;
 pub mod cli;
@@ -18,26 +19,30 @@ mod keymap;
 pub mod layered_util;
 mod llc_data;
 pub mod mangoapp;
+pub mod mcp;
 mod mem_stats;
-mod network_stats;
+pub mod network_stats;
 mod node_data;
 mod perfetto_trace;
 mod power_data;
 mod proc_data;
 pub mod profiling_events;
+pub mod render;
 pub mod search;
 mod stats;
 mod symbol_data;
 mod theme;
 mod thread_data;
+pub mod topology;
 pub mod tracer;
 mod tui;
 pub mod util;
 
 pub use crate::bpf_skel::types::bpf_event;
 pub use app::App;
+pub use bpf_prog_data::{BpfProgData, BpfProgStats};
 pub use bpf_skel::*;
-pub use columns::Columns;
+pub use columns::{Column, Columns};
 pub use cpu_data::CpuData;
 pub use cpu_stats::{CpuStatSnapshot, CpuStatTracker};
 pub use event_data::EventData;
@@ -83,6 +88,10 @@ pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AppState {
+    /// Application is in the BPF programs state.
+    BpfPrograms,
+    /// Application is in the BPF program detail state.
+    BpfProgramDetail,
     /// Application is in the default state.
     Default,
     /// Application is in the help state.
@@ -488,6 +497,7 @@ pub enum Action {
     SoftIRQ(SoftIRQAction),
     Tick,
     TickRateChange(std::time::Duration),
+    ToggleBpfPerfSampling,
     ToggleCpuFreq,
     ToggleLocalization,
     ToggleHwPressure,

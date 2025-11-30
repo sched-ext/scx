@@ -16,7 +16,7 @@
 static void __inc_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
-	struct task_ctx *taskc = get_task_ctx(p);
+	task_ctx *taskc = get_task_ctx(p);
 
 	if (taskc) {
 		if (!cpuc)
@@ -35,7 +35,7 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 static void __dec_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
-	struct task_ctx *taskc = get_task_ctx(p);
+	task_ctx *taskc = get_task_ctx(p);
 
 	if (taskc && test_task_flag(taskc, LAVD_FLAG_FUTEX_BOOST)) {
 		if (!cpuc)
@@ -62,7 +62,7 @@ static void dec_futex_boost(void)
 }
 
 __hidden
-void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
+void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc)
 {
 	if (is_lock_holder(taskc))
 		set_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);

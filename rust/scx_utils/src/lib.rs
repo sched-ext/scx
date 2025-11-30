@@ -34,15 +34,12 @@ pub use log::info;
 pub use log::warn;
 pub use paste::paste;
 
-mod clang_info;
+/// Gated exports of `scx_cargo::BpfBuilder` to avoid breaking existing users with this API change.
+/// Please switch build time support to the `scx_cargo` crate.
+#[cfg(feature = "deprecated-build-support")]
+pub use scx_cargo::{BpfBuilder, ClangInfo};
 
 mod bindings;
-
-mod bpf_builder;
-pub use bpf_builder::BpfBuilder;
-
-mod builder;
-pub use builder::Builder;
 
 mod user_exit_info;
 pub use user_exit_info::ScxConsts;
@@ -55,6 +52,7 @@ pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
 
 pub mod build_id;
 pub mod compat;
+pub use compat::ksym_exists;
 pub use compat::ROOT_PREFIX;
 
 mod libbpf_logger;

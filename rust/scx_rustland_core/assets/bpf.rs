@@ -3,7 +3,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::io::{self, ErrorKind};
 use std::mem::MaybeUninit;
 
 use crate::bpf_intf;
@@ -13,7 +12,6 @@ use crate::bpf_skel::*;
 use std::ffi::c_int;
 use std::ffi::c_ulong;
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -30,7 +28,7 @@ use libbpf_rs::libbpf_sys::bpf_object_open_opts;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 
-use libc::{pthread_self, pthread_setschedparam, sched_param};
+use libc::{c_char, pthread_self, pthread_setschedparam, sched_param};
 
 #[cfg(target_env = "musl")]
 use libc::timespec;
@@ -48,6 +46,7 @@ use scx_rustland_core::ALLOCATOR;
 
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
+const TASK_COMM_LEN: usize = 16;
 
 // Allow to dispatch the task on any CPU.
 //
@@ -86,6 +85,23 @@ pub struct QueuedTask {
     pub exec_runtime: u64,    // Total cpu time since last sleep (in ns)
     pub weight: u64,          // Task priority in the range [1..10000] (default is 100)
     pub vtime: u64,           // Current task vruntime / deadline (set by the scheduler)
+    pub enq_cnt: u64,
+    pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
+}
+
+impl QueuedTask {
+    /// Convert the task's comm field (C char array) into a Rust String.
+    #[allow(dead_code)]
+    pub fn comm_str(&self) -> String {
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(self.comm.as_ptr() as *const u8, self.comm.len()) };
+
+        // Find the first NUL byte, or take the whole array.
+        let nul_pos = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+
+        // Convert to String (handle invalid UTF-8 gracefully).
+        String::from_utf8_lossy(&bytes[..nul_pos]).into_owned()
+    }
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
@@ -96,6 +112,7 @@ pub struct DispatchedTask {
     pub flags: u64, // task's enqueue flags
     pub slice_ns: u64, // time slice in nanoseconds assigned to the task (0 = use default time slice)
     pub vtime: u64, // this value can be used to send the task's vruntime or deadline directly to the underlying BPF dispatcher
+    pub enq_cnt: u64,
 }
 
 impl DispatchedTask {
@@ -110,6 +127,7 @@ impl DispatchedTask {
             flags: task.flags,
             slice_ns: 0, // use default time slice
             vtime: 0,
+            enq_cnt: task.enq_cnt,
         }
     }
 }
@@ -149,6 +167,8 @@ impl EnqueuedMessage {
             exec_runtime: self.inner.exec_runtime,
             weight: self.inner.weight,
             vtime: self.inner.vtime,
+            enq_cnt: self.inner.enq_cnt,
+            comm: self.inner.comm,
         }
     }
 }
@@ -193,6 +213,7 @@ impl<'cb> BpfScheduler<'cb> {
         partial: bool,
         debug: bool,
         builtin_idle: bool,
+        slice_ns: u64,
         name: &str,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -234,9 +255,8 @@ impl<'cb> BpfScheduler<'cb> {
         skel.maps.rodata_data.as_mut().unwrap().smt_enabled = topo.smt_enabled;
 
         // Enable scheduler flags.
-        skel.struct_ops.rustland_mut().flags = *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+        skel.struct_ops.rustland_mut().flags =
+            *compat::SCX_OPS_ENQ_LAST | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
@@ -244,15 +264,12 @@ impl<'cb> BpfScheduler<'cb> {
         skel.maps.rodata_data.as_mut().unwrap().usersched_pid = std::process::id();
         skel.maps.rodata_data.as_mut().unwrap().khugepaged_pid = Self::khugepaged_pid();
         skel.maps.rodata_data.as_mut().unwrap().builtin_idle = builtin_idle;
+        skel.maps.rodata_data.as_mut().unwrap().slice_ns = slice_ns;
         skel.maps.rodata_data.as_mut().unwrap().debug = debug;
         let _ = Self::set_scx_ops_name(&mut skel.struct_ops.rustland_mut().name, name);
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
-
-        // Initialize cache domains.
-        Self::init_l2_cache_domains(&mut skel, &topo)?;
-        Self::init_l3_cache_domains(&mut skel, &topo)?;
 
         let struct_ops = Some(scx_ops_attach!(skel, rustland)?);
 
@@ -278,8 +295,7 @@ impl<'cb> BpfScheduler<'cb> {
             let err = Self::use_sched_ext();
             if err < 0 {
                 return Err(anyhow::Error::msg(format!(
-                    "sched_setscheduler error: {}",
-                    err
+                    "sched_setscheduler error: {err}"
                 )));
             }
         }
@@ -354,98 +370,6 @@ impl<'cb> BpfScheduler<'cb> {
         }
 
         0
-    }
-
-    fn enable_sibling_cpu(
-        skel: &mut BpfSkel<'_>,
-        lvl: usize,
-        cpu: usize,
-        sibling_cpu: usize,
-    ) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_sibling_cpu;
-        let mut args = domain_arg {
-            lvl_id: lvl as c_int,
-            cpu_id: cpu as c_int,
-            sibling_cpu_id: sibling_cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
-    fn init_cache_domains<SiblingCpuFn>(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-        cache_lvl: usize,
-        enable_sibling_cpu_fn: &SiblingCpuFn,
-    ) -> Result<(), std::io::Error>
-    where
-        SiblingCpuFn: Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
-    {
-        // Determine the list of CPU IDs associated to each cache node.
-        let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
-        for core in topo.all_cores.values() {
-            for (cpu_id, cpu) in &core.cpus {
-                let cache_id = match cache_lvl {
-                    2 => cpu.l2_id,
-                    3 => cpu.l3_id,
-                    _ => panic!("invalid cache level {}", cache_lvl),
-                };
-                cache_id_map
-                    .entry(cache_id)
-                    .or_insert_with(Vec::new)
-                    .push(*cpu_id);
-            }
-        }
-
-        // Update the BPF cpumasks for the cache domains.
-        for (_cache_id, cpus) in cache_id_map {
-            for cpu in &cpus {
-                for sibling_cpu in &cpus {
-                    enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu).map_err(|e| {
-                        io::Error::new(
-                            ErrorKind::Other,
-                            format!(
-                                "enable_sibling_cpu_fn failed for cpu {} sibling {}: err {}",
-                                cpu, sibling_cpu, e
-                            ),
-                        )
-                    })?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn init_l2_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
-    }
-
-    fn init_l3_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
     }
 
     // Notify the BPF component that the user-space scheduler has completed its scheduling cycle,
@@ -566,6 +490,7 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Pick an idle CPU for the target PID.
+    #[allow(dead_code)]
     pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
         let prog = &mut self.skel.progs.rs_select_cpu;
         let mut args = task_cpu_arg {
@@ -612,10 +537,7 @@ impl<'cb> BpfScheduler<'cb> {
                 Ok(Some(task))
             }
             res if res < 0 => Err(res),
-            res => panic!(
-                "Unexpected return value from libbpf-rs::consume_raw(): {}",
-                res
-            ),
+            res => panic!("Unexpected return value from libbpf-rs::consume_raw(): {res}"),
         }
     }
 
@@ -636,6 +558,7 @@ impl<'cb> BpfScheduler<'cb> {
             flags,
             slice_ns,
             vtime,
+            enq_cnt,
             ..
         } = &mut dispatched_task.as_mut();
 
@@ -644,6 +567,7 @@ impl<'cb> BpfScheduler<'cb> {
         *flags = task.flags;
         *slice_ns = task.slice_ns;
         *vtime = task.vtime;
+        *enq_cnt = task.enq_cnt;
 
         // Store the task in the user ring buffer.
         //

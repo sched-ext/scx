@@ -163,6 +163,9 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        let slice_ns = opts.slice_us * NSEC_PER_USEC;
+        let slice_ns_min = opts.slice_us_min * NSEC_PER_USEC;
+
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             open_object,
@@ -171,6 +174,7 @@ impl<'a> Scheduler<'a> {
             opts.partial,
             opts.verbose,
             true, // Enable built-in idle CPU selection policy
+            slice_ns_min,
             "rustland",
         )?;
 
@@ -189,16 +193,13 @@ impl<'a> Scheduler<'a> {
             tasks: BTreeSet::new(),
             vruntime_now: 0,
             init_page_faults: 0,
-            slice_ns: opts.slice_us * NSEC_PER_USEC,
-            slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
+            slice_ns,
+            slice_ns_min,
         })
     }
 
     fn get_metrics(&mut self) -> Metrics {
-        let page_faults = match Self::get_page_faults() {
-            Ok(page_faults) => page_faults,
-            Err(_) => 0,
-        };
+        let page_faults = Self::get_page_faults().unwrap_or_default();
         if self.init_page_faults == 0 {
             self.init_page_faults = page_faults;
         }
@@ -227,19 +228,9 @@ impl<'a> Scheduler<'a> {
         ts.as_nanos() as u64
     }
 
-    // Return the total amount of tasks waiting in the user-space scheduler.
-    fn nr_tasks_scheduled(&mut self) -> u64 {
-        self.tasks.len() as u64
-    }
-
-    // Return the total amount of tasks waiting to be consumed by the user-space scheduler.
-    fn nr_tasks_queued(&mut self) -> u64 {
-        *self.bpf.nr_queued_mut()
-    }
-
-    // Return the total amount of tasks that are waiting to be scheduled.
-    fn nr_tasks_waiting(&mut self) -> u64 {
-        self.nr_tasks_queued() + self.nr_tasks_scheduled()
+    // Return a value proportional to the task's weight.
+    fn scale_by_task_weight(task: &QueuedTask, value: u64) -> u64 {
+        value * task.weight / 100
     }
 
     // Return a value inversely proportional to the task's weight.
@@ -247,78 +238,75 @@ impl<'a> Scheduler<'a> {
         value * 100 / task.weight
     }
 
-    // Update task's vruntime based on the information collected from the kernel and return to the
-    // caller the evaluated task's deadline.
-    //
-    // This method implements the main task ordering logic of the scheduler.
+    /// Updates a task's virtual runtime based on kernel information and
+    /// returns the evaluated deadline.
+    ///
+    /// This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &mut QueuedTask) -> u64 {
-        // Update vruntime_now to track the latest observed vruntime.
-        if self.vruntime_now < task.vtime {
-            self.vruntime_now = task.vtime;
-        }
+        // Update task's vruntime.
+        task.vtime = if task.vtime == 0 {
+            // Re-align new tasks to the current vruntime.
+            self.vruntime_now
+        } else {
+            // Prevent sleeping tasks from gaining more than one full slice of vruntime credit.
+            let vruntime_min = self.vruntime_now.saturating_sub(self.slice_ns);
+            task.vtime.max(vruntime_min)
+        };
 
-        // Update task's vruntime re-aligning it to vruntime_now (never allow a task to accumulate
-        // a budget of more than a time slice to prevent starvation).
-        let vruntime_now = self.vruntime_now.saturating_sub(self.slice_ns);
-        if task.vtime == 0 {
-            // Slightly penalize new tasks by charging an extra time slice to prevent bursts of such
-            // tasks from disrupting the responsiveness of already running ones.
-            task.vtime = vruntime_now + Self::scale_by_task_weight_inverse(task, self.slice_ns);
-        } else if task.vtime < vruntime_now {
-            task.vtime = vruntime_now;
-        }
-        task.vtime += Self::scale_by_task_weight_inverse(task, task.stop_ts - task.start_ts);
+        // Compute the time slice the task just consumed.
+        let slice_ns = task.stop_ts.saturating_sub(task.start_ts);
 
-        // Return the task's deadline.
-        task.vtime + task.exec_runtime.min(self.slice_ns * 100)
+        // Update task and global vruntimes.
+        let vslice = Self::scale_by_task_weight_inverse(task, slice_ns);
+        task.vtime += vslice;
+        self.vruntime_now += vslice;
+
+        // Compute the deadline, adding the accumulated runtime since the last sleep. Cap
+        // exec_runtime to 100 time slices to prevent starvation of CPU-intensive tasks.
+        task.vtime + task.exec_runtime.min(self.slice_ns.saturating_mul(100))
     }
 
-    // Dispatch the first task from the task pool (sending them to the BPF dispatcher).
-    //
-    // Return true on success, false if the BPF backend can't accept any more dispatch.
+    /// Dispatch the next task in the queue.
+    ///
+    /// Return true if dispatching succeeded or there was no task to dispatch, or false if
+    /// dispatching failed (the task is automatically re-enqueued in that case).
     fn dispatch_task(&mut self) -> bool {
-        let nr_waiting = self.nr_tasks_waiting() + 1;
+        // Retrieve the next task to dispatch, if any.
+        let Some(task) = self.tasks.pop_first() else {
+            return true;
+        };
 
-        if let Some(task) = self.tasks.pop_first() {
-            // Scale time slice based on the amount of tasks that are waiting in the
-            // scheduler's queue and the previously unused time slice budget, but make sure
-            // to assign at least slice_us_min.
-            let slice_ns = (self.slice_ns / nr_waiting).max(self.slice_ns_min);
+        // Initialize a dispatched task from the queued one.
+        let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
-            // Create a new task to dispatch.
-            let mut dispatched_task = DispatchedTask::new(&task.qtask);
+        // Assign the minimum time slice scaled by the task's priority.
+        dispatched_task.slice_ns = Self::scale_by_task_weight(&task.qtask, self.slice_ns_min);
 
-            // Assign the time slice to the task and propagate the vruntime.
-            dispatched_task.slice_ns = slice_ns;
+        // Propagate the evaluated deadline to the BPF backend.
+        dispatched_task.vtime = task.deadline;
 
-            // Propagate the evaluated task's deadline to the scx_rustland_core backend.
-            dispatched_task.vtime = task.deadline;
-
-            // Try to pick an idle CPU for the task.
-            let cpu = self
+        // Attempt to select an idle CPU for the task (if percpu_local is enabled, send per-CPU
+        // tasks directly to their only usable CPU).
+        dispatched_task.cpu = if self.opts.percpu_local {
+            task.qtask.cpu
+        } else {
+            match self
                 .bpf
-                .select_cpu(task.qtask.pid, task.qtask.cpu, task.qtask.flags);
-            dispatched_task.cpu = if cpu >= 0 {
-                // An idle CPU was found, dispatch the task there.
-                cpu
-            } else if self.opts.percpu_local && task.qtask.nr_cpus_allowed == 1 {
-                // Task is restricted to run on a single CPU, dispatch it to that one.
-                task.qtask.cpu
-            } else {
-                // No idle CPU found, dispatch to the first CPU available.
-                RL_CPU_ANY
-            };
-
-            // Send task to the BPF dispatcher.
-            if self.bpf.dispatch_task(&dispatched_task).is_err() {
-                // If dispatching fails, re-add the task to the pool and skip further dispatching.
-                self.tasks.insert(task);
-
-                return false;
+                .select_cpu(task.qtask.pid, task.qtask.cpu, task.qtask.flags)
+            {
+                cpu if cpu >= 0 => cpu,
+                _ => RL_CPU_ANY,
             }
+        };
+
+        // Send the task to the BPF dispatcher.
+        if self.bpf.dispatch_task(&dispatched_task).is_err() {
+            // Dispatching failed: reinsert the task and stop dispatching.
+            self.tasks.insert(task);
+            return false;
         }
 
-        return true;
+        true
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -342,15 +330,10 @@ impl<'a> Scheduler<'a> {
                     break;
                 }
                 Err(err) => {
-                    warn!("Error: {}", err);
+                    warn!("Error: {err}");
                     break;
                 }
             }
-        }
-
-        // Dispatch the first task from the task pool only if there are tasks available.
-        if !self.tasks.is_empty() {
-            self.dispatch_task();
         }
     }
 
@@ -358,17 +341,16 @@ impl<'a> Scheduler<'a> {
     // and dispatch them to the BPF part via the dispatched list).
     fn schedule(&mut self) {
         self.drain_queued_tasks();
+        self.dispatch_task();
 
-        // Notify the dispatcher if there are still pending tasks to be processed,
+        // Notify the dispatcher if there are still pending tasks to be processed.
         self.bpf.notify_complete(self.tasks.len() as u64);
     }
 
     // Get total page faults from the process.
     fn get_page_faults() -> Result<u64, io::Error> {
-        let myself = Process::myself().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let stat = myself
-            .stat()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let myself = Process::myself().map_err(io::Error::other)?;
+        let stat = myself.stat().map_err(io::Error::other)?;
 
         Ok(stat.minflt + stat.majflt)
     }

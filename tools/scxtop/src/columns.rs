@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::bpf_prog_data::BpfProgData;
 use crate::symbol_data::SymbolSample;
 use crate::util::{format_bytes, format_percentage};
 use crate::MemStatSnapshot;
@@ -811,6 +812,219 @@ pub fn get_memory_detail_metrics() -> Vec<&'static str> {
     ]
 }
 
+/// Returns columns for BPF program statistics display
+pub fn get_bpf_program_columns() -> Vec<Column<u32, BpfProgData>> {
+    vec![
+        Column {
+            header: "ID",
+            constraint: Constraint::Length(8),
+            visible: true,
+            value_fn: Box::new(|id, _| id.to_string()),
+        },
+        Column {
+            header: "Type",
+            constraint: Constraint::Length(18),
+            visible: true,
+            value_fn: Box::new(|_, data| data.prog_type.clone()),
+        },
+        Column {
+            header: "Scheduler",
+            constraint: Constraint::Length(15),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                if data.is_sched_ext {
+                    data.sched_ext_ops_name
+                        .clone()
+                        .unwrap_or_else(|| "sched_ext".to_string())
+                } else {
+                    "-".to_string()
+                }
+            }),
+        },
+        Column {
+            header: "Name",
+            constraint: Constraint::Fill(1),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                if data.name.is_empty() {
+                    format!("<unnamed-{}>", data.id)
+                } else {
+                    data.name.clone()
+                }
+            }),
+        },
+        Column {
+            header: "Runtime",
+            constraint: Constraint::Length(12),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                if data.run_time_ns > 1_000_000_000 {
+                    format!("{:.2}s", data.run_time_ns as f64 / 1_000_000_000.0)
+                } else if data.run_time_ns > 1_000_000 {
+                    format!("{:.2}ms", data.run_time_ns as f64 / 1_000_000.0)
+                } else if data.run_time_ns > 1_000 {
+                    format!("{:.2}μs", data.run_time_ns as f64 / 1_000.0)
+                } else {
+                    format!("{}ns", data.run_time_ns)
+                }
+            }),
+        },
+        Column {
+            header: "Run Count",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| data.run_cnt.to_string()),
+        },
+        Column {
+            header: "Calls/sec",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                let rate = data.calls_per_second();
+                if rate >= 1_000_000.0 {
+                    format!("{:.1}M", rate / 1_000_000.0)
+                } else if rate >= 1_000.0 {
+                    format!("{:.1}K", rate / 1_000.0)
+                } else {
+                    format!("{:.0}", rate)
+                }
+            }),
+        },
+        Column {
+            header: "Avg Runtime",
+            constraint: Constraint::Length(12),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                let avg_ns = data.avg_runtime_ns();
+                if avg_ns > 1_000_000.0 {
+                    format!("{:.2}ms", avg_ns / 1_000_000.0)
+                } else if avg_ns > 1_000.0 {
+                    format!("{:.2}μs", avg_ns / 1_000.0)
+                } else {
+                    format!("{:.0}ns", avg_ns)
+                }
+            }),
+        },
+        Column {
+            header: "p50",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                if data.p50_runtime_ns == 0 {
+                    "-".to_string()
+                } else if data.p50_runtime_ns > 1_000_000 {
+                    format!("{:.1}ms", data.p50_runtime_ns as f64 / 1_000_000.0)
+                } else if data.p50_runtime_ns > 1_000 {
+                    format!("{:.1}μs", data.p50_runtime_ns as f64 / 1_000.0)
+                } else {
+                    format!("{}ns", data.p50_runtime_ns)
+                }
+            }),
+        },
+        Column {
+            header: "p99",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, data| {
+                if data.p99_runtime_ns == 0 {
+                    "-".to_string()
+                } else if data.p99_runtime_ns > 1_000_000 {
+                    format!("{:.1}ms", data.p99_runtime_ns as f64 / 1_000_000.0)
+                } else if data.p99_runtime_ns > 1_000 {
+                    format!("{:.1}μs", data.p99_runtime_ns as f64 / 1_000.0)
+                } else {
+                    format!("{}ns", data.p99_runtime_ns)
+                }
+            }),
+        },
+        Column {
+            header: "Min Runtime",
+            constraint: Constraint::Length(12),
+            visible: false,
+            value_fn: Box::new(|_, data| {
+                if data.min_runtime_ns == 0 {
+                    "-".to_string()
+                } else if data.min_runtime_ns > 1_000_000 {
+                    format!("{:.2}ms", data.min_runtime_ns as f64 / 1_000_000.0)
+                } else if data.min_runtime_ns > 1_000 {
+                    format!("{:.2}μs", data.min_runtime_ns as f64 / 1_000.0)
+                } else {
+                    format!("{}ns", data.min_runtime_ns)
+                }
+            }),
+        },
+        Column {
+            header: "Max Runtime",
+            constraint: Constraint::Length(12),
+            visible: false,
+            value_fn: Box::new(|_, data| {
+                if data.max_runtime_ns == 0 {
+                    "-".to_string()
+                } else if data.max_runtime_ns > 1_000_000 {
+                    format!("{:.2}ms", data.max_runtime_ns as f64 / 1_000_000.0)
+                } else if data.max_runtime_ns > 1_000 {
+                    format!("{:.2}μs", data.max_runtime_ns as f64 / 1_000.0)
+                } else {
+                    format!("{}ns", data.max_runtime_ns)
+                }
+            }),
+        },
+        Column {
+            header: "Runtime %",
+            constraint: Constraint::Length(10),
+            visible: true,
+            value_fn: Box::new(|_, _data| {
+                // Note: This will be calculated based on total_runtime_ns when rendering
+                format!("{:.2}%", 0.0) // Placeholder, will be updated during rendering
+            }),
+        },
+        Column {
+            header: "Misses",
+            constraint: Constraint::Length(8),
+            visible: true,
+            value_fn: Box::new(|_, data| data.recursion_misses.to_string()),
+        },
+        Column {
+            header: "Instructions",
+            constraint: Constraint::Length(12),
+            visible: true,
+            value_fn: Box::new(|_, data| data.verified_insns.to_string()),
+        },
+        Column {
+            header: "UID",
+            constraint: Constraint::Length(6),
+            visible: false,
+            value_fn: Box::new(|_, data| data.uid.to_string()),
+        },
+        Column {
+            header: "GPL",
+            constraint: Constraint::Length(4),
+            visible: false,
+            value_fn: Box::new(|_, data| {
+                if data.gpl_compatible { "Yes" } else { "No" }.to_string()
+            }),
+        },
+        Column {
+            header: "BTF ID",
+            constraint: Constraint::Length(8),
+            visible: false,
+            value_fn: Box::new(|_, data| {
+                if data.btf_id == 0 {
+                    "-".to_string()
+                } else {
+                    data.btf_id.to_string()
+                }
+            }),
+        },
+        Column {
+            header: "Maps",
+            constraint: Constraint::Length(6),
+            visible: false,
+            value_fn: Box::new(|_, data| data.nr_map_ids.to_string()),
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,7 +1039,7 @@ mod tests {
             header,
             constraint: Constraint::Length(10),
             visible,
-            value_fn: Box::new(|_, _| format!("value")),
+            value_fn: Box::new(|_, _| "value".to_string()),
         }
     }
 

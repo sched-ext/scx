@@ -23,7 +23,7 @@ jobs:
 
       - name: List tests
         id: output
-        run: nix run ./.github/include#list-integration-tests -- "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
+        run: nix run ./.nix#list-integration-tests -- "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -67,8 +67,8 @@ jobs:
           fi
 
           echo "KERNEL_NAME=$KERNEL_NAME" >> $GITHUB_ENV
-          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
-          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
 
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -82,15 +82,21 @@ jobs:
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # The actual build:
-      - run: meson setup build -Dkernel=$KERNEL_STORE_PATH/bzImage -Dkernel_headers=$KERNEL_HEADERS_STORE_PATH -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.scheduler['flags'] }}"
-      - run: meson compile -C build ${{ matrix.scheduler['name'] }}
+      - run: |
+          if [ "${{ matrix.scheduler['name'] }}" == "scx_chaos" ]; then
+            SCHED_PATH=$(nix build --print-build-logs --print-out-paths ./.nix#scx_chaos)/bin/scx_chaos
+          else
+            cargo build -p ${{ matrix.scheduler['name'] }}
+            SCHED_PATH=target/debug/${{ matrix.scheduler['name'] }}
+          fi
+          echo "SCHED_PATH=$SCHED_PATH" >> $GITHUB_ENV
 
       # Print CPU model before running the tests (this can be useful for
       # debugging purposes)
       - run: grep 'model name' /proc/cpuinfo | head -1
 
       # Test schedulers
-      - run: meson compile -C build test_sched_${{ matrix.scheduler['name'] }}
+      - run: .github/include/scripts/test_sched $KERNEL_STORE_PATH/bzImage $SCHED_PATH VNG_RW=true
       # this is where errors we want logs on start occurring, so always generate debug info and save logs
         if: always()
       # Stress schedulers
@@ -99,7 +105,7 @@ jobs:
         if: always()
         with:
           retries: 3
-          command: meson compile -C build stress_tests_${{ matrix.scheduler['name'] }}
+          command: .github/include/scripts/run_stress_tests -k $KERNEL_STORE_PATH/bzImage --sched ${{ matrix.scheduler['name'] }} --sched-path $SCHED_PATH --rw true --headers $KERNEL_HEADERS_STORE_PATH --extra-scheduler-args "${{ matrix.scheduler['flags'] }}"
       - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
         if: always()
       - run: mkdir -p ./log_save/
@@ -133,5 +139,5 @@ jobs:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@v4
-      - run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-build-kernels
+      - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
       - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'

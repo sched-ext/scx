@@ -36,17 +36,18 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
+use libbpf_rs::skel::Skel;
 use libbpf_rs::OpenObject;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
 use libc::c_char;
-use log::debug;
-use log::info;
 use plain::Plain;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::ksym_exists;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -63,6 +64,8 @@ use stats::SchedSamples;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
+use tracing::{debug, info, warn};
+use tracing_subscriber::filter::EnvFilter;
 
 const SCHEDULER_NAME: &str = "scx_lavd";
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
@@ -72,6 +75,10 @@ const SCHEDULER_NAME: &str = "scx_lavd";
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Automatically decide the scheduler's power mode (performance vs.
     /// powersave vs. balanced), CPU preference order, etc, based on system
     /// load. The options affecting the power mode and the use of core compaction
@@ -119,6 +126,26 @@ struct Opts {
     #[clap(long = "slice-min-us", default_value = "500")]
     slice_min_us: u64,
 
+    /// Migration delta threshold percentage (0-100). When set to a non-zero value,
+    /// uses average utilization for threshold calculation instead of current
+    /// utilization, and the threshold is calculated as: avg_load * (mig-delta-pct / 100).
+    /// Additionally, disables force task stealing in the consume path, relying only
+    /// on the is_stealer/is_stealee thresholds for more predictable load balancing.
+    /// Default is 0 (disabled, uses dynamic threshold based on load with both
+    /// probabilistic and force task stealing enabled). This is an experimental feature.
+    #[clap(long = "mig-delta-pct", default_value = "0", value_parser=Opts::mig_delta_pct_range)]
+    mig_delta_pct: u8,
+
+    /// Slice duration in microseconds to use for all tasks when pinned tasks
+    /// are running on a CPU. Must be between slice-min-us and slice-max-us.
+    /// When this option is enabled, pinned tasks are always enqueued to per-CPU DSQs
+    /// and the dispatch logic compares vtimes across all DSQs to select the lowest
+    /// vtime task. This helps improve responsiveness for pinned tasks. By default,
+    /// this option is on with a default value of 5000 (5 msec). To turn off the option,
+    /// explicitly set the value to 0.
+    #[clap(long = "pinned-slice-us", default_value = "5000")]
+    pinned_slice_us: Option<u64>,
+
     /// Limit the ratio of preemption to the roughly top P% of latency-critical
     /// tasks. When N is given as an argument, P is 0.5^N * 100. The default
     /// value is 6, which limits the preemption for the top 1.56% of
@@ -162,6 +189,11 @@ struct Opts {
     #[clap(long = "per-cpu-dsq", action = clap::ArgAction::SetTrue)]
     per_cpu_dsq: bool,
 
+    /// Enable CPU bandwidth control using cpu.max in cgroup v2.
+    /// This is a highly experimental feature.
+    #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
+    enable_cpu_bw: bool,
+
     ///
     /// Disable core compaction so the scheduler uses all the online CPUs.
     /// The core compaction attempts to minimize the number of actively used
@@ -191,14 +223,18 @@ struct Opts {
     #[clap(long)]
     monitor_sched_samples: Option<u64>,
 
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    log_level: String,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -305,11 +341,32 @@ impl Opts {
             info!("Energy model won't be used for CPU preference order.");
         }
 
+        if let Some(pinned_slice) = self.pinned_slice_us {
+            if pinned_slice == 0 {
+                info!("Pinned task slice mode is disabled. Pinned tasks will use per-domain DSQs.");
+            } else if pinned_slice < self.slice_min_us || pinned_slice > self.slice_max_us {
+                info!(
+                    "pinned-slice-us ({}) must be between slice-min-us ({}) and slice-max-us ({})",
+                    pinned_slice, self.slice_min_us, self.slice_max_us
+                );
+                return None;
+            } else {
+                info!(
+                "Pinned task slice mode is enabled ({} us). Pinned tasks will use per-CPU DSQs.",
+                pinned_slice
+            );
+            }
+        }
+
         Some(self)
     }
 
     fn preempt_shift_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 10)
+    }
+
+    fn mig_delta_pct_range(s: &str) -> Result<u8, String> {
+        number_range(s, 0, 100)
     }
 }
 
@@ -351,8 +408,15 @@ impl<'a> Scheduler<'a> {
         try_set_rlimit_infinity();
 
         // Open the BPF prog first for verification.
+        let debug_level = if opts.log_level.contains("trace") {
+            2
+        } else if opts.log_level.contains("debug") {
+            1
+        } else {
+            0
+        };
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 0);
+        skel_builder.obj_builder.debug(debug_level > 1);
         init_libbpf_logging(Some(PrintLevel::Debug));
 
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
@@ -375,10 +439,15 @@ impl<'a> Scheduler<'a> {
         Self::init_cpdoms(&mut skel, &order);
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts, &order);
+        Self::init_globals(&mut skel, &opts, &order, debug_level);
+
+        // Initialize arena
+        let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
+        let task_size = std::mem::size_of::<types::task_ctx>();
+        let arenalib = ArenaLib::init(skel.object_mut(), task_size, *NR_CPU_IDS)?;
+        arenalib.setup()?;
 
         // Attach.
-        let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
         let stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64)).launch()?;
 
@@ -418,6 +487,11 @@ impl<'a> Scheduler<'a> {
             ("futex_lock_pi", &skel.progs.fexit_futex_lock_pi),
             ("futex_unlock_pi", &skel.progs.fexit_futex_unlock_pi),
         ];
+
+        if compat::tracer_available("function")? == false {
+            info!("Ftrace is not enabled in the kernel.");
+            return Ok(false);
+        }
 
         compat::cond_kprobes_enable(ftraces)
     }
@@ -519,15 +593,16 @@ impl<'a> Scheduler<'a> {
                 }
                 skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
                     nr_neighbors;
-                for n in neighbors.borrow().iter() {
-                    skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].neighbor_bits[k] |=
-                        0x1 << n;
+                for (i, &id) in neighbors.borrow().iter().enumerate() {
+                    let idx = (k * LAVD_CPDOM_MAX_NR as usize) + i;
+                    skel.maps.bss_data.as_mut().unwrap().cpdom_ctxs[v.cpdom_id].neighbor_ids[idx] =
+                        id as u8;
                 }
             }
         }
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder) {
+    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, order: &CpuOrder, debug_level: u8) {
         let bss_data = skel.maps.bss_data.as_mut().unwrap();
         bss_data.no_preemption = opts.no_preemption;
         bss_data.no_core_compaction = opts.no_core_compaction;
@@ -535,17 +610,25 @@ impl<'a> Scheduler<'a> {
         bss_data.is_powersave_mode = opts.powersave;
         let rodata = skel.maps.rodata_data.as_mut().unwrap();
         rodata.nr_llcs = order.nr_llcs as u64;
-        rodata.__nr_cpu_ids = *NR_CPU_IDS as u64;
+        rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         rodata.is_smt_active = order.smt_enabled;
         rodata.is_autopilot_on = opts.autopilot;
-        rodata.verbose = opts.verbose;
+        rodata.verbose = debug_level;
         rodata.slice_max_ns = opts.slice_max_us * 1000;
         rodata.slice_min_ns = opts.slice_min_us * 1000;
+        rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
         rodata.preempt_shift = opts.preempt_shift;
+        rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
         rodata.per_cpu_dsq = opts.per_cpu_dsq;
+        rodata.enable_cpu_bw = opts.enable_cpu_bw;
+
+        if !ksym_exists("scx_group_set_bandwidth").unwrap() {
+            skel.struct_ops.lavd_ops_mut().cgroup_set_bandwidth = std::ptr::null_mut();
+            warn!("Kernel does not support ops.cgroup_set_bandwidth(), so disable it.");
+        }
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
@@ -564,7 +647,6 @@ impl<'a> Scheduler<'a> {
     fn relay_introspec(data: &[u8], intrspc_tx: &Sender<SchedSample>) -> i32 {
         let mt = msg_task_ctx::from_bytes(data);
         let tx = mt.taskc_x;
-        let tc = mt.taskc;
 
         // No idea how to print other types than LAVD_MSG_TASKC
         if mt.hdr.kind != LAVD_MSG_TASKC {
@@ -577,7 +659,7 @@ impl<'a> Scheduler<'a> {
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
-        let c_waker_cm: *const c_char = (&tc.waker_comm as *const [c_char; 17]) as *const c_char;
+        let c_waker_cm: *const c_char = (&tx.waker_comm as *const [c_char; 17]) as *const c_char;
         let c_waker_cm_str: &CStr = unsafe { CStr::from_ptr(c_waker_cm) };
         let waker_comm: &str = c_waker_cm_str.to_str().unwrap();
 
@@ -590,22 +672,22 @@ impl<'a> Scheduler<'a> {
             pid: tx.pid,
             comm: tx_comm.into(),
             stat: tx_stat.into(),
-            cpu_id: tc.cpu_id,
-            prev_cpu_id: tc.prev_cpu_id,
-            suggested_cpu_id: tc.suggested_cpu_id,
-            waker_pid: tc.waker_pid,
+            cpu_id: tx.cpu_id,
+            prev_cpu_id: tx.prev_cpu_id,
+            suggested_cpu_id: tx.suggested_cpu_id,
+            waker_pid: tx.waker_pid,
             waker_comm: waker_comm.into(),
-            slice: tc.slice,
-            lat_cri: tc.lat_cri,
+            slice: tx.slice,
+            lat_cri: tx.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,
             rerunnable_interval: tx.rerunnable_interval,
-            resched_interval: tc.resched_interval,
-            run_freq: tc.run_freq,
-            avg_runtime: tc.avg_runtime,
-            wait_freq: tc.wait_freq,
-            wake_freq: tc.wake_freq,
-            perf_cri: tc.perf_cri,
+            resched_interval: tx.resched_interval,
+            run_freq: tx.run_freq,
+            avg_runtime: tx.avg_runtime,
+            wait_freq: tx.wait_freq,
+            wake_freq: tx.wake_freq,
+            perf_cri: tx.perf_cri,
             thr_perf_cri: tx.thr_perf_cri,
             cpuperf_cur: tx.cpuperf_cur,
             cpu_util: tx.cpu_util,
@@ -613,7 +695,7 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
-            slice_used: tc.last_slice_used,
+            slice_used: tx.last_slice_used,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
             Err(e) => panic!("failed to send on intrspc_tx ({})", e),
@@ -833,30 +915,34 @@ impl Drop for Scheduler<'_> {
 }
 
 fn init_log(opts: &Opts) {
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )
-    .unwrap();
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
 }
 
-fn main() -> Result<()> {
-    let mut opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(mut opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_lavd {}",
@@ -877,6 +963,14 @@ fn main() -> Result<()> {
     }
 
     init_log(&opts);
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+    }
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_lavd run_id: {}", run_id);
+    }
 
     if opts.monitor.is_none() && opts.monitor_sched_samples.is_none() {
         opts.proc().unwrap();

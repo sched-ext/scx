@@ -55,6 +55,7 @@
 //!     pub exec_runtime: u64,     // Total cpu time since last sleep (in ns)
 //!     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
 //!     pub vtime: u64,            // Current task vruntime / deadline (set by the scheduler)
+//!     pub comm: [c_char; TASK_COMM_LEN], // Task's executable name
 //! }
 //!
 //! Each task dispatched using dispatch_task() contains the following:
@@ -115,6 +116,7 @@ impl<'a> Scheduler<'a> {
             false,    // partial (false = include all tasks)
             false,    // debug (false = debug mode off)
             true,     // builtin_idle (true = allow BPF to use idle CPUs if available)
+            SLICE_NS, // default time slice (for tasks automatically dispatched by the backend)
             "rlfifo", // name of the scx ops
         )?;
         Ok(Self { bpf })

@@ -18,7 +18,7 @@ jobs:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Load dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-update-kernels
+        run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-update-kernels
 
       - name: List kernels
         id: output
@@ -45,7 +45,7 @@ jobs:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Load dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-update-kernels
+        run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-update-kernels
 
       - name: Update kernel
         run: |
@@ -55,7 +55,7 @@ jobs:
           INITIAL_COMMIT=$(git rev-parse HEAD)
 
           git switch -c "deps/kernel/${{ matrix.version }}"
-          nix run ./.github/include#update-kernels -- ${{ matrix.version }}
+          nix run ./.nix#update-kernels -- ${{ matrix.version }}
 
           FINAL_COMMIT=$(git rev-parse HEAD)
           if [ "$INITIAL_COMMIT" != "$FINAL_COMMIT" ]; then
@@ -74,6 +74,7 @@ jobs:
           if echo $PR_IDS | jq -e '. == []'; then
             gh pr create --fill
           else
-            echo "PR already exists, skipping creation."
+            echo "PR already exists, updating description..."
+            gh pr edit --title "$(git log -1 --pretty=%s)" --body "$(git log -1 --pretty=%b)"
           fi
           gh pr merge --auto

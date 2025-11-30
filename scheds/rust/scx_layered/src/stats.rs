@@ -13,13 +13,13 @@ use anyhow::bail;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Local;
-use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::warn;
 
 use crate::bpf_intf;
 use crate::BpfStats;
@@ -212,6 +212,8 @@ pub struct LayerStats {
     pub llc_lats: Vec<f64>,
     #[stat(desc = "Layer memory bandwidth as a % of total allowed (0 for \"no limit\"")]
     pub membw_pct: f64,
+    #[stat(desc = "DSQ insertion ratio EWMA (10s window)")]
+    pub dsq_insert_ewma: f64,
 }
 
 impl LayerStats {
@@ -329,6 +331,7 @@ impl LayerStats {
                 .map(|lstats| lstats[LLC_LSTAT_LAT] as f64 / 1_000_000_000.0)
                 .collect(),
             membw_pct: membw_frac * 100.0,
+            dsq_insert_ewma: stats.layer_dsq_insert_ewma[lidx] * 100.0,
         }
     }
 
@@ -348,7 +351,7 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  tot={:7} local_sel/enq={}/{} enq_dsq={} wake/exp/reenq={}/{}/{}",
+            "  {:<width$}  tot={:7} local_sel/enq={}/{} enq_dsq={} wake/exp/reenq={}/{}/{} dsq_ewma={}",
             "",
             self.total,
             fmt_pct(self.sel_local),
@@ -357,6 +360,7 @@ impl LayerStats {
             fmt_pct(self.enq_wakeup),
             fmt_pct(self.enq_expire),
             fmt_pct(self.enq_reenq),
+            fmt_pct(self.dsq_insert_ewma),
             width = header_width,
         )?;
 
@@ -539,6 +543,8 @@ pub struct SysStats {
     pub gpu_tasks_affinitized: u64,
     #[stat(desc = "Time (in ms) of last affinitization run.")]
     pub gpu_task_affinitization_ms: u64,
+    #[stat(desc = "System CPU utilization EWMA (10s window)")]
+    pub system_cpu_util_ewma: f64,
 }
 
 impl SysStats {
@@ -598,6 +604,7 @@ impl SysStats {
             layers: BTreeMap::new(),
             gpu_tasks_affinitized: stats.gpu_tasks_affinitized,
             gpu_task_affinitization_ms: stats.gpu_task_affinitization_ms,
+            system_cpu_util_ewma: stats.system_cpu_util_ewma * 100.0,
         })
     }
 
@@ -616,7 +623,7 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms sys_util_ewma={:5.1}",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
@@ -624,6 +631,7 @@ impl SysStats {
             self.fallback_cpu,
             self.fallback_cpu_util,
             self.proc_ms,
+            self.system_cpu_util_ewma,
         )?;
 
         writeln!(
@@ -730,7 +738,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<SysStats>(
-        &vec![],
+        &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |sst| {

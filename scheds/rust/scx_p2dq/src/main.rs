@@ -14,14 +14,14 @@ use std::time::Duration;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use arenalib::ArenaLib;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::Skel;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::{debug, info, warn};
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -36,6 +36,8 @@ use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
+use tracing::{debug, info, warn};
+use tracing_subscriber::filter::EnvFilter;
 
 use bpf_intf::stat_idx_P2DQ_NR_STATS;
 use bpf_intf::stat_idx_P2DQ_STAT_ATQ_ENQ;
@@ -69,10 +71,14 @@ const SCHEDULER_NAME: &str = "scx_p2dq";
 ///
 #[derive(Debug, Parser)]
 struct CliOpts {
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    pub verbose: u8,
+    verbose: u8,
+
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    pub log_level: String,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -87,6 +93,10 @@ struct CliOpts {
     #[clap(long)]
     pub version: bool,
 
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    pub run_id: Option<u64>,
+
     #[clap(flatten)]
     pub sched: SchedulerOpts,
 
@@ -97,7 +107,7 @@ struct CliOpts {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    verbose: u8,
+    debug_level: u8,
 
     stats_server: StatsServer<(), Metrics>,
 }
@@ -107,11 +117,18 @@ impl<'a> Scheduler<'a> {
         opts: &SchedulerOpts,
         libbpf_ops: &LibbpfOpts,
         open_object: &'a mut MaybeUninit<OpenObject>,
-        verbose: u8,
+        log_level: &str,
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
+        let debug_level = if log_level.contains("trace") {
+            2
+        } else if log_level.contains("debug") {
+            1
+        } else {
+            0
+        };
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(verbose > 1);
+        skel_builder.obj_builder.debug(debug_level > 1);
         init_libbpf_logging(None);
         info!(
             "Running scx_p2dq (build ID: {})",
@@ -131,12 +148,36 @@ impl<'a> Scheduler<'a> {
             to this issue or file an issue on the scx repo if the problem persists. \
             https://github.com/sched-ext/scx/issues/new?labels=scx_p2dq&title=scx_p2dq:%20New%20Issue&assignees=hodgesds&body=Kernel%20version:%20(fill%20me%20out)%0ADistribution:%20(fill%20me%20out)%0AHardware:%20(fill%20me%20out)%0A%0AIssue:%20(fill%20me%20out)"
         )?;
-        scx_p2dq::init_open_skel!(&mut open_skel, topo, opts, verbose)?;
+
+        // Apply hardware-specific optimizations before macro
+        let hw_profile = scx_p2dq::HardwareProfile::detect();
+        let mut opts_optimized = opts.clone();
+        if opts.hw_auto_optimize {
+            hw_profile.optimize_scheduler_opts(&mut opts_optimized);
+        }
+
+        scx_p2dq::init_open_skel!(
+            &mut open_skel,
+            topo,
+            &opts_optimized,
+            debug_level,
+            &hw_profile
+        )?;
 
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }
         open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+
+        // Disable autoattach for the struct_ops map since we attach it manually via
+        // attach_struct_ops() in scx_ops_attach!(). This prevents libbpf from warning
+        // about uninitialized skeleton link during attach().
+        unsafe {
+            libbpf_rs::libbpf_sys::bpf_map__set_autoattach(
+                open_skel.maps.p2dq.as_libbpf_object().as_ptr(),
+                false,
+            );
+        }
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
         scx_p2dq::init_skel!(&mut skel, topo);
@@ -146,7 +187,7 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             struct_ops: None,
-            verbose,
+            debug_level,
             stats_server,
         })
     }
@@ -221,7 +262,7 @@ impl<'a> Scheduler<'a> {
     fn start(&mut self) -> Result<()> {
         self.struct_ops = Some(scx_ops_attach!(self.skel, p2dq)?);
 
-        if self.verbose > 1 {
+        if self.debug_level > 0 {
             self.print_topology()?;
         }
 
@@ -241,9 +282,8 @@ impl Drop for Scheduler<'_> {
     }
 }
 
-fn main() -> Result<()> {
-    let opts = CliOpts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: CliOpts) -> Result<()> {
     if opts.version {
         println!(
             "scx_p2dq: {}",
@@ -252,24 +292,38 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+    }
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_p2dq run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
@@ -309,7 +363,8 @@ fn main() -> Result<()> {
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts.sched, &opts.libbpf, &mut open_object, opts.verbose)?;
+        let mut sched =
+            Scheduler::init(&opts.sched, &opts.libbpf, &mut open_object, &opts.log_level)?;
         let task_size = std::mem::size_of::<types::task_p2dq>();
         let arenalib = ArenaLib::init(sched.skel.object_mut(), task_size, *NR_CPU_IDS)?;
         arenalib.setup()?;

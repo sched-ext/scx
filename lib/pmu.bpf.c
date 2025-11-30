@@ -27,6 +27,7 @@ struct {
 struct scx_pmu_counters {
 	u64 start[SCX_MAX_PMU_COUNTERS];
 	u64 agg[SCX_MAX_PMU_COUNTERS];
+	bool switched;
 	u32 gen;
 };
 
@@ -72,6 +73,11 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 		if (ret)
 			return ret;
 
+		if (unlikely(!cntrs->switched && value.enabled != value.running)) {
+			bpf_printk("SWITCHED: %ld vs %ld", value.enabled, value.running);
+			cntrs->switched = true;
+		}
+
 		/* Add the delta for this scheduling interval. */
 		cntrs->agg[idx] += value.counter - cntrs->start[idx];
 
@@ -82,7 +88,7 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 	return 0;
 }
 
-int scx_pmu_event_start(struct task_struct __arg_trusted *p)
+int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 {
 	struct bpf_perf_event_value value;
 	struct scx_pmu_counters *cntrs;
@@ -106,7 +112,11 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p)
 		if (ret)
 			return ret;
 
-		/* Add the delta for this scheduling interval. */
+		if (update) {
+			/* Add the delta for this scheduling interval. */
+			cntrs->agg[idx] += value.counter - cntrs->start[idx];
+		}
+
 		cntrs->start[idx] = value.counter;
 
 	}
@@ -243,32 +253,45 @@ int scx_pmu_read(struct task_struct __arg_trusted *p, u64 event, u64 *value, boo
 	return 0;
 }
 
-SEC("tp/sched/sched_switch")
-int scx_pmu_tc(struct trace_event_raw_sched_switch *args)
+SEC("?tp_btf/sched_switch")
+int scx_pmu_switch_tc(u64 *ctx)
 {
 	struct task_struct *prev, *next;
 	int ret;
 
+	prev = (struct task_struct *)ctx[1];
+	next = (struct task_struct *)ctx[2];
 
-	if (!args->prev_pid)
+	if (!prev->pid)
 		goto next;
 
-	prev = bpf_task_from_pid(args->prev_pid);
-	if (!prev)
-		return -ENOENT;
-
 	ret = scx_pmu_event_stop(prev);
-	bpf_task_release(prev);
 	if (ret)
 		return ret;
 
 next:
-	next = bpf_task_from_pid(args->next_pid);
-	if (!next)
-		return -ENOENT;
+	if (!next->pid)
+		return 0;
 
-	ret = scx_pmu_event_start(next);
-	bpf_task_release(next);
+	/* Skip update when there was no previous task to obtain delta */
+	return scx_pmu_event_start(next, false);
+}
 
-	return ret;
+SEC("?fentry/scx_tick")
+int scx_pmu_tick_tc(u64 *ctx)
+{
+	struct task_struct *p;
+
+	p = bpf_get_current_task_btf();
+	if (!p)
+		return 0;
+
+	if (!p->pid) {
+		return 0;
+	}
+
+	/* Tracepoints not allowed to return errors. */
+	scx_pmu_event_start(p, true);
+
+	return 0;
 }

@@ -128,15 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kprobe_event_parsing() {
-        let result = ProfilingEvent::from_str_args("kprobe:vfs_read", None).unwrap();
-
-        let expected = ProfilingEvent::Kprobe(KprobeEvent::new("vfs_read".to_string(), 0));
-
-        assert_eq!(result, expected);
-    }
-
-    #[test]
     fn test_invalid_format_missing_colon() {
         let tracker = dummy_tracker();
         let err = ProfilingEvent::from_str_args("invalid_format", None);

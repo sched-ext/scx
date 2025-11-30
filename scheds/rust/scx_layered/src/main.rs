@@ -40,10 +40,6 @@ use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::info;
-use log::trace;
-use log::warn;
-use log::{debug, error};
 use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
@@ -81,6 +77,8 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::filter::EnvFilter;
 use walkdir::WalkDir;
 
 const SCHEDULER_NAME: &str = "scx_layered";
@@ -157,6 +155,7 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
                     },
                 },
@@ -192,6 +191,7 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
                     },
                 },
@@ -232,6 +232,7 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
                     },
                 },
@@ -270,6 +271,7 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        member_expire_ms: 0,
                         placement: LayerPlacement::Standard,
                     },
                 },
@@ -367,6 +369,14 @@ lazy_static! {
 ///
 /// - HintEquals: u64. Match tasks whose hint value equals this value.
 ///   The value must be in the range [0, 1024].
+///
+/// - SystemCpuUtilBelow: f64. Match when the system CPU utilization fraction
+///   is below the specified threshold (a value in the range [0.0, 1.0]). This
+///   option can only be used in conjunction with HintEquals.
+///
+/// - DsqInsertBelow: f64. Match when the layer DSQ insertion fraction is below
+///   the specified threshold (a value in the range [0.0, 1.0]). This option can
+///   only be used in conjunction with HintEquals.
 ///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
@@ -560,6 +570,10 @@ lazy_static! {
 #[derive(Debug, Parser)]
 #[command(verbatim_doc_comment)]
 struct Opts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Scheduling slice duration in microseconds.
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
@@ -584,10 +598,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    log_level: String,
 
     /// Disable topology awareness. When enabled, the "nodes" and "llcs" settings on
     /// a layer are ignored. Defaults to false on topologies with multiple NUMA nodes
@@ -708,6 +722,10 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -967,6 +985,10 @@ struct Stats {
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: fb_procfs::CpuStat,
+    prev_pmu_resctrl_membw: (u64, u64), // (PMU-reported membw, resctrl-reported membw)
+
+    system_cpu_util_ewma: f64,       // 10s EWMA of system CPU utilization
+    layer_dsq_insert_ewma: Vec<f64>, // 10s EWMA of per-layer DSQ insertion ratio
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
@@ -1002,13 +1024,39 @@ impl Stats {
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
-                    let delta = cpu_ctxs[cpu].layer_membw_agg[layer][usage];
-                    layer_membw_agg[layer][usage] += delta;
+                    layer_membw_agg[layer][usage] += cpu_ctxs[cpu].layer_membw_agg[layer][usage];
                 }
             }
         }
 
         layer_membw_agg
+    }
+
+    /// Use the membw reported by resctrl to normalize the values reported by hw counters.
+    /// We have the following problem:
+    /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
+    /// less transparently, since we would require different RMID for each task.
+    /// 2) We want to directly use perf counters for tracking per-task memory bandwidth, but
+    /// we can't: Non-resctrl counters do not measure the right thing (e.g., they only measure
+    /// proxies like load operations),
+    /// 3) Resctrl counters are not accessible directly so we cannot read them from the BPF side.
+    ///
+    /// Approximate per-task memory bandwidth using perf counters to measure _relative_ memory
+    /// bandwidth usage.
+    fn resctrl_read_total_membw() -> Result<u64> {
+        let mut total_membw = 0u64;
+        for entry in WalkDir::new("/sys/fs/resctrl/mon_data")
+            .min_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|x| x.path().is_dir())
+        {
+            let mut path = entry.path().to_path_buf();
+            path.push("mbm_total_bytes");
+            total_membw += fs::read_to_string(path)?.trim().parse::<u64>()?;
+        }
+
+        Ok(total_membw)
     }
 
     fn new(
@@ -1020,6 +1068,7 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
+        let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
@@ -1032,10 +1081,16 @@ impl Stats {
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
-            prev_layer_membw_agg: Self::read_layer_membw_agg(&cpu_ctxs, nr_layers),
+            // This is not normalized because we don't have enough history to do so.
+            // It should not matter too much, since the value is dropped on the first
+            // iteration.
+            prev_layer_membw_agg: pmu_membw,
+            prev_pmu_resctrl_membw: (0, 0),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(proc_reader)?,
+            system_cpu_util_ewma: 0.0,
+            layer_dsq_insert_ewma: vec![0.0; nr_layers],
 
             bpf_stats: bpf_stats.clone(),
             prev_bpf_stats: bpf_stats,
@@ -1085,6 +1140,21 @@ impl Stats {
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
 
+        // Memory BW normalization. It requires finding the delta according to perf, the delta
+        // according to resctl, and finding the factor between them. This also helps in
+        // determining whether this delta is stable.
+        //
+        // We scale only the raw PMC delta - the part of the counter incremented between two
+        // periods. This is because the scaling factor is only valid for that time period.
+        // Non-scaled samples are not comparable, while scaled ones are.
+        let (pmu_prev, resctrl_prev) = self.prev_pmu_resctrl_membw;
+        let pmu_cur: u64 = cur_layer_membw_agg
+            .iter()
+            .map(|membw_agg| membw_agg[LAYER_USAGE_OPEN] + membw_agg[LAYER_USAGE_OWNED])
+            .sum();
+        let resctrl_cur = Self::resctrl_read_total_membw()?;
+        let factor = (resctrl_cur - resctrl_prev) as f64 / (pmu_cur - pmu_prev) as f64;
+
         // Computes the runtime deltas and converts them from ns to s.
         let compute_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
@@ -1099,8 +1169,8 @@ impl Stats {
                 .collect()
         };
 
-        // Computes the total memory traffic done since last computation and normalizes to bytes/s
-        // over the elapsed timescale.
+        // Computes the total memory traffic done since last computation and normalizes to GBs.
+        // We derive the rate of consumption elsewhere.
         let compute_mem_diff = |cur_agg: &Vec<Vec<u64>>, prev_agg: &Vec<Vec<u64>>| {
             cur_agg
                 .iter()
@@ -1108,7 +1178,7 @@ impl Stats {
                 .map(|(cur, prev)| {
                     cur.iter()
                         .zip(prev.iter())
-                        .map(|(c, p)| (c - p) as f64 / elapsed_f64)
+                        .map(|(c, p)| (*c as i64 - *p as i64) as f64 / (1024 as f64).powf(3.0))
                         .collect()
                 })
                 .collect()
@@ -1116,8 +1186,15 @@ impl Stats {
 
         let cur_layer_utils: Vec<Vec<f64>> =
             compute_diff(&cur_layer_usages, &self.prev_layer_usages);
+
+        // Scale the raw value delta by the resctrl/pmc computed factor.
         let cur_layer_membw: Vec<Vec<f64>> =
             compute_mem_diff(&cur_layer_membw_agg, &self.prev_layer_membw_agg);
+
+        let cur_layer_membw: Vec<Vec<f64>> = cur_layer_membw
+            .iter()
+            .map(|x| x.iter().map(|x| *x * factor).collect())
+            .collect();
 
         let metric_decay =
             |cur_metric: Vec<Vec<f64>>, prev_metric: &Vec<Vec<f64>>, decay_rate: f64| {
@@ -1143,8 +1220,40 @@ impl Stats {
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
+        // Calculate system CPU utilization EWMA (10 second window)
+        const SYS_CPU_UTIL_EWMA_SECS: f64 = 10.0;
+        let elapsed_f64 = elapsed.as_secs_f64();
+        let alpha = elapsed_f64 / SYS_CPU_UTIL_EWMA_SECS.max(elapsed_f64);
+        let system_cpu_util_ewma = alpha * cpu_busy + (1.0 - alpha) * self.system_cpu_util_ewma;
+
         let cur_bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
+
+        // Calculate per-layer DSQ insertion EWMA (10 second window)
+        const DSQ_INSERT_EWMA_SECS: f64 = 10.0;
+        let dsq_alpha = elapsed_f64 / DSQ_INSERT_EWMA_SECS.max(elapsed_f64);
+        let layer_dsq_insert_ewma: Vec<f64> = (0..self.nr_layers)
+            .map(|layer_id| {
+                let sel_local = bpf_stats.lstats[layer_id]
+                    [bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize]
+                    as f64;
+                let enq_local = bpf_stats.lstats[layer_id]
+                    [bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize]
+                    as f64;
+                let enq_dsq = bpf_stats.lstats[layer_id]
+                    [bpf_intf::layer_stat_id_LSTAT_ENQ_DSQ as usize]
+                    as f64;
+                let total_dispatches = sel_local + enq_local + enq_dsq;
+
+                let cur_ratio = if total_dispatches > 0.0 {
+                    enq_dsq / total_dispatches
+                } else {
+                    0.0
+                };
+
+                dsq_alpha * cur_ratio + (1.0 - dsq_alpha) * self.layer_dsq_insert_ewma[layer_id]
+            })
+            .collect();
 
         let processing_dur = cur_processing_dur
             .checked_sub(self.prev_processing_dur)
@@ -1165,9 +1274,13 @@ impl Stats {
             layer_membws,
             prev_layer_usages: cur_layer_usages,
             prev_layer_membw_agg: cur_layer_membw_agg,
+            // Was updated during normalization.
+            prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
+            system_cpu_util_ewma,
+            layer_dsq_insert_ewma,
 
             bpf_stats,
             prev_bpf_stats: cur_bpf_stats,
@@ -1766,6 +1879,14 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_HINT_EQUALS as i32;
                             mt.hint = *hint;
                         }
+                        LayerMatch::SystemCpuUtilBelow(threshold) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_SYSTEM_CPU_UTIL_BELOW as i32;
+                            mt.system_cpu_util_below = (*threshold * 10000.0) as u64;
+                        }
+                        LayerMatch::DsqInsertBelow(threshold) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_DSQ_INSERT_BELOW as i32;
+                            mt.dsq_insert_below = (*threshold * 10000.0) as u64;
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;
@@ -1794,6 +1915,7 @@ impl<'a> Scheduler<'a> {
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
                     placement,
+                    member_expire_ms,
                     ..
                 } = spec.kind.common();
 
@@ -1818,6 +1940,7 @@ impl<'a> Scheduler<'a> {
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
+                layer.member_expire_ms = *member_expire_ms;
                 layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
                     v if v == u64::MAX => v,
                     v => v * 1000,
@@ -2073,7 +2196,6 @@ impl<'a> Scheduler<'a> {
             let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
             cpu_ctxs[cpu].cpu = cpu as i32;
             cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
-            cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
 
             fastrand::seed(cpu as u64);
@@ -2207,7 +2329,7 @@ impl<'a> Scheduler<'a> {
         opts: &'a Opts,
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
-        hint_to_layer_map: &HashMap<u64, usize>,
+        hint_to_layer_map: &HashMap<u64, HintLayerInfo>,
         membw_tracking: bool,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
@@ -2287,8 +2409,16 @@ impl<'a> Scheduler<'a> {
         }
 
         // Open the BPF prog first for verification.
+        let debug_level = if opts.log_level.contains("trace") {
+            2
+        } else if opts.log_level.contains("debug") {
+            1
+        } else {
+            0
+        };
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 1);
+        skel_builder.obj_builder.debug(debug_level > 1);
+
         info!(
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
@@ -2297,7 +2427,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, layered, open_opts)?;
 
         // No memory BW tracking by default
-        skel.progs.scx_pmu_tc.set_autoload(membw_tracking);
+        skel.progs.scx_pmu_switch_tc.set_autoload(membw_tracking);
+        skel.progs.scx_pmu_tick_tc.set_autoload(membw_tracking);
 
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
@@ -2353,7 +2484,7 @@ impl<'a> Scheduler<'a> {
         rodata.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
         rodata.percpu_kthread_preempt_all =
             !opts.disable_percpu_kthread_preempt && opts.percpu_kthread_preempt_all;
-        rodata.debug = opts.verbose as u32;
+        rodata.debug = debug_level as u32;
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
@@ -2467,10 +2598,25 @@ impl<'a> Scheduler<'a> {
         if hint_to_layer_map.len() != 0 {
             for (k, v) in hint_to_layer_map.iter() {
                 let key: u32 = *k as u32;
-                let value: u32 = *v as u32;
+
+                // Create hint_layer_info struct
+                let mut info_bytes = vec![0u8; std::mem::size_of::<bpf_intf::hint_layer_info>()];
+                let info_ptr = info_bytes.as_mut_ptr() as *mut bpf_intf::hint_layer_info;
+                unsafe {
+                    (*info_ptr).layer_id = v.layer_id as u32;
+                    (*info_ptr).system_cpu_util_below = match v.system_cpu_util_below {
+                        Some(threshold) => (threshold * 10000.0) as u64,
+                        None => u64::MAX, // disabled sentinel
+                    };
+                    (*info_ptr).dsq_insert_below = match v.dsq_insert_below {
+                        Some(threshold) => (threshold * 10000.0) as u64,
+                        None => u64::MAX, // disabled sentinel
+                    };
+                }
+
                 skel.maps.hint_to_layer_id_map.update(
                     &key.to_ne_bytes(),
-                    &value.to_ne_bytes(),
+                    &info_bytes,
                     libbpf_rs::MapFlags::ANY,
                 )?;
             }
@@ -2630,28 +2776,22 @@ impl<'a> Scheduler<'a> {
     fn clamp_target_by_membw(
         &self,
         layer: &Layer,
-        membw_limit: usize,
-        last_membw: usize,
-        low: usize,
-        high: usize,
+        membw_limit: f64,
+        membw: f64,
+        curtarget: u64,
     ) -> usize {
-        let ncpu = layer.cpus.weight();
-        let last_membw_percpu = if ncpu > 0 { last_membw / ncpu } else { 0 };
+        let ncpu: u64 = layer.cpus.weight() as u64;
+        let membw = (membw * (1024 as f64).powf(3.0)).round() as u64;
+        let membw_limit = (membw_limit * (1024 as f64).powf(3.0)).round() as u64;
+        let last_membw_percpu = if ncpu > 0 { membw / ncpu } else { 0 };
 
-        // If there's no way we're hitting the limit, we're good.
-        if last_membw_percpu * high < membw_limit {
-            return high;
+        // Either there is no memory bandwidth limit set, or the counters
+        // are not fully initialized yet. Just return the current target.
+        if membw_limit == 0 || last_membw_percpu == 0 {
+            return curtarget as usize;
         }
 
-        // If there's no way to drop our memory usage down enough,
-        // pin the target CPUs to low and drop a warning.
-        if last_membw_percpu * low > membw_limit {
-            warn!("cannot satisfy memory bw limit for layer {}", layer.name);
-            return low;
-        }
-
-        // Clamped membw is between low and high, clamp high.
-        return membw_limit / last_membw_percpu;
+        return (membw_limit / last_membw_percpu) as usize;
     }
 
     /// Calculate how many CPUs each layer would like to have if there were
@@ -2662,6 +2802,7 @@ impl<'a> Scheduler<'a> {
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.topo.all_cpus.len();
         let utils = &self.sched_stats.layer_utils;
+        let membws = &self.sched_stats.layer_membws;
 
         let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
         let mut targets: Vec<(usize, usize)> = vec![];
@@ -2682,6 +2823,9 @@ impl<'a> Scheduler<'a> {
                     membw_gb,
                     ..
                 } => {
+                    let cpus_range =
+                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
+
                     // A grouped layer can choose to include open cputime
                     // for sizing. Also, as an empty layer can only get CPU
                     // time through fallback (counted as owned) or open
@@ -2689,34 +2833,31 @@ impl<'a> Scheduler<'a> {
                     let owned = utils[idx][LAYER_USAGE_OWNED];
                     let open = utils[idx][LAYER_USAGE_OPEN];
 
+                    let membw_owned = membws[idx][LAYER_USAGE_OWNED];
+                    let membw_open = membws[idx][LAYER_USAGE_OPEN];
+
                     let mut util = owned;
+                    let mut membw = membw_owned;
                     if layer.kind.util_includes_open_cputime() || layer.nr_cpus == 0 {
                         util += open;
+                        membw += membw_open;
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
-                    let mut high = ((util / util_range.0).floor() as usize).max(low);
+                    let high = ((util / util_range.0).floor() as usize).max(low);
 
-                    if let Some(membw_limit) = membw_gb {
-                        let membw_cpus = &self.sched_stats.layer_membws[idx];
-                        let last_membw = membw_cpus.into_iter().map(|x: &f64| *x as usize).sum();
-                        trace!(
-                            "(last_membw, membw_limit): ({last_membw} bytes, {membw_limit} GiB)"
-                        );
+                    let membw_limit = match membw_gb {
+                        Some(membw_limit) => *membw_limit,
+                        None => 0.0,
+                    };
 
-                        high = self.clamp_target_by_membw(
-                            &layer,
-                            (*membw_limit * (1024_u64.pow(3) as f64)) as usize,
-                            last_membw,
-                            low,
-                            high,
-                        );
-                    }
+                    trace!(
+                        "layer {0} (membw, membw_limit): ({membw} gi_b, {membw_limit} gi_b)",
+                        layer.name
+                    );
 
                     let target = layer.cpus.weight().clamp(low, high);
-                    let cpus_range =
-                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
 
                     records.push((
                         (owned * 100.0) as u64,
@@ -2727,13 +2868,33 @@ impl<'a> Scheduler<'a> {
                         target,
                     ));
 
-                    (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
+                    let target = target.clamp(cpus_range.0, cpus_range.1);
+                    let membw_target = self.clamp_target_by_membw(
+                        &layer,
+                        membw_limit as f64,
+                        membw as f64,
+                        target as u64,
+                    );
+
+                    trace!("CPU target pre- and post-membw adjustment: {target} -> {membw_target}");
+
+                    // If there's no way to drop our memory usage down enough,
+                    // pin the target CPUs to low and drop a warning.
+                    if membw_target < cpus_range.0 {
+                        warn!("cannot satisfy memory bw limit for layer {}", layer.name);
+                        warn!("membw_target {membw_target} low {}", cpus_range.0);
+                    };
+
+                    // Memory bandwidth target cannot override imposed limits or bump
+                    // the target above what CPU usage-based throttling requires.
+                    let target = membw_target.clamp(cpus_range.0, target);
+
+                    (target, cpus_range.0)
                 }
                 LayerKind::Open { .. } => (0, 0),
             });
         }
 
-        trace!("initial targets: {:?}", &targets);
         trace!("(owned, open, util, low, high, target): {:?}", &records);
         targets
     }
@@ -2839,7 +3000,7 @@ impl<'a> Scheduler<'a> {
     // first free LLCs from layers that shrunk from last recomputation, then
     // distribute freed LLCs to growing layers, and then spill over remaining
     // cores in free LLCs.
-    fn recompute_layer_core_order(&mut self, layer_targets: &Vec<(usize, usize)>) {
+    fn recompute_layer_core_order(&mut self, layer_targets: &Vec<(usize, usize)>) -> Result<bool> {
         // Collect freed LLCs from shrinking layers.
         debug!(
             " free: before pass: free_llcs={:?}",
@@ -2942,6 +3103,7 @@ impl<'a> Scheduler<'a> {
                 let avail = cpus_per_llc - free_vec[i].1;
                 // The amount we'll use.
                 let mut used = extra.min(avail);
+                let cores_to_add = used;
 
                 let shift = free_vec[i].1;
                 free_vec[i].1 += used;
@@ -2950,14 +3112,14 @@ impl<'a> Scheduler<'a> {
                 let llc = self.topo.all_llcs.get(&llc_id).unwrap();
 
                 for core in llc.cores.iter().skip(shift) {
-                    core_order.push(core.1.id);
                     if used == 0 {
                         break;
                     }
+                    core_order.push(core.1.id);
                     used -= 1;
                 }
 
-                extra -= used;
+                extra -= cores_to_add;
                 if extra == 0 {
                     break;
                 }
@@ -2993,6 +3155,105 @@ impl<'a> Scheduler<'a> {
                 layer.name, layer.core_order
             );
         }
+
+        // Apply CPU changes directly for StickyDynamic layers
+        // Do this in two phases: first free all CPUs, then allocate all CPUs
+        // This ensures freed CPUs are available for reallocation
+        let mut updated = false;
+
+        // Calculate target CPUs for all layers and free excess CPUs
+        for &(idx, _) in layer_targets.iter() {
+            let layer = &mut self.layers[idx];
+
+            if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
+                continue;
+            }
+
+            // Calculate new cpumask based on core_order (which includes both assigned LLCs and spillover cores)
+            let mut new_cpus = Cpumask::new();
+            for &core_id in &layer.core_order {
+                if let Some(core) = self.topo.all_cores.get(&core_id) {
+                    new_cpus |= &core.span;
+                }
+            }
+
+            // Intersect with allowed_cpus
+            new_cpus &= &layer.allowed_cpus;
+
+            // Determine CPUs to free (old cpus not in new cpus)
+            let cpus_to_free = layer.cpus.clone().and(&new_cpus.clone().not());
+
+            if cpus_to_free.weight() > 0 {
+                debug!(
+                    " apply: layer={} freeing CPUs: {}",
+                    layer.name, cpus_to_free
+                );
+                // Update layer state and free
+                layer.cpus &= &cpus_to_free.not();
+                layer.nr_cpus -= cpus_to_free.weight();
+                for cpu in cpus_to_free.iter() {
+                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                }
+                self.cpu_pool.free(&cpus_to_free)?;
+                updated = true;
+            }
+        }
+
+        // Allocate needed CPUs to all layers
+        for &(idx, _) in layer_targets.iter() {
+            let layer = &mut self.layers[idx];
+
+            if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
+                continue;
+            }
+
+            // Recalculate target CPUs
+            let mut new_cpus = Cpumask::new();
+            for &core_id in &layer.core_order {
+                if let Some(core) = self.topo.all_cores.get(&core_id) {
+                    new_cpus |= &core.span;
+                }
+            }
+            new_cpus &= &layer.allowed_cpus;
+
+            // Determine CPUs to allocate (new cpus not in old cpus, and whether they are available)
+            let available_cpus = self.cpu_pool.available_cpus();
+            let desired_to_alloc = new_cpus.clone().and(&layer.cpus.clone().not());
+            let cpus_to_alloc = desired_to_alloc.clone().and(&available_cpus);
+
+            if desired_to_alloc.weight() > cpus_to_alloc.weight() {
+                debug!(
+                    " apply: layer={} wanted to alloc {} CPUs but only {} available",
+                    layer.name,
+                    desired_to_alloc.weight(),
+                    cpus_to_alloc.weight()
+                );
+            }
+
+            if cpus_to_alloc.weight() > 0 {
+                debug!(
+                    " apply: layer={} allocating CPUs: {}",
+                    layer.name, cpus_to_alloc
+                );
+                // Update layer state and free
+                layer.cpus |= &cpus_to_alloc;
+                layer.nr_cpus += cpus_to_alloc.weight();
+                for cpu in cpus_to_alloc.iter() {
+                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+                }
+                self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
+                updated = true;
+            }
+
+            debug!(
+                " apply: layer={} final cpus.weight()={} nr_cpus={}",
+                layer.name,
+                layer.cpus.weight(),
+                layer.nr_cpus
+            );
+        }
+
+        Ok(updated)
     }
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
@@ -3005,7 +3266,20 @@ impl<'a> Scheduler<'a> {
         let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
-        self.recompute_layer_core_order(&ascending);
+        let sticky_dynamic_updated = self.recompute_layer_core_order(&ascending)?;
+        updated |= sticky_dynamic_updated;
+
+        // Update BPF cpumasks for StickyDynamic layers if they were updated
+        if sticky_dynamic_updated {
+            for (idx, layer) in self.layers.iter().enumerate() {
+                if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
+                    Self::update_bpf_layer_cpumask(
+                        layer,
+                        &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                    );
+                }
+            }
+        }
 
         // If any layer is growing, guarantee that the largest layer that is
         // freeing CPUs frees at least one CPU.
@@ -3021,6 +3295,11 @@ impl<'a> Scheduler<'a> {
         for &(idx, target) in ascending.iter().rev() {
             let layer = &mut self.layers[idx];
             if layer_is_open(layer) {
+                continue;
+            }
+
+            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
@@ -3077,6 +3356,11 @@ impl<'a> Scheduler<'a> {
             let layer = &mut self.layers[idx];
 
             if layer_is_open(layer) {
+                continue;
+            }
+
+            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
@@ -3190,6 +3474,25 @@ impl<'a> Scheduler<'a> {
             self.processing_dur,
             &self.gpu_task_handler,
         )?;
+
+        // Update BPF with EWMA values
+        self.skel
+            .maps
+            .bss_data
+            .as_mut()
+            .unwrap()
+            .system_cpu_util_ewma = (self.sched_stats.system_cpu_util_ewma * 10000.0) as u64;
+
+        for layer_id in 0..self.sched_stats.nr_layers {
+            self.skel
+                .maps
+                .bss_data
+                .as_mut()
+                .unwrap()
+                .layer_dsq_insert_ewma[layer_id] =
+                (self.sched_stats.layer_dsq_insert_ewma[layer_id] * 10000.0) as u64;
+        }
+
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
         self.gpu_task_handler.maybe_affinitize();
@@ -3584,8 +3887,14 @@ fn write_example_file(path: &str) -> Result<()> {
     Ok(f.write_all(serde_json::to_string_pretty(&*EXAMPLE_CONFIG)?.as_bytes())?)
 }
 
-fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
-    let mut hint_to_layer_map = HashMap::<u64, (usize, String)>::new();
+struct HintLayerInfo {
+    layer_id: usize,
+    system_cpu_util_below: Option<f64>,
+    dsq_insert_below: Option<f64>,
+}
+
+fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, HintLayerInfo>> {
+    let mut hint_to_layer_map = HashMap::<u64, (usize, String, Option<f64>, Option<f64>)>::new();
 
     let nr_specs = specs.len();
     if nr_specs == 0 {
@@ -3624,6 +3933,11 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
                 );
             }
             let mut hint_equals_cnt = 0;
+            let mut system_cpu_util_below_cnt = 0;
+            let mut dsq_insert_below_cnt = 0;
+            let mut hint_value: Option<u64> = None;
+            let mut system_cpu_util_threshold: Option<f64> = None;
+            let mut dsq_insert_threshold: Option<f64> = None;
             for one in ands.iter() {
                 match one {
                     LayerMatch::CgroupPrefix(prefix) => {
@@ -3651,6 +3965,26 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
                             bail!("Spec {:?} has too long a process name prefix", spec.name);
                         }
                     }
+                    LayerMatch::SystemCpuUtilBelow(threshold) => {
+                        if *threshold < 0.0 || *threshold > 1.0 {
+                            bail!(
+                                "Spec {:?} has SystemCpuUtilBelow threshold outside the range [0.0, 1.0]",
+                                spec.name
+                            );
+                        }
+                        system_cpu_util_threshold = Some(*threshold);
+                        system_cpu_util_below_cnt += 1;
+                    }
+                    LayerMatch::DsqInsertBelow(threshold) => {
+                        if *threshold < 0.0 || *threshold > 1.0 {
+                            bail!(
+                                "Spec {:?} has DsqInsertBelow threshold outside the range [0.0, 1.0]",
+                                spec.name
+                            );
+                        }
+                        dsq_insert_threshold = Some(*threshold);
+                        dsq_insert_below_cnt += 1;
+                    }
                     LayerMatch::HintEquals(hint) => {
                         if *hint > 1024 {
                             bail!(
@@ -3658,19 +3992,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
                                 spec.name
                             );
                         }
-
-                        if let Some((layer_id, name)) = hint_to_layer_map.get(hint) {
-                            if *layer_id != idx {
-                                bail!(
-                                    "Spec {:?} has hint value ({}) that is already mapped to Spec {:?}",
-                                    spec.name,
-                                    hint,
-                                    name
-                                );
-                            }
-                        } else {
-                            hint_to_layer_map.insert(*hint, (idx, spec.name.clone()));
-                        }
+                        hint_value = Some(*hint);
                         hint_equals_cnt += 1;
                     }
                     _ => {}
@@ -3679,8 +4001,47 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
             if hint_equals_cnt > 1 {
                 bail!("Only 1 HintEquals match permitted per AND block");
             }
-            if hint_equals_cnt == 1 && ands.len() != 1 {
+            let high_freq_matcher_cnt = system_cpu_util_below_cnt + dsq_insert_below_cnt;
+            if high_freq_matcher_cnt > 0 {
+                if hint_equals_cnt != 1 {
+                    bail!("High-frequency matchers (SystemCpuUtilBelow, DsqInsertBelow) must be used with one HintEquals");
+                }
+                if system_cpu_util_below_cnt > 1 {
+                    bail!("Only 1 SystemCpuUtilBelow match permitted per AND block");
+                }
+                if dsq_insert_below_cnt > 1 {
+                    bail!("Only 1 DsqInsertBelow match permitted per AND block");
+                }
+                if ands.len() != hint_equals_cnt + system_cpu_util_below_cnt + dsq_insert_below_cnt
+                {
+                    bail!("High-frequency matchers must be used only with HintEquals (no other matchers)");
+                }
+            } else if hint_equals_cnt == 1 && ands.len() != 1 {
                 bail!("HintEquals match cannot be in conjunction with other matches");
+            }
+
+            // Insert hint into map if present
+            if let Some(hint) = hint_value {
+                if let Some((layer_id, name, _, _)) = hint_to_layer_map.get(&hint) {
+                    if *layer_id != idx {
+                        bail!(
+                            "Spec {:?} has hint value ({}) that is already mapped to Spec {:?}",
+                            spec.name,
+                            hint,
+                            name
+                        );
+                    }
+                } else {
+                    hint_to_layer_map.insert(
+                        hint,
+                        (
+                            idx,
+                            spec.name.clone(),
+                            system_cpu_util_threshold,
+                            dsq_insert_threshold,
+                        ),
+                    );
+                }
             }
         }
 
@@ -3720,7 +4081,16 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<HashMap<u64, usize>> {
 
     Ok(hint_to_layer_map
         .into_iter()
-        .map(|(k, v)| (k, v.0))
+        .map(|(k, v)| {
+            (
+                k,
+                HintLayerInfo {
+                    layer_id: v.0,
+                    system_cpu_util_below: v.2,
+                    dsq_insert_below: v.3,
+                },
+            )
+        })
         .collect())
 }
 
@@ -3808,6 +4178,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
     attr.type_ = perf::bindings::PERF_TYPE_RAW;
     attr.config = event;
     attr.sample_type = 0u64;
+    attr.__bindgen_anon_1.sample_period = 0u64;
     attr.set_disabled(0);
 
     let perf_events_map = &skel.maps.scx_pmu_map;
@@ -3844,7 +4215,7 @@ fn create_perf_fds(skel: &mut BpfSkel, event: u64) -> Result<()> {
     }
 
     if failures > 0 {
-        trace!("failed to install {failures} counters");
+        println!("membw tracking: failed to install {failures} counters");
         // Keep going, do not fail the scheduler for this
     }
 
@@ -3870,7 +4241,7 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
         | "cascadelakex" | "arrowlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
         | "graniterapids" => {
             trace!("found Intel codename {codename}");
-            pmumanager.pmus.get("MEM_LOAD_RETIRED.L3_MISS")
+            pmumanager.pmus.get("LONGEST_LAT_CACHE.MISS")
         }
 
         _ => {
@@ -3888,9 +4259,8 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     Ok(config)
 }
 
-fn main() -> Result<()> {
-    let opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_layered {}",
@@ -3902,6 +4272,35 @@ fn main() -> Result<()> {
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
+    }
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
     }
 
     if opts.no_load_frac_limit {
@@ -3917,26 +4316,11 @@ fn main() -> Result<()> {
         warn!("--local_llc_iteration is deprecated and noop");
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
-
     debug!("opts={:?}", &opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_layered run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

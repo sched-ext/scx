@@ -242,6 +242,7 @@ struct task_ctx {
 	u64 last_run_ns;
 	u32 last_waker_pid;
 	u8  last_waker_comm[MAX_COMM];
+	bool is_sampled; // True if this thread is currently being sampled for this wakeup->run cycle
 };
 
 struct schedule_stop_trace_args {

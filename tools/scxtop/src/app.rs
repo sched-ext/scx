@@ -6,22 +6,27 @@
 use crate::available_kprobe_events;
 use crate::available_perf_events;
 use crate::bpf_intf;
+use crate::bpf_prog_data::{BpfProgData, BpfProgStats};
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
 use crate::columns::{
-    get_memory_detail_columns, get_memory_detail_metrics, get_memory_rates_columns,
-    get_memory_summary_columns, get_pagefault_summary_columns, get_perf_top_columns,
-    get_perf_top_columns_no_bpf, get_process_columns, get_process_columns_no_bpf, get_slab_columns,
-    get_swap_summary_columns, get_thread_columns, get_thread_columns_no_bpf, Column, Columns,
+    get_bpf_program_columns, get_perf_top_columns, get_perf_top_columns_no_bpf,
+    get_process_columns, get_process_columns_no_bpf, get_thread_columns, get_thread_columns_no_bpf,
+    Columns,
 };
 use crate::config::get_config_path;
 use crate::config::Config;
 use crate::get_default_events;
-use crate::network_stats::InterfaceStats;
+use crate::render::bpf_programs::{ProgramDetailParams, ProgramsListParams};
+use crate::render::scheduler::{SchedulerStatsParams, SchedulerViewParams};
+use crate::render::{
+    BpfProgramRenderer, MemoryRenderer, NetworkRenderer, ProcessRenderer, SchedulerRenderer,
+};
 use crate::search;
+use crate::symbol_data::SymbolData;
 use crate::util::{
-    check_perf_capability, default_scxtop_sched_ext_stats, format_bits, format_bytes, format_hz,
-    read_file_string, sanitize_nbsp, u32_to_i32,
+    check_perf_capability, default_scxtop_sched_ext_stats, format_hz, read_file_string,
+    sanitize_nbsp, u32_to_i32,
 };
 use crate::AppState;
 use crate::AppTheme;
@@ -63,8 +68,8 @@ use num_format::{SystemLocale, ToFormattedString};
 use procfs::process::all_processes;
 use ratatui::prelude::Constraint;
 use ratatui::{
-    layout::{Alignment, Layout, Margin, Rect},
-    prelude::{Direction, Stylize},
+    layout::{Alignment, Direction, Layout, Margin, Rect},
+    prelude::Stylize,
     style::{Color, Modifier, Style},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     symbols::line::THICK,
@@ -86,11 +91,11 @@ use sysinfo::System;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex as TokioMutex;
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 /// App is the struct for scxtop application state.
@@ -103,6 +108,8 @@ pub struct App<'a> {
     cpu_stat_tracker: Arc<RwLock<CpuStatTracker>>,
     sched_stats_raw: String,
     sys: Arc<StdMutex<System>>,
+    /// CPU frequency refresh interval shared with background thread (in milliseconds)
+    cpu_freq_refresh_interval_ms: Arc<AtomicU64>,
     mem_info: MemStatSnapshot,
     memory_view_state: ComponentViewState,
     network_view_state: ComponentViewState,
@@ -134,6 +141,31 @@ pub struct App<'a> {
     dsq_data: BTreeMap<u64, EventData>,
     proc_data: BTreeMap<i32, ProcData>,
     network_stats: NetworkStatSnapshot,
+
+    // BPF program statistics
+    bpf_program_stats: BpfProgStats,
+    bpf_program_columns: Columns<u32, BpfProgData>,
+    bpf_program_table_state: TableState,
+    selected_bpf_program_id: Option<u32>,
+    cached_bpf_symbol_info: Option<crate::bpf_prog_data::BpfSymbolInfo>,
+    filtered_bpf_programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)>,
+    bpf_stats_fd: Option<i32>,
+
+    // System-wide CPU time tracking for overhead calculation
+    total_cpu_time_ns: u64,
+    prev_total_cpu_time_ns: u64,
+    prev_bpf_total_runtime_ns: u64,
+    bpf_overhead_history: VecDeque<f64>,
+    terminal_width: u16,
+
+    // BPF program detail view perf data
+    #[allow(dead_code)]
+    bpf_program_symbol_data: SymbolData,
+    bpf_program_symbol_table_state: TableState,
+    bpf_program_filtered_symbols: Vec<crate::symbol_data::SymbolSample>,
+
+    // Perf sampling control
+    bpf_perf_sampling_active: bool,
 
     // Event related
     active_event: ProfilingEvent,
@@ -291,6 +323,29 @@ impl<'a> App<'a> {
         // try to infer from the fd
         let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
 
+        // Create System object and spawn background thread for CPU frequency refresh
+        let sys = Arc::new(StdMutex::new(System::new_all()));
+        let sys_clone = sys.clone();
+        let tick_rate_ms = config.tick_rate_ms();
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let should_quit_clone = should_quit.clone();
+
+        // Create shared atomic for CPU frequency refresh interval
+        let cpu_freq_refresh_interval_ms = Arc::new(AtomicU64::new(tick_rate_ms as u64));
+        let interval_clone = cpu_freq_refresh_interval_ms.clone();
+
+        // Spawn background thread to refresh CPU frequencies at the same rate as tick_rate
+        // This moves the expensive sysfs reads off the main thread
+        std::thread::spawn(move || {
+            while !should_quit_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(mut system_guard) = sys_clone.lock() {
+                    system_guard.refresh_cpu_frequency();
+                }
+                let interval_ms = interval_clone.load(std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            }
+        });
+
         let mut app = Self {
             config,
             localize: true,
@@ -299,7 +354,8 @@ impl<'a> App<'a> {
             stats_client,
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
-            sys: Arc::new(StdMutex::new(System::new_all())),
+            sys,
+            cpu_freq_refresh_interval_ms,
             mem_info,
             memory_view_state: ComponentViewState::Default,
             network_view_state: ComponentViewState::Default,
@@ -309,7 +365,7 @@ impl<'a> App<'a> {
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
-            should_quit: Arc::new(AtomicBool::new(false)),
+            should_quit,
             action_tx,
             skel: Some(skel),
             large_core_count: topo.all_cpus.len() >= 128,
@@ -329,6 +385,31 @@ impl<'a> App<'a> {
             dsq_data: BTreeMap::new(),
             proc_data,
             network_stats: NetworkStatSnapshot::new(100),
+
+            // BPF program statistics
+            bpf_program_stats: BpfProgStats::new(),
+            bpf_program_columns: Columns::new(get_bpf_program_columns()),
+            bpf_program_table_state: TableState::default(),
+            selected_bpf_program_id: None,
+            cached_bpf_symbol_info: None,
+            filtered_bpf_programs: Vec::new(),
+            bpf_stats_fd: None,
+
+            // System-wide CPU time tracking
+            total_cpu_time_ns: 0,
+            prev_total_cpu_time_ns: 0,
+            prev_bpf_total_runtime_ns: 0,
+            bpf_overhead_history: VecDeque::new(),
+            terminal_width: 80, // Default value, will be updated on first render
+
+            // BPF program detail view perf data
+            bpf_program_symbol_data: SymbolData::new(),
+            bpf_program_symbol_table_state: TableState::default(),
+            bpf_program_filtered_symbols: Vec::new(),
+
+            // Perf sampling control
+            bpf_perf_sampling_active: false,
+
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -488,6 +569,29 @@ impl<'a> App<'a> {
         // No hardware pressure monitoring without BPF
         let hw_pressure = false;
 
+        // Create System object and spawn background thread for CPU frequency refresh
+        let sys = Arc::new(StdMutex::new(System::new_all()));
+        let sys_clone = sys.clone();
+        let tick_rate_ms = config.tick_rate_ms();
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let should_quit_clone = should_quit.clone();
+
+        // Create shared atomic for CPU frequency refresh interval
+        let cpu_freq_refresh_interval_ms = Arc::new(AtomicU64::new(tick_rate_ms as u64));
+        let interval_clone = cpu_freq_refresh_interval_ms.clone();
+
+        // Spawn background thread to refresh CPU frequencies at the same rate as tick_rate
+        // This moves the expensive sysfs reads off the main thread
+        std::thread::spawn(move || {
+            while !should_quit_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(mut system_guard) = sys_clone.lock() {
+                    system_guard.refresh_cpu_frequency();
+                }
+                let interval_ms = interval_clone.load(std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            }
+        });
+
         let mut app = Self {
             config,
             localize: true,
@@ -496,7 +600,8 @@ impl<'a> App<'a> {
             stats_client,
             cpu_stat_tracker,
             sched_stats_raw: "".to_string(),
-            sys: Arc::new(StdMutex::new(System::new_all())),
+            sys,
+            cpu_freq_refresh_interval_ms,
             mem_info,
             memory_view_state: ComponentViewState::Default,
             network_view_state: ComponentViewState::Default,
@@ -506,7 +611,7 @@ impl<'a> App<'a> {
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
-            should_quit: Arc::new(AtomicBool::new(false)),
+            should_quit,
             action_tx,
             skel: None, // No BPF skeleton in non-BPF mode
             large_core_count: topo.all_cpus.len() >= 128,
@@ -525,6 +630,31 @@ impl<'a> App<'a> {
             dsq_data: BTreeMap::new(),
             proc_data,
             network_stats: NetworkStatSnapshot::new(100),
+
+            // BPF program statistics
+            bpf_program_stats: BpfProgStats::new(),
+            bpf_program_columns: Columns::new(get_bpf_program_columns()),
+            bpf_program_table_state: TableState::default(),
+            selected_bpf_program_id: None,
+            cached_bpf_symbol_info: None,
+            filtered_bpf_programs: Vec::new(),
+            bpf_stats_fd: None,
+
+            // System-wide CPU time tracking
+            total_cpu_time_ns: 0,
+            prev_total_cpu_time_ns: 0,
+            prev_bpf_total_runtime_ns: 0,
+            bpf_overhead_history: VecDeque::new(),
+            terminal_width: 80, // Default value, will be updated on first render
+
+            // BPF program detail view perf data
+            bpf_program_symbol_data: SymbolData::new(),
+            bpf_program_symbol_table_state: TableState::default(),
+            bpf_program_filtered_symbols: Vec::new(),
+
+            // Perf sampling control
+            bpf_perf_sampling_active: false,
+
             active_hw_event_id: 0,
             active_event,
             active_prof_events,
@@ -640,6 +770,36 @@ impl<'a> App<'a> {
                 self.max_fps = 1;
                 self.frames_since_update = 0;
             }
+        }
+
+        // Manage BPF stats collection based on current state
+        let is_bpf_related_state = matches!(
+            self.state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+        let was_bpf_related_state = matches!(
+            self.prev_state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+
+        // If transitioning away from BPF-related states, disable BPF stats tracking
+        if was_bpf_related_state && !is_bpf_related_state {
+            self.disable_bpf_stats();
+        }
+
+        // Manage BPF stats collection based on current state
+        let is_bpf_related_state = matches!(
+            self.state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+        let was_bpf_related_state = matches!(
+            self.prev_state,
+            AppState::BpfPrograms | AppState::BpfProgramDetail
+        );
+
+        // If transitioning away from BPF-related states, disable BPF stats tracking
+        if was_bpf_related_state && !is_bpf_related_state {
+            self.disable_bpf_stats();
         }
     }
 
@@ -861,13 +1021,6 @@ impl<'a> App<'a> {
     }
 
     /// resizes existing sched event data based on new max value.
-    fn resize_sched_events(&mut self, max_events: usize) {
-        for events in self.dsq_data.values_mut() {
-            events.set_max_size(max_events);
-        }
-    }
-
-    /// resizes existing events based on new max value.
     fn resize_events(&mut self, max_events: usize) {
         for node in self.topo.nodes.keys() {
             let node_data = self
@@ -920,18 +1073,93 @@ impl<'a> App<'a> {
     /// Uses view-specific data collection to optimize performance.
     fn on_tick(&mut self) -> Result<()> {
         match self.state {
+            AppState::BpfProgramDetail => self.on_tick_bpf_program_detail(),
+            AppState::BpfPrograms => self.on_tick_bpf_programs(),
             AppState::Default => self.on_tick_default(),
-            AppState::Process => self.on_tick_process(),
+            AppState::Help | AppState::Pause | AppState::Tracing => self.on_tick_static(),
+            AppState::Llc => self.on_tick_llc(),
+            AppState::MangoApp => self.on_tick_mango_app(),
             AppState::Memory => self.on_tick_memory(),
             AppState::Network => self.on_tick_network(),
-            AppState::Llc => self.on_tick_llc(),
             AppState::Node => self.on_tick_node(),
-            AppState::Power => self.on_tick_power(),
-            AppState::Scheduler => self.on_tick_scheduler(),
             AppState::PerfEvent | AppState::KprobeEvent => self.on_tick_events(),
             AppState::PerfTop => self.on_tick_perf_top(),
-            AppState::MangoApp => self.on_tick_mango_app(),
-            AppState::Help | AppState::Pause | AppState::Tracing => self.on_tick_static(),
+            AppState::Power => self.on_tick_power(),
+            AppState::Process => self.on_tick_process(),
+            AppState::Scheduler => self.on_tick_scheduler(),
+        }
+    }
+
+    /// Filters BPF programs based on the current filter input
+    fn filter_bpf_programs(&mut self) {
+        self.filtered_bpf_programs.clear();
+
+        if self.event_input_buffer.is_empty() {
+            // No filter, show all programs
+            self.filtered_bpf_programs = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
+        } else {
+            let filter_text = self.event_input_buffer.to_lowercase();
+
+            // Special filter for sched_ext programs
+            if filter_text == "sched_ext" || filter_text == "scheduler" {
+                self.filtered_bpf_programs = self
+                    .bpf_program_stats
+                    .programs
+                    .iter()
+                    .filter_map(|(id, data)| {
+                        if data.is_sched_ext {
+                            Some((*id, data.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            } else {
+                // Apply substring filter with scheduler name included
+                self.filtered_bpf_programs = self
+                    .bpf_program_stats
+                    .programs
+                    .iter()
+                    .filter_map(|(id, data)| {
+                        // Search in program name, type, scheduler name, and ID
+                        let search_text = format!(
+                            "{} {} {} {}",
+                            data.name.to_lowercase(),
+                            data.prog_type.to_lowercase(),
+                            data.sched_ext_ops_name
+                                .as_ref()
+                                .unwrap_or(&"".to_string())
+                                .to_lowercase(),
+                            id
+                        );
+
+                        if search_text.contains(&filter_text) {
+                            Some((*id, data.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
+        }
+
+        // Sort by average runtime descending (same as the main view)
+        self.filtered_bpf_programs.sort_by(|a, b| {
+            b.1.avg_runtime_ns()
+                .partial_cmp(&a.1.avg_runtime_ns())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Reset table selection to the first item
+        if !self.filtered_bpf_programs.is_empty() {
+            self.bpf_program_table_state.select(Some(0));
+        } else {
+            self.bpf_program_table_state.select(None);
         }
     }
 
@@ -1634,136 +1862,6 @@ impl<'a> App<'a> {
         self.render_table(frame, left, false)
     }
 
-    /// Creates a sparkline for a dsq.
-    fn dsq_sparkline(
-        &self,
-        event: &str,
-        dsq_id: u64,
-        borders: Borders,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Sparkline<'_> {
-        let data = if self.dsq_data.contains_key(&dsq_id) {
-            let dsq_data = self.dsq_data.get(&dsq_id).unwrap();
-            dsq_data.event_data_immut(event)
-        } else {
-            Vec::new()
-        };
-        // XXX: this should be max across all CPUs
-        let stats = VecStats::new(&data, None);
-        Sparkline::default()
-            .data(&data)
-            .max(stats.max)
-            .direction(RenderDirection::RightToLeft)
-            .style(self.theme().sparkline_style())
-            .block(
-                Block::new()
-                    .borders(borders)
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style())
-                    .title_top(if render_sample_rate {
-                        Line::from(format!(
-                            "sample rate {}",
-                            self.skel
-                                .as_ref()
-                                .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
-                                .unwrap_or(0)
-                        ))
-                        .style(self.theme().text_important_color())
-                        .right_aligned()
-                    } else {
-                        Line::from("".to_string())
-                    })
-                    .title_top(if render_title {
-                        Line::from(format!("{event} "))
-                            .style(self.theme().title_style())
-                            .left_aligned()
-                    } else {
-                        Line::from("".to_string())
-                    })
-                    .title_top(
-                        Line::from(if self.localize {
-                            format!(
-                                "dsq {:#X} avg {} max {} min {}",
-                                dsq_id,
-                                sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
-                                sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
-                                sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
-                            )
-                        } else {
-                            format!(
-                                "dsq {:#X} avg {} max {} min {}",
-                                dsq_id, stats.avg, stats.max, stats.min,
-                            )
-                        })
-                        .style(self.theme().title_style())
-                        .centered(),
-                    ),
-            )
-    }
-
-    /// Generates dsq sparklines.
-    fn dsq_sparklines(
-        &self,
-        event: &str,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Vec<Sparkline<'_>> {
-        self.dsq_data
-            .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
-            .enumerate()
-            .map(|(j, (dsq_id, _data))| {
-                self.dsq_sparkline(
-                    event,
-                    *dsq_id,
-                    Borders::ALL,
-                    j == 0 && render_title,
-                    j == 0 && render_sample_rate,
-                )
-            })
-            .collect()
-    }
-
-    /// Generates a DSQ bar chart.
-    fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar<'_> {
-        let gradient_color = self.gradient5_color(value, max, min);
-
-        Bar::default()
-            .value(value)
-            .style(Style::default().fg(gradient_color))
-            .label(Line::from(if self.localize {
-                format!(
-                    "{:#X} avg {} max {} min {}",
-                    dsq,
-                    sanitize_nbsp(avg.to_formatted_string(&self.locale)),
-                    sanitize_nbsp(max.to_formatted_string(&self.locale)),
-                    sanitize_nbsp(min.to_formatted_string(&self.locale))
-                )
-            } else {
-                format!("{dsq:#X} avg {avg} max {max} min {min}",)
-            }))
-            .text_value(if self.localize {
-                sanitize_nbsp(value.to_formatted_string(&self.locale))
-            } else {
-                format!("{value}")
-            })
-    }
-
-    /// Generates DSQ bar charts.
-    fn dsq_bars(&self, event: &str) -> Vec<Bar<'_>> {
-        self.dsq_data
-            .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
-            .map(|(dsq_id, dsq_data)| {
-                let values = dsq_data.event_data_immut(event);
-                let value = values.last().copied().unwrap_or(0_u64);
-                let stats = VecStats::new(&values, None);
-                self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
-            })
-            .collect()
-    }
-
     /// Returns the gradient color.
     fn gradient5_color(&self, value: u64, max: u64, min: u64) -> Color {
         if max > min {
@@ -1856,180 +1954,6 @@ impl<'a> App<'a> {
     }
 
     /// Renders scheduler stats.
-    fn render_scheduler_stats(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let paragraph = Paragraph::new(self.sched_stats_raw.clone());
-        let block = Block::bordered()
-            .title_top(
-                Line::from(self.scheduler.clone())
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .title_top(
-                Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                    .style(self.theme().text_important_color())
-                    .right_aligned(),
-            )
-            .title_bottom(
-                Line::from(format!("keep_last {}", self.scx_stats.dispatch_keep_last))
-                    .style(self.theme().text_important_color())
-                    .right_aligned(),
-            )
-            .title_bottom(
-                Line::from(format!(
-                    "select_fall {}",
-                    self.scx_stats.select_cpu_fallback
-                ))
-                .style(self.theme().text_important_color())
-                .left_aligned(),
-            )
-            .style(self.theme().border_style())
-            .border_type(BorderType::Rounded);
-
-        frame.render_widget(paragraph.block(block), area);
-
-        Ok(())
-    }
-
-    /// Renders the scheduler state as sparklines.
-    fn render_scheduler_sparklines(
-        &mut self,
-        event: &str,
-        frame: &mut Frame,
-        area: Rect,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Result<()> {
-        let num_dsqs = self
-            .dsq_data
-            .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
-            .count();
-
-        let mut dsq_constraints = Vec::new();
-
-        let area_width = area.width as usize;
-        if area_width != self.max_sched_events {
-            self.resize_sched_events(area_width);
-        }
-
-        if num_dsqs == 0 {
-            let block = Block::default()
-                .title_top(if render_title {
-                    Line::from(self.scheduler.clone())
-                        .style(self.theme().title_style())
-                        .centered()
-                } else {
-                    Line::from("".to_string())
-                })
-                .style(self.theme().border_style())
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded);
-            frame.render_widget(block, area);
-            return Ok(());
-        }
-
-        for _ in 0..num_dsqs {
-            dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
-        }
-        let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
-
-        self.dsq_sparklines(event, true, render_sample_rate)
-            .iter()
-            .enumerate()
-            .for_each(|(j, dsq_sparkline)| {
-                frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
-            });
-
-        Ok(())
-    }
-
-    /// Renders the scheduler state as barcharts.
-    fn render_scheduler_barchart(
-        &mut self,
-        event: &str,
-        frame: &mut Frame,
-        area: Rect,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Result<()> {
-        let num_dsqs = self.dsq_data.len();
-        if num_dsqs == 0 {
-            let block = Block::default()
-                .title_top(if render_title {
-                    Line::from(self.scheduler.clone())
-                        .style(self.theme().title_style())
-                        .centered()
-                } else {
-                    Line::from("".to_string())
-                })
-                .style(self.theme().border_style())
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded);
-            frame.render_widget(block, area);
-            return Ok(());
-        }
-        let sample_rate = self
-            .skel
-            .as_ref()
-            .unwrap()
-            .maps
-            .data_data
-            .as_ref()
-            .unwrap()
-            .sample_rate;
-
-        let dsq_global_iter = self
-            .dsq_data
-            .values()
-            .flat_map(|dsq_data| dsq_data.event_data_immut(event))
-            .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, None);
-
-        let bar_block = Block::default()
-            .title_top(
-                Line::from(if self.localize {
-                    format!(
-                        "{} avg {} max {} min {}",
-                        event,
-                        sanitize_nbsp(stats.avg.to_formatted_string(&self.locale)),
-                        sanitize_nbsp(stats.max.to_formatted_string(&self.locale)),
-                        sanitize_nbsp(stats.min.to_formatted_string(&self.locale))
-                    )
-                } else {
-                    format!(
-                        "{} avg {} max {} min {}",
-                        event, stats.avg, stats.max, stats.min,
-                    )
-                })
-                .style(self.theme().title_style())
-                .centered(),
-            )
-            .title_top(if render_sample_rate {
-                Line::from(format!("sample rate {sample_rate}"))
-                    .style(self.theme().text_important_color())
-                    .right_aligned()
-            } else {
-                Line::from("")
-            })
-            .style(self.theme().border_style())
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-
-        let dsq_bars: Vec<Bar> = self.dsq_bars(event);
-
-        let barchart = BarChart::default()
-            .data(BarGroup::default().bars(&dsq_bars))
-            .block(bar_block)
-            .max(stats.max)
-            .direction(Direction::Horizontal)
-            .bar_gap(0)
-            .bar_width(1);
-
-        frame.render_widget(barchart, area);
-        Ok(())
-    }
-
-    /// Draw an error message.
     fn render_error_msg(&self, frame: &mut Frame, area: Rect, msg: &str) {
         frame.render_widget(Clear, area);
 
@@ -2054,48 +1978,6 @@ impl<'a> App<'a> {
             .block(block);
 
         frame.render_widget(para, area);
-    }
-
-    /// Renders the scheduler application state.
-    fn render_scheduler(
-        &mut self,
-        event: &str,
-        frame: &mut Frame,
-        area: Rect,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Result<()> {
-        // If no scheduler is attached, display a message and return early.
-        if self.scheduler.is_empty() {
-            self.render_error_msg(frame, area, "Missing Scheduler");
-            return Ok(());
-        }
-
-        match self.view_state {
-            ViewState::Sparkline => self.render_scheduler_sparklines(
-                event,
-                frame,
-                area,
-                render_title,
-                render_sample_rate,
-            )?,
-            ViewState::BarChart => self.render_scheduler_barchart(
-                event,
-                frame,
-                area,
-                render_title,
-                render_sample_rate,
-            )?,
-            ViewState::LineGauge => self.render_scheduler_sparklines(
-                event,
-                frame,
-                area,
-                render_title,
-                render_sample_rate,
-            )?,
-        }
-
-        Ok(())
     }
 
     fn render_event_sparkline(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
@@ -2587,223 +2469,159 @@ impl<'a> App<'a> {
             anyhow::bail!("invalid memory view state: ComponentViewState::Default");
         }
 
-        let memory_key = self
-            .config
-            .active_keymap
-            .action_keys_string(Action::SetState(AppState::Memory));
-
-        // Check if the memory key is bound
-        if memory_key.is_empty() {
-            panic!("Memory key is not bound");
-        }
-
-        // Create a single block for all memory tables with keybinding in title
-        let title = if memory_key == "m" || memory_key == "M" {
-            Line::from(vec![
-                Span::styled(
-                    &memory_key,
-                    self.theme().title_style().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("emory Statistics", self.theme().text_color()),
-            ])
-        } else {
-            Line::from(vec![
-                Span::styled("Memory Statistics (", self.theme().text_color()),
-                Span::styled(&memory_key, self.theme().title_style()),
-                Span::styled(")", self.theme().text_color()),
-            ])
-        };
-
-        let block = Block::bordered()
-            .title(title)
-            .title_alignment(Alignment::Center)
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        // Get the inner area of the block
-        let inner_area = block.inner(area);
-
-        // Split the inner area into three sections for different memory tables
-        // Use proportional heights based on content - memory needs more space than swap and page faults
-        let [memory_area, swap_area, pagefault_area] = Layout::vertical([
-            Constraint::Length(3), // Memory table (header + 1 row + padding)
-            Constraint::Length(3), // Swap table (header + 1 row + padding)
-            Constraint::Length(3), // Page faults table (header + 1 row + padding)
-        ])
-        .margin(0) // Remove margin between tables
-        .areas(inner_area);
-
-        // Get the columns for memory, swap, and pagefault stats
-        let memory_columns = get_memory_summary_columns();
-        let swap_columns = get_swap_summary_columns();
-        let pagefault_columns = get_pagefault_summary_columns();
-
-        // Render the block first
-        frame.render_widget(block, area);
-
-        // Render memory statistics table (without border)
-        self.render_memory_table(frame, memory_area, None, &memory_columns, false)?;
-
-        // Render swap statistics table (without border)
-        self.render_memory_table(frame, swap_area, None, &swap_columns, false)?;
-
-        // Render page fault statistics table (without border)
-        self.render_memory_table(frame, pagefault_area, None, &pagefault_columns, false)?;
-
-        Ok(())
-    }
-
-    /// Renders a memory table with the given columns
-    fn render_memory_table(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        title: Option<&str>,
-        columns: &[Column<(), MemStatSnapshot>],
-        with_border: bool,
-    ) -> Result<()> {
-        let mem_stats = &self.mem_info;
-
-        // Create header cells from column headers
-        let header_cells: Vec<Cell> = columns
-            .iter()
-            .filter(|col| col.visible)
-            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
-            .collect();
-
-        // Create row data
-        let row_cells: Vec<Cell> = columns
-            .iter()
-            .filter(|col| col.visible)
-            .map(|col| {
-                let value = (col.value_fn)((), mem_stats);
-                Cell::from(value).style(self.theme().text_color())
-            })
-            .collect();
-
-        // Get constraints for visible columns
-        let constraints: Vec<Constraint> = columns
-            .iter()
-            .filter(|col| col.visible)
-            .map(|col| col.constraint)
-            .collect();
-
-        // Create the table with rows and constraints
-        let mut table = Table::new(vec![Row::new(row_cells)], constraints)
-            .header(Row::new(header_cells))
-            .column_spacing(1);
-
-        // Add border and title if requested
-        if with_border {
-            if let Some(table_title) = title {
-                table = table.block(
-                    Block::bordered()
-                        .title(table_title)
-                        .title_alignment(Alignment::Center)
-                        .border_type(BorderType::Rounded)
-                        .style(self.theme().border_style()),
-                );
-            } else {
-                table = table.block(
-                    Block::bordered()
-                        .border_type(BorderType::Rounded)
-                        .style(self.theme().border_style()),
-                );
-            }
-        }
-
-        frame.render_widget(table, area);
-
-        Ok(())
+        let theme = self.theme();
+        MemoryRenderer::render_memory_summary(
+            frame,
+            area,
+            &self.mem_info,
+            &self.config.active_keymap,
+            theme,
+        )
     }
 
     /// Renders a simplified network summary for the default view.
     fn render_network_summary(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        // Create a table for the network interfaces
-        let header = Row::new(vec![
-            Cell::from("Interface"),
-            Cell::from("RX Bytes"),
-            Cell::from("TX Bytes"),
-            Cell::from("RX Packets"),
-            Cell::from("TX Packets"),
-        ])
-        .height(1)
-        .style(self.theme().text_color())
-        .bold()
-        .underlined();
+        let theme = self.theme();
+        NetworkRenderer::render_network_summary(
+            frame,
+            area,
+            &self.network_stats,
+            &self.config.active_keymap,
+            self.localize,
+            &self.locale,
+            theme,
+        )
+    }
 
-        let constraints = vec![
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-        ];
-
-        let mut interfaces: Vec<(&String, &InterfaceStats)> =
-            self.network_stats.interfaces.iter().collect();
-        interfaces.sort_by(|a, b| b.1.recv_bytes.cmp(&a.1.recv_bytes));
-
-        // Limit to top 5 interfaces by received bytes
-        let top_interfaces = interfaces.into_iter().take(5);
-
-        let rows = top_interfaces.map(|(interface, _)| {
-            let delta_recv_bytes = self.network_stats.get_delta_recv_bytes(interface);
-            let delta_sent_bytes = self.network_stats.get_delta_sent_bytes(interface);
-            let delta_recv_packets = self.network_stats.get_delta_recv_packets(interface);
-            let delta_sent_packets = self.network_stats.get_delta_sent_packets(interface);
-
-            Row::new(vec![
-                Cell::from(interface.to_string()),
-                Cell::from(format_bytes(delta_recv_bytes) + "/s"),
-                Cell::from(format_bytes(delta_sent_bytes) + "/s"),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{delta_recv_packets}/s")
-                }),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{delta_sent_packets}/s")
-                }),
-            ])
-            .height(1)
-            .style(self.theme().text_color())
-        });
-
-        let block = Block::bordered()
-            .title_top({
-                let network_key = self
-                    .config
-                    .active_keymap
-                    .action_keys_string(Action::SetState(AppState::Network));
-
-                if network_key == "N" || network_key == "n" {
-                    let key_char = network_key.clone();
-                    Line::from(vec![
-                        Span::styled(
-                            key_char,
-                            self.theme().title_style().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("etwork", self.theme().text_color()),
-                    ])
-                    .style(self.theme().title_style())
-                    .centered()
-                } else {
-                    Line::from(format!("Network (press {network_key} for full view)"))
-                        .style(self.theme().title_style())
-                        .centered()
+    /// Renders the application to the frame.
+    pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        // Update terminal width for overhead history sizing
+        self.terminal_width = area.width;
+        match self.state {
+            AppState::BpfPrograms => self.render_bpf_programs(frame),
+            AppState::BpfProgramDetail => self.render_bpf_program_detail(frame),
+            AppState::Help => self.render_help(frame),
+            AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
+            AppState::Process => self.render_table(frame, area, true),
+            AppState::MangoApp => self.render_mangoapp(frame),
+            AppState::Memory => self.render_memory(frame),
+            AppState::Network => self.render_network(frame),
+            AppState::Node => self.render_node(frame),
+            AppState::Llc => self.render_llc(frame),
+            AppState::PerfTop => self.render_perf_top(frame),
+            AppState::Power => self.render_power(frame),
+            AppState::Scheduler => {
+                if self.has_capability_warnings() {
+                    self.render_capability_warnings(frame, area)?;
+                    return Ok(());
                 }
-            })
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
+                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+                let [left_top, left_center, left_bottom] = Layout::vertical([
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                ])
+                .areas(left);
+                let [right_top, right_bottom] =
+                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+                        .areas(right);
 
-        let table = Table::new(rows, constraints).header(header).block(block);
+                let sample_rate = self
+                    .skel
+                    .as_ref()
+                    .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+                    .unwrap_or(0);
 
-        frame.render_widget(table, area);
+                let params1 = SchedulerViewParams {
+                    event: "dsq_lat_us",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: true,
+                };
+                let new_max = SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_top,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params1,
+                )?;
+                self.max_sched_events = new_max;
 
-        Ok(())
+                let params2 = SchedulerViewParams {
+                    event: "dsq_slice_consumed",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_center,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params2,
+                )?;
+
+                let params3 = SchedulerViewParams {
+                    event: "dsq_vtime",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_bottom,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params3,
+                )?;
+
+                let params4 = SchedulerViewParams {
+                    event: "dsq_nr_queued",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    right_bottom,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params4,
+                )?;
+                let stats_params = SchedulerStatsParams {
+                    scheduler_name: &self.scheduler,
+                    sched_stats_raw: &self.sched_stats_raw,
+                    tick_rate_ms: self.config.tick_rate_ms(),
+                    dispatch_keep_last: self.scx_stats.dispatch_keep_last,
+                    select_cpu_fallback: self.scx_stats.select_cpu_fallback,
+                    theme: self.theme(),
+                };
+                SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
+            }
+            AppState::Tracing => self.render_tracing(frame),
+            _ => self.render_default(frame),
+        }
     }
 
     /// Renders the help TUI.
@@ -2967,6 +2785,15 @@ impl<'a> App<'a> {
                 format!(
                     "{}: filter processes/threads",
                     self.config.active_keymap.action_keys_string(Action::Filter)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: display BPF programs view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::BpfPrograms))
                 ),
                 Style::default(),
             )),
@@ -3329,32 +3156,52 @@ impl<'a> App<'a> {
 
         self.render_event(frame, right)?;
         frame.render_widget(block, left_areas[0]);
-        self.render_scheduler("dsq_lat_us", frame, left_areas[1], false, true)?;
-        self.render_scheduler("dsq_slice_consumed", frame, left_areas[2], false, false)?;
+
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
+
+        let params1 = SchedulerViewParams {
+            event: "dsq_lat_us",
+            scheduler_name: &self.scheduler,
+            dsq_data: &self.dsq_data,
+            sample_rate,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: true,
+        };
+        SchedulerRenderer::render_scheduler_view(
+            frame,
+            left_areas[1],
+            &self.view_state,
+            self.max_sched_events,
+            &params1,
+        )?;
+
+        let params2 = SchedulerViewParams {
+            event: "dsq_slice_consumed",
+            scheduler_name: &self.scheduler,
+            dsq_data: &self.dsq_data,
+            sample_rate,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: false,
+        };
+        SchedulerRenderer::render_scheduler_view(
+            frame,
+            left_areas[2],
+            &self.view_state,
+            self.max_sched_events,
+            &params2,
+        )?;
 
         Ok(())
-    }
-
-    /// Common helper to create table header and constraints from visible columns
-    fn create_table_header_and_constraints<T, D>(
-        &self,
-        visible_columns: &[&crate::columns::Column<T, D>],
-    ) -> (Row<'_>, Vec<Constraint>) {
-        let header = visible_columns
-            .iter()
-            .map(|col| Cell::from(col.header))
-            .collect::<Row>()
-            .height(1)
-            .style(self.theme().text_color())
-            .bold()
-            .underlined();
-
-        let constraints = visible_columns
-            .iter()
-            .map(|col| col.constraint)
-            .collect::<Vec<_>>();
-
-        (header, constraints)
     }
 
     /// Common helper to update events list size
@@ -3372,107 +3219,33 @@ impl<'a> App<'a> {
         area: Rect,
         render_tick_rate: bool,
     ) -> Result<()> {
-        let [scroll_area, data_area] =
-            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
-        self.update_events_list_size(data_area);
-
         let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
-        let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
+        let filtered_state = self.filtered_state.lock().unwrap();
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
 
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(self.theme().border_style())
-            .title_top(
-                Line::from(format!("Processes (total: {})", self.proc_data.len()))
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .title_top(
-                Line::from(vec![
-                    Span::styled("f", self.theme().text_important_color()),
-                    Span::styled(
-                        if self.filtering {
-                            format!(" {}_", self.event_input_buffer)
-                        } else {
-                            "ilter".to_string()
-                        },
-                        self.theme().text_color(),
-                    ),
-                ])
-                .left_aligned(),
-            )
-            .title_top(
-                Line::from(format!(
-                    "sample rate {}{}",
-                    self.skel
-                        .as_ref()
-                        .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
-                        .unwrap_or(0),
-                    if render_tick_rate {
-                        format!(" --- tick rate {}", self.config.tick_rate_ms())
-                    } else {
-                        "".to_string()
-                    }
-                ))
-                .style(self.theme().text_important_color())
-                .right_aligned(),
-            );
+        let theme = self.theme();
+        let (selected_pid, new_size) = ProcessRenderer::render_process_table(
+            frame,
+            area,
+            &self.proc_data,
+            visible_columns,
+            &filtered_state,
+            self.filtering,
+            &self.event_input_buffer,
+            sample_rate,
+            self.config.tick_rate_ms(),
+            render_tick_rate,
+            theme,
+            self.events_list_size,
+        )?;
 
-        // We want to hold the lock for as short as possible
-        let (mut filtered_processes, selected): (Vec<_>, usize) = {
-            let filtered_state = self.filtered_state.lock().unwrap();
-            let processes = filtered_state
-                .list
-                .iter()
-                .filter_map(|item| {
-                    item.as_int()
-                        .and_then(|pid| self.proc_data.get(&pid).map(|data| (pid, data)))
-                })
-                .collect();
-            (processes, filtered_state.selected)
-        };
-
-        filtered_processes.sort_unstable_by(|a, b| {
-            b.1.cpu_util_perc
-                .partial_cmp(&a.1.cpu_util_perc)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.1.num_threads.cmp(&a.1.num_threads))
-        });
-
-        let rows = filtered_processes
-            .iter()
-            .enumerate()
-            .map(|(i, (tgid, data))| {
-                visible_columns
-                    .iter()
-                    .map(|col| Cell::from((col.value_fn)(*tgid, data)))
-                    .collect::<Row>()
-                    .height(1)
-                    .style(if i == selected {
-                        self.theme().text_important_color()
-                    } else {
-                        self.theme().text_color()
-                    })
-            });
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        frame.render_stateful_widget(
-            table,
-            data_area,
-            &mut TableState::new().with_offset(selected),
-        );
-
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            scroll_area,
-            &mut ScrollbarState::new(filtered_processes.len()).position(selected),
-        );
-
-        if let Some((tgid, _)) = filtered_processes.get(selected) {
-            self.selected_process = Some(*tgid);
+        self.events_list_size = new_size;
+        if let Some(pid) = selected_pid {
+            self.selected_process = Some(pid);
         }
 
         Ok(())
@@ -3484,10 +3257,6 @@ impl<'a> App<'a> {
         area: Rect,
         render_tick_rate: bool,
     ) -> Result<()> {
-        let [scroll_area, data_area] =
-            Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
-        self.update_events_list_size(data_area);
-
         let error_str = format!(
             "Process has been killed. Press escape or {} to return to process view.",
             self.config.active_keymap.action_keys_string(Action::Quit)
@@ -3502,101 +3271,32 @@ impl<'a> App<'a> {
         };
 
         let visible_columns: Vec<_> = self.thread_columns.visible_columns().collect();
-        let (header, constraints) = self.create_table_header_and_constraints(&visible_columns);
+        let filtered_state = self.filtered_state.lock().unwrap();
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
+        let _quit_keys = self.config.active_keymap.action_keys_string(Action::Quit);
+        let theme = self.theme();
 
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(self.theme().border_style())
-            .title_top(
-                Line::from(format!(
-                    "Process: {:.15} [{}] (total threads: {})",
-                    proc_data.process_name, proc_data.tgid, proc_data.num_threads,
-                ))
-                .style(self.theme().title_style())
-                .centered(),
-            )
-            .title_top(
-                Line::from(vec![
-                    Span::styled("f", self.theme().text_important_color()),
-                    Span::styled(
-                        if self.filtering {
-                            format!(" {}_", self.event_input_buffer)
-                        } else {
-                            "ilter".to_string()
-                        },
-                        self.theme().text_color(),
-                    ),
-                ])
-                .left_aligned(),
-            )
-            .title_top(
-                Line::from(if let Some(ref skel) = self.skel {
-                    format!(
-                        "sample rate {}{}",
-                        skel.maps.data_data.as_ref().unwrap().sample_rate,
-                        if render_tick_rate {
-                            format!(" --- tick rate {}", self.config.tick_rate_ms())
-                        } else {
-                            "".to_string()
-                        }
-                    )
-                } else if render_tick_rate {
-                    format!("tick rate {}", self.config.tick_rate_ms())
-                } else {
-                    "".to_string()
-                })
-                .style(self.theme().text_important_color())
-                .right_aligned(),
-            );
+        let new_size = ProcessRenderer::render_thread_table(
+            frame,
+            area,
+            tgid,
+            proc_data,
+            visible_columns,
+            &filtered_state,
+            self.filtering,
+            &self.event_input_buffer,
+            sample_rate,
+            self.config.tick_rate_ms(),
+            render_tick_rate,
+            theme,
+            self.events_list_size,
+        )?;
 
-        let (mut filtered_threads, selected): (Vec<_>, usize) = {
-            let filtered_state = self.filtered_state.lock().unwrap();
-            let threads = filtered_state
-                .list
-                .iter()
-                .filter_map(|item| {
-                    item.as_int()
-                        .and_then(|tid| proc_data.threads.get(&tid).map(|data| (tid, data)))
-                })
-                .collect();
-            (threads, filtered_state.selected)
-        };
-
-        filtered_threads.sort_unstable_by(|a, b| {
-            b.1.cpu_util_perc
-                .partial_cmp(&a.1.cpu_util_perc)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let rows = filtered_threads.iter().enumerate().map(|(i, (tid, data))| {
-            visible_columns
-                .iter()
-                .map(|col| Cell::from((col.value_fn)(*tid, data)))
-                .collect::<Row>()
-                .height(1)
-                .style(if i == selected {
-                    self.theme().text_important_color()
-                } else {
-                    self.theme().text_color()
-                })
-        });
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        frame.render_stateful_widget(
-            table,
-            data_area,
-            &mut TableState::new().with_offset(selected),
-        );
-
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalLeft)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            scroll_area,
-            &mut ScrollbarState::new(filtered_threads.len()).position(selected),
-        );
-
+        self.events_list_size = new_size;
         Ok(())
     }
 
@@ -4076,833 +3776,153 @@ impl<'a> App<'a> {
 
     /// Renders the memory application state.
     fn render_memory(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+        let theme = self.theme();
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
 
-        let mem_stats = &self.mem_info;
-
-        // Get the columns and metrics for the detailed memory view
-        let memory_columns = get_memory_detail_columns();
-        let memory_metrics = get_memory_detail_metrics();
-
-        // Create header cells from column headers
-        let header_cells: Vec<Cell> = memory_columns
-            .iter()
-            .map(|col| Cell::from(col.header).style(self.theme().title_style()))
-            .collect();
-
-        // Create constraints from column constraints
-        let constraints: Vec<Constraint> =
-            memory_columns.iter().map(|col| col.constraint).collect();
-
-        // Create rows for memory metrics
-        let rows = memory_metrics
-            .iter()
-            .map(|metric| {
-                let cells = memory_columns
-                    .iter()
-                    .map(|col| {
-                        Cell::from((col.value_fn)(metric, mem_stats))
-                            .style(self.theme().text_important_color())
-                    })
-                    .collect::<Vec<Cell>>();
-                Row::new(cells)
-            })
-            .collect::<Vec<Row>>();
-
-        let block = Block::bordered()
-            .title_top(
-                Line::from("Memory Statistics")
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .title_top(
-                Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                    .style(self.theme().text_important_color())
-                    .right_aligned(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        let table = Table::new(rows, constraints)
-            .header(Row::new(header_cells).style(self.theme().title_style()))
-            .block(block);
-
-        frame.render_widget(table, left);
-
-        // Create memory usage gauges and additional stats for the right side
-        let [right_top, right_middle, right_bottom] = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .areas(right);
-
-        // Split the top section into two columns for memory and swap gauges
-        let [gauge_left, gauge_right] =
-            Layout::horizontal([Constraint::Fill(1); 2]).areas(right_top);
-
-        // Memory usage gauge
-        let mem_used_percent =
-            100.0 - (mem_stats.available_kb as f64 / mem_stats.total_kb as f64) * 100.0;
-        let mem_used_kb = mem_stats.total_kb - mem_stats.available_kb;
-
-        // Calculate gradient color based on memory usage percentage
-        let mem_gradient_color = self.theme().gradient_5(
-            mem_used_percent,
-            20.0, // very low threshold (0-20%)
-            40.0, // low threshold (20-40%)
-            60.0, // high threshold (40-60%)
-            80.0, // very high threshold (60-80%)
-            false,
-        );
-
-        let mem_gauge = LineGauge::default()
-            .block(
-                Block::bordered()
-                    .title_top(
-                        Line::from("Memory Usage")
-                            .style(self.theme().title_style())
-                            .centered(),
-                    )
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style()),
-            )
-            .line_set(THICK)
-            .filled_style(mem_gradient_color)
-            .ratio(mem_used_percent / 100.0)
-            .label(format!(
-                "{}/{}",
-                format_bytes(mem_used_kb),
-                format_bytes(mem_stats.total_kb),
-            ));
-
-        frame.render_widget(mem_gauge, gauge_left);
-
-        // Swap usage gauge
-        let swap_used_percent = if mem_stats.swap_total_kb > 0 {
-            100.0 - (mem_stats.swap_free_kb as f64 / mem_stats.swap_total_kb as f64) * 100.0
-        } else {
-            0.0
-        };
-        let swap_used_kb = mem_stats.swap_total_kb - mem_stats.swap_free_kb;
-
-        // Calculate gradient color based on swap usage percentage
-        let swap_gradient_color = self.theme().gradient_5(
-            swap_used_percent,
-            5.0,  // very low threshold (0-5%) - any swap usage is concerning
-            15.0, // low threshold (5-15%)
-            35.0, // high threshold (15-35%)
-            60.0, // very high threshold (35-60%)
-            false,
-        );
-
-        let swap_gauge = LineGauge::default()
-            .block(
-                Block::bordered()
-                    .title_top(
-                        Line::from("Swap Usage")
-                            .style(self.theme().title_style())
-                            .centered(),
-                    )
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style()),
-            )
-            .line_set(THICK)
-            .filled_style(swap_gradient_color)
-            .ratio(swap_used_percent / 100.0)
-            .label(format!(
-                "{}/{}",
-                format_bytes(swap_used_kb),
-                format_bytes(mem_stats.swap_total_kb),
-            ));
-
-        frame.render_widget(swap_gauge, gauge_right);
-
-        // Memory rates (pagefaults, swap I/O)
-        let memory_rates_columns = get_memory_rates_columns();
-        self.render_memory_table(
+        MemoryRenderer::render_memory_view(
             frame,
-            right_middle,
-            Some("Memory Activity Rates"),
-            &memory_rates_columns,
-            true,
-        )?;
-
-        // Slab information section
-        let slab_columns = get_slab_columns();
-        self.render_memory_table(
-            frame,
-            right_bottom,
-            Some("Slab Information"),
-            &slab_columns,
-            true,
-        )?;
-
-        Ok(())
+            &self.mem_info,
+            sample_rate,
+            self.config.tick_rate_ms(),
+            theme,
+        )
     }
 
     /// Renders the network application state.
     fn render_network(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-
-        // Create a table for the network interfaces
-        let header = Row::new(vec![
-            Cell::from("Interface"),
-            Cell::from("RX Bits"),
-            Cell::from("TX Bits"),
-            Cell::from("RX Packets"),
-            Cell::from("TX Packets"),
-            Cell::from("RX Errors"),
-            Cell::from("TX Errors"),
-        ])
-        .height(1)
-        .style(self.theme().text_color())
-        .bold()
-        .underlined();
-
-        let constraints = vec![
-            Constraint::Percentage(20),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(10),
-            Constraint::Percentage(10),
-        ];
-
-        let mut interfaces: Vec<(&String, &InterfaceStats)> =
-            self.network_stats.interfaces.iter().collect();
-        interfaces.sort_by(|a, b| a.0.cmp(b.0));
-
-        // Get totals for summary row
-        let total_delta_recv_bytes = self.network_stats.get_total_delta_recv_bytes();
-        let total_delta_sent_bytes = self.network_stats.get_total_delta_sent_bytes();
-        let total_delta_recv_packets = self.network_stats.get_total_delta_recv_packets();
-        let total_delta_sent_packets = self.network_stats.get_total_delta_sent_packets();
-        let total_delta_recv_errs = self.network_stats.get_total_delta_recv_errs();
-        let total_delta_sent_errs = self.network_stats.get_total_delta_sent_errs();
-
-        let mut rows: Vec<Row> = interfaces
-            .iter()
-            .map(|(interface, _)| {
-                let delta_recv_bytes = self.network_stats.get_delta_recv_bytes(interface);
-                let delta_sent_bytes = self.network_stats.get_delta_sent_bytes(interface);
-                let delta_recv_packets = self.network_stats.get_delta_recv_packets(interface);
-                let delta_sent_packets = self.network_stats.get_delta_sent_packets(interface);
-                let delta_recv_errs = self.network_stats.get_delta_recv_errs(interface);
-                let delta_sent_errs = self.network_stats.get_delta_sent_errs(interface);
-
-                Row::new(vec![
-                    Cell::from(interface.to_string()),
-                    Cell::from(format_bits(delta_recv_bytes) + "/s"),
-                    Cell::from(format_bits(delta_sent_bytes) + "/s"),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_recv_packets}/s")
-                    }),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_sent_packets}/s")
-                    }),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_recv_errs.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_recv_errs}/s")
-                    }),
-                    Cell::from(if self.localize {
-                        sanitize_nbsp(delta_sent_errs.to_formatted_string(&self.locale)) + "/s"
-                    } else {
-                        format!("{delta_sent_errs}/s")
-                    }),
-                ])
-                .height(1)
-                .style(self.theme().text_color())
-            })
-            .collect();
-
-        // Add summary row at the bottom
-        rows.push(
-            Row::new(vec![
-                Cell::from("TOTAL").style(
-                    Style::default()
-                        .fg(self.theme().text_important_color())
-                        .bold(),
-                ),
-                Cell::from(format_bits(total_delta_recv_bytes) + "/s")
-                    .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(format_bits(total_delta_sent_bytes) + "/s")
-                    .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_recv_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_recv_packets}/s")
-                })
-                .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_sent_packets.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_sent_packets}/s")
-                })
-                .style(Style::default().fg(self.theme().text_important_color())),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_recv_errs.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_recv_errs}/s")
-                })
-                .style(Style::default().fg(if total_delta_recv_errs > 0 {
-                    Color::Red
-                } else {
-                    self.theme().text_important_color()
-                })),
-                Cell::from(if self.localize {
-                    sanitize_nbsp(total_delta_sent_errs.to_formatted_string(&self.locale)) + "/s"
-                } else {
-                    format!("{total_delta_sent_errs}/s")
-                })
-                .style(Style::default().fg(if total_delta_sent_errs > 0 {
-                    Color::Red
-                } else {
-                    self.theme().text_important_color()
-                })),
-            ])
-            .height(1),
-        );
-
-        let block = Block::bordered()
-            .title_top(
-                Line::from("Network Interfaces")
-                    .style(self.theme().title_style())
-                    .centered(),
-            )
-            .title_top(
-                Line::from(format!("{}ms", self.config.tick_rate_ms()))
-                    .style(self.theme().text_important_color())
-                    .right_aligned(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme().border_style());
-
-        let table = Table::new(rows, constraints).header(header).block(block);
-
-        // Render the network interfaces table with integrated summary
-        frame.render_widget(table, left);
-
-        // Render network traffic charts on the right side
-        self.render_network_charts(frame, right)?;
-
-        Ok(())
+        let theme = self.theme();
+        NetworkRenderer::render_network_view(
+            frame,
+            &self.network_stats,
+            self.config.tick_rate_ms(),
+            self.localize,
+            &self.locale,
+            theme,
+        )
     }
 
-    /// Renders network traffic charts showing historical data per interface.
-    fn render_network_charts(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        // Get the top 3 most active interfaces by total bytes
-        let mut interface_activity: Vec<(String, u64)> = self
-            .network_stats
-            .interfaces
-            .iter()
-            .map(|(name, stats)| (name.clone(), stats.recv_bytes + stats.sent_bytes))
-            .collect();
-        interface_activity.sort_by(|a, b| b.1.cmp(&a.1));
-        let top_interfaces: Vec<String> = interface_activity
-            .into_iter()
-            .take(3)
-            .map(|(name, _)| name)
-            .collect();
+    /// Renders the BPF programs view
+    fn render_bpf_programs(&mut self, frame: &mut Frame) -> Result<()> {
+        // Use filtered programs if filtering is active, otherwise use all programs
+        let programs_to_display: Vec<(u32, BpfProgData)> = if self.filtering {
+            self.filtered_bpf_programs.clone()
+        } else {
+            // Create sorted list of BPF programs for display
+            let mut programs: Vec<(u32, BpfProgData)> = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
 
-        if top_interfaces.is_empty() {
-            let block = Block::bordered()
-                .title_top(
-                    Line::from("Network Traffic History")
-                        .style(self.theme().title_style())
-                        .centered(),
-                )
-                .border_type(BorderType::Rounded)
-                .style(self.theme().border_style());
+            // Sort by average runtime descending
+            programs.sort_by(|a, b| {
+                b.1.avg_runtime_ns()
+                    .partial_cmp(&a.1.avg_runtime_ns())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            programs
+        };
 
-            let paragraph = Paragraph::new("No network interfaces detected")
-                .block(block)
-                .alignment(Alignment::Center);
-
-            frame.render_widget(paragraph, area);
-            return Ok(());
-        }
-
-        // Create vertical layout for each interface (each interface gets 2 charts: bytes + packets)
-        let interface_count = top_interfaces.len();
-        let constraints: Vec<Constraint> = (0..interface_count)
-            .map(|_| Constraint::Ratio(1, interface_count as u32))
-            .collect();
-
-        let interface_areas = Layout::vertical(constraints).split(area);
-
-        // Render charts for each interface
-        for (i, interface) in top_interfaces.iter().enumerate() {
-            if i < interface_areas.len() {
-                self.render_interface_charts(frame, interface_areas[i], interface)?;
-            }
-        }
-
-        Ok(())
+        let list_params = ProgramsListParams {
+            bpf_program_stats: &self.bpf_program_stats,
+            filtered_programs: &programs_to_display,
+            bpf_program_columns: &self.bpf_program_columns,
+            bpf_overhead_history: &self.bpf_overhead_history,
+            filtering: self.filtering,
+            filter_input: &self.event_input_buffer,
+            event_input_buffer: &self.event_input_buffer,
+            theme: self.config.theme(),
+            tick_rate_ms: self.config.tick_rate_ms(),
+        };
+        BpfProgramRenderer::render_programs_list(
+            frame,
+            &mut self.bpf_program_table_state,
+            &list_params,
+        )
     }
 
-    /// Renders charts for a single interface (bytes and packets stacked vertically).
-    fn render_interface_charts(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        interface: &str,
-    ) -> Result<()> {
-        // Split area vertically: bytes chart on top, packets chart on bottom
-        let [bytes_area, packets_area] =
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-
-        // Render bytes chart for this interface
-        self.render_interface_bytes_chart(frame, bytes_area, interface)?;
-
-        // Render packets chart for this interface
-        self.render_interface_packets_chart(frame, packets_area, interface)?;
-
-        Ok(())
-    }
-
-    /// Renders the bytes chart for a single interface.
-    fn render_interface_bytes_chart(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        interface: &str,
-    ) -> Result<()> {
-        // Split area to make room for summary statistics at the bottom
-        let [chart_area, stats_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
-
-        let rx_history = self
-            .network_stats
-            .get_historical_data(interface, "recv_bytes");
-        let tx_history = self
-            .network_stats
-            .get_historical_data(interface, "sent_bytes");
-
-        // Convert to (x, y) coordinates with RX as negative, TX as positive
-        let rx_data: Vec<(f64, f64)> = rx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, -(y as f64)))
-            .collect();
-
-        let tx_data: Vec<(f64, f64)> = tx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, y as f64))
-            .collect();
-
-        // Collect all values for scaling
-        let mut all_values = Vec::new();
-        all_values.extend(rx_history.iter().map(|&v| v as f64));
-        all_values.extend(tx_history.iter().map(|&v| v as f64));
-
-        let marker = self.theme().plot_marker();
-        let tx_color = self.theme().positive_value_color();
-        let rx_color = self.theme().negative_value_color();
-
-        // Create datasets
-        let datasets = vec![
-            Dataset::default()
-                .name(format!("{interface} RX"))
-                .marker(marker)
-                .style(Style::default().fg(rx_color))
-                .data(&rx_data),
-            Dataset::default()
-                .name(format!("{interface} TX"))
-                .marker(marker)
-                .style(Style::default().fg(tx_color))
-                .data(&tx_data),
-        ];
-
-        let max_value = all_values.iter().fold(0.0f64, |a, &b| a.max(b)).max(1000.0); // Minimum 1000 bytes/s for reasonable scaling
-        let history_len = self.network_stats.max_history_size as f64;
-
-        let chart = Chart::new(datasets)
-            .block(
-                Block::bordered()
-                    .title_top(
-                        Line::from(format!("{interface} - Bits/s"))
-                            .style(self.theme().title_style())
-                            .centered(),
-                    )
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style()),
-            )
-            .x_axis(
-                Axis::default()
-                    .title("Time")
-                    .style(self.theme().text_color())
-                    .bounds([0.0, history_len]),
-            )
-            .y_axis(
-                Axis::default()
-                    .title("Bits/s")
-                    .style(self.theme().text_color())
-                    .bounds([-max_value, max_value])
-                    .labels(vec![
-                        Span::styled(
-                            format!("RX {}", format_bits(max_value as u64)),
-                            Style::default().fg(self.theme().negative_value_color()),
-                        ),
-                        Span::styled("0", self.theme().text_color()),
-                        Span::styled(
-                            format!("TX {}", format_bits(max_value as u64)),
-                            Style::default().fg(self.theme().positive_value_color()),
-                        ),
-                    ]),
-            );
-
-        frame.render_widget(chart, chart_area);
-
-        // Calculate and render summary statistics
-        self.render_bytes_summary_stats(frame, stats_area, &rx_history, &tx_history)?;
-
-        Ok(())
-    }
-
-    /// Renders summary statistics for bytes data.
-    fn render_bytes_summary_stats(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        rx_history: &[u64],
-        tx_history: &[u64],
-    ) -> Result<()> {
-        if rx_history.is_empty() && tx_history.is_empty() {
-            return Ok(());
-        }
-
-        // Calculate RX statistics
-        let (rx_min, rx_max, rx_avg) = if rx_history.is_empty() {
-            (0, 0, 0)
+    /// Renders the BPF program detail view using real BPF_ENABLE_STATS data
+    fn render_bpf_program_detail(&mut self, frame: &mut Frame) -> Result<()> {
+        // Get the selected program data and clone it to avoid borrowing issues
+        let selected_program_data = if let Some(prog_id) = self.selected_bpf_program_id {
+            self.bpf_program_stats.programs.get(&prog_id).cloned()
         } else {
-            let min = *rx_history.iter().min().unwrap_or(&0);
-            let max = *rx_history.iter().max().unwrap_or(&0);
-            let avg = rx_history.iter().sum::<u64>() / rx_history.len() as u64;
-            (min, max, avg)
+            None
         };
 
-        // Calculate TX statistics
-        let (tx_min, tx_max, tx_avg) = if tx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *tx_history.iter().min().unwrap_or(&0);
-            let max = *tx_history.iter().max().unwrap_or(&0);
-            let avg = tx_history.iter().sum::<u64>() / tx_history.len() as u64;
-            (min, max, avg)
+        let active_event_name = self.active_event.event_name();
+
+        let detail_params = ProgramDetailParams {
+            selected_program_data: selected_program_data.as_ref(),
+            bpf_program_stats: &self.bpf_program_stats,
+            filtered_symbols: &self.bpf_program_filtered_symbols,
+            bpf_perf_sampling_active: self.bpf_perf_sampling_active,
+            active_event_name,
+            theme: self.config.theme(),
+            tick_rate_ms: self.config.tick_rate_ms(),
         };
-
-        let stats_text = vec![Line::from(vec![
-            Span::raw("Min: "),
-            Span::styled(
-                format_bits(rx_min),
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                format_bits(tx_min),
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Max: "),
-            Span::styled(
-                format_bits(rx_max),
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                format_bits(tx_max),
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Avg: "),
-            Span::styled(
-                format_bits(rx_avg),
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                format_bits(tx_avg),
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-        ])];
-
-        let stats_paragraph = Paragraph::new(stats_text).style(self.theme().text_color());
-
-        frame.render_widget(stats_paragraph, area);
-        Ok(())
-    }
-
-    /// Renders the packets chart for a single interface.
-    fn render_interface_packets_chart(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        interface: &str,
-    ) -> Result<()> {
-        // Split area to make room for summary statistics at the bottom
-        let [chart_area, stats_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
-
-        let rx_history = self
-            .network_stats
-            .get_historical_data(interface, "recv_packets");
-        let tx_history = self
-            .network_stats
-            .get_historical_data(interface, "sent_packets");
-
-        // Convert to (x, y) coordinates with RX as negative, TX as positive
-        let rx_data: Vec<(f64, f64)> = rx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, -(y as f64)))
-            .collect();
-
-        let tx_data: Vec<(f64, f64)> = tx_history
-            .iter()
-            .enumerate()
-            .map(|(x, &y)| (x as f64, y as f64))
-            .collect();
-
-        // Collect all values for scaling
-        let mut all_values = Vec::new();
-        all_values.extend(rx_history.iter().map(|&v| v as f64));
-        all_values.extend(tx_history.iter().map(|&v| v as f64));
-
-        let marker = self.theme().plot_marker();
-        let tx_color = self.theme().positive_value_color();
-        let rx_color = self.theme().negative_value_color();
-
-        // Create datasets
-        let datasets = vec![
-            Dataset::default()
-                .name(format!("{interface} RX"))
-                .marker(marker)
-                .style(Style::default().fg(rx_color))
-                .data(&rx_data),
-            Dataset::default()
-                .name(format!("{interface} TX"))
-                .marker(marker)
-                .style(Style::default().fg(tx_color))
-                .data(&tx_data),
-        ];
-
-        let max_value = all_values.iter().fold(0.0f64, |a, &b| a.max(b)).max(100.0); // Minimum 100 packets/s for reasonable scaling
-        let history_len = self.network_stats.max_history_size as f64;
-
-        let chart = Chart::new(datasets)
-            .block(
-                Block::bordered()
-                    .title_top(
-                        Line::from(format!("{interface} - Packets/s"))
-                            .style(self.theme().title_style())
-                            .centered(),
-                    )
-                    .border_type(BorderType::Rounded)
-                    .style(self.theme().border_style()),
-            )
-            .x_axis(
-                Axis::default()
-                    .title("Time")
-                    .style(self.theme().text_color())
-                    .bounds([0.0, history_len]),
-            )
-            .y_axis(
-                Axis::default()
-                    .title("Packets/s")
-                    .style(self.theme().text_color())
-                    .bounds([-max_value, max_value])
-                    .labels(vec![
-                        Span::styled(
-                            if self.localize {
-                                format!(
-                                    "RX {}",
-                                    sanitize_nbsp(
-                                        (max_value as u64).to_formatted_string(&self.locale)
-                                    )
-                                )
-                            } else {
-                                format!("RX {}", max_value as u64)
-                            },
-                            Style::default().fg(self.theme().negative_value_color()),
-                        ),
-                        Span::styled("0", self.theme().text_color()),
-                        Span::styled(
-                            if self.localize {
-                                format!(
-                                    "TX {}",
-                                    sanitize_nbsp(
-                                        (max_value as u64).to_formatted_string(&self.locale)
-                                    )
-                                )
-                            } else {
-                                format!("TX {}", max_value as u64)
-                            },
-                            Style::default().fg(self.theme().positive_value_color()),
-                        ),
-                    ]),
-            );
-
-        frame.render_widget(chart, chart_area);
-
-        // Calculate and render summary statistics
-        self.render_packets_summary_stats(frame, stats_area, &rx_history, &tx_history)?;
-
-        Ok(())
-    }
-
-    /// Renders summary statistics for packets data.
-    fn render_packets_summary_stats(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        rx_history: &[u64],
-        tx_history: &[u64],
-    ) -> Result<()> {
-        if rx_history.is_empty() && tx_history.is_empty() {
-            return Ok(());
-        }
-
-        // Calculate RX statistics
-        let (rx_min, rx_max, rx_avg) = if rx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *rx_history.iter().min().unwrap_or(&0);
-            let max = *rx_history.iter().max().unwrap_or(&0);
-            let avg = rx_history.iter().sum::<u64>() / rx_history.len() as u64;
-            (min, max, avg)
-        };
-
-        // Calculate TX statistics
-        let (tx_min, tx_max, tx_avg) = if tx_history.is_empty() {
-            (0, 0, 0)
-        } else {
-            let min = *tx_history.iter().min().unwrap_or(&0);
-            let max = *tx_history.iter().max().unwrap_or(&0);
-            let avg = tx_history.iter().sum::<u64>() / tx_history.len() as u64;
-            (min, max, avg)
-        };
-
-        let rx_min_str = if self.localize {
-            sanitize_nbsp(rx_min.to_formatted_string(&self.locale))
-        } else {
-            rx_min.to_string()
-        };
-        let rx_max_str = if self.localize {
-            sanitize_nbsp(rx_max.to_formatted_string(&self.locale))
-        } else {
-            rx_max.to_string()
-        };
-        let rx_avg_str = if self.localize {
-            sanitize_nbsp(rx_avg.to_formatted_string(&self.locale))
-        } else {
-            rx_avg.to_string()
-        };
-        let tx_min_str = if self.localize {
-            sanitize_nbsp(tx_min.to_formatted_string(&self.locale))
-        } else {
-            tx_min.to_string()
-        };
-        let tx_max_str = if self.localize {
-            sanitize_nbsp(tx_max.to_formatted_string(&self.locale))
-        } else {
-            tx_max.to_string()
-        };
-        let tx_avg_str = if self.localize {
-            sanitize_nbsp(tx_avg.to_formatted_string(&self.locale))
-        } else {
-            tx_avg.to_string()
-        };
-
-        let stats_text = vec![Line::from(vec![
-            Span::raw("Min: "),
-            Span::styled(
-                rx_min_str,
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                tx_min_str,
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Max: "),
-            Span::styled(
-                rx_max_str,
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                tx_max_str,
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-            Span::raw(" Avg: "),
-            Span::styled(
-                rx_avg_str,
-                Style::default().fg(self.theme().negative_value_color()),
-            ),
-            Span::raw("/"),
-            Span::styled(
-                tx_avg_str,
-                Style::default().fg(self.theme().positive_value_color()),
-            ),
-        ])];
-
-        let stats_paragraph = Paragraph::new(stats_text).style(self.theme().text_color());
-
-        frame.render_widget(stats_paragraph, area);
-        Ok(())
-    }
-
-    /// Renders the application to the frame.
-    pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        match self.state {
-            AppState::Help => self.render_help(frame),
-            AppState::PerfEvent | AppState::KprobeEvent => self.render_event_list(frame),
-            AppState::Process => self.render_table(frame, area, true),
-            AppState::MangoApp => self.render_mangoapp(frame),
-            AppState::Memory => self.render_memory(frame),
-            AppState::Network => self.render_network(frame),
-            AppState::Node => self.render_node(frame),
-            AppState::Llc => self.render_llc(frame),
-            AppState::PerfTop => self.render_perf_top(frame),
-            AppState::Power => self.render_power(frame),
-            AppState::Scheduler => {
-                if self.has_capability_warnings() {
-                    self.render_capability_warnings(frame, area)?;
-                    return Ok(());
-                }
-                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-                let [left_top, left_center, left_bottom] = Layout::vertical([
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                ])
-                .areas(left);
-                let [right_top, right_bottom] =
-                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
-                        .areas(right);
-                self.render_scheduler("dsq_lat_us", frame, left_top, false, true)?;
-                self.render_scheduler("dsq_slice_consumed", frame, left_center, false, false)?;
-                self.render_scheduler("dsq_vtime", frame, left_bottom, false, false)?;
-                self.render_scheduler("dsq_nr_queued", frame, right_bottom, false, false)?;
-                self.render_scheduler_stats(frame, right_top)
-            }
-            AppState::Tracing => self.render_tracing(frame),
-            _ => self.render_default(frame),
-        }
+        BpfProgramRenderer::render_program_detail(
+            frame,
+            &mut self.bpf_program_symbol_table_state,
+            &detail_params,
+        )
     }
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        if self.state == AppState::PerfTop {
+        if self.state == AppState::BpfPrograms {
+            // Handle navigation for BPF programs view
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected < programs_to_display.len() - 1 {
+                    current_selected + 1
+                } else {
+                    0 // Wrap to top
+                };
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::BpfProgramDetail {
+            // Handle navigation for BPF program detail symbol table
+            let symbols_count = self.bpf_program_filtered_symbols.len();
+            if symbols_count > 0 {
+                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected < symbols_count - 1 {
+                    current_selected + 1
+                } else {
+                    0 // Wrap to top
+                };
+                self.bpf_program_symbol_table_state
+                    .select(Some(new_selected));
+            }
+        } else if self.state == AppState::PerfTop {
             // Handle PerfTop navigation separately
             let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
             if self.selected_symbol_index < max_index {
@@ -4928,13 +3948,61 @@ impl<'a> App<'a> {
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        if self.state == AppState::PerfTop {
-            // Handle PerfTop navigation separately
+        if self.state == AppState::BpfPrograms {
+            // Handle navigation for BPF programs view
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected > 0 {
+                    current_selected - 1
+                } else {
+                    programs_to_display.len() - 1 // Wrap to bottom
+                };
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::BpfProgramDetail {
+            // Handle navigation for BPF program detail symbol table
+            let symbols_count = self.bpf_program_filtered_symbols.len();
+            if symbols_count > 0 {
+                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected > 0 {
+                    current_selected - 1
+                } else {
+                    symbols_count - 1 // Wrap to bottom
+                };
+                self.bpf_program_symbol_table_state
+                    .select(Some(new_selected));
+            }
+        } else if self.state == AppState::PerfTop {
+            // Handle navigation for PerfTop view
             if self.selected_symbol_index > 0 {
                 self.selected_symbol_index -= 1;
-                self.perf_top_table_state
-                    .select(Some(self.selected_symbol_index));
             }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else if self.state == AppState::Help {
         } else {
             let mut filtered_state = self.filtered_state.lock().unwrap();
             if (self.state == AppState::PerfEvent
@@ -4953,7 +4021,45 @@ impl<'a> App<'a> {
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        if self.state == AppState::PerfTop {
+        if self.state == AppState::BpfPrograms {
+            // Handle page down for BPF programs view
+            let page_size = 10;
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let max_index = programs_to_display.len() - 1;
+
+                let new_selected = if current_selected + page_size <= max_index {
+                    current_selected + page_size
+                } else {
+                    max_index
+                };
+
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::PerfTop {
             // Handle page down for PerfTop view
             let page_size = 10;
             let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
@@ -4982,7 +4088,40 @@ impl<'a> App<'a> {
     }
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        if self.state == AppState::PerfTop {
+        if self.state == AppState::BpfPrograms {
+            // Handle page up for BPF programs view
+            let page_size = 10;
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
+
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+
+                let new_selected = current_selected.saturating_sub(page_size);
+
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::PerfTop {
             // Handle page up for PerfTop view
             let page_size = 10;
 
@@ -5075,6 +4214,55 @@ impl<'a> App<'a> {
                 self.filtering = false;
                 self.filter_symbols();
             }
+            AppState::BpfPrograms => {
+                // Enter BPF program detail view for the selected program
+                if let Some(selected_index) = self.bpf_program_table_state.selected() {
+                    // Use filtered programs if filtering is active, otherwise use all programs
+                    let programs_list: Vec<(u32, BpfProgData)> = if self.filtering {
+                        self.filtered_bpf_programs.clone()
+                    } else {
+                        // Get sorted list of BPF programs to match table order
+                        let mut programs: Vec<(u32, BpfProgData)> = self
+                            .bpf_program_stats
+                            .programs
+                            .iter()
+                            .map(|(id, data)| (*id, data.clone()))
+                            .collect();
+
+                        // Sort by average runtime descending (must match display sort order!)
+                        programs.sort_by(|a, b| {
+                            b.1.avg_runtime_ns()
+                                .partial_cmp(&a.1.avg_runtime_ns())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        programs
+                    };
+
+                    // Get the selected program ID
+                    if let Some((prog_id, _)) = programs_list.get(selected_index) {
+                        self.selected_bpf_program_id = Some(*prog_id);
+
+                        // Cache the BPF symbol info for this program (expensive operation)
+                        self.cached_bpf_symbol_info =
+                            BpfProgStats::get_real_symbol_info(*prog_id).ok().flatten();
+
+                        if let Some(ref symbol_info) = self.cached_bpf_symbol_info {
+                            log::info!(
+                                "Cached BPF symbol info for prog {}: {} ksyms, {} func_lens, {} line_info",
+                                prog_id,
+                                symbol_info.jited_ksyms.len(),
+                                symbol_info.jited_func_lens.len(),
+                                symbol_info.jited_line_info.len()
+                            );
+                        } else {
+                            log::warn!("Failed to get BPF symbol info for prog {}", prog_id);
+                        }
+
+                        self.prev_state = self.state.clone();
+                        self.state = AppState::BpfProgramDetail;
+                    }
+                }
+            }
             AppState::Default | AppState::Node | AppState::Llc | AppState::Process => {
                 // Reset process view
                 self.filtering = false;
@@ -5100,6 +4288,23 @@ impl<'a> App<'a> {
 
     fn on_escape(&mut self) -> Result<()> {
         match self.state() {
+            AppState::BpfPrograms => {
+                if self.filtering {
+                    // Clear filter and exit filtering mode
+                    self.filtering = false;
+                    self.event_input_buffer.clear();
+                    self.filter_bpf_programs();
+                }
+            }
+            AppState::BpfProgramDetail => {
+                // Go back to BPF programs list view
+                self.selected_bpf_program_id = None;
+                self.cached_bpf_symbol_info = None;
+                self.state = AppState::BpfPrograms;
+                self.filtering = false;
+                self.event_input_buffer.clear();
+                self.filter_bpf_programs();
+            }
             AppState::PerfEvent | AppState::KprobeEvent => {
                 self.event_input_buffer.clear();
                 self.filter_events();
@@ -5718,8 +4923,42 @@ impl<'a> App<'a> {
 
     /// Handles perf sample events for the perf top view.
     pub fn on_perf_sample(&mut self, action: &crate::PerfSampleAction) {
-        // Only process perf samples when in PerfTop state
-        if self.state == AppState::PerfTop {
+        // Check if we're profiling a specific BPF program
+        if self.state == AppState::BpfProgramDetail && self.bpf_perf_sampling_active {
+            if let Some(prog_id) = self.selected_bpf_program_id {
+                // For BPF program profiling, we need to check if this sample is from the BPF program
+                // BPF programs execute as JIT-compiled kernel code
+                if action.is_kernel {
+                    // Use cached BPF symbol info to check if instruction pointer is in this BPF program
+                    let is_bpf_program_sample =
+                        if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info {
+                            // Use the contains_address method to check if IP falls within BPF program
+                            bpf_symbol_info.contains_address(action.instruction_pointer)
+                        } else {
+                            // No cached symbol info - don't accept samples without address info
+                            false
+                        };
+
+                    if is_bpf_program_sample {
+                        // This is a sample from our BPF program or kernel code it calls
+                        self.bpf_program_symbol_data
+                            .add_sample_with_stacks_and_layer(
+                                action.instruction_pointer,
+                                prog_id, // Use prog_id as pid for BPF programs
+                                action.cpu_id,
+                                true, // BPF programs are kernel code
+                                &action.kernel_stack,
+                                &action.user_stack,
+                                None, // No layer ID for BPF programs
+                            );
+
+                        // Update filtered BPF symbols
+                        self.filter_bpf_symbols();
+                    }
+                }
+            }
+        } else if self.state == AppState::PerfTop {
+            // Original PerfTop behavior
             // Get layer ID from BPF sample (negative if not present)
             let layer_id = if action.layer_id >= 0 {
                 Some(action.layer_id)
@@ -5753,6 +4992,67 @@ impl<'a> App<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// Filters BPF program symbols based on the current filter text
+    fn filter_bpf_symbols(&mut self) {
+        let top_symbols = self.bpf_program_symbol_data.get_top_symbols(1000);
+
+        // Enhance symbols with BPF line information if available
+        let enhanced_symbols: Vec<crate::symbol_data::SymbolSample> = top_symbols
+            .into_iter()
+            .map(|sample| {
+                let mut enhanced = sample.clone();
+
+                // If we have cached BPF symbol info, try to get source location
+                if let Some(ref bpf_symbol_info) = self.cached_bpf_symbol_info {
+                    if let Some((line, _col)) =
+                        bpf_symbol_info.get_source_location(sample.symbol_info.address)
+                    {
+                        // Update the symbol name to include line number
+                        let base_name = &sample.symbol_info.symbol_name;
+                        enhanced.symbol_info.symbol_name = format!("{} (line {})", base_name, line);
+                        enhanced.symbol_info.line_number = Some(line);
+                    }
+                }
+
+                enhanced
+            })
+            .collect();
+
+        if !self.event_input_buffer.is_empty() {
+            let filter_text = self.event_input_buffer.to_lowercase();
+            self.bpf_program_filtered_symbols = enhanced_symbols
+                .into_iter()
+                .filter(|sample| {
+                    sample
+                        .symbol_info
+                        .symbol_name
+                        .to_lowercase()
+                        .contains(&filter_text)
+                        || sample
+                            .symbol_info
+                            .module_name
+                            .to_lowercase()
+                            .contains(&filter_text)
+                        || sample
+                            .symbol_info
+                            .file_name
+                            .as_ref()
+                            .is_some_and(|f| f.to_lowercase().contains(&filter_text))
+                })
+                .collect();
+        } else {
+            self.bpf_program_filtered_symbols = enhanced_symbols;
+        }
+
+        // Reset selection if out of bounds
+        if self.bpf_program_symbol_table_state.selected().unwrap_or(0)
+            >= self.bpf_program_filtered_symbols.len()
+            && !self.bpf_program_filtered_symbols.is_empty()
+        {
+            self.bpf_program_symbol_table_state.select(Some(0));
         }
     }
 
@@ -5826,6 +5126,7 @@ impl<'a> App<'a> {
         };
 
         let all_cpus = self.topo.all_cpus.clone();
+        let total_cpus = all_cpus.len();
         let mut attached_count = 0;
 
         for (cpu_id, _cpu_info) in all_cpus {
@@ -5938,6 +5239,12 @@ impl<'a> App<'a> {
         if attached_count == 0 {
             return Err(anyhow::anyhow!("Failed to attach perf events to any CPU"));
         }
+
+        log::info!(
+            "Attached perf sampling to {} CPUs (out of {} total)",
+            attached_count,
+            total_cpus
+        );
 
         // Store the current sampling event for display in UI
         self.current_sampling_event = Some(sampling_event);
@@ -6263,8 +5570,14 @@ impl<'a> App<'a> {
                 self.set_theme(self.theme().next());
             }
             Action::TickRateChange(dur) => {
-                self.config
-                    .set_tick_rate_ms(dur.as_millis().try_into().unwrap());
+                let new_tick_rate_ms: u64 = dur.as_millis().try_into().unwrap();
+                self.config.set_tick_rate_ms(new_tick_rate_ms as usize);
+                // Update the CPU frequency refresh interval for the background thread
+                self.cpu_freq_refresh_interval_ms
+                    .store(new_tick_rate_ms, Ordering::Relaxed);
+            }
+            Action::ToggleBpfPerfSampling => {
+                self.toggle_bpf_perf_sampling()?;
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
@@ -6274,6 +5587,22 @@ impl<'a> App<'a> {
                 if self.state == AppState::PerfTop {
                     // In PerfTop view, control perf sample rate
                     self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
+                    // Restart perf sampling with new rate if active
+                    if self.current_sampling_event.is_some() {
+                        self.detach_perf_sampling();
+                        let _ = self.attach_perf_sampling();
+                    }
+                } else if self.state == AppState::BpfProgramDetail && self.bpf_perf_sampling_active
+                {
+                    // In BPF program detail view with perf sampling active, control global perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate << 1).max(1);
+                    // Restart perf sampling with new rate
+                    self.detach_perf_sampling();
+                    let _ = self.attach_perf_sampling();
+                    log::info!(
+                        "Increased perf sample rate to {} samples/sec per CPU",
+                        self.perf_sample_rate
+                    );
                 } else if let Some(ref skel) = self.skel {
                     // Normal BPF sample rate control
                     let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
@@ -6288,6 +5617,22 @@ impl<'a> App<'a> {
                 if self.state == AppState::PerfTop {
                     // In PerfTop view, control perf sample rate
                     self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
+                    // Restart perf sampling with new rate if active
+                    if self.current_sampling_event.is_some() {
+                        self.detach_perf_sampling();
+                        let _ = self.attach_perf_sampling();
+                    }
+                } else if self.state == AppState::BpfProgramDetail && self.bpf_perf_sampling_active
+                {
+                    // In BPF program detail view with perf sampling active, control global perf sample rate
+                    self.perf_sample_rate = (self.perf_sample_rate >> 1).max(1);
+                    // Restart perf sampling with new rate
+                    self.detach_perf_sampling();
+                    let _ = self.attach_perf_sampling();
+                    log::info!(
+                        "Decreased perf sample rate to {} samples/sec per CPU",
+                        self.perf_sample_rate
+                    );
                 } else if let Some(ref skel) = self.skel {
                     // Normal BPF sample rate control
                     let sample_rate = skel.maps.data_data.as_ref().unwrap().sample_rate;
@@ -6322,6 +5667,10 @@ impl<'a> App<'a> {
                     self.filtering = true;
                     self.filter_events();
                 }
+                AppState::BpfPrograms => {
+                    self.filtering = true;
+                    self.filter_bpf_programs();
+                }
                 AppState::PerfTop => {
                     self.filtering = true;
                     self.filter_symbols();
@@ -6331,6 +5680,9 @@ impl<'a> App<'a> {
             Action::InputEntry(input) => {
                 self.event_input_buffer.push_str(input);
                 match self.state {
+                    AppState::BpfPrograms => {
+                        self.filter_bpf_programs();
+                    }
                     AppState::PerfTop => {
                         self.filter_symbols();
                     }
@@ -6342,6 +5694,9 @@ impl<'a> App<'a> {
             Action::Backspace => {
                 self.event_input_buffer.pop();
                 match self.state {
+                    AppState::BpfPrograms => {
+                        self.filter_bpf_programs();
+                    }
                     AppState::PerfTop => {
                         self.filter_symbols();
                     }
@@ -7831,7 +7186,10 @@ impl<'a> App<'a> {
 
         // Always call filter_events to update the filtered state with all processes
         // even when not actively filtering (when filtering is false, it includes all processes)
-        self.filter_events();
+        // But skip this for BpfPrograms state as it has its own filtering logic
+        if self.state != AppState::BpfPrograms {
+            self.filter_events();
+        }
 
         Ok(())
     }
@@ -8086,5 +7444,238 @@ impl<'a> App<'a> {
     /// Static views: minimal or no updates needed
     fn on_tick_static(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    /// Ensures BPF stats tracking is enabled by opening the BPF stats FD if needed
+    fn ensure_bpf_stats_enabled(&mut self) -> Result<()> {
+        if self.bpf_stats_fd.is_none() {
+            match self.enable_bpf_stats() {
+                Ok(fd) => {
+                    self.bpf_stats_fd = Some(fd);
+                    log::debug!("BPF stats tracking enabled with FD: {}", fd);
+                }
+                Err(e) => {
+                    log::warn!("Failed to enable BPF stats tracking: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Disables BPF stats tracking by closing the BPF stats FD
+    fn disable_bpf_stats(&mut self) {
+        if let Some(fd) = self.bpf_stats_fd.take() {
+            unsafe {
+                libc::close(fd);
+            }
+            log::debug!("BPF stats tracking disabled, closed FD: {}", fd);
+        }
+    }
+
+    /// Enable BPF runtime statistics using BPF_ENABLE_STATS
+    fn enable_bpf_stats(&self) -> Result<i32> {
+        use libbpf_rs::libbpf_sys::bpf_enable_stats;
+        let fd = unsafe { bpf_enable_stats(libbpf_rs::libbpf_sys::BPF_STATS_RUN_TIME) };
+        if fd < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to enable BPF stats: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(fd as i32)
+    }
+
+    /// Toggle perf sampling for the selected BPF program
+    fn toggle_bpf_perf_sampling(&mut self) -> Result<()> {
+        // Only allow toggling in BPF program detail view
+        if self.state != AppState::BpfProgramDetail {
+            log::debug!("Perf sampling toggle only available in BPF program detail view");
+            return Ok(());
+        }
+
+        if self.selected_bpf_program_id.is_none() {
+            log::warn!("No BPF program selected for perf sampling");
+            return Ok(());
+        }
+
+        let prog_id = self.selected_bpf_program_id.unwrap();
+
+        if self.bpf_perf_sampling_active {
+            // Stop sampling
+            self.bpf_perf_sampling_active = false;
+            self.detach_perf_sampling();
+            log::info!("Stopped perf sampling for BPF program {}", prog_id);
+        } else {
+            // Start sampling - attach perf events to all CPUs
+            self.attach_perf_sampling()?;
+            self.bpf_perf_sampling_active = true;
+            log::info!(
+                "Started perf sampling for BPF program {} (global sample rate: {} samples/sec per CPU)",
+                prog_id,
+                self.perf_sample_rate
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Update total CPU time from /proc/stat
+    fn update_total_cpu_time(&mut self) -> Result<()> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let file = File::open("/proc/stat")?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.starts_with("cpu ") {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() > 7 {
+                    // Sum all CPU time fields (user, nice, system, idle, iowait, irq, softirq, etc.)
+                    // Fields are in jiffies, need to convert to nanoseconds
+                    let jiffies_sum: u64 = fields[1..]
+                        .iter()
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .sum();
+
+                    // Convert jiffies to nanoseconds (assuming 100 HZ, 1 jiffy = 10ms)
+                    let clock_ticks_per_sec = 100; // sysconf(_SC_CLK_TCK), typically 100
+                    let ns_per_tick = 1_000_000_000 / clock_ticks_per_sec;
+
+                    self.prev_total_cpu_time_ns = self.total_cpu_time_ns;
+                    self.total_cpu_time_ns = jiffies_sum * ns_per_tick;
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Calculate BPF overhead as percentage of CPU time
+    fn calculate_bpf_overhead(&mut self) {
+        if self.prev_total_cpu_time_ns == 0 {
+            return; // First sample, no delta to calculate
+        }
+
+        let cpu_time_delta = self
+            .total_cpu_time_ns
+            .saturating_sub(self.prev_total_cpu_time_ns);
+        let bpf_time_delta = self
+            .bpf_program_stats
+            .total_runtime_ns
+            .saturating_sub(self.prev_bpf_total_runtime_ns);
+
+        if cpu_time_delta > 0 {
+            let overhead_pct = (bpf_time_delta as f64 / cpu_time_delta as f64) * 100.0;
+
+            // Add to history for trending
+            self.bpf_overhead_history.push_back(overhead_pct);
+
+            // Limit history size to terminal width (accounting for borders)
+            // This ensures we keep exactly the right amount of data for display
+            let max_history = self.terminal_width.saturating_sub(2).max(10) as usize;
+            while self.bpf_overhead_history.len() > max_history {
+                self.bpf_overhead_history.pop_front();
+            }
+        }
+
+        // Update previous BPF runtime for next delta calculation
+        self.prev_bpf_total_runtime_ns = self.bpf_program_stats.total_runtime_ns;
+    }
+
+    /// Runs callbacks to update BPF programs statistics on tick.
+    fn on_tick_bpf_programs(&mut self) -> Result<()> {
+        // Enable BPF stats tracking if not already enabled
+        self.ensure_bpf_stats_enabled()?;
+
+        // Update total CPU time from /proc/stat
+        self.update_total_cpu_time()?;
+
+        // Collect BPF program statistics (update existing to maintain history)
+        if let Err(e) = self.bpf_program_stats.collect_and_update() {
+            log::warn!("Failed to collect BPF program stats: {e}");
+        }
+
+        // Calculate BPF overhead percentage
+        self.calculate_bpf_overhead();
+
+        // Always refresh filtered programs list (filtering logic is inside the method)
+        self.filter_bpf_programs();
+
+        // Get the current display list (filtered or unfiltered, sorted)
+        let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = if self.filtering {
+            self.filtered_bpf_programs.clone()
+        } else {
+            let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
+            programs.sort_by(|a, b| {
+                b.1.avg_runtime_ns()
+                    .partial_cmp(&a.1.avg_runtime_ns())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            programs
+        };
+
+        // Try to preserve the selection across refreshes
+        if let Some(selected_id) = self.selected_bpf_program_id {
+            // Find the selected program in the new list
+            if let Some(new_index) = programs_to_display
+                .iter()
+                .position(|(id, _)| *id == selected_id)
+            {
+                // The selected program is still in the list, update table state to point to its new position
+                self.bpf_program_table_state.select(Some(new_index));
+            } else {
+                // The selected program is no longer in the list (e.g., unloaded or filtered out)
+                // Clear the selection and let the initialization logic below handle it
+                self.selected_bpf_program_id = None;
+                self.bpf_program_table_state.select(None);
+            }
+        }
+
+        // Initialize table selection if no item is selected and we have programs
+        if !programs_to_display.is_empty() && self.bpf_program_table_state.selected().is_none() {
+            self.bpf_program_table_state.select(Some(0));
+            // Update selected program ID to match the first item
+            if let Some((prog_id, _)) = programs_to_display.first() {
+                self.selected_bpf_program_id = Some(*prog_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Runs callbacks to update BPF program detail view on tick.
+    fn on_tick_bpf_program_detail(&mut self) -> Result<()> {
+        // Enable BPF stats tracking if not already enabled
+        self.ensure_bpf_stats_enabled()?;
+
+        // Collect BPF program statistics to keep the detailed view up to date (update existing to maintain history)
+        if let Err(e) = self.bpf_program_stats.collect_and_update() {
+            log::warn!("Failed to collect BPF program stats: {e}");
+        }
+
+        // Clear BPF symbols when not sampling
+        // (Samples are collected in on_perf_sample when sampling is active)
+        if !self.bpf_perf_sampling_active {
+            self.bpf_program_filtered_symbols.clear();
+            self.bpf_program_symbol_data = SymbolData::new();
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for App<'_> {
+    fn drop(&mut self) {
+        // Ensure BPF stats file descriptor is closed when App is dropped
+        self.disable_bpf_stats();
     }
 }

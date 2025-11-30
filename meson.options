@@ -24,14 +24,6 @@ option('veristat_diff_dir', type: 'string', value: '',
        description: 'veristat diff dir')
 option('kernel_headers', type: 'string', value: '',
        description: 'kernel headers to build the schedulers')
-option('vendordir', type: 'string', value: '/usr/share',
-       description: 'Default location for package-managed config files')
-option(
-  'systemd',
-  type: 'feature',
-  value: 'auto',
-  description: 'sd-notify support via libsystemd and install systemd unit files'
-)
 option(
   'openrc',
   type: 'feature',
@@ -55,4 +47,10 @@ option(
   type: 'string',
   value: '',
   description: 'extra sched args for stress tests',
+)
+option(
+  'force_meson',
+  type: 'boolean',
+  value: false,
+  description: 'force use of deprecated meson build system',
 )
