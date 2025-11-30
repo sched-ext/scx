@@ -213,56 +213,46 @@ struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
  * CPU context
  */
 struct cpu_ctx {
-	/* 
-	 * Information used to keep track of CPU utilization
-	 */
-	volatile u32	avg_util;	/* average of the CPU utilization */
-	volatile u32	cur_util;	/* CPU utilization of the current interval */
-	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
-	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
-	volatile u64	idle_total;	/* total idle time so far */
-	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
-
-	/*
-	 * Information used to keep track of load
-	 */
+	/* --- cacheline 0 boundary (0 bytes) --- */
+	volatile u64	flags;		/* cached copy of task's flags */
 	volatile u64	tot_svc_time;	/* total service time on a CPU scaled by tasks' weights */
 	volatile u64	tot_sc_time;	/* total scaled CPU time, which is capacity and frequency invariant. */
-	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
-
-	/*
-	 * Information used to keep track of latency criticality
-	 */
+	volatile u64	est_stopping_clk; /* estimated stopping time */
+	volatile u64	running_clk;	/* when a task starts running */
+	volatile u16	lat_cri;	/* latency criticality */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
-	volatile u32	nr_sched;	/* number of schedules */
 	volatile u64	sum_lat_cri;	/* sum of latency criticality */
-
-	/*
-	 * Information used to keep track of performance criticality
-	 */
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
+
+	/* --- cacheline 1 boundary (64 bytes) --- */
 	volatile u32	min_perf_cri;	/* mininum performance criticality */
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
-
-	/*
-	 * Information of a current running task for preemption
-	 */
-	volatile u64	running_clk;	/* when a task starts running */
-	volatile u64	est_stopping_clk; /* estimated stopping time */
-	volatile u64	flags;		/* cached copy of task's flags */
+	volatile u32	nr_sched;	/* number of schedules */
+	volatile u32	nr_preempt;
+	volatile u32	nr_x_migration;
+	volatile u32	nr_perf_cri;
+	volatile u32	nr_lat_cri;
 	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
 	volatile s32	futex_op;	/* futex op in futex V1 */
-	volatile u16	lat_cri;	/* latency criticality */
-	volatile u8	is_online;	/* is this CPU online? */
-
-	/*
-	 * Information for CPU frequency scaling
-	 */
+	volatile u32	avg_util;	/* average of the CPU utilization */
+	volatile u32	cur_util;	/* CPU utilization of the current interval */
 	u32		cpuperf_cur;	/* CPU's current performance target */
+	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
+	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+
+	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
+
+	/* --- cacheline 2 boundary (128 bytes) --- */
+	/*
+	 * Idle tracking (read-mostly)
+	 */
+	volatile u64	idle_total;	/* total idle time so far */
+	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
+	u64		online_clk;	/* when a CPU becomes online */
+	u64		offline_clk;	/* when a CPU becomes offline */
 
 	/*
-	 * Fields for core compaction
-	 *
+	 * Fields for core compaction (read-only)
 	 */
 	u16		cpu_id;		/* cpu id */
 	u16		capacity;	/* CPU capacity based on 1024 */
@@ -271,27 +261,14 @@ struct cpu_ctx {
 	u8		llc_id;		/* llc domain id */
 	u8		cpdom_id;	/* compute domain id */
 	u8		cpdom_alt_id;	/* compute domain id of anternative type */
-	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
+	u8		is_online;	/* is this CPU online? */
 
 	/*
-	 * Information for statistics.
-	 */
-	volatile u32	nr_preempt;
-	volatile u32	nr_x_migration;
-	volatile u32	nr_perf_cri;
-	volatile u32	nr_lat_cri;
-
-	/*
-	 * Information for cpu hotplug
-	 */
-	u64		online_clk;	/* when a CPU becomes online */
-	u64		offline_clk;	/* when a CPU becomes offline */
-
-	/*
-	 * Temporary cpu masks
+	 * Temporary cpu masks (read-only)
 	 */
 	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
 	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
+	/* --- cacheline 3 boundary (192 bytes) --- */
 	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
 	struct bpf_cpumask __kptr *tmp_i_mask; /* for idle cpumask */
 	struct bpf_cpumask __kptr *tmp_t_mask;

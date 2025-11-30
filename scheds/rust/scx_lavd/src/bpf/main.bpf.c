@@ -1837,7 +1837,6 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->capacity = cpu_capacity[cpu];
 		cpuc->big_core = cpu_big[cpu];
 		cpuc->turbo_core = cpu_turbo[cpu];
-		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
