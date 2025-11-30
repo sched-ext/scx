@@ -125,69 +125,46 @@ enum consts_flags {
  * Task context
  */
 struct task_ctx {
+	/* --- cacheline 0 boundary (0 bytes) --- */
 	/*
 	 * Do NOT change the position of atq. It should be at the beginning
 	 * of the task_ctx. 
-	 *
-	 * TODO: The type of atq should be scx_task_common. However, to
-	 * workaround the complex header dependencies, a large enough space
-	 * that can hold scx_task_common is allocated for now. This will be
-	 * fixed later after some more refactoring.
 	 */
-	struct scx_task_common atq;
+	struct scx_task_common atq __attribute__((aligned(CACHELINE_SIZE)));
 
-	/*
-	 * Clocks when a task state transition happens for task statistics calculation
-	 */
-	u64	last_runnable_clk;	/* last time when a task became runnable */
-	u64	last_running_clk;	/* last time when scheduled in */
-	u64	last_measured_clk;	/* last time when running time was measured */
-	u64	last_stopping_clk;	/* last time when scheduled out */
-	u64	last_quiescent_clk;	/* last time when a task became asleep */
-
-	/*
-	 * Task running statistics for latency criticality calculation
-	 */
+	/* --- cacheline 1 boundary (64 bytes) --- */
+	volatile u64	flags;		/* LAVD_FLAG_* */
+	u64	slice;			/* time slice */
 	u64	acc_runtime;		/* accmulated runtime from runnable to quiescent state */
 	u64	avg_runtime;		/* average runtime per schedule */
-	u64	run_freq;		/* scheduling frequency in a second */
+	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
-	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
+	u64	last_measured_clk;	/* last time when running time was measured */
 
-	/*
-	 * Task deadline and time slice
-	 */
-	u64	slice;			/* time slice */
+	/* --- cacheline 2 boundary (128 bytes) --- */
+	u64	last_runnable_clk;	/* last time when a task became runnable */
+	u64	last_running_clk;	/* last time when scheduled in */
+	u64	last_stopping_clk;	/* last time when scheduled out */
+	u64	run_freq;		/* scheduling frequency in a second */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
-
-	/*
-	 * IDs
-	 */
-	u32	prev_cpu_id;		/* where a task ran last time */
-	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
-	pid_t	pid;			/* pid for this task */
-	u64	cgrp_id;		/* cgroup id of this task */
-
-	/*
-	 * Task status
-	 */
-	volatile u64	flags;		/* LAVD_FLAG_* */
 	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
+	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-
-	/*
-	 * Additional information when the scheduler is monitored,
-	 * so it is updated only when is_monitored is true.
-	 */
-	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
+	u32	prev_cpu_id;		/* where a task ran last time */
 	u32	cpu_id;			/* where a task is running now */
+
+	/* --- cacheline 3 boundary (192 bytes) --- */
+	u64	last_quiescent_clk;	/* last time when a task became asleep */
+	u64	cgrp_id;		/* cgroup id of this task */
+	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
 	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
+	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
-};
+} __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
  * Compute domain context
