@@ -171,15 +171,20 @@ struct task_ctx {
  * - system > numa node > llc domain > compute domain per core type (P or E)
  */
 struct cpdom_ctx {
+	/* --- cacheline 0 boundary (0 bytes): read-only --- */
 	u64	id;				    /* id of this compute domain */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type */
 	u8	numa_id;			    /* numa domain id */
 	u8	llc_id;				    /* llc domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_valid;			    /* is this a valid compute domain? */
-	u8	is_stealer;			    /* this domain should steal tasks from others */
+	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
+	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
+	u8	neighbor_ids[LAVD_CPDOM_MAX_DIST * LAVD_CPDOM_MAX_NR]; /* neighbor IDs per distance in circular distance order */
+
+	/* --- cacheline 8 boundary (512 bytes): read-write, read-mostly --- */
+	u8	is_stealer __attribute__((aligned(CACHELINE_SIZE))); /* this domain should steal tasks from others */
 	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
-	u16	nr_cpus;			    /* the number of CPUs in this compute domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u32	sc_load;			    /* scaled load considering DSQ length and CPU utilization */
@@ -189,9 +194,7 @@ struct cpdom_ctx {
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
-	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
-	u8	neighbor_ids[LAVD_CPDOM_MAX_DIST * LAVD_CPDOM_MAX_NR]; /* neighbor IDs per distance in circular distance order */
-	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
+
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 #define get_neighbor_id(cpdomc, d, i) ((cpdomc)->neighbor_ids[((d) * LAVD_CPDOM_MAX_NR) + (i)])

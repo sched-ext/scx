@@ -1902,7 +1902,6 @@ static s32 init_per_cpu_ctx(u64 now)
 					cpdomc->nr_active_cpus++;
 					cpdomc->cap_sum_active_cpus += cpuc->capacity;
 				}
-				cpdomc->nr_cpus++;
 			}
 		}
 	}
