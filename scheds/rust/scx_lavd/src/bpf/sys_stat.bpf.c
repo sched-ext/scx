@@ -79,7 +79,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 
 	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
-	c->duration = time_delta(c->now, sys_stat.last_update_clk);
+	c->duration = time_delta(c->now, sys_stat.last_update_clk)? : 1;
 	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
