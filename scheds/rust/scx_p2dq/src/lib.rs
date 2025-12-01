@@ -314,6 +314,13 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub single_llc_fast_path: bool,
 
+    /// Enable PELT (Per-Entity Load Tracking) for improved load balancing.
+    /// PELT uses exponential decay to provide more accurate CPU utilization
+    /// tracking than simple counters. This may improve load balancing decisions
+    /// but adds computational overhead.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub enable_pelt: bool,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
 }
@@ -440,6 +447,7 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
+            rodata.p2dq_config.pelt_enabled = MaybeUninit::new(opts.enable_pelt);
 
             rodata.debug = verbose as u32;
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;

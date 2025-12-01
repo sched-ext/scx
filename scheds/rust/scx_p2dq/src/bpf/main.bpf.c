@@ -129,6 +129,7 @@ const volatile struct {
 	bool interactive_sticky;
 	bool keep_running_enabled;
 	bool kthreads_local;
+	bool pelt_enabled;
 } p2dq_config = {
 	.sched_mode = MODE_DEFAULT,
 	.nr_dsqs_per_llc = 3,
@@ -147,6 +148,7 @@ const volatile struct {
 	.interactive_sticky = false,
 	.keep_running_enabled = true,
 	.kthreads_local = true,
+	.pelt_enabled = true,
 };
 
 const volatile u32 debug = 2;
@@ -286,6 +288,125 @@ static u32 nr_idle_cpus(const struct cpumask *idle_cpumask)
 	return nr_idle;
 }
 
+/*
+ * PELT (Per-Entity Load Tracking) helper functions
+ *
+ * Simplified BPF-friendly implementation of Linux kernel PELT.
+ * Uses 1ms periods and exponential decay with 32ms half-life.
+ */
+
+/*
+ * Apply exponential decay to a value over a number of periods.
+ * Each period decays by factor of 127/128 (≈ 0.98).
+ * Bounded loop for BPF verifier compliance.
+ */
+static __always_inline u32 pelt_decay(u32 val, u32 periods)
+{
+	u32 i;
+
+	/* Bound iterations for BPF verifier (max 256 periods = 256ms) */
+	bpf_for(i, 0, periods) {
+		if (i >= 256)
+			break;
+		val = (val * 127) >> 7;
+	}
+
+	return val;
+}
+
+/*
+ * Update task's PELT metrics based on runtime.
+ * Called when task stops running or starts running (for decay).
+ *
+ * @taskc: Task context to update
+ * @now: Current timestamp in ns
+ * @delta_ns: Runtime delta (0 for decay-only update)
+ */
+static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta_ns)
+{
+	u64 elapsed_ns, elapsed_ms;
+	u32 periods, delta_ms;
+
+	if (!p2dq_config.pelt_enabled)
+		return;
+
+	if (!taskc->pelt_last_update_time) {
+		/* First update - initialize */
+		taskc->pelt_last_update_time = now;
+		taskc->util_sum = 0;
+		taskc->util_avg = 0;
+		taskc->period_contrib = 0;
+		return;
+	}
+
+	elapsed_ns = now - taskc->pelt_last_update_time;
+	elapsed_ms = elapsed_ns / NSEC_PER_MSEC;
+
+	/**
+	 * If less than 1ms has passed, accumulate in period_contrib and don't
+	 * update timestamp until a full period has passed.
+	 */
+	if (elapsed_ms == 0) {
+		delta_ms = delta_ns / NSEC_PER_MSEC;
+		taskc->period_contrib += delta_ms;
+		return;
+	}
+
+	periods = (u32)elapsed_ms;
+	if (periods > 256)
+		periods = 256;  /* Cap for verifier */
+
+	if (taskc->util_sum > 0) {
+		taskc->util_sum = pelt_decay(taskc->util_sum, periods);
+	}
+
+	if (taskc->period_contrib > 0) {
+		taskc->util_sum += taskc->period_contrib;
+		taskc->period_contrib = 0;
+	}
+
+	delta_ms = delta_ns / NSEC_PER_MSEC;
+	taskc->util_sum += delta_ms;
+
+	if (unlikely(taskc->util_sum > PELT_SUM_MAX))
+		taskc->util_sum = PELT_SUM_MAX;
+
+	/* Calculate util_avg from util_sum */
+	/* util_avg = util_sum / 128 (representing average over ~128ms window) */
+	taskc->util_avg = taskc->util_sum >> 7;
+	if (taskc->util_avg > PELT_MAX_UTIL)
+		taskc->util_avg = PELT_MAX_UTIL;
+
+	taskc->pelt_last_update_time = now;
+}
+
+/*
+ * Aggregate task's PELT metrics to LLC context.
+ * Called when task stops running to update LLC utilization averages.
+ *
+ * @llcx: LLC context to update
+ * @taskc: Task context with updated PELT metrics
+ * @is_interactive: Whether task is interactive
+ * @is_affinitized: Whether task is affinitized to this LLC
+ */
+static __always_inline void aggregate_pelt_to_llc(struct llc_ctx *llcx,
+						   task_ctx *taskc,
+						   bool is_interactive,
+						   bool is_affinitized)
+{
+	if (!p2dq_config.pelt_enabled)
+		return;
+
+	__sync_fetch_and_add(&llcx->util_avg, taskc->util_avg);
+
+	if (is_interactive)
+		__sync_fetch_and_add(&llcx->intr_util_avg, taskc->util_avg);
+
+	if (is_affinitized)
+		__sync_fetch_and_add(&llcx->affn_util_avg, taskc->util_avg);
+}
+
+
 static u32 idle_cpu_percent(const struct cpumask *idle_cpumask)
 {
 	return (100 * nr_idle_cpus(idle_cpumask)) / topo_config.nr_cpus;
@@ -304,6 +425,14 @@ static u64 task_dsq_slice_ns(struct task_struct *p, int dsq_index)
 static void task_refresh_llc_runs(task_ctx *taskc)
 {
 	taskc->llc_runs = min_llc_runs_pick2;
+}
+
+/*
+ * Get LLC load metric, using PELT util_avg if enabled, otherwise legacy load counter.
+ */
+static __always_inline u64 llc_get_load(const struct llc_ctx *llcx)
+{
+	return p2dq_config.pelt_enabled ? llcx->util_avg : llcx->load;
 }
 
 static u64 llc_nr_queued(struct llc_ctx *llcx)
@@ -1564,6 +1693,10 @@ static int p2dq_running_impl(struct task_struct *p)
 
 	taskc->last_run_at = now;
 
+	/* Decay PELT metrics when task starts running (0 delta for decay-only) */
+	if (p2dq_config.pelt_enabled)
+		update_task_pelt(taskc, now, 0);
+
 	return 0;
 }
 
@@ -1605,16 +1738,28 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 
 	p->scx.dsq_vtime += scaled_used;
 	__sync_fetch_and_add(&llcx->vtime, used);
-	__sync_fetch_and_add(&llcx->load, used);
-	if (taskc->dsq_index >= 0 && taskc->dsq_index < MAX_DSQS_PER_LLC)
-		__sync_fetch_and_add(&llcx->dsq_load[taskc->dsq_index], used);
 
-	if (task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE))
-		__sync_fetch_and_add(&llcx->intr_load, used);
+	/* Update PELT metrics if enabled */
+	if (p2dq_config.pelt_enabled) {
+		update_task_pelt(taskc, now, used);
+		aggregate_pelt_to_llc(llcx, taskc,
+				      task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE),
+				      !task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS));
+	}
 
-	if (!task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS))
-		// Note that affinitized load is absolute load, not scaled.
-		__sync_fetch_and_add(&llcx->affn_load, used);
+	/* Legacy load tracking (when PELT disabled) */
+	if (!p2dq_config.pelt_enabled) {
+		__sync_fetch_and_add(&llcx->load, used);
+		if (taskc->dsq_index >= 0 && taskc->dsq_index < MAX_DSQS_PER_LLC)
+			__sync_fetch_and_add(&llcx->dsq_load[taskc->dsq_index], used);
+
+		if (task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE))
+			__sync_fetch_and_add(&llcx->intr_load, used);
+
+		if (!task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS))
+			// Note that affinitized load is absolute load, not scaled.
+			__sync_fetch_and_add(&llcx->affn_load, used);
+	}
 
 	trace("STOPPING %s weight %d slice %llu used %llu scaled %llu",
 	      p->comm, p->scx.weight, last_dsq_slice_ns, used, scaled_used);
@@ -1806,7 +1951,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		return -EINVAL;
 
 	if (left->id == right->id) {
-		i = cur_llcx->load % topo_config.nr_llcs;
+		i = llc_get_load(cur_llcx) % topo_config.nr_llcs;
 		i &= 0x3; // verifier
 		if (i >= 0 && i < topo_config.nr_llcs)
 			right = lookup_llc_ctx(llc_ids[i]);
@@ -1815,7 +1960,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	}
 
 
-	if (right->load > left->load) {
+	if (llc_get_load(right) > llc_get_load(left)) {
 		first = right;
 		second = left;
 	} else {
@@ -1831,15 +1976,15 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	}
 
 	trace("PICK2 cpu[%d] first[%d] %llu second[%d] %llu",
-	      cpu, first->id, first->load, second->id, second->load);
+	      cpu, first->id, llc_get_load(first), second->id, llc_get_load(second));
 
-	cur_load = cur_llcx->load + ((cur_llcx->load * lb_config.slack_factor) / 100);
+	cur_load = llc_get_load(cur_llcx) + ((llc_get_load(cur_llcx) * lb_config.slack_factor) / 100);
 
-	if (first->load >= cur_load &&
+	if (llc_get_load(first) >= cur_load &&
 	    consume_llc(first))
 		return 0;
 
-	if (second->load >= cur_load &&
+	if (llc_get_load(second) >= cur_load &&
 	    consume_llc(second))
 		return 0;
 
@@ -2319,9 +2464,9 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 	slice_ns = scale_by_task_weight(p,
 					dsq_time_slice(p2dq_config.init_dsq_index));
 
-	taskc->enq_flags = 0;
 	taskc->llc_id = cpuc->llc_id;
 	taskc->node_id = cpuc->node_id;
+
 	// Adjust starting index based on niceness
 	if (p->scx.weight == 100) {
 		taskc->dsq_index = p2dq_config.init_dsq_index;
@@ -2332,6 +2477,8 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 	}
 	taskc->last_dsq_index = taskc->dsq_index;
 	taskc->slice_ns = slice_ns;
+	taskc->enq_flags = 0;
+
 	if (p->cpus_ptr == &p->cpus_mask &&
 	    p->nr_cpus_allowed == topo_config.nr_cpus)
 		task_ctx_set_flag(taskc, TASK_CTX_F_ALL_CPUS);
@@ -2587,12 +2734,17 @@ static bool load_balance_timer(void)
 			return false;
 		}
 
-		load_sum += llcx->load;
-		interactive_sum += llcx->intr_load;
+		/* Use PELT metrics if enabled, otherwise use simple counters */
+		u64 llc_load = p2dq_config.pelt_enabled ? llcx->util_avg : llcx->load;
+		u64 lb_llc_load = p2dq_config.pelt_enabled ? lb_llcx->util_avg : lb_llcx->load;
+		u64 llc_intr_load = p2dq_config.pelt_enabled ? llcx->intr_util_avg : llcx->intr_load;
+
+		load_sum += llc_load;
+		interactive_sum += llc_intr_load;
 
 		s64 load_imbalance = 0;
-		if(llcx->load > lb_llcx->load)
-			load_imbalance = (100 * (llcx->load - lb_llcx->load)) / llcx->load;
+		if(llc_load > lb_llc_load)
+			load_imbalance = (100 * (llc_load - lb_llc_load)) / llc_load;
 
 		u32 lb_slack = (lb_config.slack_factor > 0 ?
 				lb_config.slack_factor : LOAD_BALANCE_SLACK);
@@ -2603,7 +2755,7 @@ static bool load_balance_timer(void)
 			llcx->lb_llc_id = MAX_LLCS;
 
 		dbg("LB llcx[%u] %llu lb_llcx[%u] %llu imbalance %lli",
-		    llc_id, llcx->load, lb_llc_id, lb_llcx->load, load_imbalance);
+		    llc_id, llc_load, lb_llc_id, lb_llc_load, load_imbalance);
 	}
 
 	dbg("LB Total load %llu, Total interactive %llu",
@@ -2644,17 +2796,37 @@ reset_load:
 		if (!(llcx = lookup_llc_ctx(llc_id)))
 			return false;
 
-		llcx->load = 0;
-		llcx->intr_load = 0;
-		llcx->affn_load = 0;
+		/*
+		 * With PELT enabled, metrics decay automatically via exponential
+		 * weighting. We only reset simple counters for legacy mode.
+		 */
+		if (!p2dq_config.pelt_enabled) {
+			llcx->load = 0;
+			llcx->intr_load = 0;
+			llcx->affn_load = 0;
+		}
+
 		llcx->last_period_ns = scx_bpf_now();
-		bpf_for(j, 0, p2dq_config.nr_dsqs_per_llc) {
-			llcx->dsq_load[j] = 0;
-			if (llc_id == 0 && timeline_config.autoslice) {
-				if (j > 0 && dsq_time_slices[j] < dsq_time_slices[j-1]) {
-					dsq_time_slices[j] = dsq_time_slices[j-1] << p2dq_config.dsq_shift;
+
+		if (!p2dq_config.pelt_enabled) {
+			bpf_for(j, 0, p2dq_config.nr_dsqs_per_llc) {
+				llcx->dsq_load[j] = 0;
+				if (llc_id == 0 && timeline_config.autoslice) {
+					if (j > 0 && dsq_time_slices[j] < dsq_time_slices[j-1]) {
+						dsq_time_slices[j] = dsq_time_slices[j-1] << p2dq_config.dsq_shift;
+					}
+					dbg("LB autoslice interactive slice %llu", dsq_time_slices[j]);
 				}
-				dbg("LB autoslice interactive slice %llu", dsq_time_slices[j]);
+			}
+		} else {
+			/* Even with PELT, still validate autoslice timings */
+			if (llc_id == 0 && timeline_config.autoslice) {
+				bpf_for(j, 1, p2dq_config.nr_dsqs_per_llc) {
+					if (dsq_time_slices[j] < dsq_time_slices[j-1]) {
+						dsq_time_slices[j] = dsq_time_slices[j-1] << p2dq_config.dsq_shift;
+					}
+					dbg("LB autoslice interactive slice %llu", dsq_time_slices[j]);
+				}
 			}
 		}
 	}

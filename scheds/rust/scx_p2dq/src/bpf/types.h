@@ -101,11 +101,17 @@ struct llc_ctx {
 	u64				intr_load;
 	u32				state_flags;  /* Bitmask for saturated and other state */
 
+	/* PELT (Per-Entity Load Tracking) aggregate fields */
+	u64				util_avg;       /* Aggregate utilization average */
+	u64				load_avg;       /* Aggregate load average */
+	u64				intr_util_avg;  /* Interactive task utilization average */
+	u64				affn_util_avg;  /* Affinitized task utilization average */
+
 	/*
 	 * Hot atomic field #3: idle lock - frequently contended in idle CPU selection
 	 * Separate cache line from load counters above
 	 */
-	char				__pad3[CACHE_LINE_SIZE - 3*sizeof(u64) - sizeof(u32)];
+	char				__pad3[CACHE_LINE_SIZE - 7*sizeof(u64) - sizeof(u32)];
 	arena_spinlock_t		idle_lock;
 
 	/*
@@ -149,6 +155,17 @@ struct task_p2dq {
 	 */
 	struct scx_task_common	common;
 	s32			pid;
+
+	/*
+	 * PELT (Per-Entity Load Tracking) fields.
+	 * Placed early in the structure (low offset) to help BPF verifier
+	 * track arena pointer through complex control flow.
+	 */
+	u64			pelt_last_update_time;
+	u32			util_sum;
+	u32			util_avg;
+	u32			period_contrib;
+
 	u64			dsq_id;
 	u64			slice_ns;
 	int			dsq_index;

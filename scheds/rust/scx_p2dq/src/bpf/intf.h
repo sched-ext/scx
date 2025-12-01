@@ -42,6 +42,13 @@ enum consts {
 	P2DQ_MIG_DSQ		= 1LLU << 60,
 	P2DQ_INTR_DSQ		= 1LLU << 32,
 
+	// PELT (Per-Entity Load Tracking) constants
+	PELT_HALFLIFE_MS	= 32,		// 32ms half-life for exponential decay
+	PELT_PERIOD_MS		= 1,		// 1ms update period (simplified from kernel's 1024us)
+	PELT_MAX_UTIL		= 1024,		// Maximum utilization value
+	PELT_DECAY_SHIFT	= 7,		// Decay factor: (127/128) ≈ 0.98 per ms
+	PELT_SUM_MAX		= 131072,	// Maximum sum value (128 * 1024)
+
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,
 };
