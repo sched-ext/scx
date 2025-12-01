@@ -118,8 +118,7 @@ int plan_x_cpdom_migration(void)
 		 */
 		goto calc_stealer_stealee;
 	}
-	if ((stealee_threshold <= max_sc_load || overflow_running) &&
-	    (stealer_threshold < min_sc_load)) {
+	if (stealer_threshold < min_sc_load) {
 		/*
 		 * If there is a overloaded domain, always try to steal.
 		 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
