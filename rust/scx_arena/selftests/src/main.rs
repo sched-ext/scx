@@ -145,6 +145,9 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
         )?;
     }
 
+    // Drop all_clusters to release Arc references to cores before processing cores
+    drop(topo.all_clusters);
+
     for (_, core) in topo.all_cores {
         setup_topology_node(
             skel,

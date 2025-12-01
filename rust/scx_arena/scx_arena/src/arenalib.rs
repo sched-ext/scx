@@ -173,6 +173,10 @@ impl<'a> ArenaLib<'a> {
             )?;
         }
 
+        // Drop all_clusters to release Arc references to cores before processing cores
+        // Clusters may hold Arc references to cores, so we need to drop them first
+        drop(topo.all_clusters);
+
         for (core_id, core) in topo.all_cores {
             self.setup_topology_node(
                 Arc::<Core>::into_inner(core)
