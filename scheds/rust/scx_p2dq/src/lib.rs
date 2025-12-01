@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 pub mod bpf_intf;
 pub mod bpf_skel;
+pub mod energy;
 pub use bpf_skel::types;
 
 use scx_utils::cli::TopologyArgs;
@@ -339,6 +340,13 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub wakeup_preemption: bool,
 
+    /// Enable Energy-Aware Scheduling (EAS) for big.LITTLE CPUs.
+    /// Places low-utilization tasks on efficient cores and high-utilization
+    /// tasks on performance cores. Requires PELT to be enabled. Improves
+    /// battery life on heterogeneous systems.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub enable_eas: bool,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
 }
@@ -468,6 +476,9 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.pelt_enabled = MaybeUninit::new(opts.enable_pelt);
             rodata.p2dq_config.fork_balance = MaybeUninit::new(opts.fork_balance);
             rodata.p2dq_config.exec_balance = MaybeUninit::new(opts.exec_balance);
+            rodata.p2dq_config.enable_eas = MaybeUninit::new(opts.enable_eas);
+            rodata.p2dq_config.small_task_threshold = 256;  // 25% utilization
+            rodata.p2dq_config.large_task_threshold = 768;  // 75% utilization
 
             // Latency priority config
             rodata.latency_config.latency_priority_enabled = MaybeUninit::new(opts.latency_priority);
@@ -483,7 +494,16 @@ macro_rules! init_open_skel {
 
 #[macro_export]
 macro_rules! init_skel {
-    ($skel: expr, $topo: expr) => {
+    ($skel: expr, $topo: expr) => {{
+        use $crate::energy::EnergyModel;
+
+        // Initialize energy model for EAS
+        let energy_model = EnergyModel::new(&$topo).unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to create energy model: {}", e);
+            eprintln!("Energy-aware scheduling will use fallback values");
+            EnergyModel::new(&$topo).unwrap() // This should not fail
+        });
+
         for cpu in $topo.all_cpus.values() {
             $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
@@ -494,9 +514,15 @@ macro_rules! init_skel {
             $skel.maps.bss_data.as_mut().unwrap().cpu_core_ids[cpu.id] = cpu.core_id as u32;
             $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
+
+            // Populate energy model data
+            $skel.maps.bss_data.as_mut().unwrap().cpu_capacity[cpu.id] =
+                energy_model.cpu_capacity(cpu.id) as u16;
+            $skel.maps.bss_data.as_mut().unwrap().cpu_energy_cost[cpu.id] =
+                energy_model.cpu_energy_cost(cpu.id) as u16;
         }
         for llc in $topo.all_llcs.values() {
             $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
         }
-    };
+    }};
 }
