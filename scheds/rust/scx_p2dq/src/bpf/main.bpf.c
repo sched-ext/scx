@@ -50,6 +50,11 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
+
+#ifndef PF_FORKNOEXEC
+#define PF_FORKNOEXEC 0x00000040
+#endif
+
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
@@ -130,6 +135,8 @@ const volatile struct {
 	bool keep_running_enabled;
 	bool kthreads_local;
 	bool pelt_enabled;
+	bool fork_balance;
+	bool exec_balance;
 } p2dq_config = {
 	.sched_mode = MODE_DEFAULT,
 	.nr_dsqs_per_llc = 3,
@@ -149,6 +156,8 @@ const volatile struct {
 	.keep_running_enabled = true,
 	.kthreads_local = true,
 	.pelt_enabled = true,
+	.fork_balance = true,
+	.exec_balance = true,
 };
 
 /* Latency priority and preemption configuration */
@@ -902,6 +911,101 @@ found_cpu:
 	return cpu;
 }
 
+/**
+ * find_idle_cpu_in_target_llc - Find idle CPU in specific LLC for fork/exec balancing
+ * @p: task to place
+ * @target_llc_id: LLC to search for idle CPU
+ *
+ * Returns CPU ID of idle CPU in target LLC, or -1 if none available.
+ */
+static __always_inline s32 find_idle_cpu_in_target_llc(struct task_struct *p, u32 target_llc_id)
+{
+	const struct cpumask *idle_smtmask, *idle_cpumask;
+	struct llc_ctx *llcx;
+	s32 cpu = -1;
+
+	if (!p || target_llc_id >= MAX_LLCS)
+		return -1;
+
+	llcx = lookup_llc_ctx(target_llc_id);
+	if (!llcx)
+		return -1;
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+	if (!idle_cpumask || !idle_smtmask)
+		goto out;
+
+	/* Try idle core first (both SMT siblings idle) */
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		struct cpu_ctx *cpuc = lookup_cpu_ctx(cpu);
+		if (!cpuc || cpuc->llc_id != target_llc_id)
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (bpf_cpumask_test_cpu(cpu, idle_smtmask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out;
+	}
+
+	/* No idle core, try any idle CPU */
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		struct cpu_ctx *cpuc = lookup_cpu_ctx(cpu);
+		if (!cpuc || cpuc->llc_id != target_llc_id)
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (bpf_cpumask_test_cpu(cpu, idle_cpumask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out;
+	}
+
+	cpu = -1;
+
+out:
+	scx_bpf_put_cpumask(idle_cpumask);
+	scx_bpf_put_cpumask(idle_smtmask);
+	return cpu;
+}
+
+/**
+ * find_least_loaded_llc_for_fork - Find least loaded LLC using pick-2
+ * @parent_llc_id: LLC ID of parent task
+ *
+ * Returns LLC ID of least loaded LLC.
+ * Made noinline to reduce verifier complexity (only scalar params).
+ */
+u32 __attribute__((noinline)) find_least_loaded_llc_for_fork(u32 parent_llc_id)
+{
+	struct llc_ctx *parent_llc, *candidate_llc;
+	u32 candidate_id, best_id;
+	u64 best_load;
+
+	if (parent_llc_id >= MAX_LLCS)
+		return parent_llc_id;
+
+	parent_llc = lookup_llc_ctx(parent_llc_id);
+	if (!parent_llc)
+		return parent_llc_id;
+
+	best_id = parent_llc_id;
+	best_load = parent_llc->load;
+
+	if (topo_config.nr_llcs == 2) {
+		candidate_id = (parent_llc_id == llc_ids[0]) ? llc_ids[1] : llc_ids[0];
+		candidate_llc = lookup_llc_ctx(candidate_id);
+		if (candidate_llc && candidate_llc->load <= best_load)
+			return candidate_id;
+		return best_id;
+	}
+
+	candidate_llc = rand_llc_ctx();
+	if (candidate_llc && candidate_llc->load <= best_load)
+		return candidate_llc->id;
+
+	return best_id;
+}
+
 static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
@@ -1280,6 +1384,76 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if(!(taskc = lookup_task_ctx(p))) {
 		scx_bpf_error("invalid lookup");
 		return;
+	}
+
+	/* Exec balancing: balance tasks transitioning from fork to exec */
+	if (task_ctx_test_flag(taskc, TASK_CTX_F_FORKNOEXEC) && !(p->flags & PF_FORKNOEXEC) &&
+	    p2dq_config.exec_balance &&
+	    !lb_config.single_llc_mode &&
+	    task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS)) {
+		struct cpu_ctx *curr_cpuc = lookup_cpu_ctx(cpu);
+		if (curr_cpuc) {
+			u32 target_llc = find_least_loaded_llc_for_fork(curr_cpuc->llc_id);
+
+			if (target_llc != curr_cpuc->llc_id && target_llc < MAX_LLCS) {
+				taskc->target_llc_hint = target_llc;
+				stat_inc(P2DQ_STAT_EXEC_BALANCE);
+			} else {
+				stat_inc(P2DQ_STAT_EXEC_SAME_LLC);
+			}
+		}
+	}
+
+	if (p->flags & PF_FORKNOEXEC)
+		task_ctx_set_flag(taskc, TASK_CTX_F_FORKNOEXEC);
+	else
+		task_ctx_clear_flag(taskc, TASK_CTX_F_FORKNOEXEC);
+
+	/* Fork balancing: balance newly forked tasks across LLCs */
+	if (task_ctx_test_flag(taskc, TASK_CTX_F_FORKNOEXEC) && taskc->llc_runs == 0 &&
+	    p2dq_config.fork_balance &&
+	    !lb_config.single_llc_mode &&
+	    task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS)) {
+		struct cpu_ctx *curr_cpuc = lookup_cpu_ctx(cpu);
+		if (curr_cpuc) {
+			u32 target_llc = find_least_loaded_llc_for_fork(curr_cpuc->llc_id);
+
+			if (target_llc != curr_cpuc->llc_id && target_llc < MAX_LLCS) {
+				taskc->target_llc_hint = target_llc;
+				stat_inc(P2DQ_STAT_FORK_BALANCE);
+			} else {
+				stat_inc(P2DQ_STAT_FORK_SAME_LLC);
+			}
+		}
+	}
+
+	if (taskc->target_llc_hint < MAX_LLCS) {
+		u32 target_llc_id = taskc->target_llc_hint;
+		s32 target_cpu;
+
+		taskc->target_llc_hint = MAX_LLCS;
+
+		target_cpu = find_idle_cpu_in_target_llc(p, target_llc_id);
+		if (target_cpu >= 0) {
+			struct cpu_ctx *target_cpuc = lookup_cpu_ctx(target_cpu);
+			struct llc_ctx *target_llc = lookup_llc_ctx(target_llc_id);
+
+			if (target_cpuc && target_llc) {
+				taskc->llc_id = target_llc_id;
+				taskc->llc_runs = 0;
+
+				update_vtime(p, target_cpuc, taskc, target_llc);
+				ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+				ret->cpu = target_cpu;
+				ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON | target_cpu;
+				ret->fifo.slice_ns = taskc->slice_ns;
+				ret->fifo.enq_flags = enq_flags;
+
+				dbg("FORK/EXEC: pid=%d -> cpu=%d llc=%u",
+				    p->pid, target_cpu, target_llc_id);
+				return;
+			}
+		}
 	}
 
 	// Handle affinitized tasks: always use per-CPU affn_dsq
@@ -2543,6 +2717,14 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 		taskc->dsq_id = SCX_DSQ_INVALID;
 	else
 		taskc->dsq_id = cpuc->llc_dsq;
+
+	taskc->pid = p->pid;
+
+	if (p->flags & PF_FORKNOEXEC)
+		task_ctx_set_flag(taskc, TASK_CTX_F_FORKNOEXEC);
+	else
+		task_ctx_clear_flag(taskc, TASK_CTX_F_FORKNOEXEC);
+	taskc->target_llc_hint = MAX_LLCS;
 
 	return 0;
 }

@@ -229,6 +229,16 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub wakeup_llc_migrations: bool,
 
+    /// Enable fork-time load balancing across LLCs. New child processes are
+    /// placed on less loaded LLCs when the parent's LLC is overloaded.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub fork_balance: bool,
+
+    /// Enable exec-time load balancing across LLCs. Tasks transitioning from
+    /// fork to exec are migrated to less loaded LLCs if beneficial.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub exec_balance: bool,
+
     /// **DEPRECATED*** Allow selecting idle in enqueue path.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub select_idle_in_enqueue: bool,
@@ -456,6 +466,8 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
             rodata.p2dq_config.pelt_enabled = MaybeUninit::new(opts.enable_pelt);
+            rodata.p2dq_config.fork_balance = MaybeUninit::new(opts.fork_balance);
+            rodata.p2dq_config.exec_balance = MaybeUninit::new(opts.exec_balance);
 
             // Latency priority config
             rodata.latency_config.latency_priority_enabled = MaybeUninit::new(opts.latency_priority);
