@@ -743,7 +743,7 @@ int save_gpu_tgid_pid(void) {
 	struct task_ctx *taskc, *parent;
 	u64 pid_tgid;
 	u32 pid, tid;
-	u64 timestamp = 0;
+	u64 timestamp = MEMBER_INVALID;
 
 	pid_tgid = bpf_get_current_pid_tgid();
 	pid = pid_tgid >> 32;
@@ -2602,7 +2602,7 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 				last_used = bpf_map_lookup_elem(&gpu_tgid, &key);
 
 			/* If not found, we want the used predicate to be required false. */
-			if (!last_used)
+			if (!last_used || *last_used == MEMBER_INVALID)
 				return !must_be_used;
 
 			/*
@@ -3459,6 +3459,13 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->llc_id = MAX_LLCS;
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
+
+	/* 
+	 * Necessary for GPU membership logic. The field is overwritten during 
+	 * .running() and read during .stopping(), so this value is only visible
+	 * from the GPU membership kprobes.
+	 */
+	taskc->running_at = MEMBER_INVALID;
 
 	/*
 	 * Start runtime_avg at some arbitrary sane-ish value. If this becomes a
