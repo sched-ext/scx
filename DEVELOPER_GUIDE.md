@@ -106,31 +106,31 @@ sched` to get a timeline histogram with additional scheduling metrics.
 $ perf sched record
 $ perf sched timehist -Vw --state
            time    cpu  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0  task name                       wait time  sch delay   run time  state
-                                                                                                           [tid/pid]                          (msec)     (msec)     (msec)       
+                                                                                                           [tid/pid]                          (msec)     (msec)     (msec)
 --------------- ------  ---------------------------------------------------------------------------------  ------------------------------  ---------  ---------  ---------  -----
   960264.500659 [0000]                                                                                     perf[1635250]                                                    awakened: migration/0[19]
-  960264.500680 [0000]  s                                                                                  perf[1635250]                       0.000      0.000      0.000      D                                 
+  960264.500680 [0000]  s                                                                                  perf[1635250]                       0.000      0.000      0.000      D
   960264.500683 [0000]                                                                                     migration/0[19]                                                  awakened: perf[1635250]
   960264.500809 [0001]                                                                                     perf[1635250]                                                    awakened: migration/1[24]
-  960264.500814 [0001]   s                                                                                 perf[1635250]                       0.000      0.000      0.000      D                                 
+  960264.500814 [0001]   s                                                                                 perf[1635250]                       0.000      0.000      0.000      D
   960264.500816 [0001]                                                                                     migration/1[24]                                                  awakened: perf[1635250]
-  960264.500824 [0001]   s                                                                                 migration/1[24]                     0.000      0.005      0.009      S                                 
-  960264.502403 [0001]   i                                                                                 <idle>                              0.000      0.000      1.579      I                                 
-  960264.502418 [0001]   s                                                                                 HTTPSrvExec39[3403538/3403436]      0.000      0.000      0.014      S                                 
-  960264.506002 [0001]   i                                                                                 <idle>                              0.014      0.000      3.583      I                                 
-  960264.506045 [0001]   s                                                                                 CfgrIO0[13302/13094]                0.000      0.000      0.043      S                                 
+  960264.500824 [0001]   s                                                                                 migration/1[24]                     0.000      0.005      0.009      S
+  960264.502403 [0001]   i                                                                                 <idle>                              0.000      0.000      1.579      I
+  960264.502418 [0001]   s                                                                                 HTTPSrvExec39[3403538/3403436]      0.000      0.000      0.014      S
+  960264.506002 [0001]   i                                                                                 <idle>                              0.014      0.000      3.583      I
+  960264.506045 [0001]   s                                                                                 CfgrIO0[13302/13094]                0.000      0.000      0.043      S
   960264.506763 [0001]                                                                                     swapper                                                          awakened: chef-client[1629157]
-  960264.506767 [0001]   i                                                                                 <idle>                              0.043      0.000      0.721      I                                 
-  960264.506784 [0001]   s                                                                                 chef-client[1629157]                0.000      0.003      0.017      S                                 
-  960264.507622 [0001]   i                                                                                 <idle>                              0.017      0.000      0.837      I                                 
+  960264.506767 [0001]   i                                                                                 <idle>                              0.043      0.000      0.721      I
+  960264.506784 [0001]   s                                                                                 chef-client[1629157]                0.000      0.003      0.017      S
+  960264.507622 [0001]   i                                                                                 <idle>                              0.017      0.000      0.837      I
   960264.507806 [0001]                                                                                     mcrcfg-fci[1635235/1635080]                                      awakened: GlobalCPUThread[1635186/1635080
   960264.507937 [0001]                                                                                     mcrcfg-fci[1635235/1635080]                                       awakened: FalconClientThr[1635187/1635080
   960264.507996 [0001]                                                                                     mcrcfg-fci[1635235/1635080]                                       awakened: CfgrIO0[1635185/1635080]
-  960264.508007 [0001]   s                                                                                 mcrcfg-fci[1635235/1635080]          0.000      0.000      0.384      S                                  
-  960264.508079 [0001]   i                                                                                 <idle>                               0.384      0.000      0.071      I                                  
+  960264.508007 [0001]   s                                                                                 mcrcfg-fci[1635235/1635080]          0.000      0.000      0.384      S
+  960264.508079 [0001]   i                                                                                 <idle>                               0.384      0.000      0.071      I
   960264.508100 [0001]                                                                                     ThriftSrv.N2104[1635036/2683498                                   awakened: IOThreadPool0[2685229/2683498]
-  960264.508108 [0001]   s                                                                                 ThriftSrv.N2104[1635036/2683498      0.000      0.000      0.029      S                                  
-  960264.508638 [0001]   i                                                                                 <idle>                               0.029      0.000      0.529      I                                  
+  960264.508108 [0001]   s                                                                                 ThriftSrv.N2104[1635036/2683498      0.000      0.000      0.029      S
+  960264.508638 [0001]   i                                                                                 <idle>                               0.029      0.000      0.529      I
   960264.508655 [0001]                                                                                     ThriftSrv.N2104[1635036/2683498                                   awakened: ThriftIO70[2683693/2683498]
 
 ```
@@ -172,17 +172,17 @@ $ sudo retsnoop -e 'do_check*' -a ':kernel/bpf/*.c' -T
 
 FUNCTION CALL TRACE                 RESULT     DURATION
 ---------------------------------   ---------  --------
-→ do_check_common                                      
-    → init_func_state                                  
+→ do_check_common
+    → init_func_state
         ↔ tnum_const                [0]         2.084us
     ← init_func_state               [void]      6.648us
     ↔ tnum_const                    [0]         2.662us
-    → do_check                                         
+    → do_check
         ↔ mark_reg_unknown          [void]      2.251us
         ↔ tnum_const                [0]         2.421us
         ↔ reg_bounds_sanity_check   [0]         2.049us
         ↔ check_reference_leak      [0]         2.014us
-        → check_return_code                            
+        → check_return_code
             ↔ mark_reg_read         [0]         2.212us
         ← check_return_code         [0]         6.531us
         ↔ pop_stack                 [-ENOENT]   2.099us
@@ -191,16 +191,16 @@ FUNCTION CALL TRACE                 RESULT     DURATION
 ← do_check_common                   [0]        76.413us
 
                     entry_SYSCALL_64_after_hwframe+0x4b  (entry_SYSCALL_64 @ arch/x86/entry/entry_64.S:130:0)
-                    do_syscall_64+0x6a                   (arch/x86/entry/common.c:0:0)                       
-                    __x64_sys_bpf+0x18                   (kernel/bpf/syscall.c:5792:1)                       
-                    . __se_sys_bpf                       (kernel/bpf/syscall.c:5792:1)                       
-                    . __do_sys_bpf                       (kernel/bpf/syscall.c:5794:9)                       
-                    __sys_bpf+0x27e                      (kernel/bpf/syscall.c:0:9)                          
-                    bpf_prog_load+0x593                  (kernel/bpf/syscall.c:2908:6)                       
-                    bpf_check+0x1066                     (kernel/bpf/verifier.c:21608:8)                     
-                    . do_check_main                      (kernel/bpf/verifier.c:20938:8)                     
-    76us [0]        do_check_common+0x552                (kernel/bpf/verifier.c:20856:9)                     
-!    2us [-ENOENT]  pop_stack                                                                                
+                    do_syscall_64+0x6a                   (arch/x86/entry/common.c:0:0)
+                    __x64_sys_bpf+0x18                   (kernel/bpf/syscall.c:5792:1)
+                    . __se_sys_bpf                       (kernel/bpf/syscall.c:5792:1)
+                    . __do_sys_bpf                       (kernel/bpf/syscall.c:5794:9)
+                    __sys_bpf+0x27e                      (kernel/bpf/syscall.c:0:9)
+                    bpf_prog_load+0x593                  (kernel/bpf/syscall.c:2908:6)
+                    bpf_check+0x1066                     (kernel/bpf/verifier.c:21608:8)
+                    . do_check_main                      (kernel/bpf/verifier.c:20938:8)
+    76us [0]        do_check_common+0x552                (kernel/bpf/verifier.c:20856:9)
+!    2us [-ENOENT]  pop_stack
 ```
 
 ### `bpftrace`
@@ -226,7 +226,7 @@ bound, fork heavy, NUMA, cache heavy and more.
 
 ### `veristat`
 
-[`veristat`](https://github.com/libbpf/veristat) is a tool to provide statics
+[`veristat`](https://github.com/libbpf/veristat) is a tool to provide statistics
 from the BPF verifier for BPF programs. It can also be used to compare
 verification stats across runs. This is useful when trying to optimize BPF
 programs for their instruction count.

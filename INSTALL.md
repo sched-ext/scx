@@ -85,7 +85,7 @@ Alternatively, we also provide a `-git` package that is synced daily to match th
 
 #### Debugging/Security Note
 
-In past documentation it was reccomended to set the SELinux boolean domain_kernel_load_modules on in order to facilitate loading kernel modules by confined domains (e.g. scx_rusty). However recently, this has proven unnecessary in most cases in which the CachyOS kernel is present on the machine. If you expirience issues running your desired scheduler on a Fedora system, you may try running the following command:
+In past documentation it was recommended to set the SELinux boolean domain_kernel_load_modules on in order to facilitate loading kernel modules by confined domains (e.g. scx_rusty). However recently, this has proven unnecessary in most cases in which the CachyOS kernel is present on the machine. If you experience issues running your desired scheduler on a Fedora system, you may try running the following command:
 
 ```sh
 $ sudo setsebool -P domain_kernel_load_modules on
