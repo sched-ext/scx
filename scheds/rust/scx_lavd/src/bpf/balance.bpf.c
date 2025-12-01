@@ -258,6 +258,12 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		return false;
 
 	/*
+	 * No stealee, nothing to steal.
+	 */
+	if (!sys_stat.nr_stealee)
+		return false;
+
+	/*
 	 * Probabilistically make a go or no go decision to avoid the
 	 * thundering herd problem. In other words, one out of nr_cpus
 	 * will try to steal a task at a moment.
