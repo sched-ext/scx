@@ -1879,6 +1879,8 @@ static void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 
 	u64 min_vtime = 0;
 
+	bpf_rcu_read_lock();
+
 	// start with affn_dsq (local cpu dsq)
 	p = __COMPAT_scx_bpf_dsq_peek(cpuc->affn_dsq);
 	if (p) {
@@ -2005,6 +2007,8 @@ check_llc_dsq:
 			}
 		}
 	}
+
+	bpf_rcu_read_unlock();
 
 	if (dsq_id != 0)
 		trace("DISPATCH cpu[%d] min_vtime %llu dsq_id %llu atq %llu dhq %llu",
