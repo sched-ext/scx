@@ -151,6 +151,15 @@ const volatile struct {
 	.pelt_enabled = true,
 };
 
+/* Latency priority and preemption configuration */
+const volatile struct {
+	bool latency_priority_enabled;
+	bool wakeup_preemption_enabled;
+} latency_config = {
+	.latency_priority_enabled = false,
+	.wakeup_preemption_enabled = false,
+};
+
 const volatile u32 debug = 2;
 const u32 zero_u32 = 0;
 extern const volatile u32 nr_cpu_ids;
@@ -1177,6 +1186,39 @@ static s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_fl
 	else
 		cpu = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &is_idle);
 
+	// Wakeup preemption for extremely latency-critical tasks
+	// Only attempt if: no idle CPU found AND task has very high priority
+	if (!is_idle && latency_config.wakeup_preemption_enabled) {
+		struct cpu_ctx *prev_cpuc;
+
+		// Only preempt for truly latency-critical tasks (scx.weight >= 2847, equivalent to nice <= -15)
+		// and only if we can check the prev_cpu state
+		if (p->scx.weight >= 2847 &&
+		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+		    (prev_cpuc = lookup_cpu_ctx(prev_cpu))) {
+
+			// Don't preempt interactive tasks - they need low latency too
+			if (cpu_ctx_test_flag(prev_cpuc, CPU_CTX_F_INTERACTIVE)) {
+				goto skip_preempt;
+			}
+
+			// Only preempt if incoming task has higher priority than running task
+			// This ensures we only preempt lower priority work
+			if (p->scx.weight <= prev_cpuc->running_weight) {
+				goto skip_preempt;
+			}
+
+			// Queue to prev_cpu's LLC DSQ with high priority
+			// Don't bypass normal queueing - let vtime ordering work
+			// Just ensure we target prev_cpu for better cache affinity
+			cpu = prev_cpu;
+			trace("PREEMPT_TARGET [%d][%s] weight=%u > running_weight=%u on cpu=%d",
+			      p->pid, p->comm, p->scx.weight, prev_cpuc->running_weight, prev_cpu);
+		}
+	}
+
+skip_preempt:
+
 	if (likely(is_idle)) {
 		stat_inc(P2DQ_STAT_IDLE);
 		// Only direct dispatch non-affinitized tasks
@@ -1665,6 +1707,7 @@ static int p2dq_running_impl(struct task_struct *p)
 		cpu_ctx_clear_flag(cpuc, CPU_CTX_F_INTERACTIVE);
 
 	cpuc->dsq_index = taskc->dsq_index;
+	cpuc->running_weight = p->scx.weight;
 
 	if (p->scx.weight < 100)
 		cpu_ctx_set_flag(cpuc, CPU_CTX_F_NICE_TASK);
@@ -2466,6 +2509,7 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 
 	taskc->llc_id = cpuc->llc_id;
 	taskc->node_id = cpuc->node_id;
+	taskc->pid = p->pid;
 
 	// Adjust starting index based on niceness
 	if (p->scx.weight == 100) {
@@ -2499,8 +2543,6 @@ static s32 p2dq_init_task_impl(struct task_struct *p, struct scx_init_task_args 
 		taskc->dsq_id = SCX_DSQ_INVALID;
 	else
 		taskc->dsq_id = cpuc->llc_dsq;
-
-	taskc->pid = p->pid;
 
 	return 0;
 }
@@ -3025,6 +3067,7 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct enqueue_promise pro;
+
 	async_p2dq_enqueue(&pro, p, enq_flags);
 	complete_p2dq_enqueue(&pro, p);
 }

@@ -53,6 +53,7 @@ struct cpu_ctx {
 	u64				mig_dsq;
 	u64				llc_dsq;
 	u64				max_load_dsq;
+	u32				running_weight;  /* Weight of currently running task */
 
 	scx_atq_t			*mig_atq;
 	scx_dhq_t			*mig_dhq;
