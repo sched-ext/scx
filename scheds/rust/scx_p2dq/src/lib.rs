@@ -279,7 +279,7 @@ pub struct SchedulerOpts {
 
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
     /// dumb_queues.
-    #[clap(short = 't', long, value_parser = clap::value_parser!(u64), default_values_t = [0;0])]
+    #[clap(short = 't', long, value_parser = clap::value_parser!(u64), default_values_t = [500, 2500, 5000])]
     pub dsq_time_slices: Vec<u64>,
 
     /// DSQ scaling shift, each queue min timeslice is shifted by the scaling shift.
