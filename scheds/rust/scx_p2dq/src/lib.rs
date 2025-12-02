@@ -388,9 +388,11 @@ macro_rules! init_open_skel {
             let rodata = skel.maps.rodata_data.as_mut().unwrap();
             rodata.topo_config.nr_cpus = *$crate::NR_CPU_IDS as u32;
             rodata.topo_config.nr_llcs = $topo.all_llcs.clone().keys().len() as u32;
+            rodata.topo_config.nr_clusters = $topo.all_clusters.clone().keys().len() as u32;
             rodata.topo_config.nr_nodes = $topo.nodes.clone().keys().len() as u32;
             rodata.topo_config.smt_enabled = MaybeUninit::new($topo.smt_enabled);
             rodata.topo_config.has_little_cores = MaybeUninit::new($topo.has_little_cores());
+            rodata.topo_config.has_clusters = MaybeUninit::new(!$topo.all_clusters.is_empty());
 
             // timeline config
             rodata.timeline_config.min_slice_us = opts.min_slice_us;
@@ -460,6 +462,12 @@ macro_rules! init_open_skel {
 #[macro_export]
 macro_rules! init_skel {
     ($skel: expr, $topo: expr) => {
+        // Populate cluster IDs
+        for cluster in $topo.all_clusters.values() {
+            $skel.maps.bss_data.as_mut().unwrap().cluster_ids[cluster.id] = cluster.id as u64;
+        }
+
+        // Populate CPU data including cluster_id
         for cpu in $topo.all_cpus.values() {
             $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
@@ -470,7 +478,18 @@ macro_rules! init_skel {
             $skel.maps.bss_data.as_mut().unwrap().cpu_core_ids[cpu.id] = cpu.core_id as u32;
             $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
+
+            // Find cluster_id for this CPU by searching through topology
+            let mut cluster_id = 0u32;
+            for cluster in $topo.all_clusters.values() {
+                if cluster.all_cpus.contains_key(&cpu.id) {
+                    cluster_id = cluster.id as u32;
+                    break;
+                }
+            }
+            $skel.maps.bss_data.as_mut().unwrap().cpu_cluster_ids[cpu.id] = cluster_id;
         }
+
         for llc in $topo.all_llcs.values() {
             $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
         }

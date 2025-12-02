@@ -168,11 +168,30 @@ pub struct Core {
 }
 
 #[derive(Debug, Clone)]
+pub struct Cluster {
+    /// Monotonically increasing unique id
+    pub id: usize,
+    /// The kernel id of the L2 cache or cluster
+    pub kernel_id: usize,
+    pub cores: BTreeMap<usize, Arc<Core>>,
+    /// Cpumask of all CPUs in this cluster.
+    pub span: Cpumask,
+
+    /// Ancestor IDs.
+    pub llc_id: usize,
+    pub node_id: usize,
+
+    /// Skip indices to access lower level members easily.
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Llc {
     /// Monotonically increasing unique id
     pub id: usize,
     /// The kernel id of the llc
     pub kernel_id: usize,
+    pub clusters: BTreeMap<usize, Arc<Cluster>>,
     pub cores: BTreeMap<usize, Arc<Core>>,
     /// Cpumask of all CPUs in this llc.
     pub span: Cpumask,
@@ -181,6 +200,7 @@ pub struct Llc {
     pub node_id: usize,
 
     /// Skip indices to access lower level members easily.
+    pub all_clusters: BTreeMap<usize, Arc<Cluster>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
@@ -210,6 +230,7 @@ pub struct Topology {
 
     /// Skip indices to access lower level members easily.
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
+    pub all_clusters: BTreeMap<usize, Arc<Cluster>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
@@ -220,6 +241,7 @@ impl Topology {
         // objects can only be modified while there's only one reference,
         // skip indices must be built from bottom to top.
         let mut topo_llcs = BTreeMap::new();
+        let mut topo_clusters = BTreeMap::new();
         let mut topo_cores = BTreeMap::new();
         let mut topo_cpus = BTreeMap::new();
 
@@ -229,33 +251,84 @@ impl Topology {
 
             for (&llc_id, llc) in node.llcs.iter_mut() {
                 let llc_mut = Arc::get_mut(llc).unwrap();
+                let mut llc_clusters = BTreeMap::new();
                 let mut llc_cpus = BTreeMap::new();
 
-                for (&core_id, core) in llc_mut.cores.iter_mut() {
-                    let core_mut = Arc::get_mut(core).unwrap();
-                    let smt_level = core_mut.cpus.len();
+                for (&cluster_id, cluster) in llc_mut.clusters.iter_mut() {
+                    let cluster_mut = Arc::get_mut(cluster).unwrap();
+                    let mut cluster_cpus = BTreeMap::new();
 
-                    for (&cpu_id, cpu) in core_mut.cpus.iter_mut() {
-                        let cpu_mut = Arc::get_mut(cpu).unwrap();
-                        cpu_mut.smt_level = smt_level;
+                    for (&core_id, core) in cluster_mut.cores.iter_mut() {
+                        let core_mut = Arc::get_mut(core).unwrap();
+                        let smt_level = core_mut.cpus.len();
 
-                        if topo_cpus
-                            .insert(cpu_id, cpu.clone())
-                            .or(node_cpus.insert(cpu_id, cpu.clone()))
-                            .or(llc_cpus.insert(cpu_id, cpu.clone()))
-                            .is_some()
-                        {
-                            bail!("Duplicate CPU ID {}", cpu_id);
+                        for (&cpu_id, cpu) in core_mut.cpus.iter_mut() {
+                            let cpu_mut = Arc::get_mut(cpu).unwrap();
+                            cpu_mut.smt_level = smt_level;
+
+                            if topo_cpus
+                                .insert(cpu_id, cpu.clone())
+                                .or(node_cpus.insert(cpu_id, cpu.clone()))
+                                .or(llc_cpus.insert(cpu_id, cpu.clone()))
+                                .or(cluster_cpus.insert(cpu_id, cpu.clone()))
+                                .is_some()
+                            {
+                                bail!("Duplicate CPU ID {}", cpu_id);
+                            }
                         }
+
+                        // Note that in some weird architectures, core ids can be
+                        // duplicated in different LLC domains.
+                        topo_cores
+                            .insert(core_id, core.clone())
+                            .or(node_cores.insert(core_id, core.clone()));
                     }
 
-                    // Note that in some weird architectures, core ids can be
-                    // duplicated in different LLC domains.
-                    topo_cores
-                        .insert(core_id, core.clone())
-                        .or(node_cores.insert(core_id, core.clone()));
+                    cluster_mut.all_cpus = cluster_cpus;
+
+                    if topo_clusters.insert(cluster_id, cluster.clone()).is_some() {
+                        bail!("Duplicate Cluster ID {}", cluster_id);
+                    }
+                    llc_clusters.insert(cluster_id, cluster.clone());
                 }
 
+                // Fallback: if LLC has no clusters (e.g., virtual LLCs), process cores directly
+                if llc_mut.clusters.is_empty() {
+                    for (&core_id, core) in llc_mut.cores.iter_mut() {
+                        let core_mut = Arc::get_mut(core).unwrap();
+                        let smt_level = core_mut.cpus.len();
+
+                        for (&cpu_id, cpu) in core_mut.cpus.iter_mut() {
+                            let cpu_mut = Arc::get_mut(cpu).unwrap();
+                            cpu_mut.smt_level = smt_level;
+
+                            if topo_cpus
+                                .insert(cpu_id, cpu.clone())
+                                .or(node_cpus.insert(cpu_id, cpu.clone()))
+                                .or(llc_cpus.insert(cpu_id, cpu.clone()))
+                                .is_some()
+                            {
+                                bail!("Duplicate CPU ID {}", cpu_id);
+                            }
+                        }
+
+                        // Note that in some weird architectures, core ids can be
+                        // duplicated in different LLC domains.
+                        topo_cores
+                            .insert(core_id, core.clone())
+                            .or(node_cores.insert(core_id, core.clone()));
+                    }
+                }
+
+                // Populate llc.cores from cluster.cores before LLC is cloned
+                // This must be done while we still have exclusive access via llc_mut
+                for (_cluster_id, cluster) in llc_mut.clusters.iter() {
+                    for (&core_id, core) in cluster.cores.iter() {
+                        llc_mut.cores.insert(core_id, core.clone());
+                    }
+                }
+
+                llc_mut.all_clusters = llc_clusters;
                 llc_mut.all_cpus = llc_cpus;
 
                 if topo_llcs.insert(llc_id, llc.clone()).is_some() {
@@ -272,6 +345,7 @@ impl Topology {
             span,
             smt_enabled: is_smt_active().unwrap_or(false),
             all_llcs: topo_llcs,
+            all_clusters: topo_clusters,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
         })
@@ -372,6 +446,8 @@ struct TopoCtx {
     node_core_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of NUMA node LLC ids
     node_llc_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
+    /// Mapping of NUMA node LLC cluster ids (node_id, llc_id, cluster_kernel_id) -> cluster_id
+    node_llc_cluster_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of L2 ids
     l2_ids: BTreeMap<String, usize>,
     /// Mapping of L3 ids
@@ -382,11 +458,13 @@ impl TopoCtx {
     fn new() -> TopoCtx {
         let core_kernel_ids = BTreeMap::new();
         let llc_kernel_ids = BTreeMap::new();
+        let cluster_kernel_ids = BTreeMap::new();
         let l2_ids = BTreeMap::new();
         let l3_ids = BTreeMap::new();
         TopoCtx {
             node_core_kernel_ids: core_kernel_ids,
             node_llc_kernel_ids: llc_kernel_ids,
+            node_llc_cluster_kernel_ids: cluster_kernel_ids,
             l2_ids,
             l3_ids,
         }
@@ -523,14 +601,51 @@ fn create_insert_cpu(
 
     let llc = node.llcs.entry(*llc_id).or_insert(Arc::new(Llc {
         id: *llc_id,
+        clusters: BTreeMap::new(),
         cores: BTreeMap::new(),
         span: Cpumask::new(),
+        all_clusters: BTreeMap::new(),
         all_cpus: BTreeMap::new(),
 
         node_id: node.id,
         kernel_id: llc_kernel_id,
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
+
+    // Determine cluster kernel ID: use cluster_id if available (>= 0), else use L2 ID
+    // cluster_id is isize, with -1 indicating no cluster support
+    let cluster_kernel_id = if cluster_id >= 0 {
+        cluster_id as usize
+    } else if l2_id != usize::MAX {
+        l2_id
+    } else {
+        // No cluster information available, use LLC as cluster
+        llc_kernel_id
+    };
+
+    // Create unique cluster ID using (node.id, llc_id, cluster_kernel_id)
+    let num_clusters = topo_ctx.node_llc_cluster_kernel_ids.len();
+    let cluster_id_unique = topo_ctx
+        .node_llc_cluster_kernel_ids
+        .entry((node.id, *llc_id, cluster_kernel_id))
+        .or_insert(num_clusters);
+
+    // Create or get cluster
+    let cluster = llc_mut
+        .clusters
+        .entry(*cluster_id_unique)
+        .or_insert(Arc::new(Cluster {
+            id: *cluster_id_unique,
+            kernel_id: cluster_kernel_id,
+            cores: BTreeMap::new(),
+            span: Cpumask::new(),
+
+            llc_id: *llc_id,
+            node_id: node.id,
+
+            all_cpus: BTreeMap::new(),
+        }));
+    let cluster_mut = Arc::get_mut(cluster).unwrap();
 
     let core_type = if cs.avg_rcap < cs.max_rcap && rcap == cs.max_rcap {
         CoreType::Big { turbo: true }
@@ -546,7 +661,8 @@ fn create_insert_cpu(
         .entry((node.id, package_id, core_kernel_id))
         .or_insert(num_cores);
 
-    let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
+    // Insert core into cluster
+    let core = cluster_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
         id: *core_id,
         cpus: BTreeMap::new(),
         span: Cpumask::new(),
@@ -589,6 +705,7 @@ fn create_insert_cpu(
 
     // Update all of the devices' spans to include this CPU.
     core_mut.span.set_cpu(id)?;
+    cluster_mut.span.set_cpu(id)?;
     llc_mut.span.set_cpu(id)?;
     node.span.set_cpu(id)?;
 
@@ -776,9 +893,11 @@ fn replace_with_virt_llcs(
             Arc::new(Llc {
                 id: vllc_id,
                 kernel_id,
+                clusters: BTreeMap::new(),
                 cores: BTreeMap::new(),
                 span: Cpumask::new(),
                 node_id: node.id,
+                all_clusters: BTreeMap::new(),
                 all_cpus: BTreeMap::new(),
             }),
         );
@@ -884,6 +1003,15 @@ fn create_default_node(
         create_insert_cpu(*cpu_id, &mut node, online_mask, topo_ctx, &cs, flatten_llc)?;
     }
 
+    // Clear clusters before creating virtual LLCs to avoid multiple Arc references to cores
+    // replace_with_virt_llcs() will create new LLCs without clusters anyway
+    if nr_cores_per_vllc.is_some() {
+        for (_llc_id, llc) in node.llcs.iter_mut() {
+            let llc_mut = Arc::get_mut(llc).unwrap();
+            llc_mut.clusters.clear();
+        }
+    }
+
     if let Some((min_cores_val, max_cores_val)) = nr_cores_per_vllc {
         replace_with_virt_llcs(&mut node, min_cores_val, max_cores_val, 0)?;
     }
@@ -983,6 +1111,15 @@ fn create_numa_nodes(
 
         for cpu_id in cpu_ids {
             create_insert_cpu(cpu_id, &mut node, online_mask, topo_ctx, &cs, false)?;
+        }
+
+        // Clear clusters before creating virtual LLCs to avoid multiple Arc references to cores
+        // replace_with_virt_llcs() will create new LLCs without clusters anyway
+        if nr_cores_per_vllc.is_some() {
+            for (_llc_id, llc) in node.llcs.iter_mut() {
+                let llc_mut = Arc::get_mut(llc).unwrap();
+                llc_mut.clusters.clear();
+            }
         }
 
         if let Some((min_cores_val, max_cores_val)) = nr_cores_per_vllc {

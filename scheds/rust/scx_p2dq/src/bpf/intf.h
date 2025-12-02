@@ -14,43 +14,44 @@
 #endif
 
 #ifndef __KERNEL__
-typedef unsigned char u8;
-typedef unsigned int u32;
+typedef unsigned char	   u8;
+typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-
 enum consts {
-	MAX_CPUS		= 512,
-	MAX_NUMA_NODES		= 64,
-	MAX_LLCS		= 64,
-	MAX_DSQS_PER_LLC	= 8,
-	MAX_LLC_SHARDS		= 32,
-	MAX_TASK_PRIO		= 39,
-	MAX_TOPO_NODES		= 1024,
+	MAX_CPUS	   = 512,
+	MAX_NUMA_NODES	   = 64,
+	MAX_LLCS	   = 64,
+	MAX_CLUSTERS	   = 128,
+	MAX_DSQS_PER_LLC   = 8,
+	MAX_LLC_SHARDS	   = 32,
+	MAX_TASK_PRIO	   = 39,
+	MAX_TOPO_NODES	   = 1024,
 
-	NSEC_PER_USEC		= 1000ULL,
-	NSEC_PER_MSEC		= (1000ULL * NSEC_PER_USEC),
-	MSEC_PER_SEC		= 1000ULL,
-	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC,
+	NSEC_PER_USEC	   = 1000ULL,
+	NSEC_PER_MSEC	   = (1000ULL * NSEC_PER_USEC),
+	MSEC_PER_SEC	   = 1000ULL,
+	NSEC_PER_SEC	   = NSEC_PER_MSEC * MSEC_PER_SEC,
 
-	MIN_SLICE_USEC		= 10ULL,
-	MIN_SLICE_NSEC		= (10ULL * NSEC_PER_USEC),
+	MIN_SLICE_USEC	   = 10ULL,
+	MIN_SLICE_NSEC	   = (10ULL * NSEC_PER_USEC),
 
-	LOAD_BALANCE_SLACK	= 20ULL,
+	LOAD_BALANCE_SLACK = 20ULL,
 
-	P2DQ_MIG_DSQ		= 1LLU << 60,
-	P2DQ_INTR_DSQ		= 1LLU << 32,
+	P2DQ_MIG_DSQ	   = 1LLU << 60,
+	P2DQ_INTR_DSQ	   = 1LLU << 32,
 
 	// PELT (Per-Entity Load Tracking) constants
-	PELT_HALFLIFE_MS	= 32,		// 32ms half-life for exponential decay
-	PELT_PERIOD_MS		= 1,		// 1ms update period (simplified from kernel's 1024us)
-	PELT_MAX_UTIL		= 1024,		// Maximum utilization value
-	PELT_DECAY_SHIFT	= 7,		// Decay factor: (127/128) ≈ 0.98 per ms
-	PELT_SUM_MAX		= 131072,	// Maximum sum value (128 * 1024)
+	PELT_HALFLIFE_MS = 32, // 32ms half-life for exponential decay
+	PELT_PERIOD_MS =
+		1, // 1ms update period (simplified from kernel's 1024us)
+	PELT_MAX_UTIL	 = 1024, // Maximum utilization value
+	PELT_DECAY_SHIFT = 7, // Decay factor: (127/128) ≈ 0.98 per ms
+	PELT_SUM_MAX	 = 131072, // Maximum sum value (128 * 1024)
 
 	// kernel definitions
-	CLOCK_BOOTTIME		= 7,
+	CLOCK_BOOTTIME = 7,
 };
 
 enum p2dq_timers_defs {
