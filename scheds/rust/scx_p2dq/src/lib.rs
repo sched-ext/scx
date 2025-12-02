@@ -321,6 +321,14 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub enable_pelt: bool,
 
+    /// Enable latency priority system (uses task nice value)
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub latency_priority: bool,
+
+    /// Enable wakeup preemption for latency-critical tasks
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub wakeup_preemption: bool,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
 }
@@ -448,6 +456,10 @@ macro_rules! init_open_skel {
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
             rodata.p2dq_config.pelt_enabled = MaybeUninit::new(opts.enable_pelt);
+
+            // Latency priority config
+            rodata.latency_config.latency_priority_enabled = MaybeUninit::new(opts.latency_priority);
+            rodata.latency_config.wakeup_preemption_enabled = MaybeUninit::new(opts.wakeup_preemption);
 
             rodata.debug = verbose as u32;
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
