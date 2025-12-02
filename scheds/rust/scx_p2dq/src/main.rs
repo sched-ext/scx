@@ -50,6 +50,10 @@ use bpf_intf::stat_idx_P2DQ_STAT_ENQ_CPU;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_INTR;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_MIG;
+use bpf_intf::stat_idx_P2DQ_STAT_EXEC_BALANCE;
+use bpf_intf::stat_idx_P2DQ_STAT_EXEC_SAME_LLC;
+use bpf_intf::stat_idx_P2DQ_STAT_FORK_BALANCE;
+use bpf_intf::stat_idx_P2DQ_STAT_FORK_SAME_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
@@ -225,6 +229,10 @@ impl<'a> Scheduler<'a> {
             wake_prev: stats[stat_idx_P2DQ_STAT_WAKE_PREV as usize],
             wake_llc: stats[stat_idx_P2DQ_STAT_WAKE_LLC as usize],
             wake_mig: stats[stat_idx_P2DQ_STAT_WAKE_MIG as usize],
+            fork_balance: stats[stat_idx_P2DQ_STAT_FORK_BALANCE as usize],
+            exec_balance: stats[stat_idx_P2DQ_STAT_EXEC_BALANCE as usize],
+            fork_same_llc: stats[stat_idx_P2DQ_STAT_FORK_SAME_LLC as usize],
+            exec_same_llc: stats[stat_idx_P2DQ_STAT_EXEC_SAME_LLC as usize],
         }
     }
 

@@ -130,7 +130,7 @@ struct llc_ctx {
 	scx_dhq_t			*mig_dhq;
 	u64				dhq_strand;  /* Which DHQ strand (A or B) for this LLC */
 	scx_minheap_t			*idle_cpu_heap;
-};
+} __attribute__((aligned(CACHE_LINE_SIZE)));
 
 struct node_ctx {
 	u32				id;
@@ -143,6 +143,7 @@ struct node_ctx {
 #define TASK_CTX_F_WAS_NICE	(1 << 1)
 #define TASK_CTX_F_IS_KWORKER	(1 << 2)
 #define TASK_CTX_F_ALL_CPUS	(1 << 3)
+#define TASK_CTX_F_FORKNOEXEC	(1 << 4)
 
 /* Helper macros for task_ctx flags */
 #define task_ctx_set_flag(taskc, flag)		((taskc)->flags |= (flag))
@@ -179,7 +180,10 @@ struct task_p2dq {
 	u64			llc_runs; /* how many runs on the current LLC */
 	u64			enq_flags;
 	int			last_dsq_index;
-	u32			flags;  /* Bitmask for interactive, was_nice, is_kworker, all_cpus */
+	u32			flags;  /* Bitmask for interactive, was_nice, is_kworker, all_cpus, forknoexec */
+
+	/* Fork/exec balancing fields */
+	u32			target_llc_hint; /* Target LLC for initial placement (MAX_LLCS = none) */
 };
 
 typedef struct task_p2dq __arena task_ctx;
