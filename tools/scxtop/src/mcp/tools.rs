@@ -464,6 +464,10 @@ impl McpTools {
                         "end_time_ns": {
                             "type": "integer",
                             "description": "End of time range (optional, defaults to trace end)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of events to return (optional, defaults to memory-aware limit)"
                         }
                     },
                     "required": ["trace_id", "pid"]
@@ -490,6 +494,10 @@ impl McpTools {
                         "end_time_ns": {
                             "type": "integer",
                             "description": "End of time range (optional, defaults to trace end)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of events to return (optional, defaults to memory-aware limit)"
                         }
                     },
                     "required": ["trace_id", "cpu"]
@@ -2590,6 +2598,15 @@ impl McpTools {
 
         let timeline = trace.get_timeline_for_process(pid, start_ns, end_ns);
 
+        // Limit output for readability using memory-aware limit or user-provided limit
+        let default_limit = self.mem_limits.timeline_limit();
+        let timeline_limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(default_limit);
+        let limited_events: Vec<_> = timeline.events.iter().take(timeline_limit).collect();
+
         Ok(json!({
             "content": [{
                 "type": "text",
@@ -2597,13 +2614,14 @@ impl McpTools {
                     "Process Timeline for PID {} ({})\n\
                      Time range: {} - {} ns\n\
                      Total events: {}\n\n\
-                     Timeline:\n{}",
+                     Timeline (first {} events):\n{}",
                     timeline.pid,
                     timeline.comm,
                     start_ns,
                     end_ns,
                     timeline.events.len(),
-                    serde_json::to_string_pretty(&timeline.events)
+                    timeline_limit.min(timeline.events.len()),
+                    serde_json::to_string_pretty(&limited_events)
                         .unwrap_or_else(|_| "Failed to serialize timeline".to_string())
                 )
             }]
@@ -2645,8 +2663,13 @@ impl McpTools {
 
         let timeline = trace.get_cpu_timeline(cpu, start_ns, end_ns);
 
-        // Limit output for readability using memory-aware limit
-        let timeline_limit = self.mem_limits.timeline_limit();
+        // Limit output for readability using memory-aware limit or user-provided limit
+        let default_limit = self.mem_limits.timeline_limit();
+        let timeline_limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(default_limit);
         let limited_events: Vec<_> = timeline.events.iter().take(timeline_limit).collect();
 
         Ok(json!({
