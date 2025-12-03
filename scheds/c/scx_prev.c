@@ -49,6 +49,7 @@ static void read_stats(struct scx_prev *skel, __u64 *stats)
 	__u32 idx;
 
 	memset(stats, 0, sizeof(stats[0]) * 4);
+	memset(cnts, 0, sizeof(cnts));
 
 	for (idx = 0; idx < 4; idx++) {
 		int ret, cpu;
