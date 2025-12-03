@@ -2608,9 +2608,12 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			/*
 			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
 			 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
+			 *
+			 * NOTE: member_expire_ms=0 means "never expire", so skip the expiration check.
 			 */
 			recently_used = true;
-			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
+			if (layer->member_expire_ms > 0 && taskc &&
+				taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
 				taskc->recheck_layer_membership != MEMBER_CANTMATCH &&
 				(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
 
