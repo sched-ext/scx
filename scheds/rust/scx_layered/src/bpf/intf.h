@@ -75,6 +75,7 @@ enum layer_membership {
 	MEMBER_NOEXPIRE		= (u64)-1,
 	MEMBER_EXPIRED		= (u64)-2,
 	MEMBER_CANTMATCH	= (u64)-3,
+	MEMBER_INVALID		= (u64)-4,
 };
 
 static inline void ___consts_sanity_check___(void) {
