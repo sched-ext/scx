@@ -88,16 +88,16 @@ use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
 /// And then there are boilerplates to generate the bindings and make them
 /// available as modules to `main.rs`.
 ///
-/// - `Cargo.toml`: Includes `scx_utils` in the `[build-dependencies]`
+/// - `Cargo.toml`: Includes `scx_cargo` in the `[build-dependencies]`
 /// section.
 ///
-/// - `build.rs`: Uses `scx_utils::BpfBuilder` to build and generate
+/// - `build.rs`: Uses `scx_cargo::BpfBuilder` to build and generate
 /// bindings for the BPF component. For this project, it can look like the
 /// following.
 ///
 /// ```should_panic
 /// fn main() {
-///     scx_utils::BpfBuilder::new()
+///     scx_cargo::BpfBuilder::new()
 ///         .unwrap()
 ///         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
 ///         .enable_skel("src/bpf/main.bpf.c", "bpf")
