@@ -2442,21 +2442,26 @@ impl<'a> Scheduler<'a> {
         skel.progs.scx_pmu_switch_tc.set_autoload(membw_tracking);
         skel.progs.scx_pmu_tick_tc.set_autoload(membw_tracking);
 
+        let mut loaded_kprobes = HashSet::new();
+
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
             // by default, enable open if gpu support is enabled.
             // open has been observed to be relatively cheap to kprobe.
             if opts.gpu_kprobe_level >= 1 {
-                compat::cond_kprobe_enable("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
+                compat::cond_kprobe_load("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
+                loaded_kprobes.insert("nvidia_open");
             }
             // enable the rest progressively based upon how often they are called
             // for observed workloads
             if opts.gpu_kprobe_level >= 2 {
-                compat::cond_kprobe_enable("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
+                compat::cond_kprobe_load("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
+                loaded_kprobes.insert("nvidia_mmap");
             }
             if opts.gpu_kprobe_level >= 3 {
-                compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
+                compat::cond_kprobe_load("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
+                loaded_kprobes.insert("nvidia_poll");
             }
         }
 
@@ -2690,6 +2695,20 @@ impl<'a> Scheduler<'a> {
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
+
+        // Turn on installed kprobes
+        if opts.enable_gpu_support {
+            if loaded_kprobes.contains("nvidia_open") {
+                compat::cond_kprobe_attach("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
+            }
+            if loaded_kprobes.contains("nvidia_mmap") {
+                compat::cond_kprobe_attach("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
+            }
+            if loaded_kprobes.contains("nvidia_poll") {
+                compat::cond_kprobe_attach("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
+            }
+        }
+
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         let mut gpu_task_handler =
             GpuTaskAffinitizer::new(opts.gpu_affinitize_secs, opts.enable_gpu_affinitize);
