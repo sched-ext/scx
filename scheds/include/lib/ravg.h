@@ -12,6 +12,10 @@ enum ravg_consts {
 
 #ifdef __BPF__
 
+#ifndef __arena
+#define __arena __attribute__((address_space(1)))
+#endif /* __arena */
+
 /*
  * Running avg mechanism. Accumulates values between 0 and RAVG_MAX_VAL in
  * arbitrary time intervals. The accumulated values are halved every half_life
@@ -116,6 +120,21 @@ static RAVG_FN_ATTRS void ravg_transfer(struct ravg_data *base, u64 base_new_val
 		else
 			base->cur = 0;
 	}
+}
+
+static RAVG_FN_ATTRS int ravg_to_arena(struct ravg_data __arena *to, struct ravg_data *from)
+{
+	*to = *from;
+
+	return 0;
+}
+
+
+static RAVG_FN_ATTRS int ravg_from_arena(struct ravg_data *to, struct ravg_data __arena *from)
+{
+	*to = *from;
+
+	return 0;
 }
 
 #endif /* __BPF__ */
