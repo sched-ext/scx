@@ -62,6 +62,7 @@ use bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
+use bpf_intf::stat_idx_P2DQ_STAT_WAKE_SYNC_WAKER;
 use scx_p2dq::bpf_intf;
 use scx_p2dq::bpf_skel::*;
 use scx_p2dq::SchedulerOpts;
@@ -229,6 +230,7 @@ impl<'a> Scheduler<'a> {
             wake_prev: stats[stat_idx_P2DQ_STAT_WAKE_PREV as usize],
             wake_llc: stats[stat_idx_P2DQ_STAT_WAKE_LLC as usize],
             wake_mig: stats[stat_idx_P2DQ_STAT_WAKE_MIG as usize],
+            wake_sync_waker: stats[stat_idx_P2DQ_STAT_WAKE_SYNC_WAKER as usize],
             fork_balance: stats[stat_idx_P2DQ_STAT_FORK_BALANCE as usize],
             exec_balance: stats[stat_idx_P2DQ_STAT_EXEC_BALANCE as usize],
             fork_same_llc: stats[stat_idx_P2DQ_STAT_FORK_SAME_LLC as usize],

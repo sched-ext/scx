@@ -738,7 +738,8 @@ static bool can_migrate(task_ctx *taskc, struct llc_ctx *llcx)
 	    taskc->dsq_index != p2dq_config.nr_dsqs_per_llc - 1)
 		return false;
 
-	if (taskc->llc_runs > 0)
+	if (lb_config.min_llc_runs_pick2 > 0 &&
+	    taskc->llc_runs < lb_config.min_llc_runs_pick2)
 		return false;
 
 	if (unlikely(saturated || overloaded))
@@ -834,7 +835,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx,
 static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 				     s32 prev_cpu, bool *is_idle)
 {
-	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_cpumask = NULL;
 	struct mask_wrapper *wrapper;
 	struct bpf_cpumask *mask;
 	struct llc_ctx *llcx;
@@ -846,8 +847,32 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 		return prev_cpu;
 	}
 
+	/*
+	 * Fast path for affinitized tasks: Try waker CPU if it's in the
+	 * affinity mask and has no queued work. Avoids expensive idle mask operations.
+	 */
+	if (!saturated && !overloaded) {
+		s32 waker_cpu = bpf_get_smp_processor_id();
+
+		if (waker_cpu >= 0 && waker_cpu < nr_cpu_ids &&
+		    bpf_cpumask_test_cpu(waker_cpu, p->cpus_ptr)) {
+			struct cpu_ctx *waker_cpuc = lookup_cpu_ctx(waker_cpu);
+
+			if (waker_cpuc) {
+				u64 waker_local_dsq = SCX_DSQ_LOCAL_ON | waker_cpu;
+				u32 nr_queued = scx_bpf_dsq_nr_queued(waker_local_dsq);
+				nr_queued += scx_bpf_dsq_nr_queued(waker_cpuc->llc_dsq);
+
+				if (nr_queued == 0) {
+					cpu = waker_cpu;
+					*is_idle = false;
+					goto found_cpu;
+				}
+			}
+		}
+	}
+
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-	idle_smtmask = scx_bpf_get_idle_smtmask();
 
 	if (!(llcx = lookup_llc_ctx(taskc->llc_id)) ||
 	    !llcx->cpumask)
@@ -905,8 +930,8 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 	cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 
 found_cpu:
-	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(idle_smtmask);
+	if (idle_cpumask)
+		scx_bpf_put_cpumask(idle_cpumask);
 
 	return cpu;
 }
@@ -920,7 +945,7 @@ found_cpu:
  */
 static __always_inline s32 find_idle_cpu_in_target_llc(struct task_struct *p, u32 target_llc_id)
 {
-	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_smtmask = NULL, *idle_cpumask = NULL;
 	struct llc_ctx *llcx;
 	s32 cpu = -1;
 
@@ -1009,15 +1034,39 @@ u32 __attribute__((noinline)) find_least_loaded_llc_for_fork(u32 parent_llc_id)
 static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
-	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_cpumask = NULL;
 	struct llc_ctx *llcx;
 	s32 pref_cpu, cpu = prev_cpu;
 	bool migratable = false;
 
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	idle_smtmask = scx_bpf_get_idle_smtmask();
+	/*
+	 * WAKE_SYNC fast path: Check first before expensive idle mask operations
+	 * Only apply when system is not saturated. If waker is yielding and has
+	 * no queued work, hand off directly without searching for idle CPUs.
+	 */
+	if ((wake_flags & SCX_WAKE_SYNC) && !saturated && !overloaded) {
+		s32 waker_cpu = bpf_get_smp_processor_id();
+		if (waker_cpu >= 0 && waker_cpu < nr_cpu_ids &&
+		    bpf_cpumask_test_cpu(waker_cpu, p->cpus_ptr)) {
+			struct cpu_ctx *waker_cpuc = lookup_cpu_ctx(waker_cpu);
+			if (waker_cpuc) {
+				u64 waker_local_dsq = SCX_DSQ_LOCAL_ON | waker_cpu;
+				u32 nr_queued = scx_bpf_dsq_nr_queued(waker_local_dsq);
+				nr_queued += scx_bpf_dsq_nr_queued(waker_cpuc->affn_dsq);
 
-	if (!idle_cpumask || !idle_smtmask)
+				if (nr_queued == 0) {
+					stat_inc(P2DQ_STAT_WAKE_SYNC_WAKER);
+					cpu = waker_cpu;
+					*is_idle = false;
+					goto found_cpu;
+				}
+			}
+		}
+	}
+
+	/* Get idle CPU masks only if fast paths didn't succeed */
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	if (!idle_cpumask)
 		goto found_cpu;
 
 	if (bpf_cpumask_test_cpu(prev_cpu, idle_cpumask) &&
@@ -1039,12 +1088,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 
 	migratable = can_migrate(taskc, llcx);
-	if (topo_config.nr_llcs > 1 &&
-	    (llc_ctx_test_flag(llcx, LLC_CTX_F_SATURATED) || saturated || overloaded) &&
-	    !migratable) {
-		cpu = prev_cpu;
-		goto found_cpu;
-	}
 
 	if (!valid_dsq(taskc->dsq_id))
 		if (!(llcx = rand_llc_ctx()))
@@ -1056,6 +1099,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	 * waker.
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
+		struct task_struct *waker = (void *)bpf_get_current_task_btf();
+
 		// Interactive tasks aren't worth migrating across LLCs.
 		if (task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE) ||
 		    (topo_config.nr_llcs == 2 && topo_config.nr_nodes == 2)) {
@@ -1073,7 +1118,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			goto found_cpu;
 		}
 
-		struct task_struct *waker = (void *)bpf_get_current_task_btf();
 		task_ctx *waker_taskc = scx_task_data(waker);
 		// Shouldn't happen, but makes code easier to follow
 		if (!waker_taskc) {
@@ -1269,8 +1313,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	cpu = prev_cpu;
 
 found_cpu:
-	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(idle_smtmask);
+	if (idle_cpumask)
+		scx_bpf_put_cpumask(idle_cpumask);
 
 	return cpu;
 }
