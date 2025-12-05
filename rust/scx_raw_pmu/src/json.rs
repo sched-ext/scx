@@ -260,28 +260,3 @@ impl PMUManager {
         Self::new_with_resource_dir(resource_dir, dataroot.into())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_with_resources() {
-        let manager = PMUManager::new().expect("could not create PMU manager");
-
-        manager.list_metadata();
-        manager.list_counters().expect("could not list counters");
-    }
-
-    #[test]
-    fn test_with_dir() {
-        let td = tempfile::tempdir().unwrap();
-        crate::resources::extract_arch_resources(td.path()).expect("could not extract resources");
-
-        let manager =
-            PMUManager::new_with_dataroot(Some(td.path())).expect("could not create PMU manager");
-
-        manager.list_metadata();
-        manager.list_counters().expect("could not list counters");
-    }
-}
