@@ -1,36 +1,9 @@
-#pragma once
+#include <scx/common.bpf.h>
 
-/* to be included in the main bpf.c file */
-#include "ravg.bpf.h"
+#include <scx/bpf_arena_common.bpf.h>
+#include <scx/bpf_arena_spin_lock.h>
 
-#define RAVG_FN_ATTRS		inline __attribute__((unused, always_inline))
-
-static RAVG_FN_ATTRS void ravg_add(u64 *sum, u64 addend)
-{
-	u64 new = *sum + addend;
-
-	if (new >= *sum)
-		*sum = new;
-	else
-		*sum = -1;
-}
-
-static RAVG_FN_ATTRS u64 ravg_decay(u64 v, u32 shift)
-{
-	if (shift >= 64)
-		return 0;
-	else
-		return v >> shift;
-}
-
-static RAVG_FN_ATTRS u32 ravg_normalize_dur(u32 dur, u32 half_life)
-{
-	if (dur < half_life)
-		return (((u64)dur << RAVG_FRAC_BITS) + half_life - 1) /
-			half_life;
-	else
-		return 1 << RAVG_FRAC_BITS;
-}
+#include <lib/ravg.h>
 
 /*
  * Pre-computed decayed full-period values. This is quicker and keeps the bpf
@@ -61,7 +34,8 @@ static const int ravg_full_sum_len = sizeof(ravg_full_sum) / sizeof(ravg_full_su
  *
  * The current value is changing to @val at @now. Accumulate accordingly.
  */
-static RAVG_FN_ATTRS void ravg_accumulate(struct ravg_data *rd, u64 new_val, u64 now,
+__weak
+int ravg_accumulate(struct ravg_data *rd, u64 new_val, u64 now,
 					  u32 half_life)
 {
 	u32 cur_seq, val_seq, seq_delta;
@@ -140,50 +114,8 @@ out:
 	else
 		rd->val = new_val;
 	rd->val_at = now;
-}
 
-/**
- * ravg_transfer - Transfer in or out a component running avg
- * @base: ravg_data to transfer @xfer into or out of
- * @base_new_val: new value for @base
- * @xfer: ravg_data to transfer
- * @xfer_new_val: new value for @xfer
- * @is_xfer_in: transfer direction
- *
- * An ravg may be a sum of component ravgs. For example, a scheduling domain's
- * load is the sum of the load values of all member tasks. If a task is migrated
- * to a different domain, its contribution should be subtracted from the source
- * ravg and added to the destination one.
- *
- * This function can be used for such component transfers. Both @base and @xfer
- * must have been accumulated at the same timestamp. @xfer's contribution is
- * subtracted if @is_fer_in is %false and added if %true.
- */
-static RAVG_FN_ATTRS void ravg_transfer(struct ravg_data *base, u64 base_new_val,
-					struct ravg_data *xfer, u64 xfer_new_val,
-					u32 half_life, bool is_xfer_in)
-{
-	/* synchronize @base and @xfer */
-	if ((s64)(base->val_at - xfer->val_at) < 0)
-		ravg_accumulate(base, base_new_val, xfer->val_at, half_life);
-	else if ((s64)(base->val_at - xfer->val_at) > 0)
-		ravg_accumulate(xfer, xfer_new_val, base->val_at, half_life);
-
-	/* transfer */
-	if (is_xfer_in) {
-		base->old += xfer->old;
-		base->cur += xfer->cur;
-	} else {
-		if (base->old > xfer->old)
-			base->old -= xfer->old;
-		else
-			base->old = 0;
-
-		if (base->cur > xfer->cur)
-			base->cur -= xfer->cur;
-		else
-			base->cur = 0;
-	}
+	return 0;
 }
 
 /**
@@ -196,7 +128,8 @@ static RAVG_FN_ATTRS void ravg_transfer(struct ravg_data *base, u64 base_new_val
  * u64 and @b is u32 and (@a * @b) may be bigger than #U64_MAX. The caller must
  * ensure that the final shifted result fits in u64.
  */
-static __always_inline u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
+static inline
+u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
 {
 	const u64 mask32 = (u32)-1;
 	u64 al = a & mask32;
@@ -236,11 +169,14 @@ static __always_inline u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
  * Scale @rd by multiplying the tracked values by @mult and shifting right by
  * @rshift.
  */
-static RAVG_FN_ATTRS void ravg_scale(struct ravg_data *rd, u32 mult, u32 rshift)
+__weak
+int ravg_scale(struct ravg_data *rd, u32 mult, u32 rshift)
 {
 	rd->val = u64_x_u32_rshift(rd->val, mult, rshift);
 	rd->old = u64_x_u32_rshift(rd->old, mult, rshift);
 	rd->cur = u64_x_u32_rshift(rd->cur, mult, rshift);
+
+	return 0;
 }
 
 /**
@@ -251,7 +187,8 @@ static RAVG_FN_ATTRS void ravg_scale(struct ravg_data *rd, u32 mult, u32 rshift)
  *
  * Read running avg from @rd as of @now.
  */
-static RAVG_FN_ATTRS u64 ravg_read(struct ravg_data *rd, u64 now, u64 half_life)
+__weak
+u64 ravg_read(struct ravg_data *rd, u64 now, u64 half_life)
 {
 	struct ravg_data trd;
 	u32 elapsed;
