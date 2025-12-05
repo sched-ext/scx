@@ -83,7 +83,7 @@ use log::info;
 use log::warn;
 use sscanf::sscanf;
 use std::cmp::min;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -993,4 +993,104 @@ fn create_numa_nodes(
         nodes.insert(node.id, node);
     }
     Ok(nodes)
+}
+
+#[derive(PartialEq)]
+pub enum Powermode {
+    Turbo,
+    Performance,
+    Powersave,
+    Any,
+}
+
+fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
+    let cpus: Vec<usize> = Topology::new()
+        .unwrap()
+        .all_cores
+        .values()
+        .flat_map(|core| &core.cpus)
+        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
+            // Turbo mode: prioritize CPUs with the highest max frequency
+            (Powermode::Turbo, CoreType::Big { turbo: true }) |
+            // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
+            (Powermode::Performance, CoreType::Big { .. }) |
+            // Powersave mode: add all the Little CPUs
+            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            (Powermode::Any, ..) => Some(*cpu_id),
+            _ => None,
+        })
+        .collect();
+
+    Ok(cpus)
+}
+
+pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
+    let mut cpus = Vec::new();
+    let mut seen = HashSet::new();
+
+    // Handle special keywords
+    if let Some(mode) = match optarg {
+        "powersave" => Some(Powermode::Powersave),
+        "performance" => Some(Powermode::Performance),
+        "turbo" => Some(Powermode::Turbo),
+        "all" => Some(Powermode::Any),
+        _ => None,
+    } {
+        return get_primary_cpus(mode).map_err(|e| e.to_string());
+    }
+
+    // Validate input characters
+    if optarg
+        .chars()
+        .any(|c| !c.is_ascii_digit() && c != '-' && c != ',' && !c.is_whitespace())
+    {
+        return Err("Invalid character in CPU list".to_string());
+    }
+
+    // Replace all whitespace with tab (or just trim later)
+    let cleaned = optarg.replace(' ', "\t");
+
+    for token in cleaned.split(',') {
+        let token = token.trim_matches(|c: char| c.is_whitespace());
+
+        if token.is_empty() {
+            continue;
+        }
+
+        if let Some((start_str, end_str)) = token.split_once('-') {
+            let start = start_str
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "Invalid range start")?;
+            let end = end_str
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "Invalid range end")?;
+
+            if start > end {
+                return Err(format!("Invalid CPU range: {}-{}", start, end));
+            }
+
+            for i in start..=end {
+                if cpus.len() >= *NR_CPU_IDS {
+                    return Err(format!("Too many CPUs specified (max {})", *NR_CPU_IDS));
+                }
+                if seen.insert(i) {
+                    cpus.push(i);
+                }
+            }
+        } else {
+            let cpu = token
+                .parse::<usize>()
+                .map_err(|_| format!("Invalid CPU: {}", token))?;
+            if cpus.len() >= *NR_CPU_IDS {
+                return Err(format!("Too many CPUs specified (max {})", *NR_CPU_IDS));
+            }
+            if seen.insert(cpu) {
+                cpus.push(cpu);
+            }
+        }
+    }
+
+    Ok(cpus)
 }
