@@ -29,6 +29,12 @@ pub struct Metrics {
     pub timer_kicks: u64,
     #[stat(desc = "Number of times a kprobe caused a random delay to be applied")]
     pub kprobe_random_delays: u64,
+    #[stat(desc = "Peek found empty DSQ")]
+    pub peek_empty_dsq: u64,
+    #[stat(desc = "Peek found task not ready")]
+    pub peek_not_ready: u64,
+    #[stat(desc = "Peek determined DSQ needs processing")]
+    pub peek_needs_processing: u64,
 }
 
 impl Metrics {
@@ -44,6 +50,11 @@ impl Metrics {
             self.kprobe_random_delays,
             self.timer_kicks,
         )?;
+        writeln!(
+            w,
+            "peek: empty/not_ready/needs_proc {}/{}/{}",
+            self.peek_empty_dsq, self.peek_not_ready, self.peek_needs_processing,
+        )?;
         Ok(())
     }
 
@@ -56,6 +67,9 @@ impl Metrics {
             chaos_skipped: self.chaos_skipped - rhs.chaos_skipped,
             kprobe_random_delays: self.kprobe_random_delays - rhs.kprobe_random_delays,
             timer_kicks: self.timer_kicks - rhs.timer_kicks,
+            peek_empty_dsq: self.peek_empty_dsq - rhs.peek_empty_dsq,
+            peek_not_ready: self.peek_not_ready - rhs.peek_not_ready,
+            peek_needs_processing: self.peek_needs_processing - rhs.peek_needs_processing,
         }
     }
 }
