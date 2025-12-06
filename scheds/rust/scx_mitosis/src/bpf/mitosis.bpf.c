@@ -17,10 +17,8 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #endif
 
 char _license[] SEC("license") = "GPL";

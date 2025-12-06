@@ -5,7 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
+#include <lib/ravg.h>
 #include <lib/cpumask.h>
 #include <lib/sdt_task.h>
 #include <lib/topology.h>

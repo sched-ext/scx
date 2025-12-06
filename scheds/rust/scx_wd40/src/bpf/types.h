@@ -1,6 +1,8 @@
 #ifndef __TYPES_H
 #define __TYPES_H
 
+#include <lib/ravg.h>
+
 typedef struct dom_ctx __arena *dom_ptr;
 struct dom_ctx;
 

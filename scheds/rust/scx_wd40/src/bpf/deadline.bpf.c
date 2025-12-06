@@ -6,7 +6,6 @@
  */
 
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
 #include <lib/cpumask.h>
