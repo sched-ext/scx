@@ -39,12 +39,11 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #endif
 
+#include "ravg_impl.bpf.h"
 #include "sdt_task.h"
 #include "intf.h"
 #include "types.h"
