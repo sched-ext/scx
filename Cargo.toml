@@ -39,6 +39,7 @@ inherits = "release"
 lto = "thin"
 strip = true
 incremental = true
+codegen-units = 1
 
 [profile.release-fast]
 inherits = "release"
