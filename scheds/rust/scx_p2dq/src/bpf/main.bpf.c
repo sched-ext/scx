@@ -137,6 +137,10 @@ const volatile struct {
 	bool pelt_enabled;
 	bool fork_balance;
 	bool exec_balance;
+	bool enable_eas;
+	bool thermal_enabled;
+	u16 small_task_threshold;
+	u16 large_task_threshold;
 } p2dq_config = {
 	.sched_mode = MODE_DEFAULT,
 	.nr_dsqs_per_llc = 3,
@@ -158,6 +162,10 @@ const volatile struct {
 	.pelt_enabled = true,
 	.fork_balance = true,
 	.exec_balance = true,
+	.enable_eas = false,
+	.thermal_enabled = false,
+	.small_task_threshold = 256,
+	.large_task_threshold = 768,
 };
 
 /* Latency priority and preemption configuration */
@@ -186,6 +194,10 @@ u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
 u64 dsq_time_slices[MAX_DSQS_PER_LLC];
+
+/* Energy and capacity per CPU for energy-aware scheduling */
+u16 cpu_energy_cost[MAX_CPUS];  // Energy cost coefficient (0-65535)
+u16 cpu_capacity[MAX_CPUS];     // CPU capacity (0-1024)
 
 /* DHQ per LLC pair for migration (MAX_LLCS / 2 DHQs) */
 scx_dhq_t *llc_pair_dhqs[MAX_LLCS / 2];
@@ -332,6 +344,13 @@ static __always_inline u32 pelt_decay(u32 val, u32 periods)
 	return val;
 }
 
+/* Forward declarations for energy-aware scheduling helpers */
+static __always_inline u32 get_cpu_capacity(s32 cpu);
+static __always_inline u32 get_cpu_energy_cost(s32 cpu);
+static __always_inline u32 get_task_util(struct task_struct *p);
+static __always_inline bool prefer_little_core(struct task_struct *p);
+static __always_inline bool prefer_big_core(struct task_struct *p);
+
 /*
  * Update task's PELT metrics based on runtime.
  * Called when task stops running or starts running (for decay).
@@ -339,11 +358,14 @@ static __always_inline u32 pelt_decay(u32 val, u32 periods)
  * @taskc: Task context to update
  * @now: Current timestamp in ns
  * @delta_ns: Runtime delta (0 for decay-only update)
+ * @task_cpu: CPU the task is running on
  */
-static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta_ns)
+static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta_ns, s32 task_cpu)
 {
 	u64 elapsed_ns, elapsed_ms;
 	u32 periods, delta_ms;
+	u32 capacity, freq;
+	u64 scaled_delta_ms, scaled_period_contrib;
 
 	if (!p2dq_config.pelt_enabled)
 		return;
@@ -378,13 +400,27 @@ static __always_inline void update_task_pelt(task_ctx *taskc, u64 now, u64 delta
 		taskc->util_sum = pelt_decay(taskc->util_sum, periods);
 	}
 
+	capacity = get_cpu_capacity(task_cpu);
+	freq = scx_bpf_cpuperf_cur(task_cpu);
+	if (freq == 0)
+		freq = SCX_CPUPERF_ONE;
+
+	/*
+	 * Scale period contribution by capacity and frequency
+	 * This makes the PELT metric represent "work done at max CPU capacity at max freq"
+	 *
+	 * Formula: scaled_time = wall_time * (capacity / 1024) * (freq / 1024)
+	 *         = wall_time * capacity * freq / (1024 * 1024)
+	 */
 	if (taskc->period_contrib > 0) {
-		taskc->util_sum += taskc->period_contrib;
+		scaled_period_contrib = (taskc->period_contrib * capacity * freq) / (1024ULL * 1024ULL);
+		taskc->util_sum += scaled_period_contrib;
 		taskc->period_contrib = 0;
 	}
 
 	delta_ms = delta_ns / NSEC_PER_MSEC;
-	taskc->util_sum += delta_ms;
+	scaled_delta_ms = (delta_ms * capacity * freq) / (1024ULL * 1024ULL);
+	taskc->util_sum += scaled_delta_ms;
 
 	if (unlikely(taskc->util_sum > PELT_SUM_MAX))
 		taskc->util_sum = PELT_SUM_MAX;
@@ -692,6 +728,125 @@ static task_ctx *lookup_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
+/*
+ * Get CPU capacity (0-1024)
+ * Used for frequency/capacity-invariant PELT and energy-aware scheduling
+ */
+static __always_inline u32 get_cpu_capacity(s32 cpu)
+{
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return 1024;
+	return cpu_capacity[cpu] ? cpu_capacity[cpu] : 1024;
+}
+
+/*
+ * Get CPU energy cost (lower is more efficient)
+ */
+static __always_inline u32 get_cpu_energy_cost(s32 cpu)
+{
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return 65535;
+	return cpu_energy_cost[cpu] ? cpu_energy_cost[cpu] : 1024;
+}
+
+/*
+ * Get task utilization from custom PELT
+ * Returns util_avg in range 0-1024
+ * NOTE: Frequency and capacity invariant after modifications
+ */
+static __always_inline u32 get_task_util(struct task_struct *p)
+{
+	task_ctx *taskc;
+
+	taskc = lookup_task_ctx(p);
+	if (!taskc)
+		return 0;
+
+	return taskc->util_avg;
+}
+
+/*
+ * Check if task should prefer little cores based on utilization
+ */
+static __always_inline bool prefer_little_core(struct task_struct *p)
+{
+	if (!p2dq_config.enable_eas || !topo_config.has_little_cores)
+		return false;
+
+	u32 util = get_task_util(p);
+	return util < p2dq_config.small_task_threshold;
+}
+
+/*
+ * Check if task should prefer big cores based on utilization
+ */
+static __always_inline bool prefer_big_core(struct task_struct *p)
+{
+	if (!p2dq_config.enable_eas || !topo_config.has_little_cores)
+		return false;
+
+	u32 util = get_task_util(p);
+	return util > p2dq_config.large_task_threshold;
+}
+
+/*
+ * Get effective CPU capacity accounting for thermal pressure AND frequency
+ * Returns capacity in range 0-1024
+ */
+static __always_inline u32 get_effective_cpu_capacity(s32 cpu)
+{
+	struct cpu_ctx *cpuc;
+	u32 base_capacity, thermal_pressure;
+	u32 cur_freq;
+	u64 effective_capacity;
+
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return 0;
+
+	cpuc = lookup_cpu_ctx(cpu);
+	if (!cpuc)
+		return 0;
+
+	base_capacity = get_cpu_capacity(cpu);
+
+	thermal_pressure = cpuc->perf;
+
+	cur_freq = scx_bpf_cpuperf_cur(cpu);
+	if (cur_freq == 0)
+		cur_freq = SCX_CPUPERF_ONE;
+
+	/*
+	 * Effective capacity = (base - thermal) * freq / 1024
+	 * Combines thermal throttling and frequency scaling
+	 */
+	if (thermal_pressure >= base_capacity)
+		return 0;  /* Fully throttled */
+
+	effective_capacity = (u64)(base_capacity - thermal_pressure) * cur_freq / SCX_CPUPERF_ONE;
+
+	return (u32)effective_capacity;
+}
+
+/*
+ * Check if CPU is thermally throttled
+ * Returns true if pressure > 25% capacity loss
+ */
+static __always_inline bool is_cpu_throttled(s32 cpu)
+{
+	struct cpu_ctx *cpuc;
+
+	if (cpu < 0 || cpu >= MAX_CPUS)
+		return false;
+
+	cpuc = lookup_cpu_ctx(cpu);
+	if (!cpuc)
+		return false;
+
+	/* Throttled if pressure > 256 (25% of 1024) */
+	return cpuc->perf > 256;
+}
+
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -901,7 +1056,6 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
-	// Fallback to anywhere the task can run
 	cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 
 found_cpu:
@@ -1004,6 +1158,207 @@ u32 __attribute__((noinline)) find_least_loaded_llc_for_fork(u32 parent_llc_id)
 		return candidate_llc->id;
 
 	return best_id;
+}
+
+/*
+ * Pick idle CPU from mask, avoiding thermally throttled CPUs.
+ * Simpler/faster than full energy-aware selection - used for MODE_PERF/MODE_EFFICIENCY.
+ */
+static __always_inline s32 pick_idle_thermal_aware(struct bpf_cpumask *mask,
+						   struct task_struct *p)
+{
+	s32 cpu, best_cpu = -1;
+	u32 best_capacity = 0;
+
+	if (!mask)
+		return -1;
+
+	/* First pass: try to find unthrottled idle CPU */
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (is_cpu_throttled(cpu))
+			continue;
+		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+			return cpu;
+	}
+
+	/* Second pass: allow throttled CPUs, prefer least throttled */
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		u32 capacity;
+
+		if (mask && !bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
+			continue;
+
+		capacity = get_effective_cpu_capacity(cpu);
+		if (capacity > best_capacity) {
+			best_capacity = capacity;
+			best_cpu = cpu;
+		}
+	}
+
+	if (best_cpu >= 0)
+		stat_inc(P2DQ_STAT_THERMAL_AVOID);
+
+	return best_cpu;
+}
+
+/*
+ * Select best idle CPU from mask based on:
+ * - Not thermally throttled (priority 1)
+ * - High effective capacity (accounts for thermal + freq)
+ * - Low energy cost
+ *
+ * Returns CPU ID or -1 if no suitable CPU found
+ * Updates best_score with score of selected CPU (higher is better)
+ */
+static __always_inline s32 select_best_idle_cpu(struct task_struct *p,
+						struct bpf_cpumask *mask,
+						u32 *best_score)
+{
+	s32 cpu, best_cpu = -1;
+	u32 highest_score = 0;
+
+	if (!mask || !best_score)
+		return -1;
+
+	*best_score = 0;
+
+	bpf_for(cpu, 0, topo_config.nr_cpus) {
+		u32 capacity, energy_cost, score;
+
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(mask)))
+			continue;
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
+			continue;
+
+		capacity = get_effective_cpu_capacity(cpu);
+		energy_cost = get_cpu_energy_cost(cpu);
+
+		/*
+		 * Score formula: prioritize capacity, penalize energy cost
+		 * score = capacity * 10 - (energy_cost / 10)
+		 * Higher score is better
+		 *
+		 * Throttled CPUs (capacity=0) get score=0
+		 */
+		if (is_cpu_throttled(cpu)) {
+			score = 0;  /* Heavily penalize throttled CPUs */
+		} else {
+			/* Multiply capacity by 10 for more weight vs energy cost */
+			score = (capacity * 10);
+			/* Subtract scaled energy cost (divide by 10 to reduce impact) */
+			if (energy_cost < score)
+				score -= (energy_cost / 10);
+			else
+				score = 1;
+		}
+
+		if (score > highest_score) {
+			highest_score = score;
+			best_cpu = cpu;
+		}
+	}
+
+	*best_score = highest_score;
+	return best_cpu;
+}
+
+/*
+ * Pick idle CPU using comprehensive energy-aware scheduling
+ * Tries preferred core type first, then fallback type
+ */
+static __always_inline s32 pick_idle_energy_aware(struct task_struct *p,
+						  struct llc_ctx *llcx,
+						  bool *is_idle)
+{
+	s32 cpu = -1;
+	u32 pref_score = 0, fallback_score = 0;
+
+	if (!llcx || !is_idle)
+		return -1;
+
+	/* Determine preferred and fallback cpumasks based on task utilization */
+	struct bpf_cpumask *pref_mask = NULL;
+	struct bpf_cpumask *fallback_mask = NULL;
+	bool prefer_little = prefer_little_core(p);
+	bool prefer_big = prefer_big_core(p);
+
+	if (prefer_little) {
+		pref_mask = llcx->little_cpumask;
+		fallback_mask = llcx->big_cpumask;
+	} else if (prefer_big) {
+		pref_mask = llcx->big_cpumask;
+		fallback_mask = llcx->little_cpumask;
+	} else {
+		/* No strong preference, try both and pick best score */
+		s32 little_cpu = -1, big_cpu = -1;
+		u32 little_score = 0, big_score = 0;
+
+		if (llcx->little_cpumask)
+			little_cpu = select_best_idle_cpu(p, llcx->little_cpumask, &little_score);
+		if (llcx->big_cpumask)
+			big_cpu = select_best_idle_cpu(p, llcx->big_cpumask, &big_score);
+
+		/* Pick whichever has better score */
+		if (little_cpu >= 0 && big_cpu >= 0) {
+			if (little_score >= big_score) {
+				*is_idle = true;
+				stat_inc(P2DQ_STAT_EAS_LITTLE_SELECT);
+				return little_cpu;
+			} else {
+				*is_idle = true;
+				stat_inc(P2DQ_STAT_EAS_BIG_SELECT);
+				return big_cpu;
+			}
+		} else if (little_cpu >= 0) {
+			*is_idle = true;
+			stat_inc(P2DQ_STAT_EAS_LITTLE_SELECT);
+			return little_cpu;
+		} else if (big_cpu >= 0) {
+			*is_idle = true;
+			stat_inc(P2DQ_STAT_EAS_BIG_SELECT);
+			return big_cpu;
+		}
+		return -1;
+	}
+
+	/* Try preferred core type first */
+	if (pref_mask) {
+		cpu = select_best_idle_cpu(p, pref_mask, &pref_score);
+		if (cpu >= 0) {
+			*is_idle = true;
+			if (prefer_little)
+				stat_inc(P2DQ_STAT_EAS_LITTLE_SELECT);
+			else
+				stat_inc(P2DQ_STAT_EAS_BIG_SELECT);
+			return cpu;
+		}
+	}
+
+	/* Fallback to opposite core type if preferred not available */
+	if (fallback_mask) {
+		cpu = select_best_idle_cpu(p, fallback_mask, &fallback_score);
+		if (cpu >= 0) {
+			*is_idle = true;
+			stat_inc(P2DQ_STAT_EAS_FALLBACK);
+			if (prefer_little)
+				stat_inc(P2DQ_STAT_EAS_BIG_SELECT);
+			else
+				stat_inc(P2DQ_STAT_EAS_LITTLE_SELECT);
+			return cpu;
+		}
+	}
+
+	return -1;
 }
 
 static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
@@ -1141,38 +1496,65 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
+	/*
+	 * Energy-aware selection with comprehensive scoring
+	 * Uses effective capacity, energy cost, and thermal awareness
+	 */
+	if (p2dq_config.enable_eas && topo_config.has_little_cores) {
+		cpu = pick_idle_energy_aware(p, llcx, is_idle);
+		if (cpu >= 0)
+			goto found_cpu;
+	}
+
 	if (p2dq_config.sched_mode == MODE_PERF &&
 	    topo_config.has_little_cores &&
 	    llcx->big_cpumask) {
-		cpu = __pick_idle_cpu(llcx->big_cpumask,
-				      SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto found_cpu;
-		}
-		if (llcx->big_cpumask) {
-			cpu = __pick_idle_cpu(llcx->big_cpumask, 0);
+		/* Try thermal-aware selection first for big cores if thermal tracking enabled */
+		if (p2dq_config.thermal_enabled) {
+			cpu = pick_idle_thermal_aware(llcx->big_cpumask, p);
 			if (cpu >= 0) {
 				*is_idle = true;
 				goto found_cpu;
 			}
+		}
+		/* Fallback to non-thermal-aware if thermal disabled or no idle big cores */
+		if (llcx->big_cpumask &&
+		    (cpu = __pick_idle_cpu(llcx->big_cpumask, SCX_PICK_IDLE_CORE)) &&
+		    cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
+		if (llcx->big_cpumask &&
+		    (cpu = __pick_idle_cpu(llcx->big_cpumask, 0)) &&
+		    cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
 		}
 	}
 
 	if (p2dq_config.sched_mode == MODE_EFFICIENCY &&
 	    topo_config.has_little_cores &&
 	    llcx->little_cpumask) {
-		cpu = __pick_idle_cpu(llcx->little_cpumask, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto found_cpu;
-		}
-		if (llcx->little_cpumask) {
-			cpu = __pick_idle_cpu(llcx->little_cpumask, 0);
+		/* Try thermal-aware selection first for little cores if thermal tracking enabled */
+		if (p2dq_config.thermal_enabled) {
+			cpu = pick_idle_thermal_aware(llcx->little_cpumask, p);
 			if (cpu >= 0) {
 				*is_idle = true;
 				goto found_cpu;
 			}
+		}
+		/* Fallback to non-thermal-aware if thermal disabled or no idle little cores */
+		if (llcx->little_cpumask &&
+		    (cpu = __pick_idle_cpu(llcx->little_cpumask, SCX_PICK_IDLE_CORE)) &&
+		    cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
+		if (llcx->little_cpumask &&
+		    (cpu = __pick_idle_cpu(llcx->little_cpumask, 0)) &&
+		    cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
 		}
 	}
 
@@ -1912,7 +2294,7 @@ static int p2dq_running_impl(struct task_struct *p)
 
 	/* Decay PELT metrics when task starts running (0 delta for decay-only) */
 	if (p2dq_config.pelt_enabled)
-		update_task_pelt(taskc, now, 0);
+		update_task_pelt(taskc, now, 0, task_cpu);
 
 	return 0;
 }
@@ -1924,6 +2306,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	u64 used, scaled_used, last_dsq_slice_ns;
 	u64 now = bpf_ktime_get_ns();
+	s32 task_cpu = scx_bpf_task_cpu(p);
 
 	if (unlikely(!(taskc = lookup_task_ctx(p)) ||
 	    !(llcx = lookup_llc_ctx(taskc->llc_id))))
@@ -1940,7 +2323,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	// time. When a nice task was run we need to update the cpu_ctx so that
 	// tasks are no longer enqueued to the local DSQ.
 	if (task_ctx_test_flag(taskc, TASK_CTX_F_WAS_NICE) &&
-	    (cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p)))) {
+	    (cpuc = lookup_cpu_ctx(task_cpu))) {
 		cpu_ctx_clear_flag(cpuc, CPU_CTX_F_NICE_TASK);
 		task_ctx_clear_flag(taskc, TASK_CTX_F_WAS_NICE);
 	}
@@ -1958,7 +2341,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 
 	/* Update PELT metrics if enabled */
 	if (p2dq_config.pelt_enabled) {
-		update_task_pelt(taskc, now, used);
+		update_task_pelt(taskc, now, used, task_cpu);
 		aggregate_pelt_to_llc(llcx, taskc,
 				      task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE),
 				      !task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS));
@@ -3234,6 +3617,50 @@ void BPF_STRUCT_OPS(p2dq_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
 }
+
+/*
+ * Thermal Pressure Tracking (requires CONFIG_SCHED_HW_PRESSURE=y)
+ *
+ * Thermal tracking provides optimization by avoiding throttled CPUs.
+ * This program has autoload disabled by default and is conditionally
+ * enabled from userspace if the kernel supports hw_pressure_update tracepoint.
+ *
+ * The '?' suffix makes this program optional - veristat and the verifier
+ * will skip it if the tracepoint doesn't exist in the kernel.
+ *
+ * Tracepoint: hw_pressure_update
+ * Fires when kernel detects thermal throttling on a CPU
+ *
+ * Arguments:
+ *   cpu: CPU ID experiencing pressure
+ *   hw_pressure: Pressure value (0 = no throttling, 1024 = max capacity lost)
+ *
+ * Note: This tracepoint only exists on ARM/ARM64 architectures
+ */
+#if defined(__aarch64__) || defined(__arm__)
+__weak __hidden SEC("tp_btf/hw_pressure_update?")
+int BPF_PROG(on_thermal_pressure, u32 cpu, u64 hw_pressure)
+{
+	struct cpu_ctx *cpuc;
+
+	if (cpu >= MAX_CPUS)
+		return 0;
+
+	cpuc = lookup_cpu_ctx(cpu);
+	if (!cpuc)
+		return 0;
+
+	cpuc->perf = (u32)hw_pressure;
+
+	if (hw_pressure > 512) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		stat_inc(P2DQ_STAT_THERMAL_KICK);
+	}
+
+	return 0;
+}
+#endif
+
 
 #if P2DQ_CREATE_STRUCT_OPS
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
