@@ -41,6 +41,7 @@ const char help_fmt[] =
 "Usage: %s [-b BATCH]\n"
 "\n"
 "  -b BATCH      The number of tasks to batch when dispatching (default: 8)\n"
+"  -r            Refresh the output instead of printing new lines\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -51,6 +52,7 @@ const char help_fmt[] =
 static __u32 batch_size = 8;
 
 static bool verbose;
+static bool refresh;
 static volatile int exit_req;
 static int enqueued_fd, dispatched_fd;
 
@@ -309,7 +311,10 @@ static void *run_stats_printer(void *arg)
 		printf("|  disp:     %10llu |\n", nr_vruntime_dispatches);
 		printf("|  failed:   %10llu |\n", nr_vruntime_failed);
 		printf("o-----------------------o\n");
-		printf("\n\n");
+		if (refresh)
+			printf("\033[16A");
+		else
+			printf("\n\n");
 		fflush(stdout);
 		sleep(1);
 	}
@@ -372,13 +377,16 @@ static void pre_bootstrap(int argc, char **argv)
 	err = syscall(__NR_sched_setscheduler, getpid(), SCHED_EXT, &sched_param);
 	SCX_BUG_ON(err, "Failed to set scheduler to SCHED_EXT");
 
-	while ((opt = getopt(argc, argv, "b:vh")) != -1) {
+	while ((opt = getopt(argc, argv, "b:vrh")) != -1) {
 		switch (opt) {
 		case 'b':
 			batch_size = strtoul(optarg, NULL, 0);
 			break;
 		case 'v':
 			verbose = true;
+			break;
+		case 'r':
+			refresh = true;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
