@@ -3256,9 +3256,13 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 
 void BPF_STRUCT_OPS(p2dq_dequeue, struct task_struct *p __arg_trusted, u64 deq_flags)
 {
-	task_ctx *taskc = lookup_task_ctx(p);
+	task_ctx *taskc;
 	int ret;
 
+	if (!p2dq_config.atq_enabled)
+		return;
+
+	taskc = lookup_task_ctx(p);
 	ret = scx_atq_cancel(&taskc->common);
 	if (ret)
 		scx_bpf_error("scx_atq_cancel returned %d", ret);
