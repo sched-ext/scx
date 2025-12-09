@@ -23,7 +23,7 @@ enum consts {
 	CLOCK_BOOTTIME	      = 7,
 
 	MAX_CG_DEPTH	      = 256,
-	MAX_L3S		      = 16,
+	MAX_LLCS	      = 16,
 
 	DEBUG_EVENTS_BUF_SIZE = 4096,
 };
@@ -82,37 +82,36 @@ struct cgrp_ctx {
 	bool cell_owner;
 };
 
-#if defined(__BPF__)  // ← ADD THIS LINE
+#if defined(__BPF__)
 #define CELL_LOCK_T struct bpf_spin_lock
 #else
-/* userspace placeholder: kernel won’t copy spin_lock */
+/* userspace placeholder: kernel won't copy spin_lock */
 #define CELL_LOCK_T        \
-        struct {           \
-                u32 __pad; \
-        } /* 4-byte aligned as required */
+	struct {           \
+		u32 __pad; \
+	} /* 4-byte aligned as required */
 #endif
 /*
  * cell is the per-cell book-keeping
 */
 struct cell {
-        // This is a lock in the kernel and padding in the user
-        CELL_LOCK_T lock; // Assumed to be the first entry (see below)
+	// This is a lock in the kernel and padding in the user
+	CELL_LOCK_T lock; // Assumed to be the first entry (see below)
 
-        // Whether or not the cell is used
-        u32 in_use;
+	// Whether or not the cell is used
+	u32 in_use;
 
-        // Number of CPUs in this cell
-        u32 cpu_cnt;
+	// Number of CPUs in this cell
+	u32 cpu_cnt;
 
-        // Number of L3s with at least one CPU in this cell
-        u32 l3_present_cnt;
+	// Number of LLCs with at least one CPU in this cell
+	u32 llc_present_cnt;
 
-        // Number of CPUs from each L3 assigned to this cell
-        u32 l3_cpu_cnt[MAX_L3S];
+	// Number of CPUs from each LLC assigned to this cell
+	u32 llc_cpu_cnt[MAX_LLCS];
 
-        // per-L3 vtimes within this cell
-        u64 l3_vtime_now[MAX_L3S];
-
+	// per-LLC vtimes within this cell
+	u64 llc_vtime_now[MAX_LLCS];
 };
 
 // Putting the lock first in the struct is our convention.
@@ -122,24 +121,23 @@ struct cell {
 
 // All assertions work for both BPF and userspace builds
 _Static_assert(offsetof(struct cell, lock) == 0,
-               "lock/padding must be first field");
+	       "lock/padding must be first field");
 
 _Static_assert(sizeof(((struct cell *)0)->lock) == 4,
-               "lock/padding must be 4 bytes");
+	       "lock/padding must be 4 bytes");
 
 _Static_assert(_Alignof(CELL_LOCK_T) == 4,
-               "lock/padding must be 4-byte aligned");
+	       "lock/padding must be 4-byte aligned");
 
 _Static_assert(offsetof(struct cell, in_use) == 4,
-               "in_use must follow 4-byte lock/padding");
+	       "in_use must follow 4-byte lock/padding");
 
-// XXX Add these back in after removing vtime_now from the struct.
 // Verify these are the same size in both BPF and Rust.
 _Static_assert(sizeof(struct cell) ==
-                       ((4 * sizeof(u32)) + (4 * MAX_L3S) + (8 * MAX_L3S)),
-               "struct cell size must be stable for Rust bindings");
+		       ((4 * sizeof(u32)) + (4 * MAX_LLCS) + (8 * MAX_LLCS)),
+	       "struct cell size must be stable for Rust bindings");
 
 _Static_assert(sizeof(struct cell) == 208,
-               "struct cell must be exactly 208 bytes");
+	       "struct cell must be exactly 208 bytes");
 
 #endif /* __INTF_H */

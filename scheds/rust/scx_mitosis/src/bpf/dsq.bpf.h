@@ -5,7 +5,7 @@
  *
  * This header defines the 64-bit dispatch queue (DSQ) ID encoding
  * scheme for scx_mitosis, using type fields to distinguish between
- * per-CPU and cell+L3 domain queues. It includes helper functions to
+ * per-CPU and cell+LLC domain queues. It includes helper functions to
  * construct, validate, and parse these DSQ IDs for queue management.
  */
 #pragma once
@@ -50,9 +50,9 @@
  *       [ 0001 ] [          CPU#            ]
  *       [Q-TYPE:1]
  *
- *     QTYPE = 0x2 -> Cell+L3 Q
+ *     QTYPE = 0x2 -> Cell+LLC Q
  *       [31..28] [27 .. 16] [15      ..    0]
- *       [ 0010 ] [  CELL# ] [      L3ID     ]
+ *       [ 0010 ] [  CELL# ] [     LLCID     ]
  *       [Q-TYPE:2]
  *
  */
@@ -70,7 +70,7 @@
 
 /* ---- Bitfield widths (bits) ---- */
 #define CPU_B 28
-#define L3_B 16
+#define LLC_B 16
 #define CELL_B 12
 #define TYPE_B 4
 #define DATA_B 28
@@ -78,8 +78,8 @@
 
 /* Sum checks (in bits) */
 _Static_assert(CPU_B + TYPE_B == 32, "CPU layout low half must be 32 bits");
-_Static_assert(L3_B + CELL_B + TYPE_B == 32,
-	       "CELL+L3 layout low half must be 32 bits");
+_Static_assert(LLC_B + CELL_B + TYPE_B == 32,
+	       "CELL+LLC layout low half must be 32 bits");
 _Static_assert(DATA_B + TYPE_B == 32, "Common layout low half must be 32 bits");
 
 typedef union {
@@ -92,13 +92,13 @@ typedef union {
 		u64 rsvd : RSVD_B;
 	} cpu_dsq;
 
-	/* Cell+L3 user DSQ */
+	/* Cell+LLC user DSQ */
 	struct {
-		u64 l3 : L3_B;
+		u64 llc : LLC_B;
 		u64 cell : CELL_B;
 		u64 type : TYPE_B;
 		u64 rsvd : RSVD_B;
-	} cell_l3_dsq;
+	} cell_llc_dsq;
 
 	/* Generic user view */
 	struct {
@@ -127,8 +127,8 @@ typedef union {
 
 _Static_assert(sizeof(((dsq_id_t){ 0 }).cpu_dsq) == sizeof(u64),
 	       "cpu view must be 8 bytes");
-_Static_assert(sizeof(((dsq_id_t){ 0 }).cell_l3_dsq) == sizeof(u64),
-	       "cell+l3 view must be 8 bytes");
+_Static_assert(sizeof(((dsq_id_t){ 0 }).cell_llc_dsq) == sizeof(u64),
+	       "cell+LLC view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).user_dsq) == sizeof(u64),
 	       "user common view must be 8 bytes");
 _Static_assert(sizeof(((dsq_id_t){ 0 }).builtin_dsq) == sizeof(u64),
@@ -144,15 +144,15 @@ _Static_assert(_Alignof(dsq_id_t) == sizeof(u64),
 enum dsq_type {
 	DSQ_TYPE_NONE,
 	DSQ_TYPE_CPU,
-	DSQ_TYPE_CELL_L3,
+	DSQ_TYPE_CELL_LLC,
 };
 
 /* Range guards */
 _Static_assert(MAX_CPUS <= (1u << CPU_B), "MAX_CPUS must fit in field");
-_Static_assert(MAX_L3S <= (1u << L3_B), "MAX_L3S must fit in field");
+_Static_assert(MAX_LLCS <= (1u << LLC_B), "MAX_LLCS must fit in field");
 _Static_assert(MAX_CELLS <= (1u << CELL_B), "MAX_CELLS must fit in field");
-_Static_assert(DSQ_TYPE_CELL_L3 < (1u << TYPE_B),
-	       "DSQ_TYPE_CELL_L3 must fit in field");
+_Static_assert(DSQ_TYPE_CELL_LLC < (1u << TYPE_B),
+	       "DSQ_TYPE_CELL_LLC must fit in field");
 
 /*
  * While I considered error propagation, I decided to bail to force errors early.
@@ -189,12 +189,12 @@ static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
 	return (dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
 }
 
-static inline dsq_id_t get_cell_l3_dsq_id(u32 cell, u32 l3)
+static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 {
-	if (cell >= MAX_CELLS || l3 >= MAX_L3S)
-		scx_bpf_error("cell %u or l3 %u too large\n", cell, l3);
+	if (cell >= MAX_CELLS || llc >= MAX_LLCS)
+		scx_bpf_error("cell %u or llc %u too large\n", cell, llc);
 
-	return (dsq_id_t){ .cell_l3_dsq = { .l3	  = l3,
-					    .cell = cell,
-					    .type = DSQ_TYPE_CELL_L3 } };
+	return (dsq_id_t){ .cell_llc_dsq = { .llc  = llc,
+					     .cell = cell,
+					     .type = DSQ_TYPE_CELL_LLC } };
 }

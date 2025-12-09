@@ -16,7 +16,6 @@
 #include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #endif
 
 #include "intf.h"
@@ -44,9 +43,9 @@
 #define CPUMASK_LONG_ENTRIES (128)
 #define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
 
-extern const volatile u32 nr_l3;
+extern const volatile u32 nr_llc;
 
-extern struct cell_map cells;
+extern struct cell_map	  cells;
 
 enum mitosis_constants {
 
@@ -69,10 +68,14 @@ enum mitosis_constants {
 /*
  * Variables populated by userspace
  */
-const volatile bool	     enable_l3_awareness			     = false;
-const volatile bool	     enable_work_stealing	     = false;
-const volatile u32	     nr_l3			     = 1;
-
+const volatile bool enable_llc_awareness = false;
+const volatile bool enable_work_stealing = false;
+const volatile u32  nr_llc		 = 1;
+/*
+ * Number of times to skip stealing a task before actually stealing.
+ * Higher values reduce cross-LLC migrations at the risk of increasing idle time.
+ */
+const volatile u32 steal_throttle = 0;
 
 static inline void copy_cell_skip_lock(struct cell *dst, const struct cell *src)
 {
@@ -117,7 +120,7 @@ static inline struct bpf_spin_lock *get_cell_lock(u32 cell_idx)
  */
 struct task_ctx {
 	/* cpumask is the set of valid cpus this task can schedule on */
-	/* (tasks cpumask anded with its cell cpumask) */
+	/* (task's cpumask and-ed with its cell cpumask) */
 	struct bpf_cpumask __kptr *cpumask;
 	/* started_running_at for recording runtime */
 	u64 started_running_at;
@@ -132,22 +135,20 @@ struct task_ctx {
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
-	// Which L3 this task is assigned to
-	s32 l3;
+	/* Which LLC this task is assigned to */
+	s32 llc;
 
-	/* When a task is stolen, dispatch() marks the destination L3 here.
+	/* When a task is stolen, dispatch() marks the destination LLC here.
 	 * running() applies the retag and recomputes cpumask (vtime preserved).
 	*/
-	s32 pending_l3;
+	s32 pending_llc;
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 	u32 steals_prevented; /* how many times this task has been prevented from being stolen */
 };
 
-// These could go in mitosis.bpf.h, but we'll cross that bridge when we get
 static inline const struct cpumask *lookup_cell_cpumask(int idx);
-
-static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
+static inline struct task_ctx	   *lookup_task_ctx(struct task_struct *p);
 
 /* MAP TYPES */
 struct function_counters_map {
@@ -209,4 +210,5 @@ static inline void cpumask_guard_release(struct cpumask_guard *guard)
 		__attribute__((__cleanup__(cpumask_guard_release))) = \
 			cpumask_create_guard()
 
-static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
+static inline int update_task_cpumask(struct task_struct *p,
+				      struct task_ctx	 *tctx);

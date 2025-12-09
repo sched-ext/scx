@@ -114,14 +114,20 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     split_vtime_updates: bool,
 
-    /// Enable L3-awareness. This will populate the Scheduler's L3 maps and cause it
-    /// to use L3-aware scheduling.
+    /// Enable LLC-awareness. This will populate the Scheduler's LLC maps and cause it
+    /// to use LLC-aware scheduling.
     #[clap(long, default_value = "false", action = clap::ArgAction::SetFalse)]
-    enable_l3_awareness: bool,
+    enable_llc_awareness: bool,
 
-    /// Enable work stealing. This is only relevant when L3-awareness is enabled.
+    /// Enable work stealing. This is only relevant when LLC-awareness is enabled.
     #[clap(long, default_value = "false", action = clap::ArgAction::SetFalse)]
     enable_work_stealing: bool,
+
+    /// Number of times to skip a steal candidate before actually stealing.
+    /// Higher values reduce cross-LLC migrations at the cost of potential idle time.
+    /// Only relevant when work stealing is enabled.
+    #[clap(long)]
+    steal_throttle: Option<u32>,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -197,9 +203,14 @@ impl Display for DistributionStats {
 
 impl<'a> Scheduler<'a> {
   fn validate_args(opts: &Opts) -> Result<()> {
-      if opts.enable_work_stealing && !opts.enable_l3_awareness {
-          bail!("Work stealing requires L3-aware mode (--l3-awareness)");
+      if opts.enable_work_stealing && !opts.enable_llc_awareness {
+          bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
       }
+
+      if opts.steal_throttle.is_some() && !opts.enable_work_stealing {
+          bail!("--steal-throttle requires --enable-work-stealing");
+      }
+
 
       Ok(())
   }
@@ -209,8 +220,8 @@ impl<'a> Scheduler<'a> {
 
         let topology = Topology::new()?;
 
-        let nr_l3 = topology.all_llcs.len().max(1);
-        info!("Detected {} L3 cache domains", nr_l3);
+        let nr_llc = topology.all_llcs.len().max(1);
+        info!("Detected {} LLC cache domains", nr_llc);
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -227,24 +238,23 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
-        skel.maps.rodata_data.as_mut().unwrap().debug_events_enabled = opts.debug_events;
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        skel.maps.rodata_data.as_mut().unwrap().split_vtime_updates = opts.split_vtime_updates;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
-        skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
+        rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
+        rodata.debug_events_enabled = opts.debug_events;
+        rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
+        rodata.split_vtime_updates = opts.split_vtime_updates;
+
+        rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
-            skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        // Set nr_l3 in rodata
-        skel.maps.rodata_data.as_mut().unwrap().nr_l3 = nr_l3 as u32;
-        skel.maps.rodata_data.as_mut().unwrap().enable_l3_awareness = opts.enable_l3_awareness;
-        skel.maps.rodata_data.as_mut().unwrap().enable_work_stealing = opts.enable_work_stealing;
+        // Set nr_llc in rodata
+        rodata.nr_llc = nr_llc as u32;
+        rodata.enable_llc_awareness = opts.enable_llc_awareness;
+        rodata.enable_work_stealing = opts.enable_work_stealing;
+        rodata.steal_throttle = opts.steal_throttle.unwrap_or(0);
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
@@ -252,11 +262,11 @@ impl<'a> Scheduler<'a> {
         }
 
         let mut skel = scx_ops_load!(skel, mitosis, uei)?;
-        // Populate CPU to L3 map
-        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::CpuToL3, None)?;
+        // Populate CPU to LLC map
+        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::CpuToLLC, None)?;
 
-        // Populate L3 to CPUs map
-        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::L3ToCpus, None)?;
+        // Populate LLC to CPUs map
+        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::LLCToCpus, None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

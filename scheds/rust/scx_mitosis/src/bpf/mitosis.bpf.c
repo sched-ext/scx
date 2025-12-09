@@ -20,14 +20,14 @@
 #endif
 
 /*
- * When L3 awareness is disabled, we use a single "fake" L3 index to flatten
+ * When LLC awareness is disabled, we use a single "fake" LLC index to flatten
  * the entire cell's topology into one scheduling domain. All CPUs in the cell
- * share the same DSQ and vtime, ignoring actual L3 cache boundaries.
+ * share the same DSQ and vtime, ignoring actual LLC cache boundaries.
  */
-#define FAKE_FLAT_CELL_L3 0
+#define FAKE_FLAT_CELL_LLC 0
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
-#include "l3_aware.bpf.h"
+#include "llc_aware.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -46,23 +46,23 @@ const volatile bool	     split_vtime_updates	     = false;
 
 /*
  * Maps populated by userspace for use by LLC aware scheduling.
- * Declared in l3_aware.bpf.h
+ * Declared in llc_aware.bpf.h
 */
-struct cpu_to_l3_map cpu_to_l3	 SEC(".maps");
-struct l3_to_cpus_map l3_to_cpus SEC(".maps");
+struct cpu_to_llc_map cpu_to_llc   SEC(".maps");
+struct llc_to_cpus_map llc_to_cpus SEC(".maps");
 
 /*
  * Maps for statistics
 */
 struct function_counters_map function_counters SEC(".maps");
-struct steal_stats_map steal_stats SEC(".maps");
+struct steal_stats_map steal_stats	       SEC(".maps");
 
 static inline void increment_counter(enum fn_counter_idx idx)
 {
 	u64 *counter;
-	u32 key = idx;
+	u32  key = idx;
 
-	counter = bpf_map_lookup_elem(&function_counters, &key);
+	counter	 = bpf_map_lookup_elem(&function_counters, &key);
 	if (counter)
 		(*counter)++;
 }
@@ -220,7 +220,7 @@ static inline int allocate_cell()
 			return -1;
 
 		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
-			WRITE_ONCE(c->l3_vtime_now[FAKE_FLAT_CELL_L3], 0);
+			WRITE_ONCE(c->llc_vtime_now[FAKE_FLAT_CELL_LLC], 0);
 			return cell_idx;
 		}
 	}
@@ -360,7 +360,6 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 	cstat_add(idx, cell, cctx, 1);
 }
 
-// I made this static to
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx	 *tctx)
 {
@@ -392,8 +391,8 @@ static inline int update_task_cpumask(struct task_struct *p,
 	 * needs to be supported.
 	 */
 
-	// Per-CPU pinned path
-	if(!tctx->all_cell_cpus_allowed) {
+	/* Per-CPU pinned path */
+	if (!tctx->all_cell_cpus_allowed) {
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
@@ -402,18 +401,18 @@ static inline int update_task_cpumask(struct task_struct *p,
 		return 0;
 	}
 
-	// Cell-wide path
+	/* Cell-wide path */
 	if (!(cell = lookup_cell(tctx->cell)))
 		return -ENOENT;
 
-	// L3 aware version
-	if (enable_l3_awareness){
-		return update_task_l3_assignment(p, tctx, cell);
+	/* LLC aware version */
+	if (enable_llc_awareness) {
+		return update_task_llc_assignment(p, tctx, cell);
 	}
 
-	// Non-L3 aware version
-	tctx->dsq = get_cell_l3_dsq_id(tctx->cell, FAKE_FLAT_CELL_L3);
-	p->scx.dsq_vtime = READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]);
+	/* Non-LLC aware version */
+	tctx->dsq	 = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
+	p->scx.dsq_vtime = READ_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]);
 
 	return 0;
 }
@@ -644,10 +643,11 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!(cell = lookup_cell(tctx->cell)))
 			return;
 
-		if (enable_l3_awareness) {
-			basis_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
+		if (enable_llc_awareness) {
+			basis_vtime = READ_ONCE(cell->llc_vtime_now[tctx->llc]);
 		} else {
-			basis_vtime = READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]);
+			basis_vtime = READ_ONCE(
+				cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]);
 		}
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
@@ -664,7 +664,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	tctx->basis_vtime = basis_vtime;
 
-	if (time_after(vtime, basis_vtime + VTIME_MAX_FUTURE_MULTIPLIER * slice_ns)) {
+	if (time_after(vtime,
+		       basis_vtime + VTIME_MAX_FUTURE_MULTIPLIER * slice_ns)) {
 		scx_bpf_error(
 			"vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
 			p->pid, p->scx.dsq_vtime, basis_vtime,
@@ -702,21 +703,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	u64		    min_vtime;
 	struct task_struct *p;
 
-	// Get this CPU's L3 (only matters if L3-aware)
-	s32 l3 = FAKE_FLAT_CELL_L3;  // Default for non-L3-aware
-	if (enable_l3_awareness) {
-		u32 *l3_ptr = bpf_map_lookup_elem(&cpu_to_l3, &cpu);
-		if (!l3_ptr) {
-			scx_bpf_error("CPU %d not in cpu_to_l3 map - this shouldn't happen!", cpu);
+	/* Get this CPU's LLC (only matters if LLC-aware) */
+	s32 llc = FAKE_FLAT_CELL_LLC;
+	if (enable_llc_awareness) {
+		u32 *llc_ptr = bpf_map_lookup_elem(&cpu_to_llc, &cpu);
+		if (!llc_ptr) {
+			scx_bpf_error(
+				"CPU %d not in cpu_to_llc map - this shouldn't happen!",
+				cpu);
 			return;
 		}
-		l3 = (s32)*l3_ptr;
+		llc = (s32)*llc_ptr;
 	}
 
-	// Check the cell (cell-l3) dsq
-	bpf_for_each(scx_dsq, p, get_cell_l3_dsq_id(cell, l3).raw, 0) {
+	/* Check the cell (cell-llc) dsq */
+	bpf_for_each(scx_dsq, p, get_cell_llc_dsq_id(cell, llc).raw, 0) {
 		min_vtime     = p->scx.dsq_vtime;
-		min_vtime_dsq = get_cell_l3_dsq_id(cell, l3);
+		min_vtime_dsq = get_cell_llc_dsq_id(cell, llc);
 		found	      = true;
 		break;
 	}
@@ -737,9 +740,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * otherwise go idle.
 	 */
 	if (!found) {
-		// Try work stealing if enabled
-		if (enable_l3_awareness && enable_work_stealing) {
-			try_stealing_work(cell, l3);
+		/* Try work stealing if enabled */
+		if (enable_llc_awareness && enable_work_stealing) {
+			try_stealing_work(cell, llc);
 		}
 		return;
 	}
@@ -1115,15 +1118,16 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	barrier();
 	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
 
-  // Recalculate L3 counts for all active cells now that CPU assignments are complete
-  if (enable_l3_awareness) {
-      int i;
-      bpf_for(i, 0, MAX_CELLS) {
-          struct cell *c = lookup_cell(i);
-          if (c && c->in_use)
-              recalc_cell_l3_counts(i);
-      }
-  }
+	/* Recalculate LLC counts for all active cells now that CPU assignments are complete */
+	if (enable_llc_awareness) {
+		int i;
+		bpf_for(i, 0, MAX_CELLS)
+		{
+			struct cell *c = lookup_cell(i);
+			if (c && c->in_use)
+				recalc_cell_llc_counts(i);
+		}
+	}
 
 	bpf_rcu_read_unlock();
 	bpf_cgroup_release(root_cgrp_ref);
@@ -1137,25 +1141,28 @@ out:
 	return 0;
 }
 
-void advance_dsq_vtimes(struct cell *cell, struct cpu_ctx *cctx, struct task_ctx *tctx,
-				u64 task_vtime)
+void advance_dsq_vtimes(struct cell *cell, struct cpu_ctx *cctx,
+			struct task_ctx *tctx, u64 task_vtime)
 {
-	// If the CPU DSQ's vtime is behind the task's, advance it.
+	/* If the CPU DSQ's vtime is behind the task's, advance it. */
 	if (time_before(READ_ONCE(cctx->vtime_now), task_vtime))
 		WRITE_ONCE(cctx->vtime_now, task_vtime);
 
-	if (!enable_l3_awareness) {
-		// If the cell DSQ's vtime is behind the task's, advance it.
-		if (time_before(READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]), task_vtime))
-			WRITE_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3], task_vtime);
+	if (!enable_llc_awareness) {
+		/* If the cell DSQ's vtime is behind the task's, advance it. */
+		if (time_before(
+			    READ_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]),
+			    task_vtime))
+			WRITE_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC],
+				   task_vtime);
 		return;
 	}
 
-	/* We are in the l3 aware case  */
-	// XXX I dropped tctx->all_cell_cpus_allowed from the condition here.
-	if (l3_is_valid(tctx->l3)) {
-		if (time_before(READ_ONCE(cell->l3_vtime_now[tctx->l3]), task_vtime))
-			WRITE_ONCE(cell->l3_vtime_now[tctx->l3], task_vtime);
+	/* We are in the llc aware case  */
+	if (llc_is_valid(tctx->llc)) {
+		if (time_before(READ_ONCE(cell->llc_vtime_now[tctx->llc]),
+				task_vtime))
+			WRITE_ONCE(cell->llc_vtime_now[tctx->llc], task_vtime);
 	}
 }
 
@@ -1168,9 +1175,9 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
-	/* Handle stolen task retag (L3-aware mode only) */
-	if (enable_l3_awareness && enable_work_stealing) {
-		apply_pending_l3_retag(p, tctx);
+	/* Handle stolen task retag (LLC-aware mode only) */
+	if (enable_llc_awareness && enable_work_stealing) {
+		apply_pending_llc_retag(p, tctx);
 	}
 
 	/*
@@ -1371,18 +1378,18 @@ s32 validate_flags()
 			"WARNING: exiting_task_workaround disabled - may see cgrp_ctx lookup failures during scheduler load");
 	}
 
-	/* Work stealing only makes sense when enable_l3_awareness. */
-	if (enable_work_stealing && (!enable_l3_awareness)) {
+	/* Work stealing only makes sense when enable_llc_awareness. */
+	if (enable_work_stealing && (!enable_llc_awareness)) {
 		scx_bpf_error(
-			"Work stealing requires L3-aware mode to be enabled");
+			"Work stealing requires LLC-aware mode to be enabled");
 		return -EINVAL;
 	}
 
-	/* Need valid l3 */
-	if (enable_l3_awareness && (nr_l3 < 1 || nr_l3 > MAX_L3S)) {
+	/* Need valid llc */
+	if (enable_llc_awareness && (nr_llc < 1 || nr_llc > MAX_LLCS)) {
 		scx_bpf_error(
-			"L3-aware mode requires nr_l3 between 1 and %d inclusive, got %d",
-			MAX_L3S, nr_l3);
+			"LLC-aware mode requires nr_llc between 1 and %d inclusive, got %d",
+			MAX_LLCS, nr_llc);
 		return -EINVAL;
 	}
 
@@ -1427,9 +1434,9 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
-	/* Initialize L3 assignment fields */
-	if (enable_l3_awareness)
-		init_task_l3(tctx);
+	/* Initialize LLC assignment fields */
+	if (enable_llc_awareness)
+		init_task_llc(tctx);
 
 	return update_task_cell(p, tctx, args->cgroup);
 }
@@ -1490,10 +1497,11 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CELL[%d] CPUS=", i);
 		dump_cell_cpumask(i);
 		scx_bpf_dump("\n");
-		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]),
-			     scx_bpf_dsq_nr_queued(
-				     get_cell_l3_dsq_id(i, FAKE_FLAT_CELL_L3).raw));
+		scx_bpf_dump(
+			"CELL[%d] vtime=%llu nr_queued=%d\n", i,
+			READ_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]),
+			scx_bpf_dsq_nr_queued(
+				get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC).raw));
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
@@ -1586,7 +1594,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if ((ret = validate_flags()))
 		return ret;
 
-	struct cgroup	   *rootcg;
+	struct cgroup *rootcg;
 	if (!(rootcg = bpf_cgroup_from_id(root_cgid)))
 		return -ENOENT;
 
@@ -1630,27 +1638,29 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
-	if (enable_l3_awareness)
-		recalc_cell_l3_counts(ROOT_CELL_ID);
+	if (enable_llc_awareness)
+		recalc_cell_llc_counts(ROOT_CELL_ID);
 
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
-		if (enable_l3_awareness) {
-			u32 l3;
-			bpf_for(l3, 0, nr_l3) {
-				ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, l3).raw, ANY_NUMA);
+		if (enable_llc_awareness) {
+			u32 llc;
+			bpf_for(llc, 0, nr_llc)
+			{
+				ret = scx_bpf_create_dsq(
+					get_cell_llc_dsq_id(i, llc).raw,
+					ANY_NUMA);
 				if (ret < 0)
 					return ret;
 			}
 		} else {
-			ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, FAKE_FLAT_CELL_L3).raw,
-							ANY_NUMA);
+			ret = scx_bpf_create_dsq(
+				get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC).raw,
+				ANY_NUMA);
 			if (ret < 0)
 				return ret;
-
 		}
-
 
 		if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &i)))
 			return -ENOENT;
