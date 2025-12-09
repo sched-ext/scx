@@ -61,6 +61,9 @@ use bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
 use bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
+use bpf_intf::stat_idx_P2DQ_STAT_PICK2_CROSS_NUMA;
+use bpf_intf::stat_idx_P2DQ_STAT_PICK2_NUMA_FALLBACK;
+use bpf_intf::stat_idx_P2DQ_STAT_PICK2_SAME_NUMA;
 use bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_THERMAL_AVOID;
 use bpf_intf::stat_idx_P2DQ_STAT_THERMAL_KICK;
@@ -284,6 +287,9 @@ impl<'a> Scheduler<'a> {
             eas_little_select: stats[stat_idx_P2DQ_STAT_EAS_LITTLE_SELECT as usize],
             eas_big_select: stats[stat_idx_P2DQ_STAT_EAS_BIG_SELECT as usize],
             eas_fallback: stats[stat_idx_P2DQ_STAT_EAS_FALLBACK as usize],
+            pick2_same_numa: stats[stat_idx_P2DQ_STAT_PICK2_SAME_NUMA as usize],
+            pick2_cross_numa: stats[stat_idx_P2DQ_STAT_PICK2_CROSS_NUMA as usize],
+            pick2_numa_fallback: stats[stat_idx_P2DQ_STAT_PICK2_NUMA_FALLBACK as usize],
         }
     }
 
