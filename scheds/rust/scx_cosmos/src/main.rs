@@ -27,6 +27,7 @@ use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore;
+use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
@@ -190,9 +191,9 @@ struct Opts {
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
     perf_sticky: bool,
 
-    /// Enable NUMA optimizations.
+    /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
-    enable_numa: bool,
+    disable_numa: bool,
 
     /// Disable CPU frequency control.
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
@@ -405,6 +406,20 @@ impl<'a> Scheduler<'a> {
         // Check host topology to determine if we need to enable SMT capabilities.
         let smt_enabled = !opts.disable_smt && topo.smt_enabled;
 
+        // Determine the amount of non-empty NUMA nodes in the system.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
+        let numa_enabled = !opts.disable_numa && nr_nodes > 1;
+        if !numa_enabled {
+            info!("Disabling NUMA optimizations");
+        }
+
         info!(
             "{} {} {}",
             SCHEDULER_NAME,
@@ -434,7 +449,8 @@ impl<'a> Scheduler<'a> {
         rodata.deferred_wakeups = !opts.no_deferred_wakeup;
         rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.smt_enabled = smt_enabled;
-        rodata.numa_enabled = opts.enable_numa;
+        rodata.numa_enabled = numa_enabled;
+        rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
         rodata.mm_affinity = opts.mm_affinity;
@@ -485,12 +501,8 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cosmos_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
-            | if opts.enable_numa {
-                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
-            } else {
-                0
-            };
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.cosmos_ops_mut().flags
@@ -498,6 +510,20 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
+
+        // Configure CPU->node mapping (must be done after skeleton is loaded).
+        for node in topo.nodes.values() {
+            for cpu in node.all_cpus.values() {
+                if opts.verbose {
+                    info!("CPU{} -> node{}", cpu.id, node.id);
+                }
+                skel.maps.cpu_node_map.update(
+                    &(cpu.id as u32).to_ne_bytes(),
+                    &(node.id as u32).to_ne_bytes(),
+                    MapFlags::ANY,
+                )?;
+            }
+        }
 
         // Setup performance events for all CPUs
         if opts.perf_config > 0 {

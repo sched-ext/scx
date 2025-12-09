@@ -14,6 +14,16 @@ char _license[] SEC("license") = "GPL";
 #define MAX_CPUS	1024
 
 /*
+ * Maximum amount of NUMA nodes supported by the scheduler.
+ */
+#define MAX_NODES	1024
+
+/*
+ * Maximum amount of GPUs supported by the scheduler.
+ */
+#define MAX_GPUS	32
+
+/*
  * Shared DSQ used to schedule tasks in deadline mode when the system is
  * saturated.
  *
@@ -147,6 +157,11 @@ UEI_DEFINE(uei);
 static u64 nr_cpu_ids;
 
 /*
+ * Maximum possible NUMA node number.
+ */
+const volatile u32 nr_node_ids;
+
+/*
  * Current system vruntime.
  */
 static u64 vtime_now;
@@ -173,6 +188,30 @@ struct {
 	__type(key, int);
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
+
+/*
+ * CPU -> NUMA node mapping.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_CPUS);
+	__type(key, u32);	/* cpu_id */
+	__type(value, u32);	/* node_id */
+} cpu_node_map SEC(".maps");
+
+static int cpu_node(s32 cpu)
+{
+	u32 *id;
+
+	if (!numa_enabled)
+		return 0;
+
+	id = bpf_map_lookup_elem(&cpu_node_map, &cpu);
+	if (!id)
+		return -ENOENT;
+
+	return *id;
+}
 
 /*
  * Return a local task context from a generic task.
@@ -387,7 +426,7 @@ struct {
  */
 static inline u64 shared_dsq(s32 cpu)
 {
-	return numa_enabled ? __COMPAT_scx_bpf_cpu_node(cpu) : SHARED_DSQ;
+	return numa_enabled ? cpu_node(cpu) : SHARED_DSQ;
 }
 
 /*
@@ -408,20 +447,6 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 static inline bool is_system_busy(void)
 {
 	return cpu_util >= busy_threshold;
-}
-
-/*
- * Return the cpumask of fully idle SMT cores within the NUMA node that
- * contains @cpu.
- *
- * If NUMA support is disabled, @cpu is ignored.
- */
-static inline const struct cpumask *get_idle_smtmask(s32 cpu)
-{
-	if (!numa_enabled)
-		return scx_bpf_get_idle_smtmask();
-
-	return __COMPAT_scx_bpf_get_idle_smtmask_node(__COMPAT_scx_bpf_cpu_node(cpu));
 }
 
 /*
@@ -492,7 +517,7 @@ static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 	s32 cpu;
 
 	primary = !primary_all ? cast_mask(primary_cpumask) : NULL;
-	smt = smt_enabled ? get_idle_smtmask(prev_cpu) : NULL;
+	smt = smt_enabled ? scx_bpf_get_idle_smtmask() : NULL;
 
 	/*
 	 * If the task can't migrate, there's no point looking for other
@@ -743,7 +768,7 @@ static bool is_smt_contended(s32 cpu)
 	if (!smt_enabled || !avoid_smt)
 		return false;
 
-	smt = get_idle_smtmask(cpu);
+	smt = scx_bpf_get_idle_smtmask();
 	is_contended = bpf_cpumask_empty(smt);
 	scx_bpf_put_cpumask(smt);
 
@@ -788,6 +813,11 @@ is_wake_affine(const struct task_struct *waker, const struct task_struct *wakee)
 		!(waker->flags & PF_EXITING) && wakee->mm && (wakee->mm == waker->mm);
 }
 
+/*
+ * Look for the least busy cpu based on perf_event count. Look within the
+ * same node as prev_cpu, otherwise this optimization becomes expensive on
+ * large CPU numa systems
+ */
 static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu)
 {
 	struct cpu_ctx *cctx;
@@ -798,11 +828,16 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu)
 		return prev_cpu;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		if (cpu_node(cpu) != cpu_node(prev_cpu) ||
+		    !is_cpu_idle(cpu) ||
+		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
+
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (!cctx)
 			continue;
-		if (cctx->perf_events < min && is_cpu_idle(cpu) &&
-		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+
+		if (cctx->perf_events < min) {
 			min = cctx->perf_events;
 			ret_cpu = cpu;
 		}
@@ -1095,7 +1130,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 	if (numa_enabled) {
 		int node;
 
-		bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		bpf_for(node, 0, nr_node_ids) {
 			err = scx_bpf_create_dsq(node, node);
 			if (err) {
 				scx_bpf_error("failed to create node DSQ %d: %d", node, err);
