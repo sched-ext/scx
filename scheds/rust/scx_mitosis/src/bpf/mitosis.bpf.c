@@ -19,7 +19,12 @@
 #include <scx/common.bpf.h>
 #endif
 
-#define DUMMY_L3 0
+/*
+ * When L3 awareness is disabled, we use a single "fake" L3 index to flatten
+ * the entire cell's topology into one scheduling domain. All CPUs in the cell
+ * share the same DSQ and vtime, ignoring actual L3 cache boundaries.
+ */
+#define FAKE_FLAT_CELL_L3 0
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
 #include "l3_aware.bpf.h"
@@ -215,7 +220,7 @@ static inline int allocate_cell()
 			return -1;
 
 		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
-			WRITE_ONCE(c->vtime_now, 0);
+			WRITE_ONCE(c->l3_vtime_now[FAKE_FLAT_CELL_L3], 0);
 			return cell_idx;
 		}
 	}
@@ -407,8 +412,8 @@ static inline int update_task_cpumask(struct task_struct *p,
 	}
 
 	// Non-L3 aware version
-	tctx->dsq = get_cell_l3_dsq_id(tctx->cell, DUMMY_L3);
-	p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
+	tctx->dsq = get_cell_l3_dsq_id(tctx->cell, FAKE_FLAT_CELL_L3);
+	p->scx.dsq_vtime = READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]);
 
 	return 0;
 }
@@ -642,7 +647,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (enable_l3_awareness) {
 			basis_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
 		} else {
-			basis_vtime = READ_ONCE(cell->vtime_now);
+			basis_vtime = READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]);
 		}
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
@@ -698,7 +703,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	struct task_struct *p;
 
 	// Get this CPU's L3 (only matters if L3-aware)
-	s32 l3 = DUMMY_L3;  // Default for non-L3-aware
+	s32 l3 = FAKE_FLAT_CELL_L3;  // Default for non-L3-aware
 	if (enable_l3_awareness) {
 		u32 *l3_ptr = bpf_map_lookup_elem(&cpu_to_l3, &cpu);
 		if (!l3_ptr) {
@@ -1141,8 +1146,8 @@ void advance_dsq_vtimes(struct cell *cell, struct cpu_ctx *cctx, struct task_ctx
 
 	if (!enable_l3_awareness) {
 		// If the cell DSQ's vtime is behind the task's, advance it.
-		if (time_before(READ_ONCE(cell->vtime_now), task_vtime))
-			WRITE_ONCE(cell->vtime_now, task_vtime);
+		if (time_before(READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]), task_vtime))
+			WRITE_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3], task_vtime);
 		return;
 	}
 
@@ -1486,9 +1491,9 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		dump_cell_cpumask(i);
 		scx_bpf_dump("\n");
 		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->vtime_now),
+			     READ_ONCE(cell->l3_vtime_now[FAKE_FLAT_CELL_L3]),
 			     scx_bpf_dsq_nr_queued(
-				     get_cell_l3_dsq_id(i, DUMMY_L3).raw));
+				     get_cell_l3_dsq_id(i, FAKE_FLAT_CELL_L3).raw));
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
@@ -1639,7 +1644,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 					return ret;
 			}
 		} else {
-			ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, DUMMY_L3).raw,
+			ret = scx_bpf_create_dsq(get_cell_l3_dsq_id(i, FAKE_FLAT_CELL_L3).raw,
 							ANY_NUMA);
 			if (ret < 0)
 				return ret;

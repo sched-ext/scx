@@ -113,8 +113,6 @@ struct cell {
         // per-L3 vtimes within this cell
         u64 l3_vtime_now[MAX_L3S];
 
-		// XXX Remove me when shift to llc is complete.
-		u64 vtime_now;
 };
 
 // Putting the lock first in the struct is our convention.
@@ -137,11 +135,11 @@ _Static_assert(offsetof(struct cell, in_use) == 4,
 
 // XXX Add these back in after removing vtime_now from the struct.
 // Verify these are the same size in both BPF and Rust.
-// _Static_assert(sizeof(struct cell) ==
-//                        ((4 * sizeof(u32)) + (4 * MAX_L3S) + (8 * MAX_L3S)),
-//                "struct cell size must be stable for Rust bindings");
+_Static_assert(sizeof(struct cell) ==
+                       ((4 * sizeof(u32)) + (4 * MAX_L3S) + (8 * MAX_L3S)),
+               "struct cell size must be stable for Rust bindings");
 
-// _Static_assert(sizeof(struct cell) == 208,
-//                "struct cell must be exactly 208 bytes");
+_Static_assert(sizeof(struct cell) == 208,
+               "struct cell must be exactly 208 bytes");
 
 #endif /* __INTF_H */

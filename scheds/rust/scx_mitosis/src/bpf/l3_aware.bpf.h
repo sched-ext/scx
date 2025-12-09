@@ -214,7 +214,6 @@ static inline s32 pick_l3_for_task(u32 cell_id)
   /**
    * Apply pending L3 retag if task was stolen across L3 domains.
    * Called from running() when a task starts executing.
-   * Preserves vtime to maintain fairness after cross-L3 migration.
    *
    * Caller must ensure enable_l3_awareness is true.
    */
@@ -229,18 +228,16 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 		return;
 	}
 
-	// u64 save_v = p->scx.dsq_vtime;
-
 	/* Assign task to new L3 */
 	tctx->l3 = tctx->pending_l3;
 	tctx->pending_l3 = L3_INVALID;
 
-	/* New L3, need new cpumask */
+	/*
+	 * New L3, need new cpumask. This updates the task vtime
+	 * to that of the new cell-L3 dsq.
+	*/
 	update_task_cpumask(p, tctx);
 
-	/* Restore old vtime */
-	/* XXX This seems like it could be trouble. */
-	// p->scx.dsq_vtime = save_v;
 }
 
 static inline bool try_stealing_this_task(struct task_ctx *task_ctx,
@@ -293,10 +290,14 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 		if (candidate_l3 >= MAX_L3S)
 			continue;
 
-		// Skip L3s that are not present in this cell
-		// Note: rechecking cell_ptr for verifier
-		// TODO: Lock?
-		if (cell_ptr && cell_ptr->l3_cpu_cnt[candidate_l3] == 0)
+    /*
+    * Skip if the cell doesn't have CPUs in this L3.
+    * Note: rechecking cell_ptr for verifier.
+    * This is racy with try_stealing_this_task, but we don't care —
+    * if the L3 actually doesn't have CPUs come steal time,
+    * we will fail the steal and continue to the next L3.
+    */
+		if (cell_ptr && READ_ONCE(cell_ptr->l3_cpu_cnt[candidate_l3]) == 0)
 			continue;
 
 		u64 candidate_dsq = get_cell_l3_dsq_id(cell, candidate_l3).raw;
@@ -329,6 +330,7 @@ static inline bool try_stealing_work(u32 cell, s32 local_l3)
 			continue;
 		}
 
+		// Continue to next L3 if no task was stolen.
 		if (!try_stealing_this_task(task_ctx, local_l3, candidate_dsq))
 			continue;
 
