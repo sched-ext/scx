@@ -35,6 +35,7 @@ const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     split_vtime_updates	     = false;
+const volatile bool	     uses_cpu_controller	     = true;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -71,6 +72,9 @@ private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
+
+/* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
+static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
 
 /*
  * We store per-cpu values along with per-cell values. Helper functions to
@@ -136,10 +140,26 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 
 static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
-	struct cgroup *cgrp = __COMPAT_scx_bpf_task_cgroup(p);
-	if (!cgrp) {
-		scx_bpf_error("Failed to get cgroup for task %d", p->pid);
+	struct cgroup *cgrp;
+
+	if (uses_cpu_controller) {
+		cgrp = __COMPAT_scx_bpf_task_cgroup(p);
+	} else {
+		/*
+		 * When CPU controller is disabled, scx_bpf_task_cgroup() returns
+		 * root. Use p->cgroups->dfl_cgrp to get the task's actual cgroup
+		 * in the default (unified) hierarchy.
+		 *
+		 * p->cgroups is RCU-protected, so we need RCU lock.
+		 */
+		bpf_rcu_read_lock();
+		cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
+		bpf_rcu_read_unlock();
 	}
+
+	if (!cgrp)
+		scx_bpf_error("Failed to get cgroup for task %d", p->pid);
+
 	return cgrp;
 }
 
@@ -163,6 +183,8 @@ struct task_ctx {
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
+	/* Last known cgroup ID for detecting cgroup moves (used when !uses_cpu_controller) */
+	u64 cgid;
 };
 
 struct {
@@ -224,8 +246,8 @@ static inline struct cell *lookup_cell(int idx)
 }
 
 /*
- * Cells are allocated concurrently in some cases (e.g. cgroup_init).
- * allocate_cell and free_cell enable these allocations to be done safely
+ * Cells are allocated in the timer callback and freed in cgroup exit handlers.
+ * allocate_cell and free_cell use atomic operations to handle concurrent access.
  */
 static inline int allocate_cell()
 {
@@ -456,8 +478,8 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 
 		if (!cgc) {
 			scx_bpf_error(
-				"cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x)",
-				cg->kn->id, p->pid, p->flags);
+				"cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x, tctx->cgid %llu)",
+				cg->kn->id, p->pid, p->flags, tctx->cgid);
 			return -ENOENT;
 		}
 	}
@@ -471,6 +493,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	tctx->configuration_seq = READ_ONCE(applied_configuration_seq);
 	barrier();
 	tctx->cell = cgc->cell;
+	tctx->cgid = cg->kn->id;
 
 	return update_task_cpumask(p, tctx);
 }
@@ -516,7 +539,30 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 		if (update_task_cell(p, tctx, cgrp))
 			ret = -1;
 		bpf_cgroup_release(cgrp);
+		return ret;
 	}
+
+	/*
+	 * When not using CPU controller, check if task's cgroup changed.
+	 * The cgroup is already initialized by tp_cgroup_mkdir which
+	 * fires before the task can be scheduled in the new cgroup.
+	 */
+	if (!uses_cpu_controller) {
+		u64 current_cgid;
+
+		bpf_rcu_read_lock();
+		current_cgid = p->cgroups->dfl_cgrp->kn->id;
+		bpf_rcu_read_unlock();
+
+		if (current_cgid != tctx->cgid) {
+			if (!(cgrp = task_cgroup(p)))
+				return -1;
+			if (update_task_cell(p, tctx, cgrp))
+				ret = -1;
+			bpf_cgroup_release(cgrp);
+		}
+	}
+
 	return ret;
 }
 
@@ -1215,8 +1261,26 @@ int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of,
 	return 0;
 }
 
-s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
-		   struct scx_cgroup_init_args *args)
+/* From linux/percpu-refcount.h */
+#define __PERCPU_REF_DEAD (1LU << 1)
+
+/*
+ * Check if a cgroup is dying (being destroyed).
+ */
+static bool cgrp_is_dying(struct cgroup *cgrp)
+{
+	unsigned long refcnt_ptr;
+	bpf_core_read(&refcnt_ptr, sizeof(refcnt_ptr),
+		      &cgrp->self.refcnt.percpu_count_ptr);
+	return refcnt_ptr & __PERCPU_REF_DEAD;
+}
+
+/*
+ * Cgroup initialization - creates cgrp_ctx. Root cgroup is assigned cell 0.
+ * Other cgroups inherit parent's cell, and if a cpuset is configured,
+ * configuration_seq is bumped so the timer assigns a dedicated cell.
+ */
+static int init_cgrp_ctx(struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
 
@@ -1264,10 +1328,65 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 	return 0;
 }
 
+/*
+ * Initialize cgroup and all its ancestors. Handles dying cgroups gracefully.
+ * Used when CPU controller is disabled since SCX cgroup callbacks won't fire.
+ */
+static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
+{
+	u32 target_level = cgrp->level;
+	u32 level;
+	int ret;
+
+	/* Skip dying cgroups */
+	if (cgrp_is_dying(cgrp))
+		return 0;
+
+	/* Initialize ancestors first (replicates SCX cgroup_init order) */
+	bpf_for(level, 1, target_level)
+	{
+		struct cgroup *ancestor = lookup_cgrp_ancestor(cgrp, level);
+		if (!ancestor)
+			return -ENOENT;
+
+		/* Skip if dying or already initialized */
+		if (!cgrp_is_dying(ancestor) &&
+		    !lookup_cgrp_ctx_fallible(ancestor)) {
+			ret = init_cgrp_ctx(ancestor);
+			if (ret) {
+				bpf_cgroup_release(ancestor);
+				return ret;
+			}
+		}
+		bpf_cgroup_release(ancestor);
+	}
+
+	/* Skip if already initialized */
+	if (lookup_cgrp_ctx_fallible(cgrp))
+		return 0;
+
+	return init_cgrp_ctx(cgrp);
+}
+
+/*
+ * SCX cgroup callbacks - called by the SCX framework when the CPU controller
+ * is enabled.
+ */
+s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
+		   struct scx_cgroup_init_args *args)
+{
+	if (!uses_cpu_controller)
+		return 0;
+	return init_cgrp_ctx(cgrp);
+}
+
 s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
 	int		 ret;
+
+	if (!uses_cpu_controller)
+		return 0;
 
 	record_cgroup_exit(cgrp->kn->id);
 
@@ -1299,10 +1418,67 @@ void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p,
 {
 	struct task_ctx *tctx;
 
+	if (!uses_cpu_controller)
+		return;
+
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
 	update_task_cell(p, tctx, to);
+}
+
+/*
+ * Tracepoint fallbacks - only active when CPU controller is disabled.
+ * These provide cgroup tracking when SCX cgroup callbacks don't fire.
+ */
+SEC("tp_btf/cgroup_mkdir")
+int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
+{
+	int ret;
+	if (uses_cpu_controller)
+		return 0;
+
+	ret = init_cgrp_ctx_with_ancestors(cgrp);
+	if (ret) {
+		scx_bpf_error(
+			"tp_cgroup_mkdir: init_cgrp_ctx_with_ancestors failed for cgid %llu: %d",
+			cgrp->kn->id, ret);
+	}
+	return 0;
+}
+
+SEC("tp_btf/cgroup_rmdir")
+int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
+{
+	struct cgrp_ctx *cgc;
+
+	if (uses_cpu_controller)
+		return 0;
+
+	/*
+	 * Use fallible lookup since this tracepoint fires for ALL cgroups,
+	 * including ones created after scheduler attach that never had tasks.
+	 * If the cgroup doesn't have storage, it's not a cell owner anyway.
+	 */
+	if (!(cgc = lookup_cgrp_ctx_fallible(cgrp)))
+		return 0;
+
+	record_cgroup_exit(cgrp->kn->id);
+
+	if (cgc->cell_owner) {
+		int ret;
+		if ((ret = free_cell(cgc->cell)))
+			scx_bpf_error("Failed to free cell %d: %d", cgc->cell,
+				      ret);
+		/*
+		 * Need to make sure the cpus of this cell are freed back to the root
+		 * cell and the root cell cpumask can be expanded. Bump
+		 * configuration_seq so tick() does that.
+		 */
+		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
+	}
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p,
@@ -1321,13 +1497,12 @@ void BPF_STRUCT_OPS(mitosis_set_cpumask, struct task_struct *p,
 	update_task_cpumask(p, tctx);
 }
 
-s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
+static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 {
 	struct task_ctx	   *tctx;
 	struct bpf_cpumask *cpumask;
 
-	record_init_task(args->cgroup->kn->id, p->pid);
+	record_init_task(cgrp->kn->id, p->pid);
 
 	tctx = bpf_task_storage_get(&task_ctxs, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -1353,7 +1528,36 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
-	return update_task_cell(p, tctx, args->cgroup);
+	return update_task_cell(p, tctx, cgrp);
+}
+
+s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
+{
+	/*
+	 * When CPU controller is disabled, args->cgroup is root, so we need
+	 * to get the task's actual cgroup for both logging and cell assignment.
+	 * We also need to ensure the cgroup hierarchy is initialized since
+	 * SCX cgroup callbacks won't fire.
+	 */
+	if (!uses_cpu_controller) {
+		struct cgroup *cgrp = task_cgroup(p);
+		if (!cgrp)
+			return -ENOENT;
+
+		/* Ensure cgroup hierarchy is initialized (handles ancestors + this cgroup) */
+		int ret = init_cgrp_ctx_with_ancestors(cgrp);
+		if (ret) {
+			bpf_cgroup_release(cgrp);
+			return ret;
+		}
+
+		ret = init_task_impl(p, cgrp);
+		bpf_cgroup_release(cgrp);
+		return ret;
+	}
+
+	return init_task_impl(p, args->cgroup);
 }
 
 __hidden void dump_cpumask_word(s32 word, const struct cpumask *cpumask)
@@ -1519,7 +1723,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if (rootcg)
 		bpf_cgroup_release(rootcg);
 
-	/* setup all_cpumask */
+	/* setup all_cpumask - must be done before cgroup iteration */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
@@ -1546,6 +1750,50 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
+	/*
+	 * When CPU controller is disabled, initialize cgrp_ctx for all existing
+	 * cgroups. This replicates SCX cgroup_init callback behavior - all
+	 * cgroups get initialized in hierarchical order during scheduler attach.
+	 * The tracepoint handles new cgroups created after attach.
+	 */
+	if (!uses_cpu_controller) {
+		struct cgroup *iter_root = NULL;
+
+		bpf_rcu_read_lock();
+		if (root_cgrp)
+			iter_root = bpf_cgroup_acquire(root_cgrp);
+		bpf_rcu_read_unlock();
+
+		if (!iter_root) {
+			scx_bpf_error(
+				"Failed to acquire root cgroup for initialization");
+			return -ENOENT;
+		}
+
+		struct cgroup_subsys_state *root_css = &iter_root->self;
+		struct cgroup_subsys_state *pos;
+
+		bpf_rcu_read_lock();
+		bpf_for_each(css, pos, root_css,
+			     BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+			/*
+			 * pos->cgroup dereference loses RCU tracking in verifier,
+			 * so we can't use it directly with bpf_cgroup_acquire or
+			 * pass it to functions that call bpf_cgroup_ancestor.
+			 * Instead, read the cgroup ID and use bpf_cgroup_from_id
+			 * to get a trusted, acquired reference.
+			 */
+			u64	       cgid = pos->cgroup->kn->id;
+			struct cgroup *cgrp = bpf_cgroup_from_id(cgid);
+			if (cgrp) {
+				init_cgrp_ctx(cgrp);
+				bpf_cgroup_release(cgrp);
+			}
+		}
+		bpf_rcu_read_unlock();
+		bpf_cgroup_release(iter_root);
+	}
+
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
@@ -1562,8 +1810,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return -ENOMEM;
 
 		/*
-		 * Start with all full cpumask for all cells. They'll get setup in
-		 * cgroup_init
+		 * Start with full cpumask for all cells. The timer will set up
+		 * the correct cpumasks based on cgroup configuration.
 		 */
 		bpf_cpumask_setall(cpumask);
 
