@@ -19,13 +19,13 @@ pub use config::LayerMatch;
 pub use config::LayerPlacement;
 pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
-use log::info;
 use scx_utils::Core;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::NR_CPU_IDS;
 use std::sync::Arc;
+use tracing::info;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
@@ -160,6 +160,21 @@ impl CpuPool {
             bail!("Some of CPUs {} are already free", cpus_to_free);
         }
         self.available_cores |= cores;
+        self.update_fallback_cpu();
+        Ok(())
+    }
+
+    pub fn mark_allocated(&mut self, cpus_to_alloc: &Cpumask) -> Result<()> {
+        let cores = self.cpus_to_cores(cpus_to_alloc)?;
+        // Check if all requested cores are available
+        let unavailable_cores = cores.clone() & !self.available_cores.clone();
+        if unavailable_cores.any() {
+            bail!(
+                "Some of CPUs {} are not available to allocate",
+                cpus_to_alloc
+            );
+        }
+        self.available_cores &= !cores;
         self.update_fallback_cpu();
         Ok(())
     }

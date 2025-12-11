@@ -505,7 +505,8 @@ complete_p2dq_enqueue_move(struct enqueue_promise  *pro,
 		break;
 	case P2DQ_ENQUEUE_PROMISE_ATQ_FIFO:
 	case P2DQ_ENQUEUE_PROMISE_ATQ_VTIME:
-		scx_bpf_error("chaos: ATQs not supported");
+	case P2DQ_ENQUEUE_PROMISE_DHQ_VTIME:
+		scx_bpf_error("chaos: ATQs/DHQs not supported");
 		break;
 	case P2DQ_ENQUEUE_PROMISE_FAILED:
 		scx_bpf_error("chaos: delayed async_p2dq_enqueue failed");
@@ -730,7 +731,6 @@ SCX_OPS_DEFINE(chaos,
 	       .tick 		    	= (void *)chaos_tick,
 
 	       .update_idle		= (void *)p2dq_update_idle,
-	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
 	       .running			= (void *)chaos_running,

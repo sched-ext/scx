@@ -9,6 +9,7 @@ use scx_utils::Core;
 use scx_utils::Topology;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::debug;
 
 use crate::bpf_intf;
 use crate::CpuPool;
@@ -265,6 +266,10 @@ struct LayerCoreOrderGenerator<'a> {
 }
 
 impl<'a> LayerCoreOrderGenerator<'a> {
+    fn has_topology_preference(&self) -> bool {
+        self.spec.nodes().len() > 0 || self.spec.llcs().len() > 0
+    }
+
     fn rotate_layer_offset(&self, vec: &'a mut Vec<usize>) -> &Vec<usize> {
         let num_cores = self.topo.all_cores.len();
         let chunk = num_cores.div_ceil(self.layer_specs.len());
@@ -306,7 +311,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
 
     fn grow_linear(&self) -> Vec<usize> {
         let mut order = (0..self.topo.all_cores.len()).collect::<Vec<usize>>();
-        self.rotate_layer_offset(&mut order);
+        // Only rotate if no LLC/node preferences - preserve topology order otherwise
+        if !self.has_topology_preference() {
+            self.rotate_layer_offset(&mut order);
+        }
         order
     }
 
@@ -377,12 +385,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                         .map(|(core_id, core)| {
                             // this debug information is important.
                             for (cpu_id, _) in core.cpus.iter() {
-                                log::debug!(
+                                debug!(
                                     "NODE_ID: {} LLC_ID: {} CORE_ID: {} CPU_ID: {}",
-                                    node_id,
-                                    llc_id,
-                                    core_id,
-                                    cpu_id
+                                    node_id, llc_id, core_id, cpu_id
                                 );
                             }
                             core_id.clone()
@@ -514,7 +519,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     });
                 });
             });
-            self.rotate_layer_offset(&mut core_order);
+            // Don't rotate when LLC/node preferences are specified - preserve the
+            // explicit topology order built above to respect LLC/node affinity
+            // self.rotate_layer_offset(&mut core_order);
             core_order
         }
     }

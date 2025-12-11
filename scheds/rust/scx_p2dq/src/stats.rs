@@ -11,6 +11,28 @@ use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
+// Global flag to track if thermal pressure tracking is enabled
+static THERMAL_TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+// Global flag to track if energy-aware scheduling is enabled
+static EAS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_thermal_tracking_enabled(enabled: bool) {
+    THERMAL_TRACKING_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_thermal_tracking_enabled() -> bool {
+    THERMAL_TRACKING_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_eas_enabled(enabled: bool) {
+    EAS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_eas_enabled() -> bool {
+    EAS_ENABLED.load(Ordering::Relaxed)
+}
+
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
@@ -51,6 +73,24 @@ pub struct Metrics {
     pub wake_llc: u64,
     #[stat(desc = "Number of times tasks have been woken and migrated llc")]
     pub wake_mig: u64,
+    #[stat(desc = "Number of times fork balancing migrated to different LLC")]
+    pub fork_balance: u64,
+    #[stat(desc = "Number of times exec balancing migrated to different LLC")]
+    pub exec_balance: u64,
+    #[stat(desc = "Number of times fork stayed on same LLC")]
+    pub fork_same_llc: u64,
+    #[stat(desc = "Number of times exec stayed on same LLC")]
+    pub exec_same_llc: u64,
+    #[stat(desc = "Number of CPU kicks due to thermal pressure")]
+    pub thermal_kick: u64,
+    #[stat(desc = "Number of times throttled CPUs were avoided")]
+    pub thermal_avoid: u64,
+    #[stat(desc = "Number of times EAS placed task on little core")]
+    pub eas_little_select: u64,
+    #[stat(desc = "Number of times EAS placed task on big core")]
+    pub eas_big_select: u64,
+    #[stat(desc = "Number of times EAS fell back to non-preferred core type")]
+    pub eas_fallback: u64,
 }
 
 impl Metrics {
@@ -70,9 +110,10 @@ impl Metrics {
             self.enq_intr,
             self.enq_mig,
         )?;
-        writeln!(
-            w,
-            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
+
+        // Build the stats line conditionally based on thermal tracking availability
+        let mut stats_line = format!(
+            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
             self.wake_prev,
             self.wake_llc,
             self.wake_mig,
@@ -80,7 +121,29 @@ impl Metrics {
             self.dispatch_pick2,
             self.llc_migrations,
             self.node_migrations,
-        )?;
+            self.fork_balance,
+            self.fork_same_llc,
+            self.exec_balance,
+            self.exec_same_llc,
+        );
+
+        // Only show thermal stats if thermal tracking is enabled
+        if is_thermal_tracking_enabled() {
+            stats_line.push_str(&format!(
+                "\n\tthermal kick/avoid {}/{}",
+                self.thermal_kick, self.thermal_avoid,
+            ));
+        }
+
+        // Only show EAS stats if energy-aware scheduling is enabled
+        if is_eas_enabled() {
+            stats_line.push_str(&format!(
+                "\n\tEAS little/big/fallback {}/{}/{}",
+                self.eas_little_select, self.eas_big_select, self.eas_fallback,
+            ));
+        }
+
+        writeln!(w, "{}", stats_line)?;
         Ok(())
     }
 
@@ -104,6 +167,15 @@ impl Metrics {
             wake_prev: self.wake_prev - rhs.wake_prev,
             wake_llc: self.wake_llc - rhs.wake_llc,
             wake_mig: self.wake_mig - rhs.wake_mig,
+            fork_balance: self.fork_balance - rhs.fork_balance,
+            exec_balance: self.exec_balance - rhs.exec_balance,
+            fork_same_llc: self.fork_same_llc - rhs.fork_same_llc,
+            exec_same_llc: self.exec_same_llc - rhs.exec_same_llc,
+            thermal_kick: self.thermal_kick - rhs.thermal_kick,
+            thermal_avoid: self.thermal_avoid - rhs.thermal_avoid,
+            eas_little_select: self.eas_little_select - rhs.eas_little_select,
+            eas_big_select: self.eas_big_select - rhs.eas_big_select,
+            eas_fallback: self.eas_fallback - rhs.eas_fallback,
         }
     }
 }

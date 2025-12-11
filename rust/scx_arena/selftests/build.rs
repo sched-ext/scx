@@ -4,11 +4,12 @@
 // GNU General Public License version 2.
 
 fn main() {
-    scx_utils::BpfBuilder::new()
+    scx_cargo::BpfBuilder::new()
         .unwrap()
         .enable_skel("src/bpf/main.bpf.c", "main")
         .add_source("src/bpf/lib/arena.bpf.c")
         .add_source("src/bpf/lib/atq.bpf.c")
+        .add_source("src/bpf/lib/dhq.bpf.c")
         .add_source("src/bpf/lib/bitmap.bpf.c")
         .add_source("src/bpf/lib/btree.bpf.c")
         .add_source("src/bpf/lib/lvqueue.bpf.c")
@@ -20,6 +21,7 @@ fn main() {
         .add_source("src/bpf/lib/selftests/selftest.bpf.c")
         .add_source("src/bpf/lib/selftests/st_arena_topology_timer.bpf.c")
         .add_source("src/bpf/lib/selftests/st_atq.bpf.c")
+        .add_source("src/bpf/lib/selftests/st_dhq.bpf.c")
         .add_source("src/bpf/lib/selftests/st_bitmap.bpf.c")
         .add_source("src/bpf/lib/selftests/st_btree.bpf.c")
         .add_source("src/bpf/lib/selftests/st_lvqueue.bpf.c")

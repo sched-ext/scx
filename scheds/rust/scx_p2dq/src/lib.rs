@@ -4,12 +4,14 @@
 // GNU General Public License version 2.
 pub mod bpf_intf;
 pub mod bpf_skel;
+pub mod energy;
 pub use bpf_skel::types;
 
 use scx_utils::cli::TopologyArgs;
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
+use tracing::info;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -119,7 +121,7 @@ impl HardwareProfile {
             opts.wakeup_llc_migrations = false;
             // For single LLC, set min_llc_runs_pick2 to 0 (effectively disable)
             opts.min_llc_runs_pick2 = 0;
-            log::info!("Single LLC detected - disabling multi-LLC optimizations");
+            info!("Single LLC detected - disabling multi-LLC optimizations");
         }
 
         if self.is_neoverse_v2 && self.single_llc && self.core_count >= 64 {
@@ -127,16 +129,15 @@ impl HardwareProfile {
             let optimal_shards = (self.core_count / 8).min(16) as u32;
             if opts.llc_shards == get_default_llc_shards() {
                 opts.llc_shards = optimal_shards;
-                log::info!(
+                info!(
                     "Large single-LLC system ({} cores) - using {} shards",
-                    self.core_count,
-                    opts.llc_shards
+                    self.core_count, opts.llc_shards
                 );
             }
         }
 
         if self.is_neoverse_v2 {
-            log::info!("ARM64 Neoverse-V2 detected - ARM-specific optimizations available");
+            info!("ARM64 Neoverse-V2 detected - ARM-specific optimizations available");
         }
     }
 }
@@ -201,6 +202,17 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub atq_enabled: bool,
 
+    /// Use a double helix queue (DHQ) for LLC migration. DHQ provides two-strand
+    /// queue structure for cache-aware task migration between LLCs.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub dhq_enabled: bool,
+
+    /// Maximum imbalance allowed between DHQ strands. Controls how far one strand
+    /// can dequeue ahead of the other. Lower values maintain tighter balance,
+    /// higher values allow more asymmetric cross-LLC migration (0 = unlimited).
+    #[clap(long, default_value = "3", value_parser = clap::value_parser!(u64).range(0..=100))]
+    pub dhq_max_imbalance: u64,
+
     /// Schedule based on preferred core values available on some x86 systems with the appropriate
     /// CPU frequency governor (ex: amd-pstate).
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
@@ -217,6 +229,16 @@ pub struct SchedulerOpts {
     /// Allow LLC migrations on the wakeup path.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub wakeup_llc_migrations: bool,
+
+    /// Enable fork-time load balancing across LLCs. New child processes are
+    /// placed on less loaded LLCs when the parent's LLC is overloaded.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub fork_balance: bool,
+
+    /// Enable exec-time load balancing across LLCs. Tasks transitioning from
+    /// fork to exec are migrated to less loaded LLCs if beneficial.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub exec_balance: bool,
 
     /// **DEPRECATED*** Allow selecting idle in enqueue path.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -268,7 +290,7 @@ pub struct SchedulerOpts {
 
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
     /// dumb_queues.
-    #[clap(short = 't', long, value_parser = clap::value_parser!(u64), default_values_t = [0;0])]
+    #[clap(short = 't', long, value_parser = clap::value_parser!(u64), default_values_t = [500, 2500, 5000])]
     pub dsq_time_slices: Vec<u64>,
 
     /// DSQ scaling shift, each queue min timeslice is shifted by the scaling shift.
@@ -302,6 +324,28 @@ pub struct SchedulerOpts {
     /// Force single-LLC fast path optimizations
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub single_llc_fast_path: bool,
+
+    /// Enable PELT (Per-Entity Load Tracking) for improved load balancing.
+    /// PELT uses exponential decay to provide more accurate CPU utilization
+    /// tracking than simple counters. This may improve load balancing decisions
+    /// but adds computational overhead.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub enable_pelt: bool,
+
+    /// Enable latency priority system (uses task nice value)
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub latency_priority: bool,
+
+    /// Enable wakeup preemption for latency-critical tasks
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub wakeup_preemption: bool,
+
+    /// Enable Energy-Aware Scheduling (EAS) for big.LITTLE CPUs.
+    /// Places low-utilization tasks on efficient cores and high-utilization
+    /// tasks on performance cores. Requires PELT to be enabled. Improves
+    /// battery life on heterogeneous systems.
+    #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub enable_eas: bool,
 
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
@@ -346,14 +390,14 @@ macro_rules! init_open_skel {
                     }
                 }
                 for (i, slice) in opts.dsq_time_slices.iter().enumerate() {
-                    ::log::info!("DSQ[{}] slice_ns {}", i, slice * 1000);
+                    info!("DSQ[{}] slice_ns {}", i, slice * 1000);
                     skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice * 1000;
                 }
             } else {
                 for i in 0..=opts.dumb_queues - 1 {
                     let slice_ns =
                         $crate::dsq_slice_ns(i as u64, opts.min_slice_us, opts.dsq_shift);
-                    ::log::info!("DSQ[{}] slice_ns {}", i, slice_ns);
+                    info!("DSQ[{}] slice_ns {}", i, slice_ns);
                     skel.maps.bss_data.as_mut().unwrap().dsq_time_slices[i] = slice_ns;
                 }
             }
@@ -412,17 +456,33 @@ macro_rules! init_open_skel {
                 opts.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
             );
 
+            rodata.p2dq_config.dhq_enabled = MaybeUninit::new(
+                opts.dhq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false),
+            );
+
+            rodata.p2dq_config.dhq_max_imbalance = opts.dhq_max_imbalance;
+
             // Check if cpu_priority is supported by the kernel
             let cpu_priority_supported = compat::ksym_exists("sched_core_priority").unwrap_or(false);
             if opts.cpu_priority && !cpu_priority_supported {
-                ::log::warn!("CPU priority scheduling requested but kernel doesn't support sched_core_priority");
-                ::log::warn!("Feature disabled - requires kernel with hybrid CPU support and appropriate CPU governor (e.g., amd-pstate)");
-                ::log::warn!("See README for kernel requirements");
+                warn!("CPU priority scheduling requested but kernel doesn't support sched_core_priority");
+                warn!("Feature disabled - requires kernel with hybrid CPU support and appropriate CPU governor (e.g., amd-pstate)");
+                warn!("See README for kernel requirements");
             }
             rodata.p2dq_config.cpu_priority = MaybeUninit::new(opts.cpu_priority && cpu_priority_supported);
             rodata.p2dq_config.freq_control = MaybeUninit::new(opts.freq_control);
             rodata.p2dq_config.interactive_sticky = MaybeUninit::new(opts.interactive_sticky);
             rodata.p2dq_config.keep_running_enabled = MaybeUninit::new(opts.keep_running);
+            rodata.p2dq_config.pelt_enabled = MaybeUninit::new(opts.enable_pelt);
+            rodata.p2dq_config.fork_balance = MaybeUninit::new(opts.fork_balance);
+            rodata.p2dq_config.exec_balance = MaybeUninit::new(opts.exec_balance);
+            rodata.p2dq_config.enable_eas = MaybeUninit::new(opts.enable_eas);
+            rodata.p2dq_config.small_task_threshold = 256;  // 25% utilization
+            rodata.p2dq_config.large_task_threshold = 768;  // 75% utilization
+
+            // Latency priority config
+            rodata.latency_config.latency_priority_enabled = MaybeUninit::new(opts.latency_priority);
+            rodata.latency_config.wakeup_preemption_enabled = MaybeUninit::new(opts.wakeup_preemption);
 
             rodata.debug = verbose as u32;
             rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
@@ -434,7 +494,16 @@ macro_rules! init_open_skel {
 
 #[macro_export]
 macro_rules! init_skel {
-    ($skel: expr, $topo: expr) => {
+    ($skel: expr, $topo: expr) => {{
+        use $crate::energy::EnergyModel;
+
+        // Initialize energy model for EAS
+        let energy_model = EnergyModel::new(&$topo).unwrap_or_else(|e| {
+            eprintln!("Warning: Failed to create energy model: {}", e);
+            eprintln!("Energy-aware scheduling will use fallback values");
+            EnergyModel::new(&$topo).unwrap() // This should not fail
+        });
+
         for cpu in $topo.all_cpus.values() {
             $skel.maps.bss_data.as_mut().unwrap().big_core_ids[cpu.id] =
                 if cpu.core_type == ($crate::CoreType::Big { turbo: true }) {
@@ -445,9 +514,15 @@ macro_rules! init_skel {
             $skel.maps.bss_data.as_mut().unwrap().cpu_core_ids[cpu.id] = cpu.core_id as u32;
             $skel.maps.bss_data.as_mut().unwrap().cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.as_mut().unwrap().cpu_node_ids[cpu.id] = cpu.node_id as u64;
+
+            // Populate energy model data
+            $skel.maps.bss_data.as_mut().unwrap().cpu_capacity[cpu.id] =
+                energy_model.cpu_capacity(cpu.id) as u16;
+            $skel.maps.bss_data.as_mut().unwrap().cpu_energy_cost[cpu.id] =
+                energy_model.cpu_energy_cost(cpu.id) as u16;
         }
         for llc in $topo.all_llcs.values() {
             $skel.maps.bss_data.as_mut().unwrap().llc_ids[llc.id] = llc.id as u64;
         }
-    };
+    }};
 }

@@ -13,13 +13,13 @@ use anyhow::bail;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Local;
-use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::warn;
 
 use crate::bpf_intf;
 use crate::BpfStats;

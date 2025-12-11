@@ -75,6 +75,7 @@ enum layer_membership {
 	MEMBER_NOEXPIRE		= (u64)-1,
 	MEMBER_EXPIRED		= (u64)-2,
 	MEMBER_CANTMATCH	= (u64)-3,
+	MEMBER_INVALID		= (u64)-4,
 };
 
 static inline void ___consts_sanity_check___(void) {
@@ -274,6 +275,7 @@ enum layer_match_kind {
 	MATCH_HINT_EQUALS,
 	MATCH_SYSTEM_CPU_UTIL_BELOW,
 	MATCH_DSQ_INSERT_BELOW,
+	MATCH_NUMA_NODE,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -303,6 +305,7 @@ struct layer_match {
 	u64		hint;
 	u64		system_cpu_util_below;	/* ratio * 10000 */
 	u64		dsq_insert_below;	/* ratio * 10000 */
+	u32		numa_node_id;
 };
 
 struct layer_match_ands {

@@ -132,8 +132,3 @@ impl ResourceDir {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) fn extract_arch_resources(path: &std::path::Path) -> Result<(), std::io::Error> {
-    ARCH_DIR.extract(path)
-}

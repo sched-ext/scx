@@ -3,6 +3,8 @@
 #ifndef BPF_ARENA_SPIN_LOCK_H
 #define BPF_ARENA_SPIN_LOCK_H
 
+#ifdef __BPF__
+
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 
@@ -17,6 +19,8 @@
 #define ETIMEDOUT 110
 
 extern unsigned long CONFIG_NR_CPUS __kconfig;
+
+#endif
 
 /*
  * Typically, we'd just rely on the definition in vmlinux.h for qspinlock, but
@@ -111,6 +115,8 @@ struct arena_qnode {
 #endif
 
 static struct arena_qnode __arena qnodes[_Q_MAX_CPUS][_Q_MAX_NODES];
+
+#ifdef __BPF__
 
 static inline u32 encode_tail(int cpu, int idx)
 {
@@ -539,5 +545,7 @@ static __always_inline void arena_spin_unlock(arena_spinlock_t __arena *lock)
 		arena_spin_unlock((lock));        \
 		bpf_local_irq_restore(&(flags));  \
 	})
+
+#endif /* __BPF__ */
 
 #endif /* BPF_ARENA_SPIN_LOCK_H */

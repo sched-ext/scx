@@ -188,43 +188,64 @@ static bool consume_dsq(struct cpdom_ctx *cpdomc, u64 dsq_id)
 	return ret;
 }
 
-/*
- * For simplicity, try to just steal from the CPU with
- * the highest number of queued_tasks in this domain.
- */
-static int pick_most_loaded_cpu(struct cpdom_ctx *cpdomc) {
-	u64 highest_queued = 0;
-	int pick_cpu = -ENOENT;
-	int cpu, i, j;
+u64 __attribute__((noinline)) pick_most_loaded_dsq(struct cpdom_ctx *cpdomc)
+{
+	u64 pick_dsq_id = -ENOENT;
+	s32 highest_queued = -1;
 
-	if (!per_cpu_dsq)
+	if (!cpdomc) {
+		scx_bpf_error("Invalid cpdom context");
 		return -ENOENT;
+	}
 
-	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-		u64 cpumask = cpdomc->__cpumask[i];
-		bpf_for(j, 0, 64) {
-			if (cpumask & 0x1LLU << j) {
-				u64 queued;
-				cpu = (i * 64) + j;
-				if (cpu >= __nr_cpu_ids)
+	/*
+	 * For simplicity, try to just steal from the (either per-CPU or
+	 * per-domain) DSQs with the highest number of queued_tasks
+	 * in this domain.
+	 */
+	if (use_cpdom_dsq()) {
+		pick_dsq_id = cpdom_to_dsq(cpdomc->id);
+		highest_queued = scx_bpf_dsq_nr_queued(pick_dsq_id);
+	}
+
+	/*
+	 * When tasks on a per-CPU DSQ are not migratable
+	 * (e.g., pinned_slice_ns is on but per_cpu_dsq is not),
+	 * there is no need to check per-CPU DSQs.
+	 */
+	if (is_per_cpu_dsq_migratable()) {
+		int pick_cpu = -ENOENT, cpu, i, j, k;
+
+		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+			u64 cpumask = cpdomc->__cpumask[i];
+			bpf_for(k, 0, 64) {
+				s32 queued;
+				j = cpumask_next_set_bit(&cpumask);
+				if (j < 0)
 					break;
-				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
+				cpu = (i * 64) + j;
+				if (cpu >= nr_cpu_ids)
+					break;
+				queued = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) +
+					 scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
 				if (queued > highest_queued) {
 					highest_queued = queued;
 					pick_cpu = cpu;
 				}
 			}
 		}
+
+		if (pick_cpu != -ENOENT)
+			pick_dsq_id = cpu_to_dsq(pick_cpu);
 	}
 
-	return pick_cpu;
+	return pick_dsq_id;
 }
 
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
-	s64 nuance;
 
 	/*
 	 * Only active domains steal the tasks from other domains.
@@ -243,22 +264,20 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
-	nuance = bpf_get_prandom_u32();
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 
 		/*
-		 * Traverse neighbor in the same distance in arbitrary order.
+		 * Traverse neighbors in the same distance in circular distance order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
-			int pick_cpu;
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
 			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
 
-			cpdom_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
+			cpdom_id = get_neighbor_id(cpdomc, i, j);
 			if (cpdom_id < 0)
 				continue;
 
@@ -271,11 +290,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!READ_ONCE(cpdomc_pick->is_stealee) || !cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
-			if (pick_cpu >= 0)
-				dsq_id = cpu_to_dsq(pick_cpu);
-			else
-				dsq_id = cpdom_to_dsq(cpdom_id);
+			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			/*
 			 * If task stealing is successful, mark the stealer
@@ -315,27 +330,24 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
 	s64 nr_nbr, cpdom_id;
-	s64 nuance;
 
 	/*
 	 * Traverse neighbor compute domains in distance order.
 	 */
-	nuance = bpf_get_prandom_u32();
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 
 		/*
-		 * Traverse neighbor in the same distance in arbitrary order.
+		 * Traverse neighbors in the same distance in circular distance order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = cpdom_id + 1) {
-			int pick_cpu;
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
 			u64 dsq_id;
 			if (j >= nr_nbr)
 				break;
 
-			cpdom_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
+			cpdom_id = get_neighbor_id(cpdomc, i, j);
 			if (cpdom_id < 0)
 				continue;
 
@@ -348,11 +360,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 			if (!cpdomc_pick->is_valid)
 				continue;
 
-			pick_cpu = pick_most_loaded_cpu(cpdomc_pick);
-			if (pick_cpu >= 0)
-				dsq_id = cpu_to_dsq(pick_cpu);
-			else
-				dsq_id = cpdom_to_dsq(cpdom_id);
+			dsq_id = pick_most_loaded_dsq(cpdomc_pick);
 
 			if (consume_dsq(cpdomc_pick, dsq_id))
 				return true;
@@ -366,7 +374,7 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
 	struct task_struct *p;
-	u64 vtime = U64_MAX, dsq_id = cpu_dsq_id;
+	u64 vtime = U64_MAX;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
 	if (!cpdomc) {
@@ -386,26 +394,38 @@ static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 	 * When per_cpu_dsq or pinned_slice_ns is enabled, compare vtimes
 	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
 	 */
-	if (per_cpu_dsq) {
-		bpf_for_each(scx_dsq, p, cpu_dsq_id, 0) {
+	if (use_per_cpu_dsq() && use_cpdom_dsq()) {
+		u64 dsq_id = cpu_dsq_id;
+		u64 backup_dsq_id = cpdom_dsq_id;
+
+		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq_id);
+		if (p)
 			vtime = p->scx.dsq_vtime;
-			break;
+
+		p = __COMPAT_scx_bpf_dsq_peek(cpdom_dsq_id);
+		if (p && p->scx.dsq_vtime < vtime) {
+			dsq_id = cpdom_dsq_id;
+			backup_dsq_id = cpu_dsq_id;
 		}
 
-		bpf_for_each(scx_dsq, p, cpdom_dsq_id, 0) {
-			if (p->scx.dsq_vtime < vtime)
-				dsq_id = cpdom_dsq_id;
-			break;
-		}
-	} else {
-		dsq_id = cpdom_dsq_id;
+		/*
+		 * There is a scenario where the task on the Cpdom DSQ has a
+		 * lower vtime, but this CPU fails to win the race and causes
+		 * the pinned task to stall and wait on the Per-CPU DSQ for the
+		 * next scheduling round. Always try consuming from the other DSQ
+		 * to prevent this scenario.
+		 */
+		if (consume_dsq(cpdomc, dsq_id))
+			return true;
+		if (consume_dsq(cpdomc, backup_dsq_id))
+			return true;
+	} else if (use_cpdom_dsq()) {
+		if (consume_dsq(cpdomc, cpdom_dsq_id))
+			return true;
+	} else if (use_per_cpu_dsq()) {
+		if (consume_dsq(cpdomc, cpu_dsq_id))
+			return true;
 	}
-
-	/*
-	 * Try to consume a task from selected DSQ.
-	 */
-	if (consume_dsq(cpdomc, dsq_id))
-		return true;
 
 	/*
 	 * If there is no task in the assssociated DSQ, traverse neighbor

@@ -40,10 +40,6 @@ use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use log::info;
-use log::trace;
-use log::warn;
-use log::{debug, error};
 use nix::sched::CpuSet;
 use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
@@ -81,6 +77,8 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::VecDeque;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::filter::EnvFilter;
 use walkdir::WalkDir;
 
 const SCHEDULER_NAME: &str = "scx_layered";
@@ -572,6 +570,10 @@ lazy_static! {
 #[derive(Debug, Parser)]
 #[command(verbatim_doc_comment)]
 struct Opts {
+    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Scheduling slice duration in microseconds.
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
@@ -596,10 +598,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output, including libbpf details. Specify multiple
-    /// times to increase verbosity.
-    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    /// Specify the logging level. Accepts rust's envfilter syntax for modular
+    /// logging: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#example-syntax. Examples: ["info", "warn,tokio=info"]
+    #[clap(long, default_value = "info")]
+    log_level: String,
 
     /// Disable topology awareness. When enabled, the "nodes" and "llcs" settings on
     /// a layer are ignored. Defaults to false on topologies with multiple NUMA nodes
@@ -720,6 +722,10 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Optional run ID for tracking scheduler instances.
+    #[clap(long)]
+    run_id: Option<u64>,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -1881,6 +1887,18 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_DSQ_INSERT_BELOW as i32;
                             mt.dsq_insert_below = (*threshold * 10000.0) as u64;
                         }
+                        LayerMatch::NumaNode(node_id) => {
+                            if *node_id as usize >= topo.nodes.len() {
+                                bail!(
+                                    "Spec {:?} has invalid NUMA node ID {} (available nodes: 0-{})",
+                                    spec.name,
+                                    node_id,
+                                    topo.nodes.len() - 1
+                                );
+                            }
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_NUMA_NODE as i32;
+                            mt.numa_node_id = *node_id;
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;
@@ -2403,8 +2421,16 @@ impl<'a> Scheduler<'a> {
         }
 
         // Open the BPF prog first for verification.
+        let debug_level = if opts.log_level.contains("trace") {
+            2
+        } else if opts.log_level.contains("debug") {
+            1
+        } else {
+            0
+        };
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 1);
+        skel_builder.obj_builder.debug(debug_level > 1);
+
         info!(
             "Running scx_layered (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
@@ -2470,7 +2496,7 @@ impl<'a> Scheduler<'a> {
         rodata.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
         rodata.percpu_kthread_preempt_all =
             !opts.disable_percpu_kthread_preempt && opts.percpu_kthread_preempt_all;
-        rodata.debug = opts.verbose as u32;
+        rodata.debug = debug_level as u32;
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
@@ -2986,7 +3012,7 @@ impl<'a> Scheduler<'a> {
     // first free LLCs from layers that shrunk from last recomputation, then
     // distribute freed LLCs to growing layers, and then spill over remaining
     // cores in free LLCs.
-    fn recompute_layer_core_order(&mut self, layer_targets: &Vec<(usize, usize)>) {
+    fn recompute_layer_core_order(&mut self, layer_targets: &Vec<(usize, usize)>) -> Result<bool> {
         // Collect freed LLCs from shrinking layers.
         debug!(
             " free: before pass: free_llcs={:?}",
@@ -3089,6 +3115,7 @@ impl<'a> Scheduler<'a> {
                 let avail = cpus_per_llc - free_vec[i].1;
                 // The amount we'll use.
                 let mut used = extra.min(avail);
+                let cores_to_add = used;
 
                 let shift = free_vec[i].1;
                 free_vec[i].1 += used;
@@ -3097,14 +3124,14 @@ impl<'a> Scheduler<'a> {
                 let llc = self.topo.all_llcs.get(&llc_id).unwrap();
 
                 for core in llc.cores.iter().skip(shift) {
-                    core_order.push(core.1.id);
                     if used == 0 {
                         break;
                     }
+                    core_order.push(core.1.id);
                     used -= 1;
                 }
 
-                extra -= used;
+                extra -= cores_to_add;
                 if extra == 0 {
                     break;
                 }
@@ -3140,6 +3167,105 @@ impl<'a> Scheduler<'a> {
                 layer.name, layer.core_order
             );
         }
+
+        // Apply CPU changes directly for StickyDynamic layers
+        // Do this in two phases: first free all CPUs, then allocate all CPUs
+        // This ensures freed CPUs are available for reallocation
+        let mut updated = false;
+
+        // Calculate target CPUs for all layers and free excess CPUs
+        for &(idx, _) in layer_targets.iter() {
+            let layer = &mut self.layers[idx];
+
+            if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
+                continue;
+            }
+
+            // Calculate new cpumask based on core_order (which includes both assigned LLCs and spillover cores)
+            let mut new_cpus = Cpumask::new();
+            for &core_id in &layer.core_order {
+                if let Some(core) = self.topo.all_cores.get(&core_id) {
+                    new_cpus |= &core.span;
+                }
+            }
+
+            // Intersect with allowed_cpus
+            new_cpus &= &layer.allowed_cpus;
+
+            // Determine CPUs to free (old cpus not in new cpus)
+            let cpus_to_free = layer.cpus.clone().and(&new_cpus.clone().not());
+
+            if cpus_to_free.weight() > 0 {
+                debug!(
+                    " apply: layer={} freeing CPUs: {}",
+                    layer.name, cpus_to_free
+                );
+                // Update layer state and free
+                layer.cpus &= &cpus_to_free.not();
+                layer.nr_cpus -= cpus_to_free.weight();
+                for cpu in cpus_to_free.iter() {
+                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                }
+                self.cpu_pool.free(&cpus_to_free)?;
+                updated = true;
+            }
+        }
+
+        // Allocate needed CPUs to all layers
+        for &(idx, _) in layer_targets.iter() {
+            let layer = &mut self.layers[idx];
+
+            if layer.growth_algo != LayerGrowthAlgo::StickyDynamic {
+                continue;
+            }
+
+            // Recalculate target CPUs
+            let mut new_cpus = Cpumask::new();
+            for &core_id in &layer.core_order {
+                if let Some(core) = self.topo.all_cores.get(&core_id) {
+                    new_cpus |= &core.span;
+                }
+            }
+            new_cpus &= &layer.allowed_cpus;
+
+            // Determine CPUs to allocate (new cpus not in old cpus, and whether they are available)
+            let available_cpus = self.cpu_pool.available_cpus();
+            let desired_to_alloc = new_cpus.clone().and(&layer.cpus.clone().not());
+            let cpus_to_alloc = desired_to_alloc.clone().and(&available_cpus);
+
+            if desired_to_alloc.weight() > cpus_to_alloc.weight() {
+                debug!(
+                    " apply: layer={} wanted to alloc {} CPUs but only {} available",
+                    layer.name,
+                    desired_to_alloc.weight(),
+                    cpus_to_alloc.weight()
+                );
+            }
+
+            if cpus_to_alloc.weight() > 0 {
+                debug!(
+                    " apply: layer={} allocating CPUs: {}",
+                    layer.name, cpus_to_alloc
+                );
+                // Update layer state and free
+                layer.cpus |= &cpus_to_alloc;
+                layer.nr_cpus += cpus_to_alloc.weight();
+                for cpu in cpus_to_alloc.iter() {
+                    layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+                }
+                self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
+                updated = true;
+            }
+
+            debug!(
+                " apply: layer={} final cpus.weight()={} nr_cpus={}",
+                layer.name,
+                layer.cpus.weight(),
+                layer.nr_cpus
+            );
+        }
+
+        Ok(updated)
     }
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
@@ -3152,7 +3278,20 @@ impl<'a> Scheduler<'a> {
         let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
-        self.recompute_layer_core_order(&ascending);
+        let sticky_dynamic_updated = self.recompute_layer_core_order(&ascending)?;
+        updated |= sticky_dynamic_updated;
+
+        // Update BPF cpumasks for StickyDynamic layers if they were updated
+        if sticky_dynamic_updated {
+            for (idx, layer) in self.layers.iter().enumerate() {
+                if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
+                    Self::update_bpf_layer_cpumask(
+                        layer,
+                        &mut self.skel.maps.bss_data.as_mut().unwrap().layers[idx],
+                    );
+                }
+            }
+        }
 
         // If any layer is growing, guarantee that the largest layer that is
         // freeing CPUs frees at least one CPU.
@@ -3168,6 +3307,11 @@ impl<'a> Scheduler<'a> {
         for &(idx, target) in ascending.iter().rev() {
             let layer = &mut self.layers[idx];
             if layer_is_open(layer) {
+                continue;
+            }
+
+            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
@@ -3224,6 +3368,11 @@ impl<'a> Scheduler<'a> {
             let layer = &mut self.layers[idx];
 
             if layer_is_open(layer) {
+                continue;
+            }
+
+            // Skip StickyDynamic layers as they are managed in recompute_layer_core_order
+            if layer.growth_algo == LayerGrowthAlgo::StickyDynamic {
                 continue;
             }
 
@@ -4122,9 +4271,8 @@ fn setup_membw_tracking(skel: &mut OpenBpfSkel) -> Result<u64> {
     Ok(config)
 }
 
-fn main() -> Result<()> {
-    let opts = Opts::parse();
-
+#[clap_main::clap_main]
+fn main(opts: Opts) -> Result<()> {
     if opts.version {
         println!(
             "scx_layered {}",
@@ -4136,6 +4284,35 @@ fn main() -> Result<()> {
     if opts.help_stats {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
+    }
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| match EnvFilter::try_new(&opts.log_level) {
+            Ok(filter) => Ok(filter),
+            Err(e) => {
+                eprintln!(
+                    "invalid log envvar: {}, using info, err is: {}",
+                    opts.log_level, e
+                );
+                EnvFilter::try_new("info")
+            }
+        })
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .try_init()
+    {
+        Ok(()) => {}
+        Err(e) => eprintln!("failed to init logger: {}", e),
+    }
+
+    if opts.verbose > 0 {
+        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
     }
 
     if opts.no_load_frac_limit {
@@ -4151,26 +4328,11 @@ fn main() -> Result<()> {
         warn!("--local_llc_iteration is deprecated and noop");
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
-    };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_offset_to_local()
-        .expect("Failed to set local time offset")
-        .set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
-
     debug!("opts={:?}", &opts);
+
+    if let Some(run_id) = opts.run_id {
+        info!("scx_layered run_id: {}", run_id);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();

@@ -43,7 +43,6 @@
 
 #include <scx/bpf_arena_common.bpf.h>
 #include <scx/bpf_arena_spin_lock.h>
-#include <scx/ravg_impl.bpf.h>
 
 #include <lib/arena.h>
 #include <lib/cpumask.h>

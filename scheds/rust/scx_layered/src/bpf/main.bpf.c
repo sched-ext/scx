@@ -743,7 +743,7 @@ int save_gpu_tgid_pid(void) {
 	struct task_ctx *taskc, *parent;
 	u64 pid_tgid;
 	u32 pid, tid;
-	u64 timestamp = 0;
+	u64 timestamp = MEMBER_INVALID;
 
 	pid_tgid = bpf_get_current_pid_tgid();
 	pid = pid_tgid >> 32;
@@ -2605,15 +2605,18 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 				last_used = bpf_map_lookup_elem(&gpu_tgid, &key);
 
 			/* If not found, we want the used predicate to be required false. */
-			if (!last_used)
+			if (!last_used || *last_used == MEMBER_INVALID)
 				return !must_be_used;
 
 			/*
 			 * If the last kprobe fire was more than member_expire_ms ago, timestamp is stale.
 			 * Mark us as expired to trigger a rematch if we fire off any GPU kprobes.
+			 *
+			 * NOTE: member_expire_ms=0 means "never expire", so skip the expiration check.
 			 */
 			recently_used = true;
-			if (taskc && taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
+			if (layer->member_expire_ms > 0 && taskc &&
+				taskc->recheck_layer_membership != MEMBER_NOEXPIRE &&
 				taskc->recheck_layer_membership != MEMBER_CANTMATCH &&
 				(*last_used) + layer->member_expire_ms * 1000 * 1000 < now) {
 
@@ -2691,6 +2694,21 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 			return false;
 
 		return layer_dsq_insert_ewma[layer->id] < info->dsq_insert_below;
+	}
+	case MATCH_NUMA_NODE: {
+		struct node_ctx *nodec;
+		const struct cpumask *node_cpumask;
+
+		/* Get the NUMA node context */
+		if (!(nodec = lookup_node_ctx(match->numa_node_id)))
+			return false;
+
+		/* Get the node's CPU mask */
+		if (!(node_cpumask = cast_mask(nodec->cpumask)))
+			return false;
+
+		/* Check if task's affinity is a subset of the NUMA node's CPUs */
+		return bpf_cpumask_subset(p->cpus_ptr, node_cpumask);
 	}
 
 	default:
@@ -3445,6 +3463,13 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
+	/* 
+	 * Necessary for GPU membership logic. The field is overwritten during 
+	 * .running() and read during .stopping(), so this value is only visible
+	 * from the GPU membership kprobes.
+	 */
+	taskc->running_at = MEMBER_INVALID;
+
 	/*
 	 * Start runtime_avg at some arbitrary sane-ish value. If this becomes a
 	 * problem, we can track per-parent avg new task initial runtime avg and
@@ -3909,6 +3934,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_DSQ_INSERT_BELOW:
 				dbg("%s DSQ_INSERT_BELOW %llu", header, match->dsq_insert_below);
+				break;
+			case MATCH_NUMA_NODE:
+				dbg("%s MATCH_NUMA_NODE %llu", header, match->numa_node_id);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

@@ -5,6 +5,8 @@
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.bpf.h>
 
+#include <lib/rbtree.h>
+
 #include "selftest.h"
 
 SEC("syscall")
@@ -21,6 +23,12 @@ int arena_selftest(void)
 	ret = scx_selftest_atq();
 	if (ret) {
 		bpf_printk("scx_selftest_atq failed with %d", ret);
+		return ret;
+	}
+
+	ret = scx_selftest_dhq();
+	if (ret) {
+		bpf_printk("scx_selftest_dhq failed with %d", ret);
 		return ret;
 	}
 

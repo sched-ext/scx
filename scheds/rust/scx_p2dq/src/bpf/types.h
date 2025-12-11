@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lib/atq.h>
+#include <lib/dhq.h>
 #include <lib/minheap.h>
 
 /*
@@ -28,9 +29,10 @@ struct p2dq_timer {
 };
 
 /* cpu_ctx flag bits */
-#define CPU_CTX_F_INTERACTIVE	(1 << 0)
-#define CPU_CTX_F_IS_BIG	(1 << 1)
-#define CPU_CTX_F_NICE_TASK	(1 << 2)
+#define CPU_CTX_F_INTERACTIVE		(1 << 0)
+#define CPU_CTX_F_IS_BIG		(1 << 1)
+#define CPU_CTX_F_NICE_TASK		(1 << 2)
+#define CPU_CTX_F_CLEAN_AFFN_DSQ	(1 << 3)
 
 /* Helper macros for cpu_ctx flags */
 #define cpu_ctx_set_flag(cpuc, flag)	((cpuc)->flags |= (flag))
@@ -44,15 +46,18 @@ struct cpu_ctx {
 	u64				slice_ns;
 	u32				core_id;
 	u32				dsq_index;
-	u32				perf;
+	u32				perf;  /* Thermal pressure (0-1024, 0=no throttling, 1024=max capacity lost) */
 	u32				flags;  /* Bitmask for interactive, is_big, nice_task */
 	u64				ran_for;
 	u32				node_id;
 	u64				mig_dsq;
 	u64				llc_dsq;
 	u64				max_load_dsq;
+	u32				running_weight;  /* Weight of currently running task */
 
 	scx_atq_t			*mig_atq;
+	scx_dhq_t			*mig_dhq;
+	u64				dhq_strand;  /* Which DHQ strand (A or B) for this CPU's LLC */
 };
 
 /* llc_ctx state flag bits */
@@ -97,11 +102,17 @@ struct llc_ctx {
 	u64				intr_load;
 	u32				state_flags;  /* Bitmask for saturated and other state */
 
+	/* PELT (Per-Entity Load Tracking) aggregate fields */
+	u64				util_avg;       /* Aggregate utilization average */
+	u64				load_avg;       /* Aggregate load average */
+	u64				intr_util_avg;  /* Interactive task utilization average */
+	u64				affn_util_avg;  /* Affinitized task utilization average */
+
 	/*
 	 * Hot atomic field #3: idle lock - frequently contended in idle CPU selection
 	 * Separate cache line from load counters above
 	 */
-	char				__pad3[CACHE_LINE_SIZE - 3*sizeof(u64) - sizeof(u32)];
+	char				__pad3[CACHE_LINE_SIZE - 7*sizeof(u64) - sizeof(u32)];
 	arena_spinlock_t		idle_lock;
 
 	/*
@@ -116,8 +127,10 @@ struct llc_ctx {
 	struct bpf_cpumask __kptr	*tmp_cpumask;
 
 	scx_atq_t			*mig_atq;
+	scx_dhq_t			*mig_dhq;
+	u64				dhq_strand;  /* Which DHQ strand (A or B) for this LLC */
 	scx_minheap_t			*idle_cpu_heap;
-};
+} __attribute__((aligned(CACHE_LINE_SIZE)));
 
 struct node_ctx {
 	u32				id;
@@ -130,6 +143,7 @@ struct node_ctx {
 #define TASK_CTX_F_WAS_NICE	(1 << 1)
 #define TASK_CTX_F_IS_KWORKER	(1 << 2)
 #define TASK_CTX_F_ALL_CPUS	(1 << 3)
+#define TASK_CTX_F_FORKNOEXEC	(1 << 4)
 
 /* Helper macros for task_ctx flags */
 #define task_ctx_set_flag(taskc, flag)		((taskc)->flags |= (flag))
@@ -137,6 +151,23 @@ struct node_ctx {
 #define task_ctx_test_flag(taskc, flag)		((taskc)->flags & (flag))
 
 struct task_p2dq {
+	/*
+	 * Do NOT change the position of common. It should be at the beginning
+	 * of the task_ctx.
+	 */
+	struct scx_task_common	common;
+	s32			pid;
+
+	/*
+	 * PELT (Per-Entity Load Tracking) fields.
+	 * Placed early in the structure (low offset) to help BPF verifier
+	 * track arena pointer through complex control flow.
+	 */
+	u64			pelt_last_update_time;
+	u32			util_sum;
+	u32			util_avg;
+	u32			period_contrib;
+
 	u64			dsq_id;
 	u64			slice_ns;
 	int			dsq_index;
@@ -149,7 +180,10 @@ struct task_p2dq {
 	u64			llc_runs; /* how many runs on the current LLC */
 	u64			enq_flags;
 	int			last_dsq_index;
-	u32			flags;  /* Bitmask for interactive, was_nice, is_kworker, all_cpus */
+	u32			flags;  /* Bitmask for interactive, was_nice, is_kworker, all_cpus, forknoexec */
+
+	/* Fork/exec balancing fields */
+	u32			target_llc_hint; /* Target LLC for initial placement (MAX_LLCS = none) */
 };
 
 typedef struct task_p2dq __arena task_ctx;
@@ -160,6 +194,7 @@ enum enqueue_promise_kind {
 	P2DQ_ENQUEUE_PROMISE_FIFO,
 	P2DQ_ENQUEUE_PROMISE_ATQ_VTIME,
 	P2DQ_ENQUEUE_PROMISE_ATQ_FIFO,
+	P2DQ_ENQUEUE_PROMISE_DHQ_VTIME,
 	P2DQ_ENQUEUE_PROMISE_FAILED,
 };
 
@@ -178,6 +213,16 @@ struct enqueue_promise_fifo {
 	u64	slice_ns;
 
 	scx_atq_t	*atq;
+};
+
+struct enqueue_promise_dhq {
+	u64	dsq_id;
+	u64	enq_flags;
+	u64	slice_ns;
+	u64	vtime;
+	u64	strand;
+
+	scx_dhq_t	*dhq;
 };
 
 /* enqueue_promise flag bits */
@@ -200,5 +245,6 @@ struct enqueue_promise {
 	union {
 		struct enqueue_promise_vtime	vtime;
 		struct enqueue_promise_fifo	fifo;
+		struct enqueue_promise_dhq	dhq;
 	};
 };

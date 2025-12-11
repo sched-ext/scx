@@ -762,7 +762,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		cpu = pick_idle_cpu(p, prev_cpu, 0, true);
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
-			wakeup_cpu(cpu);
+			if (cpu != prev_cpu || !scx_bpf_task_running(p))
+				wakeup_cpu(cpu);
 			return;
 		}
 	}
@@ -773,7 +774,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!is_system_busy()) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
-		wakeup_cpu(prev_cpu);
+		if (!__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p))
+			wakeup_cpu(prev_cpu);
 		return;
 	}
 
@@ -786,7 +788,8 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	scx_bpf_dsq_insert_vtime(p, shared_dsq(prev_cpu),
 				 task_slice(p), task_dl(p, tctx), enq_flags);
-	wakeup_cpu(prev_cpu);
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p))
+		wakeup_cpu(prev_cpu);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)

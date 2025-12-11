@@ -1,15 +1,22 @@
 [package]
 name = "scx_lavd"
-version = "1.0.18"
+version = "1.0.20"
 authors = ["Changwoo Min <changwoo@igalia.com>", "Igalia"]
 edition = "2021"
 description = "A Latency-criticality Aware Virtual Deadline (LAVD) scheduler based on sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
+[package.metadata.scx.ci.kernel]
+blocklist = [
+  "stable/6_12" # https://github.com/sched-ext/scx/issues/3046
+]
+
 [dependencies]
+scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.3" }
 anyhow = "1.0.65"
 bitvec = { version = "1.0", features = ["serde"] }
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
+clap_main = "0.2.9"
 clap-num = { version = "1.2.0" }
 crossbeam = "0.8.4"
 ctrlc = { version = "3.1", features = ["termination"] }
@@ -17,13 +24,13 @@ hex = "0.4.3"
 itertools = "0.13.0"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
-log = "0.4.17"
 ordered-float = "3.4.0"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.18" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.18" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.23", features = ["autopower"] }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.20" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.20" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25", features = ["autopower"] }
 serde = { version = "1.0.215", features = ["derive"] }
-simplelog = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
 static_assertions = "1.1.0"
 plain = "0.2.3"
 gpoint = "0.2"
@@ -32,7 +39,7 @@ rlimit = "0.10.2"
 nix = "0.30.1"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.23" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
 
 [features]
 enable_backtrace = []

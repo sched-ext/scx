@@ -17,10 +17,8 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #endif
 
 char _license[] SEC("license") = "GPL";
@@ -1164,7 +1162,12 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
-	cidx = tctx->cell;
+	/*
+	 * Use CPU's cell (not task's cell) to match dispatch() logic.
+	 * Prevents starvation when a task is pinned outside its cell.
+	 * E.g. a cell 0 kworker pinned to a cell 1 CPU.
+	 */
+	cidx = cctx->cell;
 	if (!(cell = lookup_cell(cidx)))
 		return;
 

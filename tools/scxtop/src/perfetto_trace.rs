@@ -407,7 +407,7 @@ impl PerfettoTraceManager {
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_lat_events.remove(dsq) {
                 for dsq_lat_event in events {
-                    let ts: u64 = timestamp_absolute_us(&dsq_lat_event) as u64 / 1_000;
+                    let ts: u64 = timestamp_absolute_us(&dsq_lat_event) as u64 * 1_000;
                     self.trace.packet.push(TracePacket {
                         data: Some(trace_packet::Data::TrackEvent(dsq_lat_event)),
                         timestamp: Some(ts),
@@ -427,7 +427,7 @@ impl PerfettoTraceManager {
         for dsq in &trace_dsqs {
             if let Some(events) = self.dsq_nr_queued_events.remove(dsq) {
                 for dsq_nr_queued_event in events {
-                    let ts: u64 = timestamp_absolute_us(&dsq_nr_queued_event) as u64 / 1_000;
+                    let ts: u64 = timestamp_absolute_us(&dsq_nr_queued_event) as u64 * 1_000;
                     self.trace.packet.push(TracePacket {
                         data: Some(trace_packet::Data::TrackEvent(dsq_nr_queued_event)),
                         timestamp: Some(ts),
@@ -459,7 +459,7 @@ impl PerfettoTraceManager {
         for events in self.mem_events.values_mut() {
             let mem_sequence_id = self.rng.next_u32();
             for mem_event in events.drain(..) {
-                let ts: u64 = timestamp_absolute_us(&mem_event) as u64 / 1_000;
+                let ts: u64 = timestamp_absolute_us(&mem_event) as u64 * 1_000;
                 self.trace.packet.push(TracePacket {
                     data: Some(trace_packet::Data::TrackEvent(mem_event)),
                     timestamp: Some(ts),

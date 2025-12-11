@@ -1,5 +1,7 @@
 #pragma once
 
+#include <lib/cpumask.h>
+
 struct topology;
 typedef struct topology __arena * topo_ptr;
 
@@ -30,6 +32,7 @@ extern volatile topo_ptr topo_all;
 
 int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id);
 int topo_contains(topo_ptr topo, u32 cpu);
+int topo_cpu_to_llc_id(u32 cpu);
 
 u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level);
 #define topo_mask_level(topo, level) ((scx_bitmap_t) topo_mask_level_internal((topo), (level)))
@@ -78,3 +81,6 @@ static inline int topo_iter_start(struct topo_iter *iter)
 #define TOPO_FOR_EACH_CPU(_iter, _topo) TOPO_FOR_EACH_LEVEL((_iter), (_topo), TOPO_CPU)
 
 extern u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
+extern int nr_topo_nodes[TOPO_MAX_LEVEL];
+
+#define TOPO_NR(type) nr_topo_nodes[TOPO_##type - 1]

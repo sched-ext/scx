@@ -79,7 +79,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 
 	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
-	c->duration = time_delta(c->now, sys_stat.last_update_clk);
+	c->duration = time_delta(c->now, sys_stat.last_update_clk)? : 1;
 	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
@@ -93,25 +93,31 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	 * Collect statistics for each compute domain.
 	 */
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
-		int i, j;
+		int i, j, k;
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cpdomc->cur_util_sum = 0;
 		cpdomc->avg_util_sum = 0;
-		cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
-		if (per_cpu_dsq) {
-			bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-				u64 cpumask = cpdomc->__cpumask[i];
-				bpf_for(j, 0, 64) {
-					if (cpumask & 0x1LLU << j) {
-						cpu = (i * 64) + j;
-						if (cpu >= __nr_cpu_ids)
-							break;
-						cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
-					}
-				}
+		cpdomc->nr_queued_task = 0;
+
+		if (use_cpdom_dsq())
+			cpdomc->nr_queued_task = scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpdom_id));
+
+		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+			u64 cpumask = cpdomc->__cpumask[i];
+			bpf_for(k, 0, 64) {
+				j = cpumask_next_set_bit(&cpumask);
+				if (j < 0)
+					break;
+				cpu = (i * 64) + j;
+				if (cpu >= nr_cpu_ids)
+					break;
+
+				cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+				if (use_per_cpu_dsq())
+					cpdomc->nr_queued_task += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu));
 			}
 		}
 
@@ -126,7 +132,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	 * when the verifier gets smarter, we can merge phases 1 and 2
 	 * into one.
 	 */
-	bpf_for(cpu, 0, __nr_cpu_ids) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;
@@ -207,7 +213,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Collect statistics for each CPU (phase 2).
 	 */
-	bpf_for(cpu, 0, __nr_cpu_ids) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;
@@ -242,7 +248,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				cpuc->idle_total += time_delta(c->now, old_clk);
+				u64 duration = time_delta(c->now, old_clk);
+
+				__sync_fetch_and_add(&cpuc->idle_total, duration);
 				break;
 			}
 		}
@@ -260,6 +268,15 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			cpdomc->cur_util_sum += cpuc->cur_util;
 			cpdomc->avg_util_sum += cpuc->avg_util;
 		}
+
+		/*
+		 * cpuc->cur_stolen_est is only an estimate of the time stolen by
+		 * irq/steal during execution times. We extropolate that ratio to
+		 * the rest of CPU time as an approximation.
+		 */
+		cpuc->cur_stolen_est = (cpuc->stolen_time_est << LAVD_SHIFT) / compute;
+		cpuc->avg_stolen_est = calc_asym_avg(cpuc->avg_stolen_est, cpuc->cur_stolen_est);
+		cpuc->stolen_time_est = 0;
 
 		/*
 		 * Accmulate system-wide idle time.

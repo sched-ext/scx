@@ -33,6 +33,7 @@ mod stats;
 mod symbol_data;
 mod theme;
 mod thread_data;
+pub mod topology;
 pub mod tracer;
 mod tui;
 pub mod util;

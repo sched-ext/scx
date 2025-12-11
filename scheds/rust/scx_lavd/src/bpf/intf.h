@@ -21,28 +21,11 @@ typedef signed long s64;
 
 typedef int pid_t;
 
-#define U64_MAX ((u64)~0ULL)
-
 enum {
 	TASK_COMM_LEN = 16,
-	SCX_SLICE_INF = U64_MAX,
 };
 
-#define __kptr
 #endif
-
-#ifdef __VMLINUX_H__
-#define MAX_NICE	19
-#define MIN_NICE	-20
-#define NICE_WIDTH	(MAX_NICE - MIN_NICE + 1)
-#define MAX_RT_PRIO	100
-
-struct bpf_iter_task;
-extern int bpf_iter_task_new(struct bpf_iter_task *it,
-		struct task_struct *task, unsigned int flags) __weak __ksym;
-extern struct task_struct *bpf_iter_task_next(struct bpf_iter_task *it) __weak __ksym;
-extern void bpf_iter_task_destroy(struct bpf_iter_task *it) __weak __ksym;
-#endif /* __KERNEL__ */
 
 /*
  * common constants
@@ -59,28 +42,6 @@ enum {
 						 {HI: performance-Hungry, performance-Insensitive}
 						 {BT: Big, liTtle}
 						 {EG: Eligible, Greedy} */
-};
-
-/*
- *  DSQ (dispatch queue) IDs are 64bit of the format:
- *  Lower 63 bits are reserved by users
- *
- *   Bits: [63] [62 .. 14] [13 .. 12] [11 .. 0]
- *         [ B] [    R   ] [    T   ] [   ID  ]
- *
- *    B: Sched_ext built-in ID bit, see include/linux/sched/ext.h
- *    R: Reserved
- *    T: Type of LAVD DSQ
- *   ID: DSQ ID
- */
-enum {
-	LAVD_DSQ_TYPE_SHFT		= 12,
-	LAVD_DSQ_TYPE_MASK		= 0x3 << LAVD_DSQ_TYPE_SHFT,
-	LAVD_DSQ_ID_SHFT		= 0,
-	LAVD_DSQ_ID_MASK		= 0xfff << LAVD_DSQ_ID_SHFT,
-	LAVD_DSQ_NR_TYPES		= 2,
-	LAVD_DSQ_TYPE_CPDOM		= 1,
-	LAVD_DSQ_TYPE_CPU		= 0,
 };
 
 /*
@@ -120,71 +81,36 @@ struct sys_stat {
 };
 
 /*
- * Task context
- */
-struct task_ctx {
-	/*
-	 * Clocks when a task state transition happens for task statistics calculation
-	 */
-	u64	last_runnable_clk;	/* last time when a task became runnable */
-	u64	last_running_clk;	/* last time when scheduled in */
-	u64	last_measured_clk;	/* last time when running time was measured */
-	u64	last_stopping_clk;	/* last time when scheduled out */
-	u64	last_quiescent_clk;	/* last time when a task became asleep */
-
-	/*
-	 * Task running statistics for latency criticality calculation
-	 */
-	u64	acc_runtime;		/* accmulated runtime from runnable to quiescent state */
-	u64	avg_runtime;		/* average runtime per schedule */
-	u64	run_freq;		/* scheduling frequency in a second */
-	u64	wait_freq;		/* waiting frequency in a second */
-	u64	wake_freq;		/* waking-up frequency in a second */
-	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
-	u32	prev_cpu_id;		/* where a task ran last time */
-
-	/*
-	 * Task deadline and time slice
-	 */
-	u32	lat_cri;		/* final context-aware latency criticality */
-	u32	lat_cri_waker;		/* waker's latency criticality */
-	u32	perf_cri;		/* performance criticality of a task */
-	u64	slice;			/* time slice */
-
-	/*
-	 * Task status
-	 */
-	volatile u64	flags;		/* LAVD_FLAG_* */
-	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
-
-	/*
-	 * Additional information when the scheduler is monitored,
-	 * so it is updated only when is_monitored is true.
-	 */
-	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
-	u32	cpu_id;			/* where a task is running now */
-	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
-	pid_t	waker_pid;		/* last waker's PID */
-	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
-};
-
-/*
- * Task's extra context for report
+ * Task information for report
  */
 struct task_ctx_x {
-	pid_t	pid;
+	pid_t	pid;			/* pid for this task */
 	char	comm[TASK_COMM_LEN + 1];
 	char	stat[LAVD_STATUS_STR_LEN + 1];
+	u32	cpu_id;			/* where a task is running now */
+	u32	prev_cpu_id;		/* where a task ran last time */
+	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
+	pid_t	waker_pid;		/* last waker's PID */
+	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
+	u64	slice;		/* base time slice */
+	u32	lat_cri;		/* final context-aware latency criticality */
+	u32	avg_lat_cri;	/* average latency criticality */
 	u16	static_prio;	/* nice priority */
+	u64	rerunnable_interval;	/* rerunnable interval in ns: [last quiescent, last runnable] */
+	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
+	u64	run_freq;		/* scheduling frequency in a second */
+	u64	avg_runtime;		/* average runtime per schedule */
+	u64	wait_freq;		/* waiting frequency in a second */
+	u64	wake_freq;		/* waking-up frequency in a second */
+	u32	perf_cri;		/* performance criticality of a task */
+	u32	thr_perf_cri;	/* performance criticality threshold */
+	u32	cpuperf_cur;	/* CPU's current performance target */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
-	u64	rerunnable_interval;	/* rerunnable interval in ns: [last quiescent, last runnable] */
-	u32	thr_perf_cri;	/* performance criticality threshold */
-	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
-	u32	cpuperf_cur;	/* CPU's current performance target */
 	u64	dsq_id;		/* CPU's associated DSQ */
 	u64	dsq_consume_lat; /* DSQ's consume latency */
+	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
 };
 
 
@@ -211,7 +137,6 @@ struct msg_hdr {
 
 struct msg_task_ctx {
 	struct msg_hdr		hdr;
-	struct task_ctx		taskc;
 	struct task_ctx_x	taskc_x;
 };
 
