@@ -46,6 +46,9 @@ use bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use bpf_intf::stat_idx_P2DQ_STAT_DISPATCH_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
+use bpf_intf::stat_idx_P2DQ_STAT_EAS_BIG_SELECT;
+use bpf_intf::stat_idx_P2DQ_STAT_EAS_FALLBACK;
+use bpf_intf::stat_idx_P2DQ_STAT_EAS_LITTLE_SELECT;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_CPU;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_INTR;
 use bpf_intf::stat_idx_P2DQ_STAT_ENQ_LLC;
@@ -59,6 +62,8 @@ use bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
 use bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
 use bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
+use bpf_intf::stat_idx_P2DQ_STAT_THERMAL_AVOID;
+use bpf_intf::stat_idx_P2DQ_STAT_THERMAL_KICK;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
@@ -154,6 +159,12 @@ impl<'a> Scheduler<'a> {
             https://github.com/sched-ext/scx/issues/new?labels=scx_p2dq&title=scx_p2dq:%20New%20Issue&assignees=hodgesds&body=Kernel%20version:%20(fill%20me%20out)%0ADistribution:%20(fill%20me%20out)%0AHardware:%20(fill%20me%20out)%0A%0AIssue:%20(fill%20me%20out)"
         )?;
 
+        // Disable autoload for thermal pressure tracepoint by default
+        // Will be conditionally enabled if kernel supports it
+        // Note: This tracepoint only exists on ARM/ARM64 architectures
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        open_skel.progs.on_thermal_pressure.set_autoload(false);
+
         // Apply hardware-specific optimizations before macro
         let hw_profile = scx_p2dq::HardwareProfile::detect();
         let mut opts_optimized = opts.clone();
@@ -168,6 +179,41 @@ impl<'a> Scheduler<'a> {
             debug_level,
             &hw_profile
         )?;
+
+        // Thermal pressure tracking (ARM/ARM64 only)
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        {
+            let thermal_enabled = std::path::Path::new(
+                "/sys/kernel/tracing/events/thermal_pressure/hw_pressure_update",
+            )
+            .exists()
+                || std::path::Path::new(
+                    "/sys/kernel/debug/tracing/events/thermal_pressure/hw_pressure_update",
+                )
+                .exists();
+
+            if thermal_enabled {
+                debug!(
+                    "Kernel supports thermal pressure tracking, enabling hw_pressure_update tracepoint"
+                );
+                open_skel.progs.on_thermal_pressure.set_autoload(true);
+                stats::set_thermal_tracking_enabled(true);
+
+                open_skel
+                    .maps
+                    .rodata_data
+                    .as_mut()
+                    .unwrap()
+                    .p2dq_config
+                    .thermal_enabled = std::mem::MaybeUninit::new(true);
+            } else {
+                debug!("Kernel does not support thermal pressure tracking (CONFIG_SCHED_HW_PRESSURE not enabled)");
+            }
+        }
+
+        if opts_optimized.enable_eas {
+            stats::set_eas_enabled(true);
+        }
 
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
@@ -235,6 +281,11 @@ impl<'a> Scheduler<'a> {
             exec_balance: stats[stat_idx_P2DQ_STAT_EXEC_BALANCE as usize],
             fork_same_llc: stats[stat_idx_P2DQ_STAT_FORK_SAME_LLC as usize],
             exec_same_llc: stats[stat_idx_P2DQ_STAT_EXEC_SAME_LLC as usize],
+            thermal_kick: stats[stat_idx_P2DQ_STAT_THERMAL_KICK as usize],
+            thermal_avoid: stats[stat_idx_P2DQ_STAT_THERMAL_AVOID as usize],
+            eas_little_select: stats[stat_idx_P2DQ_STAT_EAS_LITTLE_SELECT as usize],
+            eas_big_select: stats[stat_idx_P2DQ_STAT_EAS_BIG_SELECT as usize],
+            eas_fallback: stats[stat_idx_P2DQ_STAT_EAS_FALLBACK as usize],
         }
     }
 
