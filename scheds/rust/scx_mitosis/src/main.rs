@@ -5,8 +5,8 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
-mod stats;
 mod mitosis_topology_utils;
+mod stats;
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -202,18 +202,17 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
-  fn validate_args(opts: &Opts) -> Result<()> {
-      if opts.enable_work_stealing && !opts.enable_llc_awareness {
-          bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
-      }
+    fn validate_args(opts: &Opts) -> Result<()> {
+        if opts.enable_work_stealing && !opts.enable_llc_awareness {
+            bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
+        }
 
-      if opts.steal_throttle.is_some() && !opts.enable_work_stealing {
-          bail!("--steal-throttle requires --enable-work-stealing");
-      }
+        if opts.steal_throttle.is_some() && !opts.enable_work_stealing {
+            bail!("--steal-throttle requires --enable-work-stealing");
+        }
 
-
-      Ok(())
-  }
+        Ok(())
+    }
 
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         Self::validate_args(opts)?;
@@ -263,10 +262,18 @@ impl<'a> Scheduler<'a> {
 
         let mut skel = scx_ops_load!(skel, mitosis, uei)?;
         // Populate CPU to LLC map
-        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::CpuToLLC, None)?;
+        mitosis_topology_utils::populate_topology_maps(
+            &mut skel,
+            mitosis_topology_utils::MapKind::CpuToLLC,
+            None,
+        )?;
 
         // Populate LLC to CPUs map
-        mitosis_topology_utils::populate_topology_maps( &mut skel, mitosis_topology_utils::MapKind::LLCToCpus, None)?;
+        mitosis_topology_utils::populate_topology_maps(
+            &mut skel,
+            mitosis_topology_utils::MapKind::LLCToCpus,
+            None,
+        )?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

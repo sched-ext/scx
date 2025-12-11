@@ -17,14 +17,6 @@
 typedef u32 llc_id_t;
 #define LLC_INVALID ((llc_id_t)~0u)
 
-/* Work stealing statistics map - accessible from both BPF and userspace */
-struct steal_stats_map {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u64);
-	__uint(max_entries, 1);
-};
-
 // A CPU -> LLC cache ID map
 struct cpu_to_llc_map {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -42,7 +34,6 @@ struct llc_to_cpus_map {
 
 extern struct cpu_to_llc_map  cpu_to_llc;
 extern struct llc_to_cpus_map llc_to_cpus;
-extern struct steal_stats_map steal_stats;
 
 static inline bool	      llc_is_valid(u32 llc_id)
 {
@@ -248,13 +239,6 @@ static inline bool try_stealing_this_task(struct task_ctx *task_ctx,
 	task_ctx->pending_llc	   = local_llc;
 	task_ctx->steals_prevented = 0;
 
-	/* Increment steal counter in map */
-	u32  key   = 0;
-	u64 *count = bpf_map_lookup_elem(&steal_stats, &key);
-	// NOTE: This could get expensive, but I'm not anticipating that many steals. Percpu if we care.
-	if (count)
-		__sync_fetch_and_add(count, 1);
-
 	return true;
 }
 
@@ -363,14 +347,11 @@ static inline int update_task_llc_assignment(struct task_struct *p,
 
 	/* --- Narrow the effective cpumask by the chosen LLC --- */
 	/* tctx->cpumask already contains (task_affinity & cell_mask) */
-	if (tctx->cpumask)
-		bpf_cpumask_and(tctx->cpumask,
-				(const struct cpumask *)tctx->cpumask,
-				llc_mask);
+	bpf_cpumask_and(tctx->cpumask, (const struct cpumask *)tctx->cpumask,
+			llc_mask);
 
 	/* If empty after intersection, nothing can run here */
-	if (tctx->cpumask &&
-	    bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
+	if (bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
 		scx_bpf_error("Empty cpumask after intersection");
 		return -ENODEV;
 	}

@@ -55,7 +55,6 @@ struct llc_to_cpus_map llc_to_cpus SEC(".maps");
  * Maps for statistics
 */
 struct function_counters_map function_counters SEC(".maps");
-struct steal_stats_map steal_stats	       SEC(".maps");
 
 static inline void increment_counter(enum fn_counter_idx idx)
 {
@@ -703,20 +702,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	u64		    min_vtime;
 	struct task_struct *p;
 
-	/* Get this CPU's LLC (only matters if LLC-aware) */
-	s32 llc = FAKE_FLAT_CELL_LLC;
-	if (enable_llc_awareness) {
-		u32 *llc_ptr = bpf_map_lookup_elem(&cpu_to_llc, &cpu);
-		if (!llc_ptr) {
-			scx_bpf_error(
-				"CPU %d not in cpu_to_llc map - this shouldn't happen!",
-				cpu);
-			return;
-		}
-		llc = (s32)*llc_ptr;
-	}
-
 	/* Check the cell (cell-llc) dsq */
+	u32 llc = cctx->llc;
+
 	bpf_for_each(scx_dsq, p, get_cell_llc_dsq_id(cell, llc).raw, 0) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = get_cell_llc_dsq_id(cell, llc);
@@ -742,7 +730,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (!found) {
 		/* Try work stealing if enabled */
 		if (enable_llc_awareness && enable_work_stealing) {
-			try_stealing_work(cell, llc);
+			if (try_stealing_work(cell, llc)) {
+				cstat_inc(CSTAT_STEAL, cell, cctx);
+			}
 		}
 		return;
 	}
@@ -1631,6 +1621,18 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			}
 		} else {
 			return -EINVAL;
+		}
+
+		/* Store the LLC that each cpu belongs to. Used in Dispatch. */
+		struct cpu_ctx *cpu_ctx = lookup_cpu_ctx(i);
+		if (cpu_ctx) {
+			if (enable_llc_awareness) {
+				u32 *llc_ptr;
+				llc_ptr = bpf_map_lookup_elem(&cpu_to_llc, &i);
+				cpu_ctx->llc = llc_ptr ? *llc_ptr : 0;
+			} else {
+				cpu_ctx->llc = FAKE_FLAT_CELL_LLC;
+			}
 		}
 	}
 

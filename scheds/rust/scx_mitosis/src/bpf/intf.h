@@ -59,6 +59,7 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_STEAL,
 	NR_CSTATS,
 };
 
@@ -73,8 +74,9 @@ enum fn_counter_idx {
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
-	u32 cell;
 	u64 vtime_now;
+	u32 cell;
+	u32 llc;
 };
 
 struct cgrp_ctx {

@@ -81,7 +81,11 @@ fn read_cpu_llc_map(path: &str) -> Result<Vec<(usize, usize)>> {
 
 /// Update map entries either from a file or from the host topology.
 /// This function can be used by both the main scheduler and CLI tools.
-pub fn populate_topology_maps(skel: &mut BpfSkel, map: MapKind, file: Option<String>) -> Result<()> {
+pub fn populate_topology_maps(
+    skel: &mut BpfSkel,
+    map: MapKind,
+    file: Option<String>,
+) -> Result<()> {
     match map {
         MapKind::CpuToLLC => {
             let map_entries = if let Some(path) = file {
@@ -138,14 +142,18 @@ pub fn populate_topology_maps(skel: &mut BpfSkel, map: MapKind, file: Option<Str
                     value_bytes.extend_from_slice(&long_val.to_ne_bytes());
                 }
 
-                skel.maps.llc_to_cpus.update(&key, &value_bytes, MapFlags::ANY)
-                    .context(format!("Failed to update llc_to_cpus map for LLC {}", llc_id))?;
+                skel.maps
+                    .llc_to_cpus
+                    .update(&key, &value_bytes, MapFlags::ANY)
+                    .context(format!(
+                        "Failed to update llc_to_cpus map for LLC {}",
+                        llc_id
+                    ))?;
             }
         }
     }
     Ok(())
 }
-
 
 /// Display CPU to LLC cache relationships discovered from the host topology.
 #[allow(dead_code)]
