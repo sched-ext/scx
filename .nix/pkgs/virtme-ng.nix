@@ -13,13 +13,13 @@
 
 python3.pkgs.buildPythonApplication rec {
   pname = "virtme-ng";
-  version = "1.36";
+  version = "1.40";
 
   src = fetchFromGitHub {
     owner = "arighi";
     repo = pname;
     rev = "v${version}";
-    sha256 = "sha256-/dO7BAWLsmL/EVO/9Ja8h7MuYTwOxBav3iHQkegyyoY=";
+    sha256 = "sha256-5vJ+wyCA0XKXtEzEGim1OoTBDFTS2BjJSIzkLvTYHn8=";
   };
 
   pyproject = true;
