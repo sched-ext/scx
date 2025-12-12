@@ -108,14 +108,17 @@ int plan_x_cpdom_migration(void)
 	if ((stealee_threshold > max_sc_load) && !overflow_running) {
 		/*
 		 * If there is no overloaded domain, do not try to steal.
+		 * However, the classification must still run to update
+		 * stealer/stealee roles. Otherwise, stale roles from previous
+		 * rounds will cause the load balancer to incorrectly migrate
+		 * tasks from stale stealees to stale stealers.
 		 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
 		 * [stealer_threshold ... avg_sc_load ... max_sc_load ... stealee_threshold]
 		 *            -------------------------------------->
 		 */
-		return 0;
+		goto calc_stealer_stealee;
 	}
-	if ((stealee_threshold <= max_sc_load || overflow_running) &&
-	    (stealer_threshold < min_sc_load)) {
+	if (stealer_threshold < min_sc_load) {
 		/*
 		 * If there is a overloaded domain, always try to steal.
 		 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
@@ -125,6 +128,7 @@ int plan_x_cpdom_migration(void)
 		stealer_threshold = min_sc_load;
 	}
 
+calc_stealer_stealee:
 	/*
 	 * Determine stealer and stealee domains.
 	 */
@@ -251,6 +255,12 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 	 * Only active domains steal the tasks from other domains.
 	 */
 	if (!cpdomc->nr_active_cpus)
+		return false;
+
+	/*
+	 * No stealee, nothing to steal.
+	 */
+	if (!sys_stat.nr_stealee)
 		return false;
 
 	/*
