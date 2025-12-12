@@ -96,6 +96,7 @@ const volatile struct {
 
 	bool dispatch_lb_interactive;
 	bool dispatch_pick2_disable;
+	bool dispatch_pick2_numa_aware;
 	bool eager_load_balance;
 	bool max_dsq_pick2;
 	bool wakeup_llc_migrations;
@@ -110,6 +111,7 @@ const volatile struct {
 
 	.dispatch_lb_interactive = false,
 	.dispatch_pick2_disable = false,
+	.dispatch_pick2_numa_aware = true,
 	.eager_load_balance = true,
 	.max_dsq_pick2 = false,
 	.wakeup_llc_migrations = false,
@@ -205,6 +207,12 @@ scx_dhq_t *llc_pair_dhqs[MAX_LLCS / 2];
 u32 llcs_per_node[MAX_NUMA_NODES];
 /* Global DHQ counter for unique indexing */
 u32 global_dhq_count = 0;
+
+/* NUMA-aware pick2 load balancing data structures */
+/* Maps NUMA node ID to list of LLC IDs in that node */
+u64 node_llc_ids[MAX_NUMA_NODES][MAX_LLCS];
+/* Count of LLCs per NUMA node (for random selection) */
+u32 node_llc_counts[MAX_NUMA_NODES];
 
 u64 min_slice_ns = 500;
 
@@ -961,6 +969,135 @@ static void update_vtime(struct task_struct *p, struct cpu_ctx *cpuc,
 static struct llc_ctx *rand_llc_ctx(void)
 {
 	return lookup_llc_ctx(bpf_get_prandom_u32() % topo_config.nr_llcs);
+}
+
+/*
+ * Returns a random LLC context from the specified NUMA node.
+ * Returns NULL if node_id is invalid or has no LLCs.
+ */
+static struct llc_ctx *rand_llc_ctx_from_node(u32 node_id)
+{
+	u32 llc_count, llc_index;
+	u64 llc_id;
+
+	if (node_id >= MAX_NUMA_NODES)
+		return NULL;
+
+	llc_count = node_llc_counts[node_id];
+	if (llc_count == 0 || llc_count > MAX_LLCS)
+		return NULL;
+
+	llc_index = bpf_get_prandom_u32() % llc_count;
+	if (llc_index >= MAX_LLCS)
+		return NULL;
+
+	u64 *llc_id_ptr = MEMBER_VPTR(node_llc_ids, [node_id][llc_index]);
+	if (!llc_id_ptr)
+		return NULL;
+
+	llc_id = *llc_id_ptr;
+	return lookup_llc_ctx(llc_id);
+}
+
+/*
+ * Pick two different LLCs from the same NUMA node.
+ * Returns 0 on success, -EINVAL if can't pick 2 different LLCs.
+ */
+static __always_inline int pick_two_same_node(u32 node_id,
+					       struct llc_ctx **left,
+					       struct llc_ctx **right)
+{
+	u32 llc_count, attempts = 0;
+	u32 left_index, right_index;
+	u64 llc_id;
+
+	if (node_id >= MAX_NUMA_NODES)
+		return -EINVAL;
+
+	llc_count = node_llc_counts[node_id];
+
+	/* Need at least 2 LLCs in this node */
+	if (llc_count < 2)
+		return -EINVAL;
+
+	*left = rand_llc_ctx_from_node(node_id);
+	if (!*left)
+		return -EINVAL;
+
+	/* Try to pick a different LLC, with bounded loop for verifier */
+	#pragma unroll
+	for (attempts = 0; attempts < 8; attempts++) {
+		*right = rand_llc_ctx_from_node(node_id);
+		if (*right && (*right)->id != (*left)->id) {
+			stat_inc(P2DQ_STAT_PICK2_SAME_NUMA);
+			return 0;
+		}
+	}
+
+	left_index = (*left)->index;
+	right_index = (left_index + 1) % llc_count;
+
+	if (right_index >= MAX_LLCS)
+		return -EINVAL;
+
+	u64 *llc_id_ptr = MEMBER_VPTR(node_llc_ids, [node_id][right_index]);
+	if (!llc_id_ptr)
+		return -EINVAL;
+
+	llc_id = *llc_id_ptr;
+	*right = lookup_llc_ctx(llc_id);
+
+	if (*right && (*right)->id != (*left)->id) {
+		stat_inc(P2DQ_STAT_PICK2_SAME_NUMA);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+/*
+ * Pick two LLCs from different NUMA nodes for cross-node balancing.
+ */
+static __always_inline int pick_two_cross_node(u32 current_node_id,
+						struct llc_ctx **left,
+						struct llc_ctx **right)
+{
+	u32 other_node, attempts = 0;
+
+	/* Pick one from current node */
+	*left = rand_llc_ctx_from_node(current_node_id);
+	if (!*left)
+		return -EINVAL;
+
+	/* Try to pick from a different node */
+	#pragma unroll
+	for (attempts = 0; attempts < 8; attempts++) {
+		other_node = bpf_get_prandom_u32() % topo_config.nr_nodes;
+
+		/* Ensure verifier knows bounds are satisfied */
+		if (other_node >= MAX_NUMA_NODES)
+			continue;
+
+		/* Barrier to force verifier to re-evaluate bounds */
+		barrier_var(other_node);
+
+		if (other_node != current_node_id &&
+		    node_llc_counts[other_node] > 0) {
+			*right = rand_llc_ctx_from_node(other_node);
+			if (*right && (*right)->id != (*left)->id) {
+				stat_inc(P2DQ_STAT_PICK2_CROSS_NUMA);
+				return 0;
+			}
+		}
+	}
+
+	*right = rand_llc_ctx();
+	if (*right && (*right)->id != (*left)->id) {
+		stat_inc(P2DQ_STAT_PICK2_CROSS_NUMA);
+		return 0;
+	}
+
+	return -EINVAL;
 }
 
 static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx,
@@ -2538,18 +2675,37 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	}
 
 	/*
-	 * For pick two load balancing we randomly choose two LLCs. We then
-	 * first try to consume from the LLC with the largest load. If we are
-	 * unable to consume from the first LLC then the second LLC is consumed
-	 * from. This yields better work conservation on machines with a large
-	 * number of LLCs.
+	 * NUMA-aware pick-2: prefer same-NUMA LLCs, then try cross-NUMA,
+	 * finally fallback to random selection.
 	 */
+	if (lb_config.dispatch_pick2_numa_aware && topo_config.nr_nodes > 1) {
+		u32 current_node_id = bpf_get_numa_node_id();
+		int ret;
+
+		if (current_node_id >= MAX_NUMA_NODES)
+			return -EINVAL;
+
+		if (node_llc_counts[current_node_id] >= 2) {
+			ret = pick_two_same_node(current_node_id, &left, &right);
+			if (ret == 0 && left && right)
+				goto llc_selected;
+		}
+
+		ret = pick_two_cross_node(current_node_id, &left, &right);
+		if (ret == 0 && left && right)
+			goto llc_selected;
+
+		stat_inc(P2DQ_STAT_PICK2_NUMA_FALLBACK);
+	}
+
+	/* Legacy random selection */
 	left = topo_config.nr_llcs == 2 ? lookup_llc_ctx(llc_ids[0]) : rand_llc_ctx();
 	right = topo_config.nr_llcs == 2 ? lookup_llc_ctx(llc_ids[1]) : rand_llc_ctx();
 
 	if (!left || !right)
 		return -EINVAL;
 
+	/* Handle collision (same LLC picked twice) */
 	if (left->id == right->id) {
 		i = llc_get_load(cur_llcx) % topo_config.nr_llcs;
 		i &= 0x3; // verifier
@@ -2558,6 +2714,8 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		if (!right)
 			return -EINVAL;
 	}
+
+llc_selected:
 
 
 	if (llc_get_load(right) > llc_get_load(left)) {
@@ -3542,9 +3700,35 @@ static s32 p2dq_init_impl()
 
 	// First we initialize LLCs because DSQs are created at the LLC level.
 	bpf_for(i, 0, topo_config.nr_llcs) {
+		u32 llc_id, node_id, node_llc_idx;
+
 		ret = init_llc(i);
 		if (ret)
 			return ret;
+
+		/* Build NUMA-to-LLC mapping for NUMA-aware pick2 */
+		if (i >= MAX_LLCS)
+			continue;
+
+		llc_id = llc_ids[i];
+		llcx = lookup_llc_ctx(llc_id);
+		if (!llcx)
+			continue;
+
+		node_id = llcx->node_id;
+		if (node_id >= MAX_NUMA_NODES) {
+			scx_bpf_error("LLC %u has invalid node_id %u", llc_id, node_id);
+			return -EINVAL;
+		}
+
+		node_llc_idx = node_llc_counts[node_id];
+		if (node_llc_idx >= MAX_LLCS) {
+			scx_bpf_error("Node %u has too many LLCs", node_id);
+			return -EINVAL;
+		}
+
+		node_llc_ids[node_id][node_llc_idx] = llc_id;
+		node_llc_counts[node_id]++;
 	}
 
 	bpf_for(i, 0, topo_config.nr_nodes) {
