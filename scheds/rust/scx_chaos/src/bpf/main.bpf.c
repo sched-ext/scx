@@ -41,11 +41,11 @@ const volatile int  ppid_targeting_ppid = 1;
 const volatile bool ppid_targeting_inclusive =
 	false; /* include ppid_targeting_ppid in chaos */
 
-const volatile u64 chaos_timer_check_queues_min_ns   = 500000;
-const volatile u64 chaos_timer_check_queues_max_ns   = 2000000;
-const volatile u64 chaos_timer_check_queues_slack_ns = 2500000;
+const volatile u64 chaos_timer_check_queues_min_ns	    = 500000;
+const volatile u64 chaos_timer_check_queues_max_ns	    = 2000000;
+const volatile u64 chaos_timer_check_queues_slack_ns	    = 2500000;
 
-const volatile u32 trait_delay_freq_frac32[CHAOS_TRAIT_MAX];
+const volatile u32 trait_delay_freq_frac32[CHAOS_TRAIT_MAX] = { 0, 1, 1, 1, 0 };
 
 const volatile u64 random_delays_min_ns	     = 1; /* for veristat */
 const volatile u64 random_delays_max_ns	     = 2; /* for veristat */
