@@ -158,6 +158,7 @@ struct task_ctx {
 
 	/* --- cacheline 3 boundary (192 bytes) --- */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
+	u64	last_sum_exec_clk;	/* last time when sum exec time was measured */
 	u64	cgrp_id;		/* cgroup id of this task */
 	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
 	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
@@ -246,6 +247,11 @@ struct cpu_ctx {
 	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
 
 	/* --- cacheline 2 boundary (128 bytes) --- */
+
+	volatile u32	avg_stolen_est;	/* Average of estimated steal/irq utilization of CPU */
+	volatile u32	cur_stolen_est;	/* Estimated irq/steal utilization of the current interval */
+	volatile u64	stolen_time_est; /* Estimated time stolen by steal/irq time on CPU */
+
 	/*
 	 * Idle tracking (read-mostly)
 	 */

@@ -393,6 +393,7 @@ static void update_stat_for_running(struct task_struct *p,
 	reset_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	taskc->last_running_clk = now;
 	taskc->last_measured_clk = now;
+	taskc->last_sum_exec_clk = task_exec_time(p);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -454,7 +455,7 @@ static void account_task_runtime(struct task_struct *p,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
-	u64 sus_dur, runtime, svc_time, sc_time;
+	u64 sus_dur, runtime, svc_time, sc_time, task_time, exec_delta;
 
 	/*
 	 * Since task execution can span one or more sys_stat intervals,
@@ -465,6 +466,22 @@ static void account_task_runtime(struct task_struct *p,
 	 */
 	sus_dur = get_suspended_duration_and_reset(cpuc);
 	runtime = time_delta(now, taskc->last_measured_clk + sus_dur);
+
+	/*
+	 * p->se.sum_exec_runtime serves as a proxy for rq->clock_task which
+	 * accounts for time consumed by irq_time and steal_time. On the same
+	 * token, runtime - exec_delta must equal to irq_time + steal_time barring
+	 * some imprecision when the time was snapshotted. We accumulate the delta
+	 * as cpuc->stolen_time_est to try and approximate the total time CPU spent in
+	 * stolen time (irq+steal). Until more accurate irq_time/steal_time snapshots
+	 * are available from the kernel, we can use the samples from sum_exec_runtime
+	 * to extrapolate total stolen time per CPU.
+	 */
+	task_time = task_exec_time(p);
+	exec_delta = time_delta(task_time, taskc->last_sum_exec_clk);
+	cpuc->stolen_time_est += time_delta(runtime, exec_delta);
+	runtime = exec_delta;
+
 	svc_time = runtime / p->scx.weight;
 	sc_time = scale_cap_freq(runtime, cpuc->cpu_id);
 
@@ -474,6 +491,7 @@ static void account_task_runtime(struct task_struct *p,
 	taskc->acc_runtime += runtime;
 	taskc->svc_time += svc_time;
 	taskc->last_measured_clk = now;
+	taskc->last_sum_exec_clk = task_time;
 
 	/*
 	 * Under CPU bandwidth control using cpu.max, we also need to report

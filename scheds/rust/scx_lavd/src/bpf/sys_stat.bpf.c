@@ -270,6 +270,15 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
+		 * cpuc->cur_stolen_est is only an estimate of the time stolen by
+		 * irq/steal during execution times. We extropolate that ratio to
+		 * the rest of CPU time as an approximation.
+		 */
+		cpuc->cur_stolen_est = (cpuc->stolen_time_est << LAVD_SHIFT) / compute;
+		cpuc->avg_stolen_est = calc_asym_avg(cpuc->avg_stolen_est, cpuc->cur_stolen_est);
+		cpuc->stolen_time_est = 0;
+
+		/*
 		 * Accmulate system-wide idle time.
 		 */
 		c->idle_total += cpuc->idle_total;

@@ -46,7 +46,7 @@ struct cpu_ctx {
 	u64				slice_ns;
 	u32				core_id;
 	u32				dsq_index;
-	u32				perf;
+	u32				perf;  /* Thermal pressure (0-1024, 0=no throttling, 1024=max capacity lost) */
 	u32				flags;  /* Bitmask for interactive, is_big, nice_task */
 	u64				ran_for;
 	u32				node_id;

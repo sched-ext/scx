@@ -336,3 +336,8 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
 		return cpu_to_dsq(cpuc->cpu_id);
 	return cpdom_to_dsq(cpuc->cpdom_id);
 }
+
+u64 task_exec_time(struct task_struct __arg_trusted *p)
+{
+	return p->se.sum_exec_runtime;
+}

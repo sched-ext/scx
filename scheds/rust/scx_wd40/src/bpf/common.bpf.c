@@ -5,7 +5,6 @@
  */
 
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
 #include <scx/bpf_arena_common.bpf.h>
