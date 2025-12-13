@@ -3637,7 +3637,7 @@ void BPF_STRUCT_OPS(p2dq_exit, struct scx_exit_info *ei)
  *
  * Note: This tracepoint only exists on ARM/ARM64 architectures
  */
-#if defined(__aarch64__) || defined(__arm__)
+#if defined(__TARGET_ARCH_arm64) || defined(__aarch64__)
 __weak __hidden SEC("tp_btf/hw_pressure_update?")
 int BPF_PROG(on_thermal_pressure, u32 cpu, u64 hw_pressure)
 {
