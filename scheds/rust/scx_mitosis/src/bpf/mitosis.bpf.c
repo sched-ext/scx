@@ -45,6 +45,14 @@ u32 configuration_seq;
 u32 applied_configuration_seq;
 
 /*
+ * Track whether CPU controller is enabled. Set to true when cgroup_init
+ * callback is invoked for a non-root cgroup (which only happens with CPU
+ * controller enabled). We check non-root because mitosis_init always creates
+ * cgrp_ctx for root cgroup.
+ */
+bool cpu_ctrl_enabled;
+
+/*
  * Debug events circular buffer
  */
 u32 debug_event_pos;
@@ -136,10 +144,22 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 
 static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
-	struct cgroup *cgrp = __COMPAT_scx_bpf_task_cgroup(p);
-	if (!cgrp) {
+	struct cgroup *cgrp;
+
+	/*
+	 * scx_bpf_task_cgroup uses p->sched_task_group which requires CPU
+	 * controller to be enabled. Without CPU controller, sched_task_group
+	 * is always root_task_group for all tasks, returning the wrong cgroup.
+	 * Use p->cgroups->dfl_cgrp directly to get the task's actual cgroup.
+	 */
+	if (!READ_ONCE(cpu_ctrl_enabled))
+		cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
+	else
+		cgrp = __COMPAT_scx_bpf_task_cgroup(p);
+
+	if (!cgrp)
 		scx_bpf_error("Failed to get cgroup for task %d", p->pid);
-	}
+
 	return cgrp;
 }
 
@@ -359,6 +379,39 @@ static inline const struct cpumask *lookup_cell_cpumask(int idx)
 }
 
 /*
+ * Find an existing in-use cell with a matching cpumask.
+ * Returns cell index if found, -1 otherwise.
+ * Note: cell 0 is the root cell, skip it when searching.
+ */
+static inline int find_cell_with_cpumask(const struct cpumask *target_cpumask)
+{
+	int			     cell_idx;
+	struct cell_cpumask_wrapper *cpumaskw;
+	struct cell		    *c;
+
+	bpf_for(cell_idx, 1, MAX_CELLS)
+	{
+		if (!(c = lookup_cell(cell_idx)))
+			return -1;
+
+		if (!READ_ONCE(c->in_use))
+			continue;
+
+		if (!(cpumaskw =
+			      bpf_map_lookup_elem(&cell_cpumasks, &cell_idx)))
+			continue;
+
+		if (!cpumaskw->cpumask)
+			continue;
+
+		if (bpf_cpumask_equal(target_cpumask,
+				      (const struct cpumask *)cpumaskw->cpumask))
+			return cell_idx;
+	}
+	return -1;
+}
+
+/*
  * Helper functions for bumping per-cell stats
  */
 static void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx,
@@ -438,27 +491,48 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 		/*
 		 * Cgroup lookup failed - this can happen during scheduler load
 		 * for tasks that were forked before the scheduler was loaded,
-		 * whose cgroups went offline before scx_cgroup_init() ran.
-		 * Only fall back to root cgroup if the workaround is enabled
-		 * and the task is exiting.
+		 * whose cgroups went offline before scx_cgroup_init() ran, or
+		 * when CPU controller is not enabled (cgroup_init not called).
+		 *
+		 * If CPU controller is disabled, lazily initialize cgrp_ctx.
 		 */
-		if (exiting_task_workaround_enabled &&
-		    (p->flags & PF_EXITING)) {
-			struct cgroup *rootcg = READ_ONCE(root_cgrp);
-			if (!rootcg) {
-				scx_bpf_error(
-					"Unexpected uninitialized rootcg");
-				return -ENOENT;
-			}
-
-			cgc = lookup_cgrp_ctx(rootcg);
+		if (!READ_ONCE(cpu_ctrl_enabled) &&
+		    (cgc = bpf_cgrp_storage_get(
+			     &cgrp_ctxs, cg, 0,
+			     BPF_LOCAL_STORAGE_GET_F_CREATE))) {
+			cgc->cell	= 0;
+			cgc->cell_owner = false;
+			/*
+			 * Bump configuration_seq so timer will run and
+			 * properly assign this cgroup to a cell based on
+			 * its cpuset. Force task to refresh after timer
+			 * updates applied_configuration_seq.
+			 */
+			__atomic_add_fetch(&configuration_seq, 1,
+					   __ATOMIC_RELEASE);
+			tctx->configuration_seq = (u32)-1;
+			tctx->cell		= 0;
+			return update_task_cpumask(p, tctx);
 		}
 
+		/*
+		 * Still no cgrp_ctx - fall back to root cgroup. This handles:
+		 * - Exiting tasks (when workaround enabled)
+		 * - Cgroups going offline (storage_get fails for dying cgroups)
+		 * - Any other edge case where cgrp_ctx creation fails
+		 */
+		struct cgroup *rootcg = READ_ONCE(root_cgrp);
+		if (rootcg)
+			cgc = lookup_cgrp_ctx_fallible(rootcg);
+
 		if (!cgc) {
-			scx_bpf_error(
-				"cgrp_ctx lookup failed for cgid %llu (task %d, flags 0x%x)",
-				cg->kn->id, p->pid, p->flags);
-			return -ENOENT;
+			/*
+			 * Can't get root cgrp_ctx either - this shouldn't
+			 * happen but handle gracefully by assigning to cell 0.
+			 */
+			tctx->cell		= 0;
+			tctx->configuration_seq = (u32)-1;
+			return update_task_cpumask(p, tctx);
 		}
 	}
 
@@ -803,13 +877,29 @@ struct cpumask___local {};
 typedef struct cpumask___local *cpumask_var_t___ptr;
 
 struct cpuset___cpumask_ptr {
-	cpumask_var_t___ptr cpus_allowed;
+	cpumask_var_t___ptr effective_cpus;
 };
 
 typedef struct cpumask___local cpumask_var_t___arr[1];
 
 struct cpuset___cpumask_arr {
-	cpumask_var_t___arr cpus_allowed;
+	cpumask_var_t___arr effective_cpus;
+};
+
+struct nodemask___local {
+	unsigned long bits[16]; /* MAX_NUMNODES / BITS_PER_LONG */
+};
+
+struct cpuset___cpumask_arr_v2 {
+	cpumask_var_t___arr	cpus_allowed;
+	struct nodemask___local mems_allowed;
+	cpumask_var_t___arr	effective_cpus;
+};
+
+struct cpuset___cpumask_ptr_v2 {
+	cpumask_var_t___ptr	cpus_allowed;
+	struct nodemask___local mems_allowed;
+	cpumask_var_t___ptr	effective_cpus;
 };
 
 /*
@@ -836,16 +926,36 @@ static inline int get_cgroup_cpumask(struct cgroup	  *cgrp,
 	}
 
 	int err;
-	if (bpf_core_type_matches(struct cpuset___cpumask_arr)) {
+	/*
+	 * Use effective_cpus instead of cpus_allowed. The task's p->cpus_ptr
+	 * is based on effective_cpus (via guarantee_active_cpus), so the cell
+	 * cpumask must match. effective_cpus = cpus_allowed & parent's effective.
+	 *
+	 * Check v2 structs FIRST - they have the full field layout (cpus_allowed,
+	 * mems_allowed, effective_cpus) which is needed for correct CO-RE offset
+	 * calculation. The non-v2 structs only have effective_cpus and may get
+	 * wrong offsets on kernels where effective_cpus is not the first field.
+	 */
+	if (bpf_core_type_matches(struct cpuset___cpumask_arr_v2)) {
+		struct cpuset___cpumask_arr_v2 *cpuset_typed =
+			(void *)bpf_core_cast(cpuset, struct cpuset);
+		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
+				    &cpuset_typed->effective_cpus);
+	} else if (bpf_core_type_matches(struct cpuset___cpumask_ptr_v2)) {
+		struct cpuset___cpumask_ptr_v2 *cpuset_typed =
+			(void *)bpf_core_cast(cpuset, struct cpuset);
+		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
+				    cpuset_typed->effective_cpus);
+	} else if (bpf_core_type_matches(struct cpuset___cpumask_arr)) {
 		struct cpuset___cpumask_arr *cpuset_typed =
 			(void *)bpf_core_cast(cpuset, struct cpuset);
 		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
-				    &cpuset_typed->cpus_allowed);
+				    &cpuset_typed->effective_cpus);
 	} else if (bpf_core_type_matches(struct cpuset___cpumask_ptr)) {
 		struct cpuset___cpumask_ptr *cpuset_typed =
 			(void *)bpf_core_cast(cpuset, struct cpuset);
 		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
-				    cpuset_typed->cpus_allowed);
+				    cpuset_typed->effective_cpus);
 	} else {
 		scx_bpf_error(
 			"Definition of struct cpuset did not match any expected struct");
@@ -854,7 +964,7 @@ static inline int get_cgroup_cpumask(struct cgroup	  *cgrp,
 
 	if (err < 0) {
 		scx_bpf_error(
-			"bpf_core_read of cpuset->cpus_allowed failed for cgid %llu",
+			"bpf_core_read of cpuset->effective_cpus failed for cgid %llu",
 			cgrp->kn->id);
 		return err;
 	}
@@ -965,10 +1075,24 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		/*
 		 * We can iterate over dying cgroups, in which case this lookup will
 		 * fail. These cgroups can't have tasks in them so just continue.
+		 *
+		 * If CPU controller is not enabled, cgrp_ctx won't exist yet.
+		 * Create it here.
 		 */
 		struct cgrp_ctx *cgrp_ctx;
-		if (!(cgrp_ctx = lookup_cgrp_ctx_fallible(cur_cgrp)))
-			continue;
+		if (!(cgrp_ctx = lookup_cgrp_ctx_fallible(cur_cgrp))) {
+			if (!READ_ONCE(cpu_ctrl_enabled)) {
+				if ((cgrp_ctx = bpf_cgrp_storage_get(
+					     &cgrp_ctxs, cur_cgrp, 0,
+					     BPF_LOCAL_STORAGE_GET_F_CREATE))) {
+					/* Will be properly initialized below */
+					cgrp_ctx->cell	     = 0;
+					cgrp_ctx->cell_owner = false;
+				}
+			}
+			if (!cgrp_ctx)
+				continue;
+		}
 
 		int rc = get_cgroup_cpumask(cur_cgrp, entry);
 		if (!rc) {
@@ -1009,14 +1133,24 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			goto out_root_cgrp;
 
 		/*
-		 * cgroup has a cpumask, allocate a new cell if needed, and assign cpus
+		 * cgroup has a cpumask, find existing cell with same cpumask or
+		 * allocate a new cell if needed, and assign cpus
 		 */
 		int cell_idx = READ_ONCE(cgrp_ctx->cell);
 		if (!cgrp_ctx->cell_owner) {
-			cell_idx = allocate_cell();
-			if (cell_idx < 0)
-				goto out_root_cgrp;
-			cgrp_ctx->cell_owner = true;
+			/*
+			 * First check if there's an existing cell with the
+			 * same cpumask. This avoids creating duplicate cells
+			 * for cgroups with identical cpusets.
+			 */
+			cell_idx = find_cell_with_cpumask(
+				(const struct cpumask *)&entry->cpumask);
+			if (cell_idx < 0) {
+				cell_idx = allocate_cell();
+				if (cell_idx < 0)
+					goto out_root_cgrp;
+				cgrp_ctx->cell_owner = true;
+			}
 		}
 
 		struct cell_cpumask_wrapper *cell_cpumaskw;
@@ -1215,6 +1349,18 @@ int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of,
 	return 0;
 }
 
+SEC("fentry/cgroup_mkdir")
+int BPF_PROG(fentry_cgroup_mkdir)
+{
+	/*
+	 * When CPU controller is disabled, cgroup_init callback won't fire.
+	 * Bump configuration_seq so the timer scans and initializes the new cgroup.
+	 */
+	if (!READ_ONCE(cpu_ctrl_enabled))
+		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
@@ -1233,6 +1379,12 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 		WRITE_ONCE(cgc->cell, 0);
 		return 0;
 	}
+
+	/*
+	 * CPU controller is enabled if cgroup_init is called for non-root
+	 * cgroups. This callback only fires when CPU controller is active.
+	 */
+	WRITE_ONCE(cpu_ctrl_enabled, true);
 
 	DECLARE_CPUMASK_ENTRY(entry) = allocate_cpumask_entry();
 	if (!entry)
@@ -1351,6 +1503,19 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	if (!all_cpumask) {
 		scx_bpf_error("missing all_cpumask");
 		return -EINVAL;
+	}
+
+	/*
+	 * args->cgroup comes from task_group() which returns the CPU
+	 * controller's task_group. Without CPU controller enabled, this is
+	 * always root_task_group, not the task's actual cgroup. Skip cell
+	 * assignment here and set configuration_seq to force refresh.
+	 * maybe_refresh_cell() will use task_cgroup() (allowed in select_cpu
+	 * and enqueue contexts) to get the real cgroup.
+	 */
+	if (!READ_ONCE(cpu_ctrl_enabled)) {
+		tctx->configuration_seq = (u32)-1;
+		return 0;
 	}
 
 	return update_task_cell(p, tctx, args->cgroup);
@@ -1597,6 +1762,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		scx_bpf_error("Failed to arm update timer");
 		return ret;
 	}
+
+	/*
+	 * Bump configuration_seq to ensure the timer runs at least once.
+	 * This is needed when CPU controller is not enabled, as cgroup_init
+	 * callbacks won't be called to bump it.
+	 */
+	__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
+
 	return 0;
 }
 
