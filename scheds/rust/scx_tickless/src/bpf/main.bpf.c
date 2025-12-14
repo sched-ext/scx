@@ -412,14 +412,14 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 	/*
 	 * Check if we need to preempt the running tasks.
 	 */
+	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct task_struct *p;
+		struct task_struct *p = __COMPAT_scx_bpf_cpu_curr(cpu);
 
 		/*
 		 * Ignore CPU if idle task is running.
 		 */
-		p = scx_bpf_cpu_rq(cpu)->curr;
-		if (p->flags & PF_IDLE)
+		if (!p || p->flags & PF_IDLE)
 			continue;
 
 		/*
@@ -438,6 +438,7 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 			__sync_fetch_and_add(&nr_preemptions, 1);
 		}
 	}
+	bpf_rcu_read_unlock();
 
 	bpf_timer_start(timer, tick_interval_ns(), 0);
 

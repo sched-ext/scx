@@ -454,13 +454,20 @@ static inline bool is_system_busy(void)
  */
 static inline bool is_cpu_idle(s32 cpu)
 {
-	struct rq *rq = scx_bpf_cpu_rq(cpu);
+	struct task_struct *p;
+	bool idle;
 
-	if (!rq) {
-		scx_bpf_error("Failed to access rq %d", cpu);
+	bpf_rcu_read_lock();
+	p = __COMPAT_scx_bpf_cpu_curr(cpu);
+
+	if (!p) {
+		bpf_rcu_read_unlock();
+		scx_bpf_error("Failed to access rq->curr %d", cpu);
 		return false;
 	}
-	return rq->curr->flags & PF_IDLE;
+	idle = p->flags & PF_IDLE;
+	bpf_rcu_read_unlock();
+	return idle;
 }
 
 /*

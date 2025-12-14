@@ -186,6 +186,7 @@ null_out:
 
 static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 {
+	bpf_rcu_read_lock();
 	/*
 	 * Note that we avoid using scx_bpf_kick_cpu() on purpose.
 	 * While scx_bpf_kick_cpu() can trigger a task preemption immediately,
@@ -196,11 +197,9 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 	 * set the victim task's time slice to zero so the victim task yields
 	 * the CPU in the next scheduling point.
 	 */
-	struct rq *victim_rq;
-	struct task_struct *victim_p;
+	struct task_struct *victim_p = __COMPAT_scx_bpf_cpu_curr(victim_cpuc->cpu_id);
 
-	victim_rq = scx_bpf_cpu_rq(victim_cpuc->cpu_id);
-	if (victim_rq && (victim_p = victim_rq->curr)) {
+	if (victim_p) {
 		/*
 		 * Finding a victim is racy, but we do not coordinate. Thus,
 		 * two different CPUs can choose the same victim CPU. We do not
@@ -220,8 +219,10 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 		 * (SCX_SLICE_DFL, 20 msec).
 		 */
 		u64 old = victim_cpuc->est_stopping_clk;
-		if (!old)
+		if (!old) {
+			bpf_rcu_read_unlock();
 			return;
+		}
 
 		/*
 		 * If the new slice is one, this is the last time to be kicked,
@@ -240,6 +241,7 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 				WRITE_ONCE(victim_p->scx.slice, new_slice);
 		}
 	}
+	bpf_rcu_read_unlock();
 }
 
 __hidden
