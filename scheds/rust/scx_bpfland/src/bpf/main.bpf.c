@@ -45,6 +45,11 @@ const volatile bool debug;
 const volatile u64 slice_max = 1ULL * NSEC_PER_MSEC;
 
 /*
+ * Default minimum time slice.
+ */
+const volatile u64 slice_min;
+
+/*
  * Maximum time slice lag.
  *
  * Increasing this value can help to increase the responsiveness of interactive
@@ -712,12 +717,16 @@ static u64 task_slice(const struct task_struct *p, s32 cpu)
 {
 	u64 nr_wait = scx_bpf_dsq_nr_queued(cpu_dsq(cpu)) +
 		      scx_bpf_dsq_nr_queued(node_dsq(cpu));
+	u64 slice;
 
 	/*
 	 * Adjust time slice in function of the task's priority and the
-	 * amount of tasks waiting to be dispatched.
+	 * amount of tasks waiting to be dispatched, but never assign a
+	 * time slice smaller than @slice_min.
 	 */
-	return scale_by_task_weight(p, slice_max) / MAX(nr_wait, 1);
+	slice = scale_by_task_weight(p, slice_max) / MAX(nr_wait, 1);
+
+	return MAX(slice, slice_min);
 }
 
 /*
