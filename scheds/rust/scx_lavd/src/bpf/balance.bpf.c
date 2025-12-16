@@ -133,8 +133,16 @@ int plan_x_cpdom_migration(void)
 		}
 		return 0;
 	}
-	if ((stealee_threshold <= max_sc_load || overflow_running) &&
-	    (stealer_threshold < min_sc_load)) {
+
+	/*
+	 * At this point, there is at least one overloaded domain (stealee),
+	 * indicated by the following condition:
+	 *    stealee_threshold <= max_sc_load || overflow_running
+	 *
+	 * Adjust the stealer threshold to minimum scaled load to ensure that
+	 * there exists at least one stealer.
+	 */
+	if (stealer_threshold < min_sc_load) {
 		/*
 		 * If there is a overloaded domain, always try to steal.
 		 *  <~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>
