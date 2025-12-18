@@ -209,12 +209,12 @@ topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 	int i;
 
 	if (!parent) {
-		bpf_printk("parent has no sibling");
+		bpf_printk("node is at the top level");
 		return NULL;
 	}
 
-	for (i = 0; i < topo->nr_children && can_loop; i++) {
-		child = topo->children[i];
+	for (i = 0; i < parent->nr_children && can_loop; i++) {
+		child = parent->children[i];
 		if (topo_contains(child, cpu))
 			return child;
 	}
