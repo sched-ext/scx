@@ -6,7 +6,7 @@ description = "Crate for setting up the BPF arena library for sched-ext schedule
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1.0.65"
+anyhow = "1.0.100"
 libbpf-rs = "=0.26.0-beta.1"
 libbpf-sys = "=1.6.1"
 simplelog = "0.12"

@@ -8,24 +8,24 @@ repository = "https://github.com/sched-ext/scx"
 description = "Build time utilities for sched_ext schedulers"
 
 [dependencies]
-anyhow = "1.0.65"
+anyhow = "1.0.100"
 lazy_static = "1.5.0"
 sscanf = "0.4"
 version-compare = "0.1"
-glob = "0.3.2"
+glob = "0.3.3"
 tracing = "0.1"
-tracing-subscriber = "0.3.20"
+tracing-subscriber = "0.3.22"
 libbpf-cargo = "=0.26.0-beta.1"
 tar = "0.4"
 libbpf-rs = "=0.26.0-beta.1"
 bindgen = ">=0.69"
 
 [build-dependencies]
-ruzstd = "0.8.1"
+ruzstd = "0.8.2"
 tar = "0.4"
 walkdir = "2.5"
-tempfile = "3.19.1"
+tempfile = "3.23.0"
 
 [dev-dependencies]
-regex = "1.11.2"
-tempfile = "3.19.1"
+regex = "1.12.2"
+tempfile = "3.23.0"
