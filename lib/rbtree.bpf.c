@@ -962,7 +962,7 @@ int rb_integrity_check(rbtree_t __arg_arena *rbtree)
 				bpf_printk("WARNING: Inconsistent tree. Parent has %p has red child %p", rbnode, rbnode->left);
 				return -EINVAL;
 			}
-			if (rbnode->right && rbnode->left->is_red) {
+			if (rbnode->right && rbnode->right->is_red) {
 				bpf_printk("WARNING: Inconsistent tree. Parent has %p has red child %p", rbnode, rbnode->right);
 				return -EINVAL;
 			}
