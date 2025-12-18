@@ -86,7 +86,7 @@ int lvq_push(lv_queue_t __arg_arena *lvq, u64 val)
 		lvq->cur = newarr;
 	}
 
-	lv_arr_put(arr, b, val);
+	lv_arr_put(lvq->cur, b, val);
 	lvq->bottom += 1;
 
 	return 0;
