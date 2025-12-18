@@ -11,8 +11,8 @@ description = "sched_ext scheduler tool for observability"
 ci.use_clippy = true
 
 [dependencies]
-anyhow = "1.0.65"
-clap = { version = "4.5.28", features = [
+anyhow = "1.0.100"
+clap = { version = "4.5.53", features = [
     "derive",
     "cargo",
     "wrap_help",
@@ -20,42 +20,42 @@ clap = { version = "4.5.28", features = [
     "string",
     "unstable-styles",
 ] }
-clap_complete = "4.5.45"
+clap_complete = "4.5.61"
 crossterm = { version = "0.28.1", features = ["serde", "event-stream"] }
 futures = "0.3.31"
-glob = "0.3.2"
+glob = "0.3.3"
 libbpf-rs = "=0.26.0-beta.1"
-libc = "0.2.175"
-log = "0.4.17"
-num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }
+libc = "0.2.178"
+log = "0.4.29"
+num-format = { version = "0.4.4", features = ["with-serde", "with-system-locale"] }
 perfetto_protos = "0.51.1"
 plain = "0.2.3"
 procfs = "0.15.1"
 protobuf = "3.7.2"
 rand = "0.8.5"
 ratatui = { version = "0.29.0", features = ["serde", "macros"] }
-regex = "1.11.2"
+regex = "1.12.2"
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.20" }
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.25" }
 simplelog = "0.12"
-serde_json = "1.0.133"
-serde = { version = "1.0.215", features = ["derive"] }
-signal-hook = "0.3.17"
+serde_json = "1.0.145"
+serde = { version = "1.0.228", features = ["derive"] }
+signal-hook = "0.3.18"
 sysinfo = "0.35.2"
-tokio-util = "0.7.13"
-tokio = { version = "1.42.0", features = ["full"] }
-toml = "0.8.19"
+tokio-util = "0.7.17"
+tokio = { version = "1.48.0", features = ["full"] }
+toml = "0.8.23"
 xdg = "2.5.2"
 log-panics = { version = "2", features = ["with-backtrace"]}
-hashbrown = "0.15.2"
+hashbrown = "0.15.5"
 smartstring = { version = "1.0.1", features = ["serde"] }
 nix = { version = "0.30.1", features = ["time", "user"] }
-blazesym = "0.2.0-rc.4"
-rayon = "1.10"
+blazesym = "0.2.1"
+rayon = "1.11"
 
 [dev-dependencies]
 criterion = "0.6.0"
-tempfile = "3.19.1"
+tempfile = "3.23.0"
 
 [[bench]]
 name = "search_benchmark"
