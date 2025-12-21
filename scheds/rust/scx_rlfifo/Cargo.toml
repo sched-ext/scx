@@ -7,12 +7,12 @@ description = "A simple FIFO scheduler in Rust that runs in user-space"
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.65"
 plain = "0.2.3"
 procfs = "0.18"
-ctrlc = { version = "3.5", features = ["termination"] }
+ctrlc = { version = "3.1", features = ["termination"] }
 libbpf-rs = "=0.26.0-beta.1"
-libc = "0.2.178"
+libc = "0.2.175"
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
 scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.4.9" }
 

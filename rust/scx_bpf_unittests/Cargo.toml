@@ -9,6 +9,6 @@ publish = false
 libbpf-sys = "=1.6.1"  # need the includes and can't use libbpf_rs instead
 
 [build-dependencies]
-cc = "1.2.49"
-indoc = "2.0.7"
+cc = "1.2.29"
+indoc = "2.0.5"
 object = "0.36.7"
