@@ -8,5 +8,5 @@ description = "A tool to annotate vmlinux.h with documentation from kernel sourc
 publish = false
 
 [dependencies]
-clap = { version = "4.5.53", features = ["derive"] }
+clap = { version = "4.5.28", features = ["derive"] }
 walkdir = "2.5"

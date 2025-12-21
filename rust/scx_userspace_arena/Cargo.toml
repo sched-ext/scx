@@ -13,7 +13,7 @@ ci.use_clippy = true
 [dependencies]
 scx_utils = { path = "../scx_utils", version = "1.0.25" }
 
-anyhow = "1.0.100"
+anyhow = "1.0.65"
 buddy_system_allocator = { version = "0.11.0", default-features = false }
 libbpf-rs = "=0.26.0-beta.1"
 

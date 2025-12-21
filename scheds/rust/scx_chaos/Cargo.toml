@@ -17,15 +17,15 @@ scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.24" }
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.20" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.20" }
 
-anyhow = "1.0.100"
-clap = { version = "4.5.53", features = ["derive", "env", "unicode", "wrap_help"] }
+anyhow = "1.0.65"
+clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8.4"
-ctrlc = { version = "3.5", features = ["termination"] }
+ctrlc = { version = "3.1", features = ["termination"] }
 libbpf-rs = "=0.26.0-beta.1"
-libc = "0.2.178"
-log = "0.4.29"
+libc = "0.2.175"
+log = "0.4.17"
 nix = { version = "0.30.1", features = ["process"] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
