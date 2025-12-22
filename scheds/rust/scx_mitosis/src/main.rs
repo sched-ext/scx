@@ -113,10 +113,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     split_vtime_updates: bool,
 
-    /// Use SCX cgroup callbacks (requires CPU cgroup controller enabled).
-    /// When not specified, uses tracepoints and cgroup iteration instead.
+    /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
+    /// Uses tracepoints and cgroup iteration instead.
     #[clap(long, action = clap::ArgAction::SetTrue)]
-    uses_cpu_controller: bool,
+    cpu_controller_disabled: bool,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -217,7 +217,11 @@ impl<'a> Scheduler<'a> {
             .unwrap()
             .exiting_task_workaround_enabled = opts.exiting_task_workaround;
         skel.maps.rodata_data.as_mut().unwrap().split_vtime_updates = opts.split_vtime_updates;
-        skel.maps.rodata_data.as_mut().unwrap().uses_cpu_controller = opts.uses_cpu_controller;
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .unwrap()
+            .cpu_controller_disabled = opts.cpu_controller_disabled;
 
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {

@@ -35,7 +35,7 @@ const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     split_vtime_updates	     = false;
-const volatile bool	     uses_cpu_controller	     = true;
+const volatile bool	     cpu_controller_disabled	     = false;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -142,7 +142,7 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
 	struct cgroup *cgrp;
 
-	if (uses_cpu_controller) {
+	if (!cpu_controller_disabled) {
 		cgrp = __COMPAT_scx_bpf_task_cgroup(p);
 	} else {
 		/*
@@ -183,7 +183,7 @@ struct task_ctx {
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
-	/* Last known cgroup ID for detecting cgroup moves (used when !uses_cpu_controller) */
+	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
 	u64 cgid;
 };
 
@@ -555,7 +555,7 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 	 * The cgroup is already initialized by tp_cgroup_mkdir which
 	 * fires before the task can be scheduled in the new cgroup.
 	 */
-	if (!uses_cpu_controller) {
+	if (cpu_controller_disabled) {
 		u64 current_cgid;
 
 		bpf_rcu_read_lock();
@@ -1378,7 +1378,7 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
-	if (!uses_cpu_controller)
+	if (cpu_controller_disabled)
 		return 0;
 	return init_cgrp_ctx(cgrp);
 }
@@ -1388,7 +1388,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 	struct cgrp_ctx *cgc;
 	int		 ret;
 
-	if (!uses_cpu_controller)
+	if (cpu_controller_disabled)
 		return 0;
 
 	record_cgroup_exit(cgrp->kn->id);
@@ -1421,7 +1421,7 @@ void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p,
 {
 	struct task_ctx *tctx;
 
-	if (!uses_cpu_controller)
+	if (cpu_controller_disabled)
 		return;
 
 	if (!(tctx = lookup_task_ctx(p)))
@@ -1438,7 +1438,7 @@ SEC("tp_btf/cgroup_mkdir")
 int BPF_PROG(tp_cgroup_mkdir, struct cgroup *cgrp, const char *cgrp_path)
 {
 	int ret;
-	if (uses_cpu_controller)
+	if (!cpu_controller_disabled)
 		return 0;
 
 	ret = init_cgrp_ctx_with_ancestors(cgrp);
@@ -1455,7 +1455,7 @@ int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
 {
 	struct cgrp_ctx *cgc;
 
-	if (uses_cpu_controller)
+	if (!cpu_controller_disabled)
 		return 0;
 
 	/*
@@ -1543,7 +1543,7 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	 * We also need to ensure the cgroup hierarchy is initialized since
 	 * SCX cgroup callbacks won't fire.
 	 */
-	if (!uses_cpu_controller) {
+	if (cpu_controller_disabled) {
 		struct cgroup *cgrp = task_cgroup(p);
 		if (!cgrp)
 			return -ENOENT;
@@ -1759,7 +1759,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	 * cgroups get initialized in hierarchical order during scheduler attach.
 	 * The tracepoint handles new cgroups created after attach.
 	 */
-	if (!uses_cpu_controller) {
+	if (cpu_controller_disabled) {
 		struct cgroup *iter_root = NULL;
 
 		bpf_rcu_read_lock();
