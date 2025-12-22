@@ -498,6 +498,22 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	return update_task_cpumask(p, tctx);
 }
 
+/*
+ * Get task's cgroup, update its cell, and release the cgroup.
+ */
+static __always_inline int refresh_task_cell(struct task_struct *p,
+					     struct task_ctx	*tctx)
+{
+	struct cgroup *cgrp;
+	int	       ret;
+
+	if (!(cgrp = task_cgroup(p)))
+		return -1;
+	ret = update_task_cell(p, tctx, cgrp);
+	bpf_cgroup_release(cgrp);
+	return ret;
+}
+
 /* Helper function for picking an idle cpu out of a candidate set */
 static s32 pick_idle_cpu_from(struct task_struct   *p,
 			      const struct cpumask *cand_cpumask, s32 prev_cpu,
@@ -531,16 +547,8 @@ static s32 pick_idle_cpu_from(struct task_struct   *p,
 static __always_inline int maybe_refresh_cell(struct task_struct *p,
 					      struct task_ctx	 *tctx)
 {
-	struct cgroup *cgrp;
-	int	       ret = 0;
-	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq)) {
-		if (!(cgrp = task_cgroup(p)))
-			return -1;
-		if (update_task_cell(p, tctx, cgrp))
-			ret = -1;
-		bpf_cgroup_release(cgrp);
-		return ret;
-	}
+	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq))
+		return refresh_task_cell(p, tctx);
 
 	/*
 	 * When not using CPU controller, check if task's cgroup changed.
@@ -554,16 +562,11 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 		current_cgid = p->cgroups->dfl_cgrp->kn->id;
 		bpf_rcu_read_unlock();
 
-		if (current_cgid != tctx->cgid) {
-			if (!(cgrp = task_cgroup(p)))
-				return -1;
-			if (update_task_cell(p, tctx, cgrp))
-				ret = -1;
-			bpf_cgroup_release(cgrp);
-		}
+		if (current_cgid != tctx->cgid)
+			return refresh_task_cell(p, tctx);
 	}
 
-	return ret;
+	return 0;
 }
 
 static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
