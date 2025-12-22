@@ -1024,7 +1024,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 
 	/*
 	 * If a full-idle core can't be found (or if this is not an SMT system)
-	 * try to re-use the same CPU, even if it's not in a full-idle core.
+	 * try to reuse the same CPU, even if it's not in a full-idle core.
 	 */
 	if (is_prev_allowed &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -1627,7 +1627,7 @@ static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
 	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
 
 	/*
-	 * Use a moving average to evalute the target performance level,
+	 * Use a moving average to evaluate the target performance level,
 	 * giving more priority to the current average, so that we can
 	 * react faster at CPU load variations and at the same time smooth
 	 * the short spikes.

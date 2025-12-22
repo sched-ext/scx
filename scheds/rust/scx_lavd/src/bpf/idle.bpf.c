@@ -127,7 +127,7 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 	ctx->ia_mask = ctx->cpuc_cur->tmp_t_mask;
 	ctx->io_mask = ctx->cpuc_cur->tmp_t2_mask;
 	ctx->iat_mask = ctx->cpuc_cur->tmp_t3_mask;
-	ctx->temp_mask = ctx->cpuc_cur->tmp_l_mask; /* l_mask is no longer used, recyle it. */
+	ctx->temp_mask = ctx->cpuc_cur->tmp_l_mask; /* l_mask is no longer used, recycle it. */
 	if (!ctx->ia_mask || !ctx->io_mask || !ctx->iat_mask || !ctx->temp_mask)
 		return false;
 
@@ -395,7 +395,7 @@ bool is_sync_wakeup(struct pick_ctx *ctx)
 	return true;
 }
 
-static 
+static
 s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
 	struct cpu_ctx *p0, *p1, *cpuc;
@@ -560,19 +560,19 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	/*
 	 * At the high level, the idle CPU selection policy considers the
 	 * following factors:
-	 * 
+	 *
 	 * 1) Current active and overflow set: Stay on the current active and
 	 *    overflow sets if a task can run on them.
-	 * 
+	 *
 	 * 2) CPU preference order: If a task cannot run on the current active
 	 *    or overflow set, extend the overflow set following the CPU
 	 *    preference order (performance mode vs. power-save mode).
-	 * 
+	 *
 	 * 3) CPU type vs. task type: If possible, try to run a task on the
 	 *    matching CPU type (i.e., a big task on a big core vs. a little
 	 *    task on a little core). If the matching CPUs are not active,
 	 *    stay on the previous CPU.
-	 * 
+	 *
 	 * 4) Fully idle CPU vs. partially idle CPU: Choose a fully idle CPU
 	 *    over a partially idle CPU within the previous CPU's domain.
 	 *
@@ -581,7 +581,7 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	 *    good for cache locality because the waker task hands over the CPU
 	 *    to the wakee task for the further processing after finishing
 	 *    its job.
-	 * 
+	 *
 	 * 6) Minimize cross-domain migration: Before migrating to a neighbor
 	 *    domain, try to find an (any) idle CPU on the current domain.
 	 *    Migrate a task to another domain only when the current sticky

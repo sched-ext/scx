@@ -192,7 +192,7 @@ int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 	/*
 	 * Use can_loop to help with verification. The can_loop macro was
 	 * introduced in kernel commit ba39486 and wraps around the may_goto
-	 * instruction that helps with verifiying for loops. Using may_goto
+	 * instruction that helps with verifying for loops. Using may_goto
 	 * embeds a switch into the loop that ensures it is considered
 	 * terminable by the verifier by adding a hidden switch to the loop
 	 * and counting down with every iteration.

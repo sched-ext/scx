@@ -227,7 +227,7 @@ impl BuddyAlloc {
             let leaf2base = log2(leaf_size);
             base_addr = roundup(base_addr, leaf2base);
             // we use (k + 1)-th entry's split flag to test existence of k-th entry's blocks;
-            // to accoding this convention, we make a dummy (entries_size - 1)-th entry.
+            // according to this convention, we make a dummy (entries_size - 1)-th entry.
             // so we plus 2 on entries_size.
             let entries_size = log2((end_addr - base_addr) >> leaf2base) + 2;
 

@@ -570,7 +570,7 @@ lazy_static! {
 #[derive(Debug, Parser)]
 #[command(verbatim_doc_comment)]
 struct Opts {
-    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
@@ -654,7 +654,7 @@ struct Opts {
     /// Low priority fallback DSQs are used to execute tasks with custom CPU
     /// affinities. These DSQs are immediately executed iff a CPU is
     /// otherwise idle. However, after the specified wait, they are
-    /// guranteed upto --lo-fb-share fraction of each CPU.
+    /// guaranteed upto --lo-fb-share fraction of each CPU.
     #[clap(long, default_value = "10000")]
     lo_fb_wait_us: u64,
 
@@ -692,7 +692,7 @@ struct Opts {
     enable_gpu_support: bool,
 
     /// Gpu Kprobe Level
-    /// The value set here determines how agressive
+    /// The value set here determines how aggressive
     /// the kprobes enabled on gpu driver functions are.
     /// Higher values are more aggressive, incurring more system overhead
     /// and more accurately identifying PIDs using GPUs in a more timely manner.
@@ -1505,7 +1505,7 @@ struct NodeInfo {
 
 #[derive(Debug)]
 struct GpuTaskAffinitizer {
-    // This struct tracks information neccessary to numa affinitize
+    // This struct tracks information necessary to numa affinitize
     // gpu tasks periodically when needed.
     gpu_devs_to_node_info: HashMap<u32, NodeInfo>,
     gpu_pids_to_devs: HashMap<Pid, u32>,
@@ -2274,7 +2274,7 @@ impl<'a> Scheduler<'a> {
             sys_order.retain(|id| !node_order.contains(id));
             node_order.retain(|&id| id != llc_id);
 
-            // Shufle so that different LLCs follow different orders. See
+            // Shuffle so that different LLCs follow different orders. See
             // init_cpu_prox_map().
             fastrand::seed(llc_id as u64);
             fastrand::shuffle(&mut sys_order);
@@ -3361,7 +3361,7 @@ impl<'a> Scheduler<'a> {
 
         // Grow layers. Do so in the ascending target number of CPUs order
         // so that we're always more generous to smaller layers. This avoids
-        // starving small layers and shouldn't make noticable difference for
+        // starving small layers and shouldn't make noticeable difference for
         // bigger layers as work conservation should still be achieved
         // through open execution.
         for &(idx, target) in &ascending {
@@ -4312,7 +4312,7 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     if opts.verbose > 0 {
-        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+        warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
     }
 
     if opts.no_load_frac_limit {

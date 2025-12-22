@@ -209,7 +209,7 @@ impl CpuOrderCtx {
             //     * prefer more capable CPU with higher capacity
             //       and larger cache
             //         - ^cpu_cap (chip binning), ^cache_size,
-            //     * prefere the SMT core within the same performance domain
+            //     * prefer the SMT core within the same performance domain
             //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
             (true, false) => {
                 cpu_ids.sort_by(|a, b| {
@@ -230,7 +230,7 @@ impl CpuOrderCtx {
             //         - numa_adx, llc_rdx,
             //     * prefer energy-efficient LITTLE CPU with a larger cache
             //         - cpu_cap (big/little), ^cache_size,
-            //     * prefere the SMT core within the same performance domain
+            //     * prefer the SMT core within the same performance domain
             //         - pd_adx, core_rdx, ^smt_level, cpu_rdx
             (true, true) => {
                 cpu_ids.sort_by(|a, b| {
@@ -1027,7 +1027,7 @@ impl<'a> EnergyModelOptimizer<'a> {
         }
         pds_set.append(&mut xset);
 
-        // Sort the pds_set for easy comparision.
+        // Sort the pds_set for easy comparison.
         pds_set.sort();
     }
 }
@@ -1083,7 +1083,7 @@ impl<'a> PDSetInfo<'_> {
             pd_id_set.insert(pds.pd.id);
         }
 
-        // Create a pdcpu_set, so first gather the same PDS entires.
+        // Create a pdcpu_set, so first gather the same PDS entries.
         let mut pds_map: BTreeMap<PDS<'a>, RefCell<Vec<PDS<'a>>>> = BTreeMap::new();
 
         for pds in pds_set.iter() {

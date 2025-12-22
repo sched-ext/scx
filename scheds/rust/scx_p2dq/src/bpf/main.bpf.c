@@ -1726,7 +1726,7 @@ skip_preempt:
  * immediately in `enqueue` or later in `dispatch`. This returns a tagged union
  * with three states:
  * - P2DQ_ENQUEUE_PROMISE_COMPLETE: The enqueue has been completed. Note that
- *     this case _must_ be determinstic, or else scx_chaos will stall. That is,
+ *     this case _must_ be deterministic, or else scx_chaos will stall. That is,
  *     if the same task and enq_flags arrive twice, it must have returned
  *     _COMPLETE the first time to return it again.
  * - P2DQ_ENQUEUE_PROMISE_FIFO: The completer should enqueue this task on a fifo dsq.

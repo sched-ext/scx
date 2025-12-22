@@ -163,7 +163,7 @@ u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
 /**
  * ravg_scale - Scale a running avg
  * @rd: ravg_data to scale
- * @mult: multipler
+ * @mult: multiplier
  * @rshift: right shift amount
  *
  * Scale @rd by multiplying the tracked values by @mult and shifting right by
@@ -215,7 +215,7 @@ u64 ravg_read(struct ravg_data *rd, u64 now, u64 half_life)
 	/*
 	 * At the beginning of a new half_life period, the running avg is the
 	 * same as @rd->old. At the beginning of the next, it'd be old load / 2
-	 * + current load / 2. Inbetween, we blend the two linearly.
+	 * + current load / 2. In between, we blend the two linearly.
 	 */
 	if (elapsed) {
 		u32 progress = ravg_normalize_dur(elapsed, half_life);

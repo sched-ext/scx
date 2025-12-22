@@ -721,7 +721,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
 	 * is throttled before executing the task.
 	 *
-	 * Note that we calculate the task's deadline before checking the 
+	 * Note that we calculate the task's deadline before checking the
 	 * cgroup, as we need the deadline to put aside the task when the
 	 * cgroup is throttled.
 	 *
@@ -1487,7 +1487,7 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 			 * timer already took the idle_time duration. However,
 			 * instead of dropping out, the logic here still needs
 			 * to retry to ensure the cpuc->idle_start_clk is
-			 * updated to 0 or the timer will continute accumulating
+			 * updated to 0 or the timer will continue accumulating
 			 * the idle_time for an already activated CPU.
 			 */
 			bool ret = __sync_bool_compare_and_swap(
@@ -1619,7 +1619,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	 * When @p becomes under the SCX control (e.g., being forked), @p's
 	 * context data is initialized. We can sleep in this function and the
 	 * following will automatically use GFP_KERNEL.
-	 * 
+	 *
 	 * Return 0 on success.
 	 * Return -ESRCH if @p is invalid.
 	 * Return -ENOMEM if context allocation fails.
@@ -1628,7 +1628,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		scx_bpf_error("NULL task_struct pointer received");
 		return -ESRCH;
 	}
-	
+
 	taskc = scx_task_alloc(p);
 	if (!taskc) {
 		scx_bpf_error("task_ctx_stor first lookup failed");
@@ -1801,7 +1801,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	}
 
 	/*
-	 * Initilize CPU info
+	 * Initialize CPU info
 	 */
 	one_little_capacity = LAVD_SCALE;
 	bpf_for(cpu, 0, nr_cpu_ids) {
@@ -1925,7 +1925,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	}
 
 	/*
-	 * Print some useful informatin for debugging.
+	 * Print some useful information for debugging.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
@@ -2108,7 +2108,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	init_autopilot_caps();
 
 	/*
-	 * Initilize the current logical clock and service time.
+	 * Initialize the current logical clock and service time.
 	 */
 	WRITE_ONCE(cur_logical_clk, 0);
 	WRITE_ONCE(cur_svc_time, 0);
@@ -2163,4 +2163,3 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .exit			= (void *)lavd_exit,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
-

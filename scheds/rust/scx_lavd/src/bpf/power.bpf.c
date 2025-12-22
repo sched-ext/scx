@@ -52,7 +52,7 @@ private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR];
 /* Do not use energy model in making CPU preference order decisions. */
 const volatile u8	no_use_em;
 
-/* The numbr of PCO states populated */
+/* The number of PCO states populated */
 const volatile u8	nr_pco_states;
 
 /* The upper bounds of performance capacity for each PCO state. */
@@ -406,7 +406,7 @@ int update_power_mode_time(void)
 		__sync_fetch_and_add(&powersave_mode_ns, delta);
 		break;
 	}
-	
+
 	return 0;
 }
 
@@ -832,5 +832,3 @@ int set_power_profile(struct power_arg *input)
 {
 	return do_set_power_profile(input->power_mode);
 }
-
-

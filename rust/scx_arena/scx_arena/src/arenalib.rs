@@ -24,7 +24,7 @@ use libbpf_rs::Object;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::ProgramMut;
 
-// MAX_CPU_ARRSZ has to be big enough to accomodate all present CPUs.
+// MAX_CPU_ARRSZ has to be big enough to accommodate all present CPUs.
 // Even if it's larger than the size of cpumask_t, we truncate any
 // invalid data when passing it to the kernel's topology init functions.
 /// Maximum length of CPU mask supported by the library in bits.
