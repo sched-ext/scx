@@ -185,6 +185,10 @@ pub struct SchedulerOpts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     pub dispatch_pick2_disable: bool,
 
+    /// Disables NUMA-aware pick2 load balancing.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub disable_pick2_numa_aware: bool,
+
     /// Enables pick2 load balancing on the dispatch path when LLC utilization is under the
     /// specified utilization.
     #[clap(long, default_value = "75", value_parser = clap::value_parser!(u64).range(0..100))]
@@ -432,6 +436,7 @@ macro_rules! init_open_skel {
             rodata.lb_config.max_dsq_pick2 = MaybeUninit::new(opts.max_dsq_pick2);
             rodata.lb_config.eager_load_balance = MaybeUninit::new(!opts.eager_load_balance);
             rodata.lb_config.dispatch_pick2_disable = MaybeUninit::new(opts.dispatch_pick2_disable);
+            rodata.lb_config.dispatch_pick2_numa_aware = MaybeUninit::new(!opts.disable_pick2_numa_aware);
             rodata.lb_config.dispatch_lb_busy = opts.dispatch_lb_busy;
             rodata.lb_config.dispatch_lb_interactive =
                 MaybeUninit::new(opts.dispatch_lb_interactive);

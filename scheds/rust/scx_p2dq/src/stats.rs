@@ -91,6 +91,12 @@ pub struct Metrics {
     pub eas_big_select: u64,
     #[stat(desc = "Number of times EAS fell back to non-preferred core type")]
     pub eas_fallback: u64,
+    #[stat(desc = "Number of times pick2 selected LLCs from same NUMA node")]
+    pub pick2_same_numa: u64,
+    #[stat(desc = "Number of times pick2 selected LLCs across NUMA nodes")]
+    pub pick2_cross_numa: u64,
+    #[stat(desc = "Number of times pick2 NUMA-aware selection fell back to random")]
+    pub pick2_numa_fallback: u64,
 }
 
 impl Metrics {
@@ -111,23 +117,25 @@ impl Metrics {
             self.enq_mig,
         )?;
 
-        // Build the stats line conditionally based on thermal tracking availability
         let mut stats_line = format!(
-            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
-            self.wake_prev,
-            self.wake_llc,
-            self.wake_mig,
-            self.select_pick2,
-            self.dispatch_pick2,
-            self.llc_migrations,
-            self.node_migrations,
-            self.fork_balance,
-            self.fork_same_llc,
-            self.exec_balance,
-            self.exec_same_llc,
+            "\twake prev/llc/mig {}/{}/{}",
+            self.wake_prev, self.wake_llc, self.wake_mig,
         );
 
-        // Only show thermal stats if thermal tracking is enabled
+        if crate::TOPO.all_llcs.len() > 1 {
+            stats_line.push_str(&format!(
+                "\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
+                self.select_pick2,
+                self.dispatch_pick2,
+                self.llc_migrations,
+                self.node_migrations,
+                self.fork_balance,
+                self.fork_same_llc,
+                self.exec_balance,
+                self.exec_same_llc,
+            ));
+        }
+
         if is_thermal_tracking_enabled() {
             stats_line.push_str(&format!(
                 "\n\tthermal kick/avoid {}/{}",
@@ -135,11 +143,18 @@ impl Metrics {
             ));
         }
 
-        // Only show EAS stats if energy-aware scheduling is enabled
         if is_eas_enabled() {
             stats_line.push_str(&format!(
                 "\n\tEAS little/big/fallback {}/{}/{}",
                 self.eas_little_select, self.eas_big_select, self.eas_fallback,
+            ));
+        }
+
+        let numa_total = self.pick2_same_numa + self.pick2_cross_numa + self.pick2_numa_fallback;
+        if numa_total > 0 {
+            stats_line.push_str(&format!(
+                "\n\tpick2 same_numa/cross_numa/fallback {}/{}/{}",
+                self.pick2_same_numa, self.pick2_cross_numa, self.pick2_numa_fallback,
             ));
         }
 
@@ -176,6 +191,9 @@ impl Metrics {
             eas_little_select: self.eas_little_select - rhs.eas_little_select,
             eas_big_select: self.eas_big_select - rhs.eas_big_select,
             eas_fallback: self.eas_fallback - rhs.eas_fallback,
+            pick2_same_numa: self.pick2_same_numa - rhs.pick2_same_numa,
+            pick2_cross_numa: self.pick2_cross_numa - rhs.pick2_cross_numa,
+            pick2_numa_fallback: self.pick2_numa_fallback - rhs.pick2_numa_fallback,
         }
     }
 }
