@@ -73,6 +73,8 @@ pub struct Metrics {
     pub wake_llc: u64,
     #[stat(desc = "Number of times tasks have been woken and migrated llc")]
     pub wake_mig: u64,
+    #[stat(desc = "Number of times tasks have been woken directly to waker CPU")]
+    pub wake_sync_waker: u64,
     #[stat(desc = "Number of times fork balancing migrated to different LLC")]
     pub fork_balance: u64,
     #[stat(desc = "Number of times exec balancing migrated to different LLC")]
@@ -110,13 +112,13 @@ impl Metrics {
             self.enq_intr,
             self.enq_mig,
         )?;
-
-        // Build the stats line conditionally based on thermal tracking availability
-        let mut stats_line = format!(
-            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
+        writeln!(
+            w,
+            "\twake prev/llc/mig/sync {}/{}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
             self.wake_prev,
             self.wake_llc,
             self.wake_mig,
+            self.wake_sync_waker,
             self.select_pick2,
             self.dispatch_pick2,
             self.llc_migrations,
@@ -125,25 +127,25 @@ impl Metrics {
             self.fork_same_llc,
             self.exec_balance,
             self.exec_same_llc,
-        );
+        )?;
 
         // Only show thermal stats if thermal tracking is enabled
         if is_thermal_tracking_enabled() {
-            stats_line.push_str(&format!(
-                "\n\tthermal kick/avoid {}/{}",
+            writeln!(
+                w,
+                "\tthermal kick/avoid {}/{}",
                 self.thermal_kick, self.thermal_avoid,
-            ));
+            )?;
         }
 
         // Only show EAS stats if energy-aware scheduling is enabled
         if is_eas_enabled() {
-            stats_line.push_str(&format!(
-                "\n\tEAS little/big/fallback {}/{}/{}",
+            writeln!(
+                w,
+                "\tEAS little/big/fallback {}/{}/{}",
                 self.eas_little_select, self.eas_big_select, self.eas_fallback,
-            ));
+            )?;
         }
-
-        writeln!(w, "{}", stats_line)?;
         Ok(())
     }
 
@@ -167,6 +169,7 @@ impl Metrics {
             wake_prev: self.wake_prev - rhs.wake_prev,
             wake_llc: self.wake_llc - rhs.wake_llc,
             wake_mig: self.wake_mig - rhs.wake_mig,
+            wake_sync_waker: self.wake_sync_waker - rhs.wake_sync_waker,
             fork_balance: self.fork_balance - rhs.fork_balance,
             exec_balance: self.exec_balance - rhs.exec_balance,
             fork_same_llc: self.fork_same_llc - rhs.fork_same_llc,
