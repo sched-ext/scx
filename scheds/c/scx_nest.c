@@ -72,6 +72,7 @@ static void read_stats(struct scx_nest *skel, u64 *stats)
 	u32 idx;
 
 	memset(stats, 0, sizeof(stats[0]) * NEST_STAT(NR));
+	memset(cnts, 0, sizeof(cnts));
 
 	for (idx = 0; idx < NEST_STAT(NR); idx++) {
 		int ret, cpu;
