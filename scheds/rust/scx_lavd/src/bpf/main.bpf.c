@@ -233,7 +233,6 @@ static pid_t		lavd_pid;
 /*
  * Include sub-modules
  */
-#include "idle.bpf.c"
 #include "balance.bpf.c"
 #include "lat_cri.bpf.c"
 
