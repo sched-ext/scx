@@ -58,7 +58,7 @@ const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
@@ -607,7 +607,7 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     if opts.verbose > 0 {
-        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+        warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
     }
 
     debug!("opts={:?}", &opts);

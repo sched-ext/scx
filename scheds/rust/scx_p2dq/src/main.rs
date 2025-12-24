@@ -80,7 +80,7 @@ const SCHEDULER_NAME: &str = "scx_p2dq";
 ///
 #[derive(Debug, Parser)]
 struct CliOpts {
-    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
@@ -377,7 +377,7 @@ fn main(opts: CliOpts) -> Result<()> {
     }
 
     if opts.verbose > 0 {
-        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+        warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
     }
 
     if let Some(run_id) = opts.run_id {

@@ -167,7 +167,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 
 		/*
 		 * Accumulate cpus' scaled loads,
-		 * whcih is capacity and frequency invariant.
+		 * which is capacity and frequency invariant.
 		 */
 		c->tot_sc_time += cpuc_tot_sc_time;
 
@@ -238,7 +238,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 
 		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
-		 * non-zero), accumulate the current idle peirod so far.
+		 * non-zero), accumulate the current idle period so far.
 		 */
 		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			u64 old_clk = cpuc->idle_start_clk;
@@ -256,7 +256,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
-		 * Calculcate per-CPU utilization.
+		 * Calculate per-CPU utilization.
 		 */
 		compute = time_delta(c->duration, cpuc->idle_total);
 
@@ -535,5 +535,3 @@ s32 init_sys_stat(u64 now)
 
 	return 0;
 }
-
-

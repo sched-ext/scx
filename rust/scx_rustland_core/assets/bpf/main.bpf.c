@@ -579,7 +579,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	/*
 	 * If built-in idle CPU policy is not enabled, completely delegate
-	 * the idle selection policy to user-space and keep re-using the
+	 * the idle selection policy to user-space and keep reusing the
 	 * same CPU here.
 	 */
 	if (!builtin_idle)

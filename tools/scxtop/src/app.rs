@@ -188,7 +188,7 @@ pub struct App<'a> {
     power_snapshot: crate::PowerSnapshot,
     power_collector: crate::PowerDataCollector,
 
-    // layout releated
+    // layout related
     events_list_size: u16,
 
     // trace related
@@ -219,7 +219,7 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    /// Creates a new appliation.
+    /// Creates a new application.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,

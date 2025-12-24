@@ -6,7 +6,7 @@
  * [0]: https://hal.inria.fr/hal-03612592/file/paper.pdf
  *
  * It operates as a global weighted vtime scheduler (similarly to CFS), while
- * using the Nest algorithm to choose idle cores at wakup time.
+ * using the Nest algorithm to choose idle cores at wakeup time.
  *
  * It also demonstrates the following niceties.
  *
@@ -650,4 +650,3 @@ SCX_OPS_DEFINE(nest_ops,
 	       .exit			= (void *)nest_exit,
 	       .flags			= 0,
 	       .name			= "nest");
-

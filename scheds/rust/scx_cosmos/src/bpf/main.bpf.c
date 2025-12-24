@@ -79,7 +79,7 @@ const volatile u64 preferred_cpus[MAX_CPUS];
 const volatile bool cpufreq_enabled = true;
 
 /*
- * Enable NUMA optimizatons.
+ * Enable NUMA optimizations.
  */
 const volatile bool numa_enabled;
 

@@ -128,7 +128,7 @@ struct task_ctx {
 	/* --- cacheline 0 boundary (0 bytes) --- */
 	/*
 	 * Do NOT change the position of atq. It should be at the beginning
-	 * of the task_ctx. 
+	 * of the task_ctx.
 	 */
 	struct scx_task_common atq __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -185,7 +185,7 @@ struct cpdom_ctx {
 
 	/* --- cacheline 8 boundary (512 bytes): read-write, read-mostly --- */
 	u8	is_stealer __attribute__((aligned(CACHELINE_SIZE))); /* this domain should steal tasks from others */
-	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
+	u8	is_stealee;			    /* stealer domain should steal tasks from this domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u32	sc_load;			    /* scaled load considering DSQ length and CPU utilization */
@@ -229,7 +229,7 @@ struct cpu_ctx {
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
 
 	/* --- cacheline 1 boundary (64 bytes) --- */
-	volatile u32	min_perf_cri;	/* mininum performance criticality */
+	volatile u32	min_perf_cri;	/* minimum performance criticality */
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
 	volatile u32	nr_sched;	/* number of schedules */
 	volatile u32	nr_preempt;

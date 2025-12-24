@@ -54,7 +54,7 @@ and turbo is enabled.
 
 Layer affinities can be defined using the `nodes` or `llcs` layer configs. This
 allows for restricting a layer to a NUMA node or LLC. Layers will by default
-attempt to grow within the same NUMA node, however this may change to suppport
+attempt to grow within the same NUMA node, however this may change to support
 different layer growth strategies in the future. When tuning the `util_range`
 for a layer there should be some consideration for how the layer should grow.
 For example, if the `util_range` lower bound is too high, it may lead to the

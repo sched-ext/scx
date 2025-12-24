@@ -112,7 +112,7 @@ __hidden
 u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
 {
 	/*
-	 * Increase fast but descrease slowly.
+	 * Increase fast but decrease slowly.
 	 */
 	if (old_val < new_val)
 		return __calc_avg(new_val, old_val, 2);

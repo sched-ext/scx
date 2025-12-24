@@ -57,7 +57,7 @@ fn main() {
                 let res = tx.send(id);
                 debug!("Sendt {:?} {:?}", id, res);
                 let res = rx.recv();
-                debug!("Recevied {:?}", res);
+                debug!("Received {:?}", res);
                 stats.to_json()
             }),
         );
