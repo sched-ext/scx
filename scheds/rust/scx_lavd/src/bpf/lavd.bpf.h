@@ -478,4 +478,64 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 
 extern volatile bool is_monitored;
 
+
+/* Idle CPU pick helpers */
+
+struct pick_ctx {
+	/*
+	 * Input arguments for pick_idle_cpu().
+	 */
+	const struct task_struct *p;
+	task_ctx *taskc;
+	u64 wake_flags;
+	s32 prev_cpu;
+	/*
+	 * Additional input arguments for find_sticky_cpu_and_cpdom().
+	 */
+	s32 sync_waker_cpu;
+	/*
+	 * Additional output arguments for init_active_ovrflw_masks().
+	 */
+	struct bpf_cpumask *active; /* global active mask */
+	struct bpf_cpumask *ovrflw; /* global overflow mask */
+	/*
+	 * Additional output arguments for init_ao_masks().
+	 * Additional input arguments for find_sticky_cpu_and_cpdom().
+	 */
+	struct cpu_ctx *cpuc_cur;
+	struct bpf_cpumask *a_mask; /* task's active mask */
+	struct bpf_cpumask *o_mask; /* task's overflow mask */
+	/*
+	 * Additional input arguments for init_idle_i_mask().
+	 */
+	const struct cpumask *i_mask;
+	/*
+	 * Additional input arguments for init_idle_ato_masks().
+	 * Additional input arguments for pick_idle_cpu_at_cpdom().
+	 */
+	struct bpf_cpumask *ia_mask;
+	struct bpf_cpumask *iat_mask;
+	struct bpf_cpumask *io_mask;
+	struct bpf_cpumask *temp_mask;
+	/*
+	 * Flags.
+	 */
+	bool a_empty:1;
+	bool o_empty:1;
+	bool is_task_big:1;
+	bool i_empty:1;
+	bool ia_empty:1;
+	bool iat_empty:1;
+	bool io_empty:1;
+};
+
+
+s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
+s32  pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle);
+
+bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
+
+extern u64 cur_logical_clk;
+u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
+
 #endif /* __LAVD_H */

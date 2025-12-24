@@ -4,56 +4,17 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
-struct pick_ctx {
-	/*
-	 * Input arguments for pick_idle_cpu().
-	 */
-	const struct task_struct *p;
-	task_ctx *taskc;
-	u64 wake_flags;
-	s32 prev_cpu;
-	/*
-	 * Additional input arguments for find_sticky_cpu_and_cpdom().
-	 */
-	s32 sync_waker_cpu;
-	/*
-	 * Additional output arguments for init_active_ovrflw_masks().
-	 */
-	struct bpf_cpumask *active; /* global active mask */
-	struct bpf_cpumask *ovrflw; /* global overflow mask */
-	/*
-	 * Additional output arguments for init_ao_masks().
-	 * Additional input arguments for find_sticky_cpu_and_cpdom().
-	 */
-	struct cpu_ctx *cpuc_cur;
-	struct bpf_cpumask *a_mask; /* task's active mask */
-	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	/*
-	 * Additional input arguments for init_idle_i_mask().
-	 */
-	const struct cpumask *i_mask;
-	/*
-	 * Additional input arguments for init_idle_ato_masks().
-	 * Additional input arguments for pick_idle_cpu_at_cpdom().
-	 */
-	struct bpf_cpumask *ia_mask;
-	struct bpf_cpumask *iat_mask;
-	struct bpf_cpumask *io_mask;
-	struct bpf_cpumask *temp_mask;
-	/*
-	 * Flags.
-	 */
-	bool a_empty:1;
-	bool o_empty:1;
-	bool is_task_big:1;
-	bool i_empty:1;
-	bool ia_empty:1;
-	bool iat_empty:1;
-	bool io_empty:1;
-};
+#include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include "util.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <lib/cgroup.h>
 
 struct sticky_ctx {
 	/*
@@ -155,7 +116,8 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 	return true;
 }
 
-static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
+__hidden
+s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 {
 	const volatile u16 *cpu_order = get_cpu_order();
 	const struct cpumask *online_mask;
@@ -188,8 +150,8 @@ static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 	return -ENOENT;
 }
 
-static
-s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
+
+static s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 			   bool *is_idle)
 {
 	struct bpf_cpumask *cpd_mask;
@@ -547,7 +509,7 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	return true;
 }
 
-static
+__hidden
 s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;

@@ -184,6 +184,7 @@
 #include <scx/bpf_arena_common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "util.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -196,7 +197,7 @@ char _license[] SEC("license") = "GPL";
 /*
  * Logical current clock
  */
-static u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
+u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
 
 /*
  * Current service time
@@ -228,14 +229,6 @@ static volatile u64	nr_cpus_big;
  * Scheduler's PID
  */
 static pid_t		lavd_pid;
-
-/*
- * Include sub-modules
- */
-#include "util.bpf.c"
-#include "idle.bpf.c"
-#include "balance.bpf.c"
-#include "lat_cri.bpf.c"
 
 static void advance_cur_logical_clk(struct task_struct *p)
 {
