@@ -533,4 +533,9 @@ struct pick_ctx {
 s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur);
 s32  pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle);
 
+bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id);
+
+extern u64 cur_logical_clk;
+u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc);
+
 #endif /* __LAVD_H */

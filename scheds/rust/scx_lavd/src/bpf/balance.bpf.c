@@ -4,9 +4,18 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include "util.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <lib/cgroup.h>
+
 
 extern const volatile u8	mig_delta_pct;
 
@@ -370,7 +379,8 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 	return false;
 }
 
-static bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
+__hidden
+bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
 	struct task_struct *p;
