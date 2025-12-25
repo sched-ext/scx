@@ -1,7 +1,5 @@
 # Sched_ext Schedulers and Tools
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sched-ext/scx)
-
 [`sched_ext`](https://github.com/sched-ext/scx) is a Linux kernel feature
 which enables implementing kernel thread schedulers in BPF and dynamically
 loading them. This repository contains various scheduler implementations and
