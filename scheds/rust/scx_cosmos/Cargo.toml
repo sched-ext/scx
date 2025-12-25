@@ -1,6 +1,6 @@
 [package]
 name = "scx_cosmos"
-version = "1.0.5"
+version = "1.0.6"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
 edition = "2021"
 description = "Lightweight scheduler optimized for preserving task-to-CPU locality. https://github.com/sched-ext/scx/tree/main"
