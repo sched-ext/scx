@@ -199,7 +199,7 @@ struct Opts {
 
     /// Utilization percentage to consider a CPU as busy (-1 = auto).
     ///
-    /// A value close to 0 forces tasks to migrate quickier, increasing work conservation and
+    /// A value close to 0 forces tasks to migrate quicker, increasing work conservation and
     /// potentially system responsiveness.
     ///
     /// A value close to 100 makes tasks more sticky to their CPU, increasing cache-sensivite and

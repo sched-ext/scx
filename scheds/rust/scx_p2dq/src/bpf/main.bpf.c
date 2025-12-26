@@ -1726,7 +1726,7 @@ skip_preempt:
  * immediately in `enqueue` or later in `dispatch`. This returns a tagged union
  * with three states:
  * - P2DQ_ENQUEUE_PROMISE_COMPLETE: The enqueue has been completed. Note that
- *     this case _must_ be determinstic, or else scx_chaos will stall. That is,
+ *     this case _must_ be deterministic, or else scx_chaos will stall. That is,
  *     if the same task and enq_flags arrive twice, it must have returned
  *     _COMPLETE the first time to return it again.
  * - P2DQ_ENQUEUE_PROMISE_FIFO: The completer should enqueue this task on a fifo dsq.
@@ -3637,7 +3637,7 @@ void BPF_STRUCT_OPS(p2dq_exit, struct scx_exit_info *ei)
  *
  * Note: This tracepoint only exists on ARM/ARM64 architectures
  */
-#if defined(__aarch64__) || defined(__arm__)
+#if defined(__TARGET_ARCH_arm64) || defined(__aarch64__)
 __weak __hidden SEC("tp_btf/hw_pressure_update?")
 int BPF_PROG(on_thermal_pressure, u32 cpu, u64 hw_pressure)
 {

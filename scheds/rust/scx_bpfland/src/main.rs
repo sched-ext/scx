@@ -123,6 +123,10 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1000")]
     slice_us: u64,
 
+    /// Minimum scheduling slice duration in microseconds (0 = no minimum time slice).
+    #[clap(short = 'L', long, default_value = "0")]
+    slice_min_us: u64,
+
     /// Maximum time slice lag in microseconds.
     ///
     /// A positive value can help to enhance the responsiveness of interactive tasks, but it can
@@ -336,6 +340,7 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.sticky_tasks = opts.sticky_tasks;
         rodata.slice_max = opts.slice_us * 1000;
+        rodata.slice_min = opts.slice_min_us * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.throttle_ns = opts.throttle_us * 1000;
         rodata.primary_all = domain.weight() == *NR_CPU_IDS;

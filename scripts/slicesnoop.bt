@@ -8,7 +8,7 @@
 /*
  * slicesnoop - Explore the slice distribution of DSQs
  *
- * This script is used to explore the distrubtion of slice intervals for
+ * This script is used to explore the distribution of slice intervals for
  * schedulers aggregated by DSQ id.
  *
  * Processes can be filtered by passing a pid as the first parameter (0 for

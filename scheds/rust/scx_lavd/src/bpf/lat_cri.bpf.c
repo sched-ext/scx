@@ -4,9 +4,18 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
-/*
- * To be included to the main.bpf.c
- */
+#include <scx/common.bpf.h>
+#include <scx/bpf_arena_common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include "util.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#include <lib/cgroup.h>
+
 
 static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 {
@@ -236,7 +245,8 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	return deadline >> LAVD_SHIFT;
 }
 
-static u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc)
+__hidden
+u64 calc_when_to_run(struct task_struct *p, task_ctx *taskc)
 {
 	u64 dl_delta, clc;
 

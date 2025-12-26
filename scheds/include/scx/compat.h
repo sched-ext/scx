@@ -173,7 +173,7 @@ static inline long scx_hotplug_seq(void)
 /*
  * New versions of bpftool now emit additional link placeholders for BPF maps,
  * and set up BPF skeleton in such a way that libbpf will auto-attach BPF maps
- * automatically, assumming libbpf is recent enough (v1.5+). Old libbpf will do
+ * automatically, assuming libbpf is recent enough (v1.5+). Old libbpf will do
  * nothing with those links and won't attempt to auto-attach maps.
  *
  * To maintain compatibility with older libbpf while avoiding trying to attach

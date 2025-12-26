@@ -4,6 +4,15 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 
+#include <scx/common.bpf.h>
+#include "intf.h"
+#include "lavd.bpf.h"
+#include <errno.h>
+#include <stdbool.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
 /*
  * To be included to the main.bpf.c
  */
@@ -79,6 +88,7 @@ struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
 
+__hidden
 u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
@@ -88,6 +98,7 @@ u32 __attribute__ ((noinline)) calc_avg32(u32 old_val, u32 new_val)
 	return __calc_avg(old_val, new_val, 3);
 }
 
+__hidden
 u64 __attribute__ ((noinline)) calc_avg(u64 old_val, u64 new_val)
 {
 	/*
@@ -97,10 +108,11 @@ u64 __attribute__ ((noinline)) calc_avg(u64 old_val, u64 new_val)
 	return __calc_avg(old_val, new_val, 3);
 }
 
+__hidden
 u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
 {
 	/*
-	 * Increase fast but descrease slowly.
+	 * Increase fast but decrease slowly.
 	 */
 	if (old_val < new_val)
 		return __calc_avg(new_val, old_val, 2);
@@ -108,6 +120,7 @@ u64 __attribute__ ((noinline)) calc_asym_avg(u64 old_val, u64 new_val)
 		return __calc_avg(old_val, new_val, 3);
 }
 
+__hidden
 u64 __attribute__ ((noinline)) calc_avg_freq(u64 old_freq, u64 interval)
 {
 	u64 new_freq, ewma_freq;
@@ -121,22 +134,26 @@ u64 __attribute__ ((noinline)) calc_avg_freq(u64 old_freq, u64 interval)
 	return ewma_freq;
 }
 
-static bool is_kernel_task(struct task_struct *p)
+__hidden
+bool is_kernel_task(struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
 }
 
-static bool is_kernel_worker(struct task_struct *p)
+__hidden
+bool is_kernel_worker(struct task_struct *p)
 {
 	return !!(p->flags & (PF_WQ_WORKER | PF_IO_WORKER));
 }
 
-static bool is_ksoftirqd(struct task_struct *p)
+__hidden
+bool is_ksoftirqd(struct task_struct *p)
 {
 	return is_kernel_task(p) && !__builtin_memcmp(p->comm, "ksoftirqd/", 10);
 }
 
-static bool is_pinned(const struct task_struct *p)
+__hidden
+bool is_pinned(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1;
 }
@@ -204,22 +221,26 @@ bool have_scheduled(task_ctx __arg_arena *taskc)
 	return taskc->slice != 0;
 }
 
+__hidden
 bool can_boost_slice(void)
 {
 	return sys_stat.nr_queued_task <= sys_stat.nr_active;
 }
 
+__hidden
 u16 get_nice_prio(struct task_struct __arg_trusted *p)
 {
 	u16 prio = p->static_prio - MAX_RT_PRIO; /* [0, 40) */
 	return prio;
 }
 
-static bool use_full_cpus(void)
+__hidden
+bool use_full_cpus(void)
 {
 	return sys_stat.nr_active >= nr_cpus_onln;
 }
 
+__hidden
 s64 __attribute__ ((noinline)) pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 shift, rotated;
@@ -241,8 +262,9 @@ s64 __attribute__ ((noinline)) pick_any_bit(u64 bitmap, u64 nuance)
 	return (tz + shift) & 63;
 }
 
-static void set_on_core_type(task_ctx __arg_arena *taskc,
-			     const struct cpumask *cpumask)
+__hidden
+void set_on_core_type(task_ctx __arg_arena *taskc,
+		      const struct cpumask *cpumask)
 {
 	bool on_big = false, on_little = false;
 	struct cpu_ctx *cpuc;
@@ -278,6 +300,7 @@ static void set_on_core_type(task_ctx __arg_arena *taskc,
 		reset_task_flag(taskc, LAVD_FLAG_ON_LITTLE);
 }
 
+__hidden
 bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 {
 	u32 r;
@@ -295,6 +318,7 @@ bool __attribute__ ((noinline)) prob_x_out_of_y(u32 x, u32 y)
 /*
  * We define the primary cpu in the physical core as the lowest logical cpu id.
  */
+__hidden
 u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
 	const volatile u32 *sibling;
 
@@ -310,11 +334,13 @@ u32 __attribute__ ((noinline)) get_primary_cpu(u32 cpu) {
 	return ((cpu < *sibling) ? cpu : *sibling);
 }
 
+__hidden
 u32 cpu_to_dsq(u32 cpu)
 {
 	return (get_primary_cpu(cpu)) | LAVD_DSQ_TYPE_CPU << LAVD_DSQ_TYPE_SHFT;
 }
 
+__hidden
 s32 nr_queued_on_cpu(struct cpu_ctx *cpuc)
 {
 	s32 nr_queued;
@@ -330,6 +356,7 @@ s32 nr_queued_on_cpu(struct cpu_ctx *cpuc)
 	return nr_queued;
 }
 
+__hidden
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
 {
 	if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p)))
@@ -337,6 +364,7 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
 	return cpdom_to_dsq(cpuc->cpdom_id);
 }
 
+__hidden
 u64 task_exec_time(struct task_struct __arg_trusted *p)
 {
 	return p->se.sum_exec_runtime;

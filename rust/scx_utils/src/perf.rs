@@ -13,7 +13,7 @@ use std::os::raw::{c_int, c_ulong};
 /// `std::io::Error::last_os_error`) is set to indicate the error.
 ///
 /// Note: The `attrs` argument needs to be a `*mut` because if the `size` field
-/// is too small or too large, the kernel writes the size it was expecing back
+/// is too small or too large, the kernel writes the size it was expecting back
 /// into that field. It might do other things as well.
 ///
 /// # Safety

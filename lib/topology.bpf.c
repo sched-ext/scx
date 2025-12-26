@@ -10,7 +10,7 @@ volatile topo_ptr topo_all;
 /*
  * XXXETSAL: This is a (hopefully) temporary measure that
  * makes it easier to integrate with existing schedulers that
- * use arbitraty IDs to index CPUs/LLCs/nodes. In the future we 
+ * use arbitrary IDs to index CPUs/LLCs/nodes. In the future we
  * will just keep a CPU id to CPU topology node array, but for
  * now we will have an array for each level.
  */

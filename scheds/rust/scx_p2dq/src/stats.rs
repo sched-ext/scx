@@ -55,9 +55,9 @@ pub struct Metrics {
     pub enq_intr: u64,
     #[stat(desc = "Number of times a task was enqueued to migration DSQ")]
     pub enq_mig: u64,
-    #[stat(desc = "Number of times a select_cpu pick 2 load balancing occured")]
+    #[stat(desc = "Number of times a select_cpu pick 2 load balancing occurred")]
     pub select_pick2: u64,
-    #[stat(desc = "Number of times a dispatch pick 2 load balancing occured")]
+    #[stat(desc = "Number of times a dispatch pick 2 load balancing occurred")]
     pub dispatch_pick2: u64,
     #[stat(desc = "Number of times a task migrated LLCs")]
     pub llc_migrations: u64,

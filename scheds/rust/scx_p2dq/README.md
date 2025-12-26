@@ -79,7 +79,7 @@ options for gaming:
    Overrides other slice scaling methods.
  - `--autoslice` auto scaling of interactive slice duration based on
    utilization of interactive tasks.
- - `--freq-control` for controling CPU frequency with certain drivers.
+ - `--freq-control` for controlling CPU frequency with certain drivers.
  - `--cpu-priority` uses a min-heap to schedule on CPUs based on a score of
    most recently used and preferred core value. **Requires kernel support for
    `sched_core_priority` symbol** - typically available on systems with hybrid

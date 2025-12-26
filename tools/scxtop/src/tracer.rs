@@ -16,7 +16,7 @@ pub struct Tracer<'a> {
 }
 
 impl<'a> Tracer<'a> {
-    /// Creates a new appliation.
+    /// Creates a new application.
     pub fn new(skel: BpfSkel<'a>) -> Self {
         let trace_links = vec![];
         Self { skel, trace_links }

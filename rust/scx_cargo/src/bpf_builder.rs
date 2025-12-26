@@ -79,7 +79,7 @@ use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
 /// - `src/main.rs`: Rust userspace component which loads the BPF blob and
 /// interacts it using the generated bindings.
 ///
-/// - `src/bpf/intf.h`: C header file definining constants and structs
+/// - `src/bpf/intf.h`: C header file defining constants and structs
 /// that will be used by both the BPF and userspace components.
 ///
 /// - `src/bpf/main.c`: C source code implementing the BPF component -
@@ -155,11 +155,11 @@ use tracing_subscriber::{filter, layer::SubscriberExt, Layer};
 ///
 /// - `BPF_BASE_CFLAGS`: Override the non-include part of cflags.
 ///
-/// - `BPF_EXTRA_CFLAGS_PRE_INCL`: Add cflags before the automic include
+/// - `BPF_EXTRA_CFLAGS_PRE_INCL`: Add cflags before the automatic include
 ///   search path options. Header files in the search paths added by this
-///   variable will supercede the automatic ones.
+///   variable will supersede the automatic ones.
 ///
-/// - `BPF_EXTRA_CFLAGS_POST_INCL`: Add cflags after the automic include
+/// - `BPF_EXTRA_CFLAGS_POST_INCL`: Add cflags after the automatic include
 ///   search path options. Header paths added by this variable will be
 ///   searched only if the target header file can't be found in the
 ///   automatic header paths.

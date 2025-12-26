@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use libbpf_rs::libbpf_sys::*;
-use libbpf_rs::{AsRawLibbpf, OpenProgramImpl};
+use libbpf_rs::{AsRawLibbpf, OpenProgramImpl, ProgramImpl};
 use log::warn;
 use std::env;
 use std::ffi::c_void;
@@ -282,6 +282,33 @@ pub fn cond_kprobes_enable<T>(kprobes: Vec<(&str, &OpenProgramImpl<T>)>) -> Resu
     }
 
     Ok(true)
+}
+
+pub fn cond_kprobe_load<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {
+    if in_kallsyms(sym)? {
+        unsafe {
+            bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
+            bpf_program__set_autoattach(prog_ptr.as_libbpf_object().as_ptr(), false);
+        }
+        return Ok(true);
+    } else {
+        warn!("symbol {sym} is missing, kprobe not loaded");
+    }
+
+    Ok(false)
+}
+
+pub fn cond_kprobe_attach<T>(sym: &str, prog_ptr: &ProgramImpl<T>) -> Result<bool> {
+    if in_kallsyms(sym)? {
+        unsafe {
+            bpf_program__attach(prog_ptr.as_libbpf_object().as_ptr());
+        }
+        return Ok(true);
+    } else {
+        warn!("symbol {sym} is missing, kprobe not loaded");
+    }
+
+    Ok(false)
 }
 
 pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {

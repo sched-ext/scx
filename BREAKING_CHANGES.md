@@ -1,6 +1,6 @@
 # Breaking Changes
 
-[`sched_ext`](https://github.com/sched-ext/scx) is still experimental and while we're trying to reduce the number of breaking changes, sometimes they're neccessary to fix bugs or improve the usability.
+[`sched_ext`](https://github.com/sched-ext/scx) is still experimental and while we're trying to reduce the number of breaking changes, sometimes they're necessary to fix bugs or improve the usability.
 
 Below are the changes in both the `sched_ext` kernel tree and the associated commits in this repo.
 

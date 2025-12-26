@@ -26,6 +26,8 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::MapCore;
+use libbpf_rs::MapFlags;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
@@ -46,6 +48,65 @@ use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &str = "scx_cosmos";
+
+/// Parse hexadecimal value from command line (requires "0x" prefix, e.g., "0x2")
+fn parse_hex(s: &str) -> Result<u64, String> {
+    if let Some(hex_str) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex_str, 16).map_err(|e| format!("Invalid hexadecimal value: {}", e))
+    } else {
+        Err("Hexadecimal value must start with '0x' prefix (e.g., 0x2)".to_string())
+    }
+}
+
+/// Setup performance counter events for a specific CPU using perf-event-open-sys crate
+fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<()> {
+    use perf_event_open_sys as sys;
+
+    // Get the perf_events map
+    let map = &skel.maps.perf_events;
+
+    // Create a raw perf event for the perf counter.
+    let mut attrs = sys::bindings::perf_event_attr::default();
+    attrs.type_ = sys::bindings::PERF_TYPE_RAW;
+    attrs.config = perf_config;
+    attrs.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    attrs.set_disabled(0);
+    attrs.set_inherit(0);
+
+    // Open the perf event using the syscall wrapper from perf-event crate
+    let fd = unsafe {
+        sys::perf_event_open(
+            &mut attrs, -1, // pid: -1 for all processes
+            cpu, -1, // group_fd
+            0,  // flags
+        )
+    };
+
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow::anyhow!(
+            "Failed to open perf event 0x{:x} on CPU {}: {}",
+            perf_config,
+            cpu,
+            err
+        ));
+    }
+
+    // Update the BPF map with the file descriptor
+    let key = cpu as u32;
+
+    map.update(
+        &key.to_ne_bytes(),
+        &fd.to_ne_bytes(),
+        libbpf_rs::MapFlags::ANY,
+    )
+    .with_context(|| "Failed to update perf_events map")?;
+
+    // Note: We're not closing the fd because it needs to stay open for BPF
+    // The kernel will close it when the program exits
+
+    Ok(())
+}
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -114,9 +175,25 @@ struct Opts {
     #[clap(short = 'm', long)]
     primary_domain: Option<String>,
 
-    /// Enable NUMA optimizations.
+    /// Hardware perf event to monitor (0x0 = disabled).
+    #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_hex)]
+    perf_config: u64,
+
+    /// Threshold (perf events/msec) to classify a task as event heavy.
+    #[clap(short = 'E', default_value = "0", long)]
+    perf_threshold: u64,
+
+    /// Enable sticky perf scheduling.
+    ///
+    /// When enabled, a task that generates a large number of perf events is forced to stay on the
+    /// same CPU. When disabled, the scheduler will move the task to the CPU with the smallest
+    /// amount of tracked perf events.
+    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
+    perf_sticky: bool,
+
+    /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
-    enable_numa: bool,
+    disable_numa: bool,
 
     /// Disable CPU frequency control.
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
@@ -329,6 +406,20 @@ impl<'a> Scheduler<'a> {
         // Check host topology to determine if we need to enable SMT capabilities.
         let smt_enabled = !opts.disable_smt && topo.smt_enabled;
 
+        // Determine the amount of non-empty NUMA nodes in the system.
+        let nr_nodes = topo
+            .nodes
+            .values()
+            .filter(|node| !node.all_cpus.is_empty())
+            .count();
+        info!("NUMA nodes: {}", nr_nodes);
+
+        // Automatically disable NUMA optimizations when running on non-NUMA systems.
+        let numa_enabled = !opts.disable_numa && nr_nodes > 1;
+        if !numa_enabled {
+            info!("Disabling NUMA optimizations");
+        }
+
         info!(
             "{} {} {}",
             SCHEDULER_NAME,
@@ -358,10 +449,20 @@ impl<'a> Scheduler<'a> {
         rodata.deferred_wakeups = !opts.no_deferred_wakeup;
         rodata.flat_idle_scan = opts.flat_idle_scan;
         rodata.smt_enabled = smt_enabled;
-        rodata.numa_enabled = opts.enable_numa;
+        rodata.numa_enabled = numa_enabled;
+        rodata.nr_node_ids = topo.nodes.len() as u32;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
         rodata.mm_affinity = opts.mm_affinity;
+
+        // Enable perf event scheduling settings.
+        if opts.perf_config > 0 {
+            rodata.perf_enabled = true;
+            rodata.perf_sticky = opts.perf_sticky;
+            rodata.perf_threshold = opts.perf_threshold;
+        } else {
+            rodata.perf_enabled = false;
+        }
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
@@ -400,12 +501,8 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.cosmos_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
-            | if opts.enable_numa {
-                *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
-            } else {
-                0
-            };
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.cosmos_ops_mut().flags
@@ -413,6 +510,46 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
+
+        // Configure CPU->node mapping (must be done after skeleton is loaded).
+        for node in topo.nodes.values() {
+            for cpu in node.all_cpus.values() {
+                if opts.verbose {
+                    info!("CPU{} -> node{}", cpu.id, node.id);
+                }
+                skel.maps.cpu_node_map.update(
+                    &(cpu.id as u32).to_ne_bytes(),
+                    &(node.id as u32).to_ne_bytes(),
+                    MapFlags::ANY,
+                )?;
+            }
+        }
+
+        // Setup performance events for all CPUs
+        if opts.perf_config > 0 {
+            let nr_cpus = *NR_CPU_IDS;
+            info!("Setting up performance counters for {} CPUs...", nr_cpus);
+            let mut perf_available = true;
+            for cpu in 0..nr_cpus {
+                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, opts.perf_config) {
+                    if cpu == 0 {
+                        // Only warn once on first CPU failure
+                        let err_str = e.to_string();
+                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                            warn!("Performance counters not available on this CPU architecture");
+                            warn!("PMU event 0x{:x} not supported - scheduler will run without perf monitoring", opts.perf_config);
+                        } else {
+                            warn!("Failed to setup perf events: {}", e);
+                        }
+                        perf_available = false;
+                        break;
+                    }
+                }
+            }
+            if perf_available {
+                info!("Performance counters configured successfully for all CPUs");
+            }
+        }
 
         // Enable primary scheduling domain, if defined.
         if primary_cpus.len() < *NR_CPU_IDS {
@@ -458,9 +595,11 @@ impl<'a> Scheduler<'a> {
     }
 
     fn get_metrics(&self) -> Metrics {
+        let bss_data = self.skel.maps.bss_data.as_ref().unwrap();
         Metrics {
             cpu_thresh: self.skel.maps.rodata_data.as_ref().unwrap().busy_threshold,
             cpu_util: self.skel.maps.bss_data.as_ref().unwrap().cpu_util,
+            nr_event_dispatches: bss_data.nr_event_dispatches,
         }
     }
 

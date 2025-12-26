@@ -130,6 +130,7 @@
               libseccomp
               pkg-config
               protobuf
+              virtme-ng
               zlib
               zstd
 

@@ -77,7 +77,7 @@ void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc)
  * Trace futex_wait() and futex_wake() variants similar as in-kernel lock
  * and unlock. However, in the case of futex, the user-level implementation,
  * like NTPL, can skip futex_wait() and futex_wake() for performance
- * optimization to reduce syscall overhead. Hence, tracing only the 
+ * optimization to reduce syscall overhead. Hence, tracing only the
  * kernel-side futex calls reveals incomplete user-level lock status. Also,
  * futex's spurious wake-up further complicates the problem; a lock holder
  * can call futex_wait() more than once for a single lock acquisition.
@@ -115,7 +115,7 @@ void reset_lock_futex_boost(task_ctx *taskc, struct cpu_ctx *cpuc)
  */
 
 /*
- * We trace the folloing futex calls:
+ * We trace the following futex calls:
  * - int __futex_wait(u32 *uaddr, unsigned int flags, u32 val, struct hrtimer_sleeper *to, u32 bitset)
  * - int futex_wait_multiple(struct futex_vector *vs, unsigned int count, struct hrtimer_sleeper *to)
  * - int futex_wait_requeue_pi(u32 *uaddr, unsigned int flags, u32 val, ktime_t *abs_time, u32 bitset, u32 *uaddr2)
@@ -149,9 +149,9 @@ int BPF_PROG(fexit_futex_wait_multiple, struct futex_vector *vs, unsigned int co
 		 * All of futexes are acquired.
 		 *
 		 * We don't want to traverse futex_vector here since that's
-		 * a userspace address. Hence we just pass an invalid adderess
+		 * a userspace address. Hence we just pass an invalid address
 		 * to consider all futex_waitv() calls are for the same address.
-		 * Thit is a conservative approximation boosting less.
+		 * This is a conservative approximation boosting less.
 		 */
 		inc_futex_boost();
 	}
@@ -221,7 +221,7 @@ int BPF_PROG(fexit_futex_unlock_pi, u32 *uaddr, unsigned int flags, int ret)
 
 
 /*
- * We trace the folloing futex tracepoints:
+ * We trace the following futex tracepoints:
  * - sys_exit_futex
  * - sys_exit_futex_wait
  * - sys_exit_futex_waitv

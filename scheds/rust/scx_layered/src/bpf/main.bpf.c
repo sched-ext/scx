@@ -1419,7 +1419,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 			    struct layer *layer, u64 flags)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
-	struct rq *rq;
 	struct task_struct *curr;
 	const struct cpumask *idle_cpumask;
 	bool cand_idle;
@@ -1446,19 +1445,23 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cand))
 		return false;
 
-	rq = scx_bpf_cpu_rq(cand);
-	if (!rq)
+	bpf_rcu_read_lock();
+	curr = __COMPAT_scx_bpf_cpu_curr(cand);
+	if (!curr) {
+		bpf_rcu_read_unlock();
 		return false;
-	curr = rq->curr;
+	}
 
 	if (ext_sched_class_addr && idle_sched_class_addr &&
 	    ((u64)curr->sched_class != ext_sched_class_addr) &&
 	    ((u64)curr->sched_class != idle_sched_class_addr)) {
+		bpf_rcu_read_unlock();
 		if (!(cpuc = lookup_cpu_ctx(-1)))
 			return false;
 		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
 		return false;
 	}
+	bpf_rcu_read_unlock();
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
@@ -2073,7 +2076,7 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero_u32);
 
 	if (!antistall_dsq) {
-		scx_bpf_error("cant happen");
+		scx_bpf_error("can't happen");
 		return false;
 	}
 
@@ -2180,7 +2183,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 		return false;
 
 	/*
-	 * If a layer is confined, and the CPU doens't belong to it, we shouldn't
+	 * If a layer is confined, and the CPU doesn't belong to it, we shouldn't
 	 * consume from it.
 	 */
 	if (layer->kind == LAYER_KIND_CONFINED && cpuc->layer_id != layer_id)
@@ -3460,8 +3463,8 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
-	/* 
-	 * Necessary for GPU membership logic. The field is overwritten during 
+	/*
+	 * Necessary for GPU membership logic. The field is overwritten during
 	 * .running() and read during .stopping(), so this value is only visible
 	 * from the GPU membership kprobes.
 	 */
@@ -3589,7 +3592,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	bpf_for(i, 0, nr_layers) {
 		layer = lookup_layer(i);
 		if (!layer) {
-			scx_bpf_error("unabled to lookup layer %d", i);
+			scx_bpf_error("unable to lookup layer %d", i);
 			return;
 		}
 
@@ -3687,7 +3690,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero_u32, cpu);
 
 			if (!antistall_dsq || !delay) {
-				scx_bpf_error("cant happen");
+				scx_bpf_error("can't happen");
 				goto unlock;
 			}
 
@@ -3742,7 +3745,7 @@ static u64 antistall_scan(void)
 
 /*
  * Timer callback that runs all registered timers. If a timer returns a non
- * zero value it is rerun after the return value (in nanosecods).
+ * zero value it is rerun after the return value (in nanoseconds).
  */
 u64 run_timer_cb(int key)
 {
@@ -3945,7 +3948,7 @@ static s32 init_layer(int layer_id)
 	}
 
 	if ((ret = init_layer_cpumasks(layer_id))) {
-		scx_bpf_error("could not initalize cpumasks");
+		scx_bpf_error("could not initialize cpumasks");
 		return ret;
 	}
 

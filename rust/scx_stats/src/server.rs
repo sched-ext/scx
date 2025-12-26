@@ -276,7 +276,7 @@ where
             return Ok(());
         }
 
-        // Null visit checks all nested stats are reacheable without loops.
+        // Null visit checks all nested stats are reachable without loops.
         self.visit_meta(self.top.as_ref().unwrap(), &mut |_| Ok(()))
     }
 

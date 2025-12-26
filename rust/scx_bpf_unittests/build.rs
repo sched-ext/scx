@@ -23,7 +23,7 @@ fn main() {
         root_dir.join("scheds/vmlinux/arch/x86/"),
         root_dir.join("scheds/include/bpf-compat/"),
         env::var("DEP_BPF_INCLUDE")
-            .expect("libbpf-sys include must be avaiable")
+            .expect("libbpf-sys include must be available")
             .into(),
     ];
 

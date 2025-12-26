@@ -58,7 +58,7 @@ const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Depricated, noop, use RUST_LOG or --log-level instead.
+    /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
@@ -112,6 +112,11 @@ struct Opts {
     /// cause "vtime too far ahead" errors.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     split_vtime_updates: bool,
+
+    /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
+    /// Uses tracepoints and cgroup iteration instead.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    cpu_controller_disabled: bool,
 
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
@@ -212,6 +217,11 @@ impl<'a> Scheduler<'a> {
             .unwrap()
             .exiting_task_workaround_enabled = opts.exiting_task_workaround;
         skel.maps.rodata_data.as_mut().unwrap().split_vtime_updates = opts.split_vtime_updates;
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .unwrap()
+            .cpu_controller_disabled = opts.cpu_controller_disabled;
 
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
@@ -597,7 +607,7 @@ fn main(opts: Opts) -> Result<()> {
     }
 
     if opts.verbose > 0 {
-        warn!("Setting verbose via -v is depricated and will be an error in future releases.");
+        warn!("Setting verbose via -v is deprecated and will be an error in future releases.");
     }
 
     debug!("opts={:?}", &opts);
