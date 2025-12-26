@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cargo"
-version = "1.0.25"
+version = "1.0.26"
 dependencies = [
  "anyhow",
  "bindgen 0.72.0",

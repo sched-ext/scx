@@ -21,7 +21,7 @@ serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.26" }
 
 [features]
 enable_backtrace = []
