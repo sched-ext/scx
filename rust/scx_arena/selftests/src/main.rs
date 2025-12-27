@@ -12,7 +12,6 @@ use anyhow::Context;
 use anyhow::Result;
 
 use std::ffi::c_ulong;
-use std::ffi::c_void;
 
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
@@ -26,15 +25,11 @@ use scx_utils::NR_CPU_IDS;
 
 use simplelog::{ColorChoice, Config as SimplelogConfig, TermLogger, TerminalMode};
 
-use libbpf_rs::libbpf_sys;
-
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::PrintLevel;
 use libbpf_rs::ProgramInput;
-
-const BPF_STDOUT: u32 = 1;
-const BPF_STDERR: u32 = 2;
+use libbpf_rs::Stream;
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 512;
@@ -164,35 +159,33 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
 }
 
 fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
-    let mut buf = vec![0u8; 4096];
-    let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
+    let name = if stream_id == libbpf_rs::BPF_STDOUT {
+        "OUTPUT"
+    } else {
+        "ERROR"
+    };
     let mut started = false;
 
+    let fd = skel.progs.arena_selftest.as_fd().as_raw_fd();
+    let stream = Stream::new(fd, stream_id);
     loop {
-        let ret = unsafe {
-            libbpf_sys::bpf_prog_stream_read(
-                skel.progs.arena_selftest.as_fd().as_raw_fd(),
-                stream_id,
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len() as u32,
-                std::ptr::null_mut(),
-            )
+        let output = match stream.read() {
+            Ok(out) => out,
+            Err(_) => {
+                eprintln!("STREAM {} UNAVAILABLE (REQUIRES >= v6.17)", name);
+                return;
+            }
         };
-        if ret < 0 {
-            eprintln!("STREAM {} UNAVAILABLE (REQUIRES >= v6.17)", name);
-            return;
-        }
 
         if !started {
             println!("===BEGIN STREAM {}===", name);
             started = true;
         }
 
-        if ret == 0 {
-            break;
-        }
-
-        print!("{}", String::from_utf8_lossy(&buf[..ret as usize]));
+        match output {
+            Some(string) => print!("{}", string),
+            None => break,
+        };
     }
 
     println!("\n====END STREAM  {}====", name);
@@ -239,6 +232,6 @@ fn main() {
         println!("Selftest successful.");
     }
 
-    print_stream(&mut skel, BPF_STDOUT);
-    print_stream(&mut skel, BPF_STDERR);
+    print_stream(&mut skel, libbpf_rs::BPF_STDOUT);
+    print_stream(&mut skel, libbpf_rs::BPF_STDERR);
 }
