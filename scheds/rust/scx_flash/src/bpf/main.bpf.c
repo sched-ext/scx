@@ -1429,25 +1429,31 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(enq_flags & SCX_ENQ_REENQ))
 		update_task_deadline(p, tctx);
 
-	/*
-	 * Try to dispatch the task directly, if possible.
-	 */
-	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags))
-		return;
+	if (!is_migration_disabled(p)) {
+		/*
+		 * Try to dispatch the task directly, if possible.
+		 */
+		if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags))
+			return;
 
-	/*
-	 * Try to keep awakened tasks on the same CPU using the per-CPU DSQ
-	 * and use the per-node DSQ if the CPU is getting saturated, so
-	 * that tasks can attempt to migrate somewhere else.
-	 */
-	if (!scx_bpf_task_running(p) && can_enqueue_to_cpu(p, prev_cpu)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
-					 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
-		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		/*
+		 * Try to keep awakened tasks on the same CPU using the per-CPU DSQ
+		 * and use the per-node DSQ if the CPU is getting saturated, so
+		 * that tasks can attempt to migrate somewhere else.
+		 */
+		if (!scx_bpf_task_running(p) && can_enqueue_to_cpu(p, prev_cpu)) {
+			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
+						 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
+			__sync_fetch_and_add(&nr_shared_dispatches, 1);
+			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 
-		return;
+			return;
+		}
 	}
+
+	/*
+	 * Dispatch the task to the per-node DSQ.
+	 */
 	scx_bpf_dsq_insert_vtime(p, node_to_dsq(node),
 				 task_slice(p, prev_cpu), p->scx.dsq_vtime, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
