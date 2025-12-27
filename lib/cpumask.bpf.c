@@ -86,7 +86,7 @@ scx_bitmap_vacate_cpu(scx_bitmap_t __arg_arena mask, s32 cpu)
 
 	while (can_loop) {
 		old = mask->bits[off];
-		new = old | 1 << ind;
+		new = old | 1ULL << ind;
 		if (cmpxchg(&mask->bits[off], old, new) == old)
 			return 0;
 	}
