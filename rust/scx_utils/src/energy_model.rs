@@ -65,7 +65,7 @@ impl EnergyModel {
         };
 
         for (pd_id, pd_path) in pd_paths {
-            let pd = PerfDomain::new(pd_id, pd_path).unwrap();
+            let pd = PerfDomain::new(pd_id, pd_path)?;
             perf_doms.insert(pd.id, pd.into());
         }
 
@@ -97,8 +97,8 @@ impl PerfDomain {
         let cpulist = std::fs::read_to_string(root.clone() + "/cpus")?;
         let span = Cpumask::from_cpulist(&cpulist)?;
 
-        for ps_path in get_ps_paths(root).unwrap() {
-            let ps = PerfState::new(ps_path).unwrap();
+        for ps_path in get_ps_paths(root)? {
+            let ps = PerfState::new(ps_path)?;
             perf_table.insert(ps.performance, ps.into());
         }
 
@@ -113,7 +113,7 @@ impl PerfDomain {
     /// @util is in %, ranging [0, 100].
     pub fn select_perf_state(&self, util: f32) -> Option<&Arc<PerfState>> {
         let util = clamp(util, 0.0, 100.0);
-        let (perf_max, _) = self.perf_table.last_key_value().unwrap();
+        let (perf_max, _) = self.perf_table.last_key_value()?;
         let perf_max = *perf_max as f32;
         let req_perf = (perf_max * (util / 100.0)) as usize;
         for (perf, ps) in self.perf_table.iter() {
@@ -202,7 +202,7 @@ fn get_ps_paths(root: String) -> Result<Vec<String>> {
     let ps_paths = glob(&(root.clone() + "/ps:[0-9]*"))?;
     let mut ps_vec = vec![];
     for ps_path in ps_paths.filter_map(Result::ok) {
-        let ps_str = ps_path.into_os_string().into_string().unwrap();
+        let ps_str = ps_path.to_string_lossy().into_owned();
         ps_vec.push(ps_str);
     }
 
@@ -210,13 +210,13 @@ fn get_ps_paths(root: String) -> Result<Vec<String>> {
 }
 
 fn get_pd_paths() -> Result<Vec<(usize, String)>> {
-    let prefix = get_em_root().unwrap() + "/cpu";
+    let prefix = get_em_root()? + "/cpu";
     let pd_paths = glob(&(prefix.clone() + "[0-9]*"))?;
 
     let mut pd_vec = vec![];
     for pd_path in pd_paths.filter_map(Result::ok) {
-        let pd_str = pd_path.into_os_string().into_string().unwrap();
-        let pd_id: usize = pd_str[prefix.len()..].parse().unwrap();
+        let pd_str = pd_path.to_string_lossy().into_owned();
+        let pd_id: usize = pd_str[prefix.len()..].parse()?;
         pd_vec.push((pd_id, pd_str));
     }
     if pd_vec.is_empty() {
@@ -234,7 +234,7 @@ fn get_pd_paths() -> Result<Vec<(usize, String)>> {
 
 fn get_em_root() -> Result<String> {
     if ROOT_PREFIX.is_empty() {
-        let root = compat::debugfs_mount().unwrap().join("energy_model");
+        let root = compat::debugfs_mount()?.join("energy_model");
         Ok(root.display().to_string())
     } else {
         let root = format!("{}/sys/kernel/debug/energy_model", *ROOT_PREFIX);
