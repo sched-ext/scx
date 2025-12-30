@@ -1,0 +1,13 @@
+[codespell]
+# Keep this file in sync with the repository layout. The goal is to spellcheck
+# only maintained sources and documentation, and skip generated/imported files.
+
+# Comma-separated list of paths/globs to skip.
+skip =
+    ./scheds/vmlinux,
+    ./rust/scx_raw_pmu,
+    ./**/*.autogen.*,
+    ./rust/scx_utils/src/enums.rs
+
+# Regex of lines to ignore (project-specific terms / proper nouns).
+ignore-regex = .*(ratatui|Affinitized|affinitized).*
