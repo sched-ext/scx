@@ -262,6 +262,13 @@ static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
 	 scx_bpf_pick_any_cpu_node(cpus_allowed, node, flags) :			\
 	 scx_bpf_pick_any_cpu(cpus_allowed, flags))
 
+#define __COMPAT_scx_bpf_dsq_peek(dsq_id)                                      \
+  (bpf_ksym_exists(scx_bpf_dsq_peek) ? scx_bpf_dsq_peek(dsq_id) : ({           \
+    struct task_struct *p = NULL;                                              \
+    bpf_for_each(scx_dsq, p, dsq_id, 0) { break; }                             \
+    p;                                                                         \
+  }))
+
 /*
  * Define sched_ext_ops. This may be expanded to define multiple variants for
  * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
