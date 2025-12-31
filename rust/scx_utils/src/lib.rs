@@ -62,6 +62,7 @@ pub mod libbpf_clap_opts;
 pub mod ravg;
 
 mod topology;
+pub use topology::parse_cpu_list;
 pub use topology::Core;
 pub use topology::CoreType;
 pub use topology::Cpu;
