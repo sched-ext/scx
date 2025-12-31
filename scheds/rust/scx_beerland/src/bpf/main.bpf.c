@@ -638,11 +638,6 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 {
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return prev_cpu;
 
 	/*
 	 * Make sure @prev_cpu is usable, otherwise try to move close to
@@ -678,21 +673,15 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags);
 	if (cpu < 0)
-		cpu = prev_cpu;
+		return prev_cpu;
 
 out_insert:
 	/*
-	 * Always dispatch directly to the target CPU, since the task will
-	 * always use its assigned per-CPU DSQ and we can save some
-	 * runqueue locking contention dispatching from here.
-	 *
 	 * The target CPU is automatically kicked when returning from this
 	 * callback.
 	 */
-	if (is_task_sticky(tctx))
+	if (!__COMPAT_scx_bpf_dsq_peek(cpu))
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, cpu), 0);
-	else
-		scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, cpu), task_dl(p, tctx), 0);
 
 	return cpu;
 }
@@ -718,9 +707,9 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (try_migrate(p, prev_cpu, enq_flags)) {
 			cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
-			if (cpu >= 0) {
-				scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p, prev_cpu),
-							 task_dl(p, tctx), enq_flags);
+			if (cpu >= 0 && !__COMPAT_scx_bpf_dsq_peek(cpu)) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+						   task_slice(p, prev_cpu), enq_flags);
 				if (prev_cpu != cpu || !scx_bpf_task_running(p))
 					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 				return;
@@ -771,10 +760,7 @@ static bool dispatch_from_any_cpu(s32 from_cpu)
 void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Try to consume a task from a remote CPU.
-	 *
-	 * Do not trigger any rebalance unless the system is completely
-	 * saturated.
+	 * Immediately trigger a rebalance if the system is busy.
 	 */
 	if (is_system_busy() && dispatch_from_any_cpu(cpu)) {
 		__sync_fetch_and_add(&nr_remote_dispatch, 1);
@@ -786,6 +772,14 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (scx_bpf_dsq_move_to_local(cpu)) {
 		__sync_fetch_and_add(&nr_local_dispatch, 1);
+		return;
+	}
+
+	/*
+	 * Try to consume a task from a remote CPU.
+	 */
+	if (dispatch_from_any_cpu(cpu)) {
+		__sync_fetch_and_add(&nr_remote_dispatch, 1);
 		return;
 	}
 
