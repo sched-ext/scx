@@ -80,8 +80,8 @@ enum consts_internal {
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
 	LAVD_LC_GREEDY_SHIFT		= 3, /* 12.5% */
 	LAVD_LC_WAKE_INTERVAL_MIN	= LAVD_SLICE_MIN_NS_DFL,
-	LAVD_LC_INH_WAKEE_SHIFT		= 2, /* 25.0% of wakee's latency criticality */
-	LAVD_LC_INH_WAKER_SHIFT		= 3, /* 12.5 of waker's latency criticality */
+	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
+	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
 
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
 
@@ -147,9 +147,10 @@ struct task_ctx {
 	u64	last_running_clk;	/* last time when scheduled in */
 	u64	last_stopping_clk;	/* last time when scheduled out */
 	u64	run_freq;		/* scheduling frequency in a second */
-	u32	lat_cri;		/* final context-aware latency criticality */
-	u32	lat_cri_waker;		/* waker's latency criticality */
-	u32	perf_cri;		/* performance criticality of a task */
+	u16	lat_cri;		/* final context-aware latency criticality */
+	u16	lat_cri_waker;		/* waker's latency criticality */
+	u16	lat_cri_wakee;		/* wakee's latency criticality */
+	u16	perf_cri;		/* performance criticality of a task */
 	u32	cpdom_id;		/* chosen compute domain id at ops.enqueue() */
 	s32	pinned_cpu_id;		/* pinned CPU id. -ENOENT if not pinned or not runnable. */
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */

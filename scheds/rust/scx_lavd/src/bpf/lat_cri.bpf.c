@@ -114,7 +114,7 @@ u32 __attribute__ ((noinline)) log2x(u64 v)
 static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 {
 	u64 weight_ft, wait_ft, wake_ft, runtime_ft, sum_runtime_ft;
-	u64 log_wwf, lat_cri, perf_cri = LAVD_SCALE;
+	u64 log_wwf, lat_cri, perf_cri = LAVD_SCALE, lat_cri_giver;
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
@@ -148,21 +148,30 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 
 	/*
 	 * Determine latency criticality of a task in a context-aware manner by
-	 * considering which task wakes up this task. If its waker is more
-	 * latency-critcial, inherit waker's latency criticality partially.
+	 * considering its waker and wakee's latency criticality.
+	 *
+	 * Forward propagation is to keep the waker’s momentum forward to the
+	 * wakee, and backward propagation is to boost the low-priority waker
+	 * (i.e., priority inversion) for the next time. Propagation decays
+	 * geometrically and is capped to a limit to prevent unlimited cyclic
+	 * inflation of latency-criticality.
+	 *
 	 */
-	if (taskc->lat_cri_waker > lat_cri) {
+	lat_cri_giver = taskc->lat_cri_waker + taskc->lat_cri_wakee;
+	if (lat_cri_giver > (2 * lat_cri)) {
 		/*
-		 * The amount of the wakelet's latency criticality inherited
-		 * needs to be limited, so the wakee's latency criticality
-		 * portion should always be a dominant factor.
+		 * The amount of latency criticality inherited needs to be
+		 * limited, so the task's latency criticality portion should
+		 * always be a dominant factor.
 		 */
-		u64 waker_inh = (taskc->lat_cri_waker - lat_cri) >>
-				LAVD_LC_INH_WAKER_SHIFT;
-		u64 wakee_max = lat_cri >> LAVD_LC_INH_WAKEE_SHIFT;
-		lat_cri += min(waker_inh, wakee_max);
+		u64 giver_inh = (lat_cri_giver - (2 * lat_cri)) >>
+				LAVD_LC_INH_GIVER_SHIFT;
+		u64 receiver_max = lat_cri >> LAVD_LC_INH_RECEIVER_SHIFT;
+		lat_cri += min(giver_inh, receiver_max);
 	}
 	taskc->lat_cri = lat_cri;
+	taskc->lat_cri_waker = 0;
+	taskc->lat_cri_wakee = 0;
 
 	/*
 	 * A task is more CPU-performance sensitive when it meets the following
