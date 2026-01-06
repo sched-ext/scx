@@ -77,7 +77,6 @@ typedef int64_t s64;
 /* not available when building kernel tools/sched_ext */
 #if __has_include(<lib/sdt_task_defs.h>)
 #include "bpf_arena_common.h"
-#include <lib/sdt_task_defs.h>
 #endif
 
 #endif	/* __SCHED_EXT_COMMON_H */
