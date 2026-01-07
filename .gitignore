@@ -12,3 +12,5 @@ tags
 selftest
 CLAUDE.md
 **/.claude
+**/*.ll
+**/*.s
