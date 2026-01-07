@@ -454,7 +454,7 @@ __hidden __noasan int asan_init(void)
 
 	__asan_shadow_memory_dynamic_address = (u32)ASAN_SHADOW_OFFSET;
 
-	inited				     = true;
+	inited = true;
 
 	return 0;
 }
