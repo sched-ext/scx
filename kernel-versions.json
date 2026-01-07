@@ -10,9 +10,9 @@
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
     "branch": "master",
-    "commitHash": "a069190b590e108223cd841a1c2d0bfb92230ecc",
-    "lastModified": 1767413064,
-    "narHash": "sha256-1QUEuPkB9L+A4QTqR2gfoNY75xOCITswUakLlECkEPg=",
+    "commitHash": "a8d506759231124efb911a3bd14d1ec2d9de15a1",
+    "lastModified": 1767759129,
+    "narHash": "sha256-EkdF5T6vG+YUe5B38cVtX5hQGhfU8hfGXnxhvuyc7ZQ=",
     "kernelVersion": "6.19.0-rc1"
   },
   "stable/6_12": {
