@@ -27,9 +27,7 @@ private(STATIC_ALLOC_LOCK) struct bpf_spin_lock static_lock;
 
 private(STATIC_ALLOC) struct scx_static scx_static;
 
-enum {
-	STATIC_POISON_UNINIT = 0xff,
-};
+const s8 STATIC_POISON_UNINIT = 0xff;
 
 extern volatile u64 asan_violated;
 

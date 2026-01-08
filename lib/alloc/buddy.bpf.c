@@ -10,6 +10,8 @@
 #include <alloc/buddy.h>
 #include <alloc/asan.h>
 
+volatile int zero = 0;
+
 enum {
 	BUDDY_POISONED = (s8)0xef,
 };
@@ -86,7 +88,8 @@ static u64 scx_next_pow2(__u64 n)
 	return n;
 }
 
-static int idx_set_allocated(scx_buddy_chunk_t *chunk, u64 idx, bool allocated)
+__weak
+int idx_set_allocated(scx_buddy_chunk_t __arg_arena *chunk, u64 idx, bool allocated)
 {
 	if (unlikely(idx >= SCX_BUDDY_CHUNK_ITEMS)) {
 		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
@@ -114,7 +117,8 @@ static int idx_is_allocated(scx_buddy_chunk_t *chunk, u64 idx, bool *allocated)
 	return 0;
 }
 
-static int idx_set_order(scx_buddy_chunk_t *chunk, u64 idx, u8 order)
+__weak
+int idx_set_order(scx_buddy_chunk_t __arg_arena *chunk, u64 idx, u8 order)
 {
 	u8 prev_order;
 
@@ -291,15 +295,39 @@ static u64 size_to_order(size_t size)
 	return order - SCX_BUDDY_MIN_ALLOC_SHIFT;
 }
 
+__weak
+int add_leftovers_to_freelist(scx_buddy_chunk_t __arg_arena *chunk, u32 cur_idx,
+		u64 min_order, u64 max_order)
+{
+	scx_buddy_header_t *header;
+	u64 ord;
+	u32 idx;
+
+	bpf_for(ord, min_order, max_order) {
+		/* Mark the buddy as free and add it to the freelists. */
+		idx = cur_idx + (1 << ord);
+
+		header = idx_to_header(chunk, idx);
+		if (unlikely(!header))
+			return -EINVAL;
+
+		asan_unpoison(header, sizeof(*header));
+
+		idx_set_allocated(chunk, idx, false);
+		header_add_freelist(chunk, header, idx, ord);
+	}
+
+	return 0;
+}
+
 static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 {
 	u64 order, ord, min_order, max_order;
-	scx_buddy_header_t *header;
 	scx_buddy_chunk_t  *chunk;
-	u32 idx, cur_idx;
 	size_t left;
 	int power2;
 	u64 vaddr;
+	u32 idx;
 	int ret;
 
 	scx_buddy_unlock(buddy);
@@ -338,7 +366,7 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 	asan_unpoison(chunk, sizeof(*chunk));
 
 	/* Mark all freelists as empty. */
-	for (ord = 0; ord < SCX_BUDDY_CHUNK_NUM_ORDERS && can_loop; ord++)
+	for (ord = zero; ord < SCX_BUDDY_CHUNK_NUM_ORDERS && can_loop; ord++)
 		chunk->freelists[ord] = SCX_BUDDY_CHUNK_ITEMS;
 
 	/*
@@ -377,7 +405,7 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 	 *
 	 *  Step 1:
 	 *
-	 *   cur_idx  infimum			   1 << max_order
+	 *   idx  infimum			   1 << max_order
 	 *   0 	      64	128		      1 << 20	
 	 *   |________|_________|______________________|
 	 *
@@ -394,7 +422,7 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 	 *
 	 *  Step 2:
 	 *
-	 *   cur_idx  infimum			   cur_idx + 1 << max_order
+	 *   idx  infimum			   idx + 1 << max_order
 	 *   64	      80	96		   	64 + 1 << 6 = 128
 	 *   |________|_________|______________________|
 	 *
@@ -407,26 +435,27 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 	 */
 	max_order = SCX_BUDDY_CHUNK_NUM_ORDERS;
 	left = sizeof(*chunk);
-	cur_idx = 0;
+	idx = 0;
 	while (left && can_loop) {
 		power2 = scx_fls(left);
 		if (unlikely(power2 >= SCX_BUDDY_CHUNK_NUM_ORDERS)) {
 			arena_stderr(
 				"buddy chunk metadata require allocation of order %d\n",
 				power2);
-			goto error;
+			arena_stderr(
+				"chunk has size of 0x%lx bytes (left %lx bytes)\n",
+				sizeof(*chunk), left);
+
+			scx_buddy_unlock(buddy);
+			return NULL;
 		}
 
 		/* Round up allocations that are too small. */
-		if (power2 < SCX_BUDDY_MIN_ALLOC_SHIFT) {
-			order = 0;
-			left = 0;
-		} else {
-			order = power2 - SCX_BUDDY_MIN_ALLOC_SHIFT;
-			left -= 1 << power2;
-		}
 
-		idx_set_allocated(chunk, cur_idx, true);
+		left -= (power2 >= SCX_BUDDY_MIN_ALLOC_SHIFT) ? 1 << power2 : left;
+		order = (power2 >= SCX_BUDDY_MIN_ALLOC_SHIFT) ? power2 - SCX_BUDDY_MIN_ALLOC_SHIFT : 0;
+
+		idx_set_allocated(chunk, idx, true);
 
 		/* 
 		 * Starting an order above the one we allocated, populate
@@ -434,31 +463,17 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 		 * allocation (left == 0), also mark the buddy as free.
 		 */
 		min_order = left ? order + 1 : order;
-		bpf_for(ord, min_order, max_order) {
-			/* Mark the buddy as free and add it to the freelists. */
-			idx = cur_idx + (1 << ord);
-
-			header = idx_to_header(chunk, idx);
-			if (unlikely(!header))
-				goto error;
-
-			asan_unpoison(header, sizeof(*header));
-
-			idx_set_allocated(chunk, idx, false);
-			header_add_freelist(chunk, header, idx, ord);
+		if (add_leftovers_to_freelist(chunk, idx, min_order, max_order)) {
+			scx_buddy_unlock(buddy);
+			return NULL;
 		}
 
 		/* Adjust the index. */
-		cur_idx += 1 << order;
+		idx += 1 << order;
 		max_order = order;
 	}
 
 	return chunk;
-
-error:
-	scx_buddy_unlock(buddy);
-
-	return NULL;
 }
 
 __hidden int scx_buddy_init(struct scx_buddy			 *buddy,
@@ -672,7 +687,7 @@ done:
 	return address;
 }
 
-static int scx_buddy_free_unlocked(struct scx_buddy *buddy, u64 addr)
+static __always_inline int scx_buddy_free_unlocked(struct scx_buddy *buddy, u64 addr)
 {
 	scx_buddy_header_t *header, *buddy_header;
 	u64 idx, buddy_idx, tmp_idx;
