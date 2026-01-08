@@ -465,9 +465,6 @@ __hidden __noasan int asan_init(struct asan_init_args *args)
 	 * size - right now we assume both in the offset and the size are for a 4GiB
 	 * arena. Even for a 4GiB arena, the space overhead for lazy shadow map 
 	 * allocation is 4KiB.
-	 *
-	 * XXX The shadowmap offset is hardcoded in mem_to_shadow, so we just allocate 
-	 * the pages and drop the returned address.
 	 */
 	shadowmap = (u64)bpf_arena_alloc_pages(
 		&arena, (void __arena *)__asan_shadow_memory_dynamic_address,
