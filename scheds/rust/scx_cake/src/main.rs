@@ -71,9 +71,12 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn new(args: Args, open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>) -> Result<Self> {
-        use libbpf_rs::skel::{SkelBuilder, OpenSkel};
-        
+    fn new(
+        args: Args,
+        open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
+    ) -> Result<Self> {
+        use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+
         // Open and load the BPF skeleton
         let skel_builder = BpfSkelBuilder::default();
 
@@ -90,23 +93,26 @@ impl<'a> Scheduler<'a> {
             rodata.new_flow_bonus_ns = args.new_flow_bonus * 1000;
             rodata.sparse_threshold = args.sparse_threshold;
             rodata.starvation_ns = args.starvation * 1000;
-            rodata.enable_stats = args.verbose;  // Only collect stats when --verbose is used
-            
+            rodata.enable_stats = args.verbose; // Only collect stats when --verbose is used
+
             // NOTE: Topology variables removed from BPF code (were never used)
             // Future: Re-add when CCD-local or P-core preference is implemented
         }
 
         // Load the BPF program
-        let skel = open_skel
-            .load()
-            .context("Failed to load BPF program")?;
+        let skel = open_skel.load().context("Failed to load BPF program")?;
 
-        Ok(Self { skel, args, topology: topo })
+        Ok(Self {
+            skel,
+            args,
+            topology: topo,
+        })
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
         // Attach the scheduler
-        let _link = self.skel
+        let _link = self
+            .skel
             .maps
             .cake_ops
             .attach_struct_ops()
@@ -120,7 +126,12 @@ impl<'a> Scheduler<'a> {
 
         if self.args.verbose {
             // Run TUI mode
-            tui::run_tui(&mut self.skel, shutdown.clone(), self.args.interval, self.topology.clone())?;
+            tui::run_tui(
+                &mut self.skel,
+                shutdown.clone(),
+                self.args.interval,
+                self.topology.clone(),
+            )?;
         } else {
             // Silent mode - just wait for shutdown
             while !shutdown.load(Ordering::Relaxed) {
@@ -147,16 +158,14 @@ impl<'a> Scheduler<'a> {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
 
     // Set up signal handler
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
-    
+
     ctrlc::set_handler(move || {
         info!("Received shutdown signal");
         shutdown_clone.store(true, Ordering::Relaxed);
