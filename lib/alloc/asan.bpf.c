@@ -13,18 +13,22 @@
 #pragma clang attribute push(__attribute__((no_sanitize("address"))), \
 			     apply_to = function)
 
+#define SHADOW_ALL_ZEROES ((u64)-1)
+
 /*
  * Implementation based on mm/kasan/generic.c.
  */
 
+/*
+ * Canary variable for ASAN violations.
+ */
 volatile u64 asan_violated = 0;
-
-u32 __asan_shadow_memory_dynamic_address;
 
 /*
  * XXX Shadow map occupancy map (see comment in arena_init.c and the 
  * item in the README).
  */
+u64 __asan_shadow_memory_dynamic_address;
 
 static bool reported = false;
 static bool inited = false;
@@ -101,12 +105,7 @@ static __always_inline u64 first_nonzero_byte(u64 addr, size_t size)
 		size -= 1;
 	}
 
-	/*
-	 * Can't return 0 because it is a valid arena address.
-	 */
-	/* XXX Use the arena size directly from the map. */
-
-	return ASAN_ARENA_SIZE;
+	return SHADOW_ALL_ZEROES;
 }
 
 static __always_inline bool memory_is_poisoned_n(s8a *addr, u64 size)
@@ -119,8 +118,8 @@ static __always_inline bool memory_is_poisoned_n(s8a *addr, u64 size)
 	start = (u64)mem_to_shadow(addr);
 	end = (u64)mem_to_shadow(addr + size - 1);
 
-	ret   = first_nonzero_byte(start, (end - start) + 1);
-	if (likely(ret == ASAN_ARENA_SIZE))
+	ret = first_nonzero_byte(start, (end - start) + 1);
+	if (likely(ret == SHADOW_ALL_ZEROES))
 		return false;
 
 	return __builtin_expect(ret != end || ASAN_GRANULE(addr + size - 1) >=
@@ -167,13 +166,6 @@ static __always_inline bool check_asan_args(s8a *addr, size_t size,
 	 * is a misinterpreted negative number.
 	 */
 	if (unlikely(addr + size < addr))
-		goto confirmed_invalid;
-
-	/*
-	 * The upper limit of the arena is an implicit guard around the shadow
-	 * region. Possible when attempting to access the shadow map itself.
-	 */
-	if (unlikely((u64)mem_to_shadow(addr + size - 1) >= ASAN_ARENA_SIZE))
 		goto confirmed_invalid;
 
 	return false;
@@ -352,7 +344,7 @@ __hidden __noasan int asan_poison(void __arena *addr, s8 val, size_t size)
 		return -EINVAL;
 
 	shadow = mem_to_shadow(addr);
-	len    = size >> ASAN_SHADOW_SHIFT;
+	len = size >> ASAN_SHADOW_SHIFT;
 
 	asan_memset(shadow, val, len);
 
@@ -393,7 +385,7 @@ __hidden __noasan int asan_unpoison(void __arena *addr, size_t size)
 		return -EINVAL;
 
 	shadow = mem_to_shadow(addr);
-	len    = size >> ASAN_SHADOW_SHIFT;
+	len = size >> ASAN_SHADOW_SHIFT;
 
 	asan_memset(shadow, 0, len);
 
@@ -410,15 +402,48 @@ __hidden __noasan int asan_unpoison(void __arena *addr, size_t size)
 }
 
 /*
- * Initialize ASAN state when necessary. Triggered during allocator startup.
+ * Initialize ASAN state when necessary. Triggered from userspace before
+ * allocator startup.
  */
 SEC("syscall")
-__hidden __noasan int asan_init(void)
+__hidden __noasan int asan_init(struct asan_init_args *args)
 {
-	u64 shadowmap;
+	u64 globals_pages = args->arena_globals_pages;
+	u64 all_pages = args->arena_all_pages;
+	u64 shadowmap, shadow_pgoff;
+	u64 shadow_pages;
 
 	if (inited)
 		return 0;
+
+	/* 
+	 * Retrieve how many pages in the arena are already mapped in.
+	 * This is equal to or higher than the size of the arena globals.
+	 * We use this to place the mapping right before the globals.
+	 */
+	shadow_pages = all_pages >> ASAN_SHADOW_SHIFT;
+
+	/*
+	 * Make sure the numbers provided by userspace are sane.
+	 */
+	if (all_pages > (1ULL << 32) >> PAGE_SHIFT) {
+		bpf_printk("error: arena size %lx too large", all_pages);
+		return -EINVAL;
+	}
+
+	if (globals_pages > all_pages) {
+		bpf_printk("error: globals %lx do not fit in arena %lx", globals_pages, all_pages);
+		return -EINVAL;
+	}
+
+	if (globals_pages + shadow_pages > all_pages) {
+		bpf_printk("error: globals %lx do not leave room for shadow map %lx (arena pages %lx)",
+			globals_pages, shadow_pages, all_pages);
+		return -EINVAL;
+	}
+
+	shadow_pgoff = all_pages - shadow_pages - globals_pages;
+	__asan_shadow_memory_dynamic_address = shadow_pgoff * PAGE_SIZE;
 
 	/*
 	 * XXX Fail for arenas that are < 32KiB, or are not 32KiB aligned. 
@@ -445,14 +470,12 @@ __hidden __noasan int asan_init(void)
 	 * the pages and drop the returned address.
 	 */
 	shadowmap = (u64)bpf_arena_alloc_pages(
-		&arena, (void __arena *)ASAN_SHADOW_OFFSET,
-		ASAN_SHADOW_SIZE >> PAGE_SHIFT, NUMA_NO_NODE, 0);
+		&arena, (void __arena *)__asan_shadow_memory_dynamic_address,
+		shadow_pages, NUMA_NO_NODE, 0);
 	if (!shadowmap) {
 		arena_stderr("Could not allocate shadow map\n");
 		return -ENOMEM;
 	}
-
-	__asan_shadow_memory_dynamic_address = (u32)ASAN_SHADOW_OFFSET;
 
 	inited = true;
 

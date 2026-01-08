@@ -7,10 +7,19 @@
 
 #include <lib/arena_map.h>
 
+#include <alloc/asan.h>
 #include <alloc/common.h>
 
 /* How many pages do we reserve at the beginning of the arena segment? */
 #define RESERVE_ALLOC (8)
+
+SEC("syscall")
+int arena_base(struct arena_base_args *args)
+{
+	args->arena_base = (void __arena *)((struct bpf_arena *)(&arena))->user_vm_start;
+
+	return 0;
+}
 
 SEC("syscall")
 int arena_alloc_reserve(void)

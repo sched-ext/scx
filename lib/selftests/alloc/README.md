@@ -122,13 +122,13 @@ Basic functionality
 	  	- Test with sizes 1 to 128
 	- Allocate with a set memory gap between allocations
 		- Has to be a multiple of GRANULE
-==================> WE ARE HERE
 
 Removing Temporary Workarounds
 ------------------------------
 
 - [M] Reason about offsets within the arena. Ensure ASAN works
 even with user-specified arena offsets.
+==================> WE ARE HERE
 - [M] Dynamically allocate shadow map memory. Possibly use a 
 per-page statically allocated map to see whether we have allocated
 a page for that part of the map.
