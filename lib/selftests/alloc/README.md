@@ -129,6 +129,9 @@ Removing Temporary Workarounds
 - [M] Reason about offsets within the arena. Ensure ASAN works
 even with user-specified arena offsets.
 ==================> WE ARE HERE
+- [M] Make the explicit ASAN calls conditional
+- [A] Rename allocators to remove scx prefix
+
 - [M] Dynamically allocate shadow map memory. Possibly use a 
 per-page statically allocated map to see whether we have allocated
 a page for that part of the map.
