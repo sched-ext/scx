@@ -15,7 +15,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
-extern struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym;
+extern struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym __weak;
 extern void bpf_rcu_read_lock(void) __ksym;
 extern void bpf_rcu_read_unlock(void) __ksym;
 
@@ -447,11 +447,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     
     /* PRE-CALC VICTIM (Pure ALU while waiting for tctx) */
     s32 spec_victim_cpu = spec_victim_mask ? __builtin_ctzll(spec_victim_mask) : -1;
-
-    /* PREFETCH: Load starvation_threshold and tier_multiplier cache lines */
-    volatile u64 hint_starvation = starvation_threshold[0];
-    volatile u32 hint_multiplier = tier_multiplier[0];
-    (void)hint_starvation; (void)hint_multiplier;
 
     tctx = get_task_ctx(p, false);  /* No allocation - fast path */
     if (unlikely(!tctx)) {
@@ -890,13 +885,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
     /* Initialize Idle Mask (Single RCU section - saves ~6200 cycles) */
     u32 nr_cpus = scx_bpf_nr_cpu_ids();
     
-    bpf_rcu_read_lock();  /* Single lock for entire scan */
-    for (s32 i = 0; i < 64; i++) {
-        if (i >= nr_cpus) break;
-        struct task_struct *p = scx_bpf_cpu_curr(i);
-        if (p && p->pid == 0) idle_map.as_bytes[i] = 1;
+    /* Optional: Pre-warm idle map if kfunc available (graceful fallback for older kernels) */
+    if (scx_bpf_cpu_curr) {
+        bpf_rcu_read_lock();
+        for (s32 i = 0; i < 64; i++) {
+            if (i >= nr_cpus) break;
+            struct task_struct *p = scx_bpf_cpu_curr(i);
+            if (p && p->pid == 0) idle_map.as_bytes[i] = 1;
+        }
+        bpf_rcu_read_unlock();
     }
-    bpf_rcu_read_unlock();
+    /* If kfunc unavailable, idle_map starts empty and self-populates via cake_update_idle */
 
     /* Create all 7 dispatch queues in priority order */
     ret = scx_bpf_create_dsq(CRITICAL_LATENCY_DSQ, -1);
