@@ -1,0 +1,17 @@
+Optimize Starvation Limits for Esports (Strict Entry, Generous Exit)
+
+This update finalizes the tuning for competitive gaming performance:
+
+1. Starvation Limits (Generous Exit):
+   - CritLatency: Increased from 200us -> 5ms.
+   - Realtime: Increased from 1.5ms -> 3ms.
+   - Reasoning: High-performance input tasks (avg 30us) occasionally spike (800us). Tight limits caused unnecessary preemption (stutter). Generous limits allow trusted tasks to finish execution.
+
+2. Classification Logic (Strict Entry):
+   - Reverted CritLatency requirement to 'Score == 100'.
+   - Rejected 'Score >= 90' experiment which caused a 60 FPS regression in 1% lows due to 'noisy neighbor' contention.
+
+3. Result:
+   - Restored 1% lows to ~180 FPS.
+   - Eliminated micro-stutters from starvation preemption.
+   - Documented findings in docs/Optimizations.md.
