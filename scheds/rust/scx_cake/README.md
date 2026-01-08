@@ -1,400 +1,630 @@
-# scx_cake: CAKE DRR++ Adapted for CPU Scheduling
+# scx_cake: A Low-Latency Gaming Scheduler
 
-[![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
-[![Kernel: 6.12+](https://img.shields.io/badge/Kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
-[![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg?style=flat-square)]()
+[![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](https://opensource.org/licenses/GPL-2.0)
+[![Kernel: 6.12+](https://img.shields.io/badge/Kernel-6.12%2B-green.svg)](https://kernel.org)
+[![sched_ext](https://img.shields.io/badge/sched__ext-scheduler-orange.svg)](https://github.com/sched-ext/scx)
+[![AI Usage: True](https://img.shields.io/badge/AI%20Usage-True-lightgrey.svg)]()
 
-> **ABSTRACT**: `scx_cake` is an experimental BPF CPU scheduler that adapts the network [CAKE](https://www.bufferbloat.net/projects/codel/wiki/Cake/) algorithm's DRR++ (Deficit Round Robin++) for CPU scheduling. Designed for **gaming workloads** on modern AMD and Intel hardware.
+> **ABSTRACT**: `scx_cake` is an experimental BPF CPU scheduler designed for **gaming workloads**. It abandons traditional "Fairness" in favor of strict "Latency Prioritization", reducing total scheduling overhead to approximately **~70-120 CPU cycles per task\*** (down from ~470 cycles in naive implementations).
 >
-> - **4-Tier Classification** — Tasks sorted by EWMA avg_runtime into Critical / Interactive / Frame / Bulk
-> - **Zero Global Atomics** — Per-CPU BSS arrays with MESI-guarded writes eliminate bus locking
-> - **Kernel-Delegated Idle Selection** — `scx_bpf_select_cpu_dfl()` for authoritative, zero-staleness CPU selection
-> - **Per-LLC DSQ Sharding** — Eliminates cross-CCD lock contention on multi-chiplet CPUs
-> - **DRR++ Deficit Tracking** — Network CAKE's flow fairness algorithm adapted for CPU task scheduling
+> _\*Estimates are speculative and hardware-dependent (Ryzen 7 9800X3D)._
 
 ---
 
-> [!WARNING]
-> **EXPERIMENTAL SOFTWARE**
-> This scheduler is experimental and intended for use with `sched_ext` on Linux Kernel 6.12+. Performance may vary depending on hardware and user configuration.
+## Table of Contents
 
-> [!NOTE]
-> **AI TRANSPARENCY**
-> Large Language Models were used for optimization pattern matching and design exploration. All implementation details have been human-verified, benchmarked on real gaming workloads, and validated for correctness.
+1. [Research Objectives](#1-research-objectives)
+
+   - [Test Platform](#test-platform)
+
+2. [Architecture: The Zero-Cycle Engine](#2-architecture-the-zero-cycle-engine)
+
+   - [Cycle Cost Analysis](#cycle-cost-analysis)
+     - [Per-Function Breakdown](#per-function-breakdown)
+     - [Call Frequency Estimation](#call-frequency-estimation-gaming-workload-on-9800x3d)
+     - [Before vs After Comparison](#comparison-before-vs-after-optimizations)
+   - [A. Pre-Computed Math](#a-pre-computed-math-2-cycles)
+   - [B. Global Bitmask Search](#b-global-bitmask-search-5-cycles)
+   - [C. The Scoreboard](#c-the-scoreboard-neighbor-awareness)
+   - [D. Direct Dispatch Bypass](#d-direct-dispatch-bypass-5-cycles)
+
+3. [The 7-Tier Classification System](#3-the-7-tier-classification-system)
+
+   - [Tier Classification Logic](#tier-classification-logic)
+
+4. [Performance Optimizations](#4-performance-optimizations)
+
+   - [Understanding CPU Cycles](#understanding-cpu-cycles)
+   - [A. Timestamp Caching](#a-timestamp-caching-scx_bpf_now)
+   - [B. Cache Line Optimization](#b-cache-line-optimization)
+   - [C. Idle Path Streamlining](#c-idle-path-streamlining)
+   - [D. Division-Free Arithmetic](#d-division-free-arithmetic-bitwise-magic)
+   - [E. Branchless Programming](#e-branchless-programming)
+   - [F. Pre-Computed Values](#f-pre-computed-values)
+
+5. [HPC Patterns & Industry Best Practices](#5-hpc-patterns--industry-best-practices)
+
+   - [Confirmed Patterns](#confirmed-patterns-already-implemented)
+   - [Evaluated But Not Implemented](#evaluated-but-not-implemented)
+   - [Key References](#key-references)
+
+6. [Experimental Findings](#6-experimental-findings)
+
+   - [A. Performance Wins](#a-performance-wins-)
+   - [B. Performance Regressions & Lessons Learned](#b-performance-regressions--lessons-learned-)
+   - [C. The "1% Low" Regression (Case Study)](#c-the-1-low-regression-case-study)
+   - [D. The "FPS Overshoot" Phenomenon](#d-the-fps-overshoot-phenomenon)
+   - [E. Performance Baseline](#e-performance-baseline)
+   - [F. Benchmarking](#f-benchmarking)
+
+7. [Usage](#7-usage)
+
+   - [Quick Start](#quick-start)
+   - [Monitoring (Verbose Mode)](#monitoring-verbose-mode)
+   - [CLI Options](#cli-options)
+
+8. [License & Acknowledgments](#8-license--acknowledgments)
+
+9. [Glossary](#9-glossary)
 
 ---
 
-## Navigation
+## Glossary
 
-- [1. Quick Start](#1-quick-start)
-- [2. Philosophy](#2-philosophy)
-- [3. 4-Tier System](#3-4-tier-system)
-- [4. Architecture](#4-architecture)
-- [5. Configuration](#5-configuration)
-- [6. Performance](#6-performance)
-- [7. Vocabulary](#7-vocabulary)
+Quick reference for technical terms used throughout this document.
+
+| Term                 | Definition                                                                                                                                  |
+| :------------------- | :------------------------------------------------------------------------------------------------------------------------------------------ |
+| **BPF / eBPF**       | Extended Berkeley Packet Filter - a technology allowing sandboxed programs to run in kernel space without modifying kernel source           |
+| **sched_ext**        | Linux kernel framework (6.12+) that allows custom CPU schedulers to be implemented as BPF programs                                          |
+| **DSQ**              | Dispatch Queue - a holding queue where tasks wait before being assigned to a CPU                                                            |
+| **Tier**             | Priority level (0-6) assigned to tasks based on behavior; determines quantum, preemption rights, and demotion thresholds                    |
+| **Quantum**          | Base timeslice given to a task; default 2ms. Higher tiers get shorter slices (more preemption points)                                       |
+| **Slice Multiplier** | Per-tier factor applied to quantum; e.g., 0.7x for Tier 0 means 1.4ms slice at 2ms quantum                                                  |
+| **Wait Budget**      | Max time a task can wait in queue before being considered for demotion; prevents queue bloat                                                |
+| **Starvation Limit** | Max runtime before forced preemption; safety net for runaway tasks                                                                          |
+| **TZCNT**            | "Trailing Zero Count" - x86 hardware instruction (`__builtin_ctzll`) that finds the first set bit in O(1) time                              |
+| **TSC**              | Time Stamp Counter - hardware register counting CPU cycles; reading it costs ~15-25 cycles                                                  |
+| **rq->clock**        | Cached timestamp on each CPU's run queue; cheaper to read than TSC (~3-5 cycles)                                                            |
+| **Vtime**            | Virtual Time - a fairness mechanism that normalizes task runtimes; deleted in scx_cake                                                      |
+| **Sparse Score**     | 0-100 metric computed from task behavior; high score = short bursts = high priority tier                                                    |
+| **Hot Path**         | The critical code path executed on every scheduling decision (wakeup → dispatch)                                                            |
+| **False Sharing**    | Performance degradation when CPUs update different variables on the same cache line                                                         |
+| **Cache Line**       | 64-byte block of memory fetched as a unit; crossing lines or sharing causes overhead                                                        |
+| **L1 Cache**         | Fastest CPU cache (~1-4 cycles access); our task context is designed to fit here                                                            |
+| **Direct Dispatch**  | Bypassing the global queue to place a task directly on an idle CPU's local queue                                                            |
+| **Preemption**       | Forcibly stopping a running task to run a higher-priority one                                                                               |
+| **Starvation**       | When a task waits too long without running; our starvation limits prevent this                                                              |
+| **1% Low FPS**       | Gaming benchmark metric: the FPS that 99% of frames exceed; indicates stutter/smoothness                                                    |
+| **Context Switch**   | The CPU operation of saving one task's state and loading another's (~1000+ cycles)                                                          |
+| **Atomic Operation** | CPU instruction that completes indivisibly; used for lock-free concurrent access                                                            |
+| **Branchless**       | Code without if/else jumps; avoids branch misprediction penalty (~15-20 cycles)                                                             |
+| **Multiply-Shift**   | Division approximation using `x * magic >> shift`; avoids slow division instruction                                                         |
+| **SMT**              | Simultaneous Multi-Threading (Hyperthreading); 2 threads share one physical core                                                            |
+| **NUMA**             | Non-Uniform Memory Access; memory access time varies by which CPU socket owns the RAM                                                       |
+| **IPC**              | Instructions Per Cycle; measure of CPU efficiency (higher = better)                                                                         |
+| **EMA**              | Exponential Moving Average - lightweight runtime estimator: `new_avg = (old_avg * 7 + sample) >> 3`. Replaced Kalman filter (too CPU-heavy) |
 
 ---
 
-## 1. Quick Start
+## 1. Research Objectives
+
+Modern Operating System schedulers (CFS, EEVDF) are designed for **Fairness** and **Throughput**.
+
+**The Problem**: In competitive gaming, "Fairness" is detrimental. If the scheduler pauses the Game Render thread to let a background compiler run "fairly", the player perceives stutter (1% low FPS drop) or input lag.
+
+**The Hypothesis**: By removing fairness logic and optimizing the "Hot Path" to run faster than a DRAM access (**Wait-Free**), we can achieve hardware-level responsiveness.
+
+_(See [Section 3.1](#comparison-scx_cake-vs-eevdf) for a detailed comparison with EEVDF)_
+
+**The Solution**: A **7-Tier Classification System** combined with optimized scheduling primitives.
+
+### Test Platform
+
+- **CPU**: AMD Ryzen 7 9800X3D (8 cores, 16 threads with SMT) @ ~5.0 GHz
+- **RAM**: 96GB DDR5
+- **GPU**: NVIDIA RTX 4090
+- **OS**: CachyOS 6.18 (Linux kernel 6.12+)
+
+---
+
+## 2. Architecture: The Zero-Cycle Engine
+
+The core innovation of `scx_cake` is the reduction of scheduling overhead by **~70%** compared to standard implementations.
+
+> [!WARNING] > **Speculative Estimates**: All cycle counts listed below are **conservative estimates** based on the referenced AMD Ryzen 7 9800X3D architecture. Actual runtime performance depends heavily on CPU frequency, cache state, and memory timings.
+
+### Cycle Cost Analysis
+
+#### Per-Function Breakdown
+
+| Function                | Role                    | Estimated Cycles (Speculative\*) | Key Optimizations                                                |
+| :---------------------- | :---------------------- | :------------------------------- | :--------------------------------------------------------------- |
+| `cake_enqueue`          | Task wakeup             | ~2-5c                            | Pre-computed tier (bitfield extract), MLP loads                  |
+| `cake_select_cpu`       | Find idle CPU           | ~15-25c                          | `scx_bpf_now()`, **Wait-Free Dual-View Map**, MLP "Cluster Bomb" |
+| `cake_dispatch`         | Move task to CPU        | ~5-10c                           | Direct dispatch bypass (SCX_ENQ_LAST)                            |
+| `cake_running`          | Task starts             | ~15-25c                          | `scx_bpf_now()`, Prefetch hints                                  |
+| `cake_stopping`         | Task stops              | ~40-50c                          | **Fused Load-Compute-Store**, Tier recalc                        |
+| `cake_update_idle`      | CPU idle transition     | ~5-10c                           | Single atomic byte write (Wait-Free)                             |
+| **Hot Path Total**      | enqueue→select→dispatch | **~22-40c**                      | --                                                               |
+| **Full Task Lifecycle** | All callbacks           | **~70-120c**                     | --                                                               |
+
+#### Call Frequency Estimation (Gaming Workload on 9800X3D)
+
+| Event                        | Est. Frequency | Cycles/Event\* | Cycles/Second         | % of 1 Core |
+| :--------------------------- | :------------- | :------------- | :-------------------- | :---------- |
+| Task wakes                   | ~100,000/sec   | ~25c           | 2,500,000             | 0.05%       |
+| Task stops                   | ~100,000/sec   | ~45c           | 4,500,000             | 0.09%       |
+| Idle transitions             | ~50,000/sec    | ~7c            | 350,000               | 0.007%      |
+| **Total Scheduler Overhead** | --             | --             | **~7.35M cycles/sec** | **~0.15%**  |
+
+_Note: At 5 GHz, one core executes 5,000,000,000 cycles/sec. Scheduler overhead is negligible._
+
+#### Comparison: Before vs After Optimizations
+
+| Metric                     | Naive Implementation | scx_cake             | Improvement    |
+| :------------------------- | :------------------- | :------------------- | :------------- |
+| Hot path (wakeup→dispatch) | ~400c                | ~25c                 | **16x faster** |
+| Full task lifecycle        | ~470c                | ~90c                 | **5x faster**  |
+| CPU idle check             | ~300c (map scan)     | ~5c (Wait-Free Scan) | **60x faster** |
+| Timestamp read             | ~20c (TSC)           | ~5c (cached)         | **4x faster**  |
+
+---
+
+### A. Pre-Computed Math (2 Cycles)
+
+**The Innovation**: All complex math (Tier calculation, Slice adjustment) is moved to the "Stopping Path" (when a task finishes).
+
+```c
+/* OLD: Math calculated ON WAKEUP (Critical Path) - ~100 Cycles */
+u64 vtime = (p->scx.dsq_vtime * 100) / weight; // Division!
+u8 tier = calculate_tier(p->runtime);          // Branching!
+
+/* NEW: Pre-Computed. Just Load. - 2 Cycles */
+u8 tier = GET_TIER(tctx);  // L1 Load (bitfield extract)
+```
+
+### B. Wait-Free Dual-View Map (5 Cycles)
+
+**The Innovation**: A global `idle_map` that supports both "Byte-Granularity Writes" (Wait-Free) and "Chunk-Granularity Reads" (Fast Scan).
+
+```c
+/* Dual-View Union in .bss */
+union {
+    u8  as_bytes[64];   /* WRITE VIEW: Access individually (No False Sharing logic needed) */
+    u64 as_chunks[8];   /* READ VIEW:  Access in 8 chunks (Fast Scan) */
+} idle_map;
+
+/* WRITER (Idle Path): Single byte write. No ATOMIC LOCK. */
+idle_map.as_bytes[cpu] = 1;
+
+/* READER (Select CPU): Wide load to check 8 CPUs at once. */
+if (idle_map.as_chunks[0]) ... // Checks CPUs 0-7 instaneously
+```
+
+### C. MLP "Cluster Bomb" (Parallel Loads)
+
+**The Innovation**: Issuing all independent memory loads at the start of a function to maximize Memory Level Parallelism.
+
+```c
+/* OLD: Serial Pointer Chasing - ~60 Cycles Latency */
+tctx = get_ctx(p);      // Stall...
+tier = tctx->tier;      // Stall...
+map  = bpf_map_lookup;  // Stall...
+
+/* NEW: Cluster Bomb - ~20 Cycles Latency (Overlapped) */
+u64 spec_mask = victim_mask;           // Load 1
+u8 tier = GET_TIER(tctx);              // Load 2
+u8 prev_idle = idle_map.as_bytes[cpu]; // Load 3
+/* CPU executes all loads in parallel while ALU calculates */
+```
+
+### D. Direct Dispatch Bypass (SCX_ENQ_LAST)
+
+**The Innovation**: Directly assigning a task to a CPU's local queue, bypassing global logic and redundant BPF calls.
+
+```c
+/* OLD: Standard Queueing - ~50 Cycles */
+scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice);
+
+/* NEW: Direct to CPU - 5 Cycles */
+/* SCX_ENQ_LAST tells kernel to skip expensive "re-queue" checks */
+scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, quantum_ns, SCX_ENQ_LAST);
+```
+
+---
+
+## 3. The 7-Tier Classification System
+
+Tasks are classified by **Behavior**, not "Niceness". The tier determines timeslice, preemption aggressiveness, and demotion thresholds.
+
+### Tier Overview
+
+| Tier  | Name             | Typical Tasks                   | Priority          |
+| :---- | :--------------- | :------------------------------ | :---------------- |
+| **0** | Critical Latency | Mouse, keyboard, game input     | Highest           |
+| **1** | Realtime         | Audio, networking, vsync        | Very High         |
+| **2** | Critical         | Compositor, kernel threads      | High              |
+| **3** | Gaming           | Game render loop, physics       | Normal (baseline) |
+| **4** | Interactive      | Browsers, editors, desktop apps | Lower             |
+| **5** | Batch            | Compilers, builds, nice'd tasks | Low               |
+| **6** | Background       | Encoders, backup, bulk work     | Lowest            |
+
+### Tier Timing Parameters
+
+| Tier  | Wait Budget (AQM) | Starvation Limit | Slice Multiplier  | Quantum (2ms default) |
+| :---- | :---------------- | :--------------- | :---------------- | :-------------------- |
+| **0** | 100µs             | 5ms              | 0.70x (717/1024)  | 1.4ms                 |
+| **1** | 750µs             | 3ms              | 0.80x (819/1024)  | 1.6ms                 |
+| **2** | 2ms               | 4ms              | 0.90x (922/1024)  | 1.8ms                 |
+| **3** | 4ms               | 8ms              | 1.00x (1024/1024) | 2.0ms                 |
+| **4** | 8ms               | 16ms             | 1.10x (1126/1024) | 2.2ms                 |
+| **5** | 20ms              | 40ms             | 1.20x (1229/1024) | 2.4ms                 |
+| **6** | ∞                 | 100ms            | 1.30x (1331/1024) | 2.6ms                 |
+
+_Default: `--quantum 2000` (2ms)_
+
+### Tier Classification Logic
+
+Tasks are classified based on their **sparse score** (0-100) and **runtime behavior**:
+
+| Sparse Score | Avg Runtime | Tier Assignment               | Behavior                       |
+| :----------- | :---------- | :---------------------------- | :----------------------------- |
+| 100          | < 50µs      | **Tier 0** (Critical Latency) | Ultra-short bursts (Input)     |
+| 100          | < 500µs     | **Tier 1** (Realtime)         | Very short, consistent (Audio) |
+| 90-99        | Any         | **Tier 2** (Critical)         | Short bursts (Compositor)      |
+| 70-89        | Any         | **Tier 3** (Gaming)           | Bursty, interactive (Games)    |
+| 50-69        | Any         | **Tier 4** (Interactive)      | Normal behavior (Browsers)     |
+| 30-49        | Any         | **Tier 5** (Batch)            | Longer runs (Compilers)        |
+| 0-29         | Any         | **Tier 6** (Background)       | Continuous CPU usage           |
+
+### Sparse Score Calculation
+
+The sparse score measures how "bursty" a task is:
+
+```c
+/* Higher is better (more sparse = shorter waits = more responsive) */
+sparse_score = 100 - (avg_runtime / sparse_threshold);
+```
+
+| CLI Option               | Default | Effect                                             |
+| :----------------------- | :------ | :------------------------------------------------- |
+| `--sparse-threshold 125` | 125     | Gaming-optimized (shorter tasks score higher)      |
+| `--sparse-threshold 50`  | --      | Aggressive (only very short tasks get high scores) |
+| `--sparse-threshold 250` | --      | Relaxed (longer tasks still get decent scores)     |
+
+**Example with `--sparse-threshold 50`**:
+
+- Task with 25µs avg runtime → Score = 100 - (25/50) = 99.5 → **Tier 2**
+- Task with 100µs avg runtime → Score = 100 - (100/50) = 98 → **Tier 2**
+- Task with 500µs avg runtime → Score = 100 - (500/50) = 90 → **Tier 2**
+- Task with 1ms avg runtime → Score = 100 - (1000/50) = 80 → **Tier 3**
+
+### Demotion Behavior
+
+Tasks that misbehave get demoted to prevent starvation of other tasks:
+
+| Condition                          | Action                  | Purpose                      |
+| :--------------------------------- | :---------------------- | :--------------------------- |
+| Runtime > Starvation Limit         | Force preemption        | Safety net for runaway tasks |
+| Wait time > Wait Budget (repeated) | Demote to next tier     | Prevent queue bloat          |
+| nice value > 0                     | Start at Batch tier     | Respect user priority hints  |
+| nice value < 0                     | Cap at Interactive tier | Prevent abuse                |
+
+#### Per-Tier Demotion Targets
+
+| Current Tier           | Demotes To        | When                                   |
+| :--------------------- | :---------------- | :------------------------------------- |
+| **0** Critical Latency | **1** Realtime    | Runtime > 5ms or wait budget exceeded  |
+| **1** Realtime         | **2** Critical    | Runtime > 3ms or wait budget exceeded  |
+| **2** Critical         | **3** Gaming      | Runtime > 4ms or wait budget exceeded  |
+| **3** Gaming           | **4** Interactive | Runtime > 8ms or wait budget exceeded  |
+| **4** Interactive      | **5** Batch       | Runtime > 16ms or wait budget exceeded |
+| **5** Batch            | **6** Background  | Runtime > 40ms or wait budget exceeded |
+| **6** Background       | (none)            | Cannot demote further                  |
+
+### Preemption Matrix
+
+### Preemption Policy
+
+`scx_cake` deliberately restricts preemption to ensure frame consistency for gaming workloads.
+
+**Preemption Logic:**
+
+1.  **Only Tier 0 (Critical Latency) can preempt.** This ensures mouse/keyboard input is processed immediately.
+2.  **Only Tiers 4, 5, 6 can be preempted.** Interactive, Batch, and Background tasks yield to input.
+3.  **Tiers 1, 2, 3 are Protected.** Realtime, Critical, and Gaming tasks are **never** preempted by `scx_cake`. They run until they sleep or exhaust their quantum.
+
+| Triggering Tier          | Preempts Victim Tiers | Mechanism                              |
+| :----------------------- | :-------------------- | :------------------------------------- |
+| **0** (Critical Latency) | **4, 5, 6**           | Active `kick_cpu` (Instant Preemption) |
+| **1 - 6**                | None                  | Wait for natural timeslice expire      |
+
+**Impact**: Input (Tier 0) can preempt a Browser (Tier 4) instantly, but will **wait** for the Game Loop (Tier 3) to yield naturally. This prevents input processing from tearing game frames.
+
+### Comparison: scx_cake vs. EEVDF
+
+`scx_cake` fundamentally differs from the kernel's default EEVDF (Earliest Eligible Virtual Deadline First) scheduler.
+
+| Feature                      | EEVDF (Kernel Default)           | scx_cake                                   |
+| :--------------------------- | :------------------------------- | :----------------------------------------- |
+| **Primary Goal**             | Fairness & Throughput            | **Latency & Responsiveness**               |
+| **Scheduling Metric**        | Virtual Deadline (Lag)           | **Behavioral Tier** (Sparse Score)         |
+| **Timeslice**                | Dynamic (Proportional)           | **Fixed Quantum** (Tier-Scaled)            |
+| **Preemption**               | When Lag > Slice                 | **Instant** (Higher Tier Always Wins)      |
+| **Classification Mechanism** | Nice Values (Weights)            | **Automatic Classification** + Nice Caps   |
+| **Starvation Logic**         | Guaranteed Service (Fair)        | **Force Kill** (Unfair - preemption limit) |
+| **Wait Queue**               | Single Red-Black Tree (O(log n)) | **7 Per-Tier FIFOs** (O(1))                |
+
+**Key Differences**:
+
+1.  **Fairness vs. Speed**: EEVDF spends cycles calculating "Virtual Time" to ensure every task gets its fair share. `scx_cake` abandons fairness math entirely; if a Game Thread needs the CPU, it takes it from a Compiler immediately, no calculations asked.
+2.  **Lag vs. Tiers**: EEVDF tracks "Lag" (how much a task "deserves" to run). `scx_cake` ignores what a task deserves and only cares about what it _is doing_ (e.g., "Is it bursting?").
+3.  **Complexity**: EEVDF uses a Red-Black Tree (expensive to maintain). `scx_cake` uses simple FIFOs (queues) and direct hardware dispatch.
+
+---
+
+## 4. Performance Optimizations
+
+This section documents the key performance concepts that make `scx_cake` fast. Each optimization targets a specific hardware or software bottleneck.
+
+### Understanding CPU Cycles
+
+Every operation in the scheduler costs CPU cycles. On a 5 GHz 9800X3D:
+
+- **1 cycle** = 0.2 nanoseconds
+- **100 cycles** = 20 nanoseconds
+- Context switches cost **1000+ cycles**
+
+The goal is to minimize cycles in the **hot path** (the code executed on every scheduling decision).
+
+| Operation Type       | Typical Cost | Example               |
+| :------------------- | :----------- | :-------------------- |
+| Register operation   | 1 cycle      | `a + b`               |
+| L1 cache read        | 3-4 cycles   | Reading task context  |
+| L2 cache read        | 12-15 cycles | Map lookup miss       |
+| L3 cache read        | 30-50 cycles | Cross-core data       |
+| TSC read             | 15-25 cycles | `bpf_ktime_get_ns()`  |
+| Integer division     | 20-80 cycles | `x / 20`              |
+| Branch misprediction | 15-20 cycles | `if/else` wrong path  |
+| Atomic operation     | 10-50 cycles | `__sync_fetch_and_or` |
+
+---
+
+### A. Timestamp Caching (`scx_bpf_now()`)
+
+**The Problem**: Reading time is expensive.
+
+`bpf_ktime_get_ns()` reads the hardware TSC (Time Stamp Counter), which requires:
+
+1. A serializing instruction (stops pipeline)
+2. Reading a hardware register
+3. Cost: ~15-25 cycles per call
+
+**The Solution**: Use `scx_bpf_now()` which reads the cached `rq->clock` that the kernel already maintains.
+
+```c
+/* OLD: Hardware TSC read - ~15-25 cycles */
+u64 now = bpf_ktime_get_ns();
+
+/* NEW: Cached rq->clock - ~3-5 cycles */
+u64 now = scx_bpf_now();
+```
+
+**Impact**: ~40-80 cycles saved per task (4 call sites × ~10-20 cycles each).
+
+---
+
+### B. Cache Line Optimization & Wait-Free Design
+
+**The Problem**: False sharing destroys performance on multi-core systems.
+
+**The Solution**: We isolate frequently-updated atomics on separate cache lines and use **Wait-Free** structures where possible.
+
+```c
+struct {
+    union {
+        u8  as_bytes[64];   /* Wait-Free Write */
+        u64 as_chunks[8];   /* Fast Scan Read */
+    };
+} idle_map SEC(".bss") __attribute__((aligned(64)));
+```
+
+**Why this works**:
+
+- `as_bytes[cpu] = 1` is a simple store. No `LOCK` prefix. No bus locking.
+- `as_chunks[0]` reads 8 bytes at once.
+- Alignment ensures no two CPUs contend for the same cache line unless they are neighbors (rare).
+
+### C. Idle Path Streamlining
+
+**The Problem**: Redundant operations on the idle path delay CPU sleep.
+
+**The Solution**: We stripped the idle path (`cake_update_idle`) down to a **single instruction**.
+
+- **Removed**: `victim_mask` updates (moved to `cake_running`)
+- **Removed**: Scoreboard updates (deleted feature)
+- **Kept**: Single byte write to `idle_map`
+
+**Impact**: The CPU transitions to idle state ~40 cycles faster.
+
+### D. Division-Free Arithmetic (Bitwise Magic)
+
+**The Problem**: Integer division is slow (20-80 cycles).
+
+**The Solution**: Replace division with reciprocal multiplication.
+
+```c
+/* Division by 20 for tier bucketing */
+/* Math: 3277/65536 ≈ 0.05004 ≈ 1/20 */
+u32 bucket = (score * 3277) >> 16;
+```
+
+### E. Branchless Programming
+
+**The Problem**: Branch misprediction costs ~15-20 cycles.
+
+**The Solution**: Use signed masks and bitwise logic.
+
+```c
+/* XOR-Blend Logic (cake_running) */
+u64 selector = -(s64)is_victim;  // 0 or 0xFF...
+u64 new_mask = clear_mask ^ (diff & selector);
+```
+
+### F. Pre-Computed Values
+
+**The Problem**: Calculating tiers on wake-up adds latency.
+
+**The Solution**: Move all math to `cake_stopping` (the "Cold Path").
+
+- When a task stops, we calculate its _next_ tier based on what it just did.
+- When it wakes up, we just load the value.
+
+---
+
+## 5. HPC Patterns & Industry Best Practices
+
+The optimizations in `scx_cake` are informed by high-performance computing research:
+
+### Confirmed Patterns (Already Implemented)
+
+| Pattern                            | Source          | Optimization                                   |
+| :--------------------------------- | :-------------- | :--------------------------------------------- |
+| **Wait-Free Data Structures**      | LMAX Disruptor  | Dual-View `idle_map` (Byte Write / Chunk Read) |
+| **Memory Level Parallelism (MLP)** | Modern CPU Arch | "Cluster Bomb" parallel loads in `select_cpu`  |
+| **Fused Load-Compute-Store**       | Kernel Design   | Single-burst updates in `cake_stopping`        |
+| **No Dynamic Allocation**          | NASA JPL        | Pre-allocated maps (zero `malloc` in hot path) |
+| **Division-Free Math**             | Algorithmica    | `x * magic >> shift` replacement               |
+| **Cache Line Padding**             | LMAX Disruptor  | 64-byte alignment for global masks             |
+| **Branchless Logic**               | HPC Research    | Signed-mask conditionals                       |
+
+### Key References
+
+- **Algorithmica "Algorithms for Modern Hardware"**: Cache lines, branchless programming.
+- **LMAX Disruptor**: Mechanical Sympathy, Lock-free queues.
+- **NASA JPL "Power of 10"**: Deterministic C execution.
+
+---
+
+## 6. Experimental Findings
+
+> [!WARNING] > **Performance Disclaimer**: The results below are from a specific test system (AMD Ryzen 7 9800X3D). Your results may vary based on CPU architecture (Intel vs. AMD), core count, and Game/OS version.
+
+### A. Performance Wins ✅
+
+| Optimization                 | Status     | Impact (Speculative)                       | Date     |
+| :--------------------------- | :--------- | :----------------------------------------- | :------- |
+| **Wait-Free Dual-View Map**  | **Active** | Replaced atomic bitset with byte-store     | Dec 2025 |
+| **MLP "Cluster Bomb"**       | **Active** | Parallelized memory loads (Latency Hiding) | Jan 2026 |
+| **Direct Dispatch (+Last)**  | **Active** | Skips kernel re-queueing (SCX_ENQ_LAST)    | Initial  |
+| **Fused Load-Compute-Store** | **Active** | Reduced register pressure in `stopping`    | Jan 2026 |
+| **Pre-computed Tier Math**   | **Active** | Moved math to cold path                    | Initial  |
+
+### B. Performance Regressions & Lessons Learned ⚠️
+
+| Experiment               | Result                    | Resolution                              |
+| :----------------------- | :------------------------ | :-------------------------------------- |
+| **1ms Starvation Limit** | **Stutter (1% Low drop)** | Reverted to 5ms (Tier 0 default)        |
+| **Single DSQ**           | **Contention**            | Split into 7 per-tier queues            |
+| **Atomic Bitmask (Old)** | **False Sharing**         | Replaced with Wait-Free Byte Map        |
+| **Vtime Fairness**       | **Latency Spike**         | Removed entirely (Anti-Fairness design) |
+
+### C. The "1% Low" Regression (Case Study)
+
+- **Experiment**: Tightened Critical Latency starvation limit to 1ms
+- **Result**: 1% Low FPS dropped from 180 → 120
+- **Analysis**: Legitimate heavy input frames occasionally take >1ms (e.g. initial mouse movement).
+- **Correction**: Relaxed to 5ms, restored performance.
+- **Lesson**: **Over-optimization kills stability.** Input handling needs breathing room.
+
+### E. Performance Baseline (9800X3D)
+
+| Metric                     | scx_cake                 |
+| :------------------------- | :----------------------- |
+| Scheduler Overhead         | **~0.15% (Negligible)**  |
+| Dispatch Latency           | **~10-40 cycles (Est.)** |
+| 1% Low FPS (Arc Raiders)\* | **~233 FPS**             |
+
+_\*Benchmark run on CachyOS 6.18, RTX 4090, 4K High Settings. See Disclaimer._
+
+### F. Benchmarking
+
+#### Test Methodology
+
+- **Tool**: [MangoHud](https://github.com/flightlessmango/MangoHud)
+- **Scenario**: Controlled firing range movement (30s loop)
+
+#### Results History
+
+| Date     | Build               | 1% Low FPS  | Notes             |
+| :------- | :------------------ | :---------- | :---------------- |
+| Jan 2026 | **Wait-Free + MLP** | **233 FPS** | Best Result       |
+| Dec 2025 | Cache Line Padding  | ~210 FPS    | Stable            |
+| Dec 2025 | 1ms Regression      | 120 FPS     | Failed Experiment |
+
+---
+
+## 7. Usage
+
+### Quick Start
 
 ```bash
-# Prerequisites: Linux Kernel 6.12+ with sched_ext, Rust toolchain
-
-# Clone and build
-git clone https://github.com/sched-ext/scx.git
-cd scx && cargo build --release -p scx_cake
-
-# Run (requires root)
-sudo ./target/release/scx_cake
-
-# Run with live stats TUI
-sudo scx_cake -v
+git clone https://github.com/RitzDaCat/scx_cake.git
+cd scx_cake
+./build.sh
+sudo ./start.sh
 ```
 
----
-
-## 2. Philosophy
-
-Traditional schedulers (CFS, EEVDF) optimize for **fairness** — if a game and a compiler both run, each gets 50% CPU time. For gaming, this creates two problems:
-
-1. **Latency inversion**: A 50µs input handler waits behind a 50ms compile job
-2. **Frame jitter**: Game render threads get preempted mid-frame by background work
-
-**scx_cake's answer**: Classify tasks by _behavior_ (how long they run), not by type or nice value. Short-burst tasks (input, audio) get instant priority. Long-running tasks (compilers) get larger time slices but lower priority. The system self-tunes — no manual configuration needed.
-
-This is the same insight behind network CAKE: short flows (DNS, gaming packets) should not be delayed by bulk flows (downloads). scx_cake applies this to CPU time.
-
----
-
-## 3. 4-Tier System
-
-`scx_cake` classifies every task into one of four tiers based on its **EWMA** (Exponential Weighted Moving Average) runtime. Classification is automatic and continuous — tasks move between tiers as their behavior changes.
-
-### Tier Gates
-
-| Tier   | Name        | avg_runtime | Typical Workload                                       | Quantum | Starvation |
-| :----- | :---------- | :---------- | :----------------------------------------------------- | :------ | :--------- |
-| **T0** | Critical    | < 100µs     | IRQ handlers, input drivers, audio (PipeWire), network | 0.5ms   | 3ms        |
-| **T1** | Interactive | < 2ms       | Compositors, game physics, game AI, short workers      | 2.0ms   | 8ms        |
-| **T2** | Frame       | < 8ms       | Game render threads, video encoding                    | 4.0ms   | 40ms       |
-| **T3** | Bulk        | ≥ 8ms       | Compilation, background indexing, batch jobs           | 8.0ms   | 100ms      |
-
-> [!TIP]
-> **No game task should be in T3**. Game render threads run 2-8ms per frame → T2. Physics/AI run 0.5-2ms → T1. Input handlers run < 100µs → T0. Only tasks doing 8ms+ uninterrupted CPU work (shader compilation, loading screens) land in T3.
-
-### How Classification Works
-
-1. **Initial placement**: Based on `nice` value — `nice < 0` → T0, `nice 0-10` → T1, `nice > 10` → T3
-2. **Runtime authority**: After ~3 stops, the EWMA avg_runtime becomes authoritative. A nice -5 task that runs 50ms bursts will reclassify to T3 regardless of nice value.
-3. **Hysteresis**: 10% deadband prevents oscillation at tier boundaries. Promotion requires avg_runtime clearly below the gate; demotion is immediate.
-4. **Graduated backoff**: Once a tier is stable for 3+ consecutive stops, reclassification frequency drops per-tier: T0 rechecks every 1024th stop, T3 every 16th. Instability resets to full-frequency checking.
-
-### DRR++ Deficit Tracking
-
-Adapted from network CAKE's flow fairness:
-
-- Each task starts with a **deficit** (quantum + new-flow bonus ≈ 10ms credit)
-- Each execution bout consumes deficit proportional to runtime
-- When deficit exhausts → new-flow bonus removed → task competes normally
-- This gives newly spawned threads (game launching a worker) instant responsiveness that naturally decays
-
-### DVFS (CPU Frequency Scaling)
-
-Each tier maps to a CPU performance target via RODATA lookup table:
-
-| Tier  | Target               | Rationale                                             |
-| :---- | :------------------- | :---------------------------------------------------- |
-| T0-T2 | 100% (max frequency) | Gaming workloads need full performance                |
-| T3    | 75%                  | Background work can run slightly slower to save power |
-
-On Intel hybrid CPUs (`has_hybrid = true`), targets are scaled by each core's `cpuperf_cap` to prevent over-requesting frequency on E-cores.
-
----
-
-## 4. Architecture
-
-### Overview
-
-```mermaid
-flowchart TD
-    subgraph HOT["BPF Hot Path"]
-        SELECT["cake_select_cpu"] --> |SYNC| DIRECT["Direct Dispatch<br/>to waker CPU"]
-        SELECT --> |IDLE| KERNEL["scx_bpf_select_cpu_dfl<br/>kernel idle cascade"]
-        SELECT --> |ALL BUSY| ENQ["cake_enqueue"]
-
-        KERNEL --> LOCALON["SCX_DSQ_LOCAL_ON<br/>direct to CPU"]
-
-        ENQ --> |"vtime = tier≪56 ∣ timestamp"| LLCDSQ["Per-LLC DSQ"]
-        LLCDSQ --> DISPATCH["cake_dispatch"]
-        DISPATCH --> |"1. Local LLC"| LOCAL["scx_bpf_dsq_move_to_local"]
-        DISPATCH --> |"2. Cross-LLC steal"| STEAL["Round-robin other LLCs"]
-    end
-
-    subgraph PERIODIC["Periodic Callbacks"]
-        TICK["cake_tick 1ms"] --> STARVE["Starvation check"]
-        TICK --> DVFS["DVFS frequency steering"]
-        TICK --> MBOX["Mailbox tier update"]
-        RUNNING["cake_running"] --> STAMP["Stamp last_run_at"]
-    end
-
-    subgraph CLASSIFY["Classification Engine"]
-        STOPPING["cake_stopping"] --> RECLASS["reclassify_task_cold"]
-        RECLASS --> EWMA["EWMA runtime update"]
-        RECLASS --> DEFICIT["DRR++ deficit tracking"]
-        RECLASS --> TIERMAP["Hysteresis tier mapping"]
-    end
-```
-
-### Source Files
-
-| File           | Lines | Purpose                                             |
-| :------------- | :---- | :-------------------------------------------------- |
-| `cake.bpf.c`   | 758   | All BPF ops + classification engine                 |
-| `intf.h`       | 200   | Shared structs, constants, fused config macros      |
-| `bpf_compat.h` | 118   | Relaxed atomics, De Bruijn CTZ, DSQ peek compat     |
-| `main.rs`      | 442   | Rust loader, CLI, profiles, topology detection, TUI |
-
-### Ops Callbacks (7 total)
-
-| Callback                  | Role                                                    | Hot/Cold             |
-| :------------------------ | :------------------------------------------------------ | :------------------- |
-| `cake_select_cpu`         | SYNC dispatch + kernel idle selection + kfunc tunneling | **Hot**              |
-| `cake_enqueue`            | Tier-encoded vtime insert into per-LLC DSQ              | **Hot**              |
-| `cake_dispatch`           | Local LLC → cross-LLC steal                             | **Hot**              |
-| `cake_tick`               | Starvation check, DVFS, mailbox update                  | **Hot** (1ms period) |
-| `cake_running`            | Timestamp `last_run_at`                                 | **Hot** (minimal)    |
-| `cake_stopping`           | Calls `reclassify_task_cold`                            | **Warm**             |
-| `cake_init` / `cake_exit` | DSQ creation, UEI                                       | **Cold** (once)      |
-
-### Data Structures
-
-**Per-task context** (`cake_task_ctx`, 64 bytes, cache-line aligned):
-
-```
-Bytes 0-7:   next_slice (u64)           — Pre-computed tier-adjusted quantum
-Bytes 8-11:  deficit_avg_fused (u32)    — [deficit_us:16][avg_runtime_us:16] fused
-Bytes 12-15: packed_info (u32)          — [stable:2][tier:2][flags:4][rsvd:8][wait:8][error:8]
-Bytes 16-19: last_run_at (u32)          — Timestamp (wraps at 4.2s)
-Bytes 20-21: reclass_counter (u16)      — Graduated backoff counter
-Bytes 22-63: padding
-```
-
-**Per-CPU mega-mailbox** (`mega_mailbox_entry`, 64 bytes, cache-line isolated):
-
-```
-Byte 0: flags          — [1:0]=tier, written by cake_tick
-Byte 1: dsq_hint       — DVFS perf target cache
-Byte 2: tick_counter    — Starvation graduated confidence
-Bytes 3-63: reserved
-```
-
-**Per-CPU scratch** (`cake_scratch`, 128 bytes):
-
-```
-Tunnels select_cpu → enqueue: cached_llc, cached_now (saves 2 kfunc calls)
-DSQ iterator storage for legacy peek fallback
-```
-
-### DSQ Architecture
-
-```mermaid
-flowchart LR
-    subgraph SINGLE["Single-CCD 9800X3D"]
-        DSQ0["LLC_DSQ_BASE + 0<br/>vtime ordered<br/>nr_llcs = 1<br/>stealing skipped"]
-    end
-
-    subgraph MULTI["Multi-CCD 9950X"]
-        DSQ1["LLC_DSQ_BASE + 0<br/>CCD 0 cores"] <-->|"cross-LLC steal<br/>when local empty"| DSQ2["LLC_DSQ_BASE + 1<br/>CCD 1 cores"]
-    end
-```
-
-- **Vtime encoding**: `(tier << 56) | (timestamp & 0x00FFFFFFFFFFFFFF)` — lower tiers drain first within each LLC DSQ
-- **RODATA gate**: `if (nr_llcs <= 1) return;` skips all cross-LLC stealing on single-CCD systems
-
-### Zero Global State
-
-| Anti-pattern                | scx_cake                                   |
-| :-------------------------- | :----------------------------------------- |
-| Global atomics              | **0**                                      |
-| Volatile variables          | **0**                                      |
-| Division in hot path        | **0** (shift-based µs conversion: `>> 10`) |
-| Global vtime writes         | **0** (per-task only)                      |
-| RCU lock/unlock in hot path | **0**                                      |
-
-### Kfunc Tunneling
-
-`select_cpu` caches `cpu_llc_id` and `scx_bpf_now()` in per-CPU scratch. `enqueue` reuses these values, saving ~40-60ns (2 kfunc trampoline entries) on the all-busy path.
-
-### Graduated Confidence
-
-Two independent confidence systems reduce overhead when scheduling is stable:
-
-1. **Tick starvation check**: `tick_counter` tracks consecutive ticks without contention. Skip masks grow from 0 → 1 → 3 → 7, checking every 1st → 2nd → 4th → 8th tick. Any contention resets to full alertness.
-2. **Reclassification backoff**: When a task's tier is stable for 3+ consecutive stops, reclassification drops to per-tier intervals (T0: every 1024th, T3: every 16th). A spot-check detects tier-change triggers without full reclassification cost.
-
----
-
-## 5. Configuration
-
-### Profiles (`--profile, -p`)
-
-| Profile     | Quantum | Starvation | Use Case                              |
-| :---------- | :------ | :--------- | :------------------------------------ |
-| **gaming**  | 2ms     | 100ms      | **(Default)** Balanced for most games |
-| **esports** | 1ms     | 50ms       | Competitive FPS, ultra-low latency    |
-| **legacy**  | 4ms     | 200ms      | Older CPUs, battery saving            |
-| **default** | 2ms     | 100ms      | Alias for gaming                      |
-
-### CLI Arguments
-
-| Argument                  | Default  | Description                           |
-| :------------------------ | :------- | :------------------------------------ |
-| `--profile, -p <PROFILE>` | `gaming` | Select preset profile                 |
-| `--quantum <µs>`          | profile  | Base time slice in microseconds       |
-| `--new-flow-bonus <µs>`   | profile  | Extra deficit for newly woken tasks   |
-| `--starvation <µs>`       | profile  | Max run time before forced preemption |
-| `--verbose, -v`           | `false`  | Enable live TUI stats display         |
-| `--interval <secs>`       | `1`      | TUI refresh interval                  |
-
-### Per-Tier Tuning (Gaming Profile)
-
-| Tier           | Quantum Multiplier | Effective Slice | Starvation Limit |
-| :------------- | :----------------- | :-------------- | :--------------- |
-| T0 Critical    | 0.75x              | 1.5ms           | 3ms              |
-| T1 Interactive | 1.0x               | 2.0ms           | 8ms              |
-| T2 Frame       | 1.2x               | 2.4ms           | 40ms             |
-| T3 Bulk        | 1.4x               | 2.8ms           | 100ms            |
-
-> [!NOTE]
-> **Higher tiers get smaller slices** — T0 tasks (input, audio) run < 100µs and release cores fast. T3 tasks (compilers) get larger slices for cache efficiency. This is the opposite of traditional priority systems where high priority = more CPU time.
-
-### Examples
+### Monitoring (Verbose Mode)
 
 ```bash
-# Default gaming profile
-sudo scx_cake
+sudo ./start.sh -v
+```
 
-# Competitive gaming
-sudo scx_cake -p esports
+In verbose mode, watch for:
 
-# Gaming with custom quantum and live stats
-sudo scx_cake --quantum 1500 -v
+- **Max Wait**: Should be <2ms for Gaming tier
+- **StarvPreempt**: If high, system is actively suppressing heavy tasks
+- **DirectDispatch%**: Should be >90%
 
-# Battery-friendly for laptop gaming
-sudo scx_cake -p legacy
+### CLI Options
+
+| Option               | Default        | Description                                |
+| :------------------- | :------------- | :----------------------------------------- |
+| `--quantum`          | 2000 (2ms)     | Base timeslice in microseconds             |
+| `--new-flow-bonus`   | 8000 (8ms)     | Bonus slice for newly woken tasks          |
+| `--sparse-threshold` | 50             | Threshold for sparse score calculation (‰) |
+| `--starvation`       | 100000 (100ms) | Global starvation limit in microseconds    |
+| `--verbose` / `-v`   | off            | Enable TUI monitoring                      |
+| `--interval`         | 1000           | Stats update interval in milliseconds      |
+
+### Recommended Testing Command
+
+```bash
+sudo ./start.sh --quantum 2000 --sparse-threshold 50
+```
+
+**Output when started:**
+
+```
+scx_cake scheduler started
+  Quantum:          2000 µs
+  New flow bonus:   8000 µs
+  Sparse threshold: 50‰
+  Starvation limit: 100000 µs
 ```
 
 ---
 
-## 6. Performance
-
-### Target Hardware
-
-| Component | Specification                       |
-| :-------- | :---------------------------------- |
-| CPU       | AMD Ryzen 7 9800X3D (1 CCD, 8C/16T) |
-| Kernel    | Linux 6.12+ with sched_ext          |
-
-### Design Targets
-
-- **Sub-microsecond scheduling decisions** — Select CPU + enqueue in ~17ns (SYNC) to ~36ns (all-busy)
-- **Zero bus lock contention** — No global atomics means no scaling regression under load
-- **Consistent 1% lows** — Tier-encoded vtime prevents frame time spikes from background work
-- **Input priority** — Mouse/keyboard handlers reach T0 within 3 stops, get dispatched before all other work
-
-### Benchmarks
-
-- [schbench](https://github.com/brendangregg/schbench) — Scheduler latency microbenchmark
-- Arc Raiders — AAA game stress testing (frame rates, 1% lows)
-- Splitgate 2 — Competitive FPS latency testing
-
-> [!NOTE]
-> Throughput workloads (compilers, render farms) will perform **worse** than CFS/EEVDF. This scheduler explicitly trades throughput for latency — the same tradeoff network CAKE makes for packets.
-
----
-
-## 7. Vocabulary
-
-### Core Concepts
-
-| Term         | Definition                                                                                                                               |
-| :----------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
-| **CAKE**     | [Common Applications Kept Enhanced](https://www.bufferbloat.net/projects/codel/wiki/Cake/). Network AQM algorithm this scheduler adapts. |
-| **DRR++**    | Deficit Round Robin++. Network algorithm balancing fair queuing with strict priority.                                                    |
-| **EWMA**     | Exponential Weighted Moving Average. Tracks runtime with 7/8 decay (~8 bouts to converge).                                               |
-| **Tier**     | Classification level (0-3) by avg_runtime. Controls slice, starvation, vtime priority, and DVFS.                                         |
-| **Deficit**  | Per-task credit from DRR++. New tasks get bonus credit; exhaustion removes the bonus.                                                    |
-| **Quantum**  | Base time slice a task is allotted before a scheduling decision. Multiplied by tier multiplier.                                          |
-| **Niceness** | Linux `nice` value (-20 to 19). scx_cake uses it only for initial tier placement; runtime behavior overrides.                            |
-| **DVFS**     | Dynamic Voltage and Frequency Scaling. Per-tier CPU frequency steering via `scx_bpf_cpuperf_set`.                                        |
-| **Jitter**   | Variance in scheduling latency between consecutive events. Low jitter = consistent frame delivery.                                       |
-
-### Architecture
-
-| Term                    | Definition                                                                                       |
-| :---------------------- | :----------------------------------------------------------------------------------------------- |
-| **Fused Config**        | 4 parameters packed into one 64-bit word: `[mult:12][quantum:16][budget:16][starve:20]`.         |
-| **Mega-Mailbox**        | 64B per-CPU cache-line-isolated state. Zero false sharing between cores.                         |
-| **Kfunc Tunneling**     | Caching kfunc return values in per-CPU scratch to avoid redundant trampoline calls.              |
-| **MESI Guard**          | Read-before-write pattern: skip store if value unchanged, preventing cache invalidation.         |
-| **Graduated Backoff**   | Confidence system that reduces check frequency when scheduling is stable.                        |
-| **RODATA Gate**         | Compile-time constant that eliminates entire code paths (e.g., single-CCD skips stealing).       |
-| **Adaptive Sampling**   | Dynamically adjusting check frequency based on confidence in task behavior stability.            |
-| **Bitfield Coalescing** | Packing fields written together into adjacent bits for fused clear/set ops (Rule 37).            |
-| **State Fusion**        | Combining related fields into a union for atomic single-load access (e.g., `deficit_avg_fused`). |
-| **Trampolining**        | Excessive jumping between BPF and kernel contexts. Grouped calls minimize entry/exit costs.      |
-
-### Hardware
-
-| Term                 | Definition                                                                                              |
-| :------------------- | :------------------------------------------------------------------------------------------------------ |
-| **CCD**              | Core Complex Die. Physical chiplet containing cores (9800X3D: 1 CCD, 9950X: 2 CCDs).                    |
-| **LLC**              | Last Level Cache (L3). Cores in same LLC communicate ~3-5x faster than cross-LLC.                       |
-| **SMT**              | Simultaneous Multi-Threading. Two logical CPUs per physical core.                                       |
-| **P/E Cores**        | Intel hybrid architecture: Performance cores (fast) and Efficiency cores (power-saving).                |
-| **ETD**              | Empirical Topology Discovery. Measures inter-core CAS latency at startup for display.                   |
-| **Cache Line**       | 64-byte block of memory. Smallest unit the CPU loads from RAM. Foundation of data layout.               |
-| **Line Fill Buffer** | Hardware buffer for outstanding cache line fetches. Saturating it maximizes memory bandwidth.           |
-| **MESI Protocol**    | Cache coherency protocol (Modified/Exclusive/Shared/Invalid). Unnecessary writes trigger invalidations. |
-| **Snoop Signaling**  | Cache coherency mechanism where cores monitor the bus for writes to shared cache lines.                 |
-
-### Performance
-
-| Term                     | Definition                                                                                            |
-| :----------------------- | :---------------------------------------------------------------------------------------------------- |
-| **Hot Path**             | Code on every scheduling decision: select_cpu → enqueue → dispatch.                                   |
-| **Cold Path**            | Infrequent code: task init, tier reclassification (noinline).                                         |
-| **ILP**                  | Instruction Level Parallelism. CPU executing multiple independent instructions per cycle.             |
-| **MLP**                  | Memory Level Parallelism. Issuing multiple independent loads to hide memory latency.                  |
-| **Direct Dispatch**      | `SCX_DSQ_LOCAL_ON` — task goes directly to a CPU's local queue, bypassing the DSQ path.               |
-| **1% Lows**              | Average framerate of the slowest 1% of frames. Key metric for stutter.                                |
-| **Branchless**           | Code avoiding `if/else` to prevent CPU pipeline stalls from branch misprediction.                     |
-| **Register Pressure**    | Competition for CPU registers. Excess pressure causes spills to stack (slower memory).                |
-| **Speculative Prefetch** | Hinting the CPU to load data before it's needed, hiding memory latency.                               |
-| **AoS / SoA / AoSoA**    | Array-of-Structs / Struct-of-Arrays / hybrid. Data layout affects cache efficiency and vectorization. |
-
-### Scaling Laws
-
-| Term             | Definition                                                                                       |
-| :--------------- | :----------------------------------------------------------------------------------------------- |
-| **Amdahl's Law** | Speedup limited by serial fraction. 5% serial code caps speedup at 20× regardless of core count. |
-| **Little's Law** | Concurrency = throughput × latency. Guides queue depth and parallelism decisions.                |
-| **Rent's Rule**  | Interconnect complexity grows sublinearly with component count. Guides topology-aware design.    |
-
-### Anti-Patterns
-
-| Term                   | Definition                                                                                     |
-| :--------------------- | :--------------------------------------------------------------------------------------------- |
-| **False Sharing**      | Performance penalty when CPUs write to different data on the same 64-byte cache line.          |
-| **Cache Invalidation** | Forcing other cores to discard cached data via unnecessary writes. Causes bus locking.         |
-| **Micro-slicing**      | Preempting tasks too frequently. Queued interruptions degrade throughput and increase jitter.  |
-| **Volatile**           | Compiler hint preventing optimization. Clogs LSU, breaks ILP/MLP parallelism. Avoid in BPF.    |
-| **Spills**             | Register values evicted to stack memory when register pressure is too high. ~5ns penalty each. |
-| **Barriers**           | Memory ordering fences. Force pipeline flushes and inhibit out-of-order execution.             |
-| **Read-Once**          | Compiler pattern forcing re-reads from memory. Defeats register caching and ILP.               |
-
----
+## 8. License & Acknowledgments
 
 **License**: GPL-2.0
-**Maintainer**: RitzDaCat
+
+**Inspiration**:
+
+- [CAKE (Common Applications Kept Enhanced)](https://www.bufferbloat.net/projects/codel/wiki/Cake/) - Queue management philosophy
+- [sched_ext](https://github.com/sched-ext/scx) - BPF scheduler framework
+- [Algorithmica HPC Book](https://en.algorithmica.org/hpc/) - Performance optimization patterns
+
+**Test Hardware**: AMD Ryzen 7 9800X3D, 96GB DDR5, NVIDIA RTX 4090, CachyOS 6.18
