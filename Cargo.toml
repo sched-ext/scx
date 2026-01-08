@@ -12,6 +12,7 @@ members = [
     "rust/scx_utils",
     "scheds/rust/scx_beerland",
     "scheds/rust/scx_bpfland",
+    "scheds/rust/scx_cake",
     "scheds/rust/scx_chaos",
     "scheds/rust/scx_cosmos",
     "scheds/rust/scx_flash",
