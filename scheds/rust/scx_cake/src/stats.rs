@@ -6,4 +6,12 @@
 // from BPF maps.
 
 /// Priority tier names (7-tier system with quantum multipliers)
-pub const TIER_NAMES: [&str; 7] = ["CritLatency", "Realtime", "Critical", "Gaming", "Interactive", "Batch", "Background"];
+pub const TIER_NAMES: [&str; 7] = [
+    "CritLatency",
+    "Realtime",
+    "Critical",
+    "Gaming",
+    "Interactive",
+    "Batch",
+    "Background",
+];

@@ -25,12 +25,12 @@ use crate::bpf_skel::types::cake_stats;
 use crate::bpf_skel::BpfSkel;
 use crate::stats::TIER_NAMES;
 use crate::topology::TopologyInfo;
-use libbpf_rs::{MapFlags, MapCore};
+use libbpf_rs::{MapCore, MapFlags};
 
 fn aggregate_stats(map: &libbpf_rs::Map) -> Result<cake_stats> {
     let key = 0u32;
     let key_bytes = key.to_ne_bytes();
-    
+
     // Per-CPU map lookup returns values for all CPUs
     // We treat key 0 as the single bucket containing stats for all CPUs
     let values = match map.lookup_percpu(&key_bytes, MapFlags::ANY) {
@@ -52,19 +52,19 @@ fn aggregate_stats(map: &libbpf_rs::Map) -> Result<cake_stats> {
         if cpu_bytes.len() != std::mem::size_of::<cake_stats>() {
             continue;
         }
-        
+
         // Deserialize bytes to struct (unsafe fetch)
         let s: cake_stats = unsafe { std::ptr::read_unaligned(cpu_bytes.as_ptr() as *const _) };
 
         // Sum all fields
         total.nr_new_flow_dispatches += s.nr_new_flow_dispatches;
         total.nr_old_flow_dispatches += s.nr_old_flow_dispatches;
-        
+
         for i in 0..crate::stats::TIER_NAMES.len() {
             total.nr_tier_dispatches[i] += s.nr_tier_dispatches[i];
             total.nr_starvation_preempts_tier[i] += s.nr_starvation_preempts_tier[i];
         }
-        
+
         total.nr_sparse_promotions += s.nr_sparse_promotions;
         total.nr_sparse_demotions += s.nr_sparse_demotions;
         total.nr_input_preempts += s.nr_input_preempts;
@@ -143,9 +143,15 @@ fn format_stats_for_clipboard(stats: &cake_stats, uptime: &str) -> String {
     };
 
     let mut output = String::new();
-    output.push_str(&format!("=== scx_cake Statistics (Uptime: {}) ===\n\n", uptime));
-    output.push_str(&format!("Dispatches: {} total ({:.1}% new-flow)\n\n", total_dispatches, new_pct));
-    
+    output.push_str(&format!(
+        "=== scx_cake Statistics (Uptime: {}) ===\n\n",
+        uptime
+    ));
+    output.push_str(&format!(
+        "Dispatches: {} total ({:.1}% new-flow)\n\n",
+        total_dispatches, new_pct
+    ));
+
     output.push_str("Tier           Dispatches    StarvPreempt\n");
     output.push_str("───────────────────────────────────────────\n");
     for (i, name) in TIER_NAMES.iter().enumerate() {
@@ -154,11 +160,16 @@ fn format_stats_for_clipboard(stats: &cake_stats, uptime: &str) -> String {
             name, stats.nr_tier_dispatches[i], stats.nr_starvation_preempts_tier[i]
         ));
     }
-    
-    output.push_str(&format!("\nSparse flow: +{} promotions, -{} demotions\n",
-        stats.nr_sparse_promotions, stats.nr_sparse_demotions));
-    output.push_str(&format!("Input: {} preempts fired\n", stats.nr_input_preempts));
-    
+
+    output.push_str(&format!(
+        "\nSparse flow: +{} promotions, -{} demotions\n",
+        stats.nr_sparse_promotions, stats.nr_sparse_demotions
+    ));
+    output.push_str(&format!(
+        "Input: {} preempts fired\n",
+        stats.nr_input_preempts
+    ));
+
     output
 }
 
@@ -170,10 +181,10 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(10),    // Stats table
-            Constraint::Length(5),  // Summary
-            Constraint::Length(3),  // Footer
+            Constraint::Length(3), // Header
+            Constraint::Min(10),   // Stats table
+            Constraint::Length(5), // Summary
+            Constraint::Length(3), // Footer
         ])
         .split(area);
 
@@ -184,31 +195,51 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
     } else {
         0.0
     };
-    
+
     // Build topology info string
     let topo_info = format!(
         "CPUs: {} {}{}",
         app.topology.nr_cpus,
-        if app.topology.has_dual_ccd { "[Dual-CCD]" } else { "" },
-        if app.topology.has_hybrid_cores { "[Hybrid]" } else { "" },
+        if app.topology.has_dual_ccd {
+            "[Dual-CCD]"
+        } else {
+            ""
+        },
+        if app.topology.has_hybrid_cores {
+            "[Hybrid]"
+        } else {
+            ""
+        },
     );
-    
+
     let header_text = format!(
         " {}  │  Dispatches: {} ({:.1}% new)  │  Uptime: {}",
-        topo_info, total_dispatches, new_pct, app.format_uptime()
+        topo_info,
+        total_dispatches,
+        new_pct,
+        app.format_uptime()
     );
-    let header = Paragraph::new(header_text)
-        .block(Block::default()
+    let header = Paragraph::new(header_text).block(
+        Block::default()
             .title(" scx_cake Statistics ")
-            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)));
+            .border_style(Style::default().fg(Color::Blue)),
+    );
     frame.render_widget(header, layout[0]);
 
     // --- Stats Table ---
-    let header_cells = ["Tier", "Dispatches", "StarvPreempt"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    let header_cells = ["Tier", "Dispatches", "StarvPreempt"].iter().map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header_row = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = TIER_NAMES
@@ -233,24 +264,26 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
         ],
     )
     .header(header_row)
-    .block(Block::default()
-        .title(" Per-Tier Statistics ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue)));
+    .block(
+        Block::default()
+            .title(" Per-Tier Statistics ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue)),
+    );
     frame.render_widget(table, layout[1]);
 
     // --- Summary ---
     let summary_text = format!(
         " Sparse flow: +{} promotions, -{} demotions\n \
          Input: {} preempts fired",
-        stats.nr_sparse_promotions, stats.nr_sparse_demotions,
-        stats.nr_input_preempts
+        stats.nr_sparse_promotions, stats.nr_sparse_demotions, stats.nr_input_preempts
     );
-    let summary = Paragraph::new(summary_text)
-        .block(Block::default()
+    let summary = Paragraph::new(summary_text).block(
+        Block::default()
             .title(" Summary ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)));
+            .border_style(Style::default().fg(Color::Blue)),
+    );
     frame.render_widget(summary, layout[2]);
 
     // --- Footer (key bindings + status) ---
@@ -265,22 +298,26 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
     };
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(fg_color))
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color)));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color)),
+        );
     frame.render_widget(footer, layout[3]);
 }
 
 /// Get color style for a tier
 fn tier_style(tier: usize) -> Style {
     match tier {
-        0 => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),   // CritLatency - highest priority
-        1 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),    // Realtime
-        2 => Style::default().fg(Color::Magenta),                              // Critical
-        3 => Style::default().fg(Color::Green),                                // Gaming
-        4 => Style::default().fg(Color::Yellow),                               // Interactive
-        5 => Style::default().fg(Color::Blue),                                 // Batch
-        6 => Style::default().fg(Color::DarkGray),                             // Background
+        0 => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD), // CritLatency - highest priority
+        1 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD), // Realtime
+        2 => Style::default().fg(Color::Magenta),                          // Critical
+        3 => Style::default().fg(Color::Green),                            // Gaming
+        4 => Style::default().fg(Color::Yellow),                           // Interactive
+        5 => Style::default().fg(Color::Blue),                             // Batch
+        6 => Style::default().fg(Color::DarkGray),                         // Background
         _ => Style::default(),
     }
 }
@@ -296,7 +333,7 @@ pub fn run_tui(
     let mut app = TuiApp::new(topology);
     let tick_rate = Duration::from_secs(interval_secs);
     let mut last_tick = Instant::now();
-    
+
     // Initialize clipboard (may fail on headless systems)
     let mut clipboard = Clipboard::new().ok();
 
@@ -334,12 +371,10 @@ pub fn run_tui(
                             // Copy stats to clipboard
                             let text = format_stats_for_clipboard(&stats, &app.format_uptime());
                             match &mut clipboard {
-                                Some(cb) => {
-                                    match cb.set_text(text) {
-                                        Ok(_) => app.set_status("✓ Copied to clipboard!"),
-                                        Err(_) => app.set_status("✗ Failed to copy"),
-                                    }
-                                }
+                                Some(cb) => match cb.set_text(text) {
+                                    Ok(_) => app.set_status("✓ Copied to clipboard!"),
+                                    Err(_) => app.set_status("✗ Failed to copy"),
+                                },
                                 None => app.set_status("✗ Clipboard not available"),
                             }
                         }
@@ -353,14 +388,13 @@ pub fn run_tui(
                             // Or we write a zeroed struct to all CPUs.
                             let zero_struct = cake_stats::default();
                             // Serialize to bytes
-                            let zero_bytes = unsafe { 
+                            let zero_bytes = unsafe {
                                 std::slice::from_raw_parts(
                                     &zero_struct as *const _ as *const u8,
-                                    std::mem::size_of::<cake_stats>()
+                                    std::mem::size_of::<cake_stats>(),
                                 )
                             };
 
-                            
                             // Let's defer reset logic implementation for now or try simple approach
                             // Construct Vec<Vec<u8>> for all CPUs
                             if let Ok(num_cpus) = libbpf_rs::num_possible_cpus() {
@@ -368,7 +402,11 @@ pub fn run_tui(
                                 for _ in 0..num_cpus {
                                     vals.push(zero_bytes.to_vec());
                                 }
-                                let _ = skel.maps.stats_map.update_percpu(&key_bytes, &vals, MapFlags::ANY);
+                                let _ = skel.maps.stats_map.update_percpu(
+                                    &key_bytes,
+                                    &vals,
+                                    MapFlags::ANY,
+                                );
                             }
                             app.set_status("✓ Stats reset");
                         }
