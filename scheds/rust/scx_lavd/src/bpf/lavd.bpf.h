@@ -72,6 +72,7 @@ enum consts_internal {
 	LAVD_SLICE_BOOST_BONUS		= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_SLICE_BOOST_MAX		= (500ULL * NSEC_PER_MSEC),
 	LAVD_ACC_RUNTIME_MAX		= LAVD_SLICE_MAX_NS_DFL,
+	LAVD_TASK_LAG_MAX		= (10ULL * LAVD_SLICE_MAX_NS_DFL),
 	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 16), /* assuming task's latency
 									    criticality is around 1000. */
 

@@ -202,30 +202,46 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 	taskc->perf_cri = perf_cri;
 }
 
-static u64 calc_greedy_penalty(task_ctx *taskc)
+static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 {
-	u64 ratio, penalty;
+	u64 lag_max, penalty;
+	s64 lag;
 
 	/*
-	 * The greedy ratio of a task represents how much time the task
-	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
-	 * the ratio of task's actual service time to average service time in a
-	 * system.
+	 * Calculate the task's lag -- the underserved time. Bound the lag
+	 * into [-lag_max, +lag_max] and set the LAVD_FLAG_IS_GREEDY flag
+	 * for preemption decision.
 	 */
-	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-
-	/*
-	 * For all under-utilized tasks, we treat them equally.
-	 * For over-utilized tasks, we give some mild penalty.
-	 */
-	if (ratio > LAVD_SCALE) {
-		penalty = LAVD_SCALE + ((ratio - LAVD_SCALE) >> LAVD_LC_GREEDY_SHIFT);
-		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
-	} else {
-		penalty = LAVD_SCALE;
+	lag = sys_stat.avg_svc_time - taskc->svc_time;
+	lag_max = scale_by_task_weight_inverse(p, LAVD_TASK_LAG_MAX);
+	if (lag >= 0) {
 		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
-	}
 
+		/*
+		 * Limit the positive lag to lag_max. This prevents unbounded
+		 * boost of long-sleepers.
+		 */
+		if (lag > lag_max) {
+			taskc->svc_time = sys_stat.avg_svc_time - lag_max;
+			lag = lag_max;
+		}
+	} else {
+		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
+
+		/*
+		 * Limit the negative lag to -lag_max to pay the debt
+		 * gradually over time.
+		 */
+		if (lag < -lag_max)
+			lag = -lag_max;
+	}
+	/* lag = [-lag_max, lag_max] */
+
+	/*
+	 * penalty = [100%, 125%]
+	 */
+	penalty = (((-lag + lag_max) << LAVD_SHIFT) / lag_max);
+	penalty = LAVD_SCALE + (penalty >> LAVD_LC_GREEDY_SHIFT);
 	return penalty;
 }
 
@@ -255,7 +271,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 * latency criticality, and greedy ratio.
 	 */
 	calc_lat_cri(p, taskc);
-	greedy_penalty = calc_greedy_penalty(taskc);
+	greedy_penalty = calc_greedy_penalty(p, taskc);
 	adjusted_runtime = calc_adjusted_runtime(taskc);
 
 	deadline = (adjusted_runtime * greedy_penalty) / taskc->lat_cri;
