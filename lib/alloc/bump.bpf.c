@@ -31,16 +31,16 @@ const s8 STATIC_POISON_UNINIT = 0xff;
 
 extern volatile u64 asan_violated;
 
-struct scx_ll;
-struct scx_ll {
-	struct scx_ll __arena *next;
+struct bump_ll;
+struct bump_ll {
+	struct bump_ll __arena *next;
 };
-typedef struct scx_ll __arena scx_ll_t;
+typedef struct bump_ll __arena bump_ll_t;
 
 __weak u64 bump_alloc_internal(size_t bytes, size_t alignment)
 {
 	void __arena *memory, *old;
-	scx_ll_t     *oldll, *newll;
+	bump_ll_t     *oldll, *newll;
 	size_t	      alloc_bytes;
 	size_t	      alloc_pages;
 	void __arena *ptr;
@@ -116,8 +116,8 @@ __weak u64 bump_alloc_internal(size_t bytes, size_t alignment)
 		}
 
 		/* Keep a list of allocated blocks to free on allocator destruction. */
-		oldll = (scx_ll_t *)old;
-		newll = (scx_ll_t *)memory;
+		oldll = (bump_ll_t *)old;
+		newll = (bump_ll_t *)memory;
 		asan_unpoison(newll, sizeof(*newll));
 		newll->next = oldll;
 
@@ -151,7 +151,7 @@ __weak u64 bump_alloc_internal(size_t bytes, size_t alignment)
 __weak int bump_destroy(void)
 {
 	size_t	  alloc_pages = bump.max_contig_bytes / PAGE_SIZE;
-	scx_ll_t *ll, *llnext;
+	bump_ll_t *ll, *llnext;
 
 	for (ll = bump.memory; ll && can_loop; ll = llnext) {
 		llnext = ll->next;
@@ -170,7 +170,7 @@ __weak int bump_init(size_t alloc_pages)
 {
 	size_t	      max_bytes = alloc_pages * PAGE_SIZE;
 	void __arena *memory;
-	scx_ll_t     *ll;
+	bump_ll_t     *ll;
 	int	      ret;
 
 	memory = bpf_arena_alloc_pages(&arena, NULL, alloc_pages, NUMA_NO_NODE,
@@ -188,7 +188,7 @@ __weak int bump_init(size_t alloc_pages)
 	if (ret)
 		bpf_printk("Error %d: by poisoning", ret);
 
-	ll	 = (scx_ll_t *)memory;
+	ll	 = (bump_ll_t *)memory;
 	ll->next = NULL;
 
 	bpf_spin_lock(&static_lock);
