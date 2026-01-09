@@ -257,9 +257,6 @@ async def run_build():
     """Build all targets."""
     print("Running build...", flush=True)
 
-    print("Building C schedulers...", flush=True)
-    await run_command(["make", "all"], no_capture=True)
-
     # Run Cargo and Nix builds in parallel
     print("Building Rust schedulers and scx_chaos with Nix in parallel...", flush=True)
 
