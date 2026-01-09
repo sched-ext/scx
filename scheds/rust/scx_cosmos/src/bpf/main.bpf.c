@@ -4,6 +4,7 @@
  */
 #include <scx/common.bpf.h>
 #include <scx/percpu.bpf.h>
+#include <lib/pmu.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -102,9 +103,9 @@ const volatile bool avoid_smt = true;
 const volatile bool mm_affinity;
 
 /*
- * Enable perf-event scheduling.
+ * ID of perf-event being tracked. 0 for "no event".
  */
-const volatile bool perf_enabled;
+const volatile u64 perf_config;
 
 /*
  * Performance counter threshold to classify a task as event heavy.
@@ -180,12 +181,7 @@ struct task_ctx {
 	u64 exec_runtime;
 	u64 wakeup_freq;
 	u64 last_woke_at;
-
-	/*
-	 * Per-task perf event metrics.
-	 */
 	u64 perf_events;
-	u64 perf_delta_t;
 };
 
 struct {
@@ -254,65 +250,18 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(int));
-	__uint(max_entries, MAX_CPUS);
-} perf_events SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(struct bpf_perf_event_value));
-	__uint(max_entries, 1);
-} start_readings SEC(".maps");
-
-static int read_perf_counter(s32 cpu, u32 counter_idx, struct bpf_perf_event_value *value)
+static void update_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
 {
-	u32 key = cpu + counter_idx;
-
-	return bpf_perf_event_read_value(&perf_events, key, value, sizeof(*value));
-}
-
-static void start_counters(s32 cpu)
-{
-	struct bpf_perf_event_value value;
-	struct bpf_perf_event_value *ptr;
-	u32 i;
-
-	i = 0;
-	ptr = bpf_map_lookup_elem(&start_readings, &i);
-	if (ptr) {
-		if (read_perf_counter(cpu, i, &value) == 0)
-			*ptr = value;
-		else
-			__builtin_memset(ptr, 0, sizeof(*ptr));
-	}
-}
-
-static void stop_counters(struct task_struct *p, struct task_ctx *tctx, s32 cpu)
-{
-	struct bpf_perf_event_value current, *start;
 	struct cpu_ctx *cctx;
-	u64 delta_events = 0, delta = 0;
-	u32 i = 0;
+	u64 delta = 0;
 
-	start = bpf_map_lookup_elem(&start_readings, &i);
-	if (start && start->counter != 0) {
-		if (read_perf_counter(cpu, i, &current) == 0) {
-			if (current.counter >= start->counter)
-				delta = current.counter - start->counter;
-			delta_events = delta;
-		}
-	}
+	scx_pmu_read(p, perf_config, &delta, true);
 
-	tctx->perf_events = delta_events;
 	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return;
-	cctx->perf_events += delta;
+	if (cctx)
+		cctx->perf_events += delta;
 
+	tctx->perf_events = delta;
 }
 
 /*
@@ -971,7 +920,6 @@ static int pick_least_busy_event_cpu(const struct task_struct *p, s32 prev_cpu)
 s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
-	struct task_ctx *tctx;
 	bool is_busy = is_system_busy();
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
@@ -1003,7 +951,9 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	/*
 	 * Pick an event free CPU?
 	 */
-	if (perf_enabled) {
+	if (perf_config) {
+		struct task_ctx *tctx;
+
 		tctx = try_lookup_task_ctx(p);
 		if (tctx && is_event_heavy(tctx)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
@@ -1061,7 +1011,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Immediately dispatch perf event-heavy tasks to a new CPU.
 	 */
-	if (perf_enabled && !is_migration_disabled(p) &&
+	if (perf_config && !is_migration_disabled(p) &&
 	    is_event_heavy(tctx)) {
 		new_cpu = pick_least_busy_event_cpu(p, prev_cpu);
 		if (new_cpu >= 0) {
@@ -1167,7 +1117,6 @@ void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
@@ -1194,8 +1143,8 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	/*
 	 * Capture performance counter baseline when task starts running.
 	 */
-	if (perf_enabled)
-		start_counters(cpu);
+	if (perf_config)
+		scx_pmu_event_start(p, false);
 }
 
 void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
@@ -1209,8 +1158,10 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	/* Update task's performance counters */
-	if (perf_enabled)
-		stop_counters(p, tctx, cpu);
+	if (perf_config) {
+		scx_pmu_event_stop(p);
+		update_counters(p, tctx, cpu);
+	}
 
 	/*
 	 * Evaluate the used time slice.
@@ -1242,13 +1193,23 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx *tctx;
+	int ret;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
 
+	if ((ret = scx_pmu_task_init(p)))
+		return ret;
+
 	return 0;
+}
+
+void BPF_STRUCT_OPS(cosmos_exit_task, struct task_struct *p,
+		   struct scx_exit_task_args *args)
+{
+	scx_pmu_task_fini(p);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
@@ -1307,11 +1268,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		cctx->perf_events = 0;
 	}
 
+	if (perf_config) {
+		err = scx_pmu_install(perf_config);
+		if (err)
+			return err;
+	}
+
 	return 0;
 }
 
 void BPF_STRUCT_OPS(cosmos_exit, struct scx_exit_info *ei)
 {
+	if (perf_config)
+		scx_pmu_uninstall(perf_config);
+
 	UEI_RECORD(uei, ei);
 }
 
@@ -1325,6 +1295,7 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .cpu_release		= (void *)cosmos_cpu_release,
 	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
+	       .exit_task		= (void *)cosmos_exit_task,
 	       .init			= (void *)cosmos_init,
 	       .exit			= (void *)cosmos_exit,
 	       .timeout_ms		= 5000,
