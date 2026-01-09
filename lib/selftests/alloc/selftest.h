@@ -1,6 +1,6 @@
 #pragma once
 
-#define SCX_SELFTEST(func, ...)		\
+#define ALLOC_SELFTEST(func, ...)		\
 	do {				\
 		int ret = func(__VA_ARGS__);	\
 		if (ret) {		\
@@ -9,22 +9,13 @@
 		}			\
 	} while (0)
 
-/* Each scheduler defines their own task_ctx. */
-struct task_ctx_nonarena {
-	u64 pid;
-	u64 vtime;
-};
-
-typedef struct task_ctx_nonarena __arena task_ctx;
-
-int scx_selftest_buddy(void);
-int scx_selftest_stack(void);
-int scx_selftest_static(void);
+int bump_selftest(void);
+int buddy_selftest(void);
+int stack_selftest(void);
 
 #ifndef __BPF__
 
 /* Dummy "definition" for userspace. */
 #define arena_spinlock_t u64
-#define topo_ptr void *
 
 #endif /* __BPF__ */

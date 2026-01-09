@@ -112,7 +112,7 @@ static inline bool st_isset(void __arena *mem, u8 byte, size_t size)
  * - Destroy the allocator. Ensure the allocator returns
  * zeroed out memory.
  */
-static int scx_selftest_static_alloc_single(u64 bytes, u64 alignment)
+static int bump_selftest_alloc_single(u64 bytes, u64 alignment)
 {
 	u8 __arena *barray;
 	void __arena *mem;
@@ -139,7 +139,7 @@ static int scx_selftest_static_alloc_single(u64 bytes, u64 alignment)
 	return 0;
 }
 
-static int scx_selftest_static_alloc_multiple(u64 bytes, u64 alignment)
+static int bump_selftest_alloc_multiple(u64 bytes, u64 alignment)
 {
 	void __arena *mem1, *mem2;
 	int ret;
@@ -168,7 +168,7 @@ static int scx_selftest_static_alloc_multiple(u64 bytes, u64 alignment)
 	return 0;
 }
 
-static int scx_selftest_static_alloc_aligned(void)
+static int bump_selftest_alloc_aligned(void)
 {
 	void __arena *mem;
 	u64 alignment;
@@ -199,7 +199,7 @@ static int scx_selftest_static_alloc_aligned(void)
 	return 0;
 }
 
-static int scx_selftest_static_alloc_exhaustion(u64 bytes, u64 alignment)
+static int bump_selftest_alloc_exhaustion(u64 bytes, u64 alignment)
 {
 	size_t padded = round_up(bytes, alignment);
 	size_t allocs = bytes / padded;
@@ -244,10 +244,10 @@ static int scx_selftest_static_alloc_exhaustion(u64 bytes, u64 alignment)
 	return 0;
 }
 
-#define SCX_STATIC_SELFTEST(suffix, ...) \
-	SCX_SELFTEST(scx_selftest_static_##suffix, __VA_ARGS__)
+#define BUMP_ALLOC_SELFTEST(suffix, ...) \
+	ALLOC_SELFTEST(bump_selftest_##suffix, __VA_ARGS__)
 
-__weak int scx_selftest_static(void)
+__weak int bump_selftest(void)
 {
 	u64 bytes = 128;
 	u64 alignment = 1;
@@ -257,16 +257,16 @@ __weak int scx_selftest_static(void)
 		for (alignment = 1; alignment <= ST_MAX_ALIGNMENT && can_loop;
 		     alignment <<= 1) {
 			/* Each test manages its own allocator lifecycle */
-			SCX_STATIC_SELFTEST(alloc_single, bytes, alignment);
-			SCX_STATIC_SELFTEST(alloc_multiple, bytes, alignment);
+			BUMP_ALLOC_SELFTEST(alloc_single, bytes, alignment);
+			BUMP_ALLOC_SELFTEST(alloc_multiple, bytes, alignment);
 		}
 	}
 
-	SCX_STATIC_SELFTEST(alloc_aligned);
+	BUMP_ALLOC_SELFTEST(alloc_aligned);
 
 	for (alignment = PAGE_SIZE; bytes <= ST_MAX_PAGES && can_loop;
 	     bytes <<= 1)
-		SCX_STATIC_SELFTEST(alloc_exhaustion,
+		BUMP_ALLOC_SELFTEST(alloc_exhaustion,
 				    ST_MAX_PAGES << PAGE_SHIFT, alignment);
 
 	return 0;

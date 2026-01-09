@@ -27,7 +27,7 @@ typedef struct segarr_entry __arena segarr_entry_t;
 static struct segarr_entry __arena segarr[SEGARRLEN];
 size_t __arena sizes[] = { 3, 17, 1025, 129, 16350, 333, 9, 517, 2099 };
 
-static int scx_selftest_buddy_create()
+static int buddy_selftest_create()
 {
 	const int iters = 10;
 	int ret, i;
@@ -46,7 +46,7 @@ static int scx_selftest_buddy_create()
 	return 0;
 }
 
-static int scx_selftest_buddy_alloc()
+static int buddy_selftest_alloc()
 {
 	void __arena *mem;
 	int ret, i;
@@ -69,7 +69,7 @@ static int scx_selftest_buddy_alloc()
 	return 0;
 }
 
-static int scx_selftest_buddy_alloc_free()
+static int buddy_selftest_alloc_free()
 {
 	size_t sizes[] = { 3, 17, 64, 129, 256, 333, 512, 517 };
 	const int iters = 800;
@@ -96,7 +96,7 @@ static int scx_selftest_buddy_alloc_free()
 	return 0;
 }
 
-static int scx_selftest_buddy_alloc_multiple()
+static int buddy_selftest_alloc_multiple()
 {
 	int ret, j;
 	u32 i, idx;
@@ -172,7 +172,7 @@ static int scx_selftest_buddy_alloc_multiple()
 	return 0;
 }
 
-static int scx_selftest_buddy_alignment()
+static int buddy_selftest_alignment()
 {
 	size_t sizes[] = { 1, 3, 7, 8, 9, 15, 16, 17, 31,
 			   32, 64, 100, 128, 255, 256, 512, 1000 };
@@ -214,15 +214,15 @@ static int scx_selftest_buddy_alignment()
 	return 0;
 }
 
-#define SCX_BUDDY_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_buddy_##suffix)
+#define BUDDY_ALLOC_SELFTEST(suffix) ALLOC_SELFTEST(buddy_selftest_##suffix)
 
-__weak int scx_selftest_buddy(void)
+__weak int buddy_selftest(void)
 {
-	SCX_BUDDY_SELFTEST(create);
-	SCX_BUDDY_SELFTEST(alloc);
-	SCX_BUDDY_SELFTEST(alloc_free);
-	SCX_BUDDY_SELFTEST(alloc_multiple);
-	SCX_BUDDY_SELFTEST(alignment);
+	BUDDY_ALLOC_SELFTEST(create);
+	BUDDY_ALLOC_SELFTEST(alloc);
+	BUDDY_ALLOC_SELFTEST(alloc_free);
+	BUDDY_ALLOC_SELFTEST(alloc_multiple);
+	BUDDY_ALLOC_SELFTEST(alignment);
 
 	return 0;
 }
