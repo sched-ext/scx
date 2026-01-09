@@ -91,7 +91,7 @@ static int stk_push(struct stk *stack, void __arena *elem)
 	ridx += 1;
 
 	/* Possibly loop into the next segment. */
-	if (ridx == SCX_STK_SEG_MAX) {
+	if (ridx == STK_SEG_MAX) {
 		ridx = 0;
 		stk_seg = stk_seg->next;
 		if (!stk_seg)
@@ -115,7 +115,7 @@ static void __arena *stk_pop(struct stk *stack)
 
 	/* Possibly loop into previous segment. */
 	if (ridx == 0) {
-		ridx = SCX_STK_SEG_MAX;
+		ridx = STK_SEG_MAX;
 		stk_seg = stack->current->prev;
 		/* Possibly loop back into the last segment. */
 		if (!stk_seg)
@@ -150,7 +150,7 @@ static int stk_seg_to_data(struct stk *stack, size_t nelems)
 	stack->last = stack->last->prev;
 
 	/* We removed a segment. */
-	stack->capacity -= SCX_STK_SEG_MAX;
+	stack->capacity -= STK_SEG_MAX;
 
 	for (i = zero; i < nelems && can_loop; i++) {
 		asan_poison((void __arena *)data, STACK_POISONED,
@@ -174,7 +174,7 @@ static void stk_extend(struct stk *stack, stk_seg_t *stk_seg)
 	stk_seg->next = NULL;
 
 	stack->last = stk_seg;
-	stack->capacity += SCX_STK_SEG_MAX;
+	stack->capacity += STK_SEG_MAX;
 
 	if (!stack->first)
 		stack->current = stack->first = stk_seg;
@@ -285,7 +285,7 @@ static int stk_fill_new_elems(struct stk *stack)
 
 	nr_pages = stack->nr_pages_per_alloc;
 	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
-	if (nelems > SCX_STK_SEG_MAX) {
+	if (nelems > STK_SEG_MAX) {
 		ret = -EINVAL;
 		goto error;
 	}

@@ -8,10 +8,10 @@ typedef struct stk_seg __arena stk_seg_t;
  * the void * array so it fits exactly in it.
  * Account for prev/next pointers (2 * sizeof(void *)).
  */
-#define SCX_STK_SEG_MAX ((PAGE_SIZE - 2 * sizeof(void *)) / sizeof(void *))
+#define STK_SEG_MAX ((PAGE_SIZE - 2 * sizeof(void *)) / sizeof(void *))
 
 struct stk_seg {
-	void __arena	*elems[SCX_STK_SEG_MAX];
+	void __arena	*elems[STK_SEG_MAX];
 	stk_seg_t	*prev;
 	stk_seg_t	*next;
 };

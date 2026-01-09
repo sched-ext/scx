@@ -9,16 +9,16 @@ struct buddy_header;
 typedef struct buddy_header __arena buddy_header_t;
 
 enum buddy_consts {
-	SCX_BUDDY_MIN_ALLOC_SHIFT	= 4,
-	SCX_BUDDY_MIN_ALLOC_BYTES	= 1 << SCX_BUDDY_MIN_ALLOC_SHIFT,
-	SCX_BUDDY_CHUNK_NUM_ORDERS	= 1 << 4,	/* 4 bits per order */
-	SCX_BUDDY_CHUNK_BYTES		= SCX_BUDDY_MIN_ALLOC_BYTES << SCX_BUDDY_CHUNK_NUM_ORDERS,
-	SCX_BUDDY_HEADER_OFF		= 8, /* header byte offset, see buddy.bpf.c for details */
-	SCX_BUDDY_CHUNK_PAGES		= SCX_BUDDY_CHUNK_BYTES / PAGE_SIZE,
-	SCX_BUDDY_CHUNK_ITEMS		= 1 << SCX_BUDDY_CHUNK_NUM_ORDERS,
-	SCX_BUDDY_CHUNK_OFFSET_MASK	= SCX_BUDDY_CHUNK_BYTES - 1,
-	SCX_BUDDY_VADDR_OFFSET		= SCX_BUDDY_CHUNK_BYTES,	/* Start aligning at chunk */
-	SCX_BUDDY_VADDR_SIZE		= SCX_BUDDY_CHUNK_BYTES << 10 /* 1024 chunks maximum */
+	BUDDY_MIN_ALLOC_SHIFT	= 4,
+	BUDDY_MIN_ALLOC_BYTES	= 1 << BUDDY_MIN_ALLOC_SHIFT,
+	BUDDY_CHUNK_NUM_ORDERS	= 1 << 4,	/* 4 bits per order */
+	BUDDY_CHUNK_BYTES	= BUDDY_MIN_ALLOC_BYTES << BUDDY_CHUNK_NUM_ORDERS,
+	BUDDY_HEADER_OFF	= 8, /* header byte offset, see buddy.bpf.c for details */
+	BUDDY_CHUNK_PAGES	= BUDDY_CHUNK_BYTES / PAGE_SIZE,
+	BUDDY_CHUNK_ITEMS	= 1 << BUDDY_CHUNK_NUM_ORDERS,
+	BUDDY_CHUNK_OFFSET_MASK	= BUDDY_CHUNK_BYTES - 1,
+	BUDDY_VADDR_OFFSET	= BUDDY_CHUNK_BYTES,	/* Start aligning at chunk */
+	BUDDY_VADDR_SIZE	= BUDDY_CHUNK_BYTES << 10 /* 1024 chunks maximum */
 };
 
 struct buddy_header {
@@ -31,14 +31,14 @@ struct buddy_header {
  */
 struct buddy_chunk {
 	/* The order of the current allocation for a item. 4 bits per order. */
-	u8			orders[SCX_BUDDY_CHUNK_ITEMS / 2];
+	u8		orders[BUDDY_CHUNK_ITEMS / 2];
 	/* 
 	 * Bit to denote whether chunk is allocated. Size of the allocated/free
 	 * chunk found from the orders array.
 	 */
-	u8			allocated[SCX_BUDDY_CHUNK_ITEMS / 8];
+	u8		allocated[BUDDY_CHUNK_ITEMS / 8];
 	/* Freelists for O(1) allocation. */
-	u64			freelists[SCX_BUDDY_CHUNK_NUM_ORDERS];
+	u64		freelists[BUDDY_CHUNK_NUM_ORDERS];
 	buddy_chunk_t	*prev;
 	buddy_chunk_t	*next;
 };

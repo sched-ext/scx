@@ -495,8 +495,8 @@ __weak int asan_test_buddy_uaf_single(size_t alloc_size)
 
 	bpf_for(i, 0, alloc_size) {
 		/* The header doesn't get poisoned. */
-		if (SCX_BUDDY_HEADER_OFF <= i &&
-		    i < SCX_BUDDY_HEADER_OFF + sizeof(struct buddy_header))
+		if (BUDDY_HEADER_OFF <= i &&
+		    i < BUDDY_HEADER_OFF + sizeof(struct buddy_header))
 			continue;
 
 		mem[i] = 0xba;
