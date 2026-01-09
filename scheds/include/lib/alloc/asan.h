@@ -19,6 +19,9 @@ int asan_init(struct asan_init_args *args);
 
 #define __noasan __attribute__((no_sanitize("address"))) 
 
+
+#ifdef BPF_ARENA_ASAN
+
 extern u64 __asan_shadow_memory_dynamic_address;
 
 /* Defined as char * to get 1-byte granularity for pointer arithmetic. */
@@ -99,5 +102,15 @@ int asan_dummy_call() {
 
 	return 0;
 }
+
+#else /* BPF_ARENA_ASAN */
+
+static inline int asan_poison(void __arena *addr, s8 val, size_t size) { return 0; }
+static inline int asan_unpoison(void __arena *addr, size_t size) { return 0; }
+static inline bool asan_shadow_set(void __arena *addr) { return 0; }
+static inline s8 asan_shadow_value(void __arena *addr) { return 0; }
+static inline int asan_dummy_call() { return 0; }
+
+#endif /* BPF_ARENA_ASAN */
 
 #endif /* __BPF__ */

@@ -6,6 +6,8 @@
 #include <alloc/common.h>
 #include <alloc/asan.h>
 
+#ifdef BPF_ARENA_ASAN
+
 #pragma clang attribute push(__attribute__((no_sanitize("address"))), \
 			     apply_to = function)
 
@@ -28,8 +30,6 @@ u64 __asan_shadow_memory_dynamic_address;
 
 static bool reported = false;
 static bool inited = false;
-
-static bool asan_enabled = true;
 
 /*
  * BPF does not currently support the memset/memcpy/memcmp intrinsics.
@@ -149,9 +149,6 @@ static __always_inline bool check_asan_args(s8a *addr, size_t size,
 					    bool *result)
 {
 	bool valid = true;
-
-	if (unlikely(!asan_enabled))
-		goto confirmed_valid;
 
 	/* Size 0 accesses are valid even if the address is invalid. */
 	if (unlikely(size == 0))
@@ -476,3 +473,5 @@ __hidden __noasan int asan_init(struct asan_init_args *args)
 }
 
 #pragma clang attribute pop
+
+#endif /* BPF_ARENA_ASAN */
