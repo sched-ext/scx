@@ -1,12 +1,9 @@
 #pragma once
 
+#ifdef __BPF__
+
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.bpf.h>
-
-/* Last 1/8th of the address space. */
-#define ASAN_ARENA_SIZE (1ULL << 32)
-#define ASAN_SHADOW_SIZE (ASAN_ARENA_SIZE >> 3)
-#define ASAN_SHADOW_OFFSET (ASAN_ARENA_SIZE >> 1)
 
 #define ASAN_SHADOW_SHIFT 3
 #define ASAN_SHADOW_SCALE (1ULL << ASAN_SHADOW_SHIFT)
@@ -18,13 +15,15 @@
 
 #define __noasan __attribute__((no_sanitize("address"))) 
 
+extern u64 __asan_shadow_memory_dynamic_address;
+
 /* Defined as char * to get 1-byte granularity for pointer arithmetic. */
 typedef s8 __arena s8a;
 
 static inline 
 s8a *mem_to_shadow(void __arena __arg_arena *addr)
 {
-	return (s8a *)(((u32)(u64)addr >> ASAN_SHADOW_SHIFT) + ASAN_SHADOW_OFFSET);
+	return (s8a *)(((u32)(u64)addr >> ASAN_SHADOW_SHIFT) + __asan_shadow_memory_dynamic_address);
 }
 
 static inline __noasan
@@ -33,7 +32,6 @@ s8 asan_shadow_value(void __arena __arg_arena *addr)
 	return *(s8a *)mem_to_shadow(addr);
 }
 
-int asan_init(void);
 int asan_poison(void __arena *addr, s8 val, size_t size);
 int asan_unpoison(void __arena *addr, size_t size);
 bool asan_shadow_set(void __arena *addr);
@@ -89,8 +87,6 @@ do { 					\
 	ASAN_DUMMY_CALLS_SIZE(8, (arg));	\
 } while (0)
 
-extern u32 __asan_shadow_memory_dynamic_address;
-
 __weak __attribute__((no_sanitize_address))
 int asan_dummy_call() {
 	/* Use the shadow map base to prevent it from being optimized out. */
@@ -99,3 +95,16 @@ int asan_dummy_call() {
 
 	return 0;
 }
+
+#endif /* __BPF__ */
+
+struct asan_init_args {
+	u64 arena_all_pages;
+	u64 arena_globals_pages;
+};
+
+int asan_init(struct asan_init_args *args);
+
+struct arena_base_args {
+	void __arena *arena_base;
+};

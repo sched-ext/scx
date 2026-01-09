@@ -174,3 +174,4 @@ int bpf_arena_reserve_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym
 
 void bpf_preempt_disable(void) __weak __ksym;
 void bpf_preempt_enable(void) __weak __ksym;
+ssize_t bpf_arena_mapping_nr_pages(void *p__map) __weak __ksym;
