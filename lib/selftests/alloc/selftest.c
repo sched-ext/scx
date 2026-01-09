@@ -23,6 +23,7 @@
 #include "selftest.h"
 
 #include <lib/arena.h>
+#include <lib/alloc/common.h>
 #include <lib/alloc/asan.h>
 
 #include <alloc/buddy.h>

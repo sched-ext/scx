@@ -1,5 +1,6 @@
-#ifndef __ALLOC_COMMON_H__
-#define __ALLOC_COMMON_H__
+#pragma once
+
+#ifdef __BPF__
 
 #include <scx/bpf_arena_common.bpf.h>
 #include "bpf_helpers_local.h"
@@ -29,4 +30,8 @@ extern volatile u64 asan_violated;
 #define round_up(a, b) ((((a) + (b) - 1) / (b)) * b)
 #endif
 
-#endif /* __ALLOC_COMMON_H__ */
+#endif /* __BPF__ */
+
+struct arena_base_args {
+	void __arena *arena_base;
+};

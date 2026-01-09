@@ -7,7 +7,6 @@
 
 #include <lib/arena_map.h>
 
-#include <alloc/asan.h>
 #include <alloc/common.h>
 
 /* How many pages do we reserve at the beginning of the arena segment? */

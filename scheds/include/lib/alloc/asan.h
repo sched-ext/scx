@@ -104,7 +104,3 @@ struct asan_init_args {
 };
 
 int asan_init(struct asan_init_args *args);
-
-struct arena_base_args {
-	void __arena *arena_base;
-};
