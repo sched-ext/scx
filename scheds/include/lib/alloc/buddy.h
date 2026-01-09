@@ -7,8 +7,6 @@
 #include <scx/bpf_arena_common.h>
 #endif /* __BPF__ */
 
-#include <alloc/stack.h>
-
 /* Buddy allocator-related structs. */
 
 struct buddy_chunk;
