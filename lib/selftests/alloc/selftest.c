@@ -17,14 +17,9 @@
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 
-#include <scx/common.h>
-#include <scx/bpf_arena_common.h>
+#include <alloc/userapi.h>
 
 #include "selftest.h"
-
-#include <lib/arena.h>
-#include <lib/alloc/common.h>
-#include <lib/alloc/asan.h>
 
 #include <alloc/buddy.h>
 #include <alloc/bump.h>
@@ -107,12 +102,12 @@ static int
 selftest_arena_base(struct selftest *skel, void **arena_base)
 {
 	struct bpf_test_run_opts opts;
-	struct arena_base_args args;
+	struct arena_get_base_args args;
 	u64 globals_pages;
 	int prog_fd;
 	int ret;
 
-	args = (struct arena_base_args) {
+	args = (struct arena_get_base_args) {
 		.arena_base = NULL
 	};
 
@@ -122,7 +117,7 @@ selftest_arena_base(struct selftest *skel, void **arena_base)
 		.ctx_size_in = sizeof(args),
 	};
 
-	prog_fd = bpf_program__fd(skel->progs.arena_base);
+	prog_fd = bpf_program__fd(skel->progs.arena_get_base);
 	assert(prog_fd >= 0 && "no program found");
 
 	ret = selftest_fd(prog_fd, &opts);

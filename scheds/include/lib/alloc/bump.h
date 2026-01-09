@@ -2,9 +2,6 @@
 
 #ifdef __BPF__
 
-#include <scx/bpf_arena_common.bpf.h>
-#include <scx/bpf_arena_spin_lock.h>
-
 u64 bump_alloc_internal(size_t bytes, size_t alignment);
 #define bump_alloc(bytes, alignment) ((void __arena *)bump_alloc_internal((bytes), (alignment)))
 int bump_init(size_t max_alloc_pages);

@@ -4,11 +4,9 @@
  * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <scx/common.bpf.h>
-#include <lib/arena_map.h>
 #include <alloc/common.h>
-#include <alloc/buddy.h>
 #include <alloc/asan.h>
+#include <alloc/buddy.h>
 
 volatile int zero = 0;
 

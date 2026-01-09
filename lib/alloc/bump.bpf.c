@@ -13,9 +13,6 @@
  * having to define an allocator for each type.
  */
 
-#include <scx/common.bpf.h>
-#include <lib/arena_map.h>
-
 #include <alloc/common.h>
 #include <alloc/asan.h>
 #include <alloc/bump.h>

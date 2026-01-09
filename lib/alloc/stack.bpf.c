@@ -4,10 +4,9 @@
  * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <scx/common.bpf.h>
-#include <lib/arena_map.h>
-#include <alloc/stack.h>
+#include <alloc/common.h>
 #include <alloc/asan.h>
+#include <alloc/stack.h>
 
 /*
  * Necessary for cond_break/can_loop's semantics. According to kernel commit

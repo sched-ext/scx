@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
-#include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
+
+#include <alloc/common.h>
 
 #include <alloc/asan.h>
 

@@ -1,9 +1,13 @@
 #pragma once
 
-#ifdef __BPF__
+struct asan_init_args {
+	u64 arena_all_pages;
+	u64 arena_globals_pages;
+};
 
-#include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
+int asan_init(struct asan_init_args *args);
+
+#ifdef __BPF__
 
 #define ASAN_SHADOW_SHIFT 3
 #define ASAN_SHADOW_SCALE (1ULL << ASAN_SHADOW_SHIFT)
@@ -97,10 +101,3 @@ int asan_dummy_call() {
 }
 
 #endif /* __BPF__ */
-
-struct asan_init_args {
-	u64 arena_all_pages;
-	u64 arena_globals_pages;
-};
-
-int asan_init(struct asan_init_args *args);

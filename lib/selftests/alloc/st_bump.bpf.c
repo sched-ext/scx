@@ -4,11 +4,9 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <scx/common.bpf.h>
-
+#include <alloc/common.h>
 #include <alloc/asan.h>
 #include <alloc/bump.h>
-#include <alloc/common.h>
 
 #include "selftest.h"
 
