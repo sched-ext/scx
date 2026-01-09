@@ -63,7 +63,7 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
     use perf_event_open_sys as sys;
 
     // Get the perf_events map
-    let map = &skel.maps.perf_events;
+    let map = &skel.maps.scx_pmu_map;
 
     // Create a raw perf event for the perf counter.
     let mut attrs = sys::bindings::perf_event_attr::default();
@@ -456,12 +456,10 @@ impl<'a> Scheduler<'a> {
         rodata.mm_affinity = opts.mm_affinity;
 
         // Enable perf event scheduling settings.
+        rodata.perf_config = opts.perf_config;
         if opts.perf_config > 0 {
-            rodata.perf_enabled = true;
             rodata.perf_sticky = opts.perf_sticky;
             rodata.perf_threshold = opts.perf_threshold;
-        } else {
-            rodata.perf_enabled = false;
         }
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
