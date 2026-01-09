@@ -24,7 +24,7 @@ enum {
 	STACK_POISONED = (s8)0xef,
 };
 
-__hidden int scx_stk_init(struct scx_stk		       *stack,
+__hidden int stk_init(struct stk		       *stack,
 			  arena_spinlock_t __arg_arena __arena *lock,
 			  __u64 data_size, __u64 nr_pages_per_alloc)
 {
@@ -38,9 +38,9 @@ __hidden int scx_stk_init(struct scx_stk		       *stack,
 	return 0;
 }
 
-__hidden void scx_stk_destroy(struct scx_stk *stack)
+__hidden void stk_destroy(struct stk *stack)
 {
-	scx_stk_seg_t *seg, *next;
+	stk_seg_t *seg, *next;
 	__u64 nr_pages;
 
 	/* Operation happens unlocked since we are called last. */
@@ -82,9 +82,9 @@ __hidden void scx_stk_destroy(struct scx_stk *stack)
 	stack->reserve = NULL;
 }
 
-static int scx_stk_push(struct scx_stk *stack, void __arena *elem)
+static int stk_push(struct stk *stack, void __arena *elem)
 {
-	scx_stk_seg_t *stk_seg = stack->current;
+	stk_seg_t *stk_seg = stack->current;
 	int ridx = stack->cind;
 
 	stack->current->elems[stack->cind] = elem;
@@ -108,9 +108,9 @@ static int scx_stk_push(struct scx_stk *stack, void __arena *elem)
 	return 0;
 }
 
-static void __arena *scx_stk_pop(struct scx_stk *stack)
+static void __arena *stk_pop(struct stk *stack)
 {
-	scx_stk_seg_t *stk_seg = stack->current;
+	stk_seg_t *stk_seg = stack->current;
 	void __arena *elem;
 	int ridx = stack->cind;
 
@@ -136,7 +136,7 @@ static void __arena *scx_stk_pop(struct scx_stk *stack)
 	return elem;
 }
 
-static int scx_stk_seg_to_data(struct scx_stk *stack, size_t nelems)
+static int stk_seg_to_data(struct stk *stack, size_t nelems)
 {
 	int ret, i;
 	u64 data;
@@ -155,9 +155,9 @@ static int scx_stk_seg_to_data(struct scx_stk *stack, size_t nelems)
 
 	for (i = zero; i < nelems && can_loop; i++) {
 		asan_poison((void __arena *)data, STACK_POISONED,
-			    sizeof(struct scx_stk_seg));
+			    sizeof(struct stk_seg));
 
-		ret = scx_stk_push(stack, (void __arena *)data);
+		ret = stk_push(stack, (void __arena *)data);
 		if (ret)
 			return ret;
 		data += stack->data_size;
@@ -166,7 +166,7 @@ static int scx_stk_seg_to_data(struct scx_stk *stack, size_t nelems)
 	return 0;
 }
 
-static void scx_stk_extend(struct scx_stk *stack, scx_stk_seg_t *stk_seg)
+static void stk_extend(struct stk *stack, stk_seg_t *stk_seg)
 {
 	if (stack->last)
 		stack->last->next = stk_seg;
@@ -187,7 +187,7 @@ static void scx_stk_extend(struct scx_stk *stack, scx_stk_seg_t *stk_seg)
 	 */
 }
 
-static int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
+static int stk_free_unlocked(struct stk *stack, void __arena *elem)
 {
 	if (!stack)
 		return -EINVAL;
@@ -196,16 +196,16 @@ static int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 
 	/* If no more room, repurpose the allocation into a segment. */
 	if (stack->capacity == 0) {
-		asan_unpoison(elem, sizeof(struct scx_stk_seg));
+		asan_unpoison(elem, sizeof(struct stk_seg));
 
-		scx_stk_extend(stack, (scx_stk_seg_t *)elem);
+		stk_extend(stack, (stk_seg_t *)elem);
 		return 0;
 	}
 
-	return scx_stk_push(stack, elem);
+	return stk_push(stack, elem);
 }
 
-__weak int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
+__weak int stk_free_internal(struct stk *stack, __u64 elem)
 {
 	int ret;
 
@@ -216,17 +216,17 @@ __weak int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
 	if (ret)
 		return ret;
 
-	ret = scx_stk_free_unlocked(stack, (void __arena *)elem);
+	ret = stk_free_unlocked(stack, (void __arena *)elem);
 
 	arena_spin_unlock(stack->lock);
 
 	return ret;
 }
 
-static int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages,
+static int stk_get_arena_memory(struct stk *stack, __u64 nr_pages,
 				    __u64 nstk_segs)
 {
-	scx_stk_seg_t *stk_seg;
+	stk_seg_t *stk_seg;
 	int ret, i;
 	u64 mem;
 
@@ -258,13 +258,13 @@ static int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages,
 	asan_poison((void __arena *)mem, STACK_POISONED,
 		    nstk_segs * nr_pages * PAGE_SIZE);
 
-	_Static_assert(sizeof(struct scx_stk_seg) <= PAGE_SIZE,
+	_Static_assert(sizeof(struct stk_seg) <= PAGE_SIZE,
 		       "segment must fit into a page");
 
 	/* Attach the segments to the reserve linked list. */
 	for (i = zero; i < nstk_segs && can_loop; i++) {
 		/* Keep the memory that hosts metadata unpoisoned.*/
-		stk_seg = (scx_stk_seg_t *)mem;
+		stk_seg = (stk_seg_t *)mem;
 		asan_unpoison(stk_seg, sizeof(*stk_seg));
 
 		stk_seg->next  = stack->reserve;
@@ -276,10 +276,10 @@ static int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages,
 	return 0;
 }
 
-static int scx_stk_fill_new_elems(struct scx_stk *stack)
+static int stk_fill_new_elems(struct stk *stack)
 {
 	size_t nelems, nstk_segs;
-	scx_stk_seg_t *stk_seg;
+	stk_seg_t *stk_seg;
 	__u64 nr_pages;
 	int ret, i;
 	u64 mem;
@@ -298,14 +298,14 @@ static int scx_stk_fill_new_elems(struct scx_stk *stack)
 	 * If we have more than two empty segments available,
 	 * repurpose one of them into an allocation.
 	 */
-	ret = scx_stk_seg_to_data(stack, nelems);
+	ret = stk_seg_to_data(stack, nelems);
 	if (!ret)
 		return 0;
 
 	/* If we haven't set aside enough memory from before, allocate. */
 	if (!stack->reserve || !stack->reserve->next) {
 		/* This call drops and retakes the lock. */
-		ret = scx_stk_get_arena_memory(stack, nr_pages, nstk_segs);
+		ret = stk_get_arena_memory(stack, nr_pages, nstk_segs);
 		if (ret) {
 			/* No need to unlock, we dropped the lock in the call. */
 			return ret;
@@ -325,7 +325,7 @@ static int scx_stk_fill_new_elems(struct scx_stk *stack)
 		stk_seg = stack->reserve;
 		stack->reserve = stack->reserve->next;
 
-		scx_stk_extend(stack, stk_seg);
+		stk_extend(stack, stk_seg);
 	}
 
 	/* Pop out the reserve and attach to the stack. */
@@ -334,7 +334,7 @@ static int scx_stk_fill_new_elems(struct scx_stk *stack)
 
 	mem = (u64)stk_seg;
 	for (i = zero; i < nelems && can_loop; i++) {
-		ret = scx_stk_push(stack, (void __arena *)mem);
+		ret = stk_push(stack, (void __arena *)mem);
 		if (ret)
 			goto error;
 		mem += stack->data_size;
@@ -353,7 +353,7 @@ error:
 	return ret;
 }
 
-static inline __u64 scx_stk_alloc_unlocked(struct scx_stk *stack)
+static inline __u64 stk_alloc_unlocked(struct stk *stack)
 {
 	void __arena *elem;
 	int ret;
@@ -361,13 +361,13 @@ static inline __u64 scx_stk_alloc_unlocked(struct scx_stk *stack)
 	/* If segment buffer is empty, we have to populate it. */
 	if (stack->available == 0) {
 		/* The call drops the lock on error. */
-		ret = scx_stk_fill_new_elems(stack);
+		ret = stk_fill_new_elems(stack);
 		if (ret)
 			return 0ULL;
 	}
 
 	/* An elem value of 0 implies error, drop the lock. */
-	elem = scx_stk_pop(stack);
+	elem = stk_pop(stack);
 	if (elem)
 		asan_unpoison(elem, stack->data_size);
 	else
@@ -376,7 +376,7 @@ static inline __u64 scx_stk_alloc_unlocked(struct scx_stk *stack)
 	return (__u64)elem;
 }
 
-__weak __u64 scx_stk_alloc(struct scx_stk *stack)
+__weak __u64 stk_alloc(struct stk *stack)
 {
 	u64 elem;
 
@@ -388,7 +388,7 @@ __weak __u64 scx_stk_alloc(struct scx_stk *stack)
 	if (arena_spin_lock(stack->lock))
 		return 0ULL;
 
-	elem = scx_stk_alloc_unlocked(stack);
+	elem = stk_alloc_unlocked(stack);
 
 	if (elem)
 		arena_spin_unlock(stack->lock);

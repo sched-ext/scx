@@ -205,7 +205,7 @@ u64 __arena stk_blks[STACK_ALLOCS];
 /*
  * Spinlock used by the stack allocator.
  */
-private(ST_STACK) struct scx_stk st_stack;
+private(ST_STACK) struct stk st_stack;
 u64 __arena st_asan_lock;
 
 static __maybe_unused void stk_blks_dump(void)
@@ -307,7 +307,7 @@ int asan_test_stack_uaf_oob_single(u8 __arena __arg_arena *alloced,
 	int i;
 
 	/* Use after free check. */
-	scx_stk_free(&st_stack, freed);
+	stk_free(&st_stack, freed);
 
 	bpf_for(i, 0, PAGE_SIZE) {
 		freed[i] = 0xba;
@@ -361,15 +361,15 @@ __weak int asan_test_stack_uaf_oob(void)
 	int ret, i;
 
 	/* Set the stack to support 4KiB allocations. */
-	ret = scx_stk_init(&st_stack, (arena_spinlock_t __arena *)&st_asan_lock,
+	ret = stk_init(&st_stack, (arena_spinlock_t __arena *)&st_asan_lock,
 			   alloc_size, STACK_PAGES_PER_ALLOC);
 	if (ret) {
-		bpf_printk("scx_stk_init failed with %d", ret);
+		bpf_printk("stk_init failed with %d", ret);
 		return ret;
 	}
 
 	bpf_for(i, 0, STACK_ALLOCS) {
-		block = (u64)scx_stk_alloc(&st_stack);
+		block = (u64)stk_alloc(&st_stack);
 		if (!block) {
 			bpf_printk("allocation %d failed", i);
 			return -ENOMEM;
@@ -399,7 +399,7 @@ __weak int asan_test_stack_uaf_oob(void)
 			return ret;
 	}
 
-	scx_stk_destroy(&st_stack);
+	stk_destroy(&st_stack);
 
 	return 0;
 }
