@@ -25,7 +25,7 @@
 
 private(STATIC_ALLOC_LOCK) struct bpf_spin_lock static_lock;
 
-private(STATIC_ALLOC) struct scx_static scx_static;
+private(STATIC_ALLOC) struct bump bump;
 
 const s8 STATIC_POISON_UNINIT = 0xff;
 
@@ -37,7 +37,7 @@ struct scx_ll {
 };
 typedef struct scx_ll __arena scx_ll_t;
 
-__weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
+__weak u64 bump_alloc_internal(size_t bytes, size_t alignment)
 {
 	void __arena *memory, *old;
 	scx_ll_t     *oldll, *newll;
@@ -57,15 +57,15 @@ __weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 	bpf_spin_lock(&static_lock);
 
 	/* Round up the current offset. */
-	addr	    = (__u64)scx_static.memory + scx_static.off;
+	addr	    = (__u64)bump.memory + bump.off;
 
 	padding	    = round_up(addr, alignment) - addr;
 	alloc_bytes = bytes + padding;
 
-	if (alloc_bytes > scx_static.max_contig_bytes) {
+	if (alloc_bytes > bump.max_contig_bytes) {
 		bpf_spin_unlock(&static_lock);
 		bpf_printk("invalid request %ld, max is %ld\n", alloc_bytes,
-			   scx_static.max_contig_bytes);
+			   bump.max_contig_bytes);
 		return (u64)NULL;
 	}
 
@@ -75,15 +75,15 @@ __weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 	 * size, so it does not attempt to alleviate memory
 	 * fragmentation.
 	 */
-	if (scx_static.off + alloc_bytes > scx_static.max_contig_bytes) {
-		if (scx_static.cur_memusage + scx_static.max_contig_bytes >
-		    scx_static.lim_memusage) {
+	if (bump.off + alloc_bytes > bump.max_contig_bytes) {
+		if (bump.cur_memusage + bump.max_contig_bytes >
+		    bump.lim_memusage) {
 			bpf_spin_unlock(&static_lock);
 			bpf_printk("allocator memory limit exceeded");
 			return (u64)NULL;
 		}
 
-		old = scx_static.memory;
+		old = bump.memory;
 
 		bpf_spin_unlock(&static_lock);
 
@@ -92,7 +92,7 @@ __weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		 * allocation memory.
 		 */
 
-		alloc_pages = scx_static.max_contig_bytes / PAGE_SIZE;
+		alloc_pages = bump.max_contig_bytes / PAGE_SIZE;
 
 		memory	    = bpf_arena_alloc_pages(&arena, NULL, alloc_pages,
 						    NUMA_NO_NODE, 0);
@@ -100,14 +100,14 @@ __weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 			return (u64)NULL;
 
 		asan_poison(memory, STATIC_POISON_UNINIT,
-			    scx_static.max_contig_bytes);
+			    bump.max_contig_bytes);
 
 		bpf_spin_lock(&static_lock);
 
 		/* Error out if we raced with another allocation. */
-		if (scx_static.memory != old) {
+		if (bump.memory != old) {
 			bpf_spin_unlock(&static_lock);
-			asan_unpoison(memory, scx_static.max_contig_bytes);
+			asan_unpoison(memory, bump.max_contig_bytes);
 			bpf_arena_free_pages(&arena, memory, alloc_pages);
 
 			bpf_printk(
@@ -125,9 +125,9 @@ __weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		 * Switch to new memory block, reset offset,
 		 * and recalculate base address.
 		 */
-		scx_static.memory = memory;
-		scx_static.off	  = sizeof(*newll);
-		addr		  = (__u64)scx_static.memory + scx_static.off;
+		bump.memory = memory;
+		bump.off	  = sizeof(*newll);
+		addr		  = (__u64)bump.memory + bump.off;
 
 		/*
 		 * We changed the base address. Recompute the padding.
@@ -135,38 +135,38 @@ __weak u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		padding	    = round_up(addr, alignment) - addr;
 		alloc_bytes = bytes + padding;
 
-		scx_static.cur_memusage += scx_static.max_contig_bytes;
+		bump.cur_memusage += bump.max_contig_bytes;
 	}
 
 	ptr = (void __arena *)(addr + padding);
 	asan_unpoison(ptr, bytes);
 
-	scx_static.off += alloc_bytes;
+	bump.off += alloc_bytes;
 
 	bpf_spin_unlock(&static_lock);
 
 	return (u64)ptr;
 }
 
-__weak int scx_static_destroy(void)
+__weak int bump_destroy(void)
 {
-	size_t	  alloc_pages = scx_static.max_contig_bytes / PAGE_SIZE;
+	size_t	  alloc_pages = bump.max_contig_bytes / PAGE_SIZE;
 	scx_ll_t *ll, *llnext;
 
-	for (ll = scx_static.memory; ll && can_loop; ll = llnext) {
+	for (ll = bump.memory; ll && can_loop; ll = llnext) {
 		llnext = ll->next;
-		asan_unpoison(ll, scx_static.max_contig_bytes);
+		asan_unpoison(ll, bump.max_contig_bytes);
 		bpf_arena_free_pages(&arena, ll, alloc_pages);
 	}
 
-	for (int i = 0; i < sizeof(scx_static) && can_loop; i++) {
-		((u8 *)&scx_static)[i] = 0;
+	for (int i = 0; i < sizeof(bump) && can_loop; i++) {
+		((u8 *)&bump)[i] = 0;
 	}
 
 	return 0;
 }
 
-__weak int scx_static_init(size_t alloc_pages)
+__weak int bump_init(size_t alloc_pages)
 {
 	size_t	      max_bytes = alloc_pages * PAGE_SIZE;
 	void __arena *memory;
@@ -194,7 +194,7 @@ __weak int scx_static_init(size_t alloc_pages)
 	bpf_spin_lock(&static_lock);
 
 	/* We reserve sizeof(*ll) for the embedded linked list. */
-	scx_static = (struct scx_static){
+	bump = (struct bump){
 		.max_contig_bytes = max_bytes,
 		.off		  = sizeof(*ll),
 		.memory		  = memory,
@@ -206,7 +206,7 @@ __weak int scx_static_init(size_t alloc_pages)
 	return 0;
 }
 
-__weak int scx_static_memlimit(u64 lim_memusage)
+__weak int bump_memlimit(u64 lim_memusage)
 {
 	bpf_spin_lock(&static_lock);
 
@@ -218,10 +218,10 @@ __weak int scx_static_memlimit(u64 lim_memusage)
 		goto error;
 
 	/* Have we already overshot the limit? */
-	if (lim_memusage < scx_static.cur_memusage)
+	if (lim_memusage < bump.cur_memusage)
 		goto error;
 
-	scx_static.lim_memusage = lim_memusage;
+	bump.lim_memusage = lim_memusage;
 
 	bpf_spin_unlock(&static_lock);
 

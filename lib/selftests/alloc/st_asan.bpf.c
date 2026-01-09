@@ -59,7 +59,7 @@ int asan_test_static_blob_one(void)
 	volatile struct blob __arena *blob;
 	const size_t alignment = 1;
 
-	blob = scx_static_alloc(sizeof(blob) - 1, alignment);
+	blob = bump_alloc(sizeof(blob) - 1, alignment);
 	if (!blob)
 		return -ENOMEM;
 
@@ -92,9 +92,9 @@ int asan_test_static_blob(void)
 	const int iters = 20;
 	int ret, i;
 
-	ret = scx_static_init(ST_PAGES);
+	ret = bump_init(ST_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -107,7 +107,7 @@ int asan_test_static_blob(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	ASAN_VALIDATE();
 
@@ -122,7 +122,7 @@ int asan_test_static_array_one(void)
 	char __arena *mem;
 	int i;
 
-	mem = scx_static_alloc(sizeof(*mem) * bytes, alignment);
+	mem = bump_alloc(sizeof(*mem) * bytes, alignment);
 	if (!mem)
 		return -ENOMEM;
 
@@ -141,9 +141,9 @@ int asan_test_static_array(void)
 	const size_t iters = 20;
 	int ret, i;
 
-	ret = scx_static_init(ST_PAGES);
+	ret = bump_init(ST_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -156,7 +156,7 @@ int asan_test_static_array(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	return 0;
 }
@@ -166,9 +166,9 @@ int asan_test_static_all(void)
 	const int iters = 50;
 	int ret, i;
 
-	ret = scx_static_init(ST_PAGES);
+	ret = bump_init(ST_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -188,7 +188,7 @@ int asan_test_static_all(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	return 0;
 }
