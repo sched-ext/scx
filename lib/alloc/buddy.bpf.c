@@ -30,7 +30,7 @@ static inline void buddy_unlock(struct buddy *buddy)
  * Reserve part of the arena address space for the allocator. We use
  * this to get aligned addresses for the chunks.
  */
-static int scx_reserve_arena_vaddr(struct buddy *buddy)
+static int buddy_reserve_arena_vaddr(struct buddy *buddy)
 {
 	buddy->vaddr = 0;
 
@@ -42,7 +42,7 @@ static int scx_reserve_arena_vaddr(struct buddy *buddy)
 /*
  * Free up any unused address space. Used only during teardown.
  */
-static void scx_unreserve_arena_vaddr(struct buddy *buddy)
+static void buddy_unreserve_arena_vaddr(struct buddy *buddy)
 {
 	bpf_arena_free_pages(
 		&arena, (void __arena *)(SCX_BUDDY_VADDR_OFFSET + buddy->vaddr),
@@ -52,7 +52,7 @@ static void scx_unreserve_arena_vaddr(struct buddy *buddy)
 }
 
 /* Carve out part of the reserved address space and allocate it to the */
-static int scx_alloc_arena_vaddr(struct buddy *buddy, u64 *vaddrp)
+static int buddy_alloc_arena_vaddr(struct buddy *buddy, u64 *vaddrp)
 {
 	u64 vaddr, old, new;
 
@@ -74,7 +74,7 @@ static int scx_alloc_arena_vaddr(struct buddy *buddy, u64 *vaddrp)
 	return 0;
 }
 
-static u64 scx_next_pow2(__u64 n)
+static u64 arena_next_pow2(__u64 n)
 {
 	n--;
 	n |= n >> 1;
@@ -288,7 +288,7 @@ static u64 size_to_order(size_t size)
 	 * allocation size by removing the minimum shift from it. Requests
 	 * smaller than the minimum allocation size are rounded up.
 	 */
-	order = scx_fls(scx_next_pow2(size));
+	order = arena_fls(arena_next_pow2(size));
 	if (order < SCX_BUDDY_MIN_ALLOC_SHIFT)
 		return 0;
 
@@ -332,7 +332,7 @@ static buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 
 	buddy_unlock(buddy);
 
-	ret = scx_alloc_arena_vaddr(buddy, &vaddr);
+	ret = buddy_alloc_arena_vaddr(buddy, &vaddr);
 	if (ret) {
 		DIAG();
 		return NULL;
@@ -437,7 +437,7 @@ static buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 	left = sizeof(*chunk);
 	idx = 0;
 	while (left && can_loop) {
-		power2 = scx_fls(left);
+		power2 = arena_fls(left);
 		if (unlikely(power2 >= SCX_BUDDY_CHUNK_NUM_ORDERS)) {
 			arena_stderr(
 				"buddy chunk metadata require allocation of order %d\n",
@@ -487,7 +487,7 @@ __hidden int buddy_init(struct buddy			 *buddy,
 	/* 
 	 * Reserve enough address space to ensure allocations are aligned.
 	 */
-	if ((ret = scx_reserve_arena_vaddr(buddy))) {
+	if ((ret = buddy_reserve_arena_vaddr(buddy))) {
 		DIAG();
 		return ret;
 	}
@@ -544,7 +544,7 @@ __weak int buddy_destroy(struct buddy *buddy)
 	}
 
 	/* Free up any part of the address space that did not get used. */
-	scx_unreserve_arena_vaddr(buddy);
+	buddy_unreserve_arena_vaddr(buddy);
 
 	/* Clear all fields. */
 	buddy->first_chunk = NULL;

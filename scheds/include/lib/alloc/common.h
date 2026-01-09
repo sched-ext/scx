@@ -18,7 +18,7 @@ arena_bug_trigger(const char *func, const int line)
 	*nullptr = 0;
 }
 
-int scx_fls(__u64 word);
+int arena_fls(__u64 word);
 
 extern volatile u64 asan_violated;
 

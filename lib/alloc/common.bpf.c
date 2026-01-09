@@ -27,7 +27,7 @@ int arena_alloc_reserve(void)
 }
 
 __weak
-int scx_fls(__u64 word)
+int arena_fls(__u64 word)
 {
 	unsigned int num = 0;
 
