@@ -51,6 +51,14 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
+	 * Prioritize a task woken by an RT/DL task.
+	 */
+	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL)) {
+		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+		weight_boost += 4 * LAVD_LC_WEIGHT_BOOST;
+	}
+
+	/*
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */

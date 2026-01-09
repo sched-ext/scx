@@ -1154,6 +1154,17 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	if (is_kernel_task(p) != is_kernel_task(waker))
 		return;
 
+	/*
+	 * If the waker is an RT or DL task, set the flag to increase the
+	 * wakee’s latency-criticality. We don’t track the latency-criticality
+	 * of RT/DL tasks, so we can not inherit their latency criticality.
+	 * Instead, we increase wakee’s latency-criticality by a fixed amount.
+	 */
+	if (rt_or_dl_task(waker))
+		set_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+	else
+		reset_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+
 	waker_taskc = get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
