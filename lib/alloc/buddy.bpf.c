@@ -16,12 +16,12 @@ enum {
 	BUDDY_POISONED = (s8)0xef,
 };
 
-static inline int scx_buddy_lock(struct scx_buddy *buddy)
+static inline int buddy_lock(struct buddy *buddy)
 {
 	return arena_spin_lock(buddy->lock);
 }
 
-static inline void scx_buddy_unlock(struct scx_buddy *buddy)
+static inline void buddy_unlock(struct buddy *buddy)
 {
 	arena_spin_unlock(buddy->lock);
 }
@@ -30,7 +30,7 @@ static inline void scx_buddy_unlock(struct scx_buddy *buddy)
  * Reserve part of the arena address space for the allocator. We use
  * this to get aligned addresses for the chunks.
  */
-static int scx_reserve_arena_vaddr(struct scx_buddy *buddy)
+static int scx_reserve_arena_vaddr(struct buddy *buddy)
 {
 	buddy->vaddr = 0;
 
@@ -42,7 +42,7 @@ static int scx_reserve_arena_vaddr(struct scx_buddy *buddy)
 /*
  * Free up any unused address space. Used only during teardown.
  */
-static void scx_unreserve_arena_vaddr(struct scx_buddy *buddy)
+static void scx_unreserve_arena_vaddr(struct buddy *buddy)
 {
 	bpf_arena_free_pages(
 		&arena, (void __arena *)(SCX_BUDDY_VADDR_OFFSET + buddy->vaddr),
@@ -52,7 +52,7 @@ static void scx_unreserve_arena_vaddr(struct scx_buddy *buddy)
 }
 
 /* Carve out part of the reserved address space and allocate it to the */
-static int scx_alloc_arena_vaddr(struct scx_buddy *buddy, u64 *vaddrp)
+static int scx_alloc_arena_vaddr(struct buddy *buddy, u64 *vaddrp)
 {
 	u64 vaddr, old, new;
 
@@ -89,7 +89,7 @@ static u64 scx_next_pow2(__u64 n)
 }
 
 __weak
-int idx_set_allocated(scx_buddy_chunk_t __arg_arena *chunk, u64 idx, bool allocated)
+int idx_set_allocated(buddy_chunk_t __arg_arena *chunk, u64 idx, bool allocated)
 {
 	if (unlikely(idx >= SCX_BUDDY_CHUNK_ITEMS)) {
 		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
@@ -105,7 +105,7 @@ int idx_set_allocated(scx_buddy_chunk_t __arg_arena *chunk, u64 idx, bool alloca
 	return 0;
 }
 
-static int idx_is_allocated(scx_buddy_chunk_t *chunk, u64 idx, bool *allocated)
+static int idx_is_allocated(buddy_chunk_t *chunk, u64 idx, bool *allocated)
 {
 	if (unlikely(idx >= SCX_BUDDY_CHUNK_ITEMS)) {
 		arena_stderr("setting order of invalid idx (%d, max %d)\n", idx,
@@ -118,7 +118,7 @@ static int idx_is_allocated(scx_buddy_chunk_t *chunk, u64 idx, bool *allocated)
 }
 
 __weak
-int idx_set_order(scx_buddy_chunk_t __arg_arena *chunk, u64 idx, u8 order)
+int idx_set_order(buddy_chunk_t __arg_arena *chunk, u64 idx, u8 order)
 {
 	u8 prev_order;
 
@@ -151,7 +151,7 @@ int idx_set_order(scx_buddy_chunk_t __arg_arena *chunk, u64 idx, u8 order)
 	return 0;
 }
 
-static u8 idx_get_order(scx_buddy_chunk_t *chunk, u64 idx)
+static u8 idx_get_order(buddy_chunk_t *chunk, u64 idx)
 {
 	u8 result;
 
@@ -168,7 +168,7 @@ static u8 idx_get_order(scx_buddy_chunk_t *chunk, u64 idx)
 	return (idx & 0x1) ? (result & 0xf) : (result >> 4);
 }
 
-static void __arena *idx_to_addr(scx_buddy_chunk_t *chunk, size_t idx)
+static void __arena *idx_to_addr(buddy_chunk_t *chunk, size_t idx)
 {
 	u64 address;
 
@@ -194,7 +194,7 @@ static void __arena *idx_to_addr(scx_buddy_chunk_t *chunk, size_t idx)
 	return (void __arena *)address;
 }
 
-static scx_buddy_header_t *idx_to_header(scx_buddy_chunk_t *chunk, size_t idx)
+static buddy_header_t *idx_to_header(buddy_chunk_t *chunk, size_t idx)
 {
 	bool allocated;
 	u64 address;
@@ -229,13 +229,13 @@ static scx_buddy_header_t *idx_to_header(scx_buddy_chunk_t *chunk, size_t idx)
 	 * less probable.
 	 */
 
-	return (scx_buddy_header_t *)(address + SCX_BUDDY_HEADER_OFF);
+	return (buddy_header_t *)(address + SCX_BUDDY_HEADER_OFF);
 }
 
-static void header_add_freelist(scx_buddy_chunk_t  *chunk,
-				scx_buddy_header_t *header, u64 idx, u8 order)
+static void header_add_freelist(buddy_chunk_t  *chunk,
+				buddy_header_t *header, u64 idx, u8 order)
 {
-	scx_buddy_header_t *tmp_header;
+	buddy_header_t *tmp_header;
 
 	idx_set_order(chunk, idx, order);
 
@@ -250,10 +250,10 @@ static void header_add_freelist(scx_buddy_chunk_t  *chunk,
 	chunk->freelists[order] = idx;
 }
 
-static void header_remove_freelist(scx_buddy_chunk_t  *chunk,
-				   scx_buddy_header_t *header, u8 order)
+static void header_remove_freelist(buddy_chunk_t  *chunk,
+				   buddy_header_t *header, u8 order)
 {
-	scx_buddy_header_t *tmp_header;
+	buddy_header_t *tmp_header;
 
 	if (header->prev_index != SCX_BUDDY_CHUNK_ITEMS) {
 		tmp_header = idx_to_header(chunk, header->prev_index);
@@ -296,10 +296,10 @@ static u64 size_to_order(size_t size)
 }
 
 __weak
-int add_leftovers_to_freelist(scx_buddy_chunk_t __arg_arena *chunk, u32 cur_idx,
+int add_leftovers_to_freelist(buddy_chunk_t __arg_arena *chunk, u32 cur_idx,
 		u64 min_order, u64 max_order)
 {
-	scx_buddy_header_t *header;
+	buddy_header_t *header;
 	u64 ord;
 	u32 idx;
 
@@ -320,17 +320,17 @@ int add_leftovers_to_freelist(scx_buddy_chunk_t __arg_arena *chunk, u32 cur_idx,
 	return 0;
 }
 
-static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
+static buddy_chunk_t *buddy_chunk_get(struct buddy *buddy)
 {
 	u64 order, ord, min_order, max_order;
-	scx_buddy_chunk_t  *chunk;
+	buddy_chunk_t  *chunk;
 	size_t left;
 	int power2;
 	u64 vaddr;
 	u32 idx;
 	int ret;
 
-	scx_buddy_unlock(buddy);
+	buddy_unlock(buddy);
 
 	ret = scx_alloc_arena_vaddr(buddy, &vaddr);
 	if (ret) {
@@ -355,7 +355,7 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 		return NULL;
 	}
 
-	if ((ret = scx_buddy_lock(buddy))) {
+	if ((ret = buddy_lock(buddy))) {
 		bpf_arena_free_pages(&arena, chunk, SCX_BUDDY_CHUNK_PAGES);
 		return NULL;
 	}
@@ -446,7 +446,7 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 				"chunk has size of 0x%lx bytes (left %lx bytes)\n",
 				sizeof(*chunk), left);
 
-			scx_buddy_unlock(buddy);
+			buddy_unlock(buddy);
 			return NULL;
 		}
 
@@ -464,7 +464,7 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 		 */
 		min_order = left ? order + 1 : order;
 		if (add_leftovers_to_freelist(chunk, idx, min_order, max_order)) {
-			scx_buddy_unlock(buddy);
+			buddy_unlock(buddy);
 			return NULL;
 		}
 
@@ -476,10 +476,10 @@ static scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_buddy *buddy)
 	return chunk;
 }
 
-__hidden int scx_buddy_init(struct scx_buddy			 *buddy,
+__hidden int buddy_init(struct buddy			 *buddy,
 			    arena_spinlock_t __arg_arena __arena *lock)
 {
-	scx_buddy_chunk_t *chunk;
+	buddy_chunk_t *chunk;
 	int ret;
 
 	buddy->lock = lock;
@@ -496,12 +496,12 @@ __hidden int scx_buddy_init(struct scx_buddy			 *buddy,
 		       "chunk must use one or more pages");
 
 	/* Chunk is already properly unpoisoned if allocated. */
-	if (scx_buddy_lock(buddy)) {
+	if (buddy_lock(buddy)) {
 		DIAG();
 		return -EINVAL;
 	}
 
-	chunk = scx_buddy_chunk_get(buddy);
+	chunk = buddy_chunk_get(buddy);
 	if (!chunk) {
 		buddy->first_chunk = NULL;
 		return -ENOMEM;
@@ -512,7 +512,7 @@ __hidden int scx_buddy_init(struct scx_buddy			 *buddy,
 	chunk->prev = NULL;
 	buddy->first_chunk = chunk;
 
-	scx_buddy_unlock(buddy);
+	buddy_unlock(buddy);
 
 	return 0;
 }
@@ -523,9 +523,9 @@ __hidden int scx_buddy_init(struct scx_buddy			 *buddy,
  * We do not take a lock because we are freeing arena pages, and nobody should
  * be using the allocator at that point in the execution.
  */
-__weak int scx_buddy_destroy(struct scx_buddy *buddy)
+__weak int buddy_destroy(struct buddy *buddy)
 {
-	scx_buddy_chunk_t *chunk, *next;
+	buddy_chunk_t *chunk, *next;
 
 	if (!buddy)
 		return -EINVAL;
@@ -552,10 +552,10 @@ __weak int scx_buddy_destroy(struct scx_buddy *buddy)
 	return 0;
 }
 
-__weak u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t __arg_arena *chunk,
+__weak u64 buddy_chunk_alloc(buddy_chunk_t __arg_arena *chunk,
 				 int				order_req)
 {
-	scx_buddy_header_t *header, *tmp_header, *next_header;
+	buddy_header_t *header, *tmp_header, *next_header;
 	u32 idx, tmpidx, retidx;
 	u64 address;
 	u64 order = 0;
@@ -627,9 +627,9 @@ __weak u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t __arg_arena *chunk,
 	return address;
 }
 
-__weak u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
+__weak u64 buddy_alloc_internal(struct buddy *buddy, size_t size)
 {
-	scx_buddy_chunk_t *chunk;
+	buddy_chunk_t *chunk;
 	u64 address;
 	int order;
 
@@ -642,18 +642,18 @@ __weak u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 		return (u64)NULL;
 	}
 
-	if (scx_buddy_lock(buddy))
+	if (buddy_lock(buddy))
 		return (u64)NULL;
 
 	for (chunk = buddy->first_chunk; chunk != NULL && can_loop;
 	     chunk = chunk->next) {
-		address = scx_buddy_chunk_alloc(chunk, order);
+		address = buddy_chunk_alloc(chunk, order);
 		if (address)
 			goto done;
 	}
 
 	/* Get a new chunk. */
-	chunk = scx_buddy_chunk_get(buddy);
+	chunk = buddy_chunk_get(buddy);
 	if (!chunk)
 		return (u64)NULL;
 
@@ -662,12 +662,12 @@ __weak u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 	chunk->prev = NULL;
 	buddy->first_chunk = chunk;
 
-	address = scx_buddy_chunk_alloc(buddy->first_chunk, order);
+	address = buddy_chunk_alloc(buddy->first_chunk, order);
 
 done:
 
 	if (!address) {
-		scx_buddy_unlock(buddy);
+		buddy_unlock(buddy);
 		return (u64)NULL;
 	}
 
@@ -676,22 +676,22 @@ done:
 	 * data is smaller than the header, we must poison any
 	 * unused bytes that were part of the header.
 	 */
-	if (size < SCX_BUDDY_HEADER_OFF + sizeof(scx_buddy_header_t))
+	if (size < SCX_BUDDY_HEADER_OFF + sizeof(buddy_header_t))
 		asan_poison((u8 __arena *)address + SCX_BUDDY_HEADER_OFF,
-			    BUDDY_POISONED, sizeof(scx_buddy_header_t));
+			    BUDDY_POISONED, sizeof(buddy_header_t));
 
 	asan_unpoison((u8 __arena *)address, size);
 
-	scx_buddy_unlock(buddy);
+	buddy_unlock(buddy);
 
 	return address;
 }
 
-static __always_inline int scx_buddy_free_unlocked(struct scx_buddy *buddy, u64 addr)
+static __always_inline int buddy_free_unlocked(struct buddy *buddy, u64 addr)
 {
-	scx_buddy_header_t *header, *buddy_header;
+	buddy_header_t *header, *buddy_header;
 	u64 idx, buddy_idx, tmp_idx;
-	scx_buddy_chunk_t *chunk;
+	buddy_chunk_t *chunk;
 	bool allocated;
 	u8 order;
 
@@ -765,19 +765,19 @@ static __always_inline int scx_buddy_free_unlocked(struct scx_buddy *buddy, u64 
 	return 0;
 }
 
-__weak int scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
+__weak int buddy_free_internal(struct buddy *buddy, u64 addr)
 {
 	int ret;
 
 	if (!buddy)
 		return -EINVAL;
 
-	if ((ret = scx_buddy_lock(buddy)))
+	if ((ret = buddy_lock(buddy)))
 		return ret;
 
-	scx_buddy_free_unlocked(buddy, addr);
+	buddy_free_unlocked(buddy, addr);
 
-	scx_buddy_unlock(buddy);
+	buddy_unlock(buddy);
 
 	return 0;
 }

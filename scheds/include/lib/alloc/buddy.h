@@ -11,13 +11,13 @@
 
 /* Buddy allocator-related structs. */
 
-struct scx_buddy_chunk;
-typedef struct scx_buddy_chunk __arena scx_buddy_chunk_t;
+struct buddy_chunk;
+typedef struct buddy_chunk __arena buddy_chunk_t;
 
-struct scx_buddy_header;
-typedef struct scx_buddy_header __arena scx_buddy_header_t;
+struct buddy_header;
+typedef struct buddy_header __arena buddy_header_t;
 
-enum scx_buddy_consts {
+enum buddy_consts {
 	SCX_BUDDY_MIN_ALLOC_SHIFT	= 4,
 	SCX_BUDDY_MIN_ALLOC_BYTES	= 1 << SCX_BUDDY_MIN_ALLOC_SHIFT,
 	SCX_BUDDY_CHUNK_NUM_ORDERS	= 1 << 4,	/* 4 bits per order */
@@ -30,7 +30,7 @@ enum scx_buddy_consts {
 	SCX_BUDDY_VADDR_SIZE		= SCX_BUDDY_CHUNK_BYTES << 10 /* 1024 chunks maximum */
 };
 
-struct scx_buddy_header {
+struct buddy_header {
 	u32 prev_index;	/* "Pointer" to the previous available allocation of the same size. */
 	u32 next_index; /* Same for the next allocation. */
 };
@@ -38,7 +38,7 @@ struct scx_buddy_header {
 /*
  * We bring memory into the allocator 1MiB at a time.
  */
-struct scx_buddy_chunk {
+struct buddy_chunk {
 	/* The order of the current allocation for a item. 4 bits per order. */
 	u8			orders[SCX_BUDDY_CHUNK_ITEMS / 2];
 	/* 
@@ -48,24 +48,24 @@ struct scx_buddy_chunk {
 	u8			allocated[SCX_BUDDY_CHUNK_ITEMS / 8];
 	/* Freelists for O(1) allocation. */
 	u64			freelists[SCX_BUDDY_CHUNK_NUM_ORDERS];
-	scx_buddy_chunk_t	*prev;
-	scx_buddy_chunk_t	*next;
+	buddy_chunk_t	*prev;
+	buddy_chunk_t	*next;
 };
 
-struct scx_buddy {
-	scx_buddy_chunk_t *first_chunk;		/* Pointer to the chunk linked list. */
+struct buddy {
+	buddy_chunk_t *first_chunk;		/* Pointer to the chunk linked list. */
 	arena_spinlock_t __arena *lock;		/* Allocator lock */
 	u64 vaddr;				/* Allocation into reserved vaddr */
 };
 
 #ifdef __BPF__
 
-int scx_buddy_init(struct scx_buddy *buddy, arena_spinlock_t __arena *lock);
-int scx_buddy_destroy(struct scx_buddy *buddy);
-int scx_buddy_free_internal(struct scx_buddy *buddy, u64 free);
-#define scx_buddy_free(buddy, ptr) do { scx_buddy_free_internal((buddy), (u64)(ptr)); } while (0)
-u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size);
-#define scx_buddy_alloc(alloc, size) ((void __arena *)scx_buddy_alloc_internal((alloc), (size)))
+int buddy_init(struct buddy *buddy, arena_spinlock_t __arena *lock);
+int buddy_destroy(struct buddy *buddy);
+int buddy_free_internal(struct buddy *buddy, u64 free);
+#define buddy_free(buddy, ptr) do { buddy_free_internal((buddy), (u64)(ptr)); } while (0)
+u64 buddy_alloc_internal(struct buddy *buddy, size_t size);
+#define buddy_alloc(alloc, size) ((void __arena *)buddy_alloc_internal((alloc), (size)))
 
 
 #endif /* __BPF__  */

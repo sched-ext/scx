@@ -12,7 +12,7 @@
 
 #include "selftest.h"
 
-private(ST_BUDDY) struct scx_buddy st_buddy;
+private(ST_BUDDY) struct buddy st_buddy;
 static u64 __arena st_buddy_lock;
 
 struct segarr_entry {
@@ -33,12 +33,12 @@ static int scx_selftest_buddy_create()
 	int ret, i;
 
 	for (i = 0; i < iters && can_loop; i++) {
-		ret = scx_buddy_init(
+		ret = buddy_init(
 			&st_buddy, (arena_spinlock_t __arena *)&st_buddy_lock);
 		if (ret)
 			return ret;
 
-		ret = scx_buddy_destroy(&st_buddy);
+		ret = buddy_destroy(&st_buddy);
 		if (ret)
 			return ret;
 	}
@@ -52,18 +52,18 @@ static int scx_selftest_buddy_alloc()
 	int ret, i;
 
 	for (i = 0; i < 8 && can_loop; i++) {
-		ret = scx_buddy_init(
+		ret = buddy_init(
 			&st_buddy, (arena_spinlock_t __arena *)&st_buddy_lock);
 		if (ret)
 			return ret;
 
-		mem = scx_buddy_alloc(&st_buddy, sizes[i]);
+		mem = buddy_alloc(&st_buddy, sizes[i]);
 		if (!mem) {
-			scx_buddy_destroy(&st_buddy);
+			buddy_destroy(&st_buddy);
 			return -ENOMEM;
 		}
 
-		scx_buddy_destroy(&st_buddy);
+		buddy_destroy(&st_buddy);
 	}
 
 	return 0;
@@ -76,22 +76,22 @@ static int scx_selftest_buddy_alloc_free()
 	void __arena *mem;
 	int ret, i;
 
-	ret = scx_buddy_init(&st_buddy,
+	ret = buddy_init(&st_buddy,
 			     (arena_spinlock_t __arena *)&st_buddy_lock);
 	if (ret)
 		return ret;
 
 	bpf_for(i, 0, iters) {
-		mem = scx_buddy_alloc(&st_buddy, sizes[(i * 5) % 8]);
+		mem = buddy_alloc(&st_buddy, sizes[(i * 5) % 8]);
 		if (!mem) {
-			scx_buddy_destroy(&st_buddy);
+			buddy_destroy(&st_buddy);
 			return -ENOMEM;
 		}
 
-		scx_buddy_free(&st_buddy, mem);
+		buddy_free(&st_buddy, mem);
 	}
 
-	scx_buddy_destroy(&st_buddy);
+	buddy_destroy(&st_buddy);
 
 	return 0;
 }
@@ -104,7 +104,7 @@ static int scx_selftest_buddy_alloc_multiple()
 	size_t sz;
 	u8 poison;
 
-	ret = scx_buddy_init(&st_buddy,
+	ret = buddy_init(&st_buddy,
 			     (arena_spinlock_t __arena *)&st_buddy_lock);
 	if (ret)
 		return ret;
@@ -122,9 +122,9 @@ static int scx_selftest_buddy_alloc_multiple()
 		sz = sizes[idx % 9];
 		poison = (u8)i;
 
-		mem = scx_buddy_alloc(&st_buddy, sz);
+		mem = buddy_alloc(&st_buddy, sz);
 		if (!mem) {
-			scx_buddy_destroy(&st_buddy);
+			buddy_destroy(&st_buddy);
 			bpf_printk("%s:%d", __func__, __LINE__);
 			return -ENOMEM;
 		}
@@ -136,7 +136,7 @@ static int scx_selftest_buddy_alloc_multiple()
 		bpf_for(j, 0, sz) {
 			mem[j] = poison;
 			if (mem[j] != poison) {
-				scx_buddy_destroy(&st_buddy);
+				buddy_destroy(&st_buddy);
 				return -EINVAL;
 			}
 		}
@@ -157,17 +157,17 @@ static int scx_selftest_buddy_alloc_multiple()
 
 		bpf_for(j, 0, sz) {
 			if (mem[j] != poison) {
-				scx_buddy_destroy(&st_buddy);
+				buddy_destroy(&st_buddy);
 				bpf_printk("%s:%d %lx %u vs %u", __func__,
 					   __LINE__, &mem[j], mem[j], poison);
 				return -EINVAL;
 			}
 		}
 
-		scx_buddy_free(&st_buddy, mem);
+		buddy_free(&st_buddy, mem);
 	}
 
-	scx_buddy_destroy(&st_buddy);
+	buddy_destroy(&st_buddy);
 
 	return 0;
 }
@@ -179,18 +179,18 @@ static int scx_selftest_buddy_alignment()
 	void __arena *ptrs[17];
 	int ret, i;
 
-	ret = scx_buddy_init(&st_buddy,
+	ret = buddy_init(&st_buddy,
 			     (arena_spinlock_t __arena *)&st_buddy_lock);
 	if (ret)
 		return ret;
 
 	/* Allocate various sizes and check alignment */
 	bpf_for(i, 0, 17) {
-		ptrs[i] = scx_buddy_alloc(&st_buddy, sizes[i]);
+		ptrs[i] = buddy_alloc(&st_buddy, sizes[i]);
 		if (!ptrs[i]) {
 			bpf_printk("alignment test: alloc failed for size %lu",
 				   sizes[i]);
-			scx_buddy_destroy(&st_buddy);
+			buddy_destroy(&st_buddy);
 			return -ENOMEM;
 		}
 
@@ -199,17 +199,17 @@ static int scx_selftest_buddy_alignment()
 			bpf_printk(
 				"alignment test: ptr %llx not 8-byte aligned (size %lu)",
 				(u64)ptrs[i], sizes[i]);
-			scx_buddy_destroy(&st_buddy);
+			buddy_destroy(&st_buddy);
 			return -EINVAL;
 		}
 	}
 
 	/* Free all allocations */
 	bpf_for(i, 0, 17) {
-		scx_buddy_free(&st_buddy, ptrs[i]);
+		buddy_free(&st_buddy, ptrs[i]);
 	}
 
-	scx_buddy_destroy(&st_buddy);
+	buddy_destroy(&st_buddy);
 
 	return 0;
 }

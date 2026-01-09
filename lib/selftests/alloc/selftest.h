@@ -17,16 +17,9 @@ struct task_ctx_nonarena {
 
 typedef struct task_ctx_nonarena __arena task_ctx;
 
-int scx_selftest_atq(void);
-int scx_selftest_bitmap(void);
 int scx_selftest_buddy(void);
-int scx_selftest_lvqueue(void);
-int scx_selftest_minheap(void);
 int scx_selftest_stack(void);
 int scx_selftest_static(void);
-int scx_selftest_topology(void);
-int scx_selftest_btree(void);
-int scx_selftest_rbtree(void);
 
 #ifndef __BPF__
 
