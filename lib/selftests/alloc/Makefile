@@ -55,4 +55,4 @@ main.bpf.o: $(BPF_OBJECTS)
 	clang $(BPF_FLAGS) -S -emit-llvm -o $(basename $@).ll  $<
 	clang $(BPF_FLAGS) -target bpf -O2 -S -o $(basename $@).s  $<
 clean:
-	rm -f *.skel.h *.bpf.o selftest *.ll *.s
+	rm -f *.skel.h *.bpf.o selftest *.ll *.s *.tmp
