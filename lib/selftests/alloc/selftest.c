@@ -25,9 +25,9 @@
 #include <lib/arena.h>
 #include <lib/alloc/asan.h>
 
-#include <alloc/static.h>
-#include <alloc/stack.h>
 #include <alloc/buddy.h>
+#include <alloc/bump.h>
+#include <alloc/stack.h>
 
 #include "selftest.skel.h"
 

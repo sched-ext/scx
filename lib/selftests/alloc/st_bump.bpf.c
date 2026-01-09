@@ -7,7 +7,7 @@
 #include <scx/common.bpf.h>
 
 #include <alloc/asan.h>
-#include <alloc/static.h>
+#include <alloc/bump.h>
 #include <alloc/common.h>
 
 #include "selftest.h"

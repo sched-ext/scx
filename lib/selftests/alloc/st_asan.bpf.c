@@ -8,8 +8,8 @@
 
 #include <alloc/asan.h>
 #include <alloc/buddy.h>
+#include <alloc/bump.h>
 #include <alloc/stack.h>
-#include <alloc/static.h>
 #include <alloc/common.h>
 
 #include "selftest.h"

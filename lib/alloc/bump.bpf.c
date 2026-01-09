@@ -18,7 +18,7 @@
 
 #include <alloc/common.h>
 #include <alloc/asan.h>
-#include <alloc/static.h>
+#include <alloc/bump.h>
 
 /* Maximum memory that can be allocated by the arena. */
 #define ARENA_MAX_MEMORY (1ULL << 20)
