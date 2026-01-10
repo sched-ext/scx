@@ -1,0 +1,29 @@
+[package]
+name = "scx_cake"
+version = "1.0.0"
+authors = ["ritz"]
+edition = "2021"
+description = "A sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+ctrlc = "3.4"
+libbpf-rs = "=0.26.0-beta.1"
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+plain = "0.2"
+ratatui = "0.29"
+crossterm = "0.28"
+arboard = "3.4"
+
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
+
+[build-dependencies]
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+
+[[bin]]
+name = "scx_cake"
+path = "src/main.rs"
