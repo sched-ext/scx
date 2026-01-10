@@ -1,7 +1,9 @@
+---
 name: bpf-next-test
 
-on:
-  # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
+'on':
+  # only runs on main, every 6 hours. specify hours explicitly so scheduled runs
+  # can be offset and use a random minute.
   schedule:
     - cron: "35 0,6,12,18 * * *"
 
@@ -23,15 +25,14 @@ jobs:
     needs:
       - integration-test
     steps:
-    - uses: actions/checkout@v2
-    - name: Slack Notification
-      uses: rtCamp/action-slack-notify@v2
-      env:
-        SLACK_USERNAME: ci
-        SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
-        SLACK_TITLE: Workflow failed
-        SLACK_MESSAGE: bpf-next ci job failed.
-        SLACK_COLOR: failure
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
-
-
+      - uses: actions/checkout@v4
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_USERNAME: ci
+          SLACK_ICON: >-
+            https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
+          SLACK_TITLE: Workflow failed
+          SLACK_MESSAGE: bpf-next ci job failed.
+          SLACK_COLOR: failure
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
