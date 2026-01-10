@@ -118,6 +118,13 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     cpu_controller_disabled: bool,
 
+    /// Enable dynamic CPU selection for affinitized tasks.
+    /// When enabled, affinitized tasks are randomly distributed across compatible
+    /// CPUs on each wake rather than being statically assigned to a single CPU.
+    /// This helps balance load when many affinitized tasks share overlapping CPU masks.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    dynamic_affinity_cpu_selection: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -222,6 +229,11 @@ impl<'a> Scheduler<'a> {
             .as_mut()
             .unwrap()
             .cpu_controller_disabled = opts.cpu_controller_disabled;
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .unwrap()
+            .dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
 
         skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
