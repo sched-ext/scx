@@ -36,12 +36,16 @@ void __arena *scx_task_alloc(struct task_struct *p)
 
 	mval = bpf_task_storage_get(&scx_task_map, p, 0,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!mval)
+	if (!mval) {
+		bpf_printk("%s:%d bpf_task_storage_get failed", __func__, __LINE__);
 		return NULL;
+	}
 
 	data = scx_alloc(&scx_task_allocator);
-	if (unlikely(!data))
+	if (unlikely(!data)) {
+		bpf_printk("%s:%d scx_alloc failed", __func__, __LINE__);
 		return NULL;
+	}
 
 	mval->tid = data->tid;
 	mval->tptr = (__u64) p;

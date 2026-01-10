@@ -81,6 +81,7 @@
 void __arena* bpf_arena_alloc_pages(void *map, void __arena *addr, __u32 page_cnt,
 				    int node_id, __u64 flags) __ksym __weak;
 void bpf_arena_free_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym __weak;
+int bpf_arena_reserve_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym __weak;
 
 /*
  * Note that cond_break can only be portably used in the body of a breakable
@@ -173,3 +174,4 @@ void bpf_arena_free_pages(void *map, void __arena *ptr, __u32 page_cnt) __ksym _
 
 void bpf_preempt_disable(void) __weak __ksym;
 void bpf_preempt_enable(void) __weak __ksym;
+ssize_t bpf_arena_mapping_nr_pages(void *p__map) __weak __ksym;

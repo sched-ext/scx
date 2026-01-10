@@ -11,6 +11,7 @@
 #include <libgen.h>
 #include <bpf/bpf.h>
 #include <scx/common.h>
+#include <lib/sdt_task_defs.h>
 #include "scx_sdt.bpf.skel.h"
 
 const char help_fmt[] =

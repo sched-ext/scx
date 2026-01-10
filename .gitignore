@@ -11,3 +11,6 @@ tags
 *.skel.h
 selftest
 CLAUDE.md
+**/.claude
+**/*.ll
+**/*.s

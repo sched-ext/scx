@@ -845,6 +845,51 @@ void BPF_STRUCT_OPS(lavd_dequeue, struct task_struct *p, u64 deq_flags)
 		debugln("Failed to cancel task %d with %d", p->pid, ret);
 }
 
+
+__hidden __attribute__ ((noinline))
+void consume_prev(struct task_struct *prev, task_ctx *taskc_prev, struct cpu_ctx *cpuc)
+{
+	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
+		return;
+
+	taskc_prev = taskc_prev ?: get_task_ctx(prev);
+	if (!taskc_prev)
+		return;
+
+	/*
+	 * Let's update stats first before calculating time slice.
+	 */
+	update_stat_for_refill(prev, taskc_prev, cpuc);
+
+	/*
+	 * Under the CPU bandwidth control with cpu.max,
+	 * check if the cgroup is throttled before executing
+	 * the task.
+	 */
+	if (enable_cpu_bw && (prev->pid != lavd_pid) &&
+		(cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
+		return;
+
+	/*
+	 * Refill the time slice.
+	 */
+	prev->scx.slice = calc_time_slice(taskc_prev, cpuc);
+
+	/*
+	 * Reset prev task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	if (is_lock_holder_running(cpuc))
+		reset_lock_futex_boost(taskc_prev, cpuc);
+
+	/*
+	 * Task flags can be updated when calculating the time
+	 * slice (LAVD_FLAG_SLICE_BOOST), so let's update the
+	 * CPU's copy of the flag as well.
+	 */
+	cpuc->flags = taskc_prev->flags;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct bpf_cpumask *active, *ovrflw;
@@ -878,8 +923,11 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * to make system-wide forward progress.
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    is_lock_holder_running(cpuc))
-		goto consume_prev;
+	    is_lock_holder_running(cpuc)) {
+		consume_prev(prev, NULL, cpuc);
+		return;
+	}
+
 
 	/*
 	 * If all CPUs are using, directly consume without checking CPU masks.
@@ -896,7 +944,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	ovrflw = ovrflw_cpumask;
 	if (!active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
-		goto unlock_out;
+		bpf_rcu_read_unlock();
+		return;
 	}
 
 	/*
@@ -959,8 +1008,11 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If there is nothing to run on per-CPU DSQ and we do not use
 	 * per-domain DSQ, there is nothing to do. So, stop here.
 	 */
-	if (!use_cpdom_dsq())
-		goto unlock_out;
+	if (!use_cpdom_dsq()) {
+		bpf_rcu_read_unlock();
+		return;
+	}
+
 	/* NOTE: We use per-domain DSQ. */
 
 	/*
@@ -1044,7 +1096,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		bpf_task_release(p);
 	}
 
-unlock_out:
 	bpf_rcu_read_unlock();
 
 	/*
@@ -1063,44 +1114,7 @@ consume_out:
 	/*
 	 * If nothing to run, continue running the previous task.
 	 */
-	if (prev && prev->scx.flags & SCX_TASK_QUEUED) {
-consume_prev:
-		taskc_prev = taskc_prev ?: get_task_ctx(prev);
-		if (taskc_prev) {
-			/*
-			 * Let's update stats first before calculating time slice.
-			 */
-			update_stat_for_refill(prev, taskc_prev, cpuc);
-
-			/*
-			 * Under the CPU bandwidth control with cpu.max,
-			 * check if the cgroup is throttled before executing
-			 * the task.
-			 */
-			if (enable_cpu_bw && (prev->pid != lavd_pid) &&
-			    (cgroup_throttled(prev, taskc_prev, false) == -EAGAIN))
-				return;
-
-			/*
-			 * Refill the time slice.
-			 */
-			prev->scx.slice = calc_time_slice(taskc_prev, cpuc);
-
-			/*
-			 * Reset prev task's lock and futex boost count
-			 * for a lock holder to be boosted only once.
-			 */
-			if (is_lock_holder_running(cpuc))
-				reset_lock_futex_boost(taskc_prev, cpuc);
-
-			/*
-			 * Task flags can be updated when calculating the time
-			 * slice (LAVD_FLAG_SLICE_BOOST), so let's update the
-			 * CPU's copy of the flag as well.
-			 */
-			cpuc->flags = taskc_prev->flags;
-		}
-	}
+	consume_prev(prev, taskc_prev, cpuc);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1757,10 +1771,6 @@ static int init_cpumasks(void)
 	err = calloc_cpumask(&big_cpumask);
 	if (err)
 		goto out;
-
-	err = calloc_cpumask(&little_cpumask);
-	if (err)
-		goto out;
 out:
 	bpf_rcu_read_unlock();
 	return err;
@@ -1769,7 +1779,7 @@ out:
 static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
+	struct bpf_cpumask *turbo, *big, *active, *ovrflw, *cd_cpumask;
 	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
 	int cpu, i, j, k, err = 0;
@@ -1784,10 +1794,9 @@ static s32 init_per_cpu_ctx(u64 now)
 	 */
 	turbo = turbo_cpumask;
 	big = big_cpumask;
-	little = little_cpumask;
 	active  = active_cpumask;
 	ovrflw  = ovrflw_cpumask;
-	if (!turbo || !big || !little || !active || !ovrflw) {
+	if (!turbo || !big || !active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		err = -ENOMEM;
 		goto unlock_out;
@@ -1859,7 +1868,6 @@ static s32 init_per_cpu_ctx(u64 now)
 			bpf_cpumask_set_cpu(cpu, big);
 		}
 		else {
-			bpf_cpumask_set_cpu(cpu, little);
 			have_little_core = true;
 		}
 
