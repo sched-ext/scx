@@ -3,12 +3,8 @@
  * Copyright (c) 2024-2025 Meta Platforms, Inc. and affiliates.
  * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
-#include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
-
-#include <lib/arena_map.h>
-#include <alloc/asan.h>
 #include <alloc/common.h>
+#include <alloc/asan.h>
 
 #pragma clang attribute push(__attribute__((no_sanitize("address"))), \
 			     apply_to = function)

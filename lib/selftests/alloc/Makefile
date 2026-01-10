@@ -20,6 +20,8 @@ INCLUDES=-I$(LIBBPF_DIR)/include -I$(INCLUDEDIR) -I$(INCLUDEDIR)/arch -I$(INCLUD
 BPF_CFLAGS=--target=bpf -g -O2 -D__TARGET_ARCH_x86 -mcpu=v3 -mlittle-endian
 BPF_CFLAGS+=-Wall -Wno-compare-distinct-pointer-types -Wno-incompatible-pointer-types-discards-qualifiers
 BPF_ASAN_FLAGS=-fsanitize=kernel-address -fno-stack-protector -fno-builtin
+# XXX Remove when moving to the kernel
+BPF_CFLAGS+=-D__BPF_FEATURE_ADDR_SPACE_CAST -DENABLE_ATOMICS_TESTS
 
 BPF_LLVM_FLAGS+= -mllvm -asan-instrument-address-spaces=1 -mllvm -asan-shadow-addr-space=1
 BPF_LLVM_FLAGS+= -mllvm -asan-use-stack-safety=0 -mllvm -asan-stack=0

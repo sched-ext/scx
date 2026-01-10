@@ -4,13 +4,12 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <scx/common.bpf.h>
+#include <alloc/common.h>
 
 #include <alloc/asan.h>
 #include <alloc/buddy.h>
+#include <alloc/bump.h>
 #include <alloc/stack.h>
-#include <alloc/static.h>
-#include <alloc/common.h>
 
 #include "selftest.h"
 
@@ -59,7 +58,7 @@ int asan_test_static_blob_one(void)
 	volatile struct blob __arena *blob;
 	const size_t alignment = 1;
 
-	blob = scx_static_alloc(sizeof(blob) - 1, alignment);
+	blob = bump_alloc(sizeof(blob) - 1, alignment);
 	if (!blob)
 		return -ENOMEM;
 
@@ -92,9 +91,9 @@ int asan_test_static_blob(void)
 	const int iters = 20;
 	int ret, i;
 
-	ret = scx_static_init(ST_PAGES);
+	ret = bump_init(ST_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -107,7 +106,7 @@ int asan_test_static_blob(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	ASAN_VALIDATE();
 
@@ -122,7 +121,7 @@ int asan_test_static_array_one(void)
 	char __arena *mem;
 	int i;
 
-	mem = scx_static_alloc(sizeof(*mem) * bytes, alignment);
+	mem = bump_alloc(sizeof(*mem) * bytes, alignment);
 	if (!mem)
 		return -ENOMEM;
 
@@ -141,9 +140,9 @@ int asan_test_static_array(void)
 	const size_t iters = 20;
 	int ret, i;
 
-	ret = scx_static_init(ST_PAGES);
+	ret = bump_init(ST_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -156,7 +155,7 @@ int asan_test_static_array(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	return 0;
 }
@@ -166,9 +165,9 @@ int asan_test_static_all(void)
 	const int iters = 50;
 	int ret, i;
 
-	ret = scx_static_init(ST_PAGES);
+	ret = bump_init(ST_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -188,7 +187,7 @@ int asan_test_static_all(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	return 0;
 }
@@ -205,7 +204,7 @@ u64 __arena stk_blks[STACK_ALLOCS];
 /*
  * Spinlock used by the stack allocator.
  */
-private(ST_STACK) struct scx_stk st_stack;
+private(ST_STACK) struct stk st_stack;
 u64 __arena st_asan_lock;
 
 static __maybe_unused void stk_blks_dump(void)
@@ -307,7 +306,7 @@ int asan_test_stack_uaf_oob_single(u8 __arena __arg_arena *alloced,
 	int i;
 
 	/* Use after free check. */
-	scx_stk_free(&st_stack, freed);
+	stk_free(&st_stack, freed);
 
 	bpf_for(i, 0, PAGE_SIZE) {
 		freed[i] = 0xba;
@@ -361,15 +360,15 @@ __weak int asan_test_stack_uaf_oob(void)
 	int ret, i;
 
 	/* Set the stack to support 4KiB allocations. */
-	ret = scx_stk_init(&st_stack, (arena_spinlock_t __arena *)&st_asan_lock,
+	ret = stk_init(&st_stack, (arena_spinlock_t __arena *)&st_asan_lock,
 			   alloc_size, STACK_PAGES_PER_ALLOC);
 	if (ret) {
-		bpf_printk("scx_stk_init failed with %d", ret);
+		bpf_printk("stk_init failed with %d", ret);
 		return ret;
 	}
 
 	bpf_for(i, 0, STACK_ALLOCS) {
-		block = (u64)scx_stk_alloc(&st_stack);
+		block = (u64)stk_alloc(&st_stack);
 		if (!block) {
 			bpf_printk("allocation %d failed", i);
 			return -ENOMEM;
@@ -399,7 +398,7 @@ __weak int asan_test_stack_uaf_oob(void)
 			return ret;
 	}
 
-	scx_stk_destroy(&st_stack);
+	stk_destroy(&st_stack);
 
 	return 0;
 }
@@ -442,7 +441,7 @@ int asan_test_static(void)
 	return 0;
 }
 
-private(ST_BUDDY) struct scx_buddy st_buddy_asan;
+private(ST_BUDDY) struct buddy st_buddy_asan;
 
 __weak int asan_test_buddy_oob_single(size_t alloc_size)
 {
@@ -451,9 +450,9 @@ __weak int asan_test_buddy_oob_single(size_t alloc_size)
 
 	ASAN_VALIDATE();
 
-	mem = scx_buddy_alloc(&st_buddy_asan, alloc_size);
+	mem = buddy_alloc(&st_buddy_asan, alloc_size);
 	if (!mem) {
-		bpf_printk("scx_buddy_alloc failed for size %lu", alloc_size);
+		bpf_printk("buddy_alloc failed for size %lu", alloc_size);
 		return -ENOMEM;
 	}
 
@@ -467,7 +466,7 @@ __weak int asan_test_buddy_oob_single(size_t alloc_size)
 	mem[alloc_size] = 0xba;
 	ASAN_VALIDATE_ADDR(true, &mem[alloc_size]);
 
-	scx_buddy_free(&st_buddy_asan, mem);
+	buddy_free(&st_buddy_asan, mem);
 
 	return 0;
 }
@@ -477,9 +476,9 @@ __weak int asan_test_buddy_uaf_single(size_t alloc_size)
 	u8 __arena *mem;
 	int i;
 
-	mem = scx_buddy_alloc(&st_buddy_asan, alloc_size);
+	mem = buddy_alloc(&st_buddy_asan, alloc_size);
 	if (!mem) {
-		bpf_printk("scx_buddy_alloc failed for size %lu", alloc_size);
+		bpf_printk("buddy_alloc failed for size %lu", alloc_size);
 		return -ENOMEM;
 	}
 
@@ -492,12 +491,12 @@ __weak int asan_test_buddy_uaf_single(size_t alloc_size)
 
 	ASAN_VALIDATE();
 
-	scx_buddy_free(&st_buddy_asan, mem);
+	buddy_free(&st_buddy_asan, mem);
 
 	bpf_for(i, 0, alloc_size) {
 		/* The header doesn't get poisoned. */
-		if (SCX_BUDDY_HEADER_OFF <= i &&
-		    i < SCX_BUDDY_HEADER_OFF + sizeof(struct scx_buddy_header))
+		if (BUDDY_HEADER_OFF <= i &&
+		    i < BUDDY_HEADER_OFF + sizeof(struct buddy_header))
 			continue;
 
 		mem[i] = 0xba;
@@ -517,7 +516,7 @@ __weak int asan_test_buddy_blob_single(void)
 	volatile struct buddy_blob __arena *blob;
 	const size_t alloc_size = sizeof(struct buddy_blob) - 1;
 
-	blob = scx_buddy_alloc(&st_buddy_asan, alloc_size);
+	blob = buddy_alloc(&st_buddy_asan, alloc_size);
 	if (!blob)
 		return -ENOMEM;
 
@@ -530,7 +529,7 @@ __weak int asan_test_buddy_blob_single(void)
 	blob->oob = 0;
 	ASAN_VALIDATE_ADDR(true, &blob->oob);
 
-	scx_buddy_free(&st_buddy_asan, (void __arena *)blob);
+	buddy_free(&st_buddy_asan, (void __arena *)blob);
 
 	return 0;
 }
@@ -542,10 +541,10 @@ __weak int asan_test_buddy_oob(void)
 	};
 	int ret, i;
 
-	ret = scx_buddy_init(&st_buddy_asan,
+	ret = buddy_init(&st_buddy_asan,
 			     (arena_spinlock_t __arena *)&st_asan_lock);
 	if (ret) {
-		bpf_printk("scx_buddy_init failed with %d", ret);
+		bpf_printk("buddy_init failed with %d", ret);
 		return ret;
 	}
 
@@ -554,12 +553,12 @@ __weak int asan_test_buddy_oob(void)
 		if (ret) {
 			bpf_printk("%s:%d Failed for size %lu", __func__,
 				   __LINE__, sizes[i]);
-			scx_buddy_destroy(&st_buddy_asan);
+			buddy_destroy(&st_buddy_asan);
 			return ret;
 		}
 	}
 
-	scx_buddy_destroy(&st_buddy_asan);
+	buddy_destroy(&st_buddy_asan);
 
 	ASAN_VALIDATE();
 
@@ -571,10 +570,10 @@ __weak int asan_test_buddy_uaf(void)
 	size_t sizes[] = { 16, 32, 64, 128, 256, 512, 128, 1024, 16384 };
 	int ret, i;
 
-	ret = scx_buddy_init(&st_buddy_asan,
+	ret = buddy_init(&st_buddy_asan,
 			     (arena_spinlock_t __arena *)&st_asan_lock);
 	if (ret) {
-		bpf_printk("scx_buddy_init failed with %d", ret);
+		bpf_printk("buddy_init failed with %d", ret);
 		return ret;
 	}
 
@@ -583,12 +582,12 @@ __weak int asan_test_buddy_uaf(void)
 		if (ret) {
 			bpf_printk("%s:%d Failed for size %lu", __func__,
 				   __LINE__, sizes[i]);
-			scx_buddy_destroy(&st_buddy_asan);
+			buddy_destroy(&st_buddy_asan);
 			return ret;
 		}
 	}
 
-	scx_buddy_destroy(&st_buddy_asan);
+	buddy_destroy(&st_buddy_asan);
 
 	ASAN_VALIDATE();
 
@@ -600,10 +599,10 @@ __weak int asan_test_buddy_blob(void)
 	const int iters = 10;
 	int ret, i;
 
-	ret = scx_buddy_init(&st_buddy_asan,
+	ret = buddy_init(&st_buddy_asan,
 			     (arena_spinlock_t __arena *)&st_asan_lock);
 	if (ret) {
-		bpf_printk("scx_buddy_init failed with %d", ret);
+		bpf_printk("buddy_init failed with %d", ret);
 		return ret;
 	}
 
@@ -612,12 +611,12 @@ __weak int asan_test_buddy_blob(void)
 		if (ret) {
 			bpf_printk("%s:%d Failed on iteration %d", __func__,
 				   __LINE__, i);
-			scx_buddy_destroy(&st_buddy_asan);
+			buddy_destroy(&st_buddy_asan);
 			return ret;
 		}
 	}
 
-	scx_buddy_destroy(&st_buddy_asan);
+	buddy_destroy(&st_buddy_asan);
 
 	ASAN_VALIDATE();
 

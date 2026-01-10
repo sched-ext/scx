@@ -4,11 +4,9 @@
  * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 
-#include <scx/common.bpf.h>
-
-#include <alloc/asan.h>
-#include <alloc/static.h>
 #include <alloc/common.h>
+#include <alloc/asan.h>
+#include <alloc/bump.h>
 
 #include "selftest.h"
 
@@ -56,11 +54,11 @@ static inline bool st_isset(void __arena *mem, u8 byte, size_t size)
 #define ALLOC_OR_FAIL(bytes, alignment)                                       \
 	({                                                                    \
 		void __arena *mem;                                            \
-		mem = scx_static_alloc((bytes), (alignment));                 \
+		mem = bump_alloc((bytes), (alignment));                 \
 		if (!mem) {                                                   \
-			bpf_printk("%s:%d scx_static_alloc failed", __func__, \
+			bpf_printk("%s:%d bump_alloc failed", __func__, \
 				   __LINE__);                                 \
-			scx_static_destroy();                                 \
+			bump_destroy();                                 \
 			return -ENOMEM;                                       \
 		}                                                             \
 		mem;                                                          \
@@ -68,8 +66,8 @@ static inline bool st_isset(void __arena *mem, u8 byte, size_t size)
 
 #define INIT_OR_FAIL(bytes)                                                  \
 	do {                                                                 \
-		if (scx_static_init(((bytes) >> PAGE_SHIFT))) {              \
-			bpf_printk("%s:%d scx_static_init failed", __func__, \
+		if (bump_init(((bytes) >> PAGE_SHIFT))) {              \
+			bpf_printk("%s:%d bump_init failed", __func__, \
 				   __LINE__);                                \
 			return -ENOMEM;                                      \
 		}                                                            \
@@ -112,7 +110,7 @@ static inline bool st_isset(void __arena *mem, u8 byte, size_t size)
  * - Destroy the allocator. Ensure the allocator returns
  * zeroed out memory.
  */
-static int scx_selftest_static_alloc_single(u64 bytes, u64 alignment)
+static int bump_selftest_alloc_single(u64 bytes, u64 alignment)
 {
 	u8 __arena *barray;
 	void __arena *mem;
@@ -133,21 +131,21 @@ static int scx_selftest_static_alloc_single(u64 bytes, u64 alignment)
 		st_memset(barray, ST_PATTERN1, bytes);
 		CHECK_OR_FAIL(barray, ST_PATTERN1, bytes);
 
-		scx_static_destroy();
+		bump_destroy();
 	}
 
 	return 0;
 }
 
-static int scx_selftest_static_alloc_multiple(u64 bytes, u64 alignment)
+static int bump_selftest_alloc_multiple(u64 bytes, u64 alignment)
 {
 	void __arena *mem1, *mem2;
 	int ret;
 
 	/* Initialize the allocator */
-	ret = scx_static_init(ST_MAX_PAGES);
+	ret = bump_init(ST_MAX_PAGES);
 	if (ret) {
-		bpf_printk("scx_static_init failed with %d", ret);
+		bpf_printk("bump_init failed with %d", ret);
 		return ret;
 	}
 
@@ -164,11 +162,11 @@ static int scx_selftest_static_alloc_multiple(u64 bytes, u64 alignment)
 	CHECK_OR_FAIL(mem1, ST_PATTERN1, bytes);
 	CHECK_OR_FAIL(mem2, ST_PATTERN2, bytes);
 
-	scx_static_destroy();
+	bump_destroy();
 	return 0;
 }
 
-static int scx_selftest_static_alloc_aligned(void)
+static int bump_selftest_alloc_aligned(void)
 {
 	void __arena *mem;
 	u64 alignment;
@@ -194,12 +192,12 @@ static int scx_selftest_static_alloc_aligned(void)
 		}
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 
 	return 0;
 }
 
-static int scx_selftest_static_alloc_exhaustion(u64 bytes, u64 alignment)
+static int bump_selftest_alloc_exhaustion(u64 bytes, u64 alignment)
 {
 	size_t padded = round_up(bytes, alignment);
 	size_t allocs = bytes / padded;
@@ -209,18 +207,18 @@ static int scx_selftest_static_alloc_exhaustion(u64 bytes, u64 alignment)
 	/* Allocate one page at a time here. */
 	INIT_OR_FAIL(PAGE_SIZE);
 
-	if (scx_static_memlimit(bytes)) {
-		bpf_printk("%s:%d scx_static_memlimit failed", __func__,
+	if (bump_memlimit(bytes)) {
+		bpf_printk("%s:%d bump_memlimit failed", __func__,
 			   __LINE__);
 		return -EINVAL;
 	}
 
 	/* Make an unfullfilable allocation. */
-	mem = scx_static_alloc(bytes + 1, 1);
+	mem = bump_alloc(bytes + 1, 1);
 	if (mem) {
-		bpf_printk("%s:%d scx_static_alloc succeeded", __func__,
+		bpf_printk("%s:%d bump_alloc succeeded", __func__,
 			   __LINE__);
-		scx_static_destroy();
+		bump_destroy();
 		return -EINVAL;
 	}
 
@@ -232,22 +230,22 @@ static int scx_selftest_static_alloc_exhaustion(u64 bytes, u64 alignment)
 		ALLOC_OR_FAIL(1, alignment);
 
 	/* Even a single byte allocation should fail. */
-	mem = scx_static_alloc(1, 1);
+	mem = bump_alloc(1, 1);
 	if (mem) {
-		bpf_printk("%s:%d scx_static_alloc succeeded", __func__,
+		bpf_printk("%s:%d bump_alloc succeeded", __func__,
 			   __LINE__);
-		scx_static_destroy();
+		bump_destroy();
 		return -EINVAL;
 	}
 
-	scx_static_destroy();
+	bump_destroy();
 	return 0;
 }
 
-#define SCX_STATIC_SELFTEST(suffix, ...) \
-	SCX_SELFTEST(scx_selftest_static_##suffix, __VA_ARGS__)
+#define BUMP_ALLOC_SELFTEST(suffix, ...) \
+	ALLOC_SELFTEST(bump_selftest_##suffix, __VA_ARGS__)
 
-__weak int scx_selftest_static(void)
+__weak int bump_selftest(void)
 {
 	u64 bytes = 128;
 	u64 alignment = 1;
@@ -257,16 +255,16 @@ __weak int scx_selftest_static(void)
 		for (alignment = 1; alignment <= ST_MAX_ALIGNMENT && can_loop;
 		     alignment <<= 1) {
 			/* Each test manages its own allocator lifecycle */
-			SCX_STATIC_SELFTEST(alloc_single, bytes, alignment);
-			SCX_STATIC_SELFTEST(alloc_multiple, bytes, alignment);
+			BUMP_ALLOC_SELFTEST(alloc_single, bytes, alignment);
+			BUMP_ALLOC_SELFTEST(alloc_multiple, bytes, alignment);
 		}
 	}
 
-	SCX_STATIC_SELFTEST(alloc_aligned);
+	BUMP_ALLOC_SELFTEST(alloc_aligned);
 
 	for (alignment = PAGE_SIZE; bytes <= ST_MAX_PAGES && can_loop;
 	     bytes <<= 1)
-		SCX_STATIC_SELFTEST(alloc_exhaustion,
+		BUMP_ALLOC_SELFTEST(alloc_exhaustion,
 				    ST_MAX_PAGES << PAGE_SHIFT, alignment);
 
 	return 0;
