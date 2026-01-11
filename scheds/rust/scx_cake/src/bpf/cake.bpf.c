@@ -13,11 +13,8 @@
  */
 
 #include <scx/common.bpf.h>
+#include <scx/compat.bpf.h>
 #include "intf.h"
-
-extern struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym __weak;
-extern void bpf_rcu_read_lock(void) __ksym;
-extern void bpf_rcu_read_unlock(void) __ksym;
 
 char _license[] SEC("license") = "GPL";
 
@@ -26,16 +23,20 @@ const volatile u64 quantum_ns = CAKE_DEFAULT_QUANTUM_NS;
 const volatile u64 new_flow_bonus_ns = CAKE_DEFAULT_NEW_FLOW_BONUS_NS;
 const volatile u64 sparse_threshold = CAKE_DEFAULT_SPARSE_THRESHOLD;
 const volatile u64 starvation_ns = CAKE_DEFAULT_STARVATION_NS;
-const volatile bool enable_stats = false;  /* Set to true when --verbose is used */
+const volatile bool enable_stats = false;
 
-/* NOTE: Topology variables (has_dual_ccd, has_hybrid_cores, ccd0_mask, etc.)
- * were removed. They were set by userspace but never read in BPF code.
- * Future: Re-add when CCD-local or P-core preference is implemented.
- */
+/* Topology configuration (const volatile = optimized out if false) */
+const volatile bool has_multi_llc = false;
+const volatile bool has_hybrid = false;
+const volatile bool smt_enabled = false;
 
-/*
- * Global statistics (Per-CPU to avoid bus locking)
- */
+#define CAKE_MAX_LLCS 8
+const volatile u8 cpu_llc_id[CAKE_MAX_CPUS];
+const volatile u8 cpu_is_big[CAKE_MAX_CPUS];
+const volatile u8 cpu_sibling_map[CAKE_MAX_CPUS];
+const volatile u64 llc_cpu_mask[CAKE_MAX_LLCS];
+const volatile u64 big_cpu_mask = 0;
+
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
@@ -73,6 +74,13 @@ struct {
  * Updated non-atomically (acceptable race - victim is heuristic).
  */
 u64 victim_mask SEC(".bss") __attribute__((aligned(64)));
+
+/*
+ * Global Idle Bitmask (Parallel to idle_map)
+ * Used ONLY when topology features are enabled (has_multi_llc or has_hybrid).
+ * Updated atomically to allow fast masking ops.
+ */
+u64 idle_mask_global SEC(".bss") __attribute__((aligned(64)));
 
 /* NOTE: dsq_has_tasks flag system was removed.
  * Flags became permanently dirty (never cleared) and provided no benefit.
@@ -144,6 +152,147 @@ static __always_inline s32 find_first_idle_cpu(s32 prev_cpu)
     return -1;  /* Should never reach here */
 }
 
+/*
+ * Helper: Find best core from a mask of candidates
+ * 
+ * Logic:
+ * 1. If SMT disabled: Just pick first bit (CTZ).
+ * 2. If SMT enabled:
+ *    - Try to find a core where sibling is ALSO idle (Fully Idle Core).
+ *    - Inspect up to 4 candidates to find a fully idle one.
+ *    - Fallback to first candidate if no fully idle core found.
+ */
+static __always_inline s32 pick_best_cpu_smt(u64 candidates)
+{
+    if (!candidates)
+        return -1;
+
+    /* If SMT disabled, simple CTZ is optimal */
+    if (!smt_enabled)
+        return __builtin_ctzll(candidates);
+        
+    /* SMT Enabled: Search for fully idle core (both siblings idle) */
+    u64 iter_mask = candidates;
+    s32 fallback_cpu = -1;
+    
+    /* Unroll checking loop (limit 4 checks to bound overhead) */
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        if (!iter_mask) break;
+        
+        s32 cpu = __builtin_ctzll(iter_mask);
+        
+        /* 
+         * Verifier bounds check: Force mask to 0-63.
+         * Compiler optimization removed the 'if' check because it knows ctz < 64,
+         * but Verifier doesn't know ctz output range.
+         * 
+         * USE BARRIER: Force compiler to forget 'cpu' range so it emits the AND.
+         */
+        __asm__ __volatile__("" : "+r"(cpu));
+        cpu &= 63;
+
+        /* Check sibling */
+        u8 sibling = cpu_sibling_map[cpu];
+        
+        /* 
+         * Verifier bounds check: Sibling ID from map is untrusted (u8=0-255).
+         * Must bound it to <64 for idle_map access.
+         */
+        sibling &= 63;
+        
+        /* 
+         * Note: Sibling might be > 63 if map is invalid, but cpu is from mask so <64.
+         * cpu_sibling_map values valid range 0-63.
+         */
+        if (idle_map.as_bytes[sibling]) {
+             /* Result! Both this CPU and its sibling are idle. Best choice. */
+             return cpu;
+        }
+        
+        /* Save first valid CPU as fallback */
+        if (fallback_cpu < 0) fallback_cpu = cpu;
+        
+        /* Remove this cpu and try next */
+        iter_mask &= ~(1ULL << cpu);
+    }
+    
+    /* No fully idle core found in first 4 candidates? Use best fallback. */
+    if (fallback_cpu >= 0) return fallback_cpu;
+    
+    /* Fallback: just pick first */
+    return __builtin_ctzll(candidates);
+}
+
+/*
+ * Topology-aware idle CPU finder
+ * 
+ * Optimized for:
+ * 1. Single CCD / Non-Hybrid -> Becomes find_first_idle_cpu() (Zero Overhead)
+ * 2. Multi-CCD -> Prefers local LLC, then P-cores
+ * 3. Hybrid -> Prefers P-cores
+ * 4. SMT -> Prefers fully idle cores
+ */
+static __always_inline s32 find_first_idle_cpu_topo(s32 prev_cpu)
+{
+    /* ZERO OVERHEAD PATH: Compiled out if no topology features */
+    if (!has_multi_llc && !has_hybrid && !smt_enabled)
+        return find_first_idle_cpu(prev_cpu);
+
+    /* 1. Fast path: Check prev_cpu first (hottest cache) */
+    /* Checks if prev_cpu is idle. */
+    if (prev_cpu >= 0 && prev_cpu < CAKE_MAX_CPUS && idle_map.as_bytes[prev_cpu]) {
+        /* 
+         * SMT Optimization: If SMT is on, is the sibling ALSO idle? 
+         * If yes -> optimal. If no -> maybe look for better?
+         * 
+         * PREV_CPU bias is strong (cache locality). We stick with it 
+         * even if sibling is busy, unless it's CRITICAL latency tiers?
+         * For now: stick with prev_cpu if idle. Locality > SMT contention usually.
+         */
+        return prev_cpu;
+    }
+
+    /* Load global idle mask (atomic update in background) */
+    u64 idle_current = READ_ONCE(idle_mask_global);
+    if (!idle_current)
+        return -1;
+
+    /* 2. Topology preference logic */
+    u64 candidates = 0;
+    
+    /* Preference A: Same LLC (if multi-LLC) */
+    if (has_multi_llc && prev_cpu >= 0 && prev_cpu < CAKE_MAX_CPUS) {
+        u8 my_llc = cpu_llc_id[prev_cpu];
+        /* Safety check for bounds */
+        if (my_llc < 8) {
+            u64 local_mask = llc_cpu_mask[my_llc];
+            
+            /* Sub-preference: Local P-cores first (if hybrid) */
+            if (has_hybrid) {
+                u64 big_mask = READ_ONCE(big_cpu_mask);
+                candidates = idle_current & local_mask & big_mask;
+                if (candidates) return pick_best_cpu_smt(candidates);
+            }
+            
+            /* Any local core */
+            candidates = idle_current & local_mask;
+            if (candidates) return pick_best_cpu_smt(candidates);
+        }
+    }
+
+    /* Preference B: Any P-core (if hybrid or just P-core preference) */
+    /* Note: if not hybrid, big_cpu_mask is 0, so this block skipped or candidates=0 */
+    if (has_hybrid) {
+         u64 big_mask = READ_ONCE(big_cpu_mask);
+         candidates = idle_current & big_mask;
+         if (candidates) return pick_best_cpu_smt(candidates);
+    }
+    
+    /* Fallback: Any idle CPU (we know idle_current != 0) */
+    return pick_best_cpu_smt(idle_current);
+}
+
 /* User exit info for graceful scheduler exit */
 UEI_DEFINE(uei);
 
@@ -184,64 +333,53 @@ static u64 cached_threshold_ns;
  * Per-tier starvation thresholds (nanoseconds)
  * Safety net: force preemption if task runs longer than its tier allows.
  * 
- * Formula: Starvation = 2x Wait Budget (except Background which has generous limit)
+ * Pre-computed by userspace based on profile. Zero runtime overhead.
+ * Array is padded to 8 for branchless access (tier & 7).
  */
-#define STARVATION_CRITICAL_LATENCY 5000000  /* 5ms - 2x wait budget */
-#define STARVATION_REALTIME     3000000    /* 3ms - 2x wait budget */
-#define STARVATION_CRITICAL     4000000    /* 4ms - 2x wait budget */
-#define STARVATION_GAMING       8000000    /* 8ms - 2x wait budget */
-#define STARVATION_INTERACTIVE  16000000   /* 16ms - 2x wait budget */
-#define STARVATION_BATCH        40000000   /* 40ms - 2x wait budget */
-#define STARVATION_BACKGROUND   100000000  /* 100ms - generous for bulk work */
-
-/* Array for O(1) starvation threshold lookup. PADDED TO 8 for Branchless Access (tier & 7). */
-static const u64 starvation_threshold[8] = {
-    STARVATION_CRITICAL_LATENCY, /* Tier 0: Critical Latency - 5ms */
-    STARVATION_REALTIME,     /* Tier 1: Realtime - 1.5ms */
-    STARVATION_CRITICAL,     /* Tier 2: Critical - 4ms */
-    STARVATION_GAMING,       /* Tier 3: Gaming - 8ms */
-    STARVATION_INTERACTIVE,  /* Tier 4: Interactive - 16ms */
-    STARVATION_BATCH,        /* Tier 5: Batch - 40ms */
-    STARVATION_BACKGROUND,   /* Tier 6: Background - 100ms */
-    STARVATION_BACKGROUND,   /* PADDING: Entry 7 (Safe) */
+const volatile u64 starvation_threshold[8] = {
+    CAKE_DEFAULT_STARVATION_T0,  /* Tier 0: Critical Latency */
+    CAKE_DEFAULT_STARVATION_T1,  /* Tier 1: Realtime */
+    CAKE_DEFAULT_STARVATION_T2,  /* Tier 2: Critical */
+    CAKE_DEFAULT_STARVATION_T3,  /* Tier 3: Gaming */
+    CAKE_DEFAULT_STARVATION_T4,  /* Tier 4: Interactive */
+    CAKE_DEFAULT_STARVATION_T5,  /* Tier 5: Batch */
+    CAKE_DEFAULT_STARVATION_T6,  /* Tier 6: Background */
+    CAKE_DEFAULT_STARVATION_T6,  /* PADDING: Entry 7 */
 };
 
 /*
  * Tier quantum multipliers (fixed-point, 1024 = 1.0x)
  * Higher tiers get SMALLER slices (more preemption points, lower latency)
  * Lower tiers get LARGER slices (less context switching for bulk work)
+ * 
+ * Pre-computed by userspace based on profile. Zero runtime overhead.
  */
-static const u32 tier_multiplier[8] = {
-    717,   /* Critical Latency: 0.7x (70%) */
-    819,   /* Realtime:    0.8x (80%) */
-    922,   /* Critical:    0.9x (90%) */
-    1024,  /* Gaming:      1.0x (100%) */
-    1126,  /* Interactive: 1.1x (110%) */
-    1229,  /* Batch:       1.2x (120%) */
-    1331,  /* Background:  1.3x (130%) */
-    1024,  /* PADDING: Entry 7 */
+const volatile u32 tier_multiplier[8] = {
+    CAKE_DEFAULT_MULTIPLIER_T0,  /* Critical Latency: 0.7x */
+    CAKE_DEFAULT_MULTIPLIER_T1,  /* Realtime: 0.8x */
+    CAKE_DEFAULT_MULTIPLIER_T2,  /* Critical: 0.9x */
+    CAKE_DEFAULT_MULTIPLIER_T3,  /* Gaming: 1.0x */
+    CAKE_DEFAULT_MULTIPLIER_T4,  /* Interactive: 1.1x */
+    CAKE_DEFAULT_MULTIPLIER_T5,  /* Batch: 1.2x */
+    CAKE_DEFAULT_MULTIPLIER_T6,  /* Background: 1.3x */
+    CAKE_DEFAULT_MULTIPLIER_T3,  /* PADDING: Entry 7 */
 };
 
 /*
  * Wait Budget per Tier (CAKE's AQM)
  * Tasks exceeding their tier's wait budget get demoted.
+ * 
+ * Pre-computed by userspace based on profile. Zero runtime overhead.
  */
-#define WAIT_BUDGET_CRITICAL_LATENCY 100000    /* 100µs */
-#define WAIT_BUDGET_REALTIME    750000         /* 750µs */
-#define WAIT_BUDGET_CRITICAL    2000000        /* 2ms */
-#define WAIT_BUDGET_GAMING      4000000        /* 4ms */
-#define WAIT_BUDGET_INTERACTIVE 8000000        /* 8ms */
-#define WAIT_BUDGET_BATCH       20000000       /* 20ms */
-
-static const u64 wait_budget[8] = {
-    WAIT_BUDGET_CRITICAL_LATENCY,
-    WAIT_BUDGET_REALTIME,
-    WAIT_BUDGET_CRITICAL,
-    WAIT_BUDGET_GAMING,
-    WAIT_BUDGET_INTERACTIVE,
-    WAIT_BUDGET_BATCH,
-    0,  /* Background - no limit */
-    0   /* Padding */
+const volatile u64 wait_budget[8] = {
+    CAKE_DEFAULT_WAIT_BUDGET_T0,  /* Critical Latency: 100µs */
+    CAKE_DEFAULT_WAIT_BUDGET_T1,  /* Realtime: 750µs */
+    CAKE_DEFAULT_WAIT_BUDGET_T2,  /* Critical: 2ms */
+    CAKE_DEFAULT_WAIT_BUDGET_T3,  /* Gaming: 4ms */
+    CAKE_DEFAULT_WAIT_BUDGET_T4,  /* Interactive: 8ms */
+    CAKE_DEFAULT_WAIT_BUDGET_T5,  /* Batch: 20ms */
+    CAKE_DEFAULT_WAIT_BUDGET_T6,  /* Background: no limit */
+    0,                            /* PADDING: Entry 7 */
 };
 
 /* Long-sleep recovery threshold: 33ms = 2 frames @ 60Hz */
@@ -480,19 +618,49 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (prev_valid && prev_idle) {
         is_idle = true;
         /* cpu already = prev_cpu */
-    } else if (tier <= REALTIME_DSQ) {
-        /* High priority: scan all idle CPUs */
-        s32 idle_cpu = find_first_idle_cpu(prev_cpu);
+    } else 
+    /* Check topology-optimized idle path */
+    if (tier <= REALTIME_DSQ) {
+        /* High priority: rigorous scan */
+        s32 idle_cpu = find_first_idle_cpu_topo(prev_cpu);
         if (idle_cpu >= 0) {
             cpu = idle_cpu;
             is_idle = true;
         }
     } else {
-        /* Low priority: try any idle if prev wasn't idle */
-        s32 idle_cpu = find_first_idle_cpu(-1);
-        if (idle_cpu >= 0) {
-            cpu = idle_cpu;
-            is_idle = true;
+        /* Low priority: fast scan */
+        if (has_multi_llc || has_hybrid) {
+             /* Use bitmask scan if available/relevant */
+             s32 idle_cpu = find_first_idle_cpu_topo(prev_cpu);
+             if (idle_cpu >= 0) {
+                 cpu = idle_cpu;
+                 is_idle = true;
+             }
+        } else {
+             /* Standard fast scan */
+             s32 idle_cpu = find_first_idle_cpu(-1);
+             if (idle_cpu >= 0) {
+                 cpu = idle_cpu;
+                 is_idle = true;
+             }
+        }
+    }
+    
+    /* Hybrid Gaming Logic: Avoid E-cores for gaming */
+    if (has_hybrid && is_idle && tier <= GAMING_DSQ) {
+        if (cpu >= 0 && cpu < CAKE_MAX_CPUS && !cpu_is_big[cpu]) {
+             /* We picked an E-core. Try to find a P-core instead. */
+             u64 idle_current = READ_ONCE(idle_mask_global);
+             u64 big_mask = READ_ONCE(big_cpu_mask);
+             u64 p_candidates = idle_current & big_mask;
+             
+             if (p_candidates) {
+                 cpu = __builtin_ctzll(p_candidates);
+                 /* Stick with E-core if no P-cores idle? 
+                  * Strategy: Prefer idle E-core over busy P-core.
+                  * So we only swap if we found an IDLE P-core.
+                  */
+             }
         }
     }
 
@@ -647,37 +815,51 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
     if (unlikely(cpu_idx >= 64))
         return;
 
-    u64 now = scx_bpf_now();
-    u32 now_ts = (u32)now;
     u8 tier = GET_TIER(tctx);
     
     /*
      * XOR-BLEND victim_mask update (preserved MLP optimization)
      */
-    u64 current_mask = victim_mask;
-    u64 cpu_bit = (1ULL << cpu_idx);
     u32 is_victim = (u32)tier >= INTERACTIVE_DSQ;
-    u64 set_mask = current_mask | cpu_bit;
-    u64 clear_mask = current_mask & ~cpu_bit;
-    u64 diff = set_mask ^ clear_mask;
-    u64 selector = -(s64)is_victim;
-    u64 new_mask = clear_mask ^ (diff & selector);
-    if (new_mask != current_mask)
-        victim_mask = new_mask;
+    u64 cpu_bit = (1ULL << cpu_idx);
+    
+    /* 
+     * OPTIMIZATION: Check if bit is already correct (Skip redundant atomic)
+     * Most tasks stay in same state, so this skips ~20 cycle atomic op.
+     * Also fixes previous race condition where non-atomic RMW clobbered updates.
+     */
+    bool bit_set = (READ_ONCE(victim_mask) & cpu_bit);
+    if (bit_set != is_victim) {
+        if (is_victim)
+            __sync_fetch_and_or(&victim_mask, cpu_bit);
+        else
+            __sync_fetch_and_and(&victim_mask, ~cpu_bit);
+    }
+
+    u64 now = scx_bpf_now();
+    u32 now_ts = (u32)now;
 
     /*
      * WAIT BUDGET CHECK (CAKE's AQM) - Restored
+     * 
+     * FUSED LOAD-COMPUTE-STORE:
+     * Load everything first, compute in registers, write once.
      */
-    if (likely(tctx->last_wake_ts > 0)) {
-        u64 wait_time = (u64)(now_ts - tctx->last_wake_ts);
+    u32 last_wake = tctx->last_wake_ts;
+    u16 avg_runtime = tctx->avg_runtime_us;
+    u32 packed = tctx->packed_info;
+    
+    if (likely(last_wake > 0)) {
+        u64 wait_time = (u64)(now_ts - last_wake);
         
         /* Long-sleep recovery: Reset history after 33ms */
         if (wait_time > LONG_SLEEP_THRESHOLD_NS) {
-            tctx->avg_runtime_us >>= 1;  /* 50% decay */
+            avg_runtime >>= 1;  /* 50% decay */
         }
 
+        struct cake_stats *s = NULL;
         if (enable_stats) {
-            struct cake_stats *s = get_local_stats();
+            s = get_local_stats();
             if (s) {
                 s->total_wait_ns += wait_time;
                 s->nr_waits++;
@@ -687,41 +869,67 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
         }
 
         /* Wait budget tracking (4-bit counters) */
-        u8 wait_data = GET_WAIT_DATA(tctx);
-        u8 checks = wait_data & 0xF;
-        u8 violations = wait_data >> 4;
-        
-        checks++;
-        
-        u64 budget_ns = wait_budget[tier & 7];
-        if (budget_ns > 0 && wait_time > budget_ns) {
-            violations++;
-        }
-        
-        /* Demotion check: 10-sample window, >30% violations */
-        if (checks >= 10 && tier < CAKE_TIER_BACKGROUND) {
-            if (violations >= 3) {
-                u32 current_score = GET_SPARSE_SCORE(tctx);
-                u32 penalized = (current_score > 10) ? current_score - 10 : 0;
-                SET_SPARSE_SCORE(tctx, penalized);
-                SET_WAIT_DATA(tctx, 0);
-                
-                if (enable_stats) {
-                    struct cake_stats *s = get_local_stats();
+            /* OPTIMIZATION: BATCHED RMW on packed_info */
+            /* Using local 'packed' variable loaded above */
+            u32 original_packed = packed;
+            
+            u8 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
+            u8 checks = wait_data & 0xF;
+            u8 violations = wait_data >> 4;
+            
+            checks++;
+            
+            u64 budget_ns = wait_budget[tier & 7];
+            if (budget_ns > 0 && wait_time > budget_ns) {
+                violations++;
+            }
+            
+            /* Demotion check: 10-sample window, >30% violations */
+            if (checks >= 10 && tier < CAKE_TIER_BACKGROUND) {
+                if (violations >= 3) {
+                    u32 current_score = (packed >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE;
+                    u32 penalized = (current_score > 10) ? current_score - 10 : 0;
+                    
+                    /* Update Score */
+                    packed &= ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE);
+                    packed |= (penalized & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
+                    
+                    /* Reset Wait Data */
+                    packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
+                    // (0 << SHIFT) is 0
+                    
                     if (s) s->nr_wait_demotions++;
+                } else {
+                    /* Reset Wait Data */
+                    packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
                 }
             } else {
-                SET_WAIT_DATA(tctx, 0);
+                if (checks >= 15) checks = 15;
+                if (violations >= 15) violations = 15;
+                u8 new_wait = (violations << 4) | checks;
+                
+                /* Update Wait Data */
+                packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
+                packed |= ((new_wait & MASK_WAIT_DATA) << SHIFT_WAIT_DATA);
             }
-        } else {
-            if (checks >= 15) checks = 15;
-            if (violations >= 15) violations = 15;
-            SET_WAIT_DATA(tctx, (violations << 4) | checks);
-        }
         
-        tctx->last_wake_ts = 0;  /* Clear to prevent double-counting */
+        last_wake = 0;  /* Clear to prevent double-counting */
+        
+        /* 
+         * BURST WRITEBACK: Check change to avoid dirtying cache line if possible 
+         */
+        if (packed != original_packed)
+            tctx->packed_info = packed;
     }
 
+    /* BURST WRITEBACK: 
+     * Write avg_runtime (if decayed), last_wake (if cleared), last_run (always).
+     * Grouping these encourages store buffer coalescing.
+     */
+    if (avg_runtime != tctx->avg_runtime_us)
+        tctx->avg_runtime_us = avg_runtime;
+        
+    tctx->last_wake_ts = last_wake;
     tctx->last_run_at = now_ts;
 }
 
@@ -790,11 +998,16 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     /*
      * PHASE 3: WRITE EVERYTHING BACK (Single Burst)
      * All writes to same cache line - store buffer coalesces them.
+     * 
+     * OPTIMIZATION: Skip packed_info write if unchanged.
+     * Tier/Score stability is high, skipping write saves energy.
      */
     tctx->avg_runtime_us = new_avg_us;
     tctx->deficit_us = new_deficit_us;
     tctx->next_slice = new_slice;
-    tctx->packed_info = new_packed;
+    
+    if (packed != new_packed)
+        tctx->packed_info = new_packed;
 }
 
 /*
@@ -806,12 +1019,47 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
     /* Cap CPU ID to 63 for 64-bit mask safety */
     if (cpu >= 0 && cpu < 64) {
          /* 
-          * WAIT-FREE WRITE:
-          * Just a standard store. The Store Buffer handles coherency.
-          * Cost: ~1 cycle. No bus locking.
+          * WAIT-FREE WRITE OPTIMIZATION:
+          * Check if byte is already correct. 
+          * CRITICAL: idle_map is a dense u8 array (64 bytes).
+          * A write to ANY byte invalidates the cache line for ALL CPUs.
+          * Skipping redundant writes prevents massive False Sharing storms.
           */
-         /* BRANCHLESS: bool is already 0 or 1, just cast */
-         idle_map.as_bytes[cpu] = (u8)idle;
+         if (idle_map.as_bytes[cpu] != (u8)idle) {
+             idle_map.as_bytes[cpu] = (u8)idle;
+         }
+         
+         u64 mask = (1ULL << cpu);
+
+         /* 
+          * STATE CLEANUP: Clear victim mask if CPU goes idle.
+          * cake_running isn't called for idle thread, so we must manually 
+          * clear the victim bit prevents false-positive preempt kicks.
+          */
+         if (idle) {
+             if (READ_ONCE(victim_mask) & mask) {
+                 __sync_fetch_and_and(&victim_mask, ~mask);
+             }
+         }
+
+         /* 
+          * TOPOLOGY UPDATE: Atomic bitmask (Only if topology active)
+          * ZERO OVERHEAD for single-CCD non-hybrid (compiled out)
+          */
+         if (has_multi_llc || has_hybrid || smt_enabled) {
+             /* 
+              * OPTIMIZATION: Check if bit is already correct (Skip redundant atomic)
+              * Prevents cache line bouncing/invalidation storms on this hot shared global.
+              */
+             bool currently_set = !!(READ_ONCE(idle_mask_global) & mask);
+             
+             if (currently_set != idle) {
+                 if (idle)
+                     __sync_fetch_and_or(&idle_mask_global, mask);
+                 else
+                     __sync_fetch_and_and(&idle_mask_global, ~mask);
+             }
+         }
     }
 }
 
@@ -885,17 +1133,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
     /* Initialize Idle Mask (Single RCU section - saves ~6200 cycles) */
     u32 nr_cpus = scx_bpf_nr_cpu_ids();
     
-    /* Optional: Pre-warm idle map if kfunc available (graceful fallback for older kernels) */
-    if (scx_bpf_cpu_curr) {
-        bpf_rcu_read_lock();
-        for (s32 i = 0; i < 64; i++) {
-            if (i >= nr_cpus) break;
-            struct task_struct *p = scx_bpf_cpu_curr(i);
-            if (p && p->pid == 0) idle_map.as_bytes[i] = 1;
-        }
-        bpf_rcu_read_unlock();
+    /* Pre-warm idle map using compat helper (works on v6.16+ via fallback) */
+    bpf_rcu_read_lock();
+    for (s32 i = 0; i < 64; i++) {
+        if (i >= nr_cpus) break;
+        struct task_struct *p = __COMPAT_scx_bpf_cpu_curr(i);
+        if (p && p->pid == 0) idle_map.as_bytes[i] = 1;
     }
-    /* If kfunc unavailable, idle_map starts empty and self-populates via cake_update_idle */
+    bpf_rcu_read_unlock();
 
     /* Create all 7 dispatch queues in priority order */
     ret = scx_bpf_create_dsq(CRITICAL_LATENCY_DSQ, -1);
