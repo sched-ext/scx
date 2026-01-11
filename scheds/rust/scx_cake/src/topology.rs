@@ -5,19 +5,19 @@
 // Detects CPU topology at startup:
 // - Number of CPUs
 // - CCD/CCX domains (via L3 cache IDs)
-// - P-cores vs E-cores (via CPPC or frequency)
-// - SMT siblings
+// - P-cores vs E-cores (via CoreType)
 //
 // All detection happens once at startup. Results are passed to BPF
 // as const volatile so the verifier can eliminate unused code paths.
 
 use anyhow::Result;
 use log::info;
-use std::fs;
-use std::path::Path;
+use scx_utils::{Topology, CoreType};
 
 /// Maximum supported CPUs (matches BPF array sizes)
 pub const MAX_CPUS: usize = 64;
+/// Maximum supported LLCs (matches BPF array sizes)
+pub const MAX_LLCS: usize = 8;
 
 /// Detected topology information
 #[derive(Debug, Clone)]
@@ -31,183 +31,147 @@ pub struct TopologyInfo {
     /// True if system has hybrid P/E cores (Intel hybrid or similar)
     pub has_hybrid_cores: bool,
 
-    /// Bitmask of CPUs in CCD0 (first L3 domain)
-    pub ccd0_mask: u64,
+    /// SMT enabled status
+    pub smt_enabled: bool,
+    /// Map of CPU ID -> Sibling CPU ID (or self if none/disabled)
+    pub cpu_sibling_map: [u8; MAX_CPUS],
 
-    /// Bitmask of CPUs in CCD1 (second L3 domain, if any)
-    pub ccd1_mask: u64,
-
-    /// Bitmask of P-cores (high-performance cores)
-    pub p_core_mask: u64,
-
-    /// Number of CPUs per CCD (for CCD selection logic)
+    // BPF Maps
+    pub cpu_llc_id: [u8; MAX_CPUS],
+    pub cpu_is_big: [u8; MAX_CPUS],
+    pub llc_cpu_mask: [u64; MAX_LLCS],
+    pub big_cpu_mask: u64,
+    
+    // Info
     pub cpus_per_ccd: u32,
 }
 
-impl Default for TopologyInfo {
-    fn default() -> Self {
-        Self {
-            nr_cpus: 0,
-            has_dual_ccd: false,
-            has_hybrid_cores: false,
-            ccd0_mask: 0xFFFFFFFFFFFFFFFF, // All cores in CCD0 by default
-            ccd1_mask: 0,
-            p_core_mask: 0xFFFFFFFFFFFFFFFF, // All cores are P-cores by default
-            cpus_per_ccd: 64,
-        }
-    }
-}
-
-/// Read an integer from a sysfs file
-fn read_sysfs_int(path: &Path) -> Option<i64> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-}
-
-/// Detect CPU topology from sysfs
 pub fn detect() -> Result<TopologyInfo> {
-    let mut info = TopologyInfo::default();
-    let cpu_root = Path::new("/sys/devices/system/cpu");
-
-    // Collect per-CPU information
-    let mut l3_ids: Vec<(usize, i64)> = Vec::new(); // (cpu_id, l3_cache_id)
-    let mut max_freqs: Vec<(usize, u64)> = Vec::new(); // (cpu_id, max_freq_khz)
-    let mut cppc_perfs: Vec<(usize, u64)> = Vec::new(); // (cpu_id, cppc_highest_perf)
-
-    for cpu_id in 0..MAX_CPUS {
-        let cpu_dir = cpu_root.join(format!("cpu{}", cpu_id));
-        if !cpu_dir.exists() {
-            continue;
-        }
-
-        info.nr_cpus = info.nr_cpus.max(cpu_id + 1);
-
-        // Detect L3 cache ID (for CCD detection)
-        for cache_idx in 0..4 {
-            let cache_dir = cpu_dir.join(format!("cache/index{}", cache_idx));
-            if !cache_dir.exists() {
-                continue;
+    // robustly detect topology using scx_utils
+    let topo = Topology::new()?;
+    
+    let nr_cpus = topo.all_cpus.len();
+    let nr_llcs = topo.all_llcs.len();
+    
+    // Get sibling map directly from scx_utils
+    let siblings = topo.sibling_cpus();
+    let mut cpu_sibling_map = [0u8; MAX_CPUS];
+    
+    // Default to self-mapping
+    for i in 0..MAX_CPUS {
+        cpu_sibling_map[i] = i as u8;
+    }
+    
+    // Populate with detected siblings
+    for (cpu, &sibling) in siblings.iter().enumerate() {
+        if cpu < MAX_CPUS && sibling >= 0 {
+            let sib = sibling as usize;
+            if sib < MAX_CPUS {
+                cpu_sibling_map[cpu] = sib as u8;
             }
-
-            let level = read_sysfs_int(&cache_dir.join("level"));
-            if level == Some(3) {
-                if let Some(id) = read_sysfs_int(&cache_dir.join("id")) {
-                    l3_ids.push((cpu_id, id));
-                }
-                break;
-            }
-        }
-
-        // Detect max frequency (for P/E core detection)
-        if let Some(freq) = read_sysfs_int(&cpu_dir.join("cpufreq/scaling_max_freq")) {
-            max_freqs.push((cpu_id, freq as u64));
-        }
-
-        // Detect CPPC highest_perf (more reliable for hybrid detection)
-        if let Some(perf) = read_sysfs_int(&cpu_dir.join("acpi_cppc/highest_perf")) {
-            cppc_perfs.push((cpu_id, perf as u64));
         }
     }
 
-    // Analyze L3 cache domains (CCD detection)
-    if !l3_ids.is_empty() {
-        let unique_l3s: std::collections::HashSet<i64> = l3_ids.iter().map(|(_, id)| *id).collect();
-
-        if unique_l3s.len() >= 2 {
-            info.has_dual_ccd = true;
-
-            // Get the two most common L3 IDs
-            let mut l3_counts: std::collections::HashMap<i64, usize> =
-                std::collections::HashMap::new();
-            for (_, id) in &l3_ids {
-                *l3_counts.entry(*id).or_insert(0) += 1;
-            }
-
-            let mut sorted_l3s: Vec<_> = l3_counts.into_iter().collect();
-            sorted_l3s.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by L3 ID for consistency
-
-            let ccd0_id = sorted_l3s.get(0).map(|(id, _)| *id).unwrap_or(0);
-            let ccd1_id = sorted_l3s.get(1).map(|(id, _)| *id);
-
-            info.ccd0_mask = 0;
-            info.ccd1_mask = 0;
-
-            for (cpu_id, l3_id) in &l3_ids {
-                if *cpu_id >= 64 {
-                    continue;
-                }
-                let bit = 1u64 << cpu_id;
-                if *l3_id == ccd0_id {
-                    info.ccd0_mask |= bit;
-                } else if ccd1_id == Some(*l3_id) {
-                    info.ccd1_mask |= bit;
-                }
-            }
-
-            info.cpus_per_ccd = info.ccd0_mask.count_ones();
-        }
-    }
-
-    // Analyze P/E cores (hybrid detection)
-    // Use CPPC if available, otherwise use frequency
-    let core_perfs: Vec<(usize, u64)> = if !cppc_perfs.is_empty() {
-        cppc_perfs
-    } else {
-        max_freqs
+    let mut info = TopologyInfo {
+        nr_cpus,
+        has_dual_ccd: nr_llcs > 1,
+        has_hybrid_cores: false, // Will detect below
+        smt_enabled: topo.smt_enabled,
+        cpu_sibling_map,
+        cpu_llc_id: [0; MAX_CPUS],
+        cpu_is_big: [1; MAX_CPUS], // Default to 1 (Big) to be safe
+        llc_cpu_mask: [0; MAX_LLCS],
+        big_cpu_mask: 0,
+        cpus_per_ccd: 0,
     };
 
-    if !core_perfs.is_empty() {
-        let _avg_perf: u64 =
-            core_perfs.iter().map(|(_, p)| *p).sum::<u64>() / core_perfs.len() as u64;
+    // 1. Map LLCs
+    // Note: topo.all_llcs keys are arbitrary kernel IDs. We must map them to 0..MAX_LLCS-1.
+    // We'll just use a simple counter 0,1,2... as we iterate.
+    let mut llc_idx = 0;
+    
+    for (_, llc) in &topo.all_llcs {
+        if llc_idx >= MAX_LLCS {
+            break; // Exceeded BPF limit, remaining CPUs effectively in LLC 0 or ignored? 
+                   // Ideally they map to 0 to be safe (fallback). 
+                   // But let's just stop mapping.
+        }
+        
+        let mut mask = 0u64;
+        let mut core_count = 0;
+        
+        for cpu_id in llc.all_cpus.keys() {
+            let cpu = *cpu_id;
+            if cpu < MAX_CPUS {
+                info.cpu_llc_id[cpu] = llc_idx as u8;
+                mask |= 1u64 << cpu;
+                core_count += 1;
+            }
+        }
+        
+        info.llc_cpu_mask[llc_idx] = mask;
+        if info.cpus_per_ccd == 0 { info.cpus_per_ccd = core_count; } // Estimate
+        
+        llc_idx += 1;
+    }
 
-        // Heuristic: If max perf is >20% higher than min, we have hybrid cores
-        let (min_perf, max_perf) = core_perfs
-            .iter()
-            .map(|(_, p)| *p)
-            .fold((u64::MAX, 0u64), |(min, max), p| (min.min(p), max.max(p)));
+    // 2. Identify P-cores vs E-cores
+    // Reset defaults to recalculate based on CoreType
+    info.cpu_is_big = [0; MAX_CPUS];
+    info.big_cpu_mask = 0;
+    
+    let mut p_cores_found = 0;
+    let mut e_cores_found = 0;
 
-        if max_perf > 0 && (max_perf - min_perf) * 100 / max_perf > 20 {
-            info.has_hybrid_cores = true;
-            info.p_core_mask = 0;
+    for core in topo.all_cores.values() {
+        // Determine is_big. 
+        // If CoreType::Efficiency -> 0. 
+        // If Performance or Unknown -> 1.
+        let is_big = match core.core_type {
+            CoreType::Little => 0,
+            _ => 1,
+        };
+        
+        if is_big == 1 {
+            p_cores_found += 1;
+        } else {
+            e_cores_found += 1;
+        }
 
-            // P-cores have perf >= 90% of max
-            let p_core_threshold = max_perf * 90 / 100;
-
-            for (cpu_id, perf) in &core_perfs {
-                if *cpu_id >= 64 {
-                    continue;
-                }
-                if *perf >= p_core_threshold {
-                    info.p_core_mask |= 1u64 << cpu_id;
+        for cpu_id in core.cpus.keys() {
+            let cpu = *cpu_id;
+            if cpu < MAX_CPUS {
+                info.cpu_is_big[cpu] = is_big;
+                if is_big == 1 {
+                    info.big_cpu_mask |= 1u64 << cpu;
                 }
             }
+        }
+    }
+
+    // Update hybrid flag
+    if p_cores_found > 0 && e_cores_found > 0 {
+        info.has_hybrid_cores = true;
+    } else {
+        info.has_hybrid_cores = false;
+        // If not hybrid, ensure all marked as Big for consistency (though mask handles it)
+        if p_cores_found == 0 && e_cores_found > 0 {
+            // Weird case: All E-cores? Treat as "Big" relative to nothing.
+            // But we keep as is.
         }
     }
 
     // Log detected topology
     info!("Topology detected:");
     info!("  CPUs:          {}", info.nr_cpus);
+    info!("  SMT Enabled:   {}", info.smt_enabled);
     info!("  Dual CCD:      {}", info.has_dual_ccd);
     if info.has_dual_ccd {
-        info!(
-            "    CCD0 mask:   {:016x} ({} cores)",
-            info.ccd0_mask,
-            info.ccd0_mask.count_ones()
-        );
-        info!(
-            "    CCD1 mask:   {:016x} ({} cores)",
-            info.ccd1_mask,
-            info.ccd1_mask.count_ones()
-        );
+        info!("    Masks:       {:x?}", &info.llc_cpu_mask[..llc_idx]);
     }
     info!("  Hybrid cores:  {}", info.has_hybrid_cores);
     if info.has_hybrid_cores {
-        info!(
-            "    P-core mask: {:016x} ({} P-cores)",
-            info.p_core_mask,
-            info.p_core_mask.count_ones()
-        );
+        info!("    P-core mask: {:016x}", info.big_cpu_mask);
     }
 
     Ok(info)
