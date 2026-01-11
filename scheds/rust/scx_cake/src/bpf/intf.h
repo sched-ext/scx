@@ -33,15 +33,18 @@ typedef signed long s64;
  * Lower tiers get LARGER slices (better throughput)
  */
 enum cake_tier {
-    CAKE_TIER_CRITICAL_LATENCY = 0,  /* Ultra-low latency: score=100 AND <250µs avg runtime */
-    CAKE_TIER_REALTIME    = 1,  /* Ultra-sparse: score=100 but >=250µs avg runtime */
-    CAKE_TIER_CRITICAL    = 2,  /* Very sparse: audio, compositor */
-    CAKE_TIER_GAMING      = 3,  /* Sparse/bursty: game threads, UI */
-    CAKE_TIER_INTERACTIVE = 4,  /* Baseline: default applications */
-    CAKE_TIER_BATCH       = 5,  /* Lower priority: nice > 0, heavy apps */
-    CAKE_TIER_BACKGROUND  = 6,  /* Bulk work: compilers, encoders */
-    CAKE_TIER_MAX         = 7,
+    CAKE_TIER_CRITICAL_LATENCY = 0, /* <50us avg (Input/IRQs) */
+    CAKE_TIER_REALTIME         = 1, /* <500us avg (Audio/Video) */
+    CAKE_TIER_CRITICAL         = 2, /* Very sparse (Compositor) */
+    CAKE_TIER_GAMING           = 3, /* Sparse/Bursty (Games) */
+    CAKE_TIER_INTERACTIVE      = 4, /* Normal apps (Browser/IDE) */
+    CAKE_TIER_BATCH            = 5, /* Heavy compilation/Encoding */
+    CAKE_TIER_BACKGROUND       = 6, /* Low prio (idlers) */
+    CAKE_TIER_IDLE             = 255,
+    CAKE_TIER_MAX              = 7,
 };
+
+#define CAKE_MAX_CPUS 64
 
 /*
  * Flow state flags (only CAKE_FLOW_NEW currently used)
@@ -125,11 +128,43 @@ struct cake_stats {
  * Result: Zero overhead compared to no topology support
  */
 
-/* Default values */
-#define CAKE_DEFAULT_QUANTUM_NS         (4 * 1000 * 1000)   /* 4ms */
+/* Default values (Gaming profile) */
+#define CAKE_DEFAULT_QUANTUM_NS         (2 * 1000 * 1000)   /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS  (8 * 1000 * 1000)   /* 8ms */
-#define CAKE_DEFAULT_SPARSE_THRESHOLD   100                  /* 10% = 100 permille */
+#define CAKE_DEFAULT_SPARSE_THRESHOLD   50                   /* 5% = 50 permille */
 #define CAKE_DEFAULT_INIT_COUNT         20                   /* Initial sparse count */
 #define CAKE_DEFAULT_STARVATION_NS      (100 * 1000 * 1000) /* 100ms */
+
+/*
+ * Default tier arrays (Gaming profile - pre-computed by userspace)
+ * These are the base values; profiles can scale them as needed.
+ */
+ 
+/* Per-tier starvation thresholds (nanoseconds) */
+#define CAKE_DEFAULT_STARVATION_T0  5000000    /* Critical Latency: 5ms */
+#define CAKE_DEFAULT_STARVATION_T1  3000000    /* Realtime: 3ms */
+#define CAKE_DEFAULT_STARVATION_T2  4000000    /* Critical: 4ms */
+#define CAKE_DEFAULT_STARVATION_T3  8000000    /* Gaming: 8ms */
+#define CAKE_DEFAULT_STARVATION_T4  16000000   /* Interactive: 16ms */
+#define CAKE_DEFAULT_STARVATION_T5  40000000   /* Batch: 40ms */
+#define CAKE_DEFAULT_STARVATION_T6  100000000  /* Background: 100ms */
+
+/* Tier quantum multipliers (fixed-point, 1024 = 1.0x) */
+#define CAKE_DEFAULT_MULTIPLIER_T0  717    /* Critical Latency: 0.7x */
+#define CAKE_DEFAULT_MULTIPLIER_T1  819    /* Realtime: 0.8x */
+#define CAKE_DEFAULT_MULTIPLIER_T2  922    /* Critical: 0.9x */
+#define CAKE_DEFAULT_MULTIPLIER_T3  1024   /* Gaming: 1.0x */
+#define CAKE_DEFAULT_MULTIPLIER_T4  1126   /* Interactive: 1.1x */
+#define CAKE_DEFAULT_MULTIPLIER_T5  1229   /* Batch: 1.2x */
+#define CAKE_DEFAULT_MULTIPLIER_T6  1331   /* Background: 1.3x */
+
+/* Wait budget per tier (nanoseconds) */
+#define CAKE_DEFAULT_WAIT_BUDGET_T0 100000     /* Critical Latency: 100µs */
+#define CAKE_DEFAULT_WAIT_BUDGET_T1 750000     /* Realtime: 750µs */
+#define CAKE_DEFAULT_WAIT_BUDGET_T2 2000000    /* Critical: 2ms */
+#define CAKE_DEFAULT_WAIT_BUDGET_T3 4000000    /* Gaming: 4ms */
+#define CAKE_DEFAULT_WAIT_BUDGET_T4 8000000    /* Interactive: 8ms */
+#define CAKE_DEFAULT_WAIT_BUDGET_T5 20000000   /* Batch: 20ms */
+#define CAKE_DEFAULT_WAIT_BUDGET_T6 0          /* Background: no limit */
 
 #endif /* __CAKE_INTF_H */

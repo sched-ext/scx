@@ -68,6 +68,13 @@ fn aggregate_stats(map: &libbpf_rs::Map) -> Result<cake_stats> {
         total.nr_sparse_promotions += s.nr_sparse_promotions;
         total.nr_sparse_demotions += s.nr_sparse_demotions;
         total.nr_input_preempts += s.nr_input_preempts;
+
+        total.nr_wait_demotions += s.nr_wait_demotions;
+        total.total_wait_ns += s.total_wait_ns;
+        total.nr_waits += s.nr_waits;
+        if s.max_wait_ns > total.max_wait_ns {
+            total.max_wait_ns = s.max_wait_ns;
+        }
     }
 
     Ok(total)
@@ -170,6 +177,18 @@ fn format_stats_for_clipboard(stats: &cake_stats, uptime: &str) -> String {
         stats.nr_input_preempts
     ));
 
+    let avg_wait = if stats.nr_waits > 0 {
+        stats.total_wait_ns as f64 / stats.nr_waits as f64 / 1000.0
+    } else {
+        0.0
+    };
+    output.push_str(&format!(
+        "\nWait Stats: Avg {:.1}µs, Max {}µs, Demotions: {}\n",
+        avg_wait,
+        stats.max_wait_ns / 1000,
+        stats.nr_wait_demotions
+    ));
+
     output
 }
 
@@ -198,7 +217,7 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
 
     // Build topology info string
     let topo_info = format!(
-        "CPUs: {} {}{}",
+        "CPUs: {} {}{}{}",
         app.topology.nr_cpus,
         if app.topology.has_dual_ccd {
             "[Dual-CCD]"
@@ -207,6 +226,11 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
         },
         if app.topology.has_hybrid_cores {
             "[Hybrid]"
+        } else {
+            ""
+        },
+        if app.topology.smt_enabled {
+            "[SMT]"
         } else {
             ""
         },
@@ -273,10 +297,21 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
     frame.render_widget(table, layout[1]);
 
     // --- Summary ---
+    let avg_wait = if stats.nr_waits > 0 {
+        stats.total_wait_ns as f64 / stats.nr_waits as f64 / 1000.0
+    } else {
+        0.0
+    };
+
     let summary_text = format!(
-        " Sparse flow: +{} promotions, -{} demotions\n \
-         Input: {} preempts fired",
-        stats.nr_sparse_promotions, stats.nr_sparse_demotions, stats.nr_input_preempts
+        " Sparse: +{} promo, -{} demo | Input Preempts: {}\n \
+          Wait: Avg {:.1}µs, Max {}µs | Demotions: {}",
+        stats.nr_sparse_promotions,
+        stats.nr_sparse_demotions,
+        stats.nr_input_preempts,
+        avg_wait,
+        stats.max_wait_ns / 1000,
+        stats.nr_wait_demotions
     );
     let summary = Paragraph::new(summary_text).block(
         Block::default()
