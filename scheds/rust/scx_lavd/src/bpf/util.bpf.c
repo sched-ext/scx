@@ -340,21 +340,19 @@ u32 cpu_to_dsq(u32 cpu)
 }
 
 __hidden
-s32 nr_queued_on_cpu(struct cpu_ctx *cpuc)
+bool queued_on_cpu(struct cpu_ctx *cpuc)
 {
-	s32 nr_queued;
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id))
+		return true;
 
-	nr_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpuc->cpu_id);
+	if (use_per_cpu_dsq() && scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id)))
+		return true;
 
-	if (use_per_cpu_dsq())
-		nr_queued += scx_bpf_dsq_nr_queued(cpu_to_dsq(cpuc->cpu_id));
+	if (use_cpdom_dsq() && scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id)))
+		return true;
 
-	if (use_cpdom_dsq())
-		nr_queued += scx_bpf_dsq_nr_queued(cpdom_to_dsq(cpuc->cpdom_id));
-
-	return nr_queued;
+	return false;
 }
-
 __hidden
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
 {
