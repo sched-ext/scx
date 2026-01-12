@@ -68,7 +68,8 @@ struct cake_task_ctx {
     u32 packed_info;       /* 4B: Bitfield (Err, Wait, Score, Tier, Flags) */
     u16 deficit_us;        /* 2B: Deficit (us), max 65ms */
     u16 avg_runtime_us;    /* 2B: EMA runtime estimate */
-    u8 __pad[40];          /* Pad to 64 bytes (Cache Line Size) */
+    u32 target_dsq_id;     /* 4B: Direct Dispatch Target (0 = None) */
+    u8 __pad[36];          /* Pad to 64 bytes (was 40, used 4) */
 };
 
 /* 
