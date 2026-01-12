@@ -638,7 +638,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
              }
         } else {
              /* Standard fast scan */
-             s32 idle_cpu = find_first_idle_cpu(-1);
+             s32 idle_cpu = find_first_idle_cpu(prev_cpu);
              if (idle_cpu >= 0) {
                  cpu = idle_cpu;
                  is_idle = true;
@@ -700,6 +700,24 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
     struct cake_task_ctx *tctx;
     u8 tier;
     u64 dsq_id;
+
+    /*
+     * YIELD ROUTING: Tasks that voluntarily yield forfeit latency priority.
+     * 
+     * Detection: If a task enters enqueue but wasn't sleeping (WAKEUP) and
+     * wasn't forced off (PREEMPT), it effectively "passed its turn" (yield).
+     * 
+     * Spinners calling sched_yield() are routed directly to BATCH_DSQ,
+     * bypassing tier logic. This fixes priority inversion where spinners
+     * were falsely promoted to Tier 0 due to short runtimes.
+     * 
+     * Cost: ~2 cycles (bitwise AND + branch)
+     * Savings: ~50-200 cycles (skips context lookup and tier logic)
+     */
+    if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
+        scx_bpf_dsq_insert(p, BATCH_DSQ, quantum_ns, enq_flags);
+        return;
+    }
 
     tctx = get_task_ctx(p, false);  /* No allocation - fast path */
     if (unlikely(!tctx)) {
