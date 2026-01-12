@@ -787,6 +787,20 @@ u64 scale_cap_freq(u64 dur, s32 cpu)
 	return scaled_dur;
 }
 
+u64 scale_cap_max_freq(u64 dur, s32 cpu)
+{
+	u64 cap, scaled_dur;
+
+	/*
+	 * Scale the duration by CPU capacity and its max frequency,
+	 * so calculate capacity-invariant time duration.
+	 */
+	cap = get_cpuperf_cap(cpu);
+	scaled_dur = (dur * cap) >> LAVD_SHIFT;
+
+	return scaled_dur;
+}
+
 static void do_update_autopilot_high_cap(void)
 {
 	u64 c;

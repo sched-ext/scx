@@ -86,7 +86,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 cpdom_id, cpuc_tot_sc_time, compute;
+	u64 cpdom_id, compute, non_scx_time, sc_non_scx_time, cpuc_tot_sc_time;
 	int cpu;
 
 	/*
@@ -157,13 +157,47 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		cpuc->tot_svc_time = 0;
 
 		/*
-		 * Update scaled CPU utilization,
-		 * which is capacity and frequency invariant.
+		 * If the CPU is in an idle state (i.e., idle_start_clk is
+		 * non-zero), accumulate the current idle period so far.
 		 */
-		cpuc_tot_sc_time = cpuc->tot_sc_time;
-		cpuc->tot_sc_time = 0;
+		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
+			u64 old_clk = cpuc->idle_start_clk;
+			if (old_clk == 0 || time_after(old_clk, c->now))
+				break;
+
+			bool ret = __sync_bool_compare_and_swap(
+					&cpuc->idle_start_clk, old_clk, c->now);
+			if (ret) {
+				u64 duration = time_delta(c->now, old_clk);
+
+				__sync_fetch_and_add(&cpuc->idle_total, duration);
+				break;
+			}
+		}
+
+		/*
+		 * Calculate the scaled non-SCX time of this CPU, including
+		 * IRQ, non-SCX (RT/DL) tasks. Since there is no direct way
+		 * to track non-SCX time, we derive it from the total SCX task
+		 * time (i.e., tot_task_time) and total compute time (i.e.,
+		 * duration - idle_total). We assume the CPU frequency was at
+		 * its maximum while running non-SCX tasks.
+		 */
+		compute = time_delta(c->duration, cpuc->idle_total);
+		non_scx_time = time_delta(compute, cpuc->tot_task_time);
+		sc_non_scx_time = scale_cap_max_freq(non_scx_time, cpu);
+		cpuc->tot_task_time = 0;
+
+		/*
+		 * Update scaled CPU utilization, which is capacity and
+		 * frequency invariant. The scaled CPU utilization should
+		 * include everything — SCX task time, non-SCX task time
+		 * (RT/DL), IRQ times, etc.
+		 */
+		cpuc_tot_sc_time = cpuc->tot_sc_time + sc_non_scx_time;
 		cpuc->cur_sc_util = (cpuc_tot_sc_time << LAVD_SHIFT) / c->duration;
 		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
+		cpuc->tot_sc_time = 0;
 
 		/*
 		 * Accumulate cpus' scaled loads,
@@ -237,25 +271,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
-		 * If the CPU is in an idle state (i.e., idle_start_clk is
-		 * non-zero), accumulate the current idle period so far.
-		 */
-		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
-			u64 old_clk = cpuc->idle_start_clk;
-			if (old_clk == 0 || time_after(old_clk, c->now))
-				break;
-
-			bool ret = __sync_bool_compare_and_swap(
-					&cpuc->idle_start_clk, old_clk, c->now);
-			if (ret) {
-				u64 duration = time_delta(c->now, old_clk);
-
-				__sync_fetch_and_add(&cpuc->idle_total, duration);
-				break;
-			}
-		}
-
-		/*
 		 * Calculate per-CPU utilization.
 		 */
 		compute = time_delta(c->duration, cpuc->idle_total);
@@ -298,12 +313,17 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	u64 avg_svc_time = 0, cur_sc_util, scu_spike;
 
 	/*
-	 * Calculate the CPU utilization.
+	 * Calculate the CPU utilization that includes everything
+	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
 	 */
 	c->duration_total = c->duration * nr_cpus_onln;
 	c->compute_total = time_delta(c->duration_total, c->idle_total);
 	c->cur_util = (c->compute_total << LAVD_SHIFT) / c->duration_total;
 
+	/*
+	 * Calculate the scaled CPU utilization that includes everything
+	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
+	 */
 	cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
 	if (cur_sc_util > c->cur_util)
 		cur_sc_util = min(sys_stat.avg_sc_util, c->cur_util);

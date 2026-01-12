@@ -224,7 +224,8 @@ struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
 struct cpu_ctx {
 	/* --- cacheline 0 boundary (0 bytes) --- */
 	volatile u64	flags;		/* cached copy of task's flags */
-	volatile u64	tot_svc_time;	/* total service time on a CPU scaled by tasks' weights */
+	volatile u64	tot_task_time;	/* total wall-clock time this CPU has spent running scx tasks so far. */
+	volatile u64	tot_svc_time;	/* total scx tasks' service time on a CPU scaled by tasks' weights */
 	volatile u64	tot_sc_time;	/* total scaled CPU time, which is capacity and frequency invariant. */
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	running_clk;	/* when a task starts running */
@@ -445,6 +446,7 @@ extern u32			default_big_core_scale;
 int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
 u64 scale_cap_freq(u64 dur, s32 cpu);
+u64 scale_cap_max_freq(u64 dur, s32 cpu);
 
 int reset_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);
