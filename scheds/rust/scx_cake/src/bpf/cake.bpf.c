@@ -45,27 +45,15 @@ struct {
 } stats_map SEC(".maps");
 
 /*
- * Global Idle Mask (Bitmask for CTZ scanning)
+ * Global Idle Mask (Bitmask)
  * 
- * KEPT AS BITMASK because we need "find first idle CPU" via CTZ.
- * Bytemask would require scanning, losing the O(1) advantage.
- * 
- * Write side uses atomic ops - acceptable cost for fast read.
+ * SINGLE SOURCE OF TRUTH for idle CPU tracking.
+ * - Single u64 replaces 64 bytes + 8 u64 chunks.
+ * - Eliminated False Sharing: No more 64-byte cache line invalidation.
+ * - Updated atomically with Read-Before-Write optimization.
+ * - Read via TZCNT for O(1) idle CPU discovery.
  */
-/*
- * Global Idle Mask (Dual-View Union)
- * 
- * "Wait-Free" Implementation:
- * - WRITE: Write to 'as_bytes' (u8) is a single standard store. No ATOMIC LOCK. 
- *          Store buffer handles coherency (Wait-Free).
- * - READ:  Read 'as_chunks' (u64) to scan 8 CPUs at once.
- */
-struct {
-    union {
-        u8  as_bytes[64];   /* WRITE VIEW: Access individually (No False Sharing logic) */
-        u64 as_chunks[8];   /* READ VIEW:  Access in 8 chunks (Fast Scan) */
-    };
-} idle_map SEC(".bss") __attribute__((aligned(64)));
+u64 idle_mask_global SEC(".bss") __attribute__((aligned(64)));
 
 /*
  * Global Victim Mask (Bitmask for CTZ scanning)
@@ -74,13 +62,6 @@ struct {
  * Updated non-atomically (acceptable race - victim is heuristic).
  */
 u64 victim_mask SEC(".bss") __attribute__((aligned(64)));
-
-/*
- * Global Idle Bitmask (Parallel to idle_map)
- * Used ONLY when topology features are enabled (has_multi_llc or has_hybrid).
- * Updated atomically to allow fast masking ops.
- */
-u64 idle_mask_global SEC(".bss") __attribute__((aligned(64)));
 
 /* NOTE: dsq_has_tasks flag system was removed.
  * Flags became permanently dirty (never cleared) and provided no benefit.
@@ -99,70 +80,45 @@ static __always_inline struct cake_stats *get_local_stats(void)
 }
 
 /*
- * Helper: Find first idle CPU using MLP-optimized scan
+ * Helper: Find first idle CPU using O(1) Bitmask Scan
  * 
- * O(1) OPTIMIZATION: Load all 8 chunks in parallel (MLP), OR together
- * to check if ANY CPU is idle, then scan only if needed.
- * Reduces 40 dependent cycles to ~12 parallel cycles.
+ * PERFORMANCE:
+ * - Load: Single u64 load (vs 8 loads previously)
+ * - Check: __builtin_ctzll maps to TZCNT (3 cycles)
+ * - Latency: Limited by memory fetch of idle_mask_global only.
  */
 static __always_inline s32 find_first_idle_cpu(s32 prev_cpu)
 {
-    /* 1. Check prev_cpu direct (Fastest - 1 byte load) */
-    if (prev_cpu >= 0 && prev_cpu < 64 && idle_map.as_bytes[prev_cpu]) 
-        return prev_cpu;
+    /* Load global mask once */
+    u64 idle_mask = READ_ONCE(idle_mask_global);
 
-    /* 2. MLP: Load ALL chunks in parallel (CPU issues 8 loads simultaneously) */
-    u64 c0 = idle_map.as_chunks[0];
-    u64 c1 = idle_map.as_chunks[1];
-    u64 c2 = idle_map.as_chunks[2];
-    u64 c3 = idle_map.as_chunks[3];
-    u64 c4 = idle_map.as_chunks[4];
-    u64 c5 = idle_map.as_chunks[5];
-    u64 c6 = idle_map.as_chunks[6];
-    u64 c7 = idle_map.as_chunks[7];
-    
-    /*
-     * TREE REDUCTION: Parallel OR with depth 3 instead of depth 7
-     * Reduces dependency chain from 7 serial ops to 3 parallel levels.
-     */
-    /* Level 1: 4 parallel ops */
-    u64 m0 = c0 | c1;
-    u64 m1 = c2 | c3;
-    u64 m2 = c4 | c5;
-    u64 m3 = c6 | c7;
-    
-    /* Level 2: 2 parallel ops */
-    u64 y0 = m0 | m1;
-    u64 y1 = m2 | m3;
-    
-    /* Level 3: Final check */
-    if (!(y0 | y1))
+    if (!idle_mask)
         return -1;
-    
-    /* 4. Scan chunks (we know at least one has an idle CPU) */
-    if (c0) return (0 * 8) + (__builtin_ctzll(c0) >> 3);
-    if (c1) return (1 * 8) + (__builtin_ctzll(c1) >> 3);
-    if (c2) return (2 * 8) + (__builtin_ctzll(c2) >> 3);
-    if (c3) return (3 * 8) + (__builtin_ctzll(c3) >> 3);
-    if (c4) return (4 * 8) + (__builtin_ctzll(c4) >> 3);
-    if (c5) return (5 * 8) + (__builtin_ctzll(c5) >> 3);
-    if (c6) return (6 * 8) + (__builtin_ctzll(c6) >> 3);
-    if (c7) return (7 * 8) + (__builtin_ctzll(c7) >> 3);
-    
-    return -1;  /* Should never reach here */
+
+    /* 1. Check prev_cpu direct (Bitwise extract) */
+    if (prev_cpu >= 0 && prev_cpu < 64) {
+        if ((idle_mask >> prev_cpu) & 1)
+            return prev_cpu;
+    }
+
+    /* 2. Scan: Find first set bit (TZCNT/BSF) */
+    return __builtin_ctzll(idle_mask);
 }
 
 /*
  * Helper: Find best core from a mask of candidates
  * 
+ * CHANGED: Accepts 'full_idle_mask' to check siblings without 
+ * reloading the global state.
+ * 
  * Logic:
  * 1. If SMT disabled: Just pick first bit (CTZ).
  * 2. If SMT enabled:
- *    - Try to find a core where sibling is ALSO idle (Fully Idle Core).
+ *    - Try to find a core where sibling is ALSO idle.
  *    - Inspect up to 4 candidates to find a fully idle one.
  *    - Fallback to first candidate if no fully idle core found.
  */
-static __always_inline s32 pick_best_cpu_smt(u64 candidates)
+static __always_inline s32 pick_best_cpu_smt(u64 candidates, u64 full_idle_mask)
 {
     if (!candidates)
         return -1;
@@ -182,45 +138,24 @@ static __always_inline s32 pick_best_cpu_smt(u64 candidates)
         
         s32 cpu = __builtin_ctzll(iter_mask);
         
-        /* 
-         * Verifier bounds check: Force mask to 0-63.
-         * Compiler optimization removed the 'if' check because it knows ctz < 64,
-         * but Verifier doesn't know ctz output range.
-         * 
-         * USE BARRIER: Force compiler to forget 'cpu' range so it emits the AND.
-         */
+        /* Barrier to satisfy verifier bounds */
         __asm__ __volatile__("" : "+r"(cpu));
         cpu &= 63;
 
-        /* Check sibling */
+        /* Check sibling using BITWISE extraction on full mask */
         u8 sibling = cpu_sibling_map[cpu];
-        
-        /* 
-         * Verifier bounds check: Sibling ID from map is untrusted (u8=0-255).
-         * Must bound it to <64 for idle_map access.
-         */
         sibling &= 63;
         
-        /* 
-         * Note: Sibling might be > 63 if map is invalid, but cpu is from mask so <64.
-         * cpu_sibling_map values valid range 0-63.
-         */
-        if (idle_map.as_bytes[sibling]) {
-             /* Result! Both this CPU and its sibling are idle. Best choice. */
-             return cpu;
+        /* Bit check is ~1 cycle. We already have full_idle_mask in register. */
+        if ((full_idle_mask >> sibling) & 1) {
+             return cpu; /* Both idle */
         }
         
-        /* Save first valid CPU as fallback */
         if (fallback_cpu < 0) fallback_cpu = cpu;
-        
-        /* Remove this cpu and try next */
         iter_mask &= ~(1ULL << cpu);
     }
     
-    /* No fully idle core found in first 4 candidates? Use best fallback. */
     if (fallback_cpu >= 0) return fallback_cpu;
-    
-    /* Fallback: just pick first */
     return __builtin_ctzll(candidates);
 }
 
@@ -239,24 +174,16 @@ static __always_inline s32 find_first_idle_cpu_topo(s32 prev_cpu)
     if (!has_multi_llc && !has_hybrid && !smt_enabled)
         return find_first_idle_cpu(prev_cpu);
 
-    /* 1. Fast path: Check prev_cpu first (hottest cache) */
-    /* Checks if prev_cpu is idle. */
-    if (prev_cpu >= 0 && prev_cpu < CAKE_MAX_CPUS && idle_map.as_bytes[prev_cpu]) {
-        /* 
-         * SMT Optimization: If SMT is on, is the sibling ALSO idle? 
-         * If yes -> optimal. If no -> maybe look for better?
-         * 
-         * PREV_CPU bias is strong (cache locality). We stick with it 
-         * even if sibling is busy, unless it's CRITICAL latency tiers?
-         * For now: stick with prev_cpu if idle. Locality > SMT contention usually.
-         */
-        return prev_cpu;
-    }
-
-    /* Load global idle mask (atomic update in background) */
+    /* Load global idle mask once */
     u64 idle_current = READ_ONCE(idle_mask_global);
     if (!idle_current)
         return -1;
+
+    /* 1. Fast path: Check prev_cpu first (Bitwise extract) */
+    if (prev_cpu >= 0 && prev_cpu < 64) {
+        if ((idle_current >> prev_cpu) & 1)
+            return prev_cpu;
+    }
 
     /* 2. Topology preference logic */
     u64 candidates = 0;
@@ -264,7 +191,6 @@ static __always_inline s32 find_first_idle_cpu_topo(s32 prev_cpu)
     /* Preference A: Same LLC (if multi-LLC) */
     if (has_multi_llc && prev_cpu >= 0 && prev_cpu < CAKE_MAX_CPUS) {
         u8 my_llc = cpu_llc_id[prev_cpu];
-        /* Safety check for bounds */
         if (my_llc < 8) {
             u64 local_mask = llc_cpu_mask[my_llc];
             
@@ -272,25 +198,24 @@ static __always_inline s32 find_first_idle_cpu_topo(s32 prev_cpu)
             if (has_hybrid) {
                 u64 big_mask = READ_ONCE(big_cpu_mask);
                 candidates = idle_current & local_mask & big_mask;
-                if (candidates) return pick_best_cpu_smt(candidates);
+                /* PASS FULL MASK for SMT checks */
+                if (candidates) return pick_best_cpu_smt(candidates, idle_current);
             }
             
-            /* Any local core */
             candidates = idle_current & local_mask;
-            if (candidates) return pick_best_cpu_smt(candidates);
+            if (candidates) return pick_best_cpu_smt(candidates, idle_current);
         }
     }
 
-    /* Preference B: Any P-core (if hybrid or just P-core preference) */
-    /* Note: if not hybrid, big_cpu_mask is 0, so this block skipped or candidates=0 */
+    /* Preference B: Any P-core (if hybrid) */
     if (has_hybrid) {
          u64 big_mask = READ_ONCE(big_cpu_mask);
          candidates = idle_current & big_mask;
-         if (candidates) return pick_best_cpu_smt(candidates);
+         if (candidates) return pick_best_cpu_smt(candidates, idle_current);
     }
     
-    /* Fallback: Any idle CPU (we know idle_current != 0) */
-    return pick_best_cpu_smt(idle_current);
+    /* Fallback: Any idle CPU */
+    return pick_best_cpu_smt(idle_current, idle_current);
 }
 
 /* User exit info for graceful scheduler exit */
@@ -318,6 +243,9 @@ static u64 cached_threshold_ns;
 #define INTERACTIVE_DSQ 4
 #define BATCH_DSQ       5
 #define BACKGROUND_DSQ  6
+
+/* Per-CPU Direct Dispatch Queues (1000-1063) */
+#define CAKE_DSQ_LC_BASE 1000
 
 /* Sparse score threshold for gaming detection */
 #define THRESHOLD_GAMING 70
@@ -597,17 +525,33 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     tctx->last_wake_ts = (u32)scx_bpf_now();
 
     /*
+     * SYNC WAKEUP: L1 Cache Bias
+     * If waker is going to sleep immediately, run wakee on same CPU.
+     * Data is hot in L1 cache - don't migrate it.
+     */
+    if (wake_flags & SCX_WAKE_SYNC) {
+        s32 this_cpu = bpf_get_smp_processor_id();
+        if (this_cpu >= 0 && this_cpu < 64) {
+             /* STATE-BASED DISPATCH: Set target, let enqueue handle it */
+            tctx->target_dsq_id = CAKE_DSQ_LC_BASE + this_cpu;
+            
+            /* ADD THIS: Ensure we actually reschedule to pick it up */
+            scx_bpf_kick_cpu(this_cpu, SCX_KICK_PREEMPT);
+            return this_cpu;
+        }
+    }
+
+    /*
      * MLP OPTIMIZATION: Issue independent loads in parallel
-     * Load tier AND prev_cpu idle status simultaneously.
+     * Load tier AND idle mask simultaneously.
      */
     u8 tier = GET_TIER(tctx);  /* Load 1: tctx cache line */
     
-    /* 
-     * Bounds check prev_cpu and speculatively load idle status (Load 2: idle_map)
-     * Use bitmask (& 63) - verifier tracks this reliably AND it's branchless.
-     */
+    /* Load global idle mask (replaces idle_map byte access) */
+    u64 idle_mask = READ_ONCE(idle_mask_global);  /* Load 2: MLP parallel with tier load */
+    
     u32 bounded_prev = (u32)prev_cpu & 63;  /* Always 0-63, BPF verifier happy */
-    u8 prev_idle = idle_map.as_bytes[bounded_prev];  /* MLP: parallel with tier load */
+    bool prev_idle = (idle_mask >> bounded_prev) & 1;  /* Bitwise extract */
     bool prev_valid = (prev_cpu >= 0 && prev_cpu < 64);
     
     /* Default to prev_cpu */
@@ -666,27 +610,43 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* Direct dispatch if idle CPU found - bypasses DSQ entirely */
     if (is_idle) {
-        /* Use SCX_ENQ_LAST to skip redundant enqueue call - saves 5-20µs */
-        scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, quantum_ns, SCX_ENQ_LAST);
+         /* STATE-BASED DISPATCH: Set target, let enqueue handle it */
+        tctx->target_dsq_id = CAKE_DSQ_LC_BASE + cpu;
+
         if (enable_stats) {
             struct cake_stats *s = get_local_stats();
             if (s) s->nr_new_flow_dispatches++;
         }
+        
+        /* ADD THIS: Wake up the idle CPU! */
+        /* UPGRADE: Use SCX_KICK_PREEMPT. IDLE kick might be ignored if we raced. */
+        scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+
         return cpu;  /* Critical: return early to avoid cake_enqueue */
     }
 
     /* 
-     * CRITICAL PATH: Tier 0 preemption injection
+     * CRITICAL PATH: Tier 0 preemption injection with DIRECT DISPATCH
+     * 
+     * Fast Lane: Tier 0 tasks skip cake_enqueue and global DSQ entirely.
+     * They are inserted directly into the victim's local queue.
+     * 
      * ZERO LATENCY: The victim was computed ~20 cycles ago (Cluster Bomb).
+     * Savings: 1-3µs by bypassing global DSQ lock and cake_dispatch pull.
+     * 
+     * Fallback: If no victim found, falls through to cake_enqueue (standard path).
      */
     if (tier == CRITICAL_LATENCY_DSQ && spec_victim_cpu >= 0) {
         scx_bpf_kick_cpu(spec_victim_cpu, SCX_KICK_PREEMPT);
+        
+        /* STATE-BASED DISPATCH */
+        tctx->target_dsq_id = CAKE_DSQ_LC_BASE + spec_victim_cpu;
         
         if (enable_stats) {
             struct cake_stats *s = get_local_stats();
             if (s) s->nr_input_preempts++;
         }
-        cpu = spec_victim_cpu;
+        return spec_victim_cpu;  /* Return early to skip cake_enqueue */
     }
 
     return cpu;
@@ -695,73 +655,55 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 /*
  * Enqueue task to the appropriate DSQ based on sparse detection
  */
+/*
+ * Enqueue task to the appropriate DSQ based on sparse detection
+ */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
-    struct cake_task_ctx *tctx;
-    u8 tier;
-    u64 dsq_id;
-
-    /*
-     * YIELD ROUTING: Tasks that voluntarily yield forfeit latency priority.
-     * 
-     * Detection: If a task enters enqueue but wasn't sleeping (WAKEUP) and
-     * wasn't forced off (PREEMPT), it effectively "passed its turn" (yield).
-     * 
-     * Spinners calling sched_yield() are routed directly to BATCH_DSQ,
-     * bypassing tier logic. This fixes priority inversion where spinners
-     * were falsely promoted to Tier 0 due to short runtimes.
-     * 
-     * Cost: ~2 cycles (bitwise AND + branch)
-     * Savings: ~50-200 cycles (skips context lookup and tier logic)
+    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    
+    /* 
+     * FIX: Safer Direct Dispatch Check
+     * 1. Only use target_dsq_id if this is a WAKEUP (prevents stale data on Yields).
+     * 2. Always clear target_dsq_id immediately after checking.
      */
+    if (likely(tctx)) {
+        u32 target = tctx->target_dsq_id;
+        tctx->target_dsq_id = 0; /* CONSUME: Clear immediately to prevent stale state */
+
+        if ((enq_flags & SCX_ENQ_WAKEUP) && target != 0) {
+            scx_bpf_dsq_insert(p, target, tctx->next_slice, enq_flags);
+            return;
+        }
+    }
+
+    /* Handle Yields/Background */
     if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
-        scx_bpf_dsq_insert(p, BATCH_DSQ, quantum_ns, enq_flags);
+        scx_bpf_dsq_insert(p, BACKGROUND_DSQ, quantum_ns, enq_flags);
         return;
     }
 
-    tctx = get_task_ctx(p, false);  /* No allocation - fast path */
     if (unlikely(!tctx)) {
-        /* No context yet - use INTERACTIVE defaults (context created in cake_running) */
+         /* No context yet - use INTERACTIVE defaults (context created in cake_running) */
         scx_bpf_dsq_insert(p, INTERACTIVE_DSQ, quantum_ns, enq_flags);
         return;
     }
 
-    /* Zero-Cycle Wakeup: Tier already calculated in cake_stopping */
-    /*
-     * MLP OPTIMIZATION: Load tier and slice in parallel (same cache line)
-     * Both fields are in cake_task_ctx, likely same 64-byte cache line.
-     */
-    tier = GET_TIER(tctx);           /* Load 1: packed_info field */
-    u64 slice = tctx->next_slice;    /* Load 2: next_slice (parallel - MLP) */
+    /* Standard Tier Logic (Zero-Cycle Wakeup) */
+    u8 tier = GET_TIER(tctx);
+    u64 slice = tctx->next_slice;
 
-    /* Track if this is a wakeup (new flow) or preemption (old flow) */
     if (enable_stats) {
         struct cake_stats *s = get_local_stats();
         if (s) {
-            if (enq_flags & SCX_ENQ_WAKEUP) {
-                s->nr_new_flow_dispatches++;
-            } else {
-                s->nr_old_flow_dispatches++;
-            }
-
-            /* 
-             * Bound tier for stats array access using bitmask
-             * BPF verifier requires provably bounded indices
-             * tier & 0x7 ensures max value is 7 (CAKE_TIER_MAX-1 = 6)
-             */
+            if (enq_flags & SCX_ENQ_WAKEUP) s->nr_new_flow_dispatches++;
+            else s->nr_old_flow_dispatches++;
             u8 bounded_tier = tier & 0x7;
-            if (bounded_tier < CAKE_TIER_MAX)
-                s->nr_tier_dispatches[bounded_tier]++;
+            if (bounded_tier < CAKE_TIER_MAX) s->nr_tier_dispatches[bounded_tier]++;
         }
     }
 
-    /*
-     * Route to DSQ based on tier classification.
-     * OPTIMIZATION: Direct mapping (TIER_ID == DSQ_ID)
-     */
-    dsq_id = tier;
-
-    scx_bpf_dsq_insert(p, dsq_id, slice, enq_flags);
+    scx_bpf_dsq_insert(p, tier, slice, enq_flags);
 }
 
 /*
@@ -781,6 +723,10 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
  */
 void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 {
+    /* 1. Drain private mailbox first (zero lock contention) */
+    if (scx_bpf_dsq_move_to_local(CAKE_DSQ_LC_BASE + cpu)) 
+        return;
+
     /*
      * MLP OPTIMIZATION: NULL-safe starvation check
      * Compute starvation bits without branching on prev.
@@ -1030,54 +976,37 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 /*
  * CPU idle state changed
- * Updates the idle_map byte for wait-free idle CPU scanning.
+ * Updates the global idle bitmask atomically.
  */
 void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 {
-    /* Cap CPU ID to 63 for 64-bit mask safety */
-    if (cpu >= 0 && cpu < 64) {
-         /* 
-          * WAIT-FREE WRITE OPTIMIZATION:
-          * Check if byte is already correct. 
-          * CRITICAL: idle_map is a dense u8 array (64 bytes).
-          * A write to ANY byte invalidates the cache line for ALL CPUs.
-          * Skipping redundant writes prevents massive False Sharing storms.
-          */
-         if (idle_map.as_bytes[cpu] != (u8)idle) {
-             idle_map.as_bytes[cpu] = (u8)idle;
-         }
-         
-         u64 mask = (1ULL << cpu);
+    if (cpu < 0 || cpu >= 64) return;
 
-         /* 
-          * STATE CLEANUP: Clear victim mask if CPU goes idle.
-          * cake_running isn't called for idle thread, so we must manually 
-          * clear the victim bit prevents false-positive preempt kicks.
-          */
-         if (idle) {
-             if (READ_ONCE(victim_mask) & mask) {
+    u64 mask = (1ULL << cpu);
+
+    /*
+     * OPTIMIZATION: Read-Before-Write
+     * We only perform the expensive atomic RMW if the bit is actually changing.
+     * 
+     * Cost if match:   1 Load + 1 Branch (Cheap)
+     * Cost if differ:  1 Load + 1 Branch + 1 Lock RMW (Expensive)
+     * 
+     * This prevents cache line bouncing when the scheduler "updates" idle
+     * state redundantly (e.g. during rapid task switches).
+     */
+    u64 current = READ_ONCE(idle_mask_global);
+    bool current_bit = !!(current & mask);
+
+    if (current_bit != idle) {
+        if (idle) {
+            __sync_fetch_and_or(&idle_mask_global, mask);
+            
+            /* Clear victim mask if we are going idle */
+            if (READ_ONCE(victim_mask) & mask)
                  __sync_fetch_and_and(&victim_mask, ~mask);
-             }
-         }
-
-         /* 
-          * TOPOLOGY UPDATE: Atomic bitmask (Only if topology active)
-          * ZERO OVERHEAD for single-CCD non-hybrid (compiled out)
-          */
-         if (has_multi_llc || has_hybrid || smt_enabled) {
-             /* 
-              * OPTIMIZATION: Check if bit is already correct (Skip redundant atomic)
-              * Prevents cache line bouncing/invalidation storms on this hot shared global.
-              */
-             bool currently_set = !!(READ_ONCE(idle_mask_global) & mask);
-             
-             if (currently_set != idle) {
-                 if (idle)
-                     __sync_fetch_and_or(&idle_mask_global, mask);
-                 else
-                     __sync_fetch_and_and(&idle_mask_global, ~mask);
-             }
-         }
+        } else {
+            __sync_fetch_and_and(&idle_mask_global, ~mask);
+        }
     }
 }
 
@@ -1148,17 +1077,28 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
     /* BITWISE OPTIMIZATION: >> 10 (~ / 1024) instead of / 1000 */
     cached_threshold_ns = (quantum_ns * sparse_threshold) >> 10;
 
-    /* Initialize Idle Mask (Single RCU section - saves ~6200 cycles) */
+    /* Initialize Idle Mask */
     u32 nr_cpus = scx_bpf_nr_cpu_ids();
     
-    /* Pre-warm idle map using compat helper (works on v6.16+ via fallback) */
+    /* Pre-warm idle mask using compat helper (works on v6.16+ via fallback) */
     bpf_rcu_read_lock();
     for (s32 i = 0; i < 64; i++) {
         if (i >= nr_cpus) break;
         struct task_struct *p = __COMPAT_scx_bpf_cpu_curr(i);
-        if (p && p->pid == 0) idle_map.as_bytes[i] = 1;
+        /* Set bit if idle */
+        if (p && p->pid == 0) {
+            /* No need for atomic here, single threaded init */
+            idle_mask_global |= (1ULL << i); 
+        }
     }
     bpf_rcu_read_unlock();
+
+    /* Create Per-CPU Direct Dispatch Queues (fixes 0xf crash) */
+    for (s32 i = 0; i < 64; i++) {
+        if (i >= nr_cpus) break;
+        ret = scx_bpf_create_dsq(CAKE_DSQ_LC_BASE + i, -1);
+        if (ret < 0) return ret;
+    }
 
     /* Create all 7 dispatch queues in priority order */
     ret = scx_bpf_create_dsq(CRITICAL_LATENCY_DSQ, -1);
