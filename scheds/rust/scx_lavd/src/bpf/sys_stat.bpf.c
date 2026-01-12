@@ -176,6 +176,19 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
+		 * Calculate per-CPU utilization.
+		 */
+		compute = time_delta(c->duration, cpuc->idle_total);
+		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
+		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+		if (cpdomc) {
+			cpdomc->cur_util_sum += cpuc->cur_util;
+			cpdomc->avg_util_sum += cpuc->avg_util;
+		}
+
+		/*
 		 * Calculate the scaled non-SCX time of this CPU, including
 		 * IRQ, non-SCX (RT/DL) tasks. Since there is no direct way
 		 * to track non-SCX time, we derive it from the total SCX task
@@ -183,7 +196,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 * duration - idle_total). We assume the CPU frequency was at
 		 * its maximum while running non-SCX tasks.
 		 */
-		compute = time_delta(c->duration, cpuc->idle_total);
 		non_scx_time = time_delta(compute, cpuc->tot_task_time);
 		sc_non_scx_time = scale_cap_max_freq(non_scx_time, cpu);
 		cpuc->tot_task_time = 0;
@@ -205,6 +217,11 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		c->tot_sc_time += cpuc_tot_sc_time;
 
+		/*
+		 * Track the scaled time when the utilization spikes happened.
+		 */
+		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
+			c->tsct_spike += cpuc_tot_sc_time;
 		/*
 		 * Accumulate statistics.
 		 */
@@ -241,7 +258,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
-
 	}
 
 	/*
@@ -255,7 +271,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
-		 * Accumulate task's performance criticlity information.
+		 * Accumulate task's performance criticality information.
 		 */
 		if (have_little_core) {
 			if (cpuc->min_perf_cri < c->min_perf_cri)
@@ -271,22 +287,8 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		}
 
 		/*
-		 * Calculate per-CPU utilization.
-		 */
-		compute = time_delta(c->duration, cpuc->idle_total);
-
-		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
-		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
-
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
-		if (cpdomc) {
-			cpdomc->cur_util_sum += cpuc->cur_util;
-			cpdomc->avg_util_sum += cpuc->avg_util;
-		}
-
-		/*
 		 * cpuc->cur_stolen_est is only an estimate of the time stolen by
-		 * irq/steal during execution times. We extropolate that ratio to
+		 * irq/steal during execution times. We extrapolate that ratio to
 		 * the rest of CPU time as an approximation.
 		 */
 		cpuc->cur_stolen_est = (cpuc->stolen_time_est << LAVD_SHIFT) / compute;
@@ -298,12 +300,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		c->idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
-
-		/*
-		 * Track the scaled time when the utilization spikes happened.
-		 */
-		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
-			c->tsct_spike += cpuc_tot_sc_time;
 	}
 }
 
