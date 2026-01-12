@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0
  * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
  */
-#include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
+
+#include <alloc/common.h>
 
 #include <alloc/asan.h>
 
@@ -14,15 +14,15 @@ int alloc_selftest(void)
 {
 	int ret;
 
-	ret = scx_selftest_static();
+	ret = bump_selftest();
 	if (ret) {
-		bpf_printk("scx_selftest_static failed with %d", ret);
+		bpf_printk("bump_selftest failed with %d", ret);
 		return ret;
 	}
 
-	ret = scx_selftest_buddy();
+	ret = buddy_selftest();
 	if (ret) {
-		bpf_printk("scx_selftest_buddy failed with %d", ret);
+		bpf_printk("buddy_selftest failed with %d", ret);
 		return ret;
 	}
 

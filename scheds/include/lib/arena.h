@@ -3,7 +3,7 @@
 #define NR_CPU_IDS_UNINIT (~(u32)0)
 
 /* For userspace programs, __arena is a no-op. */
-#ifndef __arena
+#if !defined(__arena) &&  !defined(__BPF__)
 #define __arena
 #endif
 
