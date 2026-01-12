@@ -414,7 +414,7 @@ static __always_inline bool use_cpdom_dsq(void)
 	return !per_cpu_dsq;
 }
 
-s32 nr_queued_on_cpu(struct cpu_ctx *cpuc);
+bool queued_on_cpu(struct cpu_ctx *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */

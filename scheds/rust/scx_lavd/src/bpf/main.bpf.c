@@ -599,7 +599,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 
-		if (!nr_queued_on_cpu(cpuc)) {
+		if (!queued_on_cpu(cpuc)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
@@ -748,7 +748,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	if (is_idle && !nr_queued_on_cpu(cpuc)) {
+	if (is_idle && !queued_on_cpu(cpuc)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {

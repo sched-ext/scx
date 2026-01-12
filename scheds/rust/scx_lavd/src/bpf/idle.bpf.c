@@ -495,7 +495,7 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 		return false;
 
 	cpuc_waker = get_cpu_ctx_id(ctx->sync_waker_cpu);
-	if (!cpuc_waker || nr_queued_on_cpu(cpuc_waker))
+	if (!cpuc_waker || queued_on_cpu(cpuc_waker))
 		return false;
 
 	if (nr_cpdoms > 1) {
