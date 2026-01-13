@@ -17,7 +17,7 @@ fn main() {
     std::assert_eq!(args().len(), 2, "Usage: client UNIX_SOCKET_PATH");
     let path = args().nth(1).unwrap();
 
-    let mut client = StatsClient::new().set_path(path).connect().unwrap();
+    let mut client = StatsClient::new().set_path(path).connect(None).unwrap();
 
     println!("===== Requesting \"stats_meta\":");
     let resp = client.request::<BTreeMap<String, StatsMeta>>("stats_meta", vec![]);
