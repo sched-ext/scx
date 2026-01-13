@@ -414,12 +414,11 @@ static __always_inline bool use_cpdom_dsq(void)
 	return !per_cpu_dsq;
 }
 
-s32 nr_queued_on_cpu(struct cpu_ctx *cpuc);
+bool queued_on_cpu(struct cpu_ctx *cpuc);
 u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
-extern struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
 extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
 
