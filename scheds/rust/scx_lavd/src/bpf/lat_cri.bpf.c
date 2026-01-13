@@ -26,50 +26,58 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 	 * consumer. If it is a synchronous wakeup, double the prioritization.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_IS_WAKEUP))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	if (test_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve
 	 * latency-critical jobs.
 	 */
 	if (is_kernel_task(p))
-		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_MEDIUM;
 
 	/*
 	 * Further prioritize ksoftirqd.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_KSOFTIRQD))
-		weight_boost += 4 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
 
 	/*
 	 * Further prioritize kworkers.
 	 */
 	if (is_kernel_worker(p))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
+
+	/*
+	 * Prioritize a task woken by an RT/DL task.
+	 */
+	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL)) {
+		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
+	}
 
 	/*
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
 	 * Prioritize a pinned task since it has restrictions in placement
 	 * so it tends to be delayed.
 	 */
 	if (is_pinned(p) || is_migration_disabled(p))
-		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_MEDIUM;
 
 	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST)) {
 		reset_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 	}
 
 	/*
@@ -114,7 +122,7 @@ u32 __attribute__ ((noinline)) log2x(u64 v)
 static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 {
 	u64 weight_ft, wait_ft, wake_ft, runtime_ft, sum_runtime_ft;
-	u64 log_wwf, lat_cri, perf_cri = LAVD_SCALE;
+	u64 log_wwf, lat_cri, perf_cri = LAVD_SCALE, lat_cri_giver;
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
@@ -148,21 +156,30 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 
 	/*
 	 * Determine latency criticality of a task in a context-aware manner by
-	 * considering which task wakes up this task. If its waker is more
-	 * latency-critcial, inherit waker's latency criticality partially.
+	 * considering its waker and wakee's latency criticality.
+	 *
+	 * Forward propagation is to keep the waker’s momentum forward to the
+	 * wakee, and backward propagation is to boost the low-priority waker
+	 * (i.e., priority inversion) for the next time. Propagation decays
+	 * geometrically and is capped to a limit to prevent unlimited cyclic
+	 * inflation of latency-criticality.
+	 *
 	 */
-	if (taskc->lat_cri_waker > lat_cri) {
+	lat_cri_giver = taskc->lat_cri_waker + taskc->lat_cri_wakee;
+	if (lat_cri_giver > (2 * lat_cri)) {
 		/*
-		 * The amount of the wakelet's latency criticality inherited
-		 * needs to be limited, so the wakee's latency criticality
-		 * portion should always be a dominant factor.
+		 * The amount of latency criticality inherited needs to be
+		 * limited, so the task's latency criticality portion should
+		 * always be a dominant factor.
 		 */
-		u64 waker_inh = (taskc->lat_cri_waker - lat_cri) >>
-				LAVD_LC_INH_WAKER_SHIFT;
-		u64 wakee_max = lat_cri >> LAVD_LC_INH_WAKEE_SHIFT;
-		lat_cri += min(waker_inh, wakee_max);
+		u64 giver_inh = (lat_cri_giver - (2 * lat_cri)) >>
+				LAVD_LC_INH_GIVER_SHIFT;
+		u64 receiver_max = lat_cri >> LAVD_LC_INH_RECEIVER_SHIFT;
+		lat_cri += min(giver_inh, receiver_max);
 	}
 	taskc->lat_cri = lat_cri;
+	taskc->lat_cri_waker = 0;
+	taskc->lat_cri_wakee = 0;
 
 	/*
 	 * A task is more CPU-performance sensitive when it meets the following
@@ -185,30 +202,46 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 	taskc->perf_cri = perf_cri;
 }
 
-static u64 calc_greedy_penalty(task_ctx *taskc)
+static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 {
-	u64 ratio, penalty;
+	u64 lag_max, penalty;
+	s64 lag;
 
 	/*
-	 * The greedy ratio of a task represents how much time the task
-	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
-	 * the ratio of task's actual service time to average service time in a
-	 * system.
+	 * Calculate the task's lag -- the underserved time. Bound the lag
+	 * into [-lag_max, +lag_max] and set the LAVD_FLAG_IS_GREEDY flag
+	 * for preemption decision.
 	 */
-	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-
-	/*
-	 * For all under-utilized tasks, we treat them equally.
-	 * For over-utilized tasks, we give some mild penalty.
-	 */
-	if (ratio > LAVD_SCALE) {
-		penalty = LAVD_SCALE + ((ratio - LAVD_SCALE) >> LAVD_LC_GREEDY_SHIFT);
-		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
-	} else {
-		penalty = LAVD_SCALE;
+	lag = sys_stat.avg_svc_time - taskc->svc_time;
+	lag_max = scale_by_task_weight_inverse(p, LAVD_TASK_LAG_MAX);
+	if (lag >= 0) {
 		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
-	}
 
+		/*
+		 * Limit the positive lag to lag_max. This prevents unbounded
+		 * boost of long-sleepers.
+		 */
+		if (lag > lag_max) {
+			taskc->svc_time = sys_stat.avg_svc_time - lag_max;
+			lag = lag_max;
+		}
+	} else {
+		set_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
+
+		/*
+		 * Limit the negative lag to -lag_max to pay the debt
+		 * gradually over time.
+		 */
+		if (lag < -lag_max)
+			lag = -lag_max;
+	}
+	/* lag = [-lag_max, lag_max] */
+
+	/*
+	 * penalty = [100%, 125%]
+	 */
+	penalty = (((-lag + lag_max) << LAVD_SHIFT) / lag_max);
+	penalty = LAVD_SCALE + (penalty >> LAVD_LC_GREEDY_SHIFT);
 	return penalty;
 }
 
@@ -238,7 +271,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 * latency criticality, and greedy ratio.
 	 */
 	calc_lat_cri(p, taskc);
-	greedy_penalty = calc_greedy_penalty(taskc);
+	greedy_penalty = calc_greedy_penalty(p, taskc);
 	adjusted_runtime = calc_adjusted_runtime(taskc);
 
 	deadline = (adjusted_runtime * greedy_penalty) / taskc->lat_cri;

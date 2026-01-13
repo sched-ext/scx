@@ -41,4 +41,8 @@ bool prob_x_out_of_y(u32 x, u32 y);
 u32 get_primary_cpu(u32 cpu);
 u64 task_exec_time(struct task_struct __arg_trusted *p);
 
+static inline bool rt_or_dl_task(struct task_struct *p)
+{
+	return unlikely(p->prio < MAX_RT_PRIO);
+}
 #endif /* __UTIL_H */

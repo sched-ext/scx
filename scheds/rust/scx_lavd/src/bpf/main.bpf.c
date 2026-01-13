@@ -519,12 +519,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->last_slice_used = time_delta(now, taskc->last_running_clk);
 
 	/*
-	 * Reset waker's latency criticality here to limit the latency boost of
-	 * a task. A task will be latency-boosted only once after wake-up.
-	 */
-	taskc->lat_cri_waker = 0;
-
-	/*
 	 * Update the current service time if necessary.
 	 */
 	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
@@ -1160,6 +1154,17 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	if (is_kernel_task(p) != is_kernel_task(waker))
 		return;
 
+	/*
+	 * If the waker is an RT or DL task, set the flag to increase the
+	 * wakee’s latency-criticality. We don’t track the latency-criticality
+	 * of RT/DL tasks, so we can not inherit their latency criticality.
+	 * Instead, we increase wakee’s latency-criticality by a fixed amount.
+	 */
+	if (rt_or_dl_task(waker))
+		set_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+	else
+		reset_task_flag(p_taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+
 	waker_taskc = get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
@@ -1181,10 +1186,21 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Propagate waker's latency criticality to wakee. Note that we pass
-	 * task's self latency criticality to limit the context into one hop.
+	 * Forward propagate waker’s latency criticality to wakee and
+	 * backward propagate wakee’s latency criticality to waker.
+	 *
+	 * Forward propagation is to keep the waker’s momentum forward to the
+	 * wakee, and backward propagation is to boost the low-priority waker
+	 * (i.e., priority inversion) for the next time. Propagation decays
+	 * geometrically and is capped to a limit to prevent unlimited cyclic
+	 * inflation of latency-criticality.
+	 *
+	 * Note that task @p’s latency criticality (p_taskc->lat_cri) is
+	 * not up-to-date, but such a small imprecision is okay.
 	 */
 	p_taskc->lat_cri_waker = waker_taskc->lat_cri;
+	if (waker_taskc->lat_cri_wakee < p_taskc->lat_cri)
+		waker_taskc->lat_cri_wakee = p_taskc->lat_cri;
 
 	/*
 	 * Collect additional information when the scheduler is monitored.
