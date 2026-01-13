@@ -91,7 +91,7 @@ enum consts_internal {
 	LAVD_SYS_STAT_INTERVAL_NS	= (2 * LAVD_SLICE_MAX_NS_DFL),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CC_PER_CORE_SHIFT		= 1,  /* 50%: maximum per-core CPU utilization */
+	LAVD_CC_PER_CPU_UTIL		= p2s(40), /* 40%: maximum per-CPU utilization */
 	LAVD_CC_UTIL_SPIKE		= p2s(90), /* When the CPU utilization is almost full (90%),
 						      it is likely that the actual utilization is even
 						      higher than that. */
