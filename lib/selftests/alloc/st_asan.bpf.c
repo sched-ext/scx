@@ -13,6 +13,8 @@
 
 #include "selftest.h"
 
+#ifdef BPF_ARENA_ASAN
+
 #define ST_PAGES 64
 
 #define ASAN_MAP_STATE(addr)                                                 \
@@ -677,3 +679,13 @@ int asan_test(void)
 
 	return 0;
 }
+
+#else
+
+SEC("syscall")
+int asan_test(void)
+{
+	return -EOPNOTSUPP;
+}
+
+#endif /* BPF_ARENA_ASAN */

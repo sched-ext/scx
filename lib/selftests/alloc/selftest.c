@@ -25,7 +25,16 @@
 #include <alloc/bump.h>
 #include <alloc/stack.h>
 
+#ifdef BPF_ARENA_ASAN
 #include "selftest.skel.h"
+typedef struct selftest selftest;
+#else
+#include "selftest_noasan.skel.h"
+typedef struct selftest_noasan selftest;
+#define selftest__open selftest_noasan__open
+#define selftest__load selftest_noasan__load
+#define selftest__attach selftest_noasan__attach
+#endif
 
 static bool verbose = false;
 
@@ -42,7 +51,7 @@ static bool verbose = false;
 
 #define CRASHOUT() do { fprintf(stderr, "%s:%d [fail]\n", __func__, __LINE__); exit(0); } while (0)
 
-typedef int (*selftest_func)(struct selftest *);
+typedef int (*selftest_func)(selftest *);
 
 static int
 selftest_fd(int prog_fd, struct bpf_test_run_opts *calleropts)
@@ -83,7 +92,7 @@ selftest_fd(int prog_fd, struct bpf_test_run_opts *calleropts)
 }
 
 static int
-selftest_arena_alloc_reserve(struct selftest *skel)
+selftest_arena_alloc_reserve(selftest *skel)
 {
 	int prog_fd;
 	int ret;
@@ -99,7 +108,7 @@ selftest_arena_alloc_reserve(struct selftest *skel)
 }
 
 static int
-selftest_arena_base(struct selftest *skel, void **arena_base)
+selftest_arena_base(selftest *skel, void **arena_base)
 {
 	struct bpf_test_run_opts opts;
 	struct arena_get_base_args args;
@@ -130,7 +139,7 @@ selftest_arena_base(struct selftest *skel, void **arena_base)
 }
 
 static int
-selftest_globals_pages(struct selftest *skel, size_t arena_all_pages, u64 *globals_pages)
+selftest_globals_pages(selftest *skel, size_t arena_all_pages, u64 *globals_pages)
 {
 	size_t pgsize = sysconf(_SC_PAGESIZE);
 	void *arena_base;
@@ -172,8 +181,9 @@ selftest_globals_pages(struct selftest *skel, size_t arena_all_pages, u64 *globa
 	return 0;
 }
 
+#if BPF_ARENA_ASAN
 static int
-selftest_asan_init(struct selftest *skel)
+selftest_asan_init(selftest *skel)
 {
 	struct bpf_test_run_opts opts;
 	size_t arena_all_pages = 1ULL << 20;
@@ -204,7 +214,46 @@ selftest_asan_init(struct selftest *skel)
 }
 
 static int
-selftest_alloc(struct selftest *skel)
+selftest_asan(selftest *skel)
+{
+	int prog_fd;
+	int ret;
+
+	ret = selftest_arena_alloc_reserve(skel);
+	if (ret)
+		return ret;
+
+	ret = selftest_asan_init(skel);
+	if (ret)
+		return ret;
+
+	printf("===START asan_test START===\n");
+	prog_fd = bpf_program__fd(skel->progs.asan_test);
+	assert(prog_fd >= 0 && "no program found");
+	ret = selftest_fd(prog_fd, NULL);
+	printf("===END  asan_test END===\n\n");
+
+	return ret;
+}
+
+#else /* BPF_ARENA_ASAN */
+
+static int
+selftest_asan_init(selftest *skel)
+{
+	return 0;
+}
+
+static int
+selftest_asan(selftest *skel)
+{
+	return 0;
+}
+
+#endif /* BPF_ARENA_ASAN */
+
+static int
+selftest_alloc(selftest *skel)
 {
 	int prog_fd;
 	int ret;
@@ -223,29 +272,6 @@ selftest_alloc(struct selftest *skel)
 
 	ret = selftest_fd(prog_fd, NULL);
 	printf("====END alloc_selftest END=====\n\n");
-
-	return ret;
-}
-
-static int
-selftest_asan(struct selftest *skel)
-{
-	int prog_fd;
-	int ret;
-
-	ret = selftest_arena_alloc_reserve(skel);
-	if (ret)
-		return ret;
-
-	ret = selftest_asan_init(skel);
-	if (ret)
-		return ret;
-
-	printf("===START asan_test START===\n");
-	prog_fd = bpf_program__fd(skel->progs.asan_test);
-	assert(prog_fd >= 0 && "no program found");
-	ret = selftest_fd(prog_fd, NULL);
-	printf("===END  asan_test END===\n\n");
 
 	return ret;
 }
@@ -276,7 +302,7 @@ static int libbpf_print_fn(enum libbpf_print_level level,
 
 int run_test(selftest_func func)
 {
-	struct selftest *skel;
+	selftest *skel;
 	int ret;
 
 	libbpf_set_print(libbpf_print_fn);
@@ -308,7 +334,10 @@ int main(int argc, char *argv[])
 	}
 
 	run_test(selftest_alloc);
+
+#ifdef BPF_ARENA_ASAN
 	run_test(selftest_asan);
+#endif
 
 	return 0;
 }
