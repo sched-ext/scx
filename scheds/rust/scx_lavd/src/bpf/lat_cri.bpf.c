@@ -26,36 +26,36 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 	 * consumer. If it is a synchronous wakeup, double the prioritization.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_IS_WAKEUP))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	if (test_task_flag(taskc, LAVD_FLAG_IS_SYNC_WAKEUP))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve
 	 * latency-critical jobs.
 	 */
 	if (is_kernel_task(p))
-		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_MEDIUM;
 
 	/*
 	 * Further prioritize ksoftirqd.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_KSOFTIRQD))
-		weight_boost += 4 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
 
 	/*
 	 * Further prioritize kworkers.
 	 */
 	if (is_kernel_worker(p))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
 	 * Prioritize a task woken by an RT/DL task.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL)) {
 		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
-		weight_boost += 4 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
 	}
 
 	/*
@@ -63,21 +63,21 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 	 * in placement so it tends to be delayed.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED))
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
 	 * Prioritize a pinned task since it has restrictions in placement
 	 * so it tends to be delayed.
 	 */
 	if (is_pinned(p) || is_migration_disabled(p))
-		weight_boost += 2 * LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_MEDIUM;
 
 	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
 	if (test_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST)) {
 		reset_task_flag(taskc, LAVD_FLAG_NEED_LOCK_BOOST);
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
+		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 	}
 
 	/*
