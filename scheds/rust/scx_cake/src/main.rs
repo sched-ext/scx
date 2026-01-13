@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use libbpf_rs::MapCore;
 use log::{info, warn};
 
 // Include the generated interface bindings
@@ -149,6 +150,68 @@ impl Profile {
                 0,          // Padding
             ],
         }
+    }
+
+    /// Consolidated tier configuration (AoS optimization)
+    ///
+    /// Generates a single array of cake_tier_config structs from the
+    /// individual tier parameter methods. This reduces cache line fetches
+    /// from 3 to 1 in the BPF hot path.
+    fn tier_configs(&self) -> [bpf_skel::types::cake_tier_config; 8] {
+        let starvation = self.starvation_threshold();
+        let multiplier = self.tier_multiplier();
+        let budget = self.wait_budget();
+
+        [
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[0],
+                wait_budget_ns: budget[0],
+                multiplier: multiplier[0],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[1],
+                wait_budget_ns: budget[1],
+                multiplier: multiplier[1],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[2],
+                wait_budget_ns: budget[2],
+                multiplier: multiplier[2],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[3],
+                wait_budget_ns: budget[3],
+                multiplier: multiplier[3],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[4],
+                wait_budget_ns: budget[4],
+                multiplier: multiplier[4],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[5],
+                wait_budget_ns: budget[5],
+                multiplier: multiplier[5],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[6],
+                wait_budget_ns: budget[6],
+                multiplier: multiplier[6],
+                _pad: [0; 3],
+            },
+            bpf_skel::types::cake_tier_config {
+                starvation_ns: starvation[7],
+                wait_budget_ns: budget[7],
+                multiplier: multiplier[7],
+                _pad: [0; 3],
+            },
+        ]
     }
 }
 
@@ -317,11 +380,9 @@ impl<'a> Scheduler<'a> {
             rodata.starvation_ns = starvation * 1000;
             rodata.enable_stats = args.verbose;
 
-            // Pre-computed tier arrays (profile-based, zero runtime overhead)
-            rodata.starvation_threshold = args.profile.starvation_threshold();
-            rodata.tier_multiplier = args.profile.tier_multiplier();
-            rodata.wait_budget = args.profile.wait_budget();
-            
+            // Pre-computed tier configuration (AoS - single cache line per tier)
+            rodata.tier_configs = args.profile.tier_configs();
+
             // Topology arrays (zero runtime overhead)
             rodata.has_multi_llc = topo.has_dual_ccd;
             rodata.has_hybrid = topo.has_hybrid_cores;
@@ -335,6 +396,22 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program
         let skel = open_skel.load().context("Failed to load BPF program")?;
+
+        // Populate Static Topology Preference Map (Data-Oriented Design)
+        // Pre-compute CPU preference lists at startup for O(1) BPF lookup.
+        // This replaces runtime topology calculation with simple array iteration.
+        let preference_vectors = topo.generate_preference_map();
+        for (cpu, vec) in preference_vectors.iter().enumerate() {
+            let key = (cpu as u32).to_ne_bytes();
+            skel.maps
+                .topo_preference_map
+                .update(&key, vec.as_bytes(), libbpf_rs::MapFlags::ANY)
+                .with_context(|| format!("Failed to update topo_preference_map for CPU {}", cpu))?;
+        }
+        info!(
+            "Populated topology preference map for {} CPUs",
+            topo.nr_cpus
+        );
 
         Ok(Self {
             skel,
