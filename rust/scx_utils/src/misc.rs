@@ -25,7 +25,7 @@ where
     ];
 
     while !should_exit() {
-        let mut client = match StatsClient::new().connect() {
+        let mut client = match StatsClient::new().connect(None) {
             Ok(v) => v,
             Err(e) => match e.downcast_ref::<std::io::Error>() {
                 Some(ioe) if RETRYABLE_ERRORS.contains(&ioe.kind()) => {

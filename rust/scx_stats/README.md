@@ -116,7 +116,7 @@ the server will shutdown when `_server` variable is dropped. The client side
 is also simple. Taken from [`examples/client.rs`](./examples/client.rs):
 
 ```rust
-    let mut client = ScxStatsClient::new().set_path(path).connect().unwrap();
+    let mut client = ScxStatsClient::new().set_path(path).connect(None).unwrap();
 ```
 
 The above creates a client instance. Let's query the statistics:

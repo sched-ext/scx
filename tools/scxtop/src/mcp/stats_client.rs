@@ -30,7 +30,9 @@ impl SharedStatsClient {
 
     /// Try to connect to the scheduler's stats socket
     pub fn connect(&self) -> Result<()> {
-        let client = StatsClient::new().set_path(&self.socket_path).connect()?;
+        let client = StatsClient::new()
+            .set_path(&self.socket_path)
+            .connect(None)?;
         let mut inner = self.inner.write().unwrap();
         *inner = Some(client);
         debug!("Connected to stats socket at {}", self.socket_path);

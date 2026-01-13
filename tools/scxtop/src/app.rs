@@ -307,7 +307,7 @@ impl<'a> App<'a> {
         if !stats_socket_path.is_empty() {
             stats_client = stats_client.set_path(stats_socket_path);
         }
-        stats_client = stats_client.connect().unwrap_or_else(|_| {
+        stats_client = stats_client.connect(None).unwrap_or_else(|_| {
             let mut client = StatsClient::new();
             if !stats_socket_path.is_empty() {
                 client = client.set_path(stats_socket_path);
@@ -552,7 +552,7 @@ impl<'a> App<'a> {
             stats_client = stats_client.set_path(stats_socket_path);
         }
         // In non-BPF mode, stats client connection may fail, so we handle it gracefully
-        stats_client = stats_client.connect().unwrap_or_else(|_| {
+        stats_client = stats_client.connect(None).unwrap_or_else(|_| {
             let mut client = StatsClient::new();
             if !stats_socket_path.is_empty() {
                 client = client.set_path(stats_socket_path);
@@ -1061,7 +1061,7 @@ impl<'a> App<'a> {
         let stats_socket_path = self.config.stats_socket_path();
         let mut new_client = StatsClient::new();
         new_client = new_client.set_path(stats_socket_path);
-        new_client = new_client.connect()?;
+        new_client = new_client.connect(None)?;
         if let Some(client_ref) = &self.stats_client {
             let mut client = client_ref.blocking_lock();
             *client = new_client;

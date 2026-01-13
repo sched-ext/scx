@@ -678,7 +678,7 @@ where
     fn drop(&mut self) {
         self.exit.store(true, Ordering::Relaxed);
         if let Some(path) = self.path.as_ref() {
-            let _ = StatsClient::new().set_path(path).connect();
+            let _ = StatsClient::new().set_path(path).connect(None);
         }
     }
 }
