@@ -2,4 +2,4 @@
 SCX_SCHEDULER=scx_cosmos
 
 # Set custom flags for each scheduler, below is an example of how to use
-#SCX_FLAGS='-d'
+SCX_FLAGS='-s 20000 -d -c 0 -p 0'
