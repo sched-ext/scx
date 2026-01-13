@@ -312,33 +312,39 @@ int do_core_compaction(void)
 		} else {
 			bpf_cpumask_clear_cpu(cpu, active);
 
-			if (cpuc->nr_pinned_tasks || (use_per_cpu_dsq() &&
-			    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)))) {
+			if (cpuc->nr_pinned_tasks ||
+			    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) ||
+			    (use_per_cpu_dsq() &&
+			     scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)))) {
 				/*
 				 * If there is something to run on this CPU,
 				 * add this CPU to the overflow set.
 				 */
 				bpf_cpumask_set_cpu(cpu, ovrflw);
-			} else if ((bpf_get_prandom_u32() %
-				    LAVD_CC_CPU_PIN_INTERVAL_DIV)) {
-				/*
-				 * This is the case when a CPU belongs to the
-				 * overflow set even though that CPU was not an
-				 * overflow set initially. This can happen only
-				 * when a pinned userspace task ran on this
-				 * CPU. In this case, we keep the CPU in an
-				 * overflow set since the CPU will be used
-				 * anyway for the task. This will promote equal
-				 * use of all used CPUs, lowering the energy
-				 * consumption by avoiding a few CPUs being
-				 * turbo-boosted. Hence, we do not clear the
-				 * overflow cpumask here for a while,
-				 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
-				 */
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
-				continue;
-			} else if (!bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-				continue;
+			} else {
+				if (!bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
+					continue;
+				/* This CPU is in the overflow set. */
+
+				if ((bpf_get_prandom_u32() %
+					    LAVD_CC_CPU_PIN_INTERVAL_DIV)) {
+					/*
+					 * This is the case when a CPU belongs to the
+					 * overflow set even though that CPU was not an
+					 * overflow set initially. This can happen only
+					 * when a pinned userspace task ran on this
+					 * CPU. In this case, we keep the CPU in an
+					 * overflow set since the CPU will be used
+					 * anyway for the task. This will promote equal
+					 * use of all used CPUs, lowering the energy
+					 * consumption by avoiding a few CPUs being
+					 * turbo-boosted. Hence, we do not clear the
+					 * overflow cpumask here for a while,
+					 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
+					 */
+					bpf_cpumask_clear_cpu(cpu, ovrflw);
+					continue;
+				}
 			}
 		}
 

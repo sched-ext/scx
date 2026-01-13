@@ -240,28 +240,6 @@ bool use_full_cpus(void)
 }
 
 __hidden
-s64 __attribute__ ((noinline)) pick_any_bit(u64 bitmap, u64 nuance)
-{
-	u64 shift, rotated;
-	int tz;
-
-	if (!bitmap)
-		return -ENOENT;
-
-	/* modulo nuance to [0, 63] */
-	shift = nuance & 63ULL;
-
-	/* Circular rotate the bitmap by 'shift' bits. */
-	rotated = (bitmap >> shift) | (bitmap << (64 - shift));
-
-	/* Count the number of trailing zeros in the raomdonly rotated bitmap. */
-	tz = ctzll(rotated);
-
-	/* Add the shift back and wrap around to get the original index. */
-	return (tz + shift) & 63;
-}
-
-__hidden
 void set_on_core_type(task_ctx __arg_arena *taskc,
 		      const struct cpumask *cpumask)
 {
