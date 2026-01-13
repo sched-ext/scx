@@ -1,0 +1,5 @@
+# List of scx_schedulers: scx_beerland scx_bpfland scx_chaos scx_cosmos scx_flash scx_lavd scx_p2dq scx_rustland scx_rusty scx_tickless
+SCX_SCHEDULER=scx_cosmos
+
+# Set custom flags for each scheduler, below is an example of how to use
+SCX_FLAGS='-s 20000 -d -c 0 -p 0'
