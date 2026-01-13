@@ -2,11 +2,6 @@
 #ifndef __UTIL_H
 #define __UTIL_H
 
-extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
-extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
-extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
-extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
 extern const volatile u64	__nr_cpu_ids;	/* maximum CPU IDs */
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
