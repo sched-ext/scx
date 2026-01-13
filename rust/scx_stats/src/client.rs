@@ -6,15 +6,14 @@ use anyhow::bail;
 use anyhow::Result;
 use log::trace;
 use serde::Deserialize;
-use std::io::{self};
-use std::io::BufRead; 
+use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
+use std::io::{self};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
-
 
 pub struct StatsClient {
     base_path: PathBuf,
