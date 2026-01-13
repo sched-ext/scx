@@ -346,6 +346,20 @@ const volatile struct cake_tier_config tier_configs[8] = {
 /* Long-sleep recovery threshold: 33ms = 2 frames @ 60Hz */
 #define LONG_SLEEP_THRESHOLD_NS 33000000
 
+/*
+ * Minimum Victim Residency: 250µs
+ * 
+ * HYSTERESIS: Prevents "staircase" migrations where tasks are immediately
+ * preempted after starting. A task must run for at least 250µs before its
+ * CPU becomes eligible for victim preemption.
+ * 
+ * 250µs rationale:
+ * - Long enough to warm L1/L2 caches (~100 cycles to fill a line)
+ * - Short enough to not block Tier 0 preemption (6% of 240Hz frame)
+ * - Matches CAKE network quantum philosophy
+ */
+#define MIN_VICTIM_RESIDENCY_NS 250000
+
 
 
 /*
@@ -717,6 +731,23 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
  */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
+    /*
+     * PROACTIVE KTHREAD SHORT-CIRCUIT (Stability & Protection Patch)
+     * 
+     * Kernel threads (ksoftirqd, kworker, irq/) are system-critical.
+     * By checking PF_KTHREAD FIRST, we:
+     *   1. Skip the expensive bpf_task_storage_get() hash lookup
+     *   2. Guarantee immediate REALTIME_DSQ placement (Tier 1)
+     *   3. Eliminate the "first-run penalty" where kthreads might
+     *      start in a low-priority tier before cake_stopping corrects it
+     * 
+     * Net effect: Faster enqueue for system tasks + deterministic latency.
+     */
+    if (p->flags & PF_KTHREAD) {
+        scx_bpf_dsq_insert(p, REALTIME_DSQ, quantum_ns, enq_flags);
+        return;
+    }
+
     struct cake_task_ctx *tctx = get_task_ctx(p, false);
     
     /* 
@@ -839,21 +870,25 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
     u8 tier = GET_TIER(tctx);
     
     /*
-     * XOR-BLEND victim_mask update with Shadow State
+     * DEFERRED VICTIM LOGIC (Stability & Protection Patch)
+     * 
+     * When a task STARTS running, we do NOT add to victim mask immediately.
+     * Instead, we ALWAYS clear the victim bit here. The victim bit will be
+     * set in cake_tick AFTER the task has run for MIN_VICTIM_RESIDENCY_NS.
+     * 
+     * This implements the "Hysteresis" pattern - adding memory to scheduling
+     * decisions to prevent rapid oscillations (staircase migrations).
      * 
      * CACHED CURSOR OPTIMIZATION: Check per-CPU shadow first (L1 hit)
      * to avoid reading the global victim_mask atomic.
      */
-    bool is_victim = (tier >= INTERACTIVE_DSQ);
     struct cake_cpu_shadow *shadow = get_shadow_state();
     
-    if (shadow && shadow->is_victim != is_victim) {
+    /* Always clear victim status when task starts - deferred to cake_tick */
+    if (shadow && shadow->is_victim) {
         u64 cpu_bit = (1ULL << cpu_idx);
-        if (is_victim)
-            __atomic_fetch_or(&victim_mask, cpu_bit, __ATOMIC_RELAXED);
-        else
-            __atomic_fetch_and(&victim_mask, ~cpu_bit, __ATOMIC_RELAXED);
-        shadow->is_victim = is_victim;
+        __atomic_fetch_and(&victim_mask, ~cpu_bit, __ATOMIC_RELAXED);
+        shadow->is_victim = false;
     }
 
     u64 now = scx_bpf_now();
@@ -997,6 +1032,26 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     u32 new_score = compute_sparse_score(old_score, runtime);
     u16 new_deficit_us = compute_deficit(old_deficit_us, runtime);
     u8 new_tier = compute_tier(new_score, new_avg_us);
+    
+    /*
+     * PRIORITY FLOOR: kthread Protection (Stability & Protection Patch)
+     * 
+     * ksoftirqd, kworker, and other kernel threads must NEVER fall into
+     * the background tiers. They handle critical system functions:
+     * - ksoftirqd: Network IRQs (packets, mouse, controller input)
+     * - kworker: Async I/O (disk, USB)
+     * - irq/: Hardware interrupt handlers
+     * 
+     * Allowing them to be demoted causes Priority Inversion where
+     * video encoding or game render threads block system-critical work.
+     * 
+     * We pin them to REALTIME (Tier 1) - high priority but not ultra-latency
+     * (Tier 0 is reserved for actual input handlers with <50µs latency).
+     */
+    if (p->flags & PF_KTHREAD) {
+        new_tier = CAKE_TIER_REALTIME;
+    }
+    
     u64 new_slice = compute_slice(new_deficit_us, new_tier);
     
     /* Stats (compiled out when enable_stats=false) */
@@ -1139,6 +1194,29 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
             if (enable_stats && tier < CAKE_TIER_MAX) {
                 struct cake_stats *s = get_local_stats();
                 if (s) s->nr_starvation_preempts_tier[tier]++;
+            }
+        }
+        
+        /*
+         * DEFERRED VICTIM LOGIC (Stability & Protection Patch)
+         * 
+         * Only after MIN_VICTIM_RESIDENCY_NS (250µs) do we consider adding
+         * this CPU to the victim mask. This prevents "staircase" migrations
+         * where tasks are preempted immediately after starting.
+         * 
+         * The victim mask is used by Tier 0 tasks to find CPUs to preempt.
+         * By deferring victim status, we ensure tasks get enough runtime
+         * to warm their caches before being considered for preemption.
+         */
+        if (runtime >= MIN_VICTIM_RESIDENCY_NS && tier >= INTERACTIVE_DSQ) {
+            u32 cpu_idx = bpf_get_smp_processor_id();
+            if (cpu_idx < 64) {
+                struct cake_cpu_shadow *shadow = get_shadow_state();
+                if (shadow && !shadow->is_victim) {
+                    u64 cpu_bit = (1ULL << cpu_idx);
+                    __atomic_fetch_or(&victim_mask, cpu_bit, __ATOMIC_RELAXED);
+                    shadow->is_victim = true;
+                }
             }
         }
     }
