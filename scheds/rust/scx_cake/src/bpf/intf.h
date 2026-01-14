@@ -102,9 +102,9 @@ struct cake_cpu_tier {
 struct cake_task_ctx {
     /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
     u64 next_slice;        /* 8B: Pre-computed slice (ns) */
-    u32 packed_info;       /* 4B: Bitfield (Err, Wait, Score, Tier, Flags) */
     u16 deficit_us;        /* 2B: Deficit (us), max 65ms */
     u16 avg_runtime_us;    /* 2B: EMA runtime estimate */
+    u32 packed_info;       /* 4B: Bitfield (Err, Wait, Score, Tier, Flags) */
     
     /* --- Timestamp Group (cake_running) [Bytes 16-23] --- */
     u32 last_run_at;       /* 4B: Last run timestamp (ns), wraps 4.2s */
