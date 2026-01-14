@@ -18,19 +18,18 @@ use scx_utils::{CoreType, Topology};
 pub const MAX_CPUS: usize = 64;
 /// Maximum supported LLCs (matches BPF array sizes)
 pub const MAX_LLCS: usize = 8;
-/// Maximum candidates in topology preference vector (matches BPF)
-pub const TOPO_MAX_CANDIDATES: usize = 8;
 
 /// Static topology preference vector (matches BPF struct topology_vector)
 ///
-/// Pre-computed list of "best neighbor" CPUs for a given CPU.
-/// Order: SMT sibling → same LLC → P-cores (if hybrid) → global
+/// SIMD-Style Tiered Masks for O(1) CPU Selection.
+/// Pre-computed bitmasks are intersected with global idle_mask.
+/// TZCNT on the result gives the best candidate in ~4 cycles.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TopologyVector {
-    pub cpus: [u8; TOPO_MAX_CANDIDATES],
-    pub count: u8,
-    pub _pad: [u8; 3],
+    pub sibling_mask: u64, // Tier 1: SMT sibling(s) - fastest cache transfer
+    pub llc_mask: u64,     // Tier 2: Same LLC/CCX cores - shared L3
+    pub _pad: [u8; 16],    // Pad to 32 bytes for cache alignment
 }
 
 impl TopologyVector {
@@ -208,52 +207,25 @@ pub fn detect() -> Result<TopologyInfo> {
 impl TopologyInfo {
     /// Generate preference vectors for all CPUs
     ///
-    /// Returns an array where index = CPU ID, value = ordered preference list.
-    /// Order priority:
-    /// 1. SMT Sibling (fastest wakeup, shares L1/L2)
-    /// 2. Same LLC (shares L3 cache)
-    /// 3. P-cores (if on hybrid system and current CPU is P-core)
-    /// 4. Any remaining CPUs
+    /// Returns an array where index = CPU ID, value = tiered bitmasks.
+    /// Tier 1: sibling_mask - SMT sibling (if any)
+    /// Tier 2: llc_mask - All cores in same LLC (excluding self)
     pub fn generate_preference_map(&self) -> [TopologyVector; MAX_CPUS] {
         let mut result = [TopologyVector::default(); MAX_CPUS];
 
         for cpu in 0..self.nr_cpus.min(MAX_CPUS) {
-            let mut candidates: Vec<usize> = Vec::new();
-
-            // Priority 1: SMT Sibling (if different from self)
+            // Tier 1: SMT Sibling mask
             let sibling = self.cpu_sibling_map[cpu] as usize;
             if sibling != cpu && sibling < self.nr_cpus {
-                candidates.push(sibling);
+                result[cpu].sibling_mask = 1u64 << sibling;
             }
 
-            // Priority 2: Same LLC neighbors (if multi-LLC)
-            if self.has_dual_ccd {
-                let my_llc = self.cpu_llc_id[cpu] as usize;
-                if my_llc < MAX_LLCS {
-                    let llc_mask = self.llc_cpu_mask[my_llc];
-                    for c in 0..self.nr_cpus.min(64) {
-                        if c != cpu && (llc_mask >> c) & 1 == 1 && !candidates.contains(&c) {
-                            candidates.push(c);
-                        }
-                    }
-                }
+            // Tier 2: LLC mask (all cores in same LLC, excluding self)
+            let my_llc = self.cpu_llc_id[cpu] as usize;
+            if my_llc < MAX_LLCS {
+                // Start with full LLC mask, remove self
+                result[cpu].llc_mask = self.llc_cpu_mask[my_llc] & !(1u64 << cpu);
             }
-
-            // Priority 3: P-cores preference (if hybrid and this is a P-core)
-            if self.has_hybrid_cores && self.cpu_is_big[cpu] == 1 {
-                for c in 0..self.nr_cpus.min(64) {
-                    if c != cpu && self.cpu_is_big[c] == 1 && !candidates.contains(&c) {
-                        candidates.push(c);
-                    }
-                }
-            }
-
-            // Pack into TopologyVector (max 8 candidates)
-            let count = candidates.len().min(TOPO_MAX_CANDIDATES);
-            for (i, &c) in candidates.iter().take(TOPO_MAX_CANDIDATES).enumerate() {
-                result[cpu].cpus[i] = c as u8;
-            }
-            result[cpu].count = count as u8;
         }
 
         result
