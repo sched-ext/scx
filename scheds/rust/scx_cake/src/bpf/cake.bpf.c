@@ -617,7 +617,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      */
     
     /* SPECULATIVE LOAD: Fetch victim_mask blindly */
-    u64 spec_victim_mask = victim_mask;
+    u64 spec_victim_mask = cake_relaxed_load_u64(&victim_mask);
     
     /* PRE-CALC VICTIM (Pure ALU while waiting for tctx) */
     s32 spec_victim_cpu = spec_victim_mask ? __builtin_ctzll(spec_victim_mask) : -1;
@@ -690,7 +690,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         if (cpu >= 0 && cpu < CAKE_MAX_CPUS && !cpu_is_big[cpu]) {
              /* We picked an E-core. Try to find a P-core instead. */
              u64 idle_current = cake_relaxed_load_u64(&idle_mask_global);
-             u64 big_mask = cake_relaxed_load_u64(&big_cpu_mask);
+             u64 big_mask = big_cpu_mask; /* Direct read (no macro) for JIT constants */
              u64 p_candidates = idle_current & big_mask;
              
              if (p_candidates) {
