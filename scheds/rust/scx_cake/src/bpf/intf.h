@@ -71,8 +71,8 @@ enum cake_flow_flags {
 struct topology_vector {
     u64 sibling_mask;   /* Tier 1: SMT sibling(s) - fastest cache transfer */
     u64 llc_mask;       /* Tier 2: Same LLC/CCX cores - shared L3 */
-    u8 _pad[16];        /* Pad to 32 bytes for cache alignment */
-};
+    u8 _pad[48];        /* Pad to 64 bytes for cache alignment */
+} __attribute__((aligned(64)));
 
 /*
  * CPU STATE ISOLATION (Frasch, 2023)
@@ -162,7 +162,8 @@ struct cake_stats {
     u64 max_wait_ns;               /* Maximum observed wait time */
     u64 nr_starvation_preempts_tier[CAKE_TIER_MAX]; /* Per-tier starvation preempts */
     u64 nr_input_preempts;         /* Preemptions injected for input/latency */
-};
+    u64 _pad[8];                   /* Pad to 256 bytes for cache line isolation in BSS array */
+} __attribute__((aligned(64)));
 
 /*
  * Topology flags - set by userspace at load time

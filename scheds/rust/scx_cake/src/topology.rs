@@ -11,6 +11,7 @@
 // as const volatile so the verifier can eliminate unused code paths.
 
 use anyhow::Result;
+use core::sync::atomic::{AtomicU64, Ordering};
 use log::info;
 use scx_utils::{CoreType, Topology};
 
@@ -24,23 +25,31 @@ pub const MAX_LLCS: usize = 8;
 /// SIMD-Style Tiered Masks for O(1) CPU Selection.
 /// Pre-computed bitmasks are intersected with global idle_mask.
 /// TZCNT on the result gives the best candidate in ~4 cycles.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[repr(C, align(64))]
+#[derive(Debug)]
 pub struct TopologyVector {
-    pub sibling_mask: u64, // Tier 1: SMT sibling(s) - fastest cache transfer
-    pub llc_mask: u64,     // Tier 2: Same LLC/CCX cores - shared L3
-    pub _pad: [u8; 16],    // Pad to 32 bytes for cache alignment
+    pub sibling_mask: AtomicU64, // Tier 1: SMT sibling(s) - fastest cache transfer
+    pub llc_mask: AtomicU64,     // Tier 2: Same LLC/CCX cores - shared L3
+    pub _pad: [u8; 48],          // Pad to 64 bytes for cache alignment
 }
 
+#[no_mangle]
+pub static mut GLOBAL_TOPO: [TopologyVector; MAX_CPUS] =
+    [const { TopologyVector::new() }; MAX_CPUS];
+
 impl TopologyVector {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: TopologyVector is repr(C) with well-defined layout
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                std::mem::size_of::<Self>(),
-            )
+    pub const fn new() -> Self {
+        Self {
+            sibling_mask: AtomicU64::new(0),
+            llc_mask: AtomicU64::new(0),
+            _pad: [0; 48],
         }
+    }
+}
+
+impl Default for TopologyVector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -211,20 +220,28 @@ impl TopologyInfo {
     /// Tier 1: sibling_mask - SMT sibling (if any)
     /// Tier 2: llc_mask - All cores in same LLC (excluding self)
     pub fn generate_preference_map(&self) -> [TopologyVector; MAX_CPUS] {
-        let mut result = [TopologyVector::default(); MAX_CPUS];
+        let result = std::array::from_fn(|_| TopologyVector::default());
 
         for cpu in 0..self.nr_cpus.min(MAX_CPUS) {
             // Tier 1: SMT Sibling mask
             let sibling = self.cpu_sibling_map[cpu] as usize;
             if sibling != cpu && sibling < self.nr_cpus {
-                result[cpu].sibling_mask = 1u64 << sibling;
+                let mask = 1u64 << sibling;
+                result[cpu].sibling_mask.store(mask, Ordering::Relaxed);
+                unsafe {
+                    GLOBAL_TOPO[cpu].sibling_mask.store(mask, Ordering::Relaxed);
+                }
             }
 
             // Tier 2: LLC mask (all cores in same LLC, excluding self)
             let my_llc = self.cpu_llc_id[cpu] as usize;
             if my_llc < MAX_LLCS {
                 // Start with full LLC mask, remove self
-                result[cpu].llc_mask = self.llc_cpu_mask[my_llc] & !(1u64 << cpu);
+                let mask = self.llc_cpu_mask[my_llc] & !(1u64 << cpu);
+                result[cpu].llc_mask.store(mask, Ordering::Relaxed);
+                unsafe {
+                    GLOBAL_TOPO[cpu].llc_mask.store(mask, Ordering::Relaxed);
+                }
             }
         }
 
