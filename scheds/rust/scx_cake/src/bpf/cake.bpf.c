@@ -185,37 +185,7 @@ static __always_inline bool is_critical_kthread(struct task_struct *p)
     return is_softirq | is_worker | is_irq;
 }
 
-/*
- * Helper: Find first idle CPU using O(1) Bitmask Scan
- * 
- * PERFORMANCE:
- * - Load: Single u64 load (vs 8 loads previously)
- * - Check: __builtin_ctzll maps to TZCNT (3 cycles)
- * - Latency: Limited by memory fetch of idle_mask_global only.
- * 
- * SYNCHRONIZATION: Uses ACQUIRE to pair with RELEASE in cake_update_idle.
- * This guarantees we see the full CPU state when the idle bit is set.
- */
-static __always_inline s32 find_first_idle_cpu(s32 prev_cpu)
-{
-    /*
-     * ACQUIRE: Synchronize with the RELEASE in cake_update_idle.
-     * Guarantees we see the latest state of the idle CPU's cache.
-     */
-    u64 idle_mask = __atomic_load_n(&idle_mask_global, __ATOMIC_ACQUIRE);
 
-    if (!idle_mask)
-        return -1;
-
-    /* 1. Check prev_cpu direct (BT instruction - no variable shift) */
-    if (prev_cpu >= 0 && prev_cpu < 64) {
-        if (idle_mask & (1ULL << prev_cpu))
-            return prev_cpu;
-    }
-
-    /* 2. Scan: Find first set bit (TZCNT/BSF) */
-    return __builtin_ctzll(idle_mask);
-}
 
 /*
  * BRANCHLESS Multi-Tier SIMD Topology Scan
