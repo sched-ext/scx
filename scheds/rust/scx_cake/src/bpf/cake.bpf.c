@@ -262,7 +262,8 @@ static __always_inline s32 select_cpu_with_arbiter(
 
     /* 2. Direct Memory Load: Peek at current occupant's tier */
     u8 floor = tctx->preempt_floor;
-    u8 occupant_tier = READ_ONCE(global_cpu_tiers[bounded_prev].tier);
+    /* MLP Load: Peek at target core's occupant tier */
+    u8 occupant_tier = (u8)cake_relaxed_load_u32(&global_cpu_tiers[bounded_prev].tier);
 
     /* 3. WARMTH ARBITRATION
      * If occupant tier >= floor, wait is shorter than 150ns migration penalty.
@@ -655,7 +656,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     u8 tier = GET_TIER(tctx);  /* Load 1: tctx cache line */
     
     /* Load global idle mask (replaces idle_map byte access) */
-    u64 idle_mask = READ_ONCE(idle_mask_global);  /* Load 2: MLP parallel with tier load */
+    u64 idle_mask = cake_relaxed_load_u64(&idle_mask_global);  /* Load 2: MLP parallel with tier load */
     
     u32 bounded_prev = (u32)prev_cpu & 63;  /* Always 0-63, BPF verifier happy */
     bool prev_idle = !!(idle_mask & (1ULL << bounded_prev));  /* BT instruction */
@@ -688,8 +689,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (has_hybrid && is_idle && tier <= GAMING_DSQ) {
         if (cpu >= 0 && cpu < CAKE_MAX_CPUS && !cpu_is_big[cpu]) {
              /* We picked an E-core. Try to find a P-core instead. */
-             u64 idle_current = READ_ONCE(idle_mask_global);
-             u64 big_mask = READ_ONCE(big_cpu_mask);
+             u64 idle_current = cake_relaxed_load_u64(&idle_mask_global);
+             u64 big_mask = cake_relaxed_load_u64(&big_cpu_mask);
              u64 p_candidates = idle_current & big_mask;
              
              if (p_candidates) {
