@@ -1,42 +1,75 @@
-/* bpf_compat.h */
+/* scx_cake/bpf/bpf_compat.h */
 #ifndef __CAKE_BPF_COMPAT_H
 #define __CAKE_BPF_COMPAT_H
 
-/* -------------------------------------------------------------------------
- * COMPILER WORKAROUND: Clang 19 BPF Backend Defect
- * -------------------------------------------------------------------------
- * Issue: Clang 19 fails to select instructions for 32-bit formal atomics 
- * (__atomic_load_n) in the BPF backend, causing a build crash.
- * Fix:   Downgrade to volatile access (READ_ONCE) for Clang < 21.
- * Volatile loads on aligned 32-bit data are implicitly atomic 
- * on BPF/x86 (single-copy atomicity).
- * -------------------------------------------------------------------------
+/*
+ * COMPILER ABSTRACTION: 32-bit/64-bit Atomic Access
+ * ---------------------------------------------------------------------------
+ * Issue: Clang 19's BPF backend hangs or crashes on complex volatile loads,
+ * causing CI failures (Exit 143/OOM) or build errors.
+ *
+ * Fix:   1. Clang 21+: Use formal atomics for maximum optimization (MLP).
+ *        2. Clang <21: Use Inline ASM to force raw BPF instructions,
+ *           bypassing the broken compiler analysis phase.
+ * ---------------------------------------------------------------------------
  */
 
-/* Ensure READ_ONCE/WRITE_ONCE exist (if not provided by vmlinux.h) */
-#ifndef READ_ONCE
-#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
-#endif
-
-#ifndef WRITE_ONCE
-#define WRITE_ONCE(x, val) (*(volatile typeof(x) *)&(x) = (val))
-#endif
-
-/* Define semantic macros based on compiler capability.
- * Use Clang 21 as the cutoff for safely re-enabling formal atomics.
- */
 #if defined(__clang__) && __clang_major__ >= 21
-    /* Modern Path: Formal Atomics (Enable MLP/optimization) */
+
+    /* MODERN PATH: Formal Atomics (Optimized/MLP) */
     #define cake_relaxed_load_u32(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
     #define cake_relaxed_store_u32(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
     #define cake_relaxed_load_u64(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
     #define cake_relaxed_store_u64(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
+
 #else
-    /* Legacy/Compat Path: Volatile Fallback (Prevents Crash) */
-    #define cake_relaxed_load_u32(ptr)      READ_ONCE(*(ptr))
-    #define cake_relaxed_store_u32(ptr, v)  WRITE_ONCE(*(ptr), (v))
-    #define cake_relaxed_load_u64(ptr)      READ_ONCE(*(ptr))
-    #define cake_relaxed_store_u64(ptr, v)  WRITE_ONCE(*(ptr), (v))
+
+    /* COMPAT PATH: Inline Assembly (Bypasses Compiler OOM/Hang) */
+    
+    static __always_inline u32 cake_relaxed_load_u32(volatile u32 *ptr) {
+        u32 val;
+        /* Raw BPF load: rX = *(u32 *)(rY + 0) */
+        asm volatile(
+            "%0 = *(u32 *)(%1 + 0)"
+            : "=r"(val)
+            : "r"(ptr)
+            : "memory"
+        );
+        return val;
+    }
+
+    static __always_inline void cake_relaxed_store_u32(volatile u32 *ptr, u32 val) {
+        /* Raw BPF store: *(u32 *)(rX + 0) = rY */
+        asm volatile(
+            "*(u32 *)(%0 + 0) = %1"
+            :
+            : "r"(ptr), "r"(val)
+            : "memory"
+        );
+    }
+
+    static __always_inline u64 cake_relaxed_load_u64(volatile u64 *ptr) {
+        u64 val;
+        /* Raw BPF load: rX = *(u64 *)(rY + 0) */
+        asm volatile(
+            "%0 = *(u64 *)(%1 + 0)"
+            : "=r"(val)
+            : "r"(ptr)
+            : "memory"
+        );
+        return val;
+    }
+
+    static __always_inline void cake_relaxed_store_u64(volatile u64 *ptr, u64 val) {
+        /* Raw BPF store: *(u64 *)(rX + 0) = rY */
+        asm volatile(
+            "*(u64 *)(%0 + 0) = %1"
+            :
+            : "r"(ptr), "r"(val)
+            : "memory"
+        );
+    }
+
 #endif
 
 #endif /* __CAKE_BPF_COMPAT_H */
