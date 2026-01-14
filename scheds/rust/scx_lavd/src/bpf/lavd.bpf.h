@@ -91,7 +91,7 @@ enum consts_internal {
 	LAVD_SYS_STAT_INTERVAL_NS	= (2 * LAVD_SLICE_MAX_NS_DFL),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CC_PER_CORE_SHIFT		= 1,  /* 50%: maximum per-core CPU utilization */
+	LAVD_CC_PER_CPU_UTIL		= p2s(40), /* 40%: maximum per-CPU utilization */
 	LAVD_CC_UTIL_SPIKE		= p2s(90), /* When the CPU utilization is almost full (90%),
 						      it is likely that the actual utilization is even
 						      higher than that. */
@@ -224,7 +224,8 @@ struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
 struct cpu_ctx {
 	/* --- cacheline 0 boundary (0 bytes) --- */
 	volatile u64	flags;		/* cached copy of task's flags */
-	volatile u64	tot_svc_time;	/* total service time on a CPU scaled by tasks' weights */
+	volatile u64	tot_task_time;	/* total wall-clock time this CPU has spent running scx tasks so far. */
+	volatile u64	tot_svc_time;	/* total scx tasks' service time on a CPU scaled by tasks' weights */
 	volatile u64	tot_sc_time;	/* total scaled CPU time, which is capacity and frequency invariant. */
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	running_clk;	/* when a task starts running */
@@ -445,6 +446,7 @@ extern u32			default_big_core_scale;
 int init_autopilot_caps(void);
 int update_autopilot_high_cap(void);
 u64 scale_cap_freq(u64 dur, s32 cpu);
+u64 scale_cap_max_freq(u64 dur, s32 cpu);
 
 int reset_cpuperf_target(struct cpu_ctx *cpuc);
 int update_cpuperf_target(struct cpu_ctx *cpuc);

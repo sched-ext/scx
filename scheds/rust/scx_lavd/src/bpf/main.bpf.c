@@ -478,6 +478,7 @@ static void account_task_runtime(struct task_struct *p,
 	svc_time = runtime / p->scx.weight;
 	sc_time = scale_cap_freq(runtime, cpuc->cpu_id);
 
+	WRITE_ONCE(cpuc->tot_task_time, cpuc->tot_task_time + task_time);
 	WRITE_ONCE(cpuc->tot_svc_time, cpuc->tot_svc_time + svc_time);
 	WRITE_ONCE(cpuc->tot_sc_time, cpuc->tot_sc_time + sc_time);
 

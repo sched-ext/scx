@@ -195,8 +195,7 @@ static int calc_nr_active_cpus(void)
 		 * When the energy model is not available, update the PCO
 		 * index based on the power mode. Then, fill the required
 		 * compute capacity in the CPU preference order, utilizing
-		 * each CPU in a certain % (LAVD_CC_PER_CORE_UTIL or
-		 * LAVD_CC_PER_CORE_SHIFT).
+		 * each CPU in a certain % (LAVD_CC_PER_CPU_UTIL).
 		 */
 		const volatile u16 *cpu_order = get_cpu_order();
 		u64 cap_cpu, cap_sum = 0;
@@ -216,7 +215,7 @@ static int calc_nr_active_cpus(void)
 				break;
 
 			cap_cpu = cpu_capacity[cpu_id];
-			cap_sum += cap_cpu >> LAVD_CC_PER_CORE_SHIFT;
+			cap_sum += (cap_cpu * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
 			if (cap_sum >= req_cap)
 				return i + 1;
 		}
@@ -783,6 +782,20 @@ u64 scale_cap_freq(u64 dur, s32 cpu)
 	cap = get_cpuperf_cap(cpu);
 	freq = scx_bpf_cpuperf_cur(cpu);
 	scaled_dur = (dur * cap * freq) >> (LAVD_SHIFT * 2);
+
+	return scaled_dur;
+}
+
+u64 scale_cap_max_freq(u64 dur, s32 cpu)
+{
+	u64 cap, scaled_dur;
+
+	/*
+	 * Scale the duration by CPU capacity and its max frequency,
+	 * so calculate capacity-invariant time duration.
+	 */
+	cap = get_cpuperf_cap(cpu);
+	scaled_dur = (dur * cap) >> LAVD_SHIFT;
 
 	return scaled_dur;
 }
