@@ -103,6 +103,8 @@ fn test_capabilities_supports_analyzer() {
     let mut caps = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: true,
         has_system_info: false,
@@ -140,6 +142,8 @@ fn test_missing_events_detection() {
     let mut caps = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: true,
         has_system_info: false,

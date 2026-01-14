@@ -238,6 +238,24 @@ pub fn get_annotation_string(annotations: &[Annotation], name: &str) -> Option<S
 
 /// Parse TrackEvent into our internal representation
 pub fn parse_track_event(event: &TrackEvent, timestamp_ns: u64) -> Option<ParsedTrackEvent> {
+    // Call the new function with empty intern tables for backward compatibility
+    parse_track_event_with_interns(
+        event,
+        timestamp_ns,
+        &super::perfetto_parser::InternTables::default(),
+    )
+}
+
+/// Parse TrackEvent with IID resolution using intern tables
+///
+/// This function supports both standard Perfetto traces (with inline strings) and
+/// traces from tools like wprof that use interned strings (IIDs) for efficiency.
+/// String values are checked first; IID resolution is only used as a fallback.
+pub fn parse_track_event_with_interns(
+    event: &TrackEvent,
+    timestamp_ns: u64,
+    intern_tables: &super::perfetto_parser::InternTables,
+) -> Option<ParsedTrackEvent> {
     // Extract event type
     let event_type = event
         .type_
@@ -245,25 +263,33 @@ pub fn parse_track_event(event: &TrackEvent, timestamp_ns: u64) -> Option<Parsed
         .map(|t| TrackEventType::from(t.enum_value_or_default()))
         .unwrap_or(TrackEventType::Unspecified);
 
-    // Extract category (first category if multiple)
+    // Extract category - check string categories first, then IIDs
     let category = if !event.categories.is_empty() {
         Some(event.categories[0].clone())
+    } else if !event.category_iids.is_empty() {
+        // Resolve category IID using intern table
+        let iid = event.category_iids[0];
+        intern_tables.event_categories.get(&iid).cloned()
     } else {
-        // Check event name if category is empty (wprof uses names for categories)
+        // Fallback: check event name (older format)
         match &event.name_field {
             Some(track_event::Name_field::Name(n)) => Some(n.clone()),
+            Some(track_event::Name_field::NameIid(iid)) => {
+                intern_tables.event_names.get(iid).cloned()
+            }
             _ => None,
         }
     };
 
-    // Extract name
+    // Extract name - check string name first, then IID
     let name = match &event.name_field {
         Some(track_event::Name_field::Name(n)) => Some(n.clone()),
+        Some(track_event::Name_field::NameIid(iid)) => intern_tables.event_names.get(iid).cloned(),
         _ => None,
     };
 
-    // Parse debug annotations
-    let annotations = parse_annotations(&event.debug_annotations);
+    // Parse debug annotations with IID resolution
+    let annotations = parse_annotations_with_interns(&event.debug_annotations, intern_tables);
 
     // Extract common metadata
     let metadata = extract_metadata(&annotations);
@@ -279,18 +305,36 @@ pub fn parse_track_event(event: &TrackEvent, timestamp_ns: u64) -> Option<Parsed
     })
 }
 
-/// Parse debug annotations from protobuf
+/// Parse debug annotations with IID resolution using intern tables
+///
+/// Supports both inline strings and interned strings (IIDs).
+/// String values are checked first; IID resolution is only used as a fallback.
+#[allow(dead_code)]
 fn parse_annotations(debug_annotations: &[DebugAnnotation]) -> Vec<Annotation> {
+    parse_annotations_with_interns(
+        debug_annotations,
+        &super::perfetto_parser::InternTables::default(),
+    )
+}
+
+/// Parse debug annotations with IID resolution using intern tables
+fn parse_annotations_with_interns(
+    debug_annotations: &[DebugAnnotation],
+    intern_tables: &super::perfetto_parser::InternTables,
+) -> Vec<Annotation> {
     debug_annotations
         .iter()
         .filter_map(|ann| {
-            // Get annotation name
+            // Get annotation name - check string name first, then IID
             let name = match &ann.name_field {
                 Some(debug_annotation::Name_field::Name(n)) => n.clone(),
+                Some(debug_annotation::Name_field::NameIid(iid)) => {
+                    intern_tables.debug_annotation_names.get(iid).cloned()?
+                }
                 _ => return None,
             };
 
-            // Get annotation value
+            // Get annotation value - check all value types including string_value_iid
             let value = match &ann.value {
                 Some(debug_annotation::Value::BoolValue(v)) => AnnotationValue::Bool(*v),
                 Some(debug_annotation::Value::UintValue(v)) => AnnotationValue::Uint(*v),
@@ -298,6 +342,15 @@ fn parse_annotations(debug_annotations: &[DebugAnnotation]) -> Vec<Annotation> {
                 Some(debug_annotation::Value::DoubleValue(v)) => AnnotationValue::Double(*v),
                 Some(debug_annotation::Value::StringValue(v)) => AnnotationValue::String(v.clone()),
                 Some(debug_annotation::Value::PointerValue(v)) => AnnotationValue::Pointer(*v),
+                Some(debug_annotation::Value::StringValueIid(iid)) => {
+                    // Resolve string value IID using intern table
+                    let resolved = intern_tables
+                        .debug_annotation_string_values
+                        .get(iid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("<iid:{}>", iid));
+                    AnnotationValue::String(resolved)
+                }
                 _ => return None,
             };
 

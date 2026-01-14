@@ -104,6 +104,8 @@ fn test_capabilities_minimal_trace() {
     let caps = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: false,
         has_system_info: false,
@@ -129,6 +131,8 @@ fn test_capabilities_minimal_analyzable() {
     let mut caps = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: false,
         has_system_info: false,
@@ -157,6 +161,8 @@ fn test_capabilities_events_by_category() {
     let mut caps = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: true,
         has_system_info: false,
@@ -201,6 +207,8 @@ fn test_compatibility_has_required_events() {
     let mut caps = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: true,
         has_system_info: false,
@@ -470,6 +478,8 @@ fn test_trace_source_variations() {
     let mut caps_scxtop = TraceCapabilities {
         available_events: std::collections::HashSet::new(),
         event_counts: std::collections::HashMap::new(),
+        track_event_categories: std::collections::HashSet::new(),
+        track_event_counts: std::collections::HashMap::new(),
         clock_sources: std::collections::HashSet::new(),
         has_process_tree: true,
         has_system_info: false,

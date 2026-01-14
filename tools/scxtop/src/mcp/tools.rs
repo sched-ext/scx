@@ -2096,7 +2096,8 @@ impl McpTools {
                      Time range: {} - {} ns ({} ms)\n\
                      Processes: {}\n\
                      CPUs: {}\n\
-                     Total events: {}\n\
+                     Total packets: {}\n\
+                     Track events: {} (categories: {:?})\n\
                      sched_ext trace: {}\n\
                      {}",
                     file_path,
@@ -2107,6 +2108,8 @@ impl McpTools {
                     trace.get_processes().len(),
                     trace.num_cpus(),
                     trace.total_events(),
+                    trace.total_track_events(),
+                    trace.get_track_event_categories(),
                     if trace.is_scx_trace() { "yes" } else { "no" },
                     if let Some(scx_meta) = trace.get_scx_metadata() {
                         format!("DSQs: {} ({:?})", scx_meta.dsq_ids.len(), &scx_meta.dsq_ids[..scx_meta.dsq_ids.len().min(10)])
