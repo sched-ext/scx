@@ -29,10 +29,14 @@
     /* Modern Path: Formal Atomics (Enable MLP/optimization) */
     #define cake_relaxed_load_u32(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
     #define cake_relaxed_store_u32(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
+    #define cake_relaxed_load_u64(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
+    #define cake_relaxed_store_u64(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
 #else
     /* Legacy/Compat Path: Volatile Fallback (Prevents Crash) */
     #define cake_relaxed_load_u32(ptr)      READ_ONCE(*(ptr))
     #define cake_relaxed_store_u32(ptr, v)  WRITE_ONCE(*(ptr), (v))
+    #define cake_relaxed_load_u64(ptr)      READ_ONCE(*(ptr))
+    #define cake_relaxed_store_u64(ptr, v)  WRITE_ONCE(*(ptr), (v))
 #endif
 
 #endif /* __CAKE_BPF_COMPAT_H */
