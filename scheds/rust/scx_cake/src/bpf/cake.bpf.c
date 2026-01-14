@@ -15,6 +15,7 @@
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
 #include "intf.h"
+#include "bpf_compat.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -430,13 +431,13 @@ struct {
  */
 
 /* Sparse Score accessor (0-100 with asymmetric adaptation) */
-#define GET_SPARSE_SCORE(ctx) ((__atomic_load_n(&(ctx)->packed_info, __ATOMIC_RELAXED) >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE)
+#define GET_SPARSE_SCORE(ctx) ((cake_relaxed_load_u32(&(ctx)->packed_info) >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE)
 
 /* Wait data accessor (violations<<4 | checks) */
-#define GET_WAIT_DATA(ctx) ((__atomic_load_n(&(ctx)->packed_info, __ATOMIC_RELAXED) >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA)
+#define GET_WAIT_DATA(ctx) ((cake_relaxed_load_u32(&(ctx)->packed_info) >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA)
 
 /* Tier accessor */
-#define GET_TIER(ctx) ((__atomic_load_n(&(ctx)->packed_info, __ATOMIC_RELAXED) >> SHIFT_TIER) & MASK_TIER)
+#define GET_TIER(ctx) ((cake_relaxed_load_u32(&(ctx)->packed_info) >> SHIFT_TIER) & MASK_TIER)
 
 /*
  * COLD PATH: Task context allocation
@@ -928,7 +929,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
      */
     u32 last_wake = tctx->last_wake_ts;
     u16 avg_runtime = tctx->avg_runtime_us;
-    u32 packed = __atomic_load_n(&tctx->packed_info, __ATOMIC_RELAXED);
+    u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
     
     if (likely(last_wake > 0)) {
         u64 wait_time = (u64)(now_ts - last_wake);
@@ -1001,7 +1002,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
          * RELAXED atomic store: Prevents compiler from splitting the 32-bit write.
          */
         if (packed != original_packed)
-            __atomic_store_n(&tctx->packed_info, packed, __ATOMIC_RELAXED);
+            cake_relaxed_store_u32(&tctx->packed_info, packed);
     }
 
     /* BURST WRITEBACK: 
@@ -1039,7 +1040,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
      * Source: Doumler, "Lock-Free Atomic Shared Pointer" (CppCon)
      */
     u64 now = scx_bpf_now();
-    u32 packed = __atomic_load_n(&tctx->packed_info, __ATOMIC_RELAXED);
+    u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
     u16 old_avg_us = tctx->avg_runtime_us;
     u16 old_deficit_us = tctx->deficit_us;
     u32 last_run = tctx->last_run_at;
@@ -1093,7 +1094,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     /* Direct atomic store to global BSS - zero false sharing due to padding */
     u32 cpu_idx = bpf_get_smp_processor_id();
     if (likely(cpu_idx < 64))
-        __atomic_store_n(&global_cpu_tiers[cpu_idx].tier, new_tier, __ATOMIC_RELAXED);
+        cake_relaxed_store_u32(&global_cpu_tiers[cpu_idx].tier, new_tier);
     
     u64 new_slice = compute_slice(new_deficit_us, new_tier);
     
@@ -1131,7 +1132,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     tctx->next_slice = new_slice;
     
     if (packed != new_packed)
-        __atomic_store_n(&tctx->packed_info, new_packed, __ATOMIC_RELAXED);
+        cake_relaxed_store_u32(&tctx->packed_info, new_packed);
 }
 
 /*
