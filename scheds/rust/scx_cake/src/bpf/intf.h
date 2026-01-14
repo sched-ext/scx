@@ -56,17 +56,22 @@ enum cake_flow_flags {
 /*
  * Static Topology Vector (populated by userspace at startup)
  * 
- * Instead of calculating LLC/Hybrid preferences at runtime, userspace
- * pre-computes a preference list for each CPU at scheduler load.
- * BPF code just iterates this array - O(1) lookup vs O(N) logic.
+ * SIMD-Style Tiered Masks for O(1) CPU Selection
  * 
- * Source: Doumler, "C++ Standard Library for Real-time Audio" (Data-Oriented Design)
+ * Instead of iterating an array of candidates (O(N) worst case),
+ * we intersect pre-computed bitmasks with the global idle_mask.
+ * TZCNT on the result gives the best candidate in ~4 cycles.
+ * 
+ * Tier 1: SMT Sibling (~1-2 cycle L1/L2 cache transfer)
+ * Tier 2: LLC Neighbors (~10-30 cycle L3 cache transfer)
+ * Tier 3: Global (any idle CPU, handled by caller)
+ * 
+ * Source: HFT ILP optimization - parallel bitwise intersection
  */
-#define TOPO_MAX_CANDIDATES 8
 struct topology_vector {
-    u8 cpus[TOPO_MAX_CANDIDATES]; /* Top 8 CPU candidates, ordered by preference */
-    u8 count;                      /* How many are valid (0-8) */
-    u8 _pad[3];                    /* Alignment padding to 12 bytes */
+    u64 sibling_mask;   /* Tier 1: SMT sibling(s) - fastest cache transfer */
+    u64 llc_mask;       /* Tier 2: Same LLC/CCX cores - shared L3 */
+    u8 _pad[16];        /* Pad to 32 bytes for cache alignment */
 };
 
 /*
@@ -96,7 +101,7 @@ struct cake_task_ctx {
     
     /* --- Read-Only / Misc [Bytes 24-63] --- */
     u32 target_dsq_id;     /* 4B: Direct Dispatch Target (0 = None) */
-    u32 rng_state;         /* 4B: XorShift RNG state (for jitter) */
+    u32 _reserved;         /* 4B: Reserved (was rng_state, now using temporal jitter) */
     u8 __pad[32];          /* Pad to 64 bytes */
 };
 
