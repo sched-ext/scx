@@ -612,136 +612,97 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     s32 cpu;
 
     /*
-     * CLUSTER BOMB: Issue all potential memory loads NOW
-     * Hides L2/L3 latency behind the tctx pointer chase.
+     * CLUSTER BOMB: Issue speculative victim load NOW
+     * This runs BEFORE the tctx map lookup, hiding latency.
      */
-    
-    /* SPECULATIVE LOAD: Fetch victim_mask blindly */
     u64 spec_victim_mask = cake_relaxed_load_u64(&victim_mask);
-    
-    /* PRE-CALC VICTIM (Pure ALU while waiting for tctx) */
     s32 spec_victim_cpu = spec_victim_mask ? __builtin_ctzll(spec_victim_mask) : -1;
 
-    tctx = get_task_ctx(p, false);  /* No allocation - fast path */
+    tctx = get_task_ctx(p, false);
     if (unlikely(!tctx)) {
-        /* No context yet - use kernel default (task will get context in cake_running) */
         bool is_idle = false;
         return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
     }
 
-    /* CRITICAL: Set wake timestamp BEFORE any early return */
+    /*
+     * IMMEDIATE CONSUMPTION: Write wake_ts NOW
+     * Don't hold this in a register - write directly to aligned tctx.
+     * This frees R5 and prevents spill/reload around helpers.
+     */
     tctx->last_wake_ts = (u32)scx_bpf_now();
 
     /*
      * SYNC WAKEUP: L1 Cache Bias
-     * If waker is going to sleep immediately, run wakee on same CPU.
-     * Data is hot in L1 cache - don't migrate it.
      */
     if (wake_flags & SCX_WAKE_SYNC) {
         s32 this_cpu = bpf_get_smp_processor_id();
         if (this_cpu >= 0 && this_cpu < 64) {
-             /* STATE-BASED DISPATCH: Set target, let enqueue handle it */
             tctx->target_dsq_id = CAKE_DSQ_LC_BASE + this_cpu;
-            
-            /* ADD THIS: Ensure we actually reschedule to pick it up */
             scx_bpf_kick_cpu(this_cpu, SCX_KICK_PREEMPT);
             return this_cpu;
         }
     }
 
     /*
-     * MLP OPTIMIZATION: Issue independent loads in parallel
-     * Load tier AND idle mask simultaneously.
+     * LOAD AFTER HELPERS: Now that all helper calls are done,
+     * load tier and idle_mask. R1-R5 are free for mask math.
      */
-    u8 tier = GET_TIER(tctx);  /* Load 1: tctx cache line */
+    u8 tier = GET_TIER(tctx);
+    u64 idle_mask = cake_relaxed_load_u64(&idle_mask_global);
     
-    /* Load global idle mask (replaces idle_map byte access) */
-    u64 idle_mask = cake_relaxed_load_u64(&idle_mask_global);  /* Load 2: MLP parallel with tier load */
-    
-    u32 bounded_prev = (u32)prev_cpu & 63;  /* Always 0-63, BPF verifier happy */
-    bool prev_idle = !!(idle_mask & (1ULL << bounded_prev));  /* BT instruction */
+    u32 bounded_prev = (u32)prev_cpu & 63;
+    bool prev_idle = !!(idle_mask & (1ULL << bounded_prev));
     bool prev_valid = (prev_cpu >= 0 && prev_cpu < 64);
     
-    /* Default to prev_cpu */
     cpu = prev_cpu;
     bool is_idle = false;
 
-    /* Use speculative prev_idle result first (fast path) */
     if (prev_valid && prev_idle) {
         is_idle = true;
         cpu = prev_cpu;
     } else {
         /*
          * ZERO-MATH LOCALITY ARBITER
-         * Decision flow: prev_cpu (L1) → sibling (L2) → SIMD scan (L3)
-         * Returns prev_cpu even when busy if occupant tier >= floor.
          */
         s32 arb_cpu = select_cpu_with_arbiter(tctx, prev_cpu, idle_mask);
         if (arb_cpu >= 0) {
             cpu = arb_cpu;
-            /* Check if selected CPU is actually idle */
             u32 bounded_arb = (u32)arb_cpu & 63;
             is_idle = !!(idle_mask & (1ULL << bounded_arb));
         }
     }
     
-    /* Hybrid Gaming Logic: Avoid E-cores for gaming */
+    /* Hybrid Gaming Logic */
     if (has_hybrid && is_idle && tier <= GAMING_DSQ) {
         if (cpu >= 0 && cpu < CAKE_MAX_CPUS && !cpu_is_big[cpu]) {
-             /* We picked an E-core. Try to find a P-core instead. */
              u64 idle_current = cake_relaxed_load_u64(&idle_mask_global);
-             u64 big_mask = big_cpu_mask; /* Direct read (no macro) for JIT constants */
-             u64 p_candidates = idle_current & big_mask;
-             
+             u64 p_candidates = idle_current & big_cpu_mask;
              if (p_candidates) {
                  cpu = __builtin_ctzll(p_candidates);
-                 /* Stick with E-core if no P-cores idle? 
-                  * Strategy: Prefer idle E-core over busy P-core.
-                  * So we only swap if we found an IDLE P-core.
-                  */
              }
         }
     }
 
-    /* Direct dispatch if idle CPU found - bypasses DSQ entirely */
+    /* Direct dispatch if idle CPU found */
     if (is_idle) {
-         /* STATE-BASED DISPATCH: Set target, let enqueue handle it */
         tctx->target_dsq_id = CAKE_DSQ_LC_BASE + cpu;
-
         if (enable_stats) {
             struct cake_stats *s = get_local_stats();
             if (s) s->nr_new_flow_dispatches++;
         }
-        
-        /* ADD THIS: Wake up the idle CPU! */
-        /* UPGRADE: Use SCX_KICK_PREEMPT. IDLE kick might be ignored if we raced. */
         scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-
-        return cpu;  /* Critical: return early to avoid cake_enqueue */
+        return cpu;
     }
 
-    /* 
-     * CRITICAL PATH: Tier 0 preemption injection with DIRECT DISPATCH
-     * 
-     * Fast Lane: Tier 0 tasks skip cake_enqueue and global DSQ entirely.
-     * They are inserted directly into the victim's local queue.
-     * 
-     * ZERO LATENCY: The victim was computed ~20 cycles ago (Cluster Bomb).
-     * Savings: 1-3µs by bypassing global DSQ lock and cake_dispatch pull.
-     * 
-     * Fallback: If no victim found, falls through to cake_enqueue (standard path).
-     */
+    /* Tier 0 preemption injection */
     if (tier == CRITICAL_LATENCY_DSQ && spec_victim_cpu >= 0) {
         scx_bpf_kick_cpu(spec_victim_cpu, SCX_KICK_PREEMPT);
-        
-        /* STATE-BASED DISPATCH */
         tctx->target_dsq_id = CAKE_DSQ_LC_BASE + spec_victim_cpu;
-        
         if (enable_stats) {
             struct cake_stats *s = get_local_stats();
             if (s) s->nr_input_preempts++;
         }
-        return spec_victim_cpu;  /* Return early to skip cake_enqueue */
+        return spec_victim_cpu;
     }
 
     return cpu;
@@ -750,21 +711,23 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 /*
  * Enqueue task to the appropriate DSQ based on sparse detection
  */
-/*
- * Enqueue task to the appropriate DSQ based on sparse detection
- */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
     /*
+     * REGISTER HINTING OPTIMIZATION: Front-load ALL uses of 'p'
+     * Extract everything we need from p NOW so the compiler can
+     * free up that register for other uses across branches.
+     */
+    u32 task_flags = p->flags;
+    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    
+    /*
      * PROACTIVE KTHREAD CLASSIFICATION (Branchless Diamond Distribution)
      * 
-     * NEW kthreads without context use mask-based selection to avoid branches:
-     * - Generate all-1s mask if critical, all-0s if housekeeping
-     * - Select tier using bitwise AND/OR instead of if/else
-     * 
-     * EXISTING kthreads use their computed tier (floor applied in cake_stopping).
+     * NEW kthreads without context use mask-based selection to avoid branches.
+     * Check uses extracted task_flags, not p->flags (p already consumed).
      */
-    if ((p->flags & PF_KTHREAD) && !bpf_task_storage_get(&task_ctx, p, 0, 0)) {
+    if ((task_flags & PF_KTHREAD) && !tctx) {
         /* Branchless tier selection using mask */
         u64 critical = is_critical_kthread(p);
         u64 mask = -(u64)critical;  /* All 1s if critical, all 0s if not */
@@ -775,8 +738,6 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         scx_bpf_dsq_insert(p, initial_tier, quantum_ns, enq_flags);
         return;
     }
-
-    struct cake_task_ctx *tctx = get_task_ctx(p, false);
     
     /* 
      * FIX: Safer Direct Dispatch Check
