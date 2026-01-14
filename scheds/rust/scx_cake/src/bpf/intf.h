@@ -115,7 +115,7 @@ struct cake_task_ctx {
     u8 preempt_floor;      /* 1B: Precomputed floor for warmth arbitration */
     u8 _reserved[3];       /* 3B: Reserved */
     u8 __pad[32];          /* Pad to 64 bytes */
-};
+} __attribute__((aligned(64))); /* Force cache-line alignment */
 
 /* 
  * Bitfield Offsets for packed_info
