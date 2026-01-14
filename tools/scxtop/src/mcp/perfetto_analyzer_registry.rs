@@ -259,7 +259,7 @@ impl TraceAnalyzer for ContextSwitchAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_switch").is_empty()
+        trace.has_event_type("sched_switch")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -299,8 +299,7 @@ impl TraceAnalyzer for WakeupLatencyAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_waking").is_empty()
-            && !trace.get_events_by_type("sched_switch").is_empty()
+        trace.has_event_type("sched_waking") && trace.has_event_type("sched_switch")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -340,7 +339,7 @@ impl TraceAnalyzer for MigrationAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_migrate_task").is_empty()
+        trace.has_event_type("sched_migrate_task")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -434,7 +433,7 @@ macro_rules! simple_analyzer_wrapper {
                 let required_events = $required;
                 required_events
                     .iter()
-                    .all(|event_type| !trace.get_events_by_type(event_type).is_empty())
+                    .all(|event_type| trace.has_event_type(event_type))
             }
 
             fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -575,7 +574,7 @@ impl TraceAnalyzer for TaskStateAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_switch").is_empty()
+        trace.has_event_type("sched_switch")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -614,7 +613,7 @@ impl TraceAnalyzer for PreemptionAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_switch").is_empty()
+        trace.has_event_type("sched_switch")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -653,8 +652,7 @@ impl TraceAnalyzer for WakeupChainAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_waking").is_empty()
-            && !trace.get_events_by_type("sched_switch").is_empty()
+        trace.has_event_type("sched_waking") && trace.has_event_type("sched_switch")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {
@@ -693,8 +691,7 @@ impl TraceAnalyzer for LatencyBreakdownAnalyzerWrapper {
     }
 
     fn can_analyze(&self, trace: &PerfettoTrace) -> bool {
-        !trace.get_events_by_type("sched_waking").is_empty()
-            && !trace.get_events_by_type("sched_switch").is_empty()
+        trace.has_event_type("sched_waking") && trace.has_event_type("sched_switch")
     }
 
     fn analyze(&self, trace: Arc<PerfettoTrace>) -> AnalyzerResult {

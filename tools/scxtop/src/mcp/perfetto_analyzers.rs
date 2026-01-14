@@ -35,11 +35,120 @@ impl ContextSwitchAnalyzer {
 
     /// Analyze CPU utilization in parallel (multi-threaded)
     pub fn analyze_cpu_utilization_parallel(&self) -> HashMap<u32, CpuUtilStats> {
-        (0..self.trace.num_cpus())
+        // First try ftrace-based analysis
+        let ftrace_result: HashMap<u32, CpuUtilStats> = (0..self.trace.num_cpus())
             .into_par_iter()
             .filter_map(|cpu| {
                 let cpu_u32 = cpu as u32;
                 self.analyze_cpu(cpu_u32).map(|stats| (cpu_u32, stats))
+            })
+            .collect();
+
+        // If we have ftrace results, use them
+        if !ftrace_result.is_empty() {
+            return ftrace_result;
+        }
+
+        // Fallback: analyze ONCPU TrackEvents (for wprof traces)
+        self.analyze_cpu_utilization_from_track_events()
+    }
+
+    /// Analyze CPU utilization from ONCPU TrackEvents (wprof traces)
+    fn analyze_cpu_utilization_from_track_events(&self) -> HashMap<u32, CpuUtilStats> {
+        use super::perfetto_track_event_types::TrackEventType;
+
+        let oncpu_events = self.trace.get_track_events_by_category("ONCPU");
+        if oncpu_events.is_empty() {
+            return HashMap::new();
+        }
+
+        // Group events by CPU
+        let mut events_by_cpu: HashMap<u32, Vec<_>> = HashMap::new();
+        for event in &oncpu_events {
+            if let Some(cpu) = event.metadata.cpu {
+                events_by_cpu.entry(cpu).or_default().push(event);
+            }
+        }
+
+        let (start_ts, end_ts) = self.trace.time_range();
+        let total_time_ns = end_ts.saturating_sub(start_ts);
+
+        // Analyze each CPU
+        events_by_cpu
+            .into_par_iter()
+            .map(|(cpu, events)| {
+                let mut active_time_ns = 0u64;
+                let mut total_switches = 0usize;
+                let mut timeslices: Vec<u64> = Vec::new();
+
+                // Track ongoing slices: track_uuid -> start_ts
+                let mut slice_starts: HashMap<u64, u64> = HashMap::new();
+
+                // Sort events by timestamp
+                let mut sorted_events = events;
+                sorted_events.sort_by_key(|e| e.timestamp_ns);
+
+                for event in sorted_events {
+                    let track_uuid = event.track_uuid.unwrap_or(0);
+
+                    match event.event_type {
+                        TrackEventType::SliceBegin => {
+                            slice_starts.insert(track_uuid, event.timestamp_ns);
+                            total_switches += 1;
+                        }
+                        TrackEventType::SliceEnd => {
+                            if let Some(start_ts) = slice_starts.remove(&track_uuid) {
+                                let duration = event.timestamp_ns.saturating_sub(start_ts);
+                                // Check if this is idle (pid 0)
+                                let is_idle = event.metadata.pid.map(|p| p == 0).unwrap_or(false);
+                                if !is_idle {
+                                    active_time_ns += duration;
+                                }
+                                timeslices.push(duration);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let idle_time_ns = total_time_ns.saturating_sub(active_time_ns);
+                let utilization_percent = if total_time_ns > 0 {
+                    (active_time_ns as f64 / total_time_ns as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                let timeslice_percentiles = if !timeslices.is_empty() {
+                    PerfettoTrace::calculate_percentiles(&timeslices)
+                } else {
+                    Percentiles {
+                        count: 0,
+                        min: 0,
+                        max: 0,
+                        mean: 0.0,
+                        median: 0,
+                        p95: 0,
+                        p99: 0,
+                        p999: 0,
+                    }
+                };
+
+                (
+                    cpu,
+                    CpuUtilStats {
+                        cpu_id: cpu,
+                        active_time_ns,
+                        idle_time_ns,
+                        utilization_percent,
+                        total_switches,
+                        min_timeslice_ns: timeslice_percentiles.min,
+                        max_timeslice_ns: timeslice_percentiles.max,
+                        avg_timeslice_ns: timeslice_percentiles.mean as u64,
+                        p50_timeslice_ns: timeslice_percentiles.median,
+                        p95_timeslice_ns: timeslice_percentiles.p95,
+                        p99_timeslice_ns: timeslice_percentiles.p99,
+                    },
+                )
             })
             .collect()
     }
@@ -431,7 +540,7 @@ impl WakeupChainAnalyzer {
         let mut per_cpu_latencies: HashMap<u32, Vec<u64>> = HashMap::new();
         let mut wakeup_times: HashMap<i32, u64> = HashMap::new(); // pid -> wakeup_ts
 
-        // Collect wakeup and schedule events
+        // Collect wakeup and schedule events from ftrace
         for cpu in 0..self.trace.num_cpus() {
             let events = self.trace.get_events_by_cpu(cpu as u32);
 
@@ -460,6 +569,129 @@ impl WakeupChainAnalyzer {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+
+        // If no ftrace data, try TrackEvents (wprof traces)
+        if latencies.is_empty() {
+            return self.analyze_wakeup_latency_from_track_events();
+        }
+
+        let overall_percentiles = if !latencies.is_empty() {
+            PerfettoTrace::calculate_percentiles(&latencies)
+        } else {
+            Percentiles::default()
+        };
+
+        // Calculate per-CPU stats
+        let per_cpu_stats = per_cpu_latencies
+            .into_iter()
+            .map(|(cpu, lats)| {
+                let percentiles = PerfettoTrace::calculate_percentiles(&lats);
+                (
+                    cpu,
+                    LatencyStatsPerCpu {
+                        cpu_id: cpu,
+                        count: percentiles.count,
+                        avg_latency_ns: percentiles.mean as u64,
+                        p99_latency_ns: percentiles.p99,
+                    },
+                )
+            })
+            .collect();
+
+        WakeupLatencyStats {
+            total_wakeups: overall_percentiles.count,
+            min_latency_ns: overall_percentiles.min,
+            max_latency_ns: overall_percentiles.max,
+            avg_latency_ns: overall_percentiles.mean as u64,
+            p50_latency_ns: overall_percentiles.median,
+            p95_latency_ns: overall_percentiles.p95,
+            p99_latency_ns: overall_percentiles.p99,
+            p999_latency_ns: overall_percentiles.p999,
+            per_cpu_stats,
+        }
+    }
+
+    /// Analyze wakeup latency from TrackEvents (wprof traces)
+    fn analyze_wakeup_latency_from_track_events(&self) -> WakeupLatencyStats {
+        use super::perfetto_track_event_types::TrackEventType;
+
+        let mut latencies: Vec<u64> = Vec::new();
+        let mut per_cpu_latencies: HashMap<u32, Vec<u64>> = HashMap::new();
+
+        // First try: use pre-calculated waking_delay_us from WAKEE events
+        let wakee_events = self.trace.get_track_events_by_category("WAKEE");
+        let wakee_new_events = self.trace.get_track_events_by_category("WAKEE_NEW");
+
+        for event in wakee_events.iter().chain(wakee_new_events.iter()) {
+            if let Some(delay_us) = event.metadata.waking_delay_us {
+                let delay_ns = delay_us * 1000; // Convert to nanoseconds
+                latencies.push(delay_ns);
+
+                if let Some(cpu) = event.metadata.cpu {
+                    per_cpu_latencies.entry(cpu).or_default().push(delay_ns);
+                }
+            }
+        }
+
+        // Second try: correlate WAKEE timestamps with ONCPU slice begin timestamps
+        // This calculates wakeup-to-schedule latency
+        if latencies.is_empty() {
+            // Build a map of PID -> earliest ONCPU begin after each wakeup
+            let oncpu_events = self.trace.get_track_events_by_category("ONCPU");
+
+            // Group ONCPU slice begins by PID and sort by timestamp
+            let mut oncpu_begins_by_pid: HashMap<i32, Vec<u64>> = HashMap::new();
+            for event in &oncpu_events {
+                if event.event_type == TrackEventType::SliceBegin {
+                    if let Some(pid) = event.metadata.pid {
+                        oncpu_begins_by_pid
+                            .entry(pid)
+                            .or_default()
+                            .push(event.timestamp_ns);
+                    }
+                }
+            }
+
+            // Sort oncpu begins by timestamp for binary search
+            for begins in oncpu_begins_by_pid.values_mut() {
+                begins.sort();
+            }
+
+            // For each WAKEE event, find the next ONCPU begin for that PID
+            for event in wakee_events.iter().chain(wakee_new_events.iter()) {
+                if let Some(pid) = event.metadata.pid {
+                    if let Some(oncpu_begins) = oncpu_begins_by_pid.get(&pid) {
+                        // Find the first ONCPU begin after this wakeup
+                        if let Ok(idx) = oncpu_begins.binary_search(&event.timestamp_ns) {
+                            // Exact match - use next one
+                            if idx + 1 < oncpu_begins.len() {
+                                let latency =
+                                    oncpu_begins[idx + 1].saturating_sub(event.timestamp_ns);
+                                if latency > 0 && latency < 1_000_000_000 {
+                                    // < 1 second sanity check
+                                    latencies.push(latency);
+                                    if let Some(cpu) = event.metadata.cpu {
+                                        per_cpu_latencies.entry(cpu).or_default().push(latency);
+                                    }
+                                }
+                            }
+                        } else if let Err(idx) = oncpu_begins.binary_search(&event.timestamp_ns) {
+                            // idx is where it would be inserted - so oncpu_begins[idx] is the first after
+                            if idx < oncpu_begins.len() {
+                                let latency = oncpu_begins[idx].saturating_sub(event.timestamp_ns);
+                                if latency > 0 && latency < 1_000_000_000 {
+                                    // < 1 second sanity check
+                                    latencies.push(latency);
+                                    if let Some(cpu) = event.metadata.cpu {
+                                        per_cpu_latencies.entry(cpu).or_default().push(latency);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

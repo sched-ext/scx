@@ -19,6 +19,19 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Intern tables for resolving IIDs to strings (used by wprof traces)
+#[derive(Debug, Clone, Default)]
+pub struct InternTables {
+    /// Event categories (field 1 in InternedData): iid -> category name
+    pub event_categories: HashMap<u64, String>,
+    /// Event names (field 2 in InternedData): iid -> event name
+    pub event_names: HashMap<u64, String>,
+    /// Debug annotation names (field 3 in InternedData): iid -> annotation name
+    pub debug_annotation_names: HashMap<u64, String>,
+    /// Debug annotation string values (field 29 in InternedData): iid -> string value
+    pub debug_annotation_string_values: HashMap<u64, String>,
+}
+
 /// Core structure for a parsed perfetto trace file
 #[derive(Clone)]
 pub struct PerfettoTrace {
@@ -49,6 +62,9 @@ pub struct PerfettoTrace {
     track_events_by_pid: HashMap<i32, Vec<usize>>, // Maps PID -> indices into track_events
     /// Track events indexed by category for efficient type queries
     track_events_by_category: HashMap<String, Vec<usize>>, // Maps category -> indices into track_events
+    /// Track UUID to thread info mapping (from TrackDescriptors)
+    #[allow(dead_code)]
+    track_uuid_to_thread: HashMap<u64, (i32, i32)>, // Maps track_uuid -> (pid, tid)
 
     /// NEW: Trace capabilities (what data is available)
     #[allow(dead_code)]
@@ -266,9 +282,53 @@ impl PerfettoTrace {
         let mut track_events: Vec<super::perfetto_track_event_types::ParsedTrackEvent> = Vec::new();
         let mut track_events_by_pid: HashMap<i32, Vec<usize>> = HashMap::new();
         let mut track_events_by_category: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut track_uuid_to_thread: HashMap<u64, (i32, i32)> = HashMap::new();
 
-        // First pass: Extract processes, threads, and track descriptors
+        // Intern tables for IID resolution (used by tools like wprof that use interned strings)
+        // This is a fallback mechanism - if strings are directly present, they're used first
+        let mut intern_tables = InternTables::default();
+
+        // First pass: Extract processes, threads, track descriptors, and build intern tables
         for (packet_idx, packet) in trace.packet.iter().enumerate() {
+            // Extract InternedData to build IID lookup tables
+            // This is optional - only needed for tools that use interned strings (e.g., wprof)
+            // interned_data is a MessageField, use .as_ref() to get Option<&InternedData>
+            if let Some(interned_data) = packet.interned_data.as_ref() {
+                // Event categories (field 1)
+                for cat in &interned_data.event_categories {
+                    if let (Some(iid), Some(name)) = (cat.iid, cat.name.as_ref()) {
+                        intern_tables.event_categories.insert(iid, name.clone());
+                    }
+                }
+
+                // Event names (field 2)
+                for name_entry in &interned_data.event_names {
+                    if let (Some(iid), Some(name)) = (name_entry.iid, name_entry.name.as_ref()) {
+                        intern_tables.event_names.insert(iid, name.clone());
+                    }
+                }
+
+                // Debug annotation names (field 3)
+                for ann_name in &interned_data.debug_annotation_names {
+                    if let (Some(iid), Some(name)) = (ann_name.iid, ann_name.name.as_ref()) {
+                        intern_tables
+                            .debug_annotation_names
+                            .insert(iid, name.clone());
+                    }
+                }
+
+                // Debug annotation string values (field 29)
+                for ann_str in &interned_data.debug_annotation_string_values {
+                    if let (Some(iid), Some(str_val)) = (ann_str.iid, ann_str.str.as_ref()) {
+                        if let Ok(str_val_string) = String::from_utf8(str_val.clone()) {
+                            intern_tables
+                                .debug_annotation_string_values
+                                .insert(iid, str_val_string);
+                        }
+                    }
+                }
+            }
+
             if let Some(data) = &packet.data {
                 match data {
                     trace_packet::Data::ProcessTree(process_tree) => {
@@ -287,7 +347,20 @@ impl PerfettoTrace {
                         }
                     }
                     trace_packet::Data::TrackDescriptor(track_desc) => {
-                        // Extract thread information
+                        // Extract process information from TrackDescriptor
+                        // (fallback for tools like wprof that don't emit ProcessTree)
+                        if let Some(process) = track_desc.process.as_ref() {
+                            if let Some(pid) = process.pid {
+                                // Only insert if not already present from ProcessTree
+                                processes.entry(pid).or_insert_with(|| ProcessInfo {
+                                    pid,
+                                    cmdline: process.cmdline.clone(),
+                                    name: process.process_name.clone(),
+                                });
+                            }
+                        }
+
+                        // Extract thread information from TrackDescriptor
                         if let Some(thread) = track_desc.thread.as_ref() {
                             if let (Some(tid), Some(pid)) = (thread.tid, thread.pid) {
                                 let key = ((pid as u64) << 32) | (tid as u64);
@@ -299,6 +372,16 @@ impl PerfettoTrace {
                                         name: thread.thread_name.clone(),
                                     },
                                 );
+                                // Also add process entry if not present
+                                processes.entry(pid).or_insert_with(|| ProcessInfo {
+                                    pid,
+                                    cmdline: vec![],
+                                    name: thread.thread_name.clone(), // Use thread name as process name fallback
+                                });
+                                // Map track_uuid to (pid, tid) for TrackEvent resolution
+                                if let Some(uuid) = track_desc.uuid {
+                                    track_uuid_to_thread.insert(uuid, (pid, tid));
+                                }
                             }
                         }
 
@@ -391,13 +474,25 @@ impl PerfettoTrace {
                             0 // No timestamp available
                         };
 
-                        // Parse track event using helper function
-                        if let Some(parsed_event) =
-                            super::perfetto_track_event_types::parse_track_event(
+                        // Parse track event using helper function with intern tables for IID resolution
+                        if let Some(mut parsed_event) =
+                            super::perfetto_track_event_types::parse_track_event_with_interns(
                                 track_event,
                                 timestamp_ns,
+                                &intern_tables,
                             )
                         {
+                            // Resolve PID/TID from track_uuid if not in annotations
+                            // This is needed for wprof traces where PID is in TrackDescriptor, not event
+                            if parsed_event.metadata.pid.is_none() {
+                                if let Some(uuid) = parsed_event.track_uuid {
+                                    if let Some(&(pid, tid)) = track_uuid_to_thread.get(&uuid) {
+                                        parsed_event.metadata.pid = Some(pid);
+                                        parsed_event.metadata.tid = Some(tid);
+                                    }
+                                }
+                            }
+
                             let event_idx = track_events.len();
 
                             // Index by PID if available
@@ -487,6 +582,7 @@ impl PerfettoTrace {
             track_events,
             track_events_by_pid,
             track_events_by_category,
+            track_uuid_to_thread,
             capabilities: None, // Lazy-loaded on demand
             event_index: None,  // Lazy-loaded on demand
         })
@@ -559,6 +655,38 @@ impl PerfettoTrace {
         }
 
         events
+    }
+
+    /// Check if trace has events of a given type (including TrackEvent equivalents)
+    /// This method checks both ftrace events and mapped TrackEvent categories
+    /// to support traces from different sources (e.g., wprof uses TrackEvents)
+    pub fn has_event_type(&self, event_type: &str) -> bool {
+        // First check ftrace events
+        if !self.get_events_by_type(event_type).is_empty() {
+            return true;
+        }
+
+        // Check if any TrackEvent category maps to this event type
+        // This uses the reverse mapping from map_wprof_category_to_ftrace
+        let matching_categories: &[&str] = match event_type {
+            "sched_switch" => &["ONCPU", "PREEMPTEE", "PREEMPTOR"],
+            "sched_wakeup" => &["WAKEE", "WAKEE_NEW"],
+            "sched_waking" => &["WAKER", "WAKER_NEW"],
+            "irq_handler_entry" => &["HARDIRQ"],
+            "softirq_entry" => &["SOFTIRQ"],
+            "sched_process_fork" => &["FORKING", "FORKED"],
+            "sched_process_exit" => &["EXIT"],
+            "sched_process_exec" => &["EXEC", "START"],
+            _ => &[],
+        };
+
+        for category in matching_categories {
+            if self.track_events_by_category.contains_key(*category) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Get all processes in the trace
