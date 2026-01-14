@@ -989,7 +989,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx,
 static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 				     s32 prev_cpu, bool *is_idle)
 {
-	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_cpumask;
 	struct mask_wrapper *wrapper;
 	struct bpf_cpumask *mask;
 	struct llc_ctx *llcx;
@@ -1002,7 +1002,6 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-	idle_smtmask = scx_bpf_get_idle_smtmask();
 
 	if (!(llcx = lookup_llc_ctx(taskc->llc_id)) ||
 	    !llcx->cpumask)
@@ -1060,7 +1059,6 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 
 found_cpu:
 	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(idle_smtmask);
 
 	return cpu;
 }
@@ -1364,15 +1362,13 @@ static __always_inline s32 pick_idle_energy_aware(struct task_struct *p,
 static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
-	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_cpumask;
 	struct llc_ctx *llcx;
 	s32 pref_cpu, cpu = prev_cpu;
 	bool migratable = false;
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-
-	if (!idle_cpumask || !idle_smtmask)
+	if (!idle_cpumask)
 		goto found_cpu;
 
 	if (bpf_cpumask_test_cpu(prev_cpu, idle_cpumask) &&
@@ -1570,20 +1566,17 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 	if (topo_config.has_little_cores &&
 	    llcx->little_cpumask && llcx->big_cpumask) {
-		if (task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE)) {
-			cpu = __pick_idle_cpu(llcx->little_cpumask,
-					      0);
-			if (cpu >= 0) {
-				*is_idle = true;
-				goto found_cpu;
-			}
-		} else {
-			cpu = __pick_idle_cpu(llcx->big_cpumask,
-					      SCX_PICK_IDLE_CORE);
-			if (cpu >= 0) {
-				*is_idle = true;
-				goto found_cpu;
-			}
+		cpu = __pick_idle_cpu(llcx->big_cpumask,
+				      SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
+		cpu = __pick_idle_cpu(llcx->little_cpumask,
+				      0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
 		}
 	}
 
@@ -1652,7 +1645,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 found_cpu:
 	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(idle_smtmask);
 
 	return cpu;
 }
@@ -1809,7 +1801,8 @@ static void async_p2dq_enqueue(struct enqueue_promise *ret,
 		}
 	}
 
-	if (taskc->target_llc_hint < MAX_LLCS) {
+	if (topo_config.nr_llcs > 1 &&
+	    taskc->target_llc_hint < MAX_LLCS) {
 		u32 target_llc_id = taskc->target_llc_hint;
 		s32 target_cpu;
 
@@ -2319,9 +2312,6 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 
-	// This is an optimization to not have to lookup the cpu_ctx every
-	// time. When a nice task was run we need to update the cpu_ctx so that
-	// tasks are no longer enqueued to the local DSQ.
 	if (task_ctx_test_flag(taskc, TASK_CTX_F_WAS_NICE) &&
 	    (cpuc = lookup_cpu_ctx(task_cpu))) {
 		cpu_ctx_clear_flag(cpuc, CPU_CTX_F_NICE_TASK);
@@ -2345,10 +2335,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		aggregate_pelt_to_llc(llcx, taskc,
 				      task_ctx_test_flag(taskc, TASK_CTX_F_INTERACTIVE),
 				      !task_ctx_test_flag(taskc, TASK_CTX_F_ALL_CPUS));
-	}
-
-	/* Legacy load tracking (when PELT disabled) */
-	if (!p2dq_config.pelt_enabled) {
+	} else {
+		/* Legacy load tracking (when PELT disabled) */
 		__sync_fetch_and_add(&llcx->load, used);
 		if (taskc->dsq_index >= 0 && taskc->dsq_index < MAX_DSQS_PER_LLC)
 			__sync_fetch_and_add(&llcx->dsq_load[taskc->dsq_index], used);
@@ -2459,7 +2447,6 @@ static bool consume_llc(struct llc_ctx *llcx)
 			goto try_dsq;
 		}
 
-		/* Insert to LLC DSQ and let move_to_local handle affinity atomically */
 		trace("DHQ %llu insert %s[%d] to LLC DSQ",
 		      llcx->mig_dhq, p->comm, p->pid);
 		scx_bpf_dsq_insert_vtime(p,
@@ -2469,7 +2456,6 @@ static bool consume_llc(struct llc_ctx *llcx)
 					 taskc->enq_flags);
 		bpf_task_release(p);
 
-		/* Try to dispatch from LLC DSQ (handles affinity check atomically) */
 		if (scx_bpf_dsq_move_to_local(cpuc->llc_dsq))
 			return true;
 
@@ -2483,7 +2469,6 @@ static bool consume_llc(struct llc_ctx *llcx)
 			return false;
 		}
 
-/* Insert to LLC DSQ and let move_to_local handle affinity atomically */
 		trace("ATQ %llu insert %s[%d] to LLC DSQ",
 		      llcx->mig_atq, p->comm, p->pid);
 		scx_bpf_dsq_insert_vtime(p,
@@ -2493,7 +2478,6 @@ static bool consume_llc(struct llc_ctx *llcx)
 					 taskc->enq_flags);
 		bpf_task_release(p);
 
-		/* Try to dispatch from LLC DSQ (handles affinity check atomically) */
 		return scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
 	}
 try_dsq:
@@ -2788,10 +2772,6 @@ check_llc_dsq:
 		trace("ATQ dispatching %llu with min vtime %llu", min_atq, min_vtime);
 		pid = scx_atq_pop(min_atq);
 		if (likely((p = bpf_task_from_pid((s32)pid)))) {
-			/*
-			 * the ATQ. Otherwise there may be priority inversions.
-			 * This probably needs to be done for the DSQs as well.
-			 */
 			if (unlikely(!(taskc = lookup_task_ctx(p)))) {
 				bpf_task_release(p);
 				scx_bpf_error("failed to get task ctx");
@@ -2799,7 +2779,6 @@ check_llc_dsq:
 			}
 
 
-			/* Insert to LLC DSQ for atomic affinity handling */
 			scx_bpf_dsq_insert_vtime(p,
 						 cpuc->llc_dsq,
 						 taskc->slice_ns,
@@ -2807,7 +2786,6 @@ check_llc_dsq:
 						 taskc->enq_flags);
 			bpf_task_release(p);
 
-			/* Try to dispatch - move_to_local handles affinity atomically */
 			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
 			return;
 		}
@@ -2854,9 +2832,6 @@ check_llc_dsq:
 				return;
 			}
 
-			/* Check if task can still run on current CPU */
-
-			/* Insert to LLC DSQ for atomic affinity handling */
 			scx_bpf_dsq_insert_vtime(p,
 						 cpuc->llc_dsq,
 						 taskc->slice_ns,
@@ -2864,7 +2839,6 @@ check_llc_dsq:
 						 taskc->enq_flags);
 			bpf_task_release(p);
 
-			/* Try to dispatch - move_to_local handles affinity atomically */
 			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
 		}
 	} else if (unlikely(p2dq_config.atq_enabled)) {
@@ -2876,9 +2850,6 @@ check_llc_dsq:
 				return;
 			}
 
-			/* Check if task can still run on current CPU */
-
-			/* Insert to LLC DSQ for atomic affinity handling */
 			scx_bpf_dsq_insert_vtime(p,
 						 cpuc->llc_dsq,
 						 taskc->slice_ns,
@@ -2886,7 +2857,6 @@ check_llc_dsq:
 						 taskc->enq_flags);
 			bpf_task_release(p);
 
-			/* Try to dispatch - move_to_local handles affinity atomically */
 			scx_bpf_dsq_move_to_local(cpuc->llc_dsq);
 			return;
 		}
@@ -2896,14 +2866,12 @@ check_llc_dsq:
 			return;
 	}
 
-	// Lookup LLC ctx (should never fail at this point)
 	if (unlikely(p2dq_config.llc_shards <= 1 &&
 	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))) {
 		scx_bpf_error("invalid llc id %u", cpuc->llc_id);
 		return;
 	}
 
-	// Try to keep prev task running (optimization for low-latency tasks)
 	if (unlikely(prev && keep_running(cpuc, llcx, prev)))
 		return;
 
