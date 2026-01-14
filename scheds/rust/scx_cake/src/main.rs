@@ -9,15 +9,14 @@ mod stats;
 mod topology;
 mod tui;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use libbpf_rs::MapCore;
 use log::{info, warn};
-
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod bpf_intf {
@@ -395,21 +394,19 @@ impl<'a> Scheduler<'a> {
         }
 
         // Load the BPF program
-        let skel = open_skel.load().context("Failed to load BPF program")?;
+        let mut skel = open_skel.load().context("Failed to load BPF program")?;
 
-        // Populate Static Topology Preference Map (Data-Oriented Design)
-        // Pre-compute CPU preference lists at startup for O(1) BPF lookup.
-        // This replaces runtime topology calculation with simple array iteration.
+        // Populate Static Topology Preference Map (BSS-Direct Addressing)
+        // Pre-compute CPU preference lists at startup for 0ns BPF lookup.
         let preference_vectors = topo.generate_preference_map();
-        for (cpu, vec) in preference_vectors.iter().enumerate() {
-            let key = (cpu as u32).to_ne_bytes();
-            skel.maps
-                .topo_preference_map
-                .update(&key, vec.as_bytes(), libbpf_rs::MapFlags::ANY)
-                .with_context(|| format!("Failed to update topo_preference_map for CPU {}", cpu))?;
+        if let Some(bss) = &mut skel.maps.bss_data {
+            for (cpu, vec) in preference_vectors.iter().enumerate().take(64) {
+                bss.global_topo[cpu].sibling_mask = vec.sibling_mask.load(Ordering::Relaxed);
+                bss.global_topo[cpu].llc_mask = vec.llc_mask.load(Ordering::Relaxed);
+            }
         }
         info!(
-            "Populated topology preference map for {} CPUs",
+            "Populated BSS topology preference map for {} CPUs",
             topo.nr_cpus
         );
 
