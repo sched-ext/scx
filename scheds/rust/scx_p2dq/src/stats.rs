@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use scx_p2dq::TOPO;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
@@ -16,6 +17,8 @@ static THERMAL_TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // Global flag to track if energy-aware scheduling is enabled
 static EAS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+static ATQ_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_thermal_tracking_enabled(enabled: bool) {
     THERMAL_TRACKING_ENABLED.store(enabled, Ordering::Relaxed);
@@ -31,6 +34,14 @@ pub fn set_eas_enabled(enabled: bool) {
 
 pub fn is_eas_enabled() -> bool {
     EAS_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_atq_enabled(enabled: bool) {
+    ATQ_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_atq_enabled() -> bool {
+    ATQ_ENABLED.load(Ordering::Relaxed)
 }
 
 #[stat_doc]
@@ -95,39 +106,51 @@ pub struct Metrics {
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
-        writeln!(
+        let multi_llc = TOPO.all_llcs.len() > 1;
+        let atq = is_atq_enabled();
+
+        write!(
             w,
-            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}\n\tatq enq/reenq {}/{}\n\tenq cpu/llc/intr/mig {}/{}/{}/{}",
-            self.direct,
-            self.idle,
-            self.keep,
-            self.same_dsq,
-            self.dsq_change,
-            self.atq_enq,
-            self.atq_reenq,
-            self.enq_cpu,
-            self.enq_llc,
-            self.enq_intr,
-            self.enq_mig,
+            "direct/idle/keep {}/{}/{}\n\tdsq same/migrate {}/{}",
+            self.direct, self.idle, self.keep, self.same_dsq, self.dsq_change,
         )?;
 
-        // Build the stats line conditionally based on thermal tracking availability
-        let mut stats_line = format!(
-            "\twake prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
-            self.wake_prev,
-            self.wake_llc,
-            self.wake_mig,
-            self.select_pick2,
-            self.dispatch_pick2,
-            self.llc_migrations,
-            self.node_migrations,
-            self.fork_balance,
-            self.fork_same_llc,
-            self.exec_balance,
-            self.exec_same_llc,
-        );
+        if atq {
+            write!(w, "\n\tatq enq/reenq {}/{}", self.atq_enq, self.atq_reenq)?;
+        }
 
-        // Only show thermal stats if thermal tracking is enabled
+        if multi_llc {
+            writeln!(
+                w,
+                "\n\tenq cpu/llc/intr/mig {}/{}/{}/{}",
+                self.enq_cpu, self.enq_llc, self.enq_intr, self.enq_mig,
+            )?;
+        } else {
+            writeln!(
+                w,
+                "\n\tenq cpu/llc/intr {}/{}/{}",
+                self.enq_cpu, self.enq_llc, self.enq_intr,
+            )?;
+        }
+
+        let mut stats_line = format!("\twake prev {}", self.wake_prev);
+
+        if multi_llc {
+            stats_line.push_str(&format!(
+                "/llc/mig {}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node {}/{}\n\tfork balance/same {}/{}\n\texec balance/same {}/{}",
+                self.wake_llc,
+                self.wake_mig,
+                self.select_pick2,
+                self.dispatch_pick2,
+                self.llc_migrations,
+                self.node_migrations,
+                self.fork_balance,
+                self.fork_same_llc,
+                self.exec_balance,
+                self.exec_same_llc,
+            ));
+        }
+
         if is_thermal_tracking_enabled() {
             stats_line.push_str(&format!(
                 "\n\tthermal kick/avoid {}/{}",
@@ -135,7 +158,6 @@ impl Metrics {
             ));
         }
 
-        // Only show EAS stats if energy-aware scheduling is enabled
         if is_eas_enabled() {
             stats_line.push_str(&format!(
                 "\n\tEAS little/big/fallback {}/{}/{}",
