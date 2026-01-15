@@ -71,6 +71,7 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_STEAL,
 	NR_CSTATS,
 };
 
@@ -86,16 +87,6 @@ struct cgrp_ctx {
 	u32  cell;
 	bool cell_owner;
 };
-
-/*
-* Cell struct shared between kernel and userspace.
-* Kernel uses spinlock for atomic updates.
-* Userspace must read with BPF_F_LOCK to avoid torn reads.
-* Lock field is padding (kernel zeros it to avoid leaking pointers).
-*
-* map.lookup(&key, MapFlags::ANY)  -> userspace may see torn state
-* map.lookup(&key, MapFlags::LOCK) -> safe read
-*/
 
 /*
  * Per-LLC data is cacheline-aligned to prevent false sharing when
@@ -120,8 +111,15 @@ _Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
 		u32 __pad; \
 	}
 #endif
+
 /*
- * cell is the per-cell book-keeping
+* Cell struct shared between kernel and userspace.
+* Kernel uses spinlock for atomic updates.
+* Userspace must read with BPF_F_LOCK to avoid torn reads.
+* Lock field is padding (kernel zeros it to avoid leaking pointers).
+*
+* map.lookup(&key, MapFlags::ANY)  -> userspace may see torn state
+* map.lookup(&key, MapFlags::LOCK) -> safe read
 */
 struct cell {
 	// This is a lock in the kernel and padding in userspace
@@ -142,7 +140,6 @@ struct cell {
 
 // Putting the lock first in the struct is our convention.
 // We pad this space when in Rust code that will never see the lock value.
-// We intentionally avoid it in copy_cell_skip_lock to keep the verifier happy.
 // It is a BPF constraint that it is 4 byte aligned.
 
 // All assertions work for both BPF and userspace builds

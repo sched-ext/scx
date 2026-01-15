@@ -423,7 +423,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 
 		tctx->dsq = get_cpu_dsq_id(cpu);
 		if (dsq_is_invalid(tctx->dsq))
-			return -EINVAL; // scx_bpf_error() already called in get_cpu_dsq_id
+			return -EINVAL;
 
 		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
 		return 0;
@@ -438,7 +438,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 	/* Non-LLC aware version */
 	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, FAKE_FLAT_CELL_LLC);
 	if (dsq_is_invalid(tctx->dsq))
-		return -EINVAL; // scx_bpf_error() already called in get_cell_llc_dsq_id
+		return -EINVAL;
 
 	struct cell *cell;
 	if (!(cell = lookup_cell(tctx->cell)))
@@ -773,7 +773,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	dsq_id_t cpu_dsq  = get_cpu_dsq_id(cpu);
 
 	if (dsq_is_invalid(cell_dsq) || dsq_is_invalid(cpu_dsq)) {
-		return; // scx_bpf_error already called in get_*_dsq_id
+		return;
 	}
 
 	/* Peek at cell-LLC DSQ head */
@@ -793,12 +793,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * If we failed to find an eligible task, scx will keep running prev if
-	 * prev->scx.flags & SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and
-	 * otherwise go idle.
+	 * If we failed to find an eligible task, try work stealing if enabled.
+	 * Otherwise, scx will keep running prev if prev->scx.flags &
+	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
-	if (!found)
+	if (!found) {
+		/* Try work stealing if enabled */
+		if (enable_llc_awareness && enable_work_stealing) {
+			/* Returns: <0 error, 0 no steal, >0 stole work */
+			s32 ret = try_stealing_work(cell, llc);
+			if (ret < 0)
+				return;
+			if (ret > 0) {
+				cstat_inc(CSTAT_STEAL, cell, cctx);
+			}
+		}
 		return;
+	}
 
 	/*
 	 * The move_to_local can fail if we raced with some other cpu in the cell
@@ -1269,16 +1280,21 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	struct task_ctx *tctx;
 	struct cell	*cell;
 
-	if (!(tctx = lookup_task_ctx(p)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
+
+	/* Handle stolen task retag (LLC-aware mode only) */
+	if (enable_llc_awareness && enable_work_stealing) {
+		if (maybe_retag_stolen_task(p, tctx, cctx) < 0)
+			return;
+	}
 
 	/*
 	 * Legacy approach: Update vtime_now before task runs.
 	 * Only used when split vtime updates is enabled.
 	 */
 	if (split_vtime_updates) {
-		if (!(cctx = lookup_cpu_ctx(-1)) ||
-		    !(cell = lookup_cell(cctx->cell)))
+		if (!(cell = lookup_cell(cctx->cell)))
 			return;
 
 		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
@@ -1593,6 +1609,13 @@ s32 validate_flags()
 		return -EINVAL;
 	}
 
+	/* Work stealing only makes sense when enable_llc_awareness. */
+	if (enable_work_stealing && (!enable_llc_awareness)) {
+		scx_bpf_error(
+			"Work stealing requires LLC-aware mode to be enabled");
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -1732,7 +1755,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		/* Per-LLC stats deferred: FAKE_FLAT_CELL_LLC used for now */
 		dsq_id_t dsq_id = get_cell_llc_dsq_id(i, FAKE_FLAT_CELL_LLC);
 		if (dsq_is_invalid(dsq_id))
-			return; // scx_bpf_error already called by get_cell_llc_dsq_id
+			return;
 
 		scx_bpf_dump(
 			"CELL[%d] vtime=%llu nr_queued=%d\n", i,
@@ -1747,7 +1770,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 
 		dsq_id = get_cpu_dsq_id(i);
 		if (dsq_is_invalid(dsq_id))
-			return; // scx_bpf_error already called by get_cpu_dsq_id
+			return;
 		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
 			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
 			     scx_bpf_dsq_nr_queued(dsq_id.raw));

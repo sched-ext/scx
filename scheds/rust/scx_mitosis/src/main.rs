@@ -129,6 +129,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_llc_awareness: bool,
 
+    /// Enable work stealing. This is only relevant when LLC-awareness is enabled.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_work_stealing: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -168,6 +172,7 @@ struct DistributionStats {
     cpu_q_pct: f64,
     cell_q_pct: f64,
     affn_viol_pct: f64,
+    steal_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -189,20 +194,31 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}% S:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
             self.cpu_q_pct,
             self.cell_q_pct,
             self.affn_viol_pct,
+            self.steal_pct,
             width = descisions_width,
         )
     }
 }
 
 impl<'a> Scheduler<'a> {
+    fn validate_args(opts: &Opts) -> Result<()> {
+        if opts.enable_work_stealing && !opts.enable_llc_awareness {
+            bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
+        }
+
+        Ok(())
+    }
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        Self::validate_args(opts)?;
+
         let topology = Topology::new()?;
 
         let nr_llc = topology.all_llcs.len().max(1);
@@ -240,6 +256,7 @@ impl<'a> Scheduler<'a> {
         // Set nr_llc in rodata
         rodata.nr_llc = nr_llc as u32;
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
+        rodata.enable_work_stealing = opts.enable_work_stealing;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
@@ -305,6 +322,7 @@ impl<'a> Scheduler<'a> {
         global_queue_decisions: u64,
         scope_queue_decisions: u64,
         scope_affn_viols: u64,
+        scope_steals: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -329,6 +347,12 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_affn_viols as f64) / (scope_queue_decisions as f64)
         };
 
+        let steal_pct = if scope_queue_decisions == 0 {
+            0.0
+        } else {
+            100.0 * (scope_steals as f64) / (scope_queue_decisions as f64)
+        };
+
         const EXPECTED_QUEUES: usize = 3;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -345,6 +369,7 @@ impl<'a> Scheduler<'a> {
             cpu_q_pct: queue_pct[1],
             cell_q_pct: queue_pct[2],
             affn_viol_pct: affinity_violations_percent,
+            steal_pct,
             global_queue_decisions,
         });
     }
@@ -371,12 +396,19 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize])
             .sum::<u64>();
 
+        // Sum steals over all cells
+        let scope_steals: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_STEAL as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self.calculate_distribution_stats(
             &queue_counts,
             global_queue_decisions,
             global_queue_decisions,
             scope_affn_viols,
+            scope_steals,
         )?;
 
         self.metrics.update(&stats);
@@ -417,11 +449,16 @@ impl<'a> Scheduler<'a> {
             let scope_affn_viols: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
 
+            // Steals for this cell
+            let scope_steals: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_STEAL as usize];
+
             let stats = self.calculate_distribution_stats(
                 &queue_counts,
                 global_queue_decisions,
                 cell_queue_decisions,
                 scope_affn_viols,
+                scope_steals,
             )?;
 
             self.metrics
