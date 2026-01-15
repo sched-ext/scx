@@ -59,6 +59,7 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_STEAL,
 	NR_CSTATS,
 };
 
