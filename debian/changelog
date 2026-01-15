@@ -1,5 +1,5 @@
 scx (1.0.19-1) unstable; urgency=medium
 
-  * Initial packaging.
+  * Initial packaging (Closes: #9999999)
 
  -- Andrea Righi <arighi@nvidia.com>  Thu, 15 Jan 2026 03:44:24 -0800

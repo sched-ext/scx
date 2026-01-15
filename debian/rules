@@ -3,6 +3,8 @@
 ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
 CARGO_BUILD_TARGETDIR := debian/cargo-target
 
+DEB_BUILD_OPTIONS += noautodbgsym
+
 export RUSTC = /usr/bin/rustc
 export CARGO = /usr/bin/cargo
 export TARGET = $(shell $(RUSTC) -vV | sed -n 's/^host: //p')

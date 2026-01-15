@@ -62,7 +62,6 @@ Build-Depends:
  libcap-dev,
  libseccomp-dev,
  zlib1g-dev,
- pkg-config,
  cmake,
  pkgconf,
  cargo,
@@ -74,7 +73,7 @@ Vcs-Git:  https://github.com/sched-ext/scx
 Package: scx
 Architecture: amd64 arm64 armhf ppc64el s390x
 Depends:
- ${shlibs:Depends},
+ ${shlibs:Depends},${misc:Depends}
 Description: sched_ext schedulers and tools
  sched_ext is a Linux kernel feature which enables implementing kernel thread
  schedulers in BPF and dynamically loading them. This package contains various
