@@ -27,7 +27,12 @@ use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
-use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
+use scx_utils::pm::{
+    cpu_idle_resume_latency_supported, epp_supported, for_each_uncore_domain, get_epp,
+    get_turbo_enabled, get_uncore_max_freq_khz, get_uncore_min_freq_khz, set_epp,
+    set_turbo_enabled, set_uncore_max_freq_khz, turbo_supported, uncore_freq_supported,
+    update_cpu_idle_resume_latency,
+};
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -420,6 +425,108 @@ fn main(opts: CliOpts) -> Result<()> {
         }
     }
 
+    let is_efficiency = opts.sched.sched_mode == scx_p2dq::SchedMode::Efficiency;
+    let is_performance = opts.sched.sched_mode == scx_p2dq::SchedMode::Performance;
+
+    let mut orig_uncore_freqs: Vec<(u32, u32, u32)> = Vec::new();
+    if opts.sched.uncore_max_freq_mhz.is_some() || is_efficiency || is_performance {
+        if !uncore_freq_supported() {
+            if opts.sched.uncore_max_freq_mhz.is_some() {
+                warn!("uncore frequency control not supported");
+            }
+        } else {
+            let _ = for_each_uncore_domain(|pkg, die| {
+                let freq_khz = if let Some(mhz) = opts.sched.uncore_max_freq_mhz {
+                    mhz * 1000
+                } else if is_efficiency {
+                    get_uncore_min_freq_khz(pkg, die)?
+                } else {
+                    get_uncore_max_freq_khz(pkg, die)?
+                };
+                if let Ok(orig) = get_uncore_max_freq_khz(pkg, die) {
+                    if orig != freq_khz {
+                        info!(
+                            "Setting max uncore frequency for package {} die {} to {} MHz",
+                            pkg,
+                            die,
+                            freq_khz / 1000
+                        );
+                        orig_uncore_freqs.push((pkg, die, orig));
+                        set_uncore_max_freq_khz(pkg, die, freq_khz)?;
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let mut orig_epps: Vec<(usize, String)> = Vec::new();
+    if (is_efficiency || is_performance) && epp_supported() {
+        let target_epp = if is_efficiency {
+            "power"
+        } else {
+            "performance"
+        };
+        for cpu in TOPO.all_cpus.values() {
+            if let Ok(orig) = get_epp(cpu.id) {
+                if orig != target_epp {
+                    if orig_epps.is_empty() {
+                        info!("Setting EPP to {} for all CPUs", target_epp);
+                    }
+                    orig_epps.push((cpu.id, orig));
+                    let _ = set_epp(cpu.id, target_epp);
+                }
+            }
+        }
+    }
+
+    let orig_turbo = if turbo_supported() {
+        let target_turbo = opts.sched.turbo.or(if is_efficiency {
+            Some(false)
+        } else if is_performance {
+            Some(true)
+        } else {
+            None
+        });
+        if let Some(want_enabled) = target_turbo {
+            if let Ok(current) = get_turbo_enabled() {
+                if current != want_enabled {
+                    let mode_suffix = if opts.sched.turbo.is_none() {
+                        if is_efficiency {
+                            " for efficiency mode"
+                        } else {
+                            " for performance mode"
+                        }
+                    } else {
+                        ""
+                    };
+                    info!(
+                        "{} turbo{}",
+                        if want_enabled {
+                            "Enabling"
+                        } else {
+                            "Disabling"
+                        },
+                        mode_suffix
+                    );
+                    let _ = set_turbo_enabled(want_enabled);
+                    Some(current)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        if opts.sched.turbo.is_some() {
+            warn!("turbo control not supported");
+        }
+        None
+    };
+
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched =
@@ -434,5 +541,31 @@ fn main(opts: CliOpts) -> Result<()> {
             break;
         }
     }
+
+    if let Some(was_enabled) = orig_turbo {
+        info!(
+            "Restoring turbo to {}",
+            if was_enabled { "enabled" } else { "disabled" }
+        );
+        let _ = set_turbo_enabled(was_enabled);
+    }
+
+    if !orig_epps.is_empty() {
+        info!("Restoring EPP settings");
+        for (cpu, epp) in orig_epps {
+            let _ = set_epp(cpu, &epp);
+        }
+    }
+
+    for (pkg, die, orig_khz) in orig_uncore_freqs {
+        info!(
+            "Restoring uncore frequency for package {} die {} to {} MHz",
+            pkg,
+            die,
+            orig_khz / 1000
+        );
+        let _ = set_uncore_max_freq_khz(pkg, die, orig_khz);
+    }
+
     Ok(())
 }

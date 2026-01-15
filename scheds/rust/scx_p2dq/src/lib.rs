@@ -347,6 +347,17 @@ pub struct SchedulerOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub enable_eas: bool,
 
+    /// Set max uncore frequency in MHz for efficiency mode (Intel only).
+    /// When set, limits the uncore (L3 cache, memory controller) frequency
+    /// to reduce power consumption. Original values restored on exit.
+    #[clap(long)]
+    pub uncore_max_freq_mhz: Option<u32>,
+
+    /// Control CPU turbo boost (Intel only).
+    /// Set to true to enable turbo, false to disable. Original value restored on exit.
+    #[clap(long)]
+    pub turbo: Option<bool>,
+
     #[clap(flatten, next_help_heading = "Topology Options")]
     pub topo: TopologyArgs,
 }
