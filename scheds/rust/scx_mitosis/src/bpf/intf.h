@@ -71,6 +71,7 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_STEAL,
 	NR_CSTATS,
 };
 
@@ -142,7 +143,6 @@ struct cell {
 
 // Putting the lock first in the struct is our convention.
 // We pad this space when in Rust code that will never see the lock value.
-// We intentionally avoid it in copy_cell_skip_lock to keep the verifier happy.
 // It is a BPF constraint that it is 4 byte aligned.
 
 // All assertions work for both BPF and userspace builds

@@ -38,6 +38,7 @@ enum mitosis_constants {
  * Variables populated by userspace
  */
 const volatile bool	   enable_llc_awareness = false;
+const volatile bool	   enable_work_stealing = false;
 const volatile u32	   nr_llc		= 1;
 
 static inline struct cell *lookup_cell(int idx)
@@ -77,6 +78,9 @@ struct task_ctx {
 	u64 cgid;
 	/* Which LLC this task is assigned to */
 	s32 llc;
+
+	u32 steal_count; /* how many times this task has been stolen */
+	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 };
 
 static inline const struct cpumask *lookup_cell_cpumask(int idx);

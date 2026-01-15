@@ -6,7 +6,8 @@
  * This header assists adding LLC cache awareness to scx_mitosis by defining
  * maps and fns for managing CPU-to-LLC domain mappings. It provides code to
  * recalculate per-LLC CPU counts within cells and implements weighted
- * random LLC selection for tasks.
+ * random LLC selection for tasks. It also tracks work-stealing
+ * statistics for cross-LLC task migrations.
  */
 #pragma once
 
@@ -35,6 +36,12 @@ static inline bool	  llc_is_valid(u32 llc_id)
 static inline void init_task_llc(struct task_ctx *tctx)
 {
 	tctx->llc = LLC_INVALID;
+
+	if (!enable_work_stealing)
+		return;
+
+	tctx->steal_count    = 0;
+	tctx->last_stolen_at = 0;
 }
 
 static inline const struct cpumask *lookup_llc_cpumask(u32 llc)
@@ -142,9 +149,10 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 	bpf_spin_lock(&cell->lock);
 	for (u32 i = 0; i < MAX_LLCS; i++)
 		llc_cpu_cnt[i] = cell->llcs[i].cpu_cnt;
-	bpf_spin_unlock(&cell->lock);
 
 	u32 total_cpu_cnt = cell->cpu_cnt;
+	bpf_spin_unlock(&cell->lock);
+
 	if (!total_cpu_cnt) {
 		scx_bpf_error(
 			"pick_llc_for_task: cell %d has no CPUs accounted yet",
@@ -191,6 +199,105 @@ static void zero_cell_vtimes(struct cell *cell)
 	}
 }
 
+/*
+ * Detect and handle cross-LLC task migration.
+ * Called from running() to check if task's assigned LLC differs
+ * from the CPU's LLC (indicating work stealing occurred).
+ *
+ * Caller must ensure enable_llc_awareness is true.
+ */
+static inline int maybe_retag_stolen_task(struct task_struct *p,
+					  struct task_ctx    *tctx,
+					  struct cpu_ctx     *cctx)
+{
+	/* No mismatch = no steal, fast path */
+	if (tctx->llc == cctx->llc)
+		return 0;
+
+	/* Task was stolen to a different LLC - update accounting */
+	tctx->steal_count++;
+	tctx->last_stolen_at = scx_bpf_now();
+
+	/* Assign task to new LLC */
+	tctx->llc = cctx->llc;
+
+	/*
+	 * New LLC, need new cpumask. This updates the task vtime
+	 * to that of the new cell-LLC DSQ.
+	 */
+	return update_task_cpumask(p, tctx);
+}
+
+/* Work stealing:
+ * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task if it can run on this cpu
+ * Returns:
+ *  true == 1;  task was stolen
+ *  false == 0; no tasks were stolen
+ *  error <0;   error encountered
+*/
+static inline s32 try_stealing_work(u32 cell, s32 local_llc)
+{
+	if (!llc_is_valid(local_llc)) {
+		scx_bpf_error("try_stealing_work: invalid local_llc: %d",
+			      local_llc);
+		return -EINVAL;
+	}
+
+	struct cell *cell_ptr = lookup_cell(cell);
+	if (!cell_ptr)
+		return -EINVAL;
+
+	// Loop over all other LLCs, looking for a queued task to steal
+	u32 i;
+	bpf_for(i, 1, nr_llc)
+	{
+		// Start with the next one to spread out the load
+		u32 candidate_llc = (local_llc + i) % nr_llc;
+
+		// Prevents the optimizer from removing the following conditional return
+		// so that the verifier knows the read will be safe
+		barrier_var(candidate_llc);
+
+		if (candidate_llc >= MAX_LLCS)
+			continue;
+
+		/*
+    * Skip if the cell doesn't have CPUs in this LLC.
+    * Note: rechecking cell_ptr for verifier.
+    * This is racy with try_stealing_this_task, but we don't care -
+    * if the LLC actually doesn't have CPUs come steal time,
+    * we will fail the steal and continue to the next LLC.
+    */
+		if (cell_ptr &&
+		    READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
+			continue;
+
+		dsq_id_t candidate_dsq =
+			get_cell_llc_dsq_id(cell, candidate_llc);
+		if (dsq_is_invalid(candidate_dsq))
+			return -EINVAL; // already errored in get_cell_llc_dsq_id
+
+		// Optimization: skip if faster than constructing an iterator
+		// Not redundant with later checking if task found (race)
+		if (!scx_bpf_dsq_nr_queued(candidate_dsq.raw))
+			continue;
+
+		/*
+		 * Attempt the steal - can fail because it's a race.
+		 * We don't update task_ctx here because the peeked task_ctx
+		 * may be stale (a different task may now be at head of DSQ).
+		 * Actual retag and accounting happens in running() via
+		 * mismatch detection.
+		 */
+		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw))
+			continue;
+
+		// Success, we got a task
+		return true;
+	}
+	return false;
+}
+
 static inline int update_task_llc_assignment(struct task_struct *p,
 					     struct task_ctx	*tctx)
 {
@@ -227,7 +334,9 @@ static inline int update_task_llc_assignment(struct task_struct *p,
 	}
 
 	/* --- Point to the correct (cell,LLC) DSQ and set vtime baseline --- */
-	tctx->dsq	  = get_cell_llc_dsq_id(tctx->cell, tctx->llc);
+	tctx->dsq = get_cell_llc_dsq_id(tctx->cell, tctx->llc);
+	if (dsq_is_invalid(tctx->dsq))
+		return -EINVAL;
 
 	struct cell *cell = lookup_cell(tctx->cell);
 	if (!cell)

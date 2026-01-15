@@ -793,12 +793,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * If we failed to find an eligible task, scx will keep running prev if
-	 * prev->scx.flags & SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and
-	 * otherwise go idle.
+	 * If we failed to find an eligible task, try work stealing if enabled.
+	 * Otherwise, scx will keep running prev if prev->scx.flags &
+	 * SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and otherwise go idle.
 	 */
-	if (!found)
+	if (!found) {
+		/* Try work stealing if enabled */
+		if (enable_llc_awareness && enable_work_stealing) {
+			/* Returns: <0 error, 0 no steal, >0 stole work */
+			s32 ret = try_stealing_work(cell, llc);
+			if (ret < 0)
+				return;
+			if (ret > 0) {
+				cstat_inc(CSTAT_STEAL, cell, cctx);
+			}
+		}
 		return;
+	}
 
 	/*
 	 * The move_to_local can fail if we raced with some other cpu in the cell
@@ -1269,16 +1280,21 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	struct task_ctx *tctx;
 	struct cell	*cell;
 
-	if (!(tctx = lookup_task_ctx(p)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
+
+	/* Handle stolen task retag (LLC-aware mode only) */
+	if (enable_llc_awareness && enable_work_stealing) {
+		if (maybe_retag_stolen_task(p, tctx, cctx) < 0)
+			return;
+	}
 
 	/*
 	 * Legacy approach: Update vtime_now before task runs.
 	 * Only used when split vtime updates is enabled.
 	 */
 	if (split_vtime_updates) {
-		if (!(cctx = lookup_cpu_ctx(-1)) ||
-		    !(cell = lookup_cell(cctx->cell)))
+		if (!(cell = lookup_cell(cctx->cell)))
 			return;
 
 		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
@@ -1590,6 +1606,13 @@ s32 validate_flags()
 		scx_bpf_error(
 			"LLC-aware mode requires nr_llc between 1 and %d inclusive, got %d",
 			MAX_LLCS, nr_llc);
+		return -EINVAL;
+	}
+
+	/* Work stealing only makes sense when enable_llc_awareness. */
+	if (enable_work_stealing && (!enable_llc_awareness)) {
+		scx_bpf_error(
+			"Work stealing requires LLC-aware mode to be enabled");
 		return -EINVAL;
 	}
 
