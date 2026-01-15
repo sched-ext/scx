@@ -214,6 +214,10 @@ impl<'a> Scheduler<'a> {
             stats::set_eas_enabled(true);
         }
 
+        if opts_optimized.atq_enabled && compat::ksym_exists("bpf_spin_unlock").unwrap_or(false) {
+            stats::set_atq_enabled(true);
+        }
+
         if opts.queued_wakeup {
             open_skel.struct_ops.p2dq_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         }

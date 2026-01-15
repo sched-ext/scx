@@ -1564,22 +1564,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		stat_inc(P2DQ_STAT_SELECT_PICK2);
 	}
 
-	if (topo_config.has_little_cores &&
-	    llcx->little_cpumask && llcx->big_cpumask) {
-		cpu = __pick_idle_cpu(llcx->big_cpumask,
-				      SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto found_cpu;
-		}
-		cpu = __pick_idle_cpu(llcx->little_cpumask,
-				      0);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto found_cpu;
-		}
-	}
-
 	if (p2dq_config.cpu_priority) {
 		pref_cpu = pref_idle_cpu(llcx);
 		if (llcx->cpumask && pref_cpu >= 0 &&
@@ -1587,6 +1571,21 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			*is_idle = true;
 			cpu = pref_cpu;
 			trace("PREF idle %s->%d", p->comm, pref_cpu);
+			goto found_cpu;
+		}
+	}
+
+	if (topo_config.has_little_cores && llcx->big_cpumask) {
+		cpu = __pick_idle_cpu(llcx->big_cpumask,
+				      SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
+		}
+		if (llcx->little_cpumask &&
+		    (cpu = __pick_idle_cpu(llcx->little_cpumask,
+					   SCX_PICK_IDLE_CORE)) >= 0) {
+			*is_idle = true;
 			goto found_cpu;
 		}
 	}
