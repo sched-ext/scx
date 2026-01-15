@@ -390,7 +390,7 @@ const volatile struct cake_tier_config tier_configs[8] = {
  * - Short enough to not block Tier 0 preemption (6% of 240Hz frame)
  * - Power-of-2 enables 1-cycle check
  */
-#define VICTIM_RESIDENCY_BIT 18  /* 2^18 = 262,144 ns ≈ 262µs */
+#define VICTIM_RESIDENCY_BIT 20  /* 2^20 ns ≈ 1ms */
 
 
 
@@ -1024,7 +1024,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
      * Precompute the floor once so select_cpu only needs a raw comparison.
      * A gap of 3 tiers is the heuristic for "Wait < Migrate" (~150ns penalty).
      */
-    tctx->preempt_floor = (new_tier < 5) ? new_tier + 3 : 7;
+    tctx->preempt_floor = (new_tier < 5) ? new_tier + 1 : 7;
     
     /* Direct atomic store to global BSS - zero false sharing due to padding */
     u32 cpu_idx = bpf_get_smp_processor_id();
