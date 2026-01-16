@@ -1,5 +1,6 @@
 [Unit]
 Description=Start scx_scheduler
+ConditionPathIsDirectory=/sys/kernel/sched_ext
 StartLimitIntervalSec=30
 StartLimitBurst=2
 
@@ -11,4 +12,4 @@ Restart=on-failure
 StandardError=journal
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target
