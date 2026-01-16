@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use core::sync::atomic::{AtomicU64, Ordering};
-use log::info;
+use log::debug;
 use scx_utils::{CoreType, Topology};
 
 /// Maximum supported CPUs (matches BPF array sizes)
@@ -197,17 +197,17 @@ pub fn detect() -> Result<TopologyInfo> {
         }
     }
 
-    // Log detected topology
-    info!("Topology detected:");
-    info!("  CPUs:          {}", info.nr_cpus);
-    info!("  SMT Enabled:   {}", info.smt_enabled);
-    info!("  Dual CCD:      {}", info.has_dual_ccd);
+    // Log detected topology (debug level - use RUST_LOG=debug to see)
+    debug!("Topology detected:");
+    debug!("  CPUs:          {}", info.nr_cpus);
+    debug!("  SMT Enabled:   {}", info.smt_enabled);
+    debug!("  Dual CCD:      {}", info.has_dual_ccd);
     if info.has_dual_ccd {
-        info!("    Masks:       {:x?}", &info.llc_cpu_mask[..llc_idx]);
+        debug!("    Masks:       {:x?}", &info.llc_cpu_mask[..llc_idx]);
     }
-    info!("  Hybrid cores:  {}", info.has_hybrid_cores);
+    debug!("  Hybrid cores:  {}", info.has_hybrid_cores);
     if info.has_hybrid_cores {
-        info!("    P-core mask: {:016x}", info.big_cpu_mask);
+        debug!("    P-core mask: {:016x}", info.big_cpu_mask);
     }
 
     Ok(info)
