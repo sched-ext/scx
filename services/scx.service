@@ -1,5 +1,6 @@
 [Unit]
 Description=Start scx_scheduler
+ConditionPathIsDirectory=/sys/kernel/sched_ext
 StartLimitIntervalSec=30
 StartLimitBurst=2
 
