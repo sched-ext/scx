@@ -12,4 +12,4 @@ Restart=on-failure
 StandardError=journal
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target
