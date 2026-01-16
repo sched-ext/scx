@@ -146,6 +146,8 @@ struct {
     bool is_idle;
 } cold_scratch SEC(".bss");
 
+
+
 /* Shadow state bit positions */
 #define SHADOW_BIT_IDLE   (1U << 0)
 #define SHADOW_BIT_VICTIM (1U << 1)
@@ -1142,84 +1144,57 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 /*
  * CPU idle state changed
  * 
- * TIERED MASK + FILTERED UPDATE PROTOCOL (Phase 2)
- * 
- * The key insight: LOCK prefix only fires when a physical CORE transitions
- * between "fully busy" (0) and "partially idle" (!0). Individual SMT thread
- * wake/sleep within a core only touches the per-core byte (no bus traffic).
- * 
- * This reduces atomic frequency by 40-60% on 9800X3D.
+ * ZERO-SPILL OPTIMIZATION: The kernel provides the CPU as a parameter.
+ * We use it directly to index global_shadow[] instead of calling
+ * bpf_get_smp_processor_id(). This eliminates all helper calls and
+ * thus all register preservation requirements.
  */
 void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 {
-    if (cpu < 0 || cpu >= 16) return;  /* 9800X3D: 16 threads max */
+    /* Bounds check using mask (branchless, verifier-friendly) */
+    u32 c = (u32)cpu & (CAKE_MAX_CPUS - 1);
+    
+    /* Direct shadow access - NO HELPER CALL, ZERO SPILLS */
+    struct cake_cpu_shadow *shadow = &global_shadow[c];
 
-    /*
-     * STEP 1: Check Local Shadow (L1 Cache Hit, Zero Bus Traffic)
-     */
-    struct cake_cpu_shadow *shadow = get_shadow_state();
-    if (unlikely(!shadow)) return;
-
+    /* Shadow-gate check (L1 hit) */
     bool shadow_idle = !!(shadow->packed_state & SHADOW_BIT_IDLE);
-    if (shadow_idle == idle) {
-        return;  /* No state change, exit early */
-    }
+    if (shadow_idle == idle)
+        return;
 
-    /*
-     * STEP 2: TIERED UPDATE - Core-local first, global only on transition
-     * 
-     * core_id = cpu / 2 (physical core)
-     * thread_bit = 1 << (cpu % 2) (SMT thread within core)
-     */
-    u32 core_id = (u32)cpu >> 1;
-    u8 thread_bit = (u8)(1 << (cpu & 1));
-    
-    /* Read current core status (L1/L2 hit, ~3 cycles) */
+    /* TIERED UPDATE */
+    u32 core_id = c >> 1;
+    u8 bit = (u8)(1 << (c & 1));
     u8 old_status = tiered_idle.core_status[core_id & 7];
-    u8 new_status;
+    u8 new_status = idle ? (old_status | bit) : (old_status & ~bit);
     
-    if (idle) {
-        new_status = old_status | thread_bit;
-    } else {
-        new_status = old_status & ~thread_bit;
-    }
-    
-    /* Store core status (architecturally atomic on x86_64, no LOCK needed) */
     tiered_idle.core_status[core_id & 7] = new_status;
-    
-    /*
-     * STEP 3: FILTERED UPDATE - Only touch global_hint on core-level transition
-     * 
-     * Filter logic:
-     *   idle && old_status == 0  → Core became "partially idle" → set global bit
-     *   !idle && new_status == 0 → Core became "fully busy"     → clear global bit
-     *   else                     → No global atomic, exit early!
-     */
-    u64 core_mask = (1ULL << core_id);
-    
+
+    /* FILTERED UPDATE: LOCK only on core-level transition */
     if (idle && old_status == 0) {
-        /* Core just became available - RELEASE to publish */
-        __atomic_fetch_or(&tiered_idle.global_hint, core_mask, __ATOMIC_RELEASE);
+        __atomic_fetch_or(&tiered_idle.global_hint, (1ULL << core_id), __ATOMIC_RELEASE);
     } else if (!idle && new_status == 0) {
-        /* Core just became fully busy - RELEASE to publish */
-        __atomic_fetch_and(&tiered_idle.global_hint, ~core_mask, __ATOMIC_RELEASE);
+        __atomic_fetch_and(&tiered_idle.global_hint, ~(1ULL << core_id), __ATOMIC_RELEASE);
     }
-    /* else: No global atomic needed! Common case with SMT. */
 
     /* Victim mask cleanup when going idle */
     if (idle && (shadow->packed_state & SHADOW_BIT_VICTIM)) {
-        u64 cpu_mask = (1ULL << cpu);
+        u64 cpu_mask = (1ULL << c);
         u64 current = cake_relaxed_load_u64(&victim_mask);
         cake_relaxed_store_u64(&victim_mask, current & ~cpu_mask);
         shadow->packed_state &= ~SHADOW_BIT_VICTIM;
     }
 
-    /* STEP 4: Update Local Shadow */
+    /* Update local shadow */
     if (idle)
         shadow->packed_state |= SHADOW_BIT_IDLE;
     else
         shadow->packed_state &= ~SHADOW_BIT_IDLE;
 }
+
+
+
+
 
 
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
