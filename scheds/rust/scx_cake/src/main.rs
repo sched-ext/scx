@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use log::{info, warn};
+use log::{debug, info, warn};
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod bpf_intf {
@@ -405,7 +405,7 @@ impl<'a> Scheduler<'a> {
                 bss.global_topo[cpu].llc_mask = vec.llc_mask.load(Ordering::Relaxed);
             }
         }
-        info!(
+        debug!(
             "Populated BSS topology preference map for {} CPUs",
             topo.nr_cpus
         );
@@ -426,16 +426,7 @@ impl<'a> Scheduler<'a> {
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
-        let (quantum, new_flow_bonus, sparse_threshold, starvation) = self.args.effective_values();
-
-        info!(
-            "scx_cake scheduler started (profile: {:?})",
-            self.args.profile
-        );
-        info!("  Quantum:          {} µs", quantum);
-        info!("  New flow bonus:   {} µs", new_flow_bonus);
-        info!("  Sparse threshold: {}‰", sparse_threshold);
-        info!("  Starvation limit: {} µs", starvation);
+        self.print_startup_splash();
 
         if self.args.verbose {
             // Run TUI mode
@@ -467,6 +458,67 @@ impl<'a> Scheduler<'a> {
 
         info!("scx_cake scheduler shutting down");
         Ok(())
+    }
+
+    fn print_startup_splash(&self) {
+        let (q, _nfb, st, starv) = self.args.effective_values();
+        let topo = &self.topology;
+
+        // ANSI Escape Codes
+        let cyan = "\x1b[36m";
+        let yellow = "\x1b[33m";
+        let green = "\x1b[32m";
+        let bold = "\x1b[1m";
+        let dim = "\x1b[2m";
+        let reset = "\x1b[0m";
+        let check = format!("{}✓{}", green, reset);
+
+        // Topology strings
+        let smt_str = if topo.smt_enabled {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
+        let topo_str = if topo.has_dual_ccd {
+            "Multi-CCD"
+        } else {
+            "Single CCD"
+        };
+        let core_str = if topo.has_hybrid_cores {
+            "Hybrid (P/E)"
+        } else {
+            "Uniform"
+        };
+
+        let profile_str = format!("{:?}", self.args.profile).to_uppercase();
+
+        println!(
+            r#"
+{bold}{cyan}🍰 scx_cake v1.01{reset} {dim}| DRR++ Sched_ext Scheduler{reset}
+{dim}────────────────────────────────────────────────────────{reset}
+{bold}HARDWARE{reset}
+  CPUs: {cyan}{cpus}{reset}  SMT: {cyan}{smt}{reset}  Topology: {cyan}{topo_type}{reset}  Cores: {cyan}{cores}{reset}
+
+{bold}PROFILE{reset}: {yellow}{profile}{reset}
+  Quantum: {quantum} µs   Sparse Gate: {gate}‰   Starvation: {starv} ms
+
+{bold}STATUS{reset}: {check} Scheduler running
+{dim}────────────────────────────────────────────────────────{reset}"#,
+            bold = bold,
+            cyan = cyan,
+            yellow = yellow,
+            dim = dim,
+            reset = reset,
+            check = check,
+            cpus = topo.nr_cpus,
+            smt = smt_str,
+            topo_type = topo_str,
+            cores = core_str,
+            profile = profile_str,
+            quantum = q,
+            gate = st,
+            starv = starv / 1000,
+        );
     }
 }
 
