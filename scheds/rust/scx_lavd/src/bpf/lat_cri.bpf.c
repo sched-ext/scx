@@ -183,6 +183,13 @@ static void calc_lat_cri(struct task_struct *p, task_ctx *taskc)
 	taskc->lat_cri_wakee = 0;
 
 	/*
+	 * Calculate and cache normalized lat_cri to avoid recalculation
+	 * during CPU selection. This normalizes lat_cri to [0, 1024] scale
+	 * based on the system-wide maximum.
+	 */
+	taskc->normalized_lat_cri = normalize_lat_cri(lat_cri);
+
+	/*
 	 * A task is more CPU-performance sensitive when it meets the following
 	 * conditions:
 	 *

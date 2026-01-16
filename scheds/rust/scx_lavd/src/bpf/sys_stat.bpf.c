@@ -320,7 +320,23 @@ static void collect_sys_stat(void)
 		 * the rest of CPU time as an approximation.
 		 */
 		cpuc->cur_stolen_est = (cpuc->stolen_time_est << LAVD_SHIFT) / compute;
-		cpuc->avg_stolen_est = calc_asym_avg(cpuc->avg_stolen_est, cpuc->cur_stolen_est);
+
+		/*
+		 * Update running average of stolen time using RAVG library.
+		 * Use accumulate/decay with 256ms (1/4 second) half-life.
+		 */
+		ravg_accumulate(&cpuc->avg_stolen_est, cpuc->cur_stolen_est, c->now, 256 * NSEC_PER_MSEC);
+
+		/*
+		 * Calculate latency capacity as 1024 - avg_stolen_est.
+		 * Read the RAVG value, convert from fixed-point, and compute remaining capacity.
+		 */
+		u64 avg_stolen_fp = ravg_read(&cpuc->avg_stolen_est, c->now, 256 * NSEC_PER_MSEC);
+		u32 avg_stolen_val = (u32)(avg_stolen_fp >> RAVG_FRAC_BITS);
+		cpuc->lat_capacity = (avg_stolen_val < 1024) ? (1024 - avg_stolen_val) : 0;
+		/* Add 12.5% headroom for latency capacity */
+		cpuc->lat_capacity = cpuc->lat_capacity + (cpuc->lat_capacity >> 3);
+
 		cpuc->stolen_time_est = 0;
 
 		/*

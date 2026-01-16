@@ -804,3 +804,92 @@ unlock_out:
 
 	return cpu;
 }
+
+/**
+ * find_latency_available_cpu - Find a CPU with sufficient latency capacity
+ * @p: task to find a CPU for
+ * @taskc: task context
+ * @start_cpu: CPU whose cpdom to search (typically from pick_idle_cpu)
+ * @lat_avail_mask: pre-allocated cpumask for collecting latency-available CPUs
+ *
+ * Iterates through all CPUs in the same compute domain (cpdom) as @start_cpu
+ * and collects all CPUs where lat_capacity >= task's normalized lat_cri,
+ * then returns a random CPU from that set.
+ *
+ * Returns: CPU ID if found, -ENOENT if no suitable CPU found
+ */
+__hidden s32 __attribute__ ((noinline))
+find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu,
+			   struct bpf_cpumask *lat_avail_mask)
+{
+	struct cpu_ctx *start_cpuc, *cpuc;
+	struct cpdom_ctx *cpdomc;
+	u16 normalized_lat_cri;
+	s32 cpu_id = -ENOENT;
+	int i, k;
+
+	/* Get the cpdom of the start CPU */
+	start_cpuc = get_cpu_ctx_id(start_cpu);
+	if (!start_cpuc)
+		return -ENOENT;
+
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [start_cpuc->cpdom_id]);
+	if (!cpdomc)
+		return -ENOENT;
+
+	/* Clear the mask before use */
+	bpf_cpumask_clear(lat_avail_mask);
+
+	/*
+	 * Use the cached normalized lat_cri from task context.
+	 * This was already calculated in calc_lat_cri().
+	 */
+	normalized_lat_cri = taskc->normalized_lat_cri;
+
+	/*
+	 * Iterate through all CPUs in the cpdom to find all CPUs with
+	 * sufficient latency capacity (lat_capacity >= normalized_lat_cri)
+	 */
+	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
+		u64 cpumask = cpdomc->__cpumask[i];
+		bpf_for(k, 0, 64) {
+			s32 bit;
+			u32 cpu;
+			u32 lat_capacity;
+
+			bit = cpumask_next_set_bit(&cpumask);
+			if (bit < 0)
+				break;
+
+			cpu = (i * 64) + bit;
+			if (cpu >= nr_cpu_ids)
+				break;
+
+			/* Get CPU context */
+			cpuc = get_cpu_ctx_id(cpu);
+			if (!cpuc)
+				continue;
+
+			/*
+			 * Read the cached latency capacity from CPU context.
+			 * lat_capacity was already calculated in collect_sys_stat().
+			 */
+			lat_capacity = cpuc->lat_capacity;
+
+			/*
+			 * Check if this CPU has sufficient latency capacity.
+			 * We want lat_capacity >= normalized_lat_cri.
+			 */
+			if (lat_capacity >= normalized_lat_cri) {
+				bpf_cpumask_set_cpu(cpu, lat_avail_mask);
+			}
+		}
+	}
+
+	/* Pick a random CPU from all latency-available CPUs */
+	cpu_id = bpf_cpumask_any_distribute(cast_mask(lat_avail_mask));
+	if (cpu_id >= nr_cpu_ids)
+		cpu_id = -ENOENT;
+
+	return cpu_id;
+}

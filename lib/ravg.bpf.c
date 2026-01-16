@@ -40,6 +40,9 @@ int ravg_accumulate(struct ravg_data *rd, u64 new_val, u64 now,
 {
 	u32 cur_seq, val_seq, seq_delta;
 
+	if (!rd)
+		return -EINVAL;
+
 	/*
 	 * It may be difficult for the caller to guarantee monotonic progress if
 	 * multiple CPUs accumulate to the same ravg_data. Handle @now being in
@@ -172,6 +175,9 @@ u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
 __weak
 int ravg_scale(struct ravg_data *rd, u32 mult, u32 rshift)
 {
+	if (!rd)
+		return -EINVAL;
+
 	rd->val = u64_x_u32_rshift(rd->val, mult, rshift);
 	rd->old = u64_x_u32_rshift(rd->old, mult, rshift);
 	rd->cur = u64_x_u32_rshift(rd->cur, mult, rshift);
@@ -192,6 +198,9 @@ u64 ravg_read(struct ravg_data *rd, u64 now, u64 half_life)
 {
 	struct ravg_data trd;
 	u32 elapsed;
+
+	if (!rd)
+		return 0;
 
 	/*
 	 * It may be difficult for the caller to guarantee monotonic progress if

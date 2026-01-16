@@ -578,6 +578,26 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	cpu_id = pick_idle_cpu(&ictx, &found_idle);
 	cpu_id = cpu_id >= 0 ? cpu_id : prev_cpu;
+
+	/*
+	 * After picking an idle CPU, try to find a CPU with sufficient
+	 * latency capacity for this task within the same compute domain.
+	 * Only perform this for the most latency-critical tasks
+	 * to minimize overhead. Skip for pinned tasks since they
+	 * have restricted CPU placement.
+	 */
+	if (cpu_id >= 0 &&
+	    ictx.taskc->normalized_lat_cri >= LAVD_LC_LATENCY_SENSITIVE_THRESH &&
+	    !is_pinned(p)) {
+		struct bpf_cpumask *lat_avail_mask = bpf_cpumask_create();
+		if (lat_avail_mask) {
+			s32 lat_cpu = find_latency_available_cpu(p, ictx.taskc, cpu_id, lat_avail_mask);
+			if (lat_cpu >= 0)
+				cpu_id = lat_cpu;
+			bpf_cpumask_release(lat_avail_mask);
+		}
+	}
+
 	ictx.taskc->suggested_cpu_id = cpu_id;
 
 	if (found_idle) {
@@ -692,6 +712,25 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		};
 
 		cpu = pick_idle_cpu(&ictx, &is_idle);
+
+		/*
+		 * After picking an idle CPU, try to find a CPU with sufficient
+		 * latency capacity for this task within the same compute domain.
+		 * Only perform this for the most latency-critical tasks
+		 * to minimize overhead. Skip for pinned tasks since they
+		 * have restricted CPU placement.
+		 */
+		if (cpu >= 0 &&
+		    taskc->normalized_lat_cri >= LAVD_LC_LATENCY_SENSITIVE_THRESH &&
+		    !is_pinned(p)) {
+			struct bpf_cpumask *lat_avail_mask = bpf_cpumask_create();
+			if (lat_avail_mask) {
+				s32 lat_cpu = find_latency_available_cpu(p, taskc, cpu, lat_avail_mask);
+				if (lat_cpu >= 0)
+					cpu = lat_cpu;
+				bpf_cpumask_release(lat_avail_mask);
+			}
+		}
 	} else {
 		cpu = scx_bpf_task_cpu(p);
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);

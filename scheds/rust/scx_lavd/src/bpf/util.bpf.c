@@ -345,3 +345,35 @@ u64 task_exec_time(struct task_struct __arg_trusted *p)
 {
 	return p->se.sum_exec_runtime;
 }
+
+/**
+ * normalize_lat_cri - Normalize latency criticality to 1024 scale
+ * @lat_cri: The latency criticality value from task_ctx
+ *
+ * Normalizes the lat_cri value from the range [0, max_lat_cri] to [0, 1024].
+ * Uses the system-wide max_lat_cri as the upper bound for normalization.
+ *
+ * Returns: Normalized value in range [0, 1024]
+ */
+__hidden
+u16 normalize_lat_cri(u16 lat_cri)
+{
+	u32 max = sys_stat.max_lat_cri;
+
+	/*
+	 * Handle edge cases:
+	 * - If max_lat_cri is 0, return 0 (no tasks have run yet)
+	 * - If lat_cri >= max_lat_cri, return 1024 (maximum)
+	 */
+	if (max == 0)
+		return 0;
+
+	if (lat_cri >= max)
+		return 1024;
+
+	/*
+	 * Normalize: (lat_cri * 1024) / max_lat_cri
+	 * Use 64-bit arithmetic to avoid overflow
+	 */
+	return (u16)(((u64)lat_cri * 1024) / max);
+}
