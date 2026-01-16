@@ -875,7 +875,8 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
     /* Always clear victim status when task starts - deferred to cake_tick */
     if (shadow && (shadow->packed_state & SHADOW_BIT_VICTIM)) {
         u64 cpu_bit = (1ULL << cpu_idx);
-        __atomic_fetch_and(&victim_mask, ~cpu_bit, __ATOMIC_RELAXED);
+        u64 current = cake_relaxed_load_u64(&victim_mask);
+        cake_relaxed_store_u64(&victim_mask, current & ~cpu_bit);
         shadow->packed_state &= ~SHADOW_BIT_VICTIM;
     }
 
@@ -1145,7 +1146,8 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
          * Check shadow first to avoid redundant atomic access.
          */
         if (shadow->packed_state & SHADOW_BIT_VICTIM) {
-            __atomic_fetch_and(&victim_mask, ~mask, __ATOMIC_RELAXED);
+            u64 current = cake_relaxed_load_u64(&victim_mask);
+            cake_relaxed_store_u64(&victim_mask, current & ~mask);
             shadow->packed_state &= ~SHADOW_BIT_VICTIM;
         }
     } else {
@@ -1223,7 +1225,8 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
                 struct cake_cpu_shadow *shadow = get_shadow_state();
                 if (shadow && !(shadow->packed_state & SHADOW_BIT_VICTIM)) {
                     u64 cpu_bit = (1ULL << cpu_idx);
-                    __atomic_fetch_or(&victim_mask, cpu_bit, __ATOMIC_RELAXED);
+                    u64 current = cake_relaxed_load_u64(&victim_mask);
+                    cake_relaxed_store_u64(&victim_mask, current | cpu_bit);
                     shadow->packed_state |= SHADOW_BIT_VICTIM;
                 }
             }
