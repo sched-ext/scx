@@ -31,6 +31,7 @@ extern char uei_dump[];
 extern const volatile u32 uei_dump_len;
 
 u64 calc_avg_freq(u64 old_freq, u64 interval);
+u32 calc_avg32(u32 old_val, u32 new_val);
 bool is_kernel_task(struct task_struct *p);
 bool is_kernel_worker(struct task_struct *p);
 bool is_ksoftirqd(struct task_struct *p);

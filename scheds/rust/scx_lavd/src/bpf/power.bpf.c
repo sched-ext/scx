@@ -7,6 +7,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "util.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -91,6 +92,91 @@ static u64		LAVD_AP_HIGH_CAP;
 volatile int		power_mode;
 volatile u64		last_power_mode_clk;
 volatile bool		is_powersave_mode;
+
+__hidden
+void update_effective_capacity(struct cpu_ctx *cpuc)
+{
+	/* WARNING: This should be called after updating cpuc->cur_util. */
+	extern struct cpufreq_policy *cpufreq_cpu_data __ksym;
+	extern const unsigned long hw_pressure __ksym __weak;
+
+	u16 capacity_policy = 0, capacity_observed;
+	unsigned long *p_pressure, pressure = 0;
+	struct cpufreq_policy **base, *policy;
+	u32 mfo;
+	int cpu;
+
+	/* Sanity check */
+	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cpu_ids)
+		return;
+	cpu = cpuc->cpu_id;
+
+	/*
+	 * Calculate the maximum capacity available at the moment which is
+	 * restricted by scaling_max_freq and thermal pressure.
+	 *
+	 * Note that we cannot rely on rq->cpu_capacity since it is not
+	 * updated when an SCX scheduler is running.
+	 *
+	 * Note that if CPU frequency and thermal are autonomously controlled
+	 * by a microcontroller, `policy` and `p_pressure` would be null.
+	 */
+	capacity_policy = cpuc->capacity;
+
+	if (unlikely((base = (struct cpufreq_policy **)&cpufreq_cpu_data) &&
+	    (bpf_probe_read_kernel(&policy, sizeof(policy), base + cpu) == 0) &&
+	    policy)) {
+		u32 cpu_max = BPF_CORE_READ(policy, cpuinfo.max_freq);
+		u32 scaling_max = BPF_CORE_READ(policy, max);
+
+		if (cpu_max > 0 && scaling_max > 0)
+			capacity_policy = (capacity_policy * scaling_max) / cpu_max;
+	}
+
+	if (unlikely(&hw_pressure &&
+	    (p_pressure = bpf_per_cpu_ptr(&hw_pressure, cpu)))) {
+		pressure = *p_pressure;
+		capacity_policy = (capacity_policy > pressure)?
+				capacity_policy - pressure : 0;
+	}
+
+	/*
+	 * Calculate the maximum capacity observed. This is necessary because
+	 * the CPU capacity can be throttled without changing the software
+	 * policy (scaling_max_freq) or notifying the loss of capacity
+	 * (hw_pressure) due to thermal conditions or power budget constraints.
+	 *
+	 * If the CPU utilization is high (say, 80%), it is very likely
+	 * that the CPU was at its highest capacity given the policy, thermal,
+	 * and power constraints. Then, choose the max frequency observed
+	 * within an interval and calculate its moving average.
+	 *
+	 * Note that we don’t care about the CAS failure, since it indicates
+	 * the higher capacity was observed in the middle.
+	 *
+	 * Note that cpuc->max_freq is [0:1024].
+	 */
+	mfo = __sync_val_compare_and_swap(&cpuc->max_freq_observed,
+					  cpuc->max_freq_observed, 0);
+	if ((mfo > 0) && ((cpuc->max_freq < mfo) ||
+	    (cpuc->cur_util >= LAVD_CPU_UTIL_THR_FOR_MAX_FREQ))) {
+		cpuc->max_freq = calc_avg32(cpuc->max_freq, mfo);
+	}
+	capacity_observed = (cpuc->capacity * cpuc->max_freq) >> LAVD_SHIFT;
+
+	/*
+	 * Choose the min between the policy-enforced capacity and
+	 * the actual observed capacity as effective capacity.
+	 */
+	if (likely(capacity_policy)) {
+		cpuc->effective_capacity = min(capacity_policy, capacity_observed);
+	} else {
+		cpuc->effective_capacity = capacity_observed;
+	}
+
+	debugln("[cpu%d] effective_capacity: %d -- capacity_policy: %d -- capacity_observed: %d -- maximum_freq_observed: %d -- hw_pressure: %u",
+		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
+}
 
 __hidden
 int reset_suspended_duration(struct cpu_ctx *cpuc)
@@ -769,21 +855,6 @@ u16 get_cpuperf_cap(s32 cpu)
 
 	debugln("Infeasible CPU id: %d", cpu);
 	return 0;
-}
-
-u64 scale_cap_freq(u64 dur, s32 cpu)
-{
-	u64 cap, freq, scaled_dur;
-
-	/*
-	 * Scale the duration by CPU capacity and frequency, so calculate
-	 * capacity-invariant and frequency-invariant time duration.
-	 */
-	cap = get_cpuperf_cap(cpu);
-	freq = scx_bpf_cpuperf_cur(cpu);
-	scaled_dur = (dur * cap * freq) >> (LAVD_SHIFT * 2);
-
-	return scaled_dur;
 }
 
 u64 scale_cap_max_freq(u64 dur, s32 cpu)

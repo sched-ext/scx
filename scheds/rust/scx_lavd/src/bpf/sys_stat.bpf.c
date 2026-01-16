@@ -7,6 +7,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "power.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -86,7 +87,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 cpdom_id, compute, non_scx_time, sc_non_scx_time, cpuc_tot_sc_time;
+	u64 cpdom_id, compute;
 	int cpu;
 
 	/*
@@ -127,12 +128,13 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Collect statistics for each CPU (phase 1).
 	 *
-	 * Note that we divide the loop into phases 1 and 2 to lower the
+	 * Note that we divide the loop into multiple phases to lower the
 	 * verification burden and to avoid a verification error. Someday,
-	 * when the verifier gets smarter, we can merge phases 1 and 2
-	 * into one.
+	 * when the verifier gets smarter, we can merge those phases into
+	 * one.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		u64 non_scx_time, sc_non_scx_time, cpuc_tot_sc_time;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;
@@ -222,6 +224,27 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
 			c->tsct_spike += cpuc_tot_sc_time;
+	}
+
+	/*
+	 * Collect statistics for each CPU (phase 2).
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			c->compute_total = 0;
+			break;
+		}
+
+		/*
+		 * Update the effective capacity of this CPU -- the capacity
+		 * that this CPU can achieve considering all the constraints,
+		 * such as policy, thermal, power, etc.
+		 *
+		 * WARNING: This should be called after updating cpuc->cur_util.
+		 */
+		update_effective_capacity(cpuc);
+
 		/*
 		 * Accumulate statistics.
 		 */
@@ -261,7 +284,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 
 	/*
-	 * Collect statistics for each CPU (phase 2).
+	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);

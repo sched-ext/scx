@@ -185,6 +185,7 @@
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
+#include "power.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -476,7 +477,7 @@ static void account_task_runtime(struct task_struct *p,
 	runtime = exec_delta;
 
 	svc_time = runtime / p->scx.weight;
-	sc_time = scale_cap_freq(runtime, cpuc->cpu_id);
+	sc_time = scale_cap_freq(runtime, cpuc);
 
 	WRITE_ONCE(cpuc->tot_task_time, cpuc->tot_task_time + task_time);
 	WRITE_ONCE(cpuc->tot_svc_time, cpuc->tot_svc_time + svc_time);
@@ -1567,7 +1568,7 @@ void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
 	 * utilization.
 	 */
 	dur = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
-	scaled_dur = scale_cap_freq(dur, cpu);
+	scaled_dur = scale_cap_freq(dur, cpuc);
 	cpuc->tot_sc_time += scaled_dur;
 
 	/*
@@ -1872,9 +1873,11 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->cpu_release_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->capacity = cpu_capacity[cpu];
+		cpuc->effective_capacity = cpuc->capacity;
 		cpuc->big_core = cpu_big[cpu];
 		cpuc->turbo_core = cpu_turbo[cpu];
 		cpuc->min_perf_cri = LAVD_SCALE;
+		cpuc->max_freq = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
 		sum_capacity += cpuc->capacity;
