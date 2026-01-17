@@ -318,7 +318,7 @@ pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>
         }
         return Ok(true);
     } else {
-        warn!("tradepoint {tracepoint} is missing, tracepoint not loaded");
+        warn!("tracepoint {tracepoint} is missing, tracepoint not loaded");
     }
 
     Ok(false)
@@ -328,7 +328,7 @@ pub fn cond_tracepoints_enable<T>(tracepoints: Vec<(&str, &OpenProgramImpl<T>)>)
     // Check if all the tracepoints exist.
     for (tp, _) in tracepoints.iter() {
         if tracepoint_exists(tp)? == false {
-            warn!("tradepoint {tp} is missing, tracepoint not loaded");
+            warn!("tracepoint {tp} is missing, tracepoint not loaded");
             return Ok(false);
         }
     }
