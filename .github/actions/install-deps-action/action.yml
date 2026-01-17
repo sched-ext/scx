@@ -1,4 +1,6 @@
+---
 name: install-deps
+description: Install system dependencies needed for CI builds/tests
 
 runs:
   using: 'composite'
@@ -8,7 +10,8 @@ runs:
     - name: Configure fast APT mirror
       uses: vegardit/fast-apt-mirror.sh@1.4.1
       with:
-        exclude-current: true # the azure repo is so unstable we should never use it
+        # the azure repo is so unstable we should never use it
+        exclude-current: true
 
     ### OTHER REPOS ####
     # turn off interactive, refresh pkgs
@@ -22,16 +25,16 @@ runs:
 
     # Download dependencies packaged by Ubuntu
     - run: |
-        sudo apt-get install -f -y bison busybox-static cmake coreutils \
-        cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod \
-        libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev \
-        linux-headers-generic linux-tools-common linux-tools-generic make \
-        ninja-build pahole pkg-config python3-dev python3-pip python3-requests \
-        qemu-kvm rsync stress-ng udev zstd libseccomp-dev libcap-ng-dev \
-        llvm-19 clang-19 python3-full curl bpftrace dwarves rustup \
-        protobuf-compiler
+        sudo apt-get install -f -y \
+          bison busybox-static cmake coreutils cpio elfutils file flex gcc \
+          gcc-multilib git iproute2 jq kbd kmod libcap-dev libelf-dev \
+          libunwind-dev libvirt-clients libzstd-dev linux-headers-generic \
+          linux-tools-common linux-tools-generic make ninja-build pahole \
+          pkg-config python3-dev python3-pip python3-requests qemu-kvm rsync \
+          stress-ng udev zstd libseccomp-dev libcap-ng-dev llvm-19 clang-19 \
+          python3-full curl bpftrace dwarves rustup protobuf-compiler
 
-        echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
+        echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
       shell: bash
 
     # ensure some toolchain is installed
@@ -45,9 +48,10 @@ runs:
 
     # Setup KVM support
     - run: |
-        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        RULE='KERNEL=="kvm", GROUP="kvm", MODE="0666", '
+        RULE+='OPTIONS+="static_node=kvm"'
+        echo "$RULE" | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
+      ### END DEPENDENCIES ###
       shell: bash
-
-    ### END DEPENDENCIES ###
