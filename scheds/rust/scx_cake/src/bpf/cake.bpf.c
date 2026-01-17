@@ -175,11 +175,11 @@ struct cake_cpu_shadow global_shadow[CAKE_MAX_CPUS] SEC(".bss") __attribute__((a
  */
 u8 __bss_tail_guard[64] SEC(".bss") __attribute__((aligned(64)));
 
-static __always_inline struct cake_cpu_shadow *get_shadow_state(void)
-{
-    u32 cpu = bpf_get_smp_processor_id();
-    return &global_shadow[cpu & (CAKE_MAX_CPUS - 1)];
-}
+/*
+ * get_shadow_state() removed - inline direct BSS access using cpu_idx
+ * to eliminate hidden bpf_get_smp_processor_id() helper calls.
+ * Use: &global_shadow[cpu_idx & (CAKE_MAX_CPUS - 1)]
+ */
 
 static __always_inline struct cake_stats *get_local_stats(void)
 {
@@ -515,6 +515,31 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
     ctx->packed_info = packed;
 
     return ctx;
+}
+
+/*
+ * COLD PATH: Kthread Priority Floor
+ *
+ * Applies REALTIME floor to critical kthreads (ksoftirqd, bound kworkers, irq/).
+ * Housekeeping kthreads (kworker/u*) get no floor and natural tier.
+ *
+ * This function is noinline to:
+ * 1. Keep is_critical_kthread()'s 8-byte p->comm load off the hot path
+ * 2. Reduce register pressure in cake_stopping (7+ registers saved)
+ * 3. Handle a rare case - most tasks are NOT kthreads
+ *
+ * Source: Cold path optimization (Gross, CppCon 2023)
+ */
+static __attribute__((noinline))
+u8 apply_kthread_floor_cold(struct task_struct *p, u8 earned_tier)
+{
+    /* Housekeeping kthreads (unbound workers): No floor, natural tiering */
+    if (!is_critical_kthread(p))
+        return earned_tier;
+
+    /* Critical kthreads: Floor at REALTIME (tier 1), can still earn tier 0 */
+    u8 realtime_floor = CAKE_TIER_REALTIME;
+    return (earned_tier > realtime_floor) ? realtime_floor : earned_tier;
 }
 
 /*
@@ -870,7 +895,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
 
 /*
  * Task is starting to run
- * 
+ *
  * Includes:
  * - XOR-blend victim_mask update (preserved MLP optimization)
  * - Wait budget checking (CAKE's AQM - restored)
@@ -878,54 +903,51 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
  */
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
-    /*
-     * PREFETCH OPTIMIZATION: Touch tier_configs array early
-     * 
-     * The CPU will load tier_configs into L1 cache while we wait
-     * for get_task_ctx() to complete. By the time we need 
-     * tier_configs[tier & 7], starvation/budget/mult are all hot.
-     * 
-     * AoS Benefit: One prefetch brings ALL tier params into cache.
-     */
-    volatile u64 prefetch_hint = tier_configs[0].starvation_ns;
-    (void)prefetch_hint;
-    
     /* LAZY ALLOCATION: Create context here (serialized per-CPU, no contention) */
     struct cake_task_ctx *tctx = get_task_ctx(p, true);
     if (unlikely(!tctx))
         return;
 
+    /*
+     * ZERO-SPILL: Get cpu_idx and now ONCE before loading tctx fields.
+     * Helper calls clobber R1-R5, so call when few values are live.
+     * Use cpu_idx directly for shadow access instead of get_shadow_state().
+     */
     u32 cpu_idx = bpf_get_smp_processor_id();
     if (unlikely(cpu_idx >= 64))
         return;
 
+    u64 now = scx_bpf_now();
+    u32 now_ts = (u32)now;
+
     u8 tier = GET_TIER(tctx);
-    
+
+    /*
+     * Global tier scoreboard: Update when task STARTS running.
+     * This reflects the CURRENT occupant's tier for the arbiter.
+     * (Moved from cake_stopping to eliminate helper call there)
+     */
+    cake_relaxed_store_u32(&global_cpu_tiers[cpu_idx].tier, tier);
+
     /*
      * DEFERRED VICTIM LOGIC (Stability & Protection Patch)
-     * 
+     *
      * When a task STARTS running, we do NOT add to victim mask immediately.
      * Instead, we ALWAYS clear the victim bit here. The victim bit will be
-     * set in cake_tick AFTER the task has run for ~262µs (2^18 ns).
-     * 
-     * This implements the "Hysteresis" pattern - adding memory to scheduling
-     * decisions to prevent rapid oscillations (staircase migrations).
-     * 
-     * CACHED CURSOR OPTIMIZATION: Check per-CPU shadow first (L1 hit)
-     * to avoid reading the global victim_mask atomic.
+     * set in cake_tick AFTER the task has run for ~1ms (2^20 ns).
+     *
+     * CACHED CURSOR OPTIMIZATION: Direct BSS access using cpu_idx.
+     * Avoids second helper call from get_shadow_state().
      */
-    struct cake_cpu_shadow *shadow = get_shadow_state();
-    
+    struct cake_cpu_shadow *shadow = &global_shadow[cpu_idx & (CAKE_MAX_CPUS - 1)];
+
     /* Always clear victim status when task starts - deferred to cake_tick */
-    if (shadow && (shadow->packed_state & SHADOW_BIT_VICTIM)) {
+    if (shadow->packed_state & SHADOW_BIT_VICTIM) {
         u64 cpu_bit = (1ULL << cpu_idx);
         u64 current = cake_relaxed_load_u64(&victim_mask);
         cake_relaxed_store_u64(&victim_mask, current & ~cpu_bit);
         shadow->packed_state &= ~SHADOW_BIT_VICTIM;
     }
-
-    u64 now = scx_bpf_now();
-    u32 now_ts = (u32)now;
 
     /*
      * WAIT BUDGET CHECK (CAKE's AQM) - Restored
@@ -1041,7 +1063,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     /*
      * PHASE 1: LOAD ALL DATA (MLP - Memory Level Parallelism)
      * Issue all loads simultaneously to hide cache latency.
-     * 
+     *
      * RELAXED atomic load: Prevents compiler from splitting the 32-bit read.
      * Source: Doumler, "Lock-Free Atomic Shared Pointer" (CppCon)
      */
@@ -1050,13 +1072,13 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     u16 old_avg_us = tctx->avg_runtime_us;
     u16 old_deficit_us = tctx->deficit_us;
     u32 last_run = tctx->last_run_at;
-    
+
     /* Extract packed fields (ALU ops while waiting for memory) */
     u32 old_score = (packed >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE;
-    
+
     /* Compute runtime from timestamp delta */
     u64 runtime = (u32)now - last_run;
-    
+
     /*
      * PHASE 2: COMPUTE EVERYTHING (ILP - Instruction Level Parallelism)
      * All operations can execute in parallel on superscalar CPUs.
@@ -1065,45 +1087,27 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     u32 new_score = compute_sparse_score(old_score, runtime);
     u16 new_deficit_us = compute_deficit(old_deficit_us, runtime);
     u8 new_tier = compute_tier(new_score, new_avg_us);
-    
+
     /*
-     * PRIORITY FLOOR: Branchless Diamond Distribution
-     * 
-     * Uses mask-based selection to avoid branch misses:
-     * 1. Generate mask: all-1s if (kthread AND critical AND needs_floor)
-     * 2. Compute floored tier: min(earned, REALTIME)
-     * 3. Select: mask ? floored_tier : earned_tier
-     * 
-     * CRITICAL kthreads: Floor at Tier 1, can earn Tier 0
-     * HOUSEKEEPING kthreads: No floor, natural tiering to Tier 5-6
+     * COLD PATH: Kthread Priority Floor (Safety Net)
+     *
+     * Most tasks are NOT kthreads, so this branch is rarely taken.
+     * The expensive is_critical_kthread() with its 8-byte p->comm load
+     * is now isolated in the cold function, reducing register pressure
+     * on the hot path from 7+ registers to 0.
      */
-    u8 realtime_floor = CAKE_TIER_REALTIME;
-    u8 floored_tier = (new_tier < realtime_floor) ? new_tier : realtime_floor;
-    
-    /* Generate mask: all-1s if critical kthread needing floor */
-    u64 is_kthread = !!(p->flags & PF_KTHREAD);
-    u64 needs_floor = (u64)(new_tier > realtime_floor);
-    u64 critical = is_critical_kthread(p);
-    u64 apply_floor = is_kthread & needs_floor & critical;
-    u64 mask = -(u64)apply_floor;  /* All 1s if apply, all 0s if not */
-    
-    /* Branchless selection: mask ? floored_tier : new_tier */
-    new_tier = (mask & floored_tier) | (~mask & new_tier);
-    
+    if (unlikely(p->flags & PF_KTHREAD))
+        new_tier = apply_kthread_floor_cold(p, new_tier);
+
     /*
      * PARTIAL PRECOMPUTATION (Gross, 2022)
      * Precompute the floor once so select_cpu only needs a raw comparison.
      * A gap of 3 tiers is the heuristic for "Wait < Migrate" (~150ns penalty).
      */
     tctx->preempt_floor = (new_tier < 5) ? new_tier + 1 : 7;
-    
-    /* Direct atomic store to global BSS - zero false sharing due to padding */
-    u32 cpu_idx = bpf_get_smp_processor_id();
-    if (likely(cpu_idx < 64))
-        cake_relaxed_store_u32(&global_cpu_tiers[cpu_idx].tier, new_tier);
-    
+
     u64 new_slice = compute_slice(new_deficit_us, new_tier);
-    
+
     /* Stats (compiled out when enable_stats=false) */
     if (enable_stats) {
         bool was_gaming = old_score >= THRESHOLD_GAMING;
@@ -1116,29 +1120,36 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
             }
         }
     }
-    
+
     /* Pack new values into packed_info (single u32 write) */
     u32 new_packed = packed;
     new_packed &= ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE);
     new_packed &= ~(MASK_TIER << SHIFT_TIER);
     new_packed |= (new_score & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
     new_packed |= (new_tier & MASK_TIER) << SHIFT_TIER;
-    
+
     /*
      * PHASE 3: WRITE EVERYTHING BACK (Single Burst)
      * All writes to same cache line - store buffer coalesces them.
-     * 
+     *
      * OPTIMIZATION: Skip packed_info write if unchanged.
      * Tier/Score stability is high, skipping write saves energy.
-     * 
+     *
      * RELAXED atomic store: Prevents compiler from splitting the 32-bit write.
      */
     tctx->avg_runtime_us = new_avg_us;
     tctx->deficit_us = new_deficit_us;
     tctx->next_slice = new_slice;
-    
+
     if (packed != new_packed)
         cake_relaxed_store_u32(&tctx->packed_info, new_packed);
+
+    /*
+     * NOTE: global_cpu_tiers update moved to cake_running.
+     * Update happens when task STARTS (correct semantics) rather than
+     * when it STOPS (stale data). This also eliminates the helper call
+     * that was causing spills here.
+     */
 }
 
 /*
@@ -1214,52 +1225,52 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
         u8 tier = GET_TIER(tctx);                    /* Load 1: packed_info */
         u32 last_run = tctx->last_run_at;            /* Load 2: last_run_at (parallel) */
         u64 threshold = tier_configs[tier & 7].starvation_ns;  /* AoS: 1 cache line */
-        
+
         /*
-         * STATE-FREE JITTER (Dependency Breaking)
-         * 
-         * Prevents Thundering Herd without RMW dependency on rng_state.
-         * Uses local CPU timestamp XOR'd with CPU ID - both already in
-         * registers or High-Speed Internal Bus.
-         * 
-         * Benefit: No false sharing, no memory load, no pipeline stall.
-         * Source: Doumler, "C++ Standard Library for Real-time Audio"
+         * STATE-FREE JITTER (Zero Helper Calls)
+         *
+         * Prevents Thundering Herd using timestamp bits only.
+         * No bpf_get_smp_processor_id() call = no spills for jitter.
+         * The low bits of scx_bpf_now() provide sufficient variance.
          */
         u32 now = (u32)scx_bpf_now();
-        u32 cpu_id = bpf_get_smp_processor_id();
-        u32 jitter = (now ^ cpu_id) & 0x7F;  /* 0-127µs variance */
+        u32 jitter = now & 0x7F;  /* 0-127µs variance from timestamp */
         threshold += (u64)(jitter << 10);    /* Convert to ~ns (×1024) */
-        
+
         /* Compute runtime after loads complete */
         u64 runtime = (u64)(now - last_run);
-        
+
         if (runtime > threshold) {
             /* Force preemption - task exceeded its tier's starvation limit */
             scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
-            
+
             /* Track per-tier starvation preempts */
             if (enable_stats && tier < CAKE_TIER_MAX) {
                 struct cake_stats *s = get_local_stats();
                 if (s) s->nr_starvation_preempts_tier[tier]++;
             }
         }
-        
+
         /*
          * DEFERRED VICTIM LOGIC (1-Cycle Bit Test)
-         * 
-         * Only after ~262µs (2^18 ns) do we consider adding this CPU to
+         *
+         * Only after ~1ms (2^20 ns) do we consider adding this CPU to
          * the victim mask. Uses single BT instruction instead of SUB+CMP.
-         * 
+         *
          * The victim mask is used by Tier 0 tasks to find CPUs to preempt.
          * By deferring victim status, we ensure tasks get enough runtime
          * to warm their caches before being considered for preemption.
+         *
+         * ZERO-SPILL: cpu_id call only here, at end of function.
+         * Only tier needs to survive the helper call.
          */
         if ((runtime >> VICTIM_RESIDENCY_BIT) && tier >= INTERACTIVE_DSQ) {
-            u32 cpu_idx = bpf_get_smp_processor_id();
-            if (cpu_idx < 64) {
-                struct cake_cpu_shadow *shadow = get_shadow_state();
-                if (shadow && !(shadow->packed_state & SHADOW_BIT_VICTIM)) {
-                    u64 cpu_bit = (1ULL << cpu_idx);
+            u32 cpu_id = bpf_get_smp_processor_id();
+            if (cpu_id < 64) {
+                /* Direct BSS access - no helper call from get_shadow_state() */
+                struct cake_cpu_shadow *shadow = &global_shadow[cpu_id & (CAKE_MAX_CPUS - 1)];
+                if (!(shadow->packed_state & SHADOW_BIT_VICTIM)) {
+                    u64 cpu_bit = (1ULL << cpu_id);
                     u64 current = cake_relaxed_load_u64(&victim_mask);
                     cake_relaxed_store_u64(&victim_mask, current | cpu_bit);
                     shadow->packed_state |= SHADOW_BIT_VICTIM;
