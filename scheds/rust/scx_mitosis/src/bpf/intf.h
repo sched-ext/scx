@@ -147,7 +147,8 @@ _Static_assert(offsetof(struct cell, in_use) == 4,
 
 // Verify these are the same size in both BPF and Rust.
 // 16 bytes header + 48 bytes padding (to align llcs) + 64*16 bytes llcs = 1088 bytes
-_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
+_Static_assert(sizeof(struct cell) ==
+		       (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
 	       "struct cell size must be stable for Rust bindings");
 
 _Static_assert(sizeof(struct cell) == 1088,

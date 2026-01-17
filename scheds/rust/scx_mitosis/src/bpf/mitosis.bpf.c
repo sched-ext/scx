@@ -684,7 +684,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 
 		if (enable_llc_awareness) {
-			basis_vtime = READ_ONCE(cell->llcs[tctx->llc].vtime_now);
+			basis_vtime =
+				READ_ONCE(cell->llcs[tctx->llc].vtime_now);
 		} else {
 			basis_vtime = READ_ONCE(
 				cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now);
@@ -1698,9 +1699,10 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		if (dsq_is_invalid(dsq_id))
 			return;
 
-		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
-			     scx_bpf_dsq_nr_queued(dsq_id.raw));
+		scx_bpf_dump(
+			"CELL[%d] vtime=%llu nr_queued=%d\n", i,
+			READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
+			scx_bpf_dsq_nr_queued(dsq_id.raw));
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
