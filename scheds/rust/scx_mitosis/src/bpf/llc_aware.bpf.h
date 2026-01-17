@@ -128,7 +128,7 @@ static __always_inline void recalc_cell_llc_counts(u32 cell_idx)
 	// Write to cell
 	bpf_spin_lock(&cell->lock);
 	for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
-		cell->llc_cpu_cnt[llc_idx] = llc_cpu_cnt_tmp[llc_idx];
+		cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
 	}
 
 	cell->llc_present_cnt = llcs_present;
@@ -156,14 +156,21 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 		return LLC_INVALID;
 	}
 
-	// Snapshot the current state of the cell
-	struct cell cell_snapshot;
+	/*
+	 * Read only what we need under the lock to avoid putting the
+	 * large cell struct on the stack (would exceed BPF stack limit).
+	 */
+	u32 total_cpu_cnt;
+	u32 llc_cpu_cnt[MAX_LLCS];
+
 	bpf_spin_lock(&cell->lock);
-	copy_cell_skip_lock(&cell_snapshot, cell);
+	total_cpu_cnt = cell->cpu_cnt;
+	for (u32 i = 0; i < MAX_LLCS; i++)
+		llc_cpu_cnt[i] = cell->llcs[i].cpu_cnt;
 	bpf_spin_unlock(&cell->lock);
 
 	// No cpus
-	if (!cell_snapshot.cpu_cnt) {
+	if (!total_cpu_cnt) {
 		scx_bpf_error(
 			"pick_llc_for_task: cell %d has no CPUs accounted yet",
 			cell_id);
@@ -174,14 +181,14 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 	 * weighted selection - accumulate CPU counts until we exceed target */
 
 	/* Generate random target value in range [0, cpu_cnt) */
-	u32 target = bpf_get_prandom_u32() % cell_snapshot.cpu_cnt;
+	u32 target = bpf_get_prandom_u32() % total_cpu_cnt;
 	u32 llc, cur = 0;
 	s32 ret = LLC_INVALID;
 
 	// This could be a prefix sum. Find first llc where we exceed target
 	bpf_for(llc, 0, nr_llc)
 	{
-		cur += cell_snapshot.llc_cpu_cnt[llc];
+		cur += llc_cpu_cnt[llc];
 		if (target < cur) {
 			ret = (s32)llc;
 			break;
@@ -284,7 +291,7 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
     * we will fail the steal and continue to the next LLC.
     */
 		if (cell_ptr &&
-		    READ_ONCE(cell_ptr->llc_cpu_cnt[candidate_llc]) == 0)
+		    READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
 			continue;
 
 		u64 candidate_dsq =
@@ -377,6 +384,6 @@ static inline int update_task_llc_assignment(struct task_struct *p,
 		return -EINVAL;
 	}
 
-	p->scx.dsq_vtime = READ_ONCE(cell->llc_vtime_now[tctx->llc]);
+	p->scx.dsq_vtime = READ_ONCE(cell->llcs[tctx->llc].vtime_now);
 	return 0;
 }

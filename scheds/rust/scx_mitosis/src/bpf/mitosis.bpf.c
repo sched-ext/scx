@@ -225,7 +225,7 @@ static inline int allocate_cell()
 			return -1;
 
 		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
-			WRITE_ONCE(c->llc_vtime_now[FAKE_FLAT_CELL_LLC], 0);
+			WRITE_ONCE(c->llcs[FAKE_FLAT_CELL_LLC].vtime_now, 0);
 			return cell_idx;
 		}
 	}
@@ -424,7 +424,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 	if (dsq_is_invalid(tctx->dsq))
 		return -EINVAL;
 
-	p->scx.dsq_vtime = READ_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]);
+	p->scx.dsq_vtime = READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now);
 
 	return 0;
 }
@@ -684,10 +684,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 
 		if (enable_llc_awareness) {
-			basis_vtime = READ_ONCE(cell->llc_vtime_now[tctx->llc]);
+			basis_vtime = READ_ONCE(cell->llcs[tctx->llc].vtime_now);
 		} else {
 			basis_vtime = READ_ONCE(
-				cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]);
+				cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now);
 		}
 	} else {
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
@@ -1210,18 +1210,18 @@ void advance_dsq_vtimes(struct cell *cell, struct cpu_ctx *cctx,
 	if (!enable_llc_awareness) {
 		/* If the cell DSQ's vtime is behind the task's, advance it. */
 		if (time_before(
-			    READ_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]),
+			    READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
 			    task_vtime))
-			WRITE_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC],
+			WRITE_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now,
 				   task_vtime);
 		return;
 	}
 
 	/* We are in the llc aware case  */
 	if (llc_is_valid(tctx->llc)) {
-		if (time_before(READ_ONCE(cell->llc_vtime_now[tctx->llc]),
+		if (time_before(READ_ONCE(cell->llcs[tctx->llc].vtime_now),
 				task_vtime))
-			WRITE_ONCE(cell->llc_vtime_now[tctx->llc], task_vtime);
+			WRITE_ONCE(cell->llcs[tctx->llc].vtime_now, task_vtime);
 	}
 }
 
@@ -1699,7 +1699,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 			return;
 
 		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->llc_vtime_now[FAKE_FLAT_CELL_LLC]),
+			     READ_ONCE(cell->llcs[FAKE_FLAT_CELL_LLC].vtime_now),
 			     scx_bpf_dsq_nr_queued(dsq_id.raw));
 	}
 

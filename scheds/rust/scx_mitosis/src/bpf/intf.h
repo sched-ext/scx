@@ -86,6 +86,18 @@ struct cgrp_ctx {
 * map.lookup(&key, MapFlags::LOCK) -> safe read
 */
 
+/*
+ * Per-LLC data is cacheline-aligned to prevent false sharing when
+ * CPUs on different LLCs update their vtime concurrently.
+ */
+struct cell_llc {
+	u64 vtime_now;
+	u32 cpu_cnt;
+} __attribute__((aligned(CACHELINE_SIZE)));
+
+_Static_assert(sizeof(struct cell_llc) == CACHELINE_SIZE,
+	       "cell_llc must be exactly one cache line");
+
 #if !defined(__BINDGEN_RUNNING__)
 #define CELL_LOCK_T struct bpf_spin_lock
 #else
@@ -111,12 +123,9 @@ struct cell {
 	// Number of LLCs with at least one CPU in this cell
 	u32 llc_present_cnt;
 
-	// Number of CPUs from each LLC assigned to this cell
-	u32 llc_cpu_cnt[MAX_LLCS];
-
-	// per-LLC vtimes within this cell
-	u64 llc_vtime_now[MAX_LLCS];
-};
+	// Per-LLC data (cacheline-aligned)
+	struct cell_llc llcs[MAX_LLCS];
+} __attribute__((aligned(CACHELINE_SIZE)));
 
 // Putting the lock first in the struct is our convention.
 // We pad this space when in Rust code that will never see the lock value.
@@ -137,11 +146,11 @@ _Static_assert(offsetof(struct cell, in_use) == 4,
 	       "in_use must follow 4-byte lock/padding");
 
 // Verify these are the same size in both BPF and Rust.
-_Static_assert(sizeof(struct cell) ==
-		       ((4 * sizeof(u32)) + (4 * MAX_LLCS) + (8 * MAX_LLCS)),
+// 16 bytes header + 48 bytes padding (to align llcs) + 64*16 bytes llcs = 1088 bytes
+_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
 	       "struct cell size must be stable for Rust bindings");
 
-_Static_assert(sizeof(struct cell) == 208,
-	       "struct cell must be exactly 208 bytes");
+_Static_assert(sizeof(struct cell) == 1088,
+	       "struct cell must be exactly 1088 bytes");
 
 #endif /* __INTF_H */
