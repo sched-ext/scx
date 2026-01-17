@@ -123,7 +123,7 @@ typedef union {
  * invalid bc bit 63 clear (it's a user DSQ) && dsq_type == 0 (no type)
  * Good for catching uninitialized DSQ IDs.
 */
-#define DSQ_INVALID ((u64)0)
+#define DSQ_INVALID ((dsq_id_t){ 0 })
 
 _Static_assert(sizeof(((dsq_id_t){ 0 }).cpu_dsq) == sizeof(u64),
 	       "cpu view must be 8 bytes");
@@ -154,9 +154,10 @@ _Static_assert(MAX_CELLS <= (1u << CELL_B), "MAX_CELLS must fit in field");
 _Static_assert(DSQ_TYPE_CELL_LLC < (1u << TYPE_B),
 	       "DSQ_TYPE_CELL_LLC must fit in field");
 
-/*
- * While I considered error propagation, I decided to bail to force errors early.
-*/
+static inline bool dsq_is_invalid(dsq_id_t dsq_id)
+{
+	return dsq_id.raw == 0;
+}
 
 static inline bool is_user_dsq(dsq_id_t dsq_id)
 {
@@ -171,10 +172,12 @@ static inline bool is_cpu_dsq(dsq_id_t dsq_id)
 }
 
 // If this is a per cpu dsq, return the cpu
-static inline u32 get_cpu_from_dsq(dsq_id_t dsq_id)
+static inline s32 get_cpu_from_dsq(dsq_id_t dsq_id)
 {
-	if (!is_cpu_dsq(dsq_id))
+	if (!is_cpu_dsq(dsq_id)) {
 		scx_bpf_error("trying to get cpu from non-cpu dsq\n");
+		return -EINVAL;
+	}
 
 	return dsq_id.cpu_dsq.cpu;
 }
@@ -183,16 +186,20 @@ static inline u32 get_cpu_from_dsq(dsq_id_t dsq_id)
 static inline dsq_id_t get_cpu_dsq_id(u32 cpu)
 {
 	// Check for valid CPU range, 0 indexed so >=.
-	if (cpu >= MAX_CPUS)
+	if (cpu >= MAX_CPUS) {
 		scx_bpf_error("invalid cpu %u\n", cpu);
+		return DSQ_INVALID;
+	}
 
 	return (dsq_id_t){ .cpu_dsq = { .cpu = cpu, .type = DSQ_TYPE_CPU } };
 }
 
 static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 {
-	if (cell >= MAX_CELLS || llc >= MAX_LLCS)
+	if (cell >= MAX_CELLS || llc >= MAX_LLCS) {
 		scx_bpf_error("cell %u or llc %u too large\n", cell, llc);
+		return DSQ_INVALID;
+	}
 
 	return (dsq_id_t){ .cell_llc_dsq = { .llc  = llc,
 					     .cell = cell,

@@ -244,15 +244,23 @@ static inline bool try_stealing_this_task(struct task_ctx *task_ctx,
 
 /* Work stealing:
  * Scan sibling (cell,LLC) DSQs in the same cell and steal the first queued task if it can run on this cpu
+ * Returns:
+ *  true == 1;  task was stolen
+ *  false == 0; no tasks were stolen
+ *  error <0;   error encountered
 */
-static inline bool try_stealing_work(u32 cell, s32 local_llc)
+static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 {
-	if (!llc_is_valid(local_llc))
+	if (!llc_is_valid(local_llc)) {
 		scx_bpf_error("try_stealing_work: invalid local_llc");
+		return -EINVAL;
+	}
 
 	struct cell *cell_ptr = lookup_cell(cell);
-	if (!cell_ptr)
+	if (!cell_ptr) {
 		scx_bpf_error("try_stealing_work: invalid cell");
+		return -EINVAL;
+	}
 
 	// Loop over all other LLCs, looking for a queued task to steal
 	u32 i;

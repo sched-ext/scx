@@ -76,6 +76,16 @@ struct cgrp_ctx {
 	bool cell_owner;
 };
 
+/*
+* Cell struct shared between kernel and userspace.
+* Kernel uses spinlock for atomic updates.
+* Userspace must read with BPF_F_LOCK to avoid torn reads.
+* Lock field is padding (kernel zeros it to avoid leaking pointers).
+*
+* map.lookup(&key, MapFlags::ANY)  -> userspace may see torn state
+* map.lookup(&key, MapFlags::LOCK) -> safe read
+*/
+
 #if !defined(__BINDGEN_RUNNING__)
 #define CELL_LOCK_T struct bpf_spin_lock
 #else
@@ -89,8 +99,8 @@ struct cgrp_ctx {
  * cell is the per-cell book-keeping
 */
 struct cell {
-	// This is a lock in the kernel and padding in the user
-	CELL_LOCK_T lock; // Assumed to be the first entry (see below)
+	// This is a lock in the kernel and padding in userspace
+	CELL_LOCK_T lock;
 
 	// Whether or not the cell is used
 	u32 in_use;
