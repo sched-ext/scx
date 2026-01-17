@@ -60,21 +60,7 @@ See [kernel.config](kernel.config) for reference.
 
 ## Fedora
 
-CachyOS provides a [community-maintained copr repository](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos) for
-CachyOS kernels which has sched-ext support.
-
-#### Installing the Kernel
-
-```sh
-$ sudo dnf copr enable bieszczaders/kernel-cachyos
-$ sudo dnf install kernel-cachyos kernel-cachyos-devel-matched
-$ sudo reboot
-```
-
-#### Installing the Schedulers
-
-The schedulers package is hosted in [another copr](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos-addons)
-also maintained by the CachyOS community.
+There are multiple ways to install scx_scheds on Fedora. The simplest way is to use the schedulers [COPR package](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos-addons), which is maintained by the CachyOS community.
 
 ```sh
 $ sudo dnf copr enable bieszczaders/kernel-cachyos-addons
@@ -82,16 +68,6 @@ $ sudo dnf install scx-scheds
 ```
 
 Alternatively, we also provide a `-git` package that is synced daily to match the upstream repository.
-
-#### Debugging/Security Note
-
-In past documentation it was recommended to set the SELinux boolean domain_kernel_load_modules on in order to facilitate loading kernel modules by confined domains (e.g. scx_rusty). However recently, this has proven unnecessary in most cases in which the CachyOS kernel is present on the machine. If you experience issues running your desired scheduler on a Fedora system, you may try running the following command:
-
-```sh
-$ sudo setsebool -P domain_kernel_load_modules on
-```
-
-NOTE: Running the above command inherently decreases the effectiveness of SELinux in containing malware IF it is present on the machine, by way of allowing a confined domain to load kernel modules, which in theory could allow an attacker to insert malicious code into the kernel.
 
 #### Setting up Dev Environment
 
