@@ -144,7 +144,8 @@ struct cake_cpu_shadow {
 struct {
     s32 prev_cpu;
     bool is_idle;
-} cold_scratch SEC(".bss");
+    u8 _pad[59];  /* Pad to 64 bytes - cache line isolation */
+} cold_scratch SEC(".bss") __attribute__((aligned(64)));
 
 
 
