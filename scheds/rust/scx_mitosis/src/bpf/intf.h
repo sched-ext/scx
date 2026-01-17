@@ -5,7 +5,8 @@
 #ifndef __INTF_H
 #define __INTF_H
 
-#ifndef __KERNEL__
+#ifdef __BINDGEN_RUNNING__
+#include <stddef.h>
 typedef unsigned long long u64;
 typedef unsigned int	   u32;
 typedef _Bool bool;
@@ -21,8 +22,8 @@ enum consts {
 	TIMER_INTERVAL_NS     = 100000000, /* 100 ms */
 	CLOCK_BOOTTIME	      = 7,
 
-	PCPU_BASE	      = 0x80000000,
 	MAX_CG_DEPTH	      = 256,
+	MAX_LLCS	      = 16,
 
 	DEBUG_EVENTS_BUF_SIZE = 4096,
 };
@@ -58,14 +59,16 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_STEAL,
 	NR_CSTATS,
 };
 
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
-	u32 cell;
 	u64 vtime_now;
+	u32 cell;
+	u32 llc;
 };
 
 struct cgrp_ctx {
@@ -74,13 +77,81 @@ struct cgrp_ctx {
 };
 
 /*
+* Cell struct shared between kernel and userspace.
+* Kernel uses spinlock for atomic updates.
+* Userspace must read with BPF_F_LOCK to avoid torn reads.
+* Lock field is padding (kernel zeros it to avoid leaking pointers).
+*
+* map.lookup(&key, MapFlags::ANY)  -> userspace may see torn state
+* map.lookup(&key, MapFlags::LOCK) -> safe read
+*/
+
+/*
+ * Per-LLC data is cacheline-aligned to prevent false sharing when
+ * CPUs on different LLCs update their vtime concurrently.
+ */
+struct cell_llc {
+	u64 vtime_now;
+	u32 cpu_cnt;
+} __attribute__((aligned(CACHELINE_SIZE)));
+
+_Static_assert(sizeof(struct cell_llc) == CACHELINE_SIZE,
+	       "cell_llc must be exactly one cache line");
+
+#if !defined(__BINDGEN_RUNNING__)
+#define CELL_LOCK_T struct bpf_spin_lock
+#else
+/* userspace placeholder: kernel won't copy spin_lock */
+#define CELL_LOCK_T        \
+	struct {           \
+		u32 __pad; \
+	} /* 4-byte aligned as required */
+#endif
+/*
  * cell is the per-cell book-keeping
 */
 struct cell {
-	// current vtime of the cell
-	u64 vtime_now;
-	// Whether or not the cell is used or not
+	// This is a lock in the kernel and padding in userspace
+	CELL_LOCK_T lock;
+
+	// Whether or not the cell is used
 	u32 in_use;
-};
+
+	// Number of CPUs in this cell
+	u32 cpu_cnt;
+
+	// Number of LLCs with at least one CPU in this cell
+	u32 llc_present_cnt;
+
+	// Per-LLC data (cacheline-aligned)
+	struct cell_llc llcs[MAX_LLCS];
+} __attribute__((aligned(CACHELINE_SIZE)));
+
+// Putting the lock first in the struct is our convention.
+// We pad this space when in Rust code that will never see the lock value.
+// We intentionally avoid it in copy_cell_skip_lock to keep the verifier happy.
+// It is a BPF constraint that it is 4 byte aligned.
+
+// All assertions work for both BPF and userspace builds
+_Static_assert(offsetof(struct cell, lock) == 0,
+	       "lock/padding must be first field");
+
+_Static_assert(sizeof(((struct cell *)0)->lock) == 4,
+	       "lock/padding must be 4 bytes");
+
+_Static_assert(_Alignof(CELL_LOCK_T) == 4,
+	       "lock/padding must be 4-byte aligned");
+
+_Static_assert(offsetof(struct cell, in_use) == 4,
+	       "in_use must follow 4-byte lock/padding");
+
+// Verify these are the same size in both BPF and Rust.
+// 16 bytes header + 48 bytes padding (to align llcs) + 64*16 bytes llcs = 1088 bytes
+_Static_assert(sizeof(struct cell) ==
+		       (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
+	       "struct cell size must be stable for Rust bindings");
+
+_Static_assert(sizeof(struct cell) == 1088,
+	       "struct cell must be exactly 1088 bytes");
 
 #endif /* __INTF_H */
