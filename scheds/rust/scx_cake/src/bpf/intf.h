@@ -86,6 +86,24 @@ struct cake_cpu_tier {
 } __attribute__((aligned(64)));
 
 /*
+ * EMPIRICAL TOPOLOGY DISCOVERY (ETD)
+ * 
+ * Populated by Rust userspace at startup via CAS ping-pong measurement.
+ * Each CPU stores its top 3 fastest peers (sorted by measured ns latency).
+ * 
+ * This enables "Surgical Seek" - the BPF hot-path checks these specific
+ * cores before falling back to the generic SIMD scan.
+ * 
+ * Example for 9800X3D:
+ *   top_peers[2] = {10, 3, 11}  → Core 2's fastest paths are to 10 (SMT),
+ *                                  then 3 and 11 (ring neighbors)
+ */
+struct core_preferences {
+    u8 top_peers[CAKE_MAX_CPUS][3];  /* Top 3 fastest peers per CPU */
+    u8 _pad[64];                      /* Align to 128 bytes */
+} __attribute__((aligned(128)));
+
+/*
  * Per-task flow state tracked in BPF
  * Padded to 64B to prevent False Sharing.
  * 
@@ -162,7 +180,8 @@ struct cake_stats {
     u64 max_wait_ns;               /* Maximum observed wait time */
     u64 nr_starvation_preempts_tier[CAKE_TIER_MAX]; /* Per-tier starvation preempts */
     u64 nr_input_preempts;         /* Preemptions injected for input/latency */
-    u64 _pad[8];                   /* Pad to 256 bytes for cache line isolation in BSS array */
+    u64 nr_etd_hits;               /* ETD surgical seeks that found idle peer */
+    u64 _pad[7];                   /* Pad to 256 bytes for cache line isolation in BSS array */
 } __attribute__((aligned(64)));
 
 /*
