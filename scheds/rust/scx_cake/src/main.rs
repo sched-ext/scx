@@ -5,6 +5,7 @@
 // This is the userspace component that loads the BPF scheduler,
 // configures it, and displays statistics.
 
+mod calibrate;
 mod stats;
 mod topology;
 mod tui;
@@ -347,6 +348,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     args: Args,
     topology: topology::TopologyInfo,
+    latency_matrix: Vec<Vec<f64>>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -410,10 +412,30 @@ impl<'a> Scheduler<'a> {
             topo.nr_cpus
         );
 
+        // ETD: Empirical Topology Discovery
+        // Measure inter-core latency via CAS ping-pong and populate core_prefs BSS
+        info!("Starting ETD calibration...");
+        let (latency_matrix, top_peers) =
+            calibrate::calibrate_topology_full(topo.nr_cpus, |current, total, is_complete| {
+                // Update progress gauge inline
+                tui::render_calibration_progress(current, total, is_complete);
+            });
+
+        if let Some(bss) = &mut skel.maps.bss_data {
+            for (cpu, peers) in top_peers.iter().enumerate().take(64) {
+                bss.core_prefs.top_peers[cpu] = *peers;
+            }
+        }
+        info!(
+            "ETD: Populated {} CPUs with empirical topology data",
+            topo.nr_cpus
+        );
+
         Ok(Self {
             skel,
             args,
             topology: topo,
+            latency_matrix,
         })
     }
 
@@ -426,7 +448,7 @@ impl<'a> Scheduler<'a> {
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
-        self.print_startup_splash();
+        self.show_startup_splash()?;
 
         if self.args.verbose {
             // Run TUI mode
@@ -460,65 +482,18 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn print_startup_splash(&self) {
+    fn show_startup_splash(&self) -> Result<()> {
         let (q, _nfb, st, starv) = self.args.effective_values();
-        let topo = &self.topology;
-
-        // ANSI Escape Codes
-        let cyan = "\x1b[36m";
-        let yellow = "\x1b[33m";
-        let green = "\x1b[32m";
-        let bold = "\x1b[1m";
-        let dim = "\x1b[2m";
-        let reset = "\x1b[0m";
-        let check = format!("{}✓{}", green, reset);
-
-        // Topology strings
-        let smt_str = if topo.smt_enabled {
-            "Enabled"
-        } else {
-            "Disabled"
-        };
-        let topo_str = if topo.has_dual_ccd {
-            "Multi-CCD"
-        } else {
-            "Single CCD"
-        };
-        let core_str = if topo.has_hybrid_cores {
-            "Hybrid (P/E)"
-        } else {
-            "Uniform"
-        };
-
         let profile_str = format!("{:?}", self.args.profile).to_uppercase();
 
-        println!(
-            r#"
-{bold}{cyan}🍰 scx_cake v1.01{reset} {dim}| DRR++ Sched_ext Scheduler{reset}
-{dim}────────────────────────────────────────────────────────{reset}
-{bold}HARDWARE{reset}
-  CPUs: {cyan}{cpus}{reset}  SMT: {cyan}{smt}{reset}  Topology: {cyan}{topo_type}{reset}  Cores: {cyan}{cores}{reset}
-
-{bold}PROFILE{reset}: {yellow}{profile}{reset}
-  Quantum: {quantum} µs   Sparse Gate: {gate}‰   Starvation: {starv} ms
-
-{bold}STATUS{reset}: {check} Scheduler running
-{dim}────────────────────────────────────────────────────────{reset}"#,
-            bold = bold,
-            cyan = cyan,
-            yellow = yellow,
-            dim = dim,
-            reset = reset,
-            check = check,
-            cpus = topo.nr_cpus,
-            smt = smt_str,
-            topo_type = topo_str,
-            cores = core_str,
-            profile = profile_str,
-            quantum = q,
-            gate = st,
-            starv = starv / 1000,
-        );
+        tui::render_startup_screen(
+            &self.topology,
+            &self.latency_matrix,
+            &profile_str,
+            q,
+            st,
+            starv,
+        )
     }
 }
 
