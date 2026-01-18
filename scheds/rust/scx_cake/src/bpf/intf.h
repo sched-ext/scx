@@ -98,10 +98,7 @@ struct cake_cpu_tier {
  *   top_peers[2] = {10, 3, 11}  → Core 2's fastest paths are to 10 (SMT),
  *                                  then 3 and 11 (ring neighbors)
  */
-struct core_preferences {
-    u8 top_peers[CAKE_MAX_CPUS][3];  /* Top 3 fastest peers per CPU */
-    u8 _pad[64];                      /* Align to 128 bytes */
-} __attribute__((aligned(128)));
+/* struct core_preferences removed - moved to cake.bpf.c */
 
 /*
  * Per-task flow state tracked in BPF

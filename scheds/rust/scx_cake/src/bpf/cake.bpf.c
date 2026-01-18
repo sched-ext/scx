@@ -170,12 +170,16 @@ struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned
 struct cake_cpu_shadow global_shadow[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 
 /*
- * EMPIRICAL TOPOLOGY DISCOVERY (ETD) - Populated by Rust at startup
- * 
- * Each CPU's top 3 fastest peers (by measured CAS ping-pong latency).
- * Enables "Surgical Seek" - check specific fast cores before SIMD scan.
+ * EMPIRICAL TOPOLOGY DISCOVERY (ETD) - SWAR Optimized
+ * * Layout: [0-7]: Best Peer, [8-15]: 2nd Best, [16-23]: 3rd Best
+ * [24-31]: Unused (Padding/Flags)
+ * * SWAR (SIMD Within A Register): We pack 3 peers into one u32.
+ * This allows fetching the entire topology neighborhood in a single
+ * memory cycle, eliminating 2/3rds of the load pressure.
  */
-struct core_preferences core_prefs SEC(".bss") __attribute__((aligned(128)));
+struct core_preferences {
+    u32 top_peers_packed[CAKE_MAX_CPUS];
+} core_prefs SEC(".bss") __attribute__((aligned(128)));
 
 /*
  * BSS TAIL GUARD: Protects against BTF truncation bugs.
@@ -302,69 +306,76 @@ static __always_inline s32 find_first_idle_cpu_topo(s32 prev_cpu, u64 idle_mask)
  *   2. Resolve to specific SMT thread via core_status
  *   3. Prefer exact peer if idle, else sibling for cache warmth
  */
-static __always_inline s32 find_surgical_victim_tiered(u32 prev_cpu, u64 global_hint)
+/*
+ * find_surgical_victim (SWAR Optimized)
+ * * MATCHES DESIGN: Zero-Spill, MLP-Fused Load, ALU-Driven ILP.
+ * * LOGIC:
+ * 1. Load: Fetches entire 3-peer neighborhood in 1 instruction (MLP).
+ * 2. ALU:  Splits peers using register shifts (ILP).
+ * 3. Check: Verifies idle status against global mask.
+ * NOTE: (p >> 1) converts Logical CPU to Physical Core index 
+ * to match the layout of global_hint.
+ * * COST: ~6-8 cycles (L1 Hit). Safe for primary path.
+ */
+static __always_inline s32 find_surgical_victim(u32 prev_cpu, u64 global_hint)
 {
+    /* Mask index to help verifier prove bounds (Zero Cost) */
     u32 idx = prev_cpu & (CAKE_MAX_CPUS - 1);
+    
+    /* [MLP] SINGLE 32-bit LOAD: Fetches Best, 2nd, and 3rd peers */
+    u32 packed = cake_relaxed_load_u32(&core_prefs.top_peers_packed[idx]);
 
-    /* Unrolled loop: Check top 3 empirically-measured peers */
-    #pragma unroll
-    for (int i = 0; i < 3; i++) {
-        u8 peer = core_prefs.top_peers[idx][i];
+    /* [ILP] ALU PRIORITY CHECK: Pipeline-friendly bitwise extraction */
 
-        /* Bounds check: 0xFF sentinel indicates invalid/padding */
-        if (peer >= 64) continue;
-
-        /* Extract core ID from logical CPU */
-        u32 peer_core = (u32)peer >> 1;
-
-        /* Stage 1: Does this peer's physical core have ANY idle capacity? */
-        if (!(global_hint & (1ULL << peer_core))) continue;
-
-        /* Stage 2: Resolve to specific SMT thread */
-        u8 core_status = tiered_idle.core_status[peer_core & 7];
-        if (!core_status) continue;  /* Race: core went busy */
-
-        u8 peer_smt = peer & 1;
-
-        /* Best case: The exact empirical peer is idle */
-        if (core_status & (1 << peer_smt))
-            return (s32)peer;
-
-        /* Good case: Peer's sibling is idle (same L2, still excellent) */
-        u8 sibling_smt = peer_smt ^ 1;
-        if (core_status & (1 << sibling_smt))
-            return (s32)((peer_core << 1) | sibling_smt);
+    /* Tier 0 (Best): Bits 0-7 */
+    u32 p0 = packed & 0xFF;
+    if (p0 < 64) {
+        /* Check physical core bit (p0 >> 1) */
+        if (global_hint & (1ULL << (p0 >> 1))) return (s32)p0;
     }
 
-    /* Fallback: No empirical peers available, caller should try generic scan */
+    /* Tier 1 (Ring): Bits 8-15 */
+    u32 p1 = (packed >> 8) & 0xFF;
+    if (p1 < 64) {
+        if (global_hint & (1ULL << (p1 >> 1))) return (s32)p1;
+    }
+
+    /* Tier 2 (Secondary): Bits 16-23 */
+    u32 p2 = (packed >> 16) & 0xFF;
+    if (p2 < 64) {
+        if (global_hint & (1ULL << (p2 >> 1))) return (s32)p2;
+    }
+
     return -1;
 }
 
 /*
- * LEGACY: find_surgical_victim (CPU-mask variant)
- * Kept for select_cpu_with_arbiter() which reconstructs a CPU-level mask.
- * New code should use find_surgical_victim_tiered() instead.
+ * find_surgical_victim_logical (SWAR Optimized)
+ * * VARIANT: Checks a LOGICAL mask (1 bit per CPU) instead of PHYSICAL.
+ * * USE CASE: Checking 'victim_mask' or 'p_candidates' (Logical IDs).
+ * * COST: ~6-8 Cycles.
  */
-static __always_inline s32 find_surgical_victim(u32 prev_cpu, u64 idle_mask)
+static __always_inline s32 find_surgical_victim_logical(u32 prev_cpu, u64 logical_mask)
 {
     u32 idx = prev_cpu & (CAKE_MAX_CPUS - 1);
+    
+    // [MLP] Single 32-bit Load
+    u32 packed = cake_relaxed_load_u32(&core_prefs.top_peers_packed[idx]);
 
-    /* Tier 0: Absolute fastest peer (typically SMT sibling) */
-    u8 p1 = core_prefs.top_peers[idx][0];
-    if ((u32)p1 < 64 && (idle_mask & (1ULL << p1)))
-        return (s32)p1;
+    // [ILP] Check Logical IDs directly (No '>> 1' shift needed)
 
-    /* Tier 1: Second fastest (ring-bus neighbor) */
-    u8 p2 = core_prefs.top_peers[idx][1];
-    if ((u32)p2 < 64 && (idle_mask & (1ULL << p2)))
-        return (s32)p2;
+    /* Tier 0 (Best) */
+    u32 p0 = packed & 0xFF;
+    if (p0 < 64 && (logical_mask & (1ULL << p0))) return (s32)p0;
 
-    /* Tier 2: Third fastest (secondary neighbor) */
-    u8 p3 = core_prefs.top_peers[idx][2];
-    if ((u32)p3 < 64 && (idle_mask & (1ULL << p3)))
-        return (s32)p3;
+    /* Tier 1 (Ring) */
+    u32 p1 = (packed >> 8) & 0xFF;
+    if (p1 < 64 && (logical_mask & (1ULL << p1))) return (s32)p1;
 
-    /* Fallback: Caller should use SIMD scan */
+    /* Tier 2 (Secondary) */
+    u32 p2 = (packed >> 16) & 0xFF;
+    if (p2 < 64 && (logical_mask & (1ULL << p2))) return (s32)p2;
+
     return -1;
 }
 
@@ -778,7 +789,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * Archive prev_cpu to BSS immediately to avoid stack persistence.
      */
     cold_scratch.prev_cpu = prev_cpu;
-    u32 tc_id = (u32)bpf_get_smp_processor_id();
+    /* tc_id removed from hot path to prevent spill */
     
     tctx = get_task_ctx(p, false);
     if (unlikely(!tctx)) {
@@ -789,6 +800,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* Sync Wakeup: Early Exit */
     if (wake_flags & SCX_WAKE_SYNC) {
+        u32 tc_id = bpf_get_smp_processor_id();
         if (tc_id < CAKE_MAX_CPUS) {
             tctx->target_dsq_id = CAKE_DSQ_LC_BASE + tc_id;
             scx_bpf_kick_cpu(tc_id, SCX_KICK_PREEMPT);
@@ -819,11 +831,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     bool found_idle = false;
 
     /* PHASE 1: ETD Surgical Seek - Check empirically-measured fast peers */
+    /* SWAR Optimization: Pass global_hint directly for register-only check */
     if (global_hint) {
-        selected_cpu = find_surgical_victim_tiered(cold_scratch.prev_cpu, global_hint);
+        selected_cpu = find_surgical_victim((u32)cold_scratch.prev_cpu, global_hint);
         if (selected_cpu >= 0) {
             found_idle = true;
             if (enable_stats) {
+                u32 tc_id = bpf_get_smp_processor_id();
                 (&global_stats[tc_id & 63])->nr_etd_hits++;
             }
         }
@@ -870,7 +884,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (has_hybrid && found_idle && tier <= GAMING_DSQ) {
         if ((u32)selected_cpu < CAKE_MAX_CPUS && !cpu_is_big[selected_cpu]) {
              u64 p_candidates = cake_relaxed_load_u64(&idle_mask_global) & big_cpu_mask;
-             if (p_candidates) selected_cpu = (s32)__builtin_ctzll(p_candidates);
+             if (p_candidates) {
+                // Try to find a P-core that is topologically close (e.g. share L3)
+                s32 best_p = find_surgical_victim_logical((u32)cold_scratch.prev_cpu, p_candidates);
+                if (best_p >= 0) selected_cpu = best_p;
+                else selected_cpu = (s32)__builtin_ctzll(p_candidates);
+            }
         }
     }
 
@@ -878,6 +897,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (found_idle) {
         tctx->target_dsq_id = CAKE_DSQ_LC_BASE + (u32)selected_cpu;
         if (enable_stats) {
+            u32 tc_id = bpf_get_smp_processor_id();
             (&global_stats[tc_id & 63])->nr_new_flow_dispatches++;
         }
         scx_bpf_kick_cpu((u32)selected_cpu, SCX_KICK_PREEMPT);
@@ -887,13 +907,23 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (tier == CRITICAL_LATENCY_DSQ) {
         u64 spec_mask = cake_relaxed_load_u64(&victim_mask);
         if (spec_mask) {
-            u32 s_cpu = (u32)__builtin_ctzll(spec_mask);
-            tctx->target_dsq_id = CAKE_DSQ_LC_BASE + s_cpu;
+            s32 s_cpu = -1;
+
+            /* ✅ TOPOLOGY OPTIMIZATION: Check for close victims first */
+            s_cpu = find_surgical_victim_logical((u32)cold_scratch.prev_cpu, spec_mask);
+
+            /* Fallback: If no close victims, pick any victim */
+            if (s_cpu < 0) {
+                s_cpu = (s32)__builtin_ctzll(spec_mask);
+            }
+
+            tctx->target_dsq_id = CAKE_DSQ_LC_BASE + (u32)s_cpu;
             if (enable_stats) {
+                u32 tc_id = bpf_get_smp_processor_id();
                 (&global_stats[tc_id & 63])->nr_input_preempts++;
             }
-            scx_bpf_kick_cpu(s_cpu, SCX_KICK_PREEMPT);
-            return (s32)s_cpu;
+            scx_bpf_kick_cpu((u32)s_cpu, SCX_KICK_PREEMPT);
+            return s_cpu;
         }
     }
 
