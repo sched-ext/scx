@@ -830,34 +830,36 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     s32 selected_cpu = cold_scratch.prev_cpu;
     bool found_idle = false;
 
-    /* PHASE 1: ETD Surgical Seek - Check empirically-measured fast peers */
-    /* SWAR Optimization: Pass global_hint directly for register-only check */
+    /* PHASE 1: Prev-CPU Warmth Check (Cache Affinity) */
+    /* ALWAYS try to stay on the same core or its SMT sibling first */
     if (global_hint) {
+        u32 prev_core = (u32)cold_scratch.prev_cpu >> 1;
+        if ((u32)cold_scratch.prev_cpu < 64 && (global_hint & (1ULL << prev_core))) {
+            u8 core_status = tiered_idle.core_status[prev_core & 7];
+            u8 prev_smt = (u8)((u32)cold_scratch.prev_cpu & 1);
+            
+            /* 1. Stick to previous CPU (Best L1/L2 Cache) */
+            if (core_status & (1 << prev_smt)) {
+                selected_cpu = cold_scratch.prev_cpu;
+                found_idle = true;
+            } 
+            /* 2. SMT Sibling (Shared L2, excellent transfer) */
+            else if (core_status) {
+                selected_cpu = (s32)((prev_core << 1) | (__builtin_ctz(core_status) & 1));
+                found_idle = true;
+            }
+        }
+    }
+
+    /* PHASE 2: ETD Surgical Seek (If local core is busy) */
+    /* Only migrate if we CANNOT run locally */
+    if (!found_idle && global_hint) {
         selected_cpu = find_surgical_victim((u32)cold_scratch.prev_cpu, global_hint);
         if (selected_cpu >= 0) {
             found_idle = true;
             if (enable_stats) {
                 u32 tc_id = bpf_get_smp_processor_id();
                 (&global_stats[tc_id & 63])->nr_etd_hits++;
-            }
-        }
-    }
-
-    /* PHASE 2: Prev-CPU Warmth Check (if ETD missed) */
-    if (!found_idle) {
-        u32 prev_core = (u32)cold_scratch.prev_cpu >> 1;
-        if ((u32)cold_scratch.prev_cpu < 16 && (global_hint & (1ULL << prev_core))) {
-            /* Confirm with core_status - which SMT sibling is actually idle? */
-            u8 core_status = tiered_idle.core_status[prev_core & 7];
-            u8 prev_smt = (u8)((u32)cold_scratch.prev_cpu & 1);
-            if (core_status & (1 << prev_smt)) {
-                /* prev_cpu itself is idle - best case! */
-                selected_cpu = cold_scratch.prev_cpu;
-                found_idle = true;
-            } else if (core_status) {
-                /* Sibling is idle instead - take it for cache warmth */
-                selected_cpu = (s32)((prev_core << 1) | (__builtin_ctz(core_status) & 1));
-                found_idle = true;
             }
         }
     }
