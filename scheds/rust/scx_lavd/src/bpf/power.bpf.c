@@ -264,8 +264,10 @@ static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
 
 static int calc_nr_active_cpus(void)
 {
-	u64 req_cap;
-	int i;
+	u64 req_cap, eff_cap, sum_eff_cap;
+	struct cpu_ctx *cpuc;
+	int i, j;
+	u16 cpu;
 
 	/*
 	 * First, calculate the required compute capacity:
@@ -280,29 +282,31 @@ static int calc_nr_active_cpus(void)
 		/*
 		 * When the energy model is not available, update the PCO
 		 * index based on the power mode. Then, fill the required
-		 * compute capacity in the CPU preference order, utilizing
+		 * effective capacity in the CPU preference order, utilizing
 		 * each CPU in a certain % (LAVD_CC_PER_CPU_UTIL).
 		 */
-		const volatile u16 *cpu_order = get_cpu_order();
-		u64 cap_cpu, cap_sum = 0;
-		u16 cpu_id;
-
 		if (is_powersave_mode)
 			WRITE_ONCE(pco_idx, 0);
 		else
 			WRITE_ONCE(pco_idx, nr_pco_states - 1);
 
+		const volatile u16 *cpu_order = get_cpu_order();
+		sum_eff_cap = 0;
 		bpf_for(i, 0, nr_cpu_ids) {
 			if (i >= LAVD_CPU_ID_MAX)
 				break;
 
-			cpu_id = cpu_order[i];
-			if (cpu_id >= LAVD_CPU_ID_MAX)
+			cpu = cpu_order[i];
+			if (cpu >= LAVD_CPU_ID_MAX)
 				break;
 
-			cap_cpu = cpu_capacity[cpu_id];
-			cap_sum += (cap_cpu * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
-			if (cap_sum >= req_cap)
+			cpuc = get_cpu_ctx_id(cpu);
+			if (!cpuc || !cpuc->is_online)
+				continue;
+
+			eff_cap = cpuc->effective_capacity; 
+			sum_eff_cap += (eff_cap * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
+			if (sum_eff_cap >= req_cap)
 				return i + 1;
 		}
 	} else {
@@ -317,25 +321,45 @@ static int calc_nr_active_cpus(void)
 				break;
 
 			if (pco_bounds[i] >= req_cap) {
-				WRITE_ONCE(pco_idx, i);
-				return pco_nr_primary[i];
+				const volatile u16 *cpu_order = pco_table[i];
+				sum_eff_cap = 0;
+
+				bpf_for(j, 0, pco_nr_primary[i]) {
+					if (j >= LAVD_CPU_ID_MAX)
+						break;
+
+					cpu = cpu_order[j];
+					if (cpu >= LAVD_CPU_ID_MAX)
+						break;
+
+					cpuc = get_cpu_ctx_id(cpu);
+					if (!cpuc || !cpuc->is_online)
+						continue;
+
+					eff_cap = cpuc->effective_capacity; 
+					sum_eff_cap += (eff_cap * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
+					if (sum_eff_cap >= req_cap) {
+						WRITE_ONCE(pco_idx, i);
+						return pco_nr_primary[i];
+					}
+				}
 			}
 		}
+
+		WRITE_ONCE(pco_idx, nr_pco_states - 1);
 	}
 
-	/* Should not be here. */
 	return nr_cpu_ids;
 }
 
 __weak
 int do_core_compaction(void)
 {
-	const volatile u16 *cpu_order;
-	struct cpu_ctx *cpuc;
+	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
 	struct bpf_cpumask *active, *ovrflw;
+	const volatile u16 *cpu_order;
 	struct cpdom_ctx *cpdomc;
 	int nr_active, cpu, i;
-	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
 	u64 cpdom_id;
 
 	bpf_rcu_read_lock();
@@ -363,6 +387,8 @@ int do_core_compaction(void)
 	 * Assign active and overflow cores.
 	 */
 	bpf_for(i, 0, nr_cpu_ids) {
+		struct cpu_ctx *cpuc;
+
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
 

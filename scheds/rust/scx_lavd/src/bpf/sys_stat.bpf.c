@@ -74,8 +74,12 @@ struct sys_stat_ctx {
 	u32		cur_sc_util;
 };
 
-static void init_sys_stat_ctx(struct sys_stat_ctx *c)
+static struct sys_stat_ctx ctx;
+
+static void init_sys_stat_ctx(void)
 {
+	struct sys_stat_ctx *c = &ctx;
+
 	__builtin_memset(c, 0, sizeof(*c));
 
 	c->min_perf_cri = LAVD_SCALE;
@@ -84,10 +88,11 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
-static void collect_sys_stat(struct sys_stat_ctx *c)
+static void collect_sys_stat(void)
 {
+	struct sys_stat_ctx *c = &ctx;
 	struct cpdom_ctx *cpdomc;
-	u64 cpdom_id, compute;
+	u64 cpdom_id, compute = 1;
 	int cpu;
 
 	/*
@@ -326,8 +331,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 }
 
-static void calc_sys_stat(struct sys_stat_ctx *c)
+static void calc_sys_stat(void)
 {
+	struct sys_stat_ctx *c = &ctx;
 	static int cnt = 0;
 	u64 avg_svc_time = 0, cur_sc_util, scu_spike;
 
@@ -475,11 +481,9 @@ static void calc_sys_time_slice(void)
 
 static int do_update_sys_stat(void)
 {
-	struct sys_stat_ctx c;
-
-	init_sys_stat_ctx(&c);
-	collect_sys_stat(&c);
-	calc_sys_stat(&c);
+	init_sys_stat_ctx();
+	collect_sys_stat();
+	calc_sys_stat();
 
 	return 0;
 }
