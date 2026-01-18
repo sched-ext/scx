@@ -270,7 +270,7 @@ struct cpu_ctx {
 	 * (read-only)
 	 */
 	u16		cpu_id;		/* cpu id */
-	u16		capacity;	/* the maximum capacity that CPU can do */
+	u16		max_capacity;	/* the maximum capacity that CPU can do */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
 	u8		llc_id;		/* llc domain id */

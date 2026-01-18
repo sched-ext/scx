@@ -14,8 +14,8 @@ extern bool			have_little_core;
 extern bool			have_turbo_core;
 extern const volatile bool	is_smt_active;
 
-extern u64			total_capacity;
-extern u64			one_little_capacity;
+extern u64			total_max_capacity;
+extern u64			one_little_max_capacity;
 extern u32			cur_big_core_scale;
 extern u32			default_big_core_scale;
 

@@ -72,10 +72,10 @@ volatile static int	pco_idx;
  * Big & LITTLE core's capacities
  */
 /* Total compute capacity of online CPUs. */
-u64		total_capacity;
+u64		total_max_capacity;
 
 /* Capacity of one LITTLEst CPU. */
-u64		one_little_capacity;
+u64		one_little_max_capacity;
 
 /* Big core's compute ratio among currently active cores scaled by 1024. */
 u32		cur_big_core_scale;
@@ -121,7 +121,7 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	 * Note that if CPU frequency and thermal are autonomously controlled
 	 * by a microcontroller, `policy` and `p_pressure` would be null.
 	 */
-	capacity_policy = cpuc->capacity;
+	capacity_policy = cpuc->max_capacity;
 
 	if (unlikely((base = (struct cpufreq_policy **)&cpufreq_cpu_data) &&
 	    (bpf_probe_read_kernel(&policy, sizeof(policy), base + cpu) == 0) &&
@@ -162,7 +162,7 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	    (cpuc->cur_util >= LAVD_CPU_UTIL_THR_FOR_MAX_FREQ))) {
 		cpuc->max_freq = calc_avg32(cpuc->max_freq, mfo);
 	}
-	capacity_observed = (cpuc->capacity * cpuc->max_freq) >> LAVD_SHIFT;
+	capacity_observed = (cpuc->max_capacity * cpuc->max_freq) >> LAVD_SHIFT;
 
 	/*
 	 * Choose the min between the policy-enforced capacity and
@@ -259,7 +259,7 @@ static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
 	 * avg_sc_util is confusing. So, let's convert it to 100% scale when
 	 * all CPUs are 100% utilized.
 	 */
-	return (avg_sc_util * nr_cpus_onln * 1000) / total_capacity;
+	return (avg_sc_util * nr_cpus_onln * 1000) / total_max_capacity;
 }
 
 static int calc_nr_active_cpus(void)
@@ -390,7 +390,7 @@ int do_core_compaction(void)
 			 */
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
-				cpdomc->cap_sum_temp += cpuc->capacity;
+				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 				cpdomc->nr_acpus_temp++;
 			}
 
@@ -441,9 +441,9 @@ int do_core_compaction(void)
 		/*
 		 * Calculate big capacity ratio if a CPU is on.
 		 */
-		sum_capacity += cpuc->capacity;
+		sum_capacity += cpuc->effective_capacity;
 		if (cpuc->big_core)
-			big_capacity += cpuc->capacity;
+			big_capacity += cpuc->effective_capacity;
 	}
 
 	cur_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
@@ -753,7 +753,7 @@ int reinit_active_cpumask_for_performance(void)
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->capacity;
+				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 			}
 		}
 	} else {
@@ -774,7 +774,7 @@ int reinit_active_cpumask_for_performance(void)
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->capacity;
+				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 			}
 		}
 
@@ -876,9 +876,9 @@ static void do_update_autopilot_high_cap(void)
 	u64 c;
 
 	if (is_smt_active)
-		c = (total_capacity * LAVD_AP_HIGH_UTIL_DFL_SMT_RT);
+		c = (total_max_capacity * LAVD_AP_HIGH_UTIL_DFL_SMT_RT);
 	else
-		c = (total_capacity * LAVD_AP_HIGH_UTIL_DFL_NO_SMT_RT);
+		c = (total_max_capacity * LAVD_AP_HIGH_UTIL_DFL_NO_SMT_RT);
 
 	LAVD_AP_HIGH_CAP = c >> LAVD_SHIFT;
 }
@@ -898,7 +898,7 @@ int init_autopilot_caps(void)
 		 * When the energy model is not available, rely on the heuristics.
 		 * We move up to the balanced mode if one core is half utilized.
 		 */
-		LAVD_AP_LOW_CAP = one_little_capacity / 2;
+		LAVD_AP_LOW_CAP = one_little_max_capacity / 2;
 		do_update_autopilot_high_cap();
 	} else {
 		/*
