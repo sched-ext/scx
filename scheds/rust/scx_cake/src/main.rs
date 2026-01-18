@@ -422,8 +422,17 @@ impl<'a> Scheduler<'a> {
             });
 
         if let Some(bss) = &mut skel.maps.bss_data {
-            for (cpu, peers) in top_peers.iter().enumerate().take(64) {
-                bss.core_prefs.top_peers[cpu] = *peers;
+            for (cpu, peers) in top_peers.iter().enumerate() {
+                if cpu < 64 {
+                    // SWAR Packing: Little Endian [P0, P1, P2, FF]
+                    // 0xFF (255) is the sentinel for "Invalid/Padding"
+                    let packed: u32 = (peers[0] as u32)
+                        | ((peers[1] as u32) << 8)
+                        | ((peers[2] as u32) << 16)
+                        | (0xFF << 24);
+
+                    bss.core_prefs.top_peers_packed[cpu] = packed;
+                }
             }
         }
         info!(
