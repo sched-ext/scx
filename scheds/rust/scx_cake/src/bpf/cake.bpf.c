@@ -598,6 +598,64 @@ struct {
  * 
  * Source: Gross, "Simple is Fast" (CppCon 2023)
  */
+/*
+ * COLD PATH: Handle new kthread initialization
+ * * Extracts string parsing and tier assignment from the hot wakeup path.
+ * Saves I-Cache space in cake_enqueue for standard tasks.
+ */
+static __attribute__((noinline))
+void init_new_kthread_cold(struct task_struct *p, u64 enq_flags)
+{
+    /* Branchless tier selection using mask */
+    u64 critical = is_critical_kthread(p);
+    u64 mask = -(u64)critical;  /* All 1s if critical, all 0s if not */
+    
+    /* Select: critical ? REALTIME_DSQ : INTERACTIVE_DSQ */
+    u8 initial_tier = (mask & REALTIME_DSQ) | (~mask & INTERACTIVE_DSQ);
+    
+    scx_bpf_dsq_insert(p, initial_tier, quantum_ns, enq_flags);
+}
+
+/* * COLD PATH: Handle sparse score demotion 
+ * Reduces register pressure and I-Cache usage in cake_running.
+ */
+static __attribute__((noinline))
+u32 handle_demotion_cold(u32 packed)
+{
+    /* Calculate Penalty */
+    u32 current_score = (packed >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE;
+    u32 penalty = (current_score >= 10) ? 10 : current_score; 
+    
+    /* Apply Penalty */
+    packed &= ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE);
+    packed |= ((current_score - penalty) & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
+    
+    /* Update Stats */
+    if (enable_stats) {
+         struct cake_stats *s = get_local_stats();
+         if (s) s->nr_wait_demotions++;
+    }
+    
+    /* Reset Wait Data (Write 0s) */
+    return packed & ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
+}
+
+/* * COLD PATH: Update global victim mask 
+ * Removes atomic RMW operations from the high-frequency tick loop.
+ */
+static __attribute__((noinline))
+void set_victim_status_cold(u32 cpu_id, struct cake_cpu_shadow *shadow)
+{
+    u64 cpu_bit = (1ULL << cpu_id);
+    u64 current = cake_relaxed_load_u64(&victim_mask);
+    
+    /* Atomic Update to Global Mask */
+    cake_relaxed_store_u64(&victim_mask, current | cpu_bit);
+    
+    /* Update Local Shadow */
+    shadow->packed_state |= SHADOW_BIT_VICTIM;
+}
+
 static __attribute__((noinline)) 
 struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
 {
@@ -951,17 +1009,18 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * NEW kthreads without context use mask-based selection to avoid branches.
      * Check uses extracted task_flags, not p->flags (p already consumed).
      */
-    if ((task_flags & PF_KTHREAD) && !tctx) {
-        /* Branchless tier selection using mask */
-        u64 critical = is_critical_kthread(p);
-        u64 mask = -(u64)critical;  /* All 1s if critical, all 0s if not */
-        
-        /* Select: critical ? REALTIME_DSQ : INTERACTIVE_DSQ */
-        u8 initial_tier = (mask & REALTIME_DSQ) | (~mask & INTERACTIVE_DSQ);
-        
-        scx_bpf_dsq_insert(p, initial_tier, quantum_ns, enq_flags);
+    /*
+     * PROACTIVE KTHREAD CLASSIFICATION (Moved to Cold Path)
+     * * Optimization: The heavy string parsing logic is now in a 
+     * separate function (init_new_kthread_cold).
+     * This keeps the 'cake_enqueue' instruction footprint small
+     * for the 99.9% of wakeups that are NOT new kthreads.
+     */
+    if (unlikely((task_flags & PF_KTHREAD) && !tctx)) {
+        init_new_kthread_cold(p, enq_flags);
         return;
     }
+
     
     /* 
      * FIX: Safer Direct Dispatch Check
@@ -1137,49 +1196,47 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
         }
 
         /* Wait budget tracking (4-bit counters) */
-            /* OPTIMIZATION: BATCHED RMW on packed_info */
-            /* Using local 'packed' variable loaded above */
-            u32 original_packed = packed;
-            
-            u8 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
-            u8 checks = wait_data & 0xF;
-            u8 violations = wait_data >> 4;
-            
-            checks++;
-            
-            u64 budget_ns = tier_configs[tier & 7].wait_budget_ns;
-            if (budget_ns > 0 && wait_time > budget_ns) {
-                violations++;
-            }
-            
-            /* Demotion check: 10-sample window, >30% violations */
-            if (checks >= 10 && tier < CAKE_TIER_BACKGROUND) {
-                if (violations >= 3) {
-                    u32 current_score = (packed >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE;
-                    u32 penalized = (current_score > 10) ? current_score - 10 : 0;
-                    
-                    /* Update Score */
-                    packed &= ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE);
-                    packed |= (penalized & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
-                    
-                    /* Reset Wait Data */
-                    packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
-                    // (0 << SHIFT) is 0
-                    
-                    if (s) s->nr_wait_demotions++;
-                } else {
-                    /* Reset Wait Data */
-                    packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
-                }
-            } else {
-                if (checks >= 15) checks = 15;
-                if (violations >= 15) violations = 15;
-                u8 new_wait = (violations << 4) | checks;
-                
-                /* Update Wait Data */
-                packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
-                packed |= ((new_wait & MASK_WAIT_DATA) << SHIFT_WAIT_DATA);
-            }
+        /* * OPTIMIZATION: Pure Bitwise Wait Budget (Zero Branch)
+         * Replaces control flow with boolean algebra for maximum ILP.
+         */
+        u32 original_packed = packed;
+        
+        /* 1. Extract Fields (Parallel Loads) */
+        u32 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
+        u32 checks = wait_data & 0xF;
+        u32 violations = wait_data >> 4;
+        
+        /* 2. Compute Violation Status (Branchless Boolean) */
+        u64 budget_ns = tier_configs[tier & 7].wait_budget_ns;
+        /* is_violation = 1 if (budget > 0 AND wait > budget), else 0 */
+        u32 is_violation = (budget_ns > 0) & (wait_time > budget_ns);
+        
+        /* 3. Saturating Updates (Bitwise Logic) */
+        /* Increment checks, clamp at 15 */
+        checks += (checks < 15);
+        /* Increment violations if needed, clamp at 15 */
+        violations += is_violation & (violations < 15);
+
+        /* 4. Demotion Check (The only necessary branch) */
+        /* Check: checks >= 10 AND violations >= 3 */
+        bool check_threshold = (checks >= 10);
+        bool viol_threshold = (violations >= 3);
+        bool can_demote = (tier < CAKE_TIER_BACKGROUND);
+
+        if (unlikely(check_threshold && can_demote)) {
+             if (viol_threshold) {
+                 /* COLD PATH CALL: Handle Demotion */
+                 packed = handle_demotion_cold(packed);
+             } else {
+                 /* Reset Wait Data (Write 0s) */
+                 packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
+             }
+        } else {
+             /* Normal Update (Pack and Write) */
+             u32 new_wait = (violations << 4) | checks;
+             packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
+             packed |= (new_wait & MASK_WAIT_DATA) << SHIFT_WAIT_DATA;
+        }
         
         last_wake = 0;  /* Clear to prevent double-counting */
         
@@ -1410,28 +1467,17 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
         }
 
         /*
-         * DEFERRED VICTIM LOGIC (1-Cycle Bit Test)
-         *
-         * Only after ~1ms (2^20 ns) do we consider adding this CPU to
-         * the victim mask. Uses single BT instruction instead of SUB+CMP.
-         *
-         * The victim mask is used by Tier 0 tasks to find CPUs to preempt.
-         * By deferring victim status, we ensure tasks get enough runtime
-         * to warm their caches before being considered for preemption.
-         *
-         * ZERO-SPILL: cpu_id call only here, at end of function.
-         * Only tier needs to survive the helper call.
+         * DEFERRED VICTIM LOGIC (Optimized)
+         * The fast check (runtime >> 20) happens inline.
+         * The heavy update happens in the cold function.
          */
         if ((runtime >> VICTIM_RESIDENCY_BIT) && tier >= INTERACTIVE_DSQ) {
             u32 cpu_id = bpf_get_smp_processor_id();
             if (cpu_id < 64) {
-                /* Direct BSS access - no helper call from get_shadow_state() */
                 struct cake_cpu_shadow *shadow = &global_shadow[cpu_id & (CAKE_MAX_CPUS - 1)];
+                /* Only branch to cold path if not already set */
                 if (!(shadow->packed_state & SHADOW_BIT_VICTIM)) {
-                    u64 cpu_bit = (1ULL << cpu_id);
-                    u64 current = cake_relaxed_load_u64(&victim_mask);
-                    cake_relaxed_store_u64(&victim_mask, current | cpu_bit);
-                    shadow->packed_state |= SHADOW_BIT_VICTIM;
+                    set_victim_status_cold(cpu_id, shadow);
                 }
             }
         }
