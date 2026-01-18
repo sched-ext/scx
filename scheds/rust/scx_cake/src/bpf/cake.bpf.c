@@ -170,6 +170,14 @@ struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned
 struct cake_cpu_shadow global_shadow[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 
 /*
+ * EMPIRICAL TOPOLOGY DISCOVERY (ETD) - Populated by Rust at startup
+ * 
+ * Each CPU's top 3 fastest peers (by measured CAS ping-pong latency).
+ * Enables "Surgical Seek" - check specific fast cores before SIMD scan.
+ */
+struct core_preferences core_prefs SEC(".bss") __attribute__((aligned(128)));
+
+/*
  * BSS TAIL GUARD: Protects against BTF truncation bugs.
  * If the BTF generator miscalculates section boundaries, this
  * padding absorbs the error instead of corrupting real variables.
@@ -273,6 +281,94 @@ static __always_inline s32 find_first_idle_cpu_topo(s32 prev_cpu, u64 idle_mask)
 }
 
 /*
+ * EMPIRICAL TOPOLOGY DISCOVERY (ETD) - Surgical Seek (Tiered-Aware)
+ *
+ * PRIMARY CPU SELECTION PATH: Check empirically-measured "sweet spots"
+ * BEFORE falling back to blind global scans. These are the 3 CPUs with
+ * the lowest measured CAS ping-pong latency (ground truth from silicon).
+ *
+ * On 9800X3D:
+ *   - Peer 0: SMT sibling (~18ns)
+ *   - Peer 1: Ring-bus neighbor (~21ns)
+ *   - Peer 2: Secondary neighbor (~21.5ns)
+ *
+ * vs. Distant Neighbor: ~28ns (eliminated by ETD-first approach)
+ *
+ * Performance: 3 core checks + SMT resolution (~8-10 cycles)
+ * ROI: 30:1 vs cross-CCD miss penalty (~250 cycles)
+ *
+ * Tiered Integration: Works with Phase 2 tiered idle tracking:
+ *   1. Check if peer's core has idle capacity (global_hint)
+ *   2. Resolve to specific SMT thread via core_status
+ *   3. Prefer exact peer if idle, else sibling for cache warmth
+ */
+static __always_inline s32 find_surgical_victim_tiered(u32 prev_cpu, u64 global_hint)
+{
+    u32 idx = prev_cpu & (CAKE_MAX_CPUS - 1);
+
+    /* Unrolled loop: Check top 3 empirically-measured peers */
+    #pragma unroll
+    for (int i = 0; i < 3; i++) {
+        u8 peer = core_prefs.top_peers[idx][i];
+
+        /* Bounds check: 0xFF sentinel indicates invalid/padding */
+        if (peer >= 64) continue;
+
+        /* Extract core ID from logical CPU */
+        u32 peer_core = (u32)peer >> 1;
+
+        /* Stage 1: Does this peer's physical core have ANY idle capacity? */
+        if (!(global_hint & (1ULL << peer_core))) continue;
+
+        /* Stage 2: Resolve to specific SMT thread */
+        u8 core_status = tiered_idle.core_status[peer_core & 7];
+        if (!core_status) continue;  /* Race: core went busy */
+
+        u8 peer_smt = peer & 1;
+
+        /* Best case: The exact empirical peer is idle */
+        if (core_status & (1 << peer_smt))
+            return (s32)peer;
+
+        /* Good case: Peer's sibling is idle (same L2, still excellent) */
+        u8 sibling_smt = peer_smt ^ 1;
+        if (core_status & (1 << sibling_smt))
+            return (s32)((peer_core << 1) | sibling_smt);
+    }
+
+    /* Fallback: No empirical peers available, caller should try generic scan */
+    return -1;
+}
+
+/*
+ * LEGACY: find_surgical_victim (CPU-mask variant)
+ * Kept for select_cpu_with_arbiter() which reconstructs a CPU-level mask.
+ * New code should use find_surgical_victim_tiered() instead.
+ */
+static __always_inline s32 find_surgical_victim(u32 prev_cpu, u64 idle_mask)
+{
+    u32 idx = prev_cpu & (CAKE_MAX_CPUS - 1);
+
+    /* Tier 0: Absolute fastest peer (typically SMT sibling) */
+    u8 p1 = core_prefs.top_peers[idx][0];
+    if ((u32)p1 < 64 && (idle_mask & (1ULL << p1)))
+        return (s32)p1;
+
+    /* Tier 1: Second fastest (ring-bus neighbor) */
+    u8 p2 = core_prefs.top_peers[idx][1];
+    if ((u32)p2 < 64 && (idle_mask & (1ULL << p2)))
+        return (s32)p2;
+
+    /* Tier 2: Third fastest (secondary neighbor) */
+    u8 p3 = core_prefs.top_peers[idx][2];
+    if ((u32)p3 < 64 && (idle_mask & (1ULL << p3)))
+        return (s32)p3;
+
+    /* Fallback: Caller should use SIMD scan */
+    return -1;
+}
+
+/*
  * ZERO-MATH LOCALITY ARBITER (Warmth-First)
  * 
  * Replaces "Idle-First" bias with "Warmth-First" bias.
@@ -313,7 +409,12 @@ static __always_inline s32 select_cpu_with_arbiter(
         }
     }
 
-    /* 5. Cold Fallback: Full SIMD scan for any idle core */
+    /* 5. ETD Surgical Seek: Check empirically-measured fast peers */
+    s32 surgical = find_surgical_victim(bounded_prev, idle_mask);
+    if (surgical >= 0)
+        return surgical;
+
+    /* 6. Cold Fallback: Full SIMD scan for any idle core */
     return find_first_idle_cpu_topo(prev_cpu, idle_mask);
 }
 
@@ -695,11 +796,21 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         }
     }
 
-    /* 
-     * HOT PATH START: Two-Stage Tiered Search (Phase 2)
-     * 
-     * Stage 1: Scan global_hint for first core with idle thread
-     * Stage 2: Confirm in core_status and pick specific SMT sibling
+    /*
+     * ========================================================================
+     * PRIMARY PATH: ETD SURGICAL SEEK (Empirical Topology Discovery)
+     * ========================================================================
+     *
+     * ARCHITECTURAL RATIONALE:
+     * Modern CPUs (Zen 4, Raptor Lake) are defined by Non-Uniform Cache
+     * Architecture (NUCA). Cross-CCD migration costs 60-80ns (~250 cycles).
+     *
+     * ETD provides "Ground Truth" from silicon: the actual measured latency
+     * between cores via CAS ping-pong. This is the FIRST filter, not a
+     * fallback, because topology matters most when we have CHOICE.
+     *
+     * ROI: 4-10 cycle cost vs 250 cycle cross-CCD penalty = 30:1 return.
+     * ========================================================================
      */
     u64 global_hint = cake_relaxed_load_u64(&tiered_idle.global_hint);
     u8 tier = GET_TIER(tctx);
@@ -707,23 +818,37 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     s32 selected_cpu = cold_scratch.prev_cpu;
     bool found_idle = false;
 
-    /* Fast check: is prev_cpu's core in global_hint? */
-    u32 prev_core = (u32)selected_cpu >> 1;
-    if ((u32)selected_cpu < 16 && (global_hint & (1ULL << prev_core))) {
-        /* Confirm with core_status - which SMT sibling is actually idle? */
-        u8 core_status = tiered_idle.core_status[prev_core & 7];
-        u8 prev_smt = (u8)((u32)selected_cpu & 1);
-        if (core_status & (1 << prev_smt)) {
-            /* prev_cpu itself is idle - best case! */
+    /* PHASE 1: ETD Surgical Seek - Check empirically-measured fast peers */
+    if (global_hint) {
+        selected_cpu = find_surgical_victim_tiered(cold_scratch.prev_cpu, global_hint);
+        if (selected_cpu >= 0) {
             found_idle = true;
-        } else if (core_status) {
-            /* Sibling is idle instead - take it for cache warmth */
-            selected_cpu = (s32)((prev_core << 1) | (__builtin_ctz(core_status) & 1));
-            found_idle = true;
+            if (enable_stats) {
+                (&global_stats[tc_id & 63])->nr_etd_hits++;
+            }
         }
     }
-    
-    /* Fallback: scan global_hint for any idle core */
+
+    /* PHASE 2: Prev-CPU Warmth Check (if ETD missed) */
+    if (!found_idle) {
+        u32 prev_core = (u32)cold_scratch.prev_cpu >> 1;
+        if ((u32)cold_scratch.prev_cpu < 16 && (global_hint & (1ULL << prev_core))) {
+            /* Confirm with core_status - which SMT sibling is actually idle? */
+            u8 core_status = tiered_idle.core_status[prev_core & 7];
+            u8 prev_smt = (u8)((u32)cold_scratch.prev_cpu & 1);
+            if (core_status & (1 << prev_smt)) {
+                /* prev_cpu itself is idle - best case! */
+                selected_cpu = cold_scratch.prev_cpu;
+                found_idle = true;
+            } else if (core_status) {
+                /* Sibling is idle instead - take it for cache warmth */
+                selected_cpu = (s32)((prev_core << 1) | (__builtin_ctz(core_status) & 1));
+                found_idle = true;
+            }
+        }
+    }
+
+    /* PHASE 3: Generic Global Scan (if ETD + warmth both missed) */
     if (!found_idle && global_hint) {
         u32 idle_core = (u32)__builtin_ctzll(global_hint);
         u8 core_status = tiered_idle.core_status[idle_core & 7];
@@ -734,7 +859,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         }
     }
 
-    /* Ultra-fallback: try arbiter if tiered search found nothing */
+    /* PHASE 4: Ultra-fallback - Arbiter with preemption logic */
     if (!found_idle) {
         selected_cpu = select_cpu_with_arbiter(tctx, cold_scratch.prev_cpu, global_hint);
         if (selected_cpu >= 0) found_idle = true;
