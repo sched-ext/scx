@@ -11,13 +11,15 @@ mod topology;
 mod tui;
 
 use core::sync::atomic::Ordering;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use log::{debug, info, warn};
+use nix::sys::signal::{SigSet, Signal};
+use nix::sys::signalfd::{SfdFlags, SignalFd};
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod bpf_intf {
@@ -468,21 +470,73 @@ impl<'a> Scheduler<'a> {
                 self.topology.clone(),
             )?;
         } else {
-            // Silent mode - just wait for shutdown
-            while !shutdown.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_secs(self.args.interval));
-
-                // Check for scheduler exit using the UEI
-                if scx_utils::uei_exited!(&self.skel, uei) {
-                    match scx_utils::uei_report!(&self.skel, uei) {
-                        Ok(reason) => {
-                            warn!("BPF scheduler exited: {:?}", reason);
+            /*
+             * EVENT-BASED SILENT MODE (Zero CPU Usage)
+             *
+             * Instead of polling in a loop, we block on a signalfd.
+             * The kernel wakes us ONLY when a signal (SIGINT/SIGTERM) arrives.
+             *
+             * We use poll() with a 60-second timeout to periodically check
+             * if the BPF scheduler exited unexpectedly (UEI).
+             *
+             * CPU Usage: 0.00% (truly dormant between events)
+             */
+            
+            // Block SIGINT and SIGTERM from normal delivery
+            let mut mask = SigSet::empty();
+            mask.add(Signal::SIGINT);
+            mask.add(Signal::SIGTERM);
+            mask.thread_block().context("Failed to block signals")?;
+            
+            // Create signalfd to receive signals as readable events
+            let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK)
+                .context("Failed to create signalfd")?;
+            
+            use nix::poll::{poll, PollFd, PollFlags};
+            use std::os::fd::BorrowedFd;
+            
+            loop {
+                // Block for up to 60 seconds, then check UEI
+                // poll() returns: >0 = readable, 0 = timeout, -1 = error
+                // SAFETY: sfd is valid for the duration of this loop
+                let poll_fd = unsafe { 
+                    PollFd::new(BorrowedFd::borrow_raw(sfd.as_raw_fd()), PollFlags::POLLIN)
+                };
+                let mut fds = [poll_fd];
+                let result = poll(&mut fds, nix::poll::PollTimeout::from(60_000u16)); // 60 seconds
+                
+                match result {
+                    Ok(n) if n > 0 => {
+                        // Signal received - read it to clear and exit
+                        if let Ok(Some(siginfo)) = sfd.read_signal() {
+                            info!("Received signal {} - shutting down", siginfo.ssi_signo);
                         }
-                        Err(e) => {
-                            warn!("BPF scheduler exited (failed to get reason: {})", e);
+                        break;
+                    }
+                    Ok(_) => {
+                        // Timeout - check UEI
+                        if scx_utils::uei_exited!(&self.skel, uei) {
+                            match scx_utils::uei_report!(&self.skel, uei) {
+                                Ok(reason) => {
+                                    warn!("BPF scheduler exited: {:?}", reason);
+                                }
+                                Err(e) => {
+                                    warn!("BPF scheduler exited (failed to get reason: {})", e);
+                                }
+                            }
+                            break;
                         }
                     }
-                    break;
+                    Err(nix::errno::Errno::EINTR) => {
+                        // Interrupted - check shutdown flag
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("poll() error: {}", e);
+                        break;
+                    }
                 }
             }
         }

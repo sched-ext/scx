@@ -3724,6 +3724,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
+ "nix 0.29.0",
  "quanta",
  "ratatui 0.30.0",
  "scx_cargo",
