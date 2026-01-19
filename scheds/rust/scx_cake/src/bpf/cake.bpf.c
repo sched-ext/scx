@@ -66,27 +66,35 @@ struct topology_vector global_topo[CAKE_MAX_CPUS] SEC(".bss") __attribute__((ali
 
 /*
  * TIERED IDLE MASK (Phase 2 Optimization)
- * 
+ *
  * ARCHITECTURE: Two-level hierarchy to reduce LOCK prefix frequency
- * 
+ *
  * Level 1: core_status[8] - Per-physical-core bytes (SMT-aware)
  *   Bit 0 = SMT thread 0 idle, Bit 1 = SMT thread 1 idle
  *   Standard u8 stores are architecturally atomic on x86_64.
- * 
+ *
  * Level 2: global_hint - 1 bit per physical core
  *   Updated ONLY when core_status transitions 0 <-> !0
  *   This is the "Filtered Update Protocol" - LOCK only fires on
  *   core-level transitions, not every thread wake/sleep.
- * 
+ *
  * BENEFIT (9800X3D): 40-60% reduction in atomic frequency,
  * eliminates L3 bank arbiter queues.
- * 
+ *
+ * CACHE LINE SEPARATION: core_status and global_hint on separate lines
+ * to prevent false sharing. Non-atomic core_status writes won't invalidate
+ * cache lines held by cores performing atomic global_hint operations.
+ *
  * Source: Fretz, "Beyond Sequential Consistency" (C++Now 2024)
  */
 struct tiered_idle_mask {
-    u8 core_status[8];   /* Per-core SMT status */
-    u64 global_hint;     /* 1 bit per physical core */
-    u8 _pad[48];         /* Pad to 128 bytes */
+    /* Cache Line 0: Per-core status (read-mostly, non-atomic writes) */
+    u8 core_status[8];   /* Bytes 0-7: Per-core SMT status */
+    u8 _pad0[56];        /* Bytes 8-63: Pad to full cache line */
+
+    /* Cache Line 1: Global atomic state (write-heavy, atomic ops) */
+    u64 global_hint;     /* Bytes 64-71: 1 bit per physical core */
+    u8 _pad1[56];        /* Bytes 72-127: Pad to full cache line */
 } __attribute__((aligned(128)));
 
 static struct tiered_idle_mask tiered_idle SEC(".bss") __attribute__((aligned(128)));
