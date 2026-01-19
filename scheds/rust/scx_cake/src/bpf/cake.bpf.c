@@ -708,7 +708,8 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
 
     /* Initialize task context fields */
     ctx->next_slice = quantum_ns;
-    ctx->deficit_us = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
+    u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
+    ctx->deficit_avg_fused = PACK_DEFICIT_AVG(init_deficit, 0);  /* avg_runtime starts at 0 */
     ctx->last_run_at = 0;
     ctx->last_wake_ts = 0;      /* No pending wake */
     ctx->avg_runtime_us = 0;    /* EMA starts fresh */
@@ -1363,8 +1364,11 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
      * Write avg_runtime (if decayed), last_wake (if cleared), last_run (always).
      * Grouping these encourages store buffer coalescing.
      */
-    if (avg_runtime != tctx->avg_runtime_us)
-        tctx->avg_runtime_us = avg_runtime;
+    if (avg_runtime != tctx->avg_runtime_us) {
+        /* FUSED STORE: Update both fields atomically */
+        u16 curr_deficit = tctx->deficit_us;
+        tctx->deficit_avg_fused = PACK_DEFICIT_AVG(curr_deficit, avg_runtime);
+    }
         
     tctx->last_wake_ts = last_wake;
     tctx->last_run_at = now_ts;
@@ -1395,8 +1399,12 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
      */
     u64 now = scx_bpf_now();
     u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
-    u16 old_avg_us = tctx->avg_runtime_us;
-    u16 old_deficit_us = tctx->deficit_us;
+    
+    /* FUSED LOAD: Single u32 read instead of 2x u16 reads (50% reduction) */
+    u32 deficit_avg_fused = tctx->deficit_avg_fused;
+    u16 old_deficit_us = EXTRACT_DEFICIT(deficit_avg_fused);
+    u16 old_avg_us = EXTRACT_AVG_RT(deficit_avg_fused);
+    
     u32 last_run = tctx->last_run_at;
 
     /* Extract packed fields (ALU ops while waiting for memory) */
@@ -1463,8 +1471,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
      *
      * RELAXED atomic store: Prevents compiler from splitting the 32-bit write.
      */
-    tctx->avg_runtime_us = new_avg_us;
-    tctx->deficit_us = new_deficit_us;
+    /* FUSED STORE: Single u32 write instead of 2x u16 writes (50% reduction) */
+    tctx->deficit_avg_fused = PACK_DEFICIT_AVG(new_deficit_us, new_avg_us);
     tctx->next_slice = new_slice;
 
     /* Blind relaxed store - Store Buffer absorbs redundant writes */
