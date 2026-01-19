@@ -117,8 +117,16 @@ struct cake_cpu_tier {
 struct cake_task_ctx {
     /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
     u64 next_slice;        /* 8B: Pre-computed slice (ns) */
-    u16 deficit_us;        /* 2B: Deficit (us), max 65ms */
-    u16 avg_runtime_us;    /* 2B: EMA runtime estimate */
+    
+    /* LOAD FUSING: Union allows atomic u32 access to both u16 fields */
+    union {
+        struct {
+            u16 deficit_us;        /* 2B: Deficit (us), max 65ms */
+            u16 avg_runtime_us;    /* 2B: EMA runtime estimate */
+        };
+        u32 deficit_avg_fused;     /* 4B: Fused access (deficit in low 16, avg in high 16) */
+    };
+    
     u32 packed_info;       /* 4B: Bitfield (Err, Wait, Score, Tier, Flags) */
     
     /* --- Timestamp Group (cake_running) [Bytes 16-23] --- */
@@ -148,6 +156,11 @@ struct cake_task_ctx {
 #define MASK_SPARSE_SCORE   0x7F  /* 7 bits: 0-127, clamped to 0-100 */
 #define MASK_TIER           0x07  /* 3 bits: 0-7 */
 #define MASK_FLAGS          0x0F  /* 4 bits */
+
+/* Load fusing helpers for deficit_avg_fused */
+#define EXTRACT_DEFICIT(fused)  ((u16)((fused) & 0xFFFF))
+#define EXTRACT_AVG_RT(fused)   ((u16)((fused) >> 16))
+#define PACK_DEFICIT_AVG(deficit, avg)  (((u32)(deficit) & 0xFFFF) | ((u32)(avg) << 16))
 
 /* Sparse score thresholds (0-100 scale) */
 #define THRESHOLD_BACKGROUND    0    /* score < 30 = Background */
