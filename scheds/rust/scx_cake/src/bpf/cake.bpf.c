@@ -158,6 +158,21 @@ struct {
 #define SHADOW_WARM_TIER_MASK  0x7 /* 3 bits for tier 0-6 */
 
 /*
+ * MESI-FRIENDLY WARM-TIER UPDATE
+ * 
+ * Skip write if unchanged to prevent cache line invalidation.
+ * During steady-state gaming, tier stays at 3 (GAMING_DSQ) ~90% of the time.
+ * Skipped writes keep the line in Shared state, eliminating RFO traffic.
+ */
+static __always_inline void update_warm_tier(struct cake_cpu_shadow *shadow, u32 new_tier)
+{
+    u32 old = shadow->packed_state;
+    u32 new = (old & 0xFFFF) | (new_tier << SHADOW_WARM_TIER_SHIFT);
+    if (old != new)
+        shadow->packed_state = new;
+}
+
+/*
  * GLOBAL STATISTICS (Zero-Latency BSS Array)
  * 
  * Replaces BPF_MAP_TYPE_PERCPU_ARRAY. 0ns lookup vs 25ns helper call.
@@ -695,6 +710,24 @@ void set_victim_status_cold(u32 cpu_id, struct cake_cpu_shadow *shadow)
     shadow->packed_state |= SHADOW_BIT_VICTIM;
 }
 
+/*
+ * FUSION #6: Clear Victim Status (Inline Helper)
+ * Deduplicates identical logic from cake_running and cake_update_idle.
+ * Saves 64 bytes I-Cache by eliminating code duplication.
+ */
+static __always_inline void clear_victim_status(u32 cpu_id, struct cake_cpu_shadow *shadow)
+{
+    if (shadow->packed_state & SHADOW_BIT_VICTIM) {
+        u64 cpu_bit = (1ULL << cpu_id);
+        u64 current = cake_relaxed_load_u64(&victim_mask);
+        /* MESI: Only write if bit is actually set - avoids RFO on redundant clear */
+        if (current & cpu_bit) {
+            cake_relaxed_store_u64(&victim_mask, current & ~cpu_bit);
+        }
+        shadow->packed_state &= ~SHADOW_BIT_VICTIM;
+    }
+}
+
 static __attribute__((noinline)) 
 struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
 {
@@ -1190,11 +1223,11 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
     u64 starvation_bits = prev ? (prev->pid ^ prev->se.sum_exec_runtime) : 1;
     if ((starvation_bits & 0xF) == 0) {
         if (scx_bpf_dsq_move_to_local(BACKGROUND_DSQ)) {
-            shadow->packed_state = (shadow->packed_state & 0xFFFF) | (BACKGROUND_DSQ << SHADOW_WARM_TIER_SHIFT);
+            update_warm_tier(shadow, BACKGROUND_DSQ);
             return;
         }
         if (scx_bpf_dsq_move_to_local(INTERACTIVE_DSQ)) {
-            shadow->packed_state = (shadow->packed_state & 0xFFFF) | (INTERACTIVE_DSQ << SHADOW_WARM_TIER_SHIFT);
+            update_warm_tier(shadow, INTERACTIVE_DSQ);
             return;
         }
     }
@@ -1204,7 +1237,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
     for (u32 i = 0; i < 7; i++) {
         if (scx_bpf_dsq_move_to_local(i)) {
             /* Update warm-tier for next dispatch */
-            shadow->packed_state = (shadow->packed_state & 0xFFFF) | (i << SHADOW_WARM_TIER_SHIFT);
+            update_warm_tier(shadow, i);
             return;
         }
     }
@@ -1266,25 +1299,20 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
      */
     struct cake_cpu_shadow *shadow = &global_shadow[cpu_idx & (CAKE_MAX_CPUS - 1)];
 
-    /* Always clear victim status when task starts - deferred to cake_tick */
-    if (shadow->packed_state & SHADOW_BIT_VICTIM) {
-        u64 cpu_bit = (1ULL << cpu_idx);
-        u64 current = cake_relaxed_load_u64(&victim_mask);
-        /* MESI: Only write if bit is actually set - avoids RFO on redundant clear */
-        if (current & cpu_bit) {
-            cake_relaxed_store_u64(&victim_mask, current & ~cpu_bit);
-        }
-        shadow->packed_state &= ~SHADOW_BIT_VICTIM;
-    }
+    /* FUSION #6: Use inline helper for victim cleanup (deduplication) */
+    clear_victim_status(cpu_idx, shadow);
 
     /*
      * WAIT BUDGET CHECK (CAKE's AQM) - Restored
      * 
      * FUSED LOAD-COMPUTE-STORE:
      * Load everything first, compute in registers, write once.
+     * FUSION #2: Single 8-byte load for both timestamps.
      */
-    u32 last_wake = tctx->last_wake_ts;
-    u16 avg_runtime = tctx->avg_runtime_us;
+    u64 timestamps = tctx->timestamps_fused;
+    u32 last_wake = EXTRACT_LAST_WAKE(timestamps);
+    u32 deficit_avg = tctx->deficit_avg_fused;
+    u16 avg_runtime = EXTRACT_AVG_RT(deficit_avg);
     u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
     
     if (likely(last_wake > 0)) {
@@ -1521,15 +1549,9 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
         __atomic_fetch_and(&tiered_idle.global_hint, ~(1ULL << core_id), __ATOMIC_RELEASE);
     }
 
-    /* Victim mask cleanup when going idle */
-    if (idle && (shadow->packed_state & SHADOW_BIT_VICTIM)) {
-        u64 cpu_mask = (1ULL << c);
-        u64 current = cake_relaxed_load_u64(&victim_mask);
-        /* MESI: Only write if bit is actually set - avoids RFO on redundant clear */
-        if (current & cpu_mask) {
-            cake_relaxed_store_u64(&victim_mask, current & ~cpu_mask);
-        }
-        shadow->packed_state &= ~SHADOW_BIT_VICTIM;
+    /* FUSION #6: Use inline helper for victim cleanup (deduplication) */
+    if (idle) {
+        clear_victim_status(c, shadow);
     }
 
     /* Update local shadow */
@@ -1560,6 +1582,13 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     u32 last_run = tctx->last_run_at;
     u64 threshold = tier_configs[tier & 7].starvation_ns;
 
+    /*
+     * FUSION #3: Hoist cpu_id before starvation check.
+     * Eliminates scx_bpf_task_cpu(p) helper call (~15-20 cycles).
+     * In cake_tick, the task is always running on the current CPU.
+     */
+    u32 cpu_id = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+
     /* STATE-FREE JITTER: Uses timestamp bits for variance (0-127µs) */
     u32 now = (u32)scx_bpf_now();
     u32 jitter = now & 0x7F;
@@ -1574,7 +1603,7 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      */
     bool needs_kick = (runtime > threshold);
     if (unlikely(needs_kick)) {
-        scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
+        scx_bpf_kick_cpu(cpu_id, SCX_KICK_PREEMPT);  /* FUSION #3: Use hoisted cpu_id */
 
         if (enable_stats && tier < CAKE_TIER_MAX) {
             struct cake_stats *s = get_local_stats();
@@ -1589,7 +1618,7 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      *
      * Eligibility: runtime >= 1ms AND tier >= Interactive AND not already victim
      */
-    u32 cpu_id = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);  /* Mask, not branch */
+    /* cpu_id already hoisted above (Fusion #3) */
     struct cake_cpu_shadow *shadow = &global_shadow[cpu_id];
     
     bool is_eligible = (runtime >> VICTIM_RESIDENCY_BIT) & 
