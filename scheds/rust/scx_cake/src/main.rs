@@ -481,30 +481,30 @@ impl<'a> Scheduler<'a> {
              *
              * CPU Usage: 0.00% (truly dormant between events)
              */
-            
+
             // Block SIGINT and SIGTERM from normal delivery
             let mut mask = SigSet::empty();
             mask.add(Signal::SIGINT);
             mask.add(Signal::SIGTERM);
             mask.thread_block().context("Failed to block signals")?;
-            
+
             // Create signalfd to receive signals as readable events
             let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK)
                 .context("Failed to create signalfd")?;
-            
+
             use nix::poll::{poll, PollFd, PollFlags};
             use std::os::fd::BorrowedFd;
-            
+
             loop {
                 // Block for up to 60 seconds, then check UEI
                 // poll() returns: >0 = readable, 0 = timeout, -1 = error
                 // SAFETY: sfd is valid for the duration of this loop
-                let poll_fd = unsafe { 
+                let poll_fd = unsafe {
                     PollFd::new(BorrowedFd::borrow_raw(sfd.as_raw_fd()), PollFlags::POLLIN)
                 };
                 let mut fds = [poll_fd];
                 let result = poll(&mut fds, nix::poll::PollTimeout::from(60_000u16)); // 60 seconds
-                
+
                 match result {
                     Ok(n) if n > 0 => {
                         // Signal received - read it to clear and exit
