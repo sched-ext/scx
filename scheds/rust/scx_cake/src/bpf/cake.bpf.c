@@ -849,10 +849,9 @@ static __always_inline u32 compute_sparse_score(u32 old_score, u64 runtime_ns)
     bool sparse = runtime_ns < cached_threshold_ns;
     s32 raw_score = sparse ? sparse_result : heavy_result;
 
-    /* Clamp to 0-100 (branchless: use conditional move) */
-    if (raw_score < 0) raw_score = 0;
-    else if (raw_score > 100) raw_score = 100;
-    
+    /* Branchless clamp to 0-100 (2x cmov, zero branch mispredictions) */
+    raw_score = (raw_score < 0) ? 0 : ((raw_score > 100) ? 100 : raw_score);
+
     return (u32)raw_score;
 }
 
