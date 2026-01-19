@@ -1502,8 +1502,9 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     tctx->deficit_avg_fused = PACK_DEFICIT_AVG(new_deficit_us, new_avg_us);
     tctx->next_slice = new_slice;
 
-    /* Blind relaxed store - Store Buffer absorbs redundant writes */
-    cake_relaxed_store_u32(&tctx->packed_info, new_packed);
+    /* Skip write if tier/score unchanged (expected 30-50% skip rate) */
+    if (packed != new_packed)
+        cake_relaxed_store_u32(&tctx->packed_info, new_packed);
 
     /*
      * NOTE: global_cpu_tiers update moved to cake_running.
