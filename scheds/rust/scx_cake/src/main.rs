@@ -510,6 +510,7 @@ impl<'a> Scheduler<'a> {
                         // Signal received - read it to clear and exit
                         if let Ok(Some(siginfo)) = sfd.read_signal() {
                             info!("Received signal {} - shutting down", siginfo.ssi_signo);
+                            shutdown.store(true, Ordering::Relaxed);
                         }
                         break;
                     }

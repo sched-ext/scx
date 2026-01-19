@@ -368,12 +368,19 @@ mod tests {
         let config = EtdConfig {
             iterations: 100,
             samples: 2,
+            warmup: 10,
+            max_stddev: 100.0,
         };
         let result = measure_pair(0, 1, &config);
         // Result might be None if pinning fails, that's OK in tests
-        if let Some(latency) = result {
-            assert!(latency > 0.0, "Latency should be positive");
-            assert!(latency < 1_000_000.0, "Latency should be reasonable (<1ms)");
+        if let Some(latencies) = result {
+            for latency in &latencies {
+                assert!(*latency > 0.0, "Latency should be positive");
+                assert!(
+                    *latency < 1_000_000.0,
+                    "Latency should be reasonable (<1ms)"
+                );
+            }
         }
     }
 }
