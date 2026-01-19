@@ -270,9 +270,11 @@ static int calc_nr_active_cpus(void)
 	u16 cpu;
 
 	/*
-	 * First, calculate the required compute capacity:
+	 * First, calculate the required compute capacity. Give some (say 25%)
+	 * headroom to handle sudden load spikes smoothly.
 	 */
 	req_cap = calc_required_capacity();
+	req_cap += (req_cap * LAVD_CC_REQ_CAPACITY_HEADROOM) >> LAVD_SHIFT;
 
 	/*
 	 * Then, determine the number of active CPUs that meet the required
