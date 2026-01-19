@@ -130,8 +130,14 @@ struct cake_task_ctx {
     u32 packed_info;       /* 4B: Bitfield (Err, Wait, Score, Tier, Flags) */
     
     /* --- Timestamp Group (cake_running) [Bytes 16-23] --- */
-    u32 last_run_at;       /* 4B: Last run timestamp (ns), wraps 4.2s */
-    u32 last_wake_ts;      /* 4B: Wake timestamp for wait budget */
+    /* LOAD FUSING: Union allows atomic u64 access to both u32 timestamp fields */
+    union {
+        struct {
+            u32 last_run_at;       /* 4B: Last run timestamp (ns), wraps 4.2s */
+            u32 last_wake_ts;      /* 4B: Wake timestamp for wait budget */
+        };
+        u64 timestamps_fused;      /* 8B: Fused access (last_run in low 32, last_wake in high 32) */
+    };
     
     /* --- Read-Only / Misc [Bytes 24-63] --- */
     u32 target_dsq_id;     /* 4B: Direct Dispatch Target (0 = None) */
@@ -161,6 +167,11 @@ struct cake_task_ctx {
 #define EXTRACT_DEFICIT(fused)  ((u16)((fused) & 0xFFFF))
 #define EXTRACT_AVG_RT(fused)   ((u16)((fused) >> 16))
 #define PACK_DEFICIT_AVG(deficit, avg)  (((u32)(deficit) & 0xFFFF) | ((u32)(avg) << 16))
+
+/* Timestamp fusing helpers for timestamps_fused */
+#define EXTRACT_LAST_RUN(fused)   ((u32)((fused) & 0xFFFFFFFF))
+#define EXTRACT_LAST_WAKE(fused)  ((u32)((fused) >> 32))
+#define PACK_TIMESTAMPS(last_run, last_wake)  (((u64)(last_run) & 0xFFFFFFFF) | ((u64)(last_wake) << 32))
 
 /* Sparse score thresholds (0-100 scale) */
 #define THRESHOLD_BACKGROUND    0    /* score < 30 = Background */
