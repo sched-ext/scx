@@ -710,8 +710,7 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
     ctx->next_slice = quantum_ns;
     u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
     ctx->deficit_avg_fused = PACK_DEFICIT_AVG(init_deficit, 0);  /* avg_runtime starts at 0 */
-    ctx->last_run_at = 0;
-    ctx->last_wake_ts = 0;      /* No pending wake */
+    ctx->timestamps_fused = 0;  /* Both last_run_at and last_wake_ts start at 0 */
     ctx->avg_runtime_us = 0;    /* EMA starts fresh */
     /* rng_state removed - now using state-free temporal jitter */
     
@@ -1369,9 +1368,9 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
         u16 curr_deficit = tctx->deficit_us;
         tctx->deficit_avg_fused = PACK_DEFICIT_AVG(curr_deficit, avg_runtime);
     }
-        
-    tctx->last_wake_ts = last_wake;
-    tctx->last_run_at = now_ts;
+    
+    /* FUSED STORE: Single u64 write instead of 2x u32 writes (50% reduction) */
+    tctx->timestamps_fused = PACK_TIMESTAMPS(now_ts, last_wake);
 }
 
 /*
