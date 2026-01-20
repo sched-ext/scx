@@ -342,6 +342,138 @@ pub fn extract_top_peers(matrix: &[Vec<f64>], top_n: usize) -> Vec<[u8; 3]> {
     result
 }
 
+/// Unified CPU topology entry matching BPF struct cpu_topology_entry
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CpuTopologyEntry {
+    pub sibling: u8,    // SMT sibling CPU ID (0xFF if none)
+    pub llc_id: u8,     // LLC/CCD domain ID
+    pub peer_1: u8,     // 2nd fastest peer
+    pub peer_2: u8,     // 3rd fastest peer
+    pub peer_3: u8,     // 4th fastest peer
+    pub flags: u8,      // Bit 0: is_big, Bit 1: has_sibling
+    pub core_id: u8,    // Physical core ID (0-31)
+    pub thread_bit: u8, // Pre-computed (1 << thread_idx)
+    pub dsq_id: u32,    // Pre-computed (CAKE_DSQ_LC_BASE + cpu_id)
+    pub _pad: u32,      // Pad to 16 bytes
+}
+
+/// Topology flags (must match intf.h)
+pub const CPU_TOPO_FLAG_IS_BIG: u8 = 1 << 0;
+pub const CPU_TOPO_FLAG_HAS_SIBLING: u8 = 1 << 1;
+pub const CPU_TOPO_INVALID: u8 = 0xFF;
+
+/// Generate unified topology entries from ETD matrix and kernel topology.
+///
+/// Combines:
+/// - ETD measured latencies (peer ordering)
+/// - Kernel sibling map (SMT validation)
+/// - LLC IDs and P/E core flags
+///
+/// Returns array of CpuTopologyEntry for each CPU.
+pub fn generate_unified_topology(
+    matrix: &[Vec<f64>],
+    sibling_map: &[u8],
+    llc_ids: &[u8],
+    is_big: &[u8],
+    core_ids: &[u8],
+    thread_bits: &[u8],
+    dsq_ids: &[u32],
+) -> Vec<CpuTopologyEntry> {
+    let nr_cpus = matrix.len();
+    let mut result = vec![CpuTopologyEntry::default(); nr_cpus];
+
+    for cpu in 0..nr_cpus {
+        // Collect (peer_cpu, latency) pairs, excluding self
+        let mut peers: Vec<(usize, f64)> = matrix[cpu]
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != cpu)
+            .map(|(j, &lat)| (j, lat))
+            .collect();
+
+        // Sort by latency (fastest first)
+        peers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Get sibling from kernel topology (validated against ETD)
+        let kernel_sibling = if cpu < sibling_map.len() {
+            sibling_map[cpu]
+        } else {
+            CPU_TOPO_INVALID
+        };
+
+        // ETD's fastest peer should be the SMT sibling (if exists)
+        // Use kernel sibling as primary source, ETD validates
+        let has_sibling = kernel_sibling != cpu as u8 && kernel_sibling < nr_cpus as u8;
+
+        // Build the entry
+        result[cpu] = CpuTopologyEntry {
+            sibling: if has_sibling {
+                kernel_sibling
+            } else {
+                CPU_TOPO_INVALID
+            },
+            llc_id: if cpu < llc_ids.len() { llc_ids[cpu] } else { 0 },
+            // Skip sibling in peer list (it's already in .sibling)
+            peer_1: peers
+                .get(if has_sibling { 1 } else { 0 })
+                .map(|p| p.0 as u8)
+                .unwrap_or(CPU_TOPO_INVALID),
+            peer_2: peers
+                .get(if has_sibling { 2 } else { 1 })
+                .map(|p| p.0 as u8)
+                .unwrap_or(CPU_TOPO_INVALID),
+            peer_3: peers
+                .get(if has_sibling { 3 } else { 2 })
+                .map(|p| p.0 as u8)
+                .unwrap_or(CPU_TOPO_INVALID),
+            flags: {
+                let mut f = 0u8;
+                if cpu < is_big.len() && is_big[cpu] != 0 {
+                    f |= CPU_TOPO_FLAG_IS_BIG;
+                }
+                if has_sibling {
+                    f |= CPU_TOPO_FLAG_HAS_SIBLING;
+                }
+                f
+            },
+            core_id: if cpu < core_ids.len() {
+                core_ids[cpu]
+            } else {
+                0
+            },
+            thread_bit: if cpu < thread_bits.len() {
+                thread_bits[cpu]
+            } else {
+                1
+            },
+            dsq_id: if cpu < dsq_ids.len() {
+                dsq_ids[cpu]
+            } else {
+                1000 // Fallback CAKE_DSQ_LC_BASE
+            },
+            _pad: 0,
+        };
+
+        debug!(
+            "ETD: CPU {:2} unified: sibling={}, llc={}, peers=[{},{},{}], flags=0x{:02x}",
+            cpu,
+            if result[cpu].sibling == CPU_TOPO_INVALID {
+                "none".to_string()
+            } else {
+                result[cpu].sibling.to_string()
+            },
+            result[cpu].llc_id,
+            result[cpu].peer_1,
+            result[cpu].peer_2,
+            result[cpu].peer_3,
+            result[cpu].flags
+        );
+    }
+
+    result
+}
+
 /// Full calibration: Returns (latency_matrix, top_peers)
 ///
 /// The progress_callback is called after each CPU pair measurement with (current, total, is_complete).
