@@ -64,8 +64,8 @@ pub fn detect() -> Result<TopologyInfo> {
     let mut cpu_sibling_map = [0u8; MAX_CPUS];
 
     // Default to self-mapping
-    for i in 0..MAX_CPUS {
-        cpu_sibling_map[i] = i as u8;
+    for (i, sibling) in cpu_sibling_map.iter_mut().enumerate().take(MAX_CPUS) {
+        *sibling = i as u8;
     }
 
     // Populate with detected siblings
@@ -101,9 +101,9 @@ pub fn detect() -> Result<TopologyInfo> {
     // We'll just use a simple counter 0,1,2... as we iterate.
     let mut llc_idx = 0;
 
-    for (_, llc) in &topo.all_llcs {
+    for llc in topo.all_llcs.values() {
         if llc_idx >= MAX_LLCS {
-            break; 
+            break;
         }
 
         let mut mask = 0u64;
@@ -168,7 +168,7 @@ pub fn detect() -> Result<TopologyInfo> {
                 info.cpu_core_id[cpu] = core_id as u8;
                 info.cpu_thread_bit[cpu] = 1 << thread_idx;
                 info.cpu_dsq_id[cpu] = 1000 /* CAKE_DSQ_LC_BASE */ + cpu as u32;
-                
+
                 if core_id < 32 {
                     info.core_cpu_mask[core_id] |= 1u64 << cpu;
                 }

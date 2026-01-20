@@ -181,24 +181,27 @@ pub fn render_calibration_progress(current: usize, total: usize, is_complete: bo
     let _ = io::stdout().flush();
 }
 
+/// Parameters for the startup screen
+pub struct StartupParams<'a> {
+    pub topology: &'a TopologyInfo,
+    pub latency_matrix: &'a [Vec<f64>],
+    pub profile: &'a str,
+    pub quantum: u64,
+    pub sparse_threshold: u64,
+    pub starvation: u64,
+}
+
 /// Render a beautiful one-time startup screen using Ratatui
 /// This renders directly to stdout inline (persists in terminal like println)
-pub fn render_startup_screen(
-    topology: &TopologyInfo,
-    latency_matrix: &[Vec<f64>],
-    profile: &str,
-    quantum: u64,
-    sparse_threshold: u64,
-    starvation: u64,
-) -> Result<()> {
+pub fn render_startup_screen(params: StartupParams) -> Result<()> {
     // Get terminal size
     let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
-    let nr_cpus = latency_matrix.len();
+    let nr_cpus = params.latency_matrix.len();
 
     // Layout dimensions
     let left_height = 6 + 6 + (nr_cpus / 8 + 6);
     let matrix_height = nr_cpus + 6;
-    let body_height = left_height.max(matrix_height as usize);
+    let body_height = left_height.max(matrix_height);
     let total_height = (4 + body_height + 3) as u16;
 
     let area = Rect::new(0, 0, width, total_height);
@@ -225,17 +228,7 @@ pub fn render_startup_screen(
         let elapsed_ms = start_time.elapsed().as_millis() as u32;
         buffer.reset();
 
-        render_startup_widgets(
-            &mut buffer,
-            area,
-            topology,
-            latency_matrix,
-            profile,
-            quantum,
-            sparse_threshold,
-            starvation,
-            elapsed_ms,
-        );
+        render_startup_widgets(&mut buffer, area, &params, elapsed_ms);
 
         let t_duration = tachyonfx::Duration::from_millis(elapsed_ms);
         fx_manager.process_effects(t_duration, &mut buffer, area);
@@ -278,12 +271,7 @@ pub fn render_startup_screen(
     render_startup_widgets(
         &mut buffer,
         area,
-        topology,
-        latency_matrix,
-        profile,
-        quantum,
-        sparse_threshold,
-        starvation,
+        &params,
         duration_ms, // Full completion
     );
 
@@ -302,7 +290,7 @@ pub fn render_startup_screen(
             }
             print!("{}", cell.symbol());
         }
-        print!("\x1b[0m\n");
+        println!("\x1b[0m");
     }
     io::stdout().flush()?;
 
@@ -368,12 +356,7 @@ impl ToAnsi for Style {
 fn render_startup_widgets(
     buffer: &mut Buffer,
     area: Rect,
-    topology: &TopologyInfo,
-    latency_matrix: &[Vec<f64>],
-    profile: &str,
-    quantum: u64,
-    sparse_threshold: u64,
-    starvation: u64,
+    params: &StartupParams,
     elapsed_ms: u32,
 ) {
     // --- Layout Configuration ---
@@ -453,11 +436,15 @@ fn render_startup_widgets(
     title.render(outer_layout[0], buffer);
 
     // --- System Specs ---
-    let smt_str = if topology.smt_enabled { "On" } else { "Off" };
+    let smt_str = if params.topology.smt_enabled {
+        "On"
+    } else {
+        "Off"
+    };
     let hardware_rows = vec![
         Row::new(vec![
             Cell::from("CPUs").style(Style::default().fg(Color::Cyan)),
-            Cell::from(topology.nr_cpus.to_string()),
+            Cell::from(params.topology.nr_cpus.to_string()),
         ]),
         Row::new(vec![
             Cell::from("SMT").style(Style::default().fg(Color::Cyan)),
@@ -465,7 +452,7 @@ fn render_startup_widgets(
         ]),
         Row::new(vec![
             Cell::from("Layout").style(Style::default().fg(Color::Cyan)),
-            Cell::from(if topology.has_dual_ccd {
+            Cell::from(if params.topology.has_dual_ccd {
                 "Multi-CCD"
             } else {
                 "Single"
@@ -492,7 +479,7 @@ fn render_startup_widgets(
         Line::from(vec![
             Span::styled("Mode: ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                profile,
+                params.profile,
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -500,19 +487,22 @@ fn render_startup_widgets(
         ]),
         Line::from(vec![
             Span::styled("Quantum: ", Style::default().fg(Color::Cyan)),
-            Span::styled(format!("{}µs", quantum), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}µs", params.quantum),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Sparse: ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                format!("{}‰", sparse_threshold),
+                format!("{}‰", params.sparse_threshold),
                 Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
             Span::styled("Preempt: ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                format!("{}ms", starvation / 1000),
+                format!("{}ms", params.starvation / 1000),
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -527,15 +517,15 @@ fn render_startup_widgets(
     profile_text.render(left_layout[1], buffer);
 
     // --- Topology Overview ---
-    let topology_grid = build_cpu_topology_grid_compact(topology);
+    let topology_grid = build_cpu_topology_grid_compact(params.topology);
     topology_grid.render(left_layout[2], buffer);
 
     // --- Empirical Fabric (The Heatmap) ---
-    let heatmap = LatencyHeatmap::new(latency_matrix, topology);
+    let heatmap = LatencyHeatmap::new(params.latency_matrix, params.topology);
     heatmap.render(dashboard_layout[1], buffer);
 
     // --- Numerical Truth (Raw Data) ---
-    let data_table = LatencyTable::new(latency_matrix, topology);
+    let data_table = LatencyTable::new(params.latency_matrix, params.topology);
     data_table.render(dashboard_layout[2], buffer);
 
     // --- Footer ---
@@ -732,7 +722,7 @@ impl<'a> Widget for LatencyHeatmap<'a> {
         // Legend at bottom
         let legend_y = inner_area.bottom().saturating_sub(1);
         let legend_x = inner_area.x + 1;
-        if legend_y >= inner_area.y + nr_cpus as u16 + 1 {
+        if legend_y > inner_area.y + nr_cpus as u16 {
             buf.set_string(
                 legend_x,
                 legend_y,
