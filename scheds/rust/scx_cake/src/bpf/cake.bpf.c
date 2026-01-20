@@ -133,6 +133,15 @@ struct {
 
 
 /*
+ * PER-CPU SCRATCH AREA (BSS-Tunneling)
+ * 
+ * Used to preserve registers across helper calls without using the stack (r10).
+ * Since BPF programs are serialized per-CPU, we can safely "tunnel"
+ * task pointers and context through this zero-latency BSS region.
+ */
+
+
+/*
  * Per-CPU Shadow State ("Cached Cursor" + Cache Line Isolation)
  * 
  * Each CPU tracks what it believes its bit in the global masks is.
@@ -238,9 +247,8 @@ static __always_inline bool is_critical_kthread(struct task_struct *p)
 {
     const char *comm = p->comm;
     
-    /* Single 8-byte load - de-congests Load-Store Unit (LSU) */
-    u64 head;
-    __builtin_memcpy(&head, comm, sizeof(head));
+    /* Direct 8-byte load - eliminates stack usage from __builtin_memcpy */
+    u64 head = *(u64 *)p->comm;
     
     /*
      * BRANCHLESS CLASSIFICATION:
@@ -620,7 +628,7 @@ void init_new_kthread_cold(struct task_struct *p, u64 enq_flags)
 /* * COLD PATH: Handle sparse score demotion 
  * Reduces register pressure and I-Cache usage in cake_running.
  */
-static __attribute__((noinline))
+static __always_inline
 u32 handle_demotion_cold(u32 packed)
 {
     /* Calculate Penalty */
@@ -644,7 +652,7 @@ u32 handle_demotion_cold(u32 packed)
 /* * COLD PATH: Update global victim mask 
  * Removes atomic RMW operations from the high-frequency tick loop.
  */
-static __attribute__((noinline))
+static __always_inline
 void set_victim_status_cold(u32 cpu_id, struct cake_cpu_shadow *shadow)
 {
     u64 cpu_bit = (1ULL << cpu_id);
@@ -720,7 +728,7 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
  *
  * Source: Cold path optimization (Gross, CppCon 2023)
  */
-static __attribute__((noinline))
+static __always_inline
 u8 apply_kthread_floor_cold(struct task_struct *p, u8 earned_tier)
 {
     /* Housekeeping kthreads (unbound workers): No floor, natural tiering */
@@ -866,6 +874,10 @@ static __always_inline u16 compute_deficit(u16 old_deficit_us, u64 runtime_ns)
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
+    /* 
+     * REGISTER PINNING: Pin p to r6 to avoid stack spills. 
+     */
+    register struct task_struct *p_reg asm("r6") = p;
     struct cake_task_ctx *tctx;
 
     /*
@@ -875,18 +887,20 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     cold_scratch.prev_cpu = prev_cpu;
     /* tc_id removed from hot path to prevent spill */
     
-    tctx = get_task_ctx(p, false);
+    tctx = get_task_ctx(p_reg, false);
     if (unlikely(!tctx)) {
-        return scx_bpf_select_cpu_dfl(p, cold_scratch.prev_cpu, wake_flags, &cold_scratch.is_idle);
+        return scx_bpf_select_cpu_dfl(p_reg, cold_scratch.prev_cpu, wake_flags, &cold_scratch.is_idle);
     }
+
+    register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
     
-    tctx->last_wake_ts = (u32)scx_bpf_now();
+    tctx_reg->last_wake_ts = (u32)scx_bpf_now();
 
     /* Sync Wakeup: Early Exit */
     if (wake_flags & SCX_WAKE_SYNC) {
         u32 tc_id = bpf_get_smp_processor_id();
         if (tc_id < CAKE_MAX_CPUS) {
-            tctx->target_dsq_id = CAKE_DSQ_LC_BASE + tc_id;
+            tctx_reg->target_dsq_id = CAKE_DSQ_LC_BASE + tc_id;
             scx_bpf_kick_cpu(tc_id, SCX_KICK_PREEMPT);
             return (s32)tc_id;
         }
@@ -908,7 +922,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * ROI: 4-10 cycle cost vs 250 cycle cross-CCD penalty = 30:1 return.
      * ========================================================================
      */
-    u8 tier = GET_TIER(tctx);
+    u8 tier = GET_TIER(tctx_reg);
 
     s32 selected_cpu = cold_scratch.prev_cpu;
     bool found_idle = false;
@@ -1028,7 +1042,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* PHASE 6: Ultra-fallback - Arbiter with preemption logic */
     if (!found_idle) {
-        selected_cpu = select_cpu_with_arbiter(tctx, cold_scratch.prev_cpu);
+        selected_cpu = select_cpu_with_arbiter(tctx_reg, cold_scratch.prev_cpu);
         if (selected_cpu >= 0) found_idle = true;
     }
 
@@ -1053,7 +1067,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* Final Dispatch */
     if (found_idle) {
-        tctx->target_dsq_id = cpu_topo[selected_cpu & 63].dsq_id;
+        tctx_reg->target_dsq_id = cpu_topo[selected_cpu & 63].dsq_id;
         if (enable_stats) {
             u32 tc_id = bpf_get_smp_processor_id();
             (&global_stats[tc_id & 63])->nr_new_flow_dispatches++;
@@ -1075,7 +1089,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                 s_cpu = (s32)__builtin_ctzll(spec_mask);
             }
 
-            tctx->target_dsq_id = cpu_topo[s_cpu & 63].dsq_id;
+            tctx_reg->target_dsq_id = cpu_topo[s_cpu & 63].dsq_id;
             if (enable_stats) {
                 u32 tc_id = bpf_get_smp_processor_id();
                 (&global_stats[tc_id & 63])->nr_input_preempts++;
@@ -1093,13 +1107,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
  */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
+    register struct task_struct *p_reg asm("r6") = p;
     /*
      * REGISTER HINTING OPTIMIZATION: Front-load ALL uses of 'p'
      * Extract everything we need from p NOW so the compiler can
      * free up that register for other uses across branches.
      */
-    u32 task_flags = p->flags;
-    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    u32 task_flags = p_reg->flags;
+    struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
     
     /*
      * PROACTIVE KTHREAD CLASSIFICATION (Branchless Diamond Distribution)
@@ -1115,9 +1130,11 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * for the 99.9% of wakeups that are NOT new kthreads.
      */
     if (unlikely((task_flags & PF_KTHREAD) && !tctx)) {
-        init_new_kthread_cold(p, enq_flags);
+        init_new_kthread_cold(p_reg, enq_flags);
         return;
     }
+
+    register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
 
     
     /* 
@@ -1125,31 +1142,31 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * 1. Only use target_dsq_id if this is a WAKEUP (prevents stale data on Yields).
      * 2. Always clear target_dsq_id immediately after checking.
      */
-    if (likely(tctx)) {
-        u32 target = tctx->target_dsq_id;
-        tctx->target_dsq_id = 0; /* CONSUME: Clear immediately to prevent stale state */
+    if (likely(tctx_reg)) {
+        u32 target = tctx_reg->target_dsq_id;
+        tctx_reg->target_dsq_id = 0; /* CONSUME: Clear immediately to prevent stale state */
 
         if ((enq_flags & SCX_ENQ_WAKEUP) && target != 0) {
-            scx_bpf_dsq_insert(p, target, tctx->next_slice, enq_flags);
+            scx_bpf_dsq_insert(p_reg, target, tctx_reg->next_slice, enq_flags);
             return;
         }
     }
 
     /* Handle Yields/Background */
     if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
-        scx_bpf_dsq_insert(p, BACKGROUND_DSQ, quantum_ns, enq_flags);
+        scx_bpf_dsq_insert(p_reg, BACKGROUND_DSQ, quantum_ns, enq_flags);
         return;
     }
 
-    if (unlikely(!tctx)) {
+    if (unlikely(!tctx_reg)) {
          /* No context yet - use INTERACTIVE defaults (context created in cake_running) */
-        scx_bpf_dsq_insert(p, INTERACTIVE_DSQ, quantum_ns, enq_flags);
+        scx_bpf_dsq_insert(p_reg, INTERACTIVE_DSQ, quantum_ns, enq_flags);
         return;
     }
 
     /* Standard Tier Logic (Zero-Cycle Wakeup) */
-    u8 tier = GET_TIER(tctx);
-    u64 slice = tctx->next_slice;
+    u8 tier = GET_TIER(tctx_reg);
+    u64 slice = tctx_reg->next_slice;
 
     if (enable_stats) {
         struct cake_stats *s = get_local_stats();
@@ -1163,7 +1180,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
             s->nr_tier_dispatches[bounded_tier]++;
     }
 
-    scx_bpf_dsq_insert(p, tier, slice, enq_flags);
+    scx_bpf_dsq_insert(p_reg, tier, slice, enq_flags);
 }
 
 /*
@@ -1268,226 +1285,112 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
         cake_relaxed_store_u32(&global_cpu_tiers[cpu_idx].tier, tier);
     }
 
+    /* 
+     * REGISTER PINNING: Pin critical context to satisfy verifier and prevent spills.
+     * Using r6/r7/r8 for persistent pointers/scalars across helper calls.
+     */
+
+    register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
+    register u32 cpu_idx_reg asm("r8") = cpu_idx;
+
     /*
      * DEFERRED VICTIM LOGIC (Stability & Protection Patch)
-     *
-     * When a task STARTS running, we do NOT add to victim mask immediately.
-     * Instead, we ALWAYS clear the victim bit here. The victim bit will be
-     * set in cake_tick AFTER the task has run for ~1ms (2^20 ns).
-     *
-     * CACHED CURSOR OPTIMIZATION: Direct BSS access using cpu_idx.
-     * Avoids second helper call from get_shadow_state().
      */
-    struct cake_cpu_shadow *shadow = &global_shadow[cpu_idx & (CAKE_MAX_CPUS - 1)];
+    struct cake_cpu_shadow *shadow = &global_shadow[cpu_idx_reg & (CAKE_MAX_CPUS - 1)];
 
     /* FUSION #6: Use inline helper for victim cleanup (deduplication) */
-    clear_victim_status(cpu_idx, shadow);
+    clear_victim_status(cpu_idx_reg, shadow);
 
     /*
      * WAIT BUDGET CHECK (CAKE's AQM) - Restored
-     * 
-     * FUSED LOAD-COMPUTE-STORE:
-     * Load everything first, compute in registers, write once.
-     * FUSION #2: Single 8-byte load for both timestamps.
      */
-    u64 timestamps = tctx->timestamps_fused;
-    u32 last_wake = EXTRACT_LAST_WAKE(timestamps);
-    u32 deficit_avg = tctx->deficit_avg_fused;
-    u16 avg_runtime = EXTRACT_AVG_RT(deficit_avg);
-    u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
+    u64 state_ts = tctx_reg->timestamps_fused;
+    u32 last_wake = EXTRACT_LAST_WAKE(state_ts);
     
     if (likely(last_wake > 0)) {
         u64 wait_time = (u64)(now_ts - last_wake);
         
-        /* Long-sleep recovery: Reset history after 33ms */
-        if (wait_time > LONG_SLEEP_THRESHOLD_NS) {
-            avg_runtime >>= 1;  /* 50% decay */
-        }
-
-        struct cake_stats *s = NULL;
-        if (enable_stats) {
-            s = get_local_stats();
-            if (s) {
-                s->total_wait_ns += wait_time;
-                s->nr_waits++;
-                if (wait_time > s->max_wait_ns)
-                    s->max_wait_ns = wait_time;
-            }
-        }
-
-        /* Wait budget tracking (4-bit counters) */
-        /* * OPTIMIZATION: Pure Bitwise Wait Budget (Zero Branch)
-         * Replaces control flow with boolean algebra for maximum ILP.
-         */
-
-        /* 1. Extract Fields (Parallel Loads) */
+        /* 1. Extract Fields */
+        u32 packed = cake_relaxed_load_u32(&tctx_reg->packed_info);
         u32 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
-        u32 checks = wait_data & 0xF;
-        u32 violations = wait_data >> 4;
         
-        /* 2. Compute Violation Status (Branchless Boolean) */
+        /* 
+         * DE-BRANCHLESS OPTIMIZATION:
+         * Explicit branches for budget check reduce register pressure.
+         */
         u64 budget_ns = tier_configs[tier & 7].wait_budget_ns;
-        /* is_violation = 1 if (budget > 0 AND wait > budget), else 0 */
-        u32 is_violation = (budget_ns > 0) & (wait_time > budget_ns);
+        if (budget_ns > 0 && wait_time > budget_ns) {
+            /* Increment violations (bits 4-7), clamp at 15 */
+            if ((wait_data >> 4) < 15) wait_data += 0x10;
+        }
         
-        /* 3. Saturating Updates (Bitwise Logic) */
-        /* Increment checks, clamp at 15 */
-        checks += (checks < 15);
-        /* Increment violations if needed, clamp at 15 */
-        violations += is_violation & (violations < 15);
+        /* Increment checks (bits 0-3), clamp at 15 */
+        if ((wait_data & 0xF) < 15) wait_data++;
 
-        /* 4. Demotion Check (The only necessary branch) */
-        /* Check: checks >= 10 AND violations >= 3 */
-        bool check_threshold = (checks >= 10);
-        bool viol_threshold = (violations >= 3);
-        bool can_demote = (tier < CAKE_TIER_BACKGROUND);
-
-        if (unlikely(check_threshold && can_demote)) {
-             if (viol_threshold) {
-                 /* COLD PATH CALL: Handle Demotion */
+        /* 3. Demotion Check */
+        if (unlikely((wait_data & 0xF) >= 10)) {
+             if ((wait_data >> 4) >= 3 && tier < CAKE_TIER_BACKGROUND) {
+                 /* COLD PATH CALL */
                  packed = handle_demotion_cold(packed);
              } else {
-                 /* Reset Wait Data (Write 0s) */
                  packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
              }
         } else {
-             /* Normal Update (Pack and Write) */
-             u32 new_wait = (violations << 4) | checks;
              packed &= ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
-             packed |= (new_wait & MASK_WAIT_DATA) << SHIFT_WAIT_DATA;
+             packed |= (wait_data << SHIFT_WAIT_DATA);
         }
         
-        last_wake = 0;  /* Clear to prevent double-counting */
-        
-        /* 
-         * STATE BURST COMMIT (Fusion #8)
-         * Prepare 64-bit state update. Low 32: deficit/avg, High 32: packed_info.
-         */
-        u32 final_deficit_avg = tctx->deficit_avg_fused;
-        if (avg_runtime != tctx->avg_runtime_us) {
-            u16 curr_deficit = tctx->deficit_us;
-            final_deficit_avg = PACK_DEFICIT_AVG(curr_deficit, avg_runtime);
+        /* Prepare 64-bit state update */
+        u32 final_deficit_avg = tctx_reg->deficit_avg_fused;
+        u16 avg_rt = EXTRACT_AVG_RT(final_deficit_avg);
+        if (wait_time > LONG_SLEEP_THRESHOLD_NS) {
+            avg_rt >>= 1;
+            final_deficit_avg = PACK_DEFICIT_AVG(tctx_reg->deficit_us, avg_rt);
         }
 
         u64 state_fused = ((u64)packed << 32) | final_deficit_avg;
-        cake_relaxed_store_u64(&tctx->state_fused_u64, state_fused);
+        cake_relaxed_store_u64(&tctx_reg->state_fused_u64, state_fused);
+        last_wake = 0;
     }
     
-    /* FUSED STORE: Single u64 write instead of 2x u32 writes (50% reduction) */
-    tctx->timestamps_fused = PACK_TIMESTAMPS(now_ts, last_wake);
+    tctx_reg->timestamps_fused = PACK_TIMESTAMPS(now_ts, last_wake);
 }
 
-/*
- * Task is stopping (yielding or being preempted)
- * 
- * FUSED LOAD-COMPUTE-STORE OPTIMIZATION:
- * Phase 1: Load all data (MLP - parallel memory access)
- * Phase 2: Compute everything (ILP - parallel ALU)
- * Phase 3: Write everything back (single burst)
- * 
- * Saves ~12 cycles by eliminating interleaved R/W.
- */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
-    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    /* scx_bpf_now() clobbers r1-r5; call it first before pinning */
+    u64 now = scx_bpf_now();
+
+    register struct task_struct *p_reg asm("r6") = p;
+    struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
     if (unlikely(!tctx || tctx->last_run_at == 0))
         return;
+    register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
+
+    u64 runtime = (u32)now - tctx_reg->last_run_at;
 
     /*
-     * PHASE 1: LOAD ALL DATA (MLP - Memory Level Parallelism)
-     * Issue all loads simultaneously to hide cache latency.
-     *
-     * RELAXED atomic load: Prevents compiler from splitting the 32-bit read.
-     * Source: Doumler, "Lock-Free Atomic Shared Pointer" (CppCon)
+     * QUAD-PINNING (r6-r9): Keep all critical intermediates in callee-saved slots.
      */
-    u64 now = scx_bpf_now();
-    u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
-    
-    /* FUSED LOAD: Single u32 read instead of 2x u16 reads (50% reduction) */
-    u32 deficit_avg_fused = tctx->deficit_avg_fused;
-    u16 old_deficit_us = EXTRACT_DEFICIT(deficit_avg_fused);
-    u16 old_avg_us = EXTRACT_AVG_RT(deficit_avg_fused);
-    
-    u32 last_run = tctx->last_run_at;
+    register u32 score asm("r8") = compute_sparse_score((cake_relaxed_load_u32(&tctx_reg->packed_info) >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE, runtime);
+    register u32 avg_def asm("r9") = PACK_DEFICIT_AVG(compute_deficit(EXTRACT_DEFICIT(tctx_reg->deficit_avg_fused), runtime),
+                                                      compute_ema_runtime(EXTRACT_AVG_RT(tctx_reg->deficit_avg_fused), runtime));
 
-    /* Extract packed fields (ALU ops while waiting for memory) */
-    u32 old_score = (packed >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE;
-
-    /* Compute runtime from timestamp delta */
-    u64 runtime = (u32)now - last_run;
-
-    /*
-     * PHASE 2: COMPUTE EVERYTHING (ILP - Instruction Level Parallelism)
-     * All operations can execute in parallel on superscalar CPUs.
-     */
-    u16 new_avg_us = compute_ema_runtime(old_avg_us, runtime);
-    u32 new_score = compute_sparse_score(old_score, runtime);
-    u16 new_deficit_us = compute_deficit(old_deficit_us, runtime);
-    u8 new_tier = compute_tier(new_score, new_avg_us);
-
-    /*
-     * COLD PATH: Kthread Priority Floor (Safety Net)
-     *
-     * Most tasks are NOT kthreads, so this branch is rarely taken.
-     * The expensive is_critical_kthread() with its 8-byte p->comm load
-     * is now isolated in the cold function, reducing register pressure
-     * on the hot path from 7+ registers to 0.
-     */
-    if (unlikely(p->flags & PF_KTHREAD))
-        new_tier = apply_kthread_floor_cold(p, new_tier);
-
-    /*
-     * WARMTH CEILING (Inverted Logic)
-     * 
-     * Wait for FAST occupants (low tier), migrate from SLOW occupants (high tier).
-     * Tier 0 tasks finish in ~50µs, tier 6 can take seconds.
-     * 
-     * ceiling = maximum tier we're willing to wait for
-     * If occupant <= ceiling, WAIT (they'll finish fast, keep cache warm)
-     * If occupant > ceiling, MIGRATE (they're too slow)
-     */
-    tctx->preempt_floor = new_tier;  // Wait for same-tier or faster only
-
-    u64 new_slice = compute_slice(new_deficit_us, new_tier);
-
-    /* Stats (compiled out when enable_stats=false) */
-    if (enable_stats) {
-        bool was_gaming = old_score >= THRESHOLD_GAMING;
-        bool is_gaming = new_score >= THRESHOLD_GAMING;
-        if (was_gaming != is_gaming) {
-            struct cake_stats *s = get_local_stats();
-            if (s) {
-                if (is_gaming) s->nr_sparse_promotions++;
-                else s->nr_sparse_demotions++;
-            }
-        }
+    u8 tier = compute_tier(score, (u16)(avg_def >> 16));
+    if (unlikely(p_reg->flags & PF_KTHREAD)) {
+        tier = apply_kthread_floor_cold(p_reg, tier);
     }
 
-    /* Pack new values into packed_info (single u32 write) */
-    u32 new_packed = packed;
-    new_packed &= ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE);
-    new_packed &= ~(MASK_TIER << SHIFT_TIER);
-    new_packed |= (new_score & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
-    new_packed |= (new_tier & MASK_TIER) << SHIFT_TIER;
+    /* Atomic Commit */
+    tctx_reg->preempt_floor = tier;
+    tctx_reg->next_slice = compute_slice((u16)avg_def, tier);
 
-    /*
-     * PHASE 3: STATE BURST COMMIT (Fusion #8)
-     * Zen 4 Store Buffer coalesces both state fields into a single 64-bit transaction.
-     */
-    tctx->next_slice = new_slice;
+    u32 p_bits = cake_relaxed_load_u32(&tctx_reg->packed_info);
+    p_bits &= ~((MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE) | (MASK_TIER << SHIFT_TIER));
+    p_bits |= (score & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
+    p_bits |= (tier & MASK_TIER) << SHIFT_TIER;
 
-    u32 final_deficit_avg = PACK_DEFICIT_AVG(new_deficit_us, new_avg_us);
-    u64 state_fused = ((u64)new_packed << 32) | final_deficit_avg;
-    
-    /* Commit 64-bit fused state at once */
-    cake_relaxed_store_u64(&tctx->state_fused_u64, state_fused);
-
-    /*
-     * NOTE: global_cpu_tiers update moved to cake_running.
-     * Update happens when task STARTS (correct semantics) rather than
-     * when it STOPS (stale data). This also eliminates the helper call
-     * that was causing spills here.
-     */
+    cake_relaxed_store_u64(&tctx_reg->state_fused_u64, ((u64)p_bits << 32) | avg_def);
 }
 
 /*
@@ -1567,33 +1470,27 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
 
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
 {
-    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    /* 
+     * REGISTER PINNING: Pin p to r6 to avoid stack spills.
+     * Satisfies verifier type tracking without volatile barriers.
+     */
+    register struct task_struct *p_reg asm("r6") = p;
+    register struct cake_task_ctx *tctx_reg asm("r7") = get_task_ctx(p_reg, false);
+    register u32 cpu_id_reg asm("r8") = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     
-    /* MERGED GUARD: Single branch for both null and uninitialized */
-    if (unlikely(!tctx || tctx->last_run_at == 0))
+    if (unlikely(!tctx_reg || tctx_reg->last_run_at == 0))
         return;
-
-    /*
-     * PARALLEL LOAD: Fetch tier and timing data simultaneously.
-     * MLP optimization - memory loads issued in parallel.
-     */
-    u8 tier = GET_TIER(tctx);
-    u32 last_run = tctx->last_run_at;
-    u64 threshold = tier_configs[tier & 7].starvation_ns;
-
-    /*
-     * FUSION #3: Hoist cpu_id before starvation check.
-     * Eliminates scx_bpf_task_cpu(p) helper call (~15-20 cycles).
-     * In cake_tick, the task is always running on the current CPU.
-     */
-    u32 cpu_id = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
     /* STATE-FREE JITTER: Uses timestamp bits for variance (0-127µs) */
     u32 now = (u32)scx_bpf_now();
-    u32 jitter = now & 0x7F;
-    threshold += (u64)(jitter << 10);
-
-    /* Compute runtime once, use twice */
+    
+    /* PHASE 1: COMPUTE RUNTIME & THRESHOLDS */
+    register u8 tier_reg asm("r9") = GET_TIER(tctx_reg);
+    u32 last_run = tctx_reg->last_run_at;
+    u64 threshold = tier_configs[tier_reg & 7].starvation_ns;
+    
+    /* Reduced jitter: 0x0F = 15 * 1024ns = ~15.3µs range (Minimizes lockstep without bloating frame times) */
+    threshold += (u64)((now & 0x0F) << 10);
     u64 runtime = (u64)(now - last_run);
 
     /*
@@ -1602,11 +1499,11 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      */
     bool needs_kick = (runtime > threshold);
     if (unlikely(needs_kick)) {
-        scx_bpf_kick_cpu(cpu_id, SCX_KICK_PREEMPT);  /* FUSION #3: Use hoisted cpu_id */
+        scx_bpf_kick_cpu(cpu_id_reg, SCX_KICK_PREEMPT);  /* FUSION #3: Use hoisted cpu_id_reg */
 
-        if (enable_stats && tier < CAKE_TIER_MAX) {
+        if (enable_stats && tier_reg < CAKE_TIER_MAX) {
             struct cake_stats *s = get_local_stats();
-            if (s) s->nr_starvation_preempts_tier[tier]++;
+            if (s) s->nr_starvation_preempts_tier[tier_reg]++;
         }
     }
 
@@ -1617,15 +1514,15 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      *
      * Eligibility: runtime >= 1ms AND tier >= Interactive AND not already victim
      */
-    /* cpu_id already hoisted above (Fusion #3) */
-    struct cake_cpu_shadow *shadow = &global_shadow[cpu_id];
+    /* cpu_id_reg already hoisted above (Fusion #3) */
+    struct cake_cpu_shadow *shadow = &global_shadow[cpu_id_reg];
     
     bool is_eligible = (runtime >> VICTIM_RESIDENCY_BIT) & 
-                       (tier >= REALTIME_DSQ && tier <= BATCH_DSQ) & 
+                       (tier_reg >= REALTIME_DSQ && tier_reg <= BATCH_DSQ) & 
                        !(shadow->packed_state & SHADOW_BIT_VICTIM);
 
     if (unlikely(is_eligible)) {
-        set_victim_status_cold(cpu_id, shadow);
+        set_victim_status_cold(cpu_id_reg, shadow);
     }
 }
 
