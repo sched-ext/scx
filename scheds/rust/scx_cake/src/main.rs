@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use log::{debug, info, warn};
+use log::{info, warn};
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 // Include the generated interface bindings
@@ -373,74 +373,100 @@ impl<'a> Scheduler<'a> {
         // Get effective values (profile + CLI overrides)
         let (quantum, new_flow_bonus, sparse_threshold, starvation) = args.effective_values();
 
-        // Configure the scheduler via rodata (read-only data)
-        // All values are pre-computed here - zero runtime overhead in BPF
-        if let Some(rodata) = &mut open_skel.maps.rodata_data {
-            // Top-level configuration
-            rodata.quantum_ns = quantum * 1000;
-            rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
-            rodata.sparse_threshold = sparse_threshold;
-            rodata.starvation_ns = starvation * 1000;
-            rodata.enable_stats = args.verbose;
-
-            // Pre-computed tier configuration (AoS - single cache line per tier)
-            rodata.tier_configs = args.profile.tier_configs();
-
-            // Topology arrays (zero runtime overhead)
-            rodata.has_multi_llc = topo.has_dual_ccd;
-            rodata.has_hybrid = topo.has_hybrid_cores;
-            rodata.smt_enabled = topo.smt_enabled;
-            rodata.cpu_llc_id = topo.cpu_llc_id;
-            rodata.cpu_is_big = topo.cpu_is_big;
-            rodata.cpu_sibling_map = topo.cpu_sibling_map;
-            rodata.llc_cpu_mask = topo.llc_cpu_mask;
-            rodata.big_cpu_mask = topo.big_cpu_mask;
-        }
-
-        // Load the BPF program
-        let mut skel = open_skel.load().context("Failed to load BPF program")?;
-
-        // Populate Static Topology Preference Map (BSS-Direct Addressing)
-        // Pre-compute CPU preference lists at startup for 0ns BPF lookup.
-        let preference_vectors = topo.generate_preference_map();
-        if let Some(bss) = &mut skel.maps.bss_data {
-            for (cpu, vec) in preference_vectors.iter().enumerate().take(64) {
-                bss.global_topo[cpu].sibling_mask = vec.sibling_mask.load(Ordering::Relaxed);
-                bss.global_topo[cpu].llc_mask = vec.llc_mask.load(Ordering::Relaxed);
-            }
-        }
-        debug!(
-            "Populated BSS topology preference map for {} CPUs",
-            topo.nr_cpus
-        );
-
-        // ETD: Empirical Topology Discovery
-        // Measure inter-core latency via CAS ping-pong and populate core_prefs BSS
+        // ETD: Empirical Topology Discovery (BEFORE BPF load for RODATA population)
+        // Measure inter-core latency via CAS ping-pong
         info!("Starting ETD calibration...");
-        let (latency_matrix, top_peers) =
+        let (latency_matrix, _top_peers) =
             calibrate::calibrate_topology_full(topo.nr_cpus, |current, total, is_complete| {
                 // Update progress gauge inline
                 tui::render_calibration_progress(current, total, is_complete);
             });
 
-        if let Some(bss) = &mut skel.maps.bss_data {
-            for (cpu, peers) in top_peers.iter().enumerate() {
-                if cpu < 64 {
-                    // SWAR Packing: Little Endian [P0, P1, P2, FF]
-                    // 0xFF (255) is the sentinel for "Invalid/Padding"
-                    let packed: u32 = (peers[0] as u32)
-                        | ((peers[1] as u32) << 8)
-                        | ((peers[2] as u32) << 16)
-                        | (0xFF << 24);
+        // Configure the scheduler via rodata (read-only data)
+        if let Some(rodata) = &mut open_skel.maps.rodata_data {
+            rodata.quantum_ns = quantum * 1000;
+            rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
+            rodata.sparse_threshold = sparse_threshold;
 
-                    bss.core_prefs.top_peers_packed[cpu] = packed;
+            // Populate Zero-Math Arbiter LUT
+            let wait_budgets = args.profile.wait_budget();
+            for tier in 0..8 {
+                let budget = wait_budgets[tier];
+                for rank in 0..8 {
+                    let migration_cost = match rank {
+                        0 => 50,   // SMT: cheap
+                        1 => 400,  // Peer 1
+                        2 => 600,  // Peer 2
+                        3 => 800,  // Peer 3
+                        _ => 1200, // Global
+                    };
+
+                    let patience_factor = if budget > migration_cost {
+                        (budget - migration_cost) / 100_000
+                    } else {
+                        0
+                    };
+
+                    rodata.arbiter_cfg.lut[tier][rank] = if patience_factor > 200 { 6 }
+                    else if patience_factor > 50 { 4 }
+                    else if patience_factor > 10 { 3 }
+                    else if patience_factor > 2 { 1 }
+                    else { 0 };
+
+                    if tier == 0 { rodata.arbiter_cfg.lut[tier][rank] = 0; }
                 }
             }
+
+            rodata.starvation_ns = starvation * 1000;
+            rodata.enable_stats = args.verbose;
+            rodata.tier_configs = args.profile.tier_configs();
+
+            // Topology logic
+            rodata.has_multi_llc = topo.has_dual_ccd;
+            rodata.has_hybrid = topo.has_hybrid_cores;
+            rodata.smt_enabled = topo.smt_enabled;
+            rodata.core_thread_mask = topo.core_thread_mask;
+            rodata.cpu_llc_id = topo.cpu_llc_id;
+            rodata.cpu_is_big = topo.cpu_is_big;
+            rodata.cpu_sibling_map = topo.cpu_sibling_map;
+            rodata.llc_cpu_mask = topo.llc_cpu_mask;
+            rodata.big_cpu_mask = topo.big_cpu_mask;
+
+            let unified_topo = calibrate::generate_unified_topology(
+                &latency_matrix,
+                &topo.cpu_sibling_map,
+                &topo.cpu_llc_id,
+                &topo.cpu_is_big,
+                &topo.cpu_core_id,
+                &topo.cpu_thread_bit,
+                &topo.cpu_dsq_id,
+            );
+
+            rodata.nr_cores = topo.nr_cpus as u8 / if topo.smt_enabled { 2 } else { 1 };
+            rodata.nr_cpus_total = topo.nr_cpus as u8;
+
+            let mut core_to_cpu = [0xFFu8; 32];
+            for (cpu, entry) in unified_topo.iter().enumerate().take(64) {
+                rodata.cpu_topo[cpu].sibling = entry.sibling;
+                rodata.cpu_topo[cpu].llc_id = entry.llc_id;
+                rodata.cpu_topo[cpu].peer_1 = entry.peer_1;
+                rodata.cpu_topo[cpu].peer_2 = entry.peer_2;
+                rodata.cpu_topo[cpu].peer_3 = entry.peer_3;
+                rodata.cpu_topo[cpu].flags = entry.flags;
+                rodata.cpu_topo[cpu].core_id = entry.core_id;
+                rodata.cpu_topo[cpu].thread_bit = entry.thread_bit;
+                rodata.cpu_topo[cpu].dsq_id = entry.dsq_id;
+
+                if entry.thread_bit & 1 != 0 && entry.core_id < 32 {
+                    core_to_cpu[entry.core_id as usize] = cpu as u8;
+                }
+            }
+            rodata.core_to_cpu = core_to_cpu;
+            rodata.core_cpu_mask = topo.core_cpu_mask;
         }
-        info!(
-            "ETD: Populated {} CPUs with empirical topology data",
-            topo.nr_cpus
-        );
+
+        // Load the BPF program
+        let skel = open_skel.load().context("Failed to load BPF program")?;
 
         Ok(Self {
             skel,
