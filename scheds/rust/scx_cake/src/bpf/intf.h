@@ -53,26 +53,6 @@ enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
 };
 
-/*
- * Static Topology Vector (populated by userspace at startup)
- * 
- * SIMD-Style Tiered Masks for O(1) CPU Selection
- * 
- * Instead of iterating an array of candidates (O(N) worst case),
- * we intersect pre-computed bitmasks with the global idle_mask.
- * TZCNT on the result gives the best candidate in ~4 cycles.
- * 
- * Tier 1: SMT Sibling (~1-2 cycle L1/L2 cache transfer)
- * Tier 2: LLC Neighbors (~10-30 cycle L3 cache transfer)
- * Tier 3: Global (any idle CPU, handled by caller)
- * 
- * Source: HFT ILP optimization - parallel bitwise intersection
- */
-struct topology_vector {
-    u64 sibling_mask;   /* Tier 1: SMT sibling(s) - fastest cache transfer */
-    u64 llc_mask;       /* Tier 2: Same LLC/CCX cores - shared L3 */
-    u8 _pad[48];        /* Pad to 64 bytes for cache alignment */
-} __attribute__((aligned(64)));
 
 /*
  * CPU STATE ISOLATION (Frasch, 2023)
@@ -98,36 +78,75 @@ struct cake_cpu_tier {
  *   top_peers[2] = {10, 3, 11}  → Core 2's fastest paths are to 10 (SMT),
  *                                  then 3 and 11 (ring neighbors)
  */
-/* struct core_preferences removed - moved to cake.bpf.c */
+
+/*
+ * UNIFIED CPU TOPOLOGY ENTRY (Fused ETD + Topology)
+ * 
+ * Single 8-byte structure per CPU containing:
+ * - SMT sibling (from ETD: guaranteed fastest peer)
+ * - LLC domain ID (for cross-CCD cost assessment)
+ * - Next 3 fastest peers (ring neighbors, ordered by measured latency)
+ * - Flags for P/E core identification
+ * 
+ * Benefits:
+ * - Single cache line fetch for all topology info (~2-3 cycles saved)
+ * - ETD "ground truth" used everywhere (no kernel/measured mismatch)
+ * - Simplified code path in cake_select_cpu
+ * 
+ * Populated by userspace at startup after ETD calibration.
+ * Stored in RODATA for zero-cost constant folding.
+ */
+struct cpu_topology_entry {
+    u8 sibling;        /* SMT sibling CPU ID (0xFF if none) */
+    u8 llc_id;         /* LLC/CCD domain ID (0-7) */
+    u8 peer_1;         /* 2nd fastest peer (ring neighbor) */
+    u8 peer_2;         /* 3rd fastest peer */
+    u8 peer_3;         /* 4th fastest peer */
+    u8 flags;          /* Bit 0: is_big, Bit 1: has_sibling */
+    u8 core_id;        /* Physical core ID (0-31) */
+    u8 thread_bit;     /* Pre-computed (1 << thread_idx) */
+    u32 dsq_id;        /* Pre-computed (CAKE_DSQ_LC_BASE + cpu_id) */
+    u32 _pad;          /* Pad to 16 bytes */
+} __attribute__((packed));
+
+/* Topology flags */
+#define CPU_TOPO_FLAG_IS_BIG      (1 << 0)
+#define CPU_TOPO_FLAG_HAS_SIBLING (1 << 1)
+
+/* Invalid CPU sentinel (no sibling or peer) */
+#define CPU_TOPO_INVALID 0xFF
 
 /*
  * Per-task flow state tracked in BPF
  * Padded to 64B to prevent False Sharing.
  * 
  * OPTIMIZATION: Store Coalescing Layout
- * The first 16 bytes (next_slice, packed_info, deficit, avg_runtime)
+ * The first 16 bytes (next_slice, state_fused_u64)
  * are ALL written together in cake_stopping().
  * 
  * By placing them contiguously, the CPU Store Buffer merges these 
  * into a single burst write, reducing L1 bandwidth pressure by ~50%
  * during context switches.
- * 
- * Source: Frasch, "Lock-Free FIFO" (CppCon 2023)
  */
 struct cake_task_ctx {
     /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
     u64 next_slice;        /* 8B: Pre-computed slice (ns) */
     
-    /* LOAD FUSING: Union allows atomic u32 access to both u16 fields */
+    /* STATE FUSION: Union allows atomic u64 access to both state fields */
     union {
         struct {
-            u16 deficit_us;        /* 2B: Deficit (us), max 65ms */
-            u16 avg_runtime_us;    /* 2B: EMA runtime estimate */
+            union {
+                struct {
+                    u16 deficit_us;        /* 2B: Deficit (us) */
+                    u16 avg_runtime_us;    /* 2B: EMA runtime estimate */
+                };
+                u32 deficit_avg_fused;     /* 4B: Fused access */
+            };
+            u32 packed_info;               /* 4B: Bitfield */
         };
-        u32 deficit_avg_fused;     /* 4B: Fused access (deficit in low 16, avg in high 16) */
+        u64 state_fused_u64;               /* 8B: Direct burst commit */
     };
     
-    u32 packed_info;       /* 4B: Bitfield (Err, Wait, Score, Tier, Flags) */
     
     /* --- Timestamp Group (cake_running) [Bytes 16-23] --- */
     /* LOAD FUSING: Union allows atomic u64 access to both u32 timestamp fields */
@@ -181,9 +200,50 @@ struct cake_task_ctx {
 #define THRESHOLD_CRITICAL     90    /* score >= 90 = Critical */
 #define THRESHOLD_REALTIME    100    /* score == 100 = Realtime+ */
 
-/* Latency gates for score=100 tasks */
-#define LATENCY_GATE_CRITICAL   50   /* < 50µs avg → Critical Latency (tier 0) */
-#define LATENCY_GATE_REALTIME  500   /* < 500µs avg → Realtime (tier 1) */
+/* Latency gates for score=100 tasks (tighter for better tier separation) */
+#define LATENCY_GATE_CRITICAL   25   /* < 25µs avg → Critical Latency (tier 0) - true IRQ */
+#define LATENCY_GATE_REALTIME  100   /* < 100µs avg → Realtime (tier 1) - fast input */
+#define LATENCY_GATE_CRITICAL2 500   /* < 500µs avg → Critical (tier 2) - compositor */
+
+/*
+ * ZERO-MATH ARBITER LUT (Pre-computed Wait/Go Logic)
+ * 
+ * Dimensions: [My_Tier (0-7)][Target_Rank (0-7)]
+ * Value: Threshold Tier (If occupant <= threshold, WAIT. Else GO.)
+ * 
+ * Rank 0: SMT Sibling (Fastest)
+ * Rank 1-3: ETD Peers
+ * Rank 4+: Global / Distant
+ */
+struct arbiter_config {
+    u8 lut[8][8];      /* The decision matrix */
+    u8 _pad[0];        /* Pad to 64 bytes if needed */
+} __attribute__((aligned(64)));
+
+/*
+ * TIERED IDLE MASK (Unified Silicon Map)
+ *
+ * ARCHITECTURE: Unified bit-address space where all masks use Logical CPU IDs.
+ * 
+ * Level 1: core_status[32] - Per-physical-core bytes (SMT-aware)
+ *   Bit 0 = SMT thread 0 idle, Bit 1 = SMT thread 1 idle
+ *
+ * Level 2: logical_hint - 64-bit mask of ALL logical CPUs
+ *
+ * Level 3: physical_hint - 64-bit mask of CPUs belonging to FULLY IDLE cores.
+ *   If CPU i is set in physical_hint, it means core(i) is completely idle.
+ *   This allows direct mask operations: (physical_hint & big_cpu_mask).
+ */
+struct tiered_idle_mask {
+    /* Cache Line 0: Per-core status (read-mostly, non-atomic writes) */
+    u8 core_status[32];  /* Bytes 0-31: Per-core SMT status (up to 32 cores) */
+    u8 _pad0[32];        /* Bytes 32-63: Pad to full cache line */
+
+    /* Cache Line 1: Global atomic state (write-heavy, atomic ops) */
+    u64 physical_hint;    /* Bytes 64-71: 1 bit per CPU if core is fully idle */
+    u64 logical_hint;     /* Bytes 72-79: 1 bit per CPU if thread is idle */
+    u8 _pad1[48];         /* Bytes 80-127: Pad to 128 bytes */
+} __attribute__((aligned(128)));
 
 /*
  * Statistics shared with userspace
