@@ -64,4 +64,18 @@
 
 #endif
 
+/*
+ * BPF ISA ATOMIC TARGETING
+ * ---------------------------------------------------------------------------
+ * Map to BPF_ATOMIC_OR/AND instructions by using __atomic built-ins with
+ * a void cast. This avoids the overhead of the 'fetch' variant (extra regs)
+ * and ensures the JIT emits a single LOCK OR/AND on x86_64.
+ * ---------------------------------------------------------------------------
+ */
+#define bpf_atomic_or(ptr, val) \
+    ((void)__atomic_fetch_or((ptr), (val), __ATOMIC_RELAXED))
+
+#define bpf_atomic_and(ptr, val) \
+    ((void)__atomic_fetch_and((ptr), (val), __ATOMIC_RELAXED))
+
 #endif /* __CAKE_BPF_COMPAT_H */
