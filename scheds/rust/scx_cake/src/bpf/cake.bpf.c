@@ -1521,22 +1521,31 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
     
     tiered_idle.core_status[core_id & 31] = new_status;
 
-    /* LOGICAL UPDATE: 1 bit per thread */
+    /* LOGICAL UPDATE: 1 bit per thread (Gated Test-and-Test-and-Set) */
+    u64 target_bit = (1ULL << c);
     if (idle) {
-        __atomic_fetch_or(&idle_mask_logical, (1ULL << c), __ATOMIC_RELEASE);
+        if (!(cake_relaxed_load_u64(&idle_mask_logical) & target_bit)) {
+            bpf_atomic_or(&idle_mask_logical, target_bit);
+        }
     } else {
-        __atomic_fetch_and(&idle_mask_logical, ~(1ULL << c), __ATOMIC_RELEASE);
+        if (cake_relaxed_load_u64(&idle_mask_logical) & target_bit) {
+            bpf_atomic_and(&idle_mask_logical, ~target_bit);
+        }
     }
 
     /* PHYSICAL UPDATE: Manage CPU bits for fully idle cores */
     u8 target_mask = core_thread_mask[core_id & 31];
     u64 core_mask = core_cpu_mask[core_id & 31];
     if (idle && new_status == target_mask) {
-        /* Core just became fully idle: set ALL its CPU bits in physical_hint */
-        __atomic_fetch_or(&idle_mask_physical, core_mask, __ATOMIC_RELEASE);
+        /* Core just became fully idle: set ALL its CPU bits in physical_hint (Gated TTAS) */
+        if (!(cake_relaxed_load_u64(&idle_mask_physical) & core_mask)) {
+            bpf_atomic_or(&idle_mask_physical, core_mask);
+        }
     } else if (!idle && old_status == target_mask) {
-        /* Core is no longer fully idle: clear ALL its CPU bits in physical_hint */
-        __atomic_fetch_and(&idle_mask_physical, ~core_mask, __ATOMIC_RELEASE);
+        /* Core is no longer fully idle: clear ALL its CPU bits in physical_hint (Gated TTAS) */
+        if (cake_relaxed_load_u64(&idle_mask_physical) & core_mask) {
+            bpf_atomic_and(&idle_mask_physical, ~core_mask);
+        }
     }
 
     /* FUSION #6: Use inline helper for victim cleanup (deduplication) */
