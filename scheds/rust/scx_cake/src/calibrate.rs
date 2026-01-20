@@ -232,53 +232,50 @@ where
     let total_pairs = (nr_cpus * (nr_cpus - 1)) / 2;
     let mut current_pair = 0;
 
+    #[allow(clippy::needless_range_loop)]
     for cpu_a in 0..nr_cpus {
         for cpu_b in (cpu_a + 1)..nr_cpus {
             current_pair += 1;
             let mut retry_count = 0;
             const MAX_RETRIES: u32 = 3;
 
-            loop {
-                if let Some(samples) = measure_pair(cpu_a, cpu_b, config) {
-                    if !samples.is_empty() {
-                        // Calculate mean and standard deviation
-                        let n = samples.len() as f64;
-                        let mean = samples.iter().sum::<f64>() / n;
-                        let variance = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
-                        let stddev = variance.sqrt();
+            while let Some(samples) = measure_pair(cpu_a, cpu_b, config) {
+                if !samples.is_empty() {
+                    // Calculate mean and standard deviation
+                    let n = samples.len() as f64;
+                    let mean = samples.iter().sum::<f64>() / n;
+                    let variance = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+                    let stddev = variance.sqrt();
 
-                        // Check if variance is acceptable (no IRQ interference)
-                        if stddev <= config.max_stddev || retry_count >= MAX_RETRIES {
-                            // Use median for final value (more robust than mean)
-                            let mut sorted = samples;
-                            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                            let median = sorted[sorted.len() / 2];
+                    // Check if variance is acceptable (no IRQ interference)
+                    if stddev <= config.max_stddev || retry_count >= MAX_RETRIES {
+                        // Use median for final value (more robust than mean)
+                        let mut sorted = samples;
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let median = sorted[sorted.len() / 2];
 
-                            matrix[cpu_a][cpu_b] = median;
-                            matrix[cpu_b][cpu_a] = median;
+                        matrix[cpu_a][cpu_b] = median;
+                        matrix[cpu_b][cpu_a] = median;
 
-                            if stddev > config.max_stddev {
-                                debug!(
-                                    "ETD: CPU {}<->{} stddev={:.1}ns (exceeded threshold after {} retries)",
-                                    cpu_a, cpu_b, stddev, retry_count
-                                );
-                            }
-
-                            // Report progress (not complete yet)
-                            progress_callback(current_pair, total_pairs, false);
-                            break;
-                        } else {
-                            retry_count += 1;
+                        if stddev > config.max_stddev {
                             debug!(
-                                "ETD: CPU {}<->{} stddev={:.1}ns > {:.1}ns, retrying ({}/{})",
-                                cpu_a, cpu_b, stddev, config.max_stddev, retry_count, MAX_RETRIES
+                                "ETD: CPU {}<->{} stddev={:.1}ns (exceeded threshold after {} retries)",
+                                cpu_a, cpu_b, stddev, retry_count
                             );
                         }
+
+                        // Report progress (not complete yet)
+                        progress_callback(current_pair, total_pairs, false);
+                        break;
                     } else {
-                        break; // Empty samples, skip
+                        retry_count += 1;
+                        debug!(
+                            "ETD: CPU {}<->{} stddev={:.1}ns > {:.1}ns, retrying ({}/{})",
+                            cpu_a, cpu_b, stddev, config.max_stddev, retry_count, MAX_RETRIES
+                        );
                     }
                 } else {
-                    break; // Measurement failed, skip
+                    break; // Empty samples, skip
                 }
             }
         }
@@ -333,7 +330,7 @@ pub fn extract_top_peers(matrix: &[Vec<f64>], top_n: usize) -> Vec<[u8; 3]> {
             "ETD: CPU {:2} top peers: {:?} (latencies: {:.1}ns, {:.1}ns, {:.1}ns)",
             cpu,
             result[cpu],
-            peers.get(0).map(|p| p.1).unwrap_or(0.0),
+            peers.first().map(|p| p.1).unwrap_or(0.0),
             peers.get(1).map(|p| p.1).unwrap_or(0.0),
             peers.get(2).map(|p| p.1).unwrap_or(0.0)
         );

@@ -390,8 +390,7 @@ impl<'a> Scheduler<'a> {
 
             // Populate Zero-Math Arbiter LUT
             let wait_budgets = args.profile.wait_budget();
-            for tier in 0..8 {
-                let budget = wait_budgets[tier];
+            for (tier, &budget) in wait_budgets.iter().enumerate().take(8) {
                 for rank in 0..8 {
                     let migration_cost = match rank {
                         0 => 50,   // SMT: cheap
@@ -407,13 +406,21 @@ impl<'a> Scheduler<'a> {
                         0
                     };
 
-                    rodata.arbiter_cfg.lut[tier][rank] = if patience_factor > 200 { 6 }
-                    else if patience_factor > 50 { 4 }
-                    else if patience_factor > 10 { 3 }
-                    else if patience_factor > 2 { 1 }
-                    else { 0 };
+                    rodata.arbiter_cfg.lut[tier][rank] = if patience_factor > 200 {
+                        6
+                    } else if patience_factor > 50 {
+                        4
+                    } else if patience_factor > 10 {
+                        3
+                    } else if patience_factor > 2 {
+                        1
+                    } else {
+                        0
+                    };
 
-                    if tier == 0 { rodata.arbiter_cfg.lut[tier][rank] = 0; }
+                    if tier == 0 {
+                        rodata.arbiter_cfg.lut[tier][rank] = 0;
+                    }
                 }
             }
 
@@ -576,14 +583,14 @@ impl<'a> Scheduler<'a> {
         let (q, _nfb, st, starv) = self.args.effective_values();
         let profile_str = format!("{:?}", self.args.profile).to_uppercase();
 
-        tui::render_startup_screen(
-            &self.topology,
-            &self.latency_matrix,
-            &profile_str,
-            q,
-            st,
-            starv,
-        )
+        tui::render_startup_screen(tui::StartupParams {
+            topology: &self.topology,
+            latency_matrix: &self.latency_matrix,
+            profile: &profile_str,
+            quantum: q,
+            sparse_threshold: st,
+            starvation: starv,
+        })
     }
 }
 
