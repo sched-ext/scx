@@ -93,7 +93,7 @@ struct task_ctx_x {
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
 	u64	slice;		/* base time slice */
-	u32	lat_cri;		/* final context-aware latency criticality */
+	u16	normalized_lat_cri;	/* lat_cri normalized to [0, 1024] scale */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u16	static_prio;	/* nice priority */
 	u64	rerunnable_interval;	/* rerunnable interval in ns: [last quiescent, last runnable] */
@@ -105,7 +105,7 @@ struct task_ctx_x {
 	u32	perf_cri;		/* performance criticality of a task */
 	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	cpuperf_cur;	/* CPU's current performance target */
-	u64	cpu_util;	/* cpu utilization in [0..100] */
+	u32	lat_capacity;	/* latency capacity: 1024 - avg_stolen_est */
 	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
 	u32	nr_active;	/* number of active cores */
 	u64	dsq_id;		/* CPU's associated DSQ */

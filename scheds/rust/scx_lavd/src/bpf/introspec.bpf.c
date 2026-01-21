@@ -65,7 +65,7 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	for (i = 0; i < sizeof(m->taskc_x.waker_comm) && can_loop; i++)
 		((char *)m->taskc_x.waker_comm)[i] = ((char __arena *)taskc->waker_comm)[i];
 	m->taskc_x.slice = taskc->slice;
-	m->taskc_x.lat_cri = taskc->lat_cri;
+	m->taskc_x.normalized_lat_cri = taskc->normalized_lat_cri;
 	m->taskc_x.avg_lat_cri = sys_stat.avg_lat_cri;
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.rerunnable_interval = time_delta(taskc->last_quiescent_clk, taskc->last_runnable_clk);
@@ -77,7 +77,7 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.perf_cri = taskc->perf_cri;
 	m->taskc_x.thr_perf_cri = sys_stat.thr_perf_cri;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
-	m->taskc_x.cpu_util = s2p(cpuc->avg_util);
+	m->taskc_x.lat_capacity = cpuc->lat_capacity;
 	m->taskc_x.cpu_sutil = s2p(cpuc->avg_sc_util);
 	m->taskc_x.nr_active = sys_stat.nr_active;
 	m->taskc_x.dsq_id = cpdomc->id;
