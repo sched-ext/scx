@@ -610,10 +610,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		struct bpf_cpumask *lat_avail_mask = bpf_cpumask_create();
 		if (lat_avail_mask) {
 			s32 lat_cpu = find_latency_available_cpu(p, ictx.taskc, cpu_id, lat_avail_mask);
-			if (lat_cpu >= 0) {
+			if (lat_cpu >= 0)
 				cpu_id = lat_cpu;
-				// TODO: Put it in per-cpu DSQ please.
-			}
 			bpf_cpumask_release(lat_avail_mask);
 		}
 	}
@@ -638,7 +636,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		if (!queued_on_cpu(cpuc)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, ictx.taskc);
 			p->scx.slice = LAVD_SLICE_MAX_NS_DFL;
+			/* Because we're on the select path, SCX_DSQ_LOCAL *actually* targets
+			 * the local DSQ of the CPU *RETURNED* by the select_cpu operation.
+			*/
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+			// scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu_id, p->scx.slice, 0);
 			goto out;
 		}
 	} else {
@@ -807,7 +809,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {
-		dsq_id = get_target_dsq_id(p, cpuc);
+		dsq_id = get_target_dsq_id(p, cpuc, taskc);
 		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
 					 p->scx.dsq_vtime, enq_flags);
 	}
@@ -872,7 +874,7 @@ int enqueue_cb(struct task_struct __arg_trusted *p)
 	/*
 	 * Enqueue the task to a DSQ.
 	 */
-	dsq_id = get_target_dsq_id(p, cpuc);
+	dsq_id = get_target_dsq_id(p, cpuc, taskc);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime, 0);
 
 	return 0;

@@ -893,6 +893,8 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 				 */
 				avg_util = cpuc->avg_util;
 				if (avg_util < lowest_util) {
+					// bpf_printk("lat_avail: new best_cpu=%d util=%u prev_lowest=%u",
+					// 	   cpu, avg_util, lowest_util);
 					lowest_util = avg_util;
 					best_cpu = cpu;
 				}
@@ -910,8 +912,9 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 	} else {
 		cpu_id = bpf_cpumask_any_distribute(cast_mask(lat_avail_mask));
 		if (cpu_id >= nr_cpu_ids)
-			cpu_id = -ENOENT;
+			return -ENOENT;
 	}
 
+	taskc->per_cpu_dsq_only = true;
 	return cpu_id;
 }

@@ -333,9 +333,11 @@ bool queued_on_cpu(struct cpu_ctx *cpuc)
 	return false;
 }
 __hidden
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc)
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc)
 {
 	if (per_cpu_dsq || (pinned_slice_ns && is_pinned(p)))
+		return cpu_to_dsq(cpuc->cpu_id);
+	if (taskc && taskc->per_cpu_dsq_only)
 		return cpu_to_dsq(cpuc->cpu_id);
 	return cpdom_to_dsq(cpuc->cpdom_id);
 }

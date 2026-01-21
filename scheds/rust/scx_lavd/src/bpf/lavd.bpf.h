@@ -165,6 +165,7 @@ struct task_ctx {
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	u32	prev_cpu_id;		/* where a task ran last time */
 	u32	cpu_id;			/* where a task is running now */
+	bool	per_cpu_dsq_only;	/* if true, schedule only in per-CPU DSQs, not shared per-domain DSQ */
 
 	/* --- cacheline 3 boundary (192 bytes) --- */
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
@@ -424,7 +425,7 @@ static __always_inline bool use_cpdom_dsq(void)
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
