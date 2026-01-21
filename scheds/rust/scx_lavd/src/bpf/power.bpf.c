@@ -7,6 +7,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "util.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -71,10 +72,10 @@ volatile static int	pco_idx;
  * Big & LITTLE core's capacities
  */
 /* Total compute capacity of online CPUs. */
-u64		total_capacity;
+u64		total_max_capacity;
 
 /* Capacity of one LITTLEst CPU. */
-u64		one_little_capacity;
+u64		one_little_max_capacity;
 
 /* Big core's compute ratio among currently active cores scaled by 1024. */
 u32		cur_big_core_scale;
@@ -91,6 +92,91 @@ static u64		LAVD_AP_HIGH_CAP;
 volatile int		power_mode;
 volatile u64		last_power_mode_clk;
 volatile bool		is_powersave_mode;
+
+__hidden
+void update_effective_capacity(struct cpu_ctx *cpuc)
+{
+	/* WARNING: This should be called after updating cpuc->cur_util. */
+	extern struct cpufreq_policy *cpufreq_cpu_data __ksym;
+	extern const unsigned long hw_pressure __ksym __weak;
+
+	u16 capacity_policy = 0, capacity_observed;
+	unsigned long *p_pressure, pressure = 0;
+	struct cpufreq_policy **base, *policy;
+	u32 mfo;
+	int cpu;
+
+	/* Sanity check */
+	if (!cpuc || cpuc->cpu_id < 0 || cpuc->cpu_id >= nr_cpu_ids)
+		return;
+	cpu = cpuc->cpu_id;
+
+	/*
+	 * Calculate the maximum capacity available at the moment which is
+	 * restricted by scaling_max_freq and thermal pressure.
+	 *
+	 * Note that we cannot rely on rq->cpu_capacity since it is not
+	 * updated when an SCX scheduler is running.
+	 *
+	 * Note that if CPU frequency and thermal are autonomously controlled
+	 * by a microcontroller, `policy` and `p_pressure` would be null.
+	 */
+	capacity_policy = cpuc->max_capacity;
+
+	if (unlikely((base = (struct cpufreq_policy **)&cpufreq_cpu_data) &&
+	    (bpf_probe_read_kernel(&policy, sizeof(policy), base + cpu) == 0) &&
+	    policy)) {
+		u32 cpu_max = BPF_CORE_READ(policy, cpuinfo.max_freq);
+		u32 scaling_max = BPF_CORE_READ(policy, max);
+
+		if (cpu_max > 0 && scaling_max > 0)
+			capacity_policy = (capacity_policy * scaling_max) / cpu_max;
+	}
+
+	if (unlikely(&hw_pressure &&
+	    (p_pressure = bpf_per_cpu_ptr(&hw_pressure, cpu)))) {
+		pressure = *p_pressure;
+		capacity_policy = (capacity_policy > pressure)?
+				capacity_policy - pressure : 0;
+	}
+
+	/*
+	 * Calculate the maximum capacity observed. This is necessary because
+	 * the CPU capacity can be throttled without changing the software
+	 * policy (scaling_max_freq) or notifying the loss of capacity
+	 * (hw_pressure) due to thermal conditions or power budget constraints.
+	 *
+	 * If the CPU utilization is high (say, 80%), it is very likely
+	 * that the CPU was at its highest capacity given the policy, thermal,
+	 * and power constraints. Then, choose the max frequency observed
+	 * within an interval and calculate its moving average.
+	 *
+	 * Note that we don’t care about the CAS failure, since it indicates
+	 * the higher capacity was observed in the middle.
+	 *
+	 * Note that cpuc->max_freq is [0:1024].
+	 */
+	mfo = __sync_val_compare_and_swap(&cpuc->max_freq_observed,
+					  cpuc->max_freq_observed, 0);
+	if ((mfo > 0) && ((cpuc->max_freq < mfo) ||
+	    (cpuc->cur_util >= LAVD_CPU_UTIL_THR_FOR_MAX_FREQ))) {
+		cpuc->max_freq = calc_avg32(cpuc->max_freq, mfo);
+	}
+	capacity_observed = (cpuc->max_capacity * cpuc->max_freq) >> LAVD_SHIFT;
+
+	/*
+	 * Choose the min between the policy-enforced capacity and
+	 * the actual observed capacity as effective capacity.
+	 */
+	if (likely(capacity_policy)) {
+		cpuc->effective_capacity = min(capacity_policy, capacity_observed);
+	} else {
+		cpuc->effective_capacity = capacity_observed;
+	}
+
+	debugln("[cpu%d] effective_capacity: %d -- capacity_policy: %d -- capacity_observed: %d -- maximum_freq_observed: %d -- hw_pressure: %u",
+		cpu, cpuc->effective_capacity, capacity_policy, capacity_observed, mfo, pressure);
+}
 
 __hidden
 int reset_suspended_duration(struct cpu_ctx *cpuc)
@@ -173,18 +259,22 @@ static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
 	 * avg_sc_util is confusing. So, let's convert it to 100% scale when
 	 * all CPUs are 100% utilized.
 	 */
-	return (avg_sc_util * nr_cpus_onln * 1000) / total_capacity;
+	return (avg_sc_util * nr_cpus_onln * 1000) / total_max_capacity;
 }
 
 static int calc_nr_active_cpus(void)
 {
-	u64 req_cap;
-	int i;
+	u64 req_cap, eff_cap, sum_eff_cap;
+	struct cpu_ctx *cpuc;
+	int i, j;
+	u16 cpu;
 
 	/*
-	 * First, calculate the required compute capacity:
+	 * First, calculate the required compute capacity. Give some (say 25%)
+	 * headroom to handle sudden load spikes smoothly.
 	 */
 	req_cap = calc_required_capacity();
+	req_cap += (req_cap * LAVD_CC_REQ_CAPACITY_HEADROOM) >> LAVD_SHIFT;
 
 	/*
 	 * Then, determine the number of active CPUs that meet the required
@@ -194,29 +284,31 @@ static int calc_nr_active_cpus(void)
 		/*
 		 * When the energy model is not available, update the PCO
 		 * index based on the power mode. Then, fill the required
-		 * compute capacity in the CPU preference order, utilizing
+		 * effective capacity in the CPU preference order, utilizing
 		 * each CPU in a certain % (LAVD_CC_PER_CPU_UTIL).
 		 */
-		const volatile u16 *cpu_order = get_cpu_order();
-		u64 cap_cpu, cap_sum = 0;
-		u16 cpu_id;
-
 		if (is_powersave_mode)
 			WRITE_ONCE(pco_idx, 0);
 		else
 			WRITE_ONCE(pco_idx, nr_pco_states - 1);
 
+		const volatile u16 *cpu_order = get_cpu_order();
+		sum_eff_cap = 0;
 		bpf_for(i, 0, nr_cpu_ids) {
 			if (i >= LAVD_CPU_ID_MAX)
 				break;
 
-			cpu_id = cpu_order[i];
-			if (cpu_id >= LAVD_CPU_ID_MAX)
+			cpu = cpu_order[i];
+			if (cpu >= LAVD_CPU_ID_MAX)
 				break;
 
-			cap_cpu = cpu_capacity[cpu_id];
-			cap_sum += (cap_cpu * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
-			if (cap_sum >= req_cap)
+			cpuc = get_cpu_ctx_id(cpu);
+			if (!cpuc || !cpuc->is_online)
+				continue;
+
+			eff_cap = cpuc->effective_capacity; 
+			sum_eff_cap += (eff_cap * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
+			if (sum_eff_cap >= req_cap)
 				return i + 1;
 		}
 	} else {
@@ -231,25 +323,45 @@ static int calc_nr_active_cpus(void)
 				break;
 
 			if (pco_bounds[i] >= req_cap) {
-				WRITE_ONCE(pco_idx, i);
-				return pco_nr_primary[i];
+				const volatile u16 *cpu_order = pco_table[i];
+				sum_eff_cap = 0;
+
+				bpf_for(j, 0, pco_nr_primary[i]) {
+					if (j >= LAVD_CPU_ID_MAX)
+						break;
+
+					cpu = cpu_order[j];
+					if (cpu >= LAVD_CPU_ID_MAX)
+						break;
+
+					cpuc = get_cpu_ctx_id(cpu);
+					if (!cpuc || !cpuc->is_online)
+						continue;
+
+					eff_cap = cpuc->effective_capacity; 
+					sum_eff_cap += (eff_cap * LAVD_CC_PER_CPU_UTIL) >> LAVD_SHIFT;
+					if (sum_eff_cap >= req_cap) {
+						WRITE_ONCE(pco_idx, i);
+						return pco_nr_primary[i];
+					}
+				}
 			}
 		}
+
+		WRITE_ONCE(pco_idx, nr_pco_states - 1);
 	}
 
-	/* Should not be here. */
 	return nr_cpu_ids;
 }
 
 __weak
 int do_core_compaction(void)
 {
-	const volatile u16 *cpu_order;
-	struct cpu_ctx *cpuc;
+	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
 	struct bpf_cpumask *active, *ovrflw;
+	const volatile u16 *cpu_order;
 	struct cpdom_ctx *cpdomc;
 	int nr_active, cpu, i;
-	u32 sum_capacity = 0, big_capacity = 0, nr_active_cpdoms = 0;
 	u64 cpdom_id;
 
 	bpf_rcu_read_lock();
@@ -277,6 +389,8 @@ int do_core_compaction(void)
 	 * Assign active and overflow cores.
 	 */
 	bpf_for(i, 0, nr_cpu_ids) {
+		struct cpu_ctx *cpuc;
+
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -304,7 +418,7 @@ int do_core_compaction(void)
 			 */
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
-				cpdomc->cap_sum_temp += cpuc->capacity;
+				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 				cpdomc->nr_acpus_temp++;
 			}
 
@@ -355,9 +469,9 @@ int do_core_compaction(void)
 		/*
 		 * Calculate big capacity ratio if a CPU is on.
 		 */
-		sum_capacity += cpuc->capacity;
+		sum_capacity += cpuc->effective_capacity;
 		if (cpuc->big_core)
-			big_capacity += cpuc->capacity;
+			big_capacity += cpuc->effective_capacity;
 	}
 
 	cur_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
@@ -667,7 +781,7 @@ int reinit_active_cpumask_for_performance(void)
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->capacity;
+				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 			}
 		}
 	} else {
@@ -688,7 +802,7 @@ int reinit_active_cpumask_for_performance(void)
 			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->capacity;
+				cpdomc->cap_sum_temp += cpuc->effective_capacity;
 			}
 		}
 
@@ -771,21 +885,6 @@ u16 get_cpuperf_cap(s32 cpu)
 	return 0;
 }
 
-u64 scale_cap_freq(u64 dur, s32 cpu)
-{
-	u64 cap, freq, scaled_dur;
-
-	/*
-	 * Scale the duration by CPU capacity and frequency, so calculate
-	 * capacity-invariant and frequency-invariant time duration.
-	 */
-	cap = get_cpuperf_cap(cpu);
-	freq = scx_bpf_cpuperf_cur(cpu);
-	scaled_dur = (dur * cap * freq) >> (LAVD_SHIFT * 2);
-
-	return scaled_dur;
-}
-
 u64 scale_cap_max_freq(u64 dur, s32 cpu)
 {
 	u64 cap, scaled_dur;
@@ -805,9 +904,9 @@ static void do_update_autopilot_high_cap(void)
 	u64 c;
 
 	if (is_smt_active)
-		c = (total_capacity * LAVD_AP_HIGH_UTIL_DFL_SMT_RT);
+		c = (total_max_capacity * LAVD_AP_HIGH_UTIL_DFL_SMT_RT);
 	else
-		c = (total_capacity * LAVD_AP_HIGH_UTIL_DFL_NO_SMT_RT);
+		c = (total_max_capacity * LAVD_AP_HIGH_UTIL_DFL_NO_SMT_RT);
 
 	LAVD_AP_HIGH_CAP = c >> LAVD_SHIFT;
 }
@@ -827,7 +926,7 @@ int init_autopilot_caps(void)
 		 * When the energy model is not available, rely on the heuristics.
 		 * We move up to the balanced mode if one core is half utilized.
 		 */
-		LAVD_AP_LOW_CAP = one_little_capacity / 2;
+		LAVD_AP_LOW_CAP = one_little_max_capacity / 2;
 		do_update_autopilot_high_cap();
 	} else {
 		/*

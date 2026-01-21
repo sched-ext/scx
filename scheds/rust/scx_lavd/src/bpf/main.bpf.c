@@ -185,6 +185,7 @@
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
+#include "power.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -476,7 +477,7 @@ static void account_task_runtime(struct task_struct *p,
 	runtime = exec_delta;
 
 	svc_time = runtime / p->scx.weight;
-	sc_time = scale_cap_freq(runtime, cpuc->cpu_id);
+	sc_time = scale_cap_freq(runtime, cpuc);
 
 	WRITE_ONCE(cpuc->tot_task_time, cpuc->tot_task_time + task_time);
 	WRITE_ONCE(cpuc->tot_svc_time, cpuc->tot_svc_time + svc_time);
@@ -1430,7 +1431,7 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	cpu_ctx_init_online(cpuc, cpu, now);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
-	__sync_fetch_and_add(&total_capacity, cpuc->capacity);
+	__sync_fetch_and_add(&total_max_capacity, cpuc->max_capacity);
 	update_autopilot_high_cap();
 	update_sys_stat();
 }
@@ -1453,7 +1454,7 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	cpu_ctx_init_offline(cpuc, cpu, now);
 
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
-	__sync_fetch_and_sub(&total_capacity, cpuc->capacity);
+	__sync_fetch_and_sub(&total_max_capacity, cpuc->max_capacity);
 	update_autopilot_high_cap();
 	update_sys_stat();
 }
@@ -1567,7 +1568,7 @@ void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
 	 * utilization.
 	 */
 	dur = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
-	scaled_dur = scale_cap_freq(dur, cpu);
+	scaled_dur = scale_cap_freq(dur, cpuc);
 	cpuc->tot_sc_time += scaled_dur;
 
 	/*
@@ -1822,7 +1823,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initialize CPU info
 	 */
-	one_little_capacity = LAVD_SCALE;
+	one_little_max_capacity = LAVD_SCALE;
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		if (cpu >= LAVD_CPU_ID_MAX)
 			break;
@@ -1871,17 +1872,19 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->offline_clk = now;
 		cpuc->cpu_release_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
-		cpuc->capacity = cpu_capacity[cpu];
+		cpuc->max_capacity = cpu_capacity[cpu];
+		cpuc->effective_capacity = cpuc->max_capacity;
 		cpuc->big_core = cpu_big[cpu];
 		cpuc->turbo_core = cpu_turbo[cpu];
 		cpuc->min_perf_cri = LAVD_SCALE;
+		cpuc->max_freq = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
-		sum_capacity += cpuc->capacity;
+		sum_capacity += cpuc->max_capacity;
 
 		if (cpuc->big_core) {
 			nr_cpus_big++;
-			big_capacity += cpuc->capacity;
+			big_capacity += cpuc->max_capacity;
 			bpf_cpumask_set_cpu(cpu, big);
 		}
 		else {
@@ -1893,11 +1896,11 @@ static s32 init_per_cpu_ctx(u64 now)
 			have_turbo_core = true;
 		}
 
-		if (cpuc->capacity < one_little_capacity)
-			one_little_capacity = cpuc->capacity;
+		if (cpuc->max_capacity < one_little_max_capacity)
+			one_little_max_capacity = cpuc->max_capacity;
 	}
 	default_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
-	total_capacity = sum_capacity;
+	total_max_capacity = sum_capacity;
 
 	/*
 	 * Initialize compute domain id.
@@ -1936,7 +1939,7 @@ static s32 init_per_cpu_ctx(u64 now)
 				if (bpf_cpumask_test_cpu(cpu, online_cpumask)) {
 					bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					cpdomc->nr_active_cpus++;
-					cpdomc->cap_sum_active_cpus += cpuc->capacity;
+					cpdomc->cap_sum_active_cpus += cpuc->effective_capacity;
 				}
 			}
 		}
@@ -1952,9 +1955,9 @@ static s32 init_per_cpu_ctx(u64 now)
 			err = -ESRCH;
 			goto unlock_out;
 		}
-		debugln("cpu[%d] capacity: %d, big_core: %d, turbo_core: %d, "
+		debugln("cpu[%d] max_capacity: %d, big_core: %d, turbo_core: %d, "
 			"cpdom_id: %llu, alt_id: %llu",
-			cpu, cpuc->capacity, cpuc->big_core, cpuc->turbo_core,
+			cpu, cpuc->max_capacity, cpuc->big_core, cpuc->turbo_core,
 			cpuc->cpdom_id, cpuc->cpdom_alt_id);
 	}
 

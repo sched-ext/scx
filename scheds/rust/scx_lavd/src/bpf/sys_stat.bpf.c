@@ -7,6 +7,7 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
+#include "power.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -73,8 +74,12 @@ struct sys_stat_ctx {
 	u32		cur_sc_util;
 };
 
-static void init_sys_stat_ctx(struct sys_stat_ctx *c)
+static struct sys_stat_ctx ctx;
+
+static void init_sys_stat_ctx(void)
 {
+	struct sys_stat_ctx *c = &ctx;
+
 	__builtin_memset(c, 0, sizeof(*c));
 
 	c->min_perf_cri = LAVD_SCALE;
@@ -83,10 +88,11 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
-static void collect_sys_stat(struct sys_stat_ctx *c)
+static void collect_sys_stat(void)
 {
+	struct sys_stat_ctx *c = &ctx;
 	struct cpdom_ctx *cpdomc;
-	u64 cpdom_id, compute, non_scx_time, sc_non_scx_time, cpuc_tot_sc_time;
+	u64 cpdom_id, compute = 1;
 	int cpu;
 
 	/*
@@ -127,12 +133,13 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Collect statistics for each CPU (phase 1).
 	 *
-	 * Note that we divide the loop into phases 1 and 2 to lower the
+	 * Note that we divide the loop into multiple phases to lower the
 	 * verification burden and to avoid a verification error. Someday,
-	 * when the verifier gets smarter, we can merge phases 1 and 2
-	 * into one.
+	 * when the verifier gets smarter, we can merge those phases into
+	 * one.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		u64 non_scx_time, sc_non_scx_time, cpuc_tot_sc_time;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;
@@ -222,6 +229,27 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 */
 		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
 			c->tsct_spike += cpuc_tot_sc_time;
+	}
+
+	/*
+	 * Collect statistics for each CPU (phase 2).
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			c->compute_total = 0;
+			break;
+		}
+
+		/*
+		 * Update the effective capacity of this CPU -- the capacity
+		 * that this CPU can achieve considering all the constraints,
+		 * such as policy, thermal, power, etc.
+		 *
+		 * WARNING: This should be called after updating cpuc->cur_util.
+		 */
+		update_effective_capacity(cpuc);
+
 		/*
 		 * Accumulate statistics.
 		 */
@@ -261,7 +289,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 
 	/*
-	 * Collect statistics for each CPU (phase 2).
+	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -303,8 +331,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 }
 
-static void calc_sys_stat(struct sys_stat_ctx *c)
+static void calc_sys_stat(void)
 {
+	struct sys_stat_ctx *c = &ctx;
 	static int cnt = 0;
 	u64 avg_svc_time = 0, cur_sc_util, scu_spike;
 
@@ -452,11 +481,9 @@ static void calc_sys_time_slice(void)
 
 static int do_update_sys_stat(void)
 {
-	struct sys_stat_ctx c;
-
-	init_sys_stat_ctx(&c);
-	collect_sys_stat(&c);
-	calc_sys_stat(&c);
+	init_sys_stat_ctx();
+	collect_sys_stat();
+	calc_sys_stat();
 
 	return 0;
 }

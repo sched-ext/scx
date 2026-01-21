@@ -86,12 +86,14 @@ enum consts_internal {
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
 
-	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
-
-	LAVD_SYS_STAT_INTERVAL_NS	= (2 * LAVD_SLICE_MAX_NS_DFL),
+	LAVD_SYS_STAT_INTERVAL_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CC_PER_CPU_UTIL		= p2s(40), /* 40%: maximum per-CPU utilization */
+	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
+	LAVD_CPU_UTIL_THR_FOR_MAX_FREQ	= p2s(80), /* cpu utilization threshold to update max freq */
+
+	LAVD_CC_REQ_CAPACITY_HEADROOM	= p2s(25), /* 25%: inflate required capacity by 25% to handle sudden spikes */
+	LAVD_CC_PER_CPU_UTIL		= p2s(50), /* 50%: maximum per-CPU utilization */
 	LAVD_CC_UTIL_SPIKE		= p2s(90), /* When the CPU utilization is almost full (90%),
 						      it is likely that the actual utilization is even
 						      higher than that. */
@@ -230,13 +232,16 @@ struct cpu_ctx {
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	running_clk;	/* when a task starts running */
 	volatile u16	lat_cri;	/* latency criticality */
+	volatile u16	effective_capacity;/* the capacity that CPU can do right now */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
 	volatile u64	sum_lat_cri;	/* sum of latency criticality */
-	volatile u64	sum_perf_cri;	/* sum of performance criticality */
 
 	/* --- cacheline 1 boundary (64 bytes) --- */
+	volatile u64	sum_perf_cri;	/* sum of performance criticality */
 	volatile u32	min_perf_cri;	/* minimum performance criticality */
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
+	volatile u32	max_freq;	/* maximum CPU frequency averaged across multiple intervals */
+	volatile u32	max_freq_observed; /* maximum CPU frequency observed within an interval scaled to 1024 */
 	volatile u32	nr_sched;	/* number of schedules */
 	volatile u32	nr_preempt;
 	volatile u32	nr_x_migration;
@@ -247,30 +252,25 @@ struct cpu_ctx {
 	volatile u32	avg_util;	/* average of the CPU utilization */
 	volatile u32	cur_util;	/* CPU utilization of the current interval */
 	u32		cpuperf_cur;	/* CPU's current performance target */
-	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
-	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
-
-	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
 
 	/* --- cacheline 2 boundary (128 bytes) --- */
-
+	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
+	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
 	volatile u32	avg_stolen_est;	/* Average of estimated steal/irq utilization of CPU */
 	volatile u32	cur_stolen_est;	/* Estimated irq/steal utilization of the current interval */
 	volatile u64	stolen_time_est; /* Estimated time stolen by steal/irq time on CPU */
-
-	/*
-	 * Idle tracking (read-mostly)
-	 */
 	volatile u64	idle_total;	/* total idle time so far */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
 	u64		online_clk;	/* when a CPU becomes online */
 	u64		offline_clk;	/* when a CPU becomes offline */
 
 	/*
-	 * Fields for core compaction (read-only)
+	 * --- cacheline 3 boundary (192 bytes) ---
+	 * (read-only)
 	 */
 	u16		cpu_id;		/* cpu id */
-	u16		capacity;	/* CPU capacity based on 1024 */
+	u16		max_capacity;	/* the maximum capacity that CPU can do */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
 	u8		llc_id;		/* llc domain id */
@@ -278,12 +278,8 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of anternative type */
 	u8		is_online;	/* is this CPU online? */
 
-	/*
-	 * Temporary cpu masks (read-only)
-	 */
 	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
 	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
-	/* --- cacheline 3 boundary (192 bytes) --- */
 	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
 	struct bpf_cpumask __kptr *tmp_i_mask; /* for idle cpumask */
 	struct bpf_cpumask __kptr *tmp_t_mask;
@@ -427,35 +423,6 @@ extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 extern struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 extern struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 extern struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-
-/* Power management helpers. */
-int do_core_compaction(void);
-int update_thr_perf_cri(void);
-int reinit_active_cpumask_for_performance(void);
-bool is_perf_cri(task_ctx *taskc);
-
-extern bool			have_little_core;
-extern bool			have_turbo_core;
-extern const volatile bool	is_smt_active;
-
-extern u64			total_capacity;
-extern u64			one_little_capacity;
-extern u32			cur_big_core_scale;
-extern u32			default_big_core_scale;
-
-int init_autopilot_caps(void);
-int update_autopilot_high_cap(void);
-u64 scale_cap_freq(u64 dur, s32 cpu);
-u64 scale_cap_max_freq(u64 dur, s32 cpu);
-
-int reset_cpuperf_target(struct cpu_ctx *cpuc);
-int update_cpuperf_target(struct cpu_ctx *cpuc);
-u16 get_cpuperf_cap(s32 cpu);
-
-int reset_suspended_duration(struct cpu_ctx *cpuc);
-u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc);
-
-const volatile u16 *get_cpu_order(void);
 
 /* Load balancer helpers. */
 
