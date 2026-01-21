@@ -814,7 +814,7 @@ unlock_out:
  *
  * Iterates through all CPUs in the same compute domain (cpdom) as @start_cpu
  * and collects all CPUs where lat_capacity >= task's normalized lat_cri,
- * then returns a random CPU from that set.
+ * then returns the CPU with the lowest avg_util (least loaded) from that set.
  *
  * Returns: CPU ID if found, -ENOENT if no suitable CPU found
  */
@@ -826,6 +826,8 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 	struct cpdom_ctx *cpdomc;
 	u16 normalized_lat_cri;
 	s32 cpu_id = -ENOENT;
+	s32 best_cpu = -ENOENT;
+	u32 lowest_util = U32_MAX;
 	int i, k;
 
 	/* Get the cpdom of the start CPU */
@@ -848,7 +850,8 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 
 	/*
 	 * Iterate through all CPUs in the cpdom to find all CPUs with
-	 * sufficient latency capacity (lat_capacity >= normalized_lat_cri)
+	 * sufficient latency capacity (lat_capacity >= normalized_lat_cri).
+	 * Among those, track the CPU with the lowest avg_util.
 	 */
 	bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
 		u64 cpumask = cpdomc->__cpumask[i];
@@ -856,6 +859,7 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 			s32 bit;
 			u32 cpu;
 			u32 lat_capacity;
+			u32 avg_util;
 
 			bit = cpumask_next_set_bit(&cpumask);
 			if (bit < 0)
@@ -882,14 +886,32 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 			 */
 			if (lat_capacity >= normalized_lat_cri) {
 				bpf_cpumask_set_cpu(cpu, lat_avail_mask);
+
+				/*
+				 * Track the CPU with the lowest avg_util
+				 * among those with sufficient latency capacity.
+				 */
+				avg_util = cpuc->avg_util;
+				if (avg_util < lowest_util) {
+					lowest_util = avg_util;
+					best_cpu = cpu;
+				}
 			}
 		}
 	}
 
-	/* Pick a random CPU from all latency-available CPUs */
-	cpu_id = bpf_cpumask_any_distribute(cast_mask(lat_avail_mask));
-	if (cpu_id >= nr_cpu_ids)
-		cpu_id = -ENOENT;
+	/*
+	 * Return the CPU with the lowest utilization among latency-capable CPUs.
+	 * Fall back to random selection if no best CPU was found (shouldn't happen
+	 * if the mask is non-empty).
+	 */
+	if (best_cpu >= 0) {
+		cpu_id = best_cpu;
+	} else {
+		cpu_id = bpf_cpumask_any_distribute(cast_mask(lat_avail_mask));
+		if (cpu_id >= nr_cpu_ids)
+			cpu_id = -ENOENT;
+	}
 
 	return cpu_id;
 }

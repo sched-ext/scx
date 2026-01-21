@@ -175,6 +175,9 @@ struct task_ctx {
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
+
+	/* --- cacheline 4 boundary (256 bytes) --- */
+	struct ravg_data avg_util;	/* running average of task utilization [0, 1024] */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*

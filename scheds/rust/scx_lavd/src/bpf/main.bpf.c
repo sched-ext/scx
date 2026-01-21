@@ -449,7 +449,7 @@ static void account_task_runtime(struct task_struct *p,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
-	u64 sus_dur, runtime, svc_time, sc_time, task_time, exec_delta;
+	u64 sus_dur, runtime, wall_time, svc_time, sc_time, task_time, exec_delta;
 
 	/*
 	 * Since task execution can span one or more sys_stat intervals,
@@ -459,7 +459,7 @@ static void account_task_runtime(struct task_struct *p,
 	 * execution duration since the last measured time.
 	 */
 	sus_dur = get_suspended_duration_and_reset(cpuc);
-	runtime = time_delta(now, taskc->last_measured_clk + sus_dur);
+	wall_time = time_delta(now, taskc->last_measured_clk + sus_dur);
 
 	/*
 	 * p->se.sum_exec_runtime serves as a proxy for rq->clock_task which
@@ -473,7 +473,7 @@ static void account_task_runtime(struct task_struct *p,
 	 */
 	task_time = task_exec_time(p);
 	exec_delta = time_delta(task_time, taskc->last_sum_exec_clk);
-	cpuc->stolen_time_est += time_delta(runtime, exec_delta);
+	cpuc->stolen_time_est += time_delta(wall_time, exec_delta);
 	runtime = exec_delta;
 
 	svc_time = runtime / p->scx.weight;
@@ -487,6 +487,24 @@ static void account_task_runtime(struct task_struct *p,
 	taskc->svc_time += svc_time;
 	taskc->last_measured_clk = now;
 	taskc->last_sum_exec_clk = task_time;
+
+	/*
+	 * Track per-task utilization using ravg.
+	 * Utilization = (runtime / wall_time) scaled to [0, 1024].
+	 * Use 256ms half-life for decay.
+	 *
+	 * Since task_ctx is arena-allocated, we copy the ravg_data
+	 * to a local variable, accumulate, then copy back.
+	 */
+	if (wall_time > 0) {
+		struct ravg_data avg_util_local = {};
+		u64 util = (runtime << LAVD_SHIFT) / wall_time;
+		if (util > LAVD_SCALE)
+			util = LAVD_SCALE;
+		avg_util_local = *(struct ravg_data *)&taskc->avg_util;
+		ravg_accumulate(&avg_util_local, util, now, 256 * NSEC_PER_MSEC);
+		*(struct ravg_data *)&taskc->avg_util = avg_util_local;
+	}
 
 	/*
 	 * Under CPU bandwidth control using cpu.max, we also need to report
@@ -592,8 +610,10 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		struct bpf_cpumask *lat_avail_mask = bpf_cpumask_create();
 		if (lat_avail_mask) {
 			s32 lat_cpu = find_latency_available_cpu(p, ictx.taskc, cpu_id, lat_avail_mask);
-			if (lat_cpu >= 0)
+			if (lat_cpu >= 0) {
 				cpu_id = lat_cpu;
+				// TODO: Put it in per-cpu DSQ please.
+			}
 			bpf_cpumask_release(lat_avail_mask);
 		}
 	}
