@@ -915,6 +915,30 @@ find_latency_available_cpu(struct task_struct *p, task_ctx *taskc, s32 start_cpu
 			return -ENOENT;
 	}
 
+	/*
+	 * Check if the task's avg_util is higher than the selected CPU's avg_util.
+	 * If so, this task is too "heavy" for per-CPU DSQ placement and should
+	 * fall back to domain-level DSQ insertion for better load distribution.
+	 */
+	if (best_cpu >= 0) {
+		struct ravg_data task_util_local = {};
+		u64 task_util_fp;
+		u32 task_util;
+		u64 now = scx_bpf_now();
+
+		/* Read task's avg_util from arena */
+		task_util_local = *(struct ravg_data *)&taskc->avg_util;
+		task_util_fp = ravg_read(&task_util_local, now, 256 * NSEC_PER_MSEC);
+		task_util = (u32)(task_util_fp >> RAVG_FRAC_BITS);
+
+		/*
+		 * If task utilization exceeds the best CPU's utilization,
+		 * reject per-CPU placement and use domain DSQ instead.
+		 */
+		if (task_util > lowest_util)
+			return -ENOENT;
+	}
+
 	taskc->per_cpu_dsq_only = true;
 	return cpu_id;
 }
