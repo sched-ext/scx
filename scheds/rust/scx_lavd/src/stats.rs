@@ -156,8 +156,8 @@ pub struct SchedSample {
     pub slice: u64,
     #[stat(desc = "Amount of time actually used by task in a slice")]
     pub slice_used: u64,
-    #[stat(desc = "Latency criticality of this task")]
-    pub lat_cri: u32,
+    #[stat(desc = "Normalized latency criticality of this task [0-1024]")]
+    pub normalized_lat_cri: u16,
     #[stat(desc = "Average latency criticality in a system")]
     pub avg_lat_cri: u32,
     #[stat(desc = "Static priority (20 == nice 0)")]
@@ -180,8 +180,8 @@ pub struct SchedSample {
     pub thr_perf_cri: u32,
     #[stat(desc = "Target performance level of this CPU")]
     pub cpuperf_cur: u32,
-    #[stat(desc = "CPU utilization of this CPU")]
-    pub cpu_util: u64,
+    #[stat(desc = "Latency capacity of this CPU")]
+    pub lat_capacity: u32,
     #[stat(desc = "Scaled CPU utilization of this CPU")]
     pub cpu_sutil: u64,
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
@@ -208,7 +208,7 @@ impl SchedSample {
             "WKER_COMM",
             "SLC_NS",
             "SLC_USED_NS",
-            "LAT_CRI",
+            "NORM_LC",
             "AVG_LC",
             "ST_PRIO",
             "RERNBL_NS",
@@ -220,7 +220,7 @@ impl SchedSample {
             "PERF_CRI",
             "THR_PC",
             "CPUFREQ",
-            "CPU_UTIL",
+            "LAT_CAP",
             "CPU_SUTIL",
             "NR_ACT",
             "DSQ_ID",
@@ -248,7 +248,7 @@ impl SchedSample {
             self.waker_comm,
             self.slice,
             self.slice_used,
-            self.lat_cri,
+            self.normalized_lat_cri,
             self.avg_lat_cri,
             self.static_prio,
             self.rerunnable_interval,
@@ -260,7 +260,7 @@ impl SchedSample {
             self.perf_cri,
             self.thr_perf_cri,
             self.cpuperf_cur,
-            self.cpu_util,
+            self.lat_capacity,
             self.cpu_sutil,
             self.nr_active,
             self.dsq_id,
