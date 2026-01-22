@@ -118,6 +118,11 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     cpu_controller_disabled: bool,
 
+    /// Reject tasks with multi-CPU pinning that doesn't cover the entire cell.
+    /// By default, these tasks are allowed but may have degraded performance.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    reject_multicpu_pinning: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -227,6 +232,12 @@ impl<'a> Scheduler<'a> {
         for cpu in topology.all_cpus.keys() {
             skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
+
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .unwrap()
+            .reject_multicpu_pinning = opts.reject_multicpu_pinning;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
