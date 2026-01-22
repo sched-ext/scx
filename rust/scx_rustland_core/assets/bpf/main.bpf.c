@@ -232,7 +232,7 @@ struct {
 /*
  * Return true if the target task @p is the user-space scheduler.
  */
-static inline bool is_usersched_task(const struct task_struct *p)
+static __always_inline bool is_usersched_task(const struct task_struct *p)
 {
 	return p->pid == usersched_pid;
 }
@@ -240,7 +240,7 @@ static inline bool is_usersched_task(const struct task_struct *p)
 /*
  * Return true if the target task @p is a kernel thread.
  */
-static inline bool is_kthread(const struct task_struct *p)
+static __always_inline bool is_kthread(const struct task_struct *p)
 {
 	return p->flags & PF_KTHREAD;
 }
@@ -248,7 +248,7 @@ static inline bool is_kthread(const struct task_struct *p)
 /*
  * Return true if the target task @p is kswapd.
  */
-static inline bool is_kswapd(const struct task_struct *p)
+static __always_inline bool is_kswapd(const struct task_struct *p)
 {
         return p->flags & (PF_KSWAPD | PF_KCOMPACTD);
 }
@@ -256,7 +256,7 @@ static inline bool is_kswapd(const struct task_struct *p)
 /*
  * Return true if the target task @p is khugepaged, false otherwise.
  */
-static inline bool is_khugepaged(const struct task_struct *p)
+static __always_inline bool is_khugepaged(const struct task_struct *p)
 {
 	return khugepaged_pid && p->pid == khugepaged_pid;
 }
@@ -343,7 +343,7 @@ static u64 cpu_to_dsq(s32 cpu)
  * Return true if @this_cpu and @that_cpu are in the same LLC, false
  * otherwise.
  */
-static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
+static __always_inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
 {
         if (this_cpu == that_cpu)
                 return true;
@@ -354,7 +354,7 @@ static inline bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
 /*
  * Return true if @this_cpu is faster than @that_cpu, false otherwise.
  */
-static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
+static __always_inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 {
         if (this_cpu == that_cpu)
                 return false;
@@ -365,7 +365,7 @@ static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
 /*
  * Return true if @cpu is a fully-idle SMT core, false otherwise.
  */
-static inline bool is_smt_idle(s32 cpu)
+static __always_inline bool is_smt_idle(s32 cpu)
 {
 	const struct cpumask *idle_smtmask;
         bool is_idle;
@@ -383,7 +383,7 @@ static inline bool is_smt_idle(s32 cpu)
 /*
  * Return true on a wake-up event, false otherwise.
  */
-static inline bool is_wakeup(u64 wake_flags)
+static __always_inline bool is_wakeup(u64 wake_flags)
 {
 	return wake_flags & SCX_WAKE_TTWU;
 }
