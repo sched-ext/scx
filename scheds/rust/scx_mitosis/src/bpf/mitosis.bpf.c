@@ -36,6 +36,7 @@ const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     split_vtime_updates	     = false;
 const volatile bool	     cpu_controller_disabled	     = false;
+const volatile bool	     dynamic_affinity_cpu_selection  = false;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -616,7 +617,50 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if (!tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-		cpu = dsq_to_cpu(tctx->dsq);
+
+		if (dynamic_affinity_cpu_selection) {
+			const struct cpumask *idle_smtmask;
+
+			/*
+			 * Dynamic affinity balancing: use pick_idle_cpu_from
+			 * for SMT-aware idle CPU selection. If no idle CPU,
+			 * randomly pick to balance load over time.
+			 */
+			idle_smtmask = scx_bpf_get_idle_smtmask();
+			if (!idle_smtmask) {
+				cpu = prev_cpu;
+				goto affn_done;
+			}
+
+			cpu = pick_idle_cpu_from(p, p->cpus_ptr, prev_cpu,
+						 idle_smtmask);
+			scx_bpf_put_idle_cpumask(idle_smtmask);
+
+			if (cpu < 0)
+				cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+
+			/*
+			 * If switching to a different CPU's DSQ, update the
+			 * DSQ assignment and reset vtime to the new CPU's
+			 * vtime_now to ensure fair scheduling in the new DSQ.
+			 */
+			if (cpu_dsq(cpu) != tctx->dsq) {
+				struct cpu_ctx *new_cctx = lookup_cpu_ctx(cpu);
+				if (new_cctx) {
+					tctx->dsq = cpu_dsq(cpu);
+					p->scx.dsq_vtime =
+						READ_ONCE(new_cctx->vtime_now);
+				} else {
+					/* Invalid CPU, fall back to prev_cpu */
+					cpu = prev_cpu;
+				}
+			}
+		} else {
+			cpu = dsq_to_cpu(tctx->dsq);
+		}
+
+affn_done:
+
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		return cpu;
@@ -665,7 +709,38 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 
 	if (!tctx->all_cell_cpus_allowed) {
-		cpu = dsq_to_cpu(tctx->dsq);
+		if (dynamic_affinity_cpu_selection) {
+			/*
+			 * Dynamic affinity balancing: if current assigned CPU
+			 * has tasks queued, randomly pick from allowed CPUs to
+			 * balance load across compatible CPUs over time.
+			 *
+			 * This runs even if select_cpu() was called, because
+			 * select_cpu() may have picked a random CPU when no
+			 * idle CPUs were available, without checking queue depth.
+			 */
+			cpu = dsq_to_cpu(tctx->dsq);
+			if (scx_bpf_dsq_nr_queued(tctx->dsq) > 0) {
+				s32 new_cpu;
+
+				new_cpu =
+					bpf_cpumask_any_distribute(p->cpus_ptr);
+				if (new_cpu < nr_possible_cpus &&
+				    cpu_dsq(new_cpu) != tctx->dsq) {
+					struct cpu_ctx *new_cctx;
+
+					new_cctx = lookup_cpu_ctx(new_cpu);
+					if (new_cctx) {
+						tctx->dsq = cpu_dsq(new_cpu);
+						vtime	  = READ_ONCE(
+							    new_cctx->vtime_now);
+						cpu = new_cpu;
+					}
+				}
+			}
+		} else {
+			cpu = dsq_to_cpu(tctx->dsq);
+		}
 	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
