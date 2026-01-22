@@ -36,6 +36,7 @@ const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     split_vtime_updates	     = false;
 const volatile bool	     cpu_controller_disabled	     = false;
+const volatile bool	     reject_multicpu_pinning	     = false;
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -418,6 +419,20 @@ static inline int update_task_cpumask(struct task_struct *p,
 	if (cell_cpumask)
 		tctx->all_cell_cpus_allowed =
 			bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
+
+	/*
+	* Single-CPU pinning is fine (even if outside this cell).
+	* However, multi-CPU pinning that doesn't cover the entire
+	* cell is not supported - the scheduler can't efficiently
+	* handle partial affinity restrictions.
+	*/
+	if (tctx->cell != 0 && reject_multicpu_pinning &&
+	    !tctx->all_cell_cpus_allowed &&
+	    bpf_cpumask_weight(p->cpus_ptr) > 1) {
+		scx_bpf_error("multi-CPU pinning within cell %d not supported",
+			      tctx->cell);
+		return -EINVAL;
+	}
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
