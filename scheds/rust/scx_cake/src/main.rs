@@ -344,6 +344,7 @@ impl<'a> Scheduler<'a> {
             rodata.quantum_ns = quantum * 1000;
             rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
             rodata.sparse_threshold = sparse_threshold;
+            rodata.cached_threshold_ns = (quantum * 1000 * sparse_threshold) >> 10;
 
             // Populate Zero-Math Arbiter LUT
             let wait_budgets = args.profile.wait_budget();
