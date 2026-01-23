@@ -326,7 +326,7 @@ static __always_inline s32 find_surgical_victim_logical(u32 prev_cpu, u64 logica
      * defined by logical_mask (e.g. current CCD or full system).
      */
     if (logical_mask)
-        return (s32)__builtin_ctzll(logical_mask);
+        return (s32)BIT_SCAN_FORWARD_U64(logical_mask);
 
     return -1;
 }
@@ -365,7 +365,7 @@ static __always_inline s32 select_cpu_with_arbiter(
 
     /* RANK 3: Any Idle SMT (Fallback) */
     if (l_mask) {
-        target_cpu = (s32)__builtin_ctzll(l_mask);
+        target_cpu = (s32)BIT_SCAN_FORWARD_U64(l_mask);
         target_rank = 3;
     }
 
@@ -1024,7 +1024,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (!found_idle) {
         u64 l_mask = cake_relaxed_load_u64(&idle_mask_logical);
         if (l_mask) {
-            selected_cpu = (s32)__builtin_ctzll(l_mask);
+            selected_cpu = (s32)BIT_SCAN_FORWARD_U64(l_mask);
             found_idle = true;
 
             /* Update HINT: Cache for next wakeup */
@@ -1081,7 +1081,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
             /* Fallback: If no close victims, pick any victim */
             if (s_cpu < 0) {
-                s_cpu = (s32)__builtin_ctzll(spec_mask);
+                s_cpu = (s32)BIT_SCAN_FORWARD_U64(spec_mask);
             }
 
             tctx_reg->target_dsq_id = cpu_topo[s_cpu & 63].dsq_id;
