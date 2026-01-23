@@ -1298,15 +1298,19 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 
     /*
      * WAIT BUDGET CHECK (CAKE's AQM) - Restored
+     * 
+     * PHASE 1 OPTIMIZATION: Memory Load Hoisting
+     * Hoisted packed_info load to enable parallel execution with timestamps_fused.
+     * Both loads can now issue simultaneously, hiding L2 latency (~15 cycles on miss).
      */
     u64 state_ts = tctx_reg->timestamps_fused;
+    u32 packed = cake_relaxed_load_u32(&tctx_reg->packed_info);  /* HOISTED: Parallel with state_ts */
     u32 last_wake = EXTRACT_LAST_WAKE(state_ts);
     
     if (likely(last_wake > 0)) {
         u64 wait_time = (u64)(now_ts - last_wake);
         
-        /* 1. Extract Fields */
-        u32 packed = cake_relaxed_load_u32(&tctx_reg->packed_info);
+        /* 1. Extract Fields (packed already loaded) */
         u32 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
         
         /* 
