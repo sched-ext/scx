@@ -221,28 +221,23 @@ struct arbiter_config {
 } __attribute__((aligned(64)));
 
 /*
- * TIERED IDLE MASK (Unified Silicon Map)
- *
- * ARCHITECTURE: Unified bit-address space where all masks use Logical CPU IDs.
- * 
- * Level 1: core_status[32] - Per-physical-core bytes (SMT-aware)
- *   Bit 0 = SMT thread 0 idle, Bit 1 = SMT thread 1 idle
- *
- * Level 2: logical_hint - 64-bit mask of ALL logical CPUs
- *
- * Level 3: physical_hint - 64-bit mask of CPUs belonging to FULLY IDLE cores.
- *   If CPU i is set in physical_hint, it means core(i) is completely idle.
- *   This allows direct mask operations: (physical_hint & big_cpu_mask).
+ * CORE STATUS ISOLATION
+ * Prevents False Sharing (MESI storms) between physical cores.
+ * Each core gets a dedicated 64-byte line to avoid RFO traffic.
  */
-struct tiered_idle_mask {
-    /* Cache Line 0: Per-core status (read-mostly, non-atomic writes) */
-    u8 core_status[32];  /* Bytes 0-31: Per-core SMT status (up to 32 cores) */
-    u8 _pad0[32];        /* Bytes 32-63: Pad to full cache line */
+struct cake_core_status {
+    u8 status;          /* Bit 0: thread 0 idle, Bit 1: thread 1 idle */
+    u8 _pad[63];        /* Pad to full cache line */
+} __attribute__((aligned(64)));
 
-    /* Cache Line 1: Global atomic state (write-heavy, atomic ops) */
-    u64 physical_hint;    /* Bytes 64-71: 1 bit per CPU if core is fully idle */
-    u64 logical_hint;     /* Bytes 72-79: 1 bit per CPU if thread is idle */
-    u8 _pad1[48];         /* Bytes 80-127: Pad to 128 bytes */
+struct tiered_idle_mask {
+    /* Level 1: Isolated per-core status bytes */
+    struct cake_core_status core[32];
+
+    /* Level 2/3: Global atomic hints (separated from core status lines) */
+    u64 physical_hint;
+    u64 logical_hint;
+    u8 _pad0[48];       /* Pad hint line to 64 bytes */
 } __attribute__((aligned(128)));
 
 /*
