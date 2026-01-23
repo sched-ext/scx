@@ -582,10 +582,10 @@ struct {
  */
 
 /* Sparse Score accessor (0-100 with asymmetric adaptation) */
-#define GET_SPARSE_SCORE(ctx) ((cake_relaxed_load_u32(&(ctx)->packed_info) >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE)
+#define GET_SPARSE_SCORE(ctx) EXTRACT_BITS_U32(cake_relaxed_load_u32(&(ctx)->packed_info), SHIFT_SPARSE_SCORE, 7)
 
 /* Wait data accessor (violations<<4 | checks) */
-#define GET_WAIT_DATA(ctx) ((cake_relaxed_load_u32(&(ctx)->packed_info) >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA)
+#define GET_WAIT_DATA(ctx) EXTRACT_BITS_U32(cake_relaxed_load_u32(&(ctx)->packed_info), SHIFT_WAIT_DATA, 8)
 
 /* Tier accessor */
 
@@ -957,7 +957,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (!found_idle) {
         u32 c_prev = (u32)cold_scratch.prev_cpu & (CAKE_MAX_CPUS - 1);
         struct cake_cpu_shadow *shadow_prev = &global_shadow[c_prev];
-        u8 hint_cpu = (u8)((shadow_prev->packed_state >> SHADOW_HINT_CPU_SHIFT) & SHADOW_HINT_CPU_MASK);
+        u8 hint_cpu = (u8)EXTRACT_BITS_U32(shadow_prev->packed_state, SHADOW_HINT_CPU_SHIFT, 6);
         
         /* Verify hint against actual idle mask */
         if (hint_cpu < 64 && (cake_relaxed_load_u64(&idle_mask_logical) & (1ULL << hint_cpu))) {
@@ -1204,7 +1204,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
      * In a gaming session, this will likely be GAMING_DSQ (3).
      * Hit rate ~90% during steady-state gaming workloads.
      */
-    u32 warm_tier = (shadow->packed_state >> SHADOW_WARM_TIER_SHIFT) & SHADOW_WARM_TIER_MASK;
+    u32 warm_tier = EXTRACT_BITS_U32(shadow->packed_state, SHADOW_WARM_TIER_SHIFT, 3);
     if (warm_tier < 7) {
         if (scx_bpf_dsq_move_to_local(warm_tier))
             return;
