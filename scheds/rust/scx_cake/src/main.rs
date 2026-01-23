@@ -165,10 +165,10 @@ impl Profile {
 
         let mut configs = [0u64; 8];
         for i in 0..8 {
-            configs[i] = (multiplier[i] as u64 & 0xFFF) |
-                         ((quantum_us & 0xFFFF) << 12) |
-                         (((budget[i] >> 10) & 0xFFFF) << 28) |
-                         (((starvation[i] >> 10) & 0xFFFFF) << 44);
+            configs[i] = (multiplier[i] as u64 & 0xFFF)
+                | ((quantum_us & 0xFFFF) << 12)
+                | (((budget[i] >> 10) & 0xFFFF) << 28)
+                | (((starvation[i] >> 10) & 0xFFFFF) << 44);
         }
         configs
     }
