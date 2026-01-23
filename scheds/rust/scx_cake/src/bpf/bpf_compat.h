@@ -94,4 +94,11 @@
         (((u64)(val) >> (start)) & ((1ULL << (len)) - 1))
 #endif
 
+/*
+ * BIT SCAN FORWARD (CTZ): Deterministic bit scanning
+ * Note: BPF ISA does not have a native bit-scan instruction.
+ * __builtin_ctzll lowers to an efficient De Bruijn sequence in Clang/LLVM.
+ */
+#define BIT_SCAN_FORWARD_U64(mask) __builtin_ctzll(mask)
+
 #endif /* __CAKE_BPF_COMPAT_H */
