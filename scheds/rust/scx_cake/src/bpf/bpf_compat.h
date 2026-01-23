@@ -78,4 +78,20 @@
 #define bpf_atomic_and(ptr, val) \
     ((void)__atomic_fetch_and((ptr), (val), __ATOMIC_RELAXED))
 
+/*
+ * BMI2 BEXTR: Extract bitfield in 1 cycle
+ * Fallback: Shift + mask (2 cycles)
+ */
+#if defined(__BMI2__) && defined(__x86_64__)
+    #define EXTRACT_BITS_U32(val, start, len) \
+        __builtin_ia32_bextr_u32((val), ((len) << 8) | (start))
+    #define EXTRACT_BITS_U64(val, start, len) \
+        __builtin_ia32_bextr_u64((val), ((len) << 8) | (start))
+#else
+    #define EXTRACT_BITS_U32(val, start, len) \
+        (((u32)(val) >> (start)) & ((1U << (len)) - 1))
+    #define EXTRACT_BITS_U64(val, start, len) \
+        (((u64)(val) >> (start)) & ((1ULL << (len)) - 1))
+#endif
+
 #endif /* __CAKE_BPF_COMPAT_H */
