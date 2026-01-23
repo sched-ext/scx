@@ -463,39 +463,31 @@ u64 cached_threshold_ns __attribute__((aligned(8)));
  * 
  * Pre-computed by userspace based on profile. Zero runtime overhead.
  */
-const struct cake_tier_config tier_configs[8] = {
+const fused_config_t tier_configs[8] = {
     /* Tier 0: Critical Latency */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T0, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T0, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T0 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T0, 
+                CAKE_DEFAULT_WAIT_BUDGET_T0 / 1024, CAKE_DEFAULT_STARVATION_T0 / 1024),
     /* Tier 1: Realtime */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T1, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T1, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T1 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T1, 
+                CAKE_DEFAULT_WAIT_BUDGET_T1 / 1024, CAKE_DEFAULT_STARVATION_T1 / 1024),
     /* Tier 2: Critical */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T2, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T2, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T2 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T2, 
+                CAKE_DEFAULT_WAIT_BUDGET_T2 / 1024, CAKE_DEFAULT_STARVATION_T2 / 1024),
     /* Tier 3: Gaming */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T3, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T3, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T3 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T3, 
+                CAKE_DEFAULT_WAIT_BUDGET_T3 / 1024, CAKE_DEFAULT_STARVATION_T3 / 1024),
     /* Tier 4: Interactive */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T4, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T4, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T4 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T4, 
+                CAKE_DEFAULT_WAIT_BUDGET_T4 / 1024, CAKE_DEFAULT_STARVATION_T4 / 1024),
     /* Tier 5: Batch */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T5, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T5, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T5 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T5, 
+                CAKE_DEFAULT_WAIT_BUDGET_T5 / 1024, CAKE_DEFAULT_STARVATION_T5 / 1024),
     /* Tier 6: Background */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T6, 
-      .wait_budget_ns = CAKE_DEFAULT_WAIT_BUDGET_T6, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T6 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T6, 
+                CAKE_DEFAULT_WAIT_BUDGET_T6 / 1024, CAKE_DEFAULT_STARVATION_T6 / 1024),
     /* Tier 7: Padding */
-    { .starvation_ns = CAKE_DEFAULT_STARVATION_T6, 
-      .wait_budget_ns = 0, 
-      .multiplier = CAKE_DEFAULT_MULTIPLIER_T3 },
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS / 1024, CAKE_DEFAULT_MULTIPLIER_T3, 
+                0, CAKE_DEFAULT_STARVATION_T6 / 1024),
 };
 
 /*
@@ -841,10 +833,13 @@ static __always_inline u8 compute_tier(u32 score, u16 avg_us)
  */
 static __always_inline u64 compute_slice(u16 deficit_us, u8 tier)
 {
+    fused_config_t cfg = tier_configs[tier & 7];
+    u64 q_ns = UNPACK_QUANTUM_NS(cfg);
     u64 deficit_ns = (u64)deficit_us << 10;
-    u64 base_slice = (deficit_ns > quantum_ns) ? deficit_ns : quantum_ns;
-    /* AoS: Access multiplier from consolidated tier config */
-    return (base_slice * tier_configs[tier & 7].multiplier) >> 10;
+    u64 base_slice = (deficit_ns > q_ns) ? deficit_ns : q_ns;
+    
+    /* Fused RODATA: Use single 64-bit load + shift/mask */
+    return (base_slice * UNPACK_MULTIPLIER(cfg)) >> 10;
 }
 
 /*
@@ -1318,7 +1313,7 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
          * DE-BRANCHLESS OPTIMIZATION:
          * Explicit branches for budget check reduce register pressure.
          */
-        u64 budget_ns = tier_configs[tier & 7].wait_budget_ns;
+        u64 budget_ns = UNPACK_BUDGET_NS(tier_configs[tier & 7]);
         if (budget_ns > 0 && wait_time > budget_ns) {
             /* Increment violations (bits 4-7), clamp at 15 */
             if ((wait_data >> 4) < 15) wait_data += 0x10;
@@ -1487,7 +1482,7 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     /* PHASE 1: COMPUTE RUNTIME & THRESHOLDS */
     register u8 tier_reg asm("r9") = GET_TIER(tctx_reg);
     u32 last_run = tctx_reg->last_run_at;
-    u64 threshold = tier_configs[tier_reg & 7].starvation_ns;
+    u64 threshold = UNPACK_STARVATION_NS(tier_configs[tier_reg & 7]);
     
     /* Reduced jitter: 0x0F = 15 * 1024ns = ~15.3µs range (Minimizes lockstep without bloating frame times) */
     threshold += (u64)((now & 0x0F) << 10);

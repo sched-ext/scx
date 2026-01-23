@@ -315,22 +315,44 @@ struct cake_stats {
 #define CAKE_DEFAULT_WAIT_BUDGET_T6 0          /* Background: no limit */
 
 /*
- * Tier Configuration Data (32 bytes)
+ * Fused Tier Configuration (64-bit RODATA Optimization)
  * 
- * OPTIMIZATION: Array of Structures (AoS)
- * Consolidates starvation, budget, and multiplier to minimize cache misses.
- * Accessing one tier loads ALL its params in a single cache line fill.
+ * Packs 4 per-tier parameters into a single 64-bit word.
+ * Optimized for Zen 5 load-to-use efficiency.
  * 
- * Layout: [Starvation:8][Budget:8][Mult:4][Pad:12] = 32 bytes
- * Fits exactly 2 tiers per 64-byte cache line.
- * 
- * Source: Frasch, "Lock-Free FIFO" (CppCon 2023) - Cache Line Consolidation
+ * Layout V2 (LSB to MSB):
+ * [0-11]  Multiplier (fixed-point, 1024=1.0x, 0-4095) -> 1-cycle extraction
+ * [12-27] Quantum (us units, 0-65535us)
+ * [28-43] Wait Budget (us units, 0-65535us)
+ * [44-63] Starvation Threshold (us units, 0-1,048,575us approx 1s) -> No mask needed
  */
-struct cake_tier_config {
-    u64 starvation_ns;     /* Starvation threshold (ns) */
-    u64 wait_budget_ns;    /* AQM Wait budget (ns) */
-    u32 multiplier;        /* Slice multiplier (fixed point, 1024 = 1.0x) */
-    u32 _pad[3];           /* Pad to 32 bytes for alignment */
-};
+typedef u64 fused_config_t;
+
+#define CFG_SHIFT_MULTIPLIER  0
+#define CFG_SHIFT_QUANTUM     12
+#define CFG_SHIFT_BUDGET      28
+#define CFG_SHIFT_STARVATION  44
+
+#define CFG_MASK_MULTIPLIER   0x0FFFULL
+#define CFG_MASK_QUANTUM      0xFFFFULL
+#define CFG_MASK_BUDGET       0xFFFFULL
+#define CFG_MASK_STARVATION   0xFFFFFULL
+
+/* Extraction Macros (BPF Side) */
+/* Multiplier: bits 0-11. AND only. */
+#define UNPACK_MULTIPLIER(cfg)    ((cfg) & CFG_MASK_MULTIPLIER)
+/* Quantum: bits 12-27. SHR; AND; SHL. */
+#define UNPACK_QUANTUM_NS(cfg)    ((((cfg) >> CFG_SHIFT_QUANTUM) & CFG_MASK_QUANTUM) << 10)
+/* Budget: bits 28-43. SHR; AND; SHL. */
+#define UNPACK_BUDGET_NS(cfg)     ((((cfg) >> CFG_SHIFT_BUDGET) & CFG_MASK_BUDGET) << 10)
+/* Starvation: bits 44-63. SHR; SHL. (Mask redundant) */
+#define UNPACK_STARVATION_NS(cfg) (((cfg) >> CFG_SHIFT_STARVATION) << 10)
+
+/* Packing Macro (Userspace/Helper) */
+#define PACK_CONFIG(q_us, mult, budget_us, starv_us) \
+    ((((u64)(mult) & CFG_MASK_MULTIPLIER) << CFG_SHIFT_MULTIPLIER) | \
+     (((u64)(q_us) & CFG_MASK_QUANTUM) << CFG_SHIFT_QUANTUM) | \
+     (((u64)(budget_us) & CFG_MASK_BUDGET) << CFG_SHIFT_BUDGET) | \
+     (((u64)(starv_us) & CFG_MASK_STARVATION) << CFG_SHIFT_STARVATION))
 
 #endif /* __CAKE_INTF_H */
