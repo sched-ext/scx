@@ -669,9 +669,9 @@ static __always_inline void clear_victim_status(u32 cpu_id, struct cake_cpu_shad
         u64 current = cake_relaxed_load_u64(&victim_mask);
         /* MESI: Only write if bit is actually set - avoids RFO on redundant clear */
         if (current & cpu_bit) {
-            cake_relaxed_store_u64(&victim_mask, current & ~cpu_bit);
+            cake_relaxed_store_u64(&victim_mask, current ^ (cpu_bit & current));
         }
-        shadow->packed_state &= ~SHADOW_BIT_VICTIM;
+        shadow->packed_state = shadow->packed_state ^ (SHADOW_BIT_VICTIM & shadow->packed_state);
     }
 }
 
@@ -1385,7 +1385,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     tctx_reg->next_slice = compute_slice((u16)avg_def, tier);
 
     u32 p_bits = cake_relaxed_load_u32(&tctx_reg->packed_info);
-    p_bits &= ~((MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE) | (MASK_TIER << SHIFT_TIER));
+    u32 clear_mask = (MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE) | (MASK_TIER << SHIFT_TIER);
+    p_bits = p_bits ^ (clear_mask & p_bits);
     p_bits |= (score & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
     p_bits |= (tier & MASK_TIER) << SHIFT_TIER;
 
@@ -1419,7 +1420,7 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
     u8 bit = topo->thread_bit;
 
     u8 old_status = tiered_idle.core_status[core_id & 31];
-    u8 new_status = idle ? (old_status | bit) : (old_status & ~bit);
+    u8 new_status = idle ? (old_status | bit) : (old_status ^ (bit & old_status));
     
     tiered_idle.core_status[core_id & 31] = new_status;
 
