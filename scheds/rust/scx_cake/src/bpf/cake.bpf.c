@@ -978,46 +978,39 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * 6. Arbiter Fallback (Wait Budget)
      */
 
-    /* PHASE 1: Warmth Check (Already handled in Phase 1 start) */
-    if (!found_idle && has_multi_llc) {
-        u8 llc_id = topo->llc_id;
-        if (llc_id < CAKE_MAX_LLCS) {
-            u64 my_llc_mask = llc_cpu_mask[llc_id];
-
-            /* PHASE 2: Local Physical (Isolation win) */
-            u64 p_mask = cake_relaxed_load_u64(&idle_mask_physical) & my_llc_mask;
-            if (p_mask) {
-                s32 p_cpu = find_surgical_victim_logical(prev, p_mask);
-                if (p_cpu >= 0) {
-                    selected_cpu = p_cpu;
-                    found_idle = true;
-                }
-            }
-
-            /* PHASE 3: Local Logical (Locality win) */
-            if (!found_idle) {
-                u64 l_mask = cake_relaxed_load_u64(&idle_mask_logical) & my_llc_mask;
-                if (l_mask) {
-                    s32 l_cpu = find_surgical_victim_logical(prev, l_mask);
-                    if (l_cpu >= 0) {
-                        selected_cpu = l_cpu;
-                        found_idle = true;
-                    }
-                }
-            }
-        }
-    }
-
-    /* PHASE 4: Global Physical (Generic Scan fallback) */
+    /*
+     * PHASE 1: Warmth Check (Already handled in Phase 1 start)
+     * 
+     * PHASE 5 OPTIMIZATION: CMOV CASCADE
+     * Speculatively compute all topological escalation paths to eliminate
+     * high-penalty branch mispredictions.
+     */
     if (!found_idle) {
-        u64 p_mask = cake_relaxed_load_u64(&idle_mask_physical);
-        if (p_mask) {
-            s32 p_cpu = find_surgical_victim_logical(prev, p_mask);
-            if (p_cpu >= 0) {
-                selected_cpu = p_cpu;
-                found_idle = true;
+        u64 l_mask_phys = cake_relaxed_load_u64(&idle_mask_physical);
+        u64 l_mask_log = cake_relaxed_load_u64(&idle_mask_logical);
+        
+        /* 1. System-wide candidates (Fallback) */
+        s32 cpu_sys_phys = l_mask_phys ? find_surgical_victim_logical(prev, l_mask_phys) : -1;
+        
+        /* 2. LLC-local candidates (Primary) */
+        s32 cpu_loc_phys = -1;
+        s32 cpu_loc_log = -1;
+        
+        if (has_multi_llc) {
+            u64 my_llc_mask = (topo->llc_id < CAKE_MAX_LLCS) ? llc_cpu_mask[topo->llc_id] : 0;
+            if (my_llc_mask) {
+                cpu_loc_phys = (l_mask_phys & my_llc_mask) ? find_surgical_victim_logical(prev, l_mask_phys & my_llc_mask) : -1;
+                cpu_loc_log = (l_mask_log & my_llc_mask) ? find_surgical_victim_logical(prev, l_mask_log & my_llc_mask) : -1;
             }
         }
+
+        /* Waterfall Selection (CMOV-compatible chain) */
+        s32 best_loc = (cpu_loc_phys >= 0) ? cpu_loc_phys : cpu_loc_log;
+        s32 backup = (cpu_sys_phys >= 0) ? cpu_sys_phys : -1;
+        
+        selected_cpu = (best_loc >= 0) ? best_loc : backup;
+        if (selected_cpu >= 0) found_idle = true;
+        else selected_cpu = cold_scratch.prev_cpu;
     }
 
     /* PHASE 5: Global Logical (Generic Scan fallback) */
