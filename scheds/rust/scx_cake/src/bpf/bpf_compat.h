@@ -101,4 +101,9 @@
  */
 #define BIT_SCAN_FORWARD_U64(mask) __builtin_ctzll(mask)
 
+/*
+ * RAW BIT SCAN: Allows passing a pre-hoisted multiplier
+ */
+#define BIT_SCAN_FORWARD_U64_RAW(mask, mult) ((u8)((mult * ((mask) & -(mask))) >> 58))
+
 #endif /* __CAKE_BPF_COMPAT_H */
