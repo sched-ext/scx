@@ -154,66 +154,23 @@ impl Profile {
         }
     }
 
-    /// Consolidated tier configuration (AoS optimization)
+    /// Consolidated tier configuration (Fused RODATA Optimization)
     ///
-    /// Generates a single array of cake_tier_config structs from the
-    /// individual tier parameter methods. This reduces cache line fetches
-    /// from 3 to 1 in the BPF hot path.
-    fn tier_configs(&self) -> [bpf_skel::types::cake_tier_config; 8] {
+    /// Packs quantum, multiplier, budget, and starvation into a single u64
+    /// per tier. Fits all 8 tiers in 64 bytes (1 cache line).
+    fn tier_configs(&self, quantum_us: u64) -> [u64; 8] {
         let starvation = self.starvation_threshold();
         let multiplier = self.tier_multiplier();
         let budget = self.wait_budget();
 
-        [
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[0],
-                wait_budget_ns: budget[0],
-                multiplier: multiplier[0],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[1],
-                wait_budget_ns: budget[1],
-                multiplier: multiplier[1],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[2],
-                wait_budget_ns: budget[2],
-                multiplier: multiplier[2],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[3],
-                wait_budget_ns: budget[3],
-                multiplier: multiplier[3],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[4],
-                wait_budget_ns: budget[4],
-                multiplier: multiplier[4],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[5],
-                wait_budget_ns: budget[5],
-                multiplier: multiplier[5],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[6],
-                wait_budget_ns: budget[6],
-                multiplier: multiplier[6],
-                _pad: [0; 3],
-            },
-            bpf_skel::types::cake_tier_config {
-                starvation_ns: starvation[7],
-                wait_budget_ns: budget[7],
-                multiplier: multiplier[7],
-                _pad: [0; 3],
-            },
-        ]
+        let mut configs = [0u64; 8];
+        for i in 0..8 {
+            configs[i] = (multiplier[i] as u64 & 0xFFF) |
+                         ((quantum_us & 0xFFFF) << 12) |
+                         (((budget[i] >> 10) & 0xFFFF) << 28) |
+                         (((starvation[i] >> 10) & 0xFFFFF) << 44);
+        }
+        configs
     }
 }
 
@@ -426,7 +383,7 @@ impl<'a> Scheduler<'a> {
 
             rodata.starvation_ns = starvation * 1000;
             rodata.enable_stats = args.verbose;
-            rodata.tier_configs = args.profile.tier_configs();
+            rodata.tier_configs = args.profile.tier_configs(quantum);
 
             // Topology logic
             rodata.has_multi_llc = topo.has_dual_ccd;
