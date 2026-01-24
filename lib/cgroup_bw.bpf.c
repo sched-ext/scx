@@ -5,7 +5,7 @@
  */
 
 #include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
+#include <bpf_arena_common.bpf.h>
 #include <lib/topology.h>
 #include <lib/cgroup.h>
 #include <lib/atq.h>

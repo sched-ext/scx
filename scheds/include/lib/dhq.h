@@ -2,8 +2,8 @@
 
 #ifdef __BPF__
 #include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
-#include <scx/bpf_arena_spin_lock.h>
+#include <bpf_arena_common.bpf.h>
+#include <bpf_arena_spin_lock.h>
 #endif /* __BPF__ */
 
 #include <lib/minheap.h>
