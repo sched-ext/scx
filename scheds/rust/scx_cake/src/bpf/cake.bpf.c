@@ -136,10 +136,14 @@ struct {
 /*
  * PER-CPU SCRATCH AREA (BSS-Tunneling)
  * 
- * Used to preserve registers across helper calls without using the stack (r10).
- * Since BPF programs are serialized per-CPU, we can safely "tunnel"
- * task pointers and context through this zero-latency BSS region.
+ * Used for output parameters to BPF helpers to avoid stack usage.
+ * Isolated per-CPU to prevent cache-line bouncing (MESI contention).
+ * Since BPF programs are serialized per-CPU, this is safe for tunneling.
  */
+struct cake_scratch {
+    bool dummy_idle;
+    u8 _pad[63]; /* Pad to 64 bytes for cache line isolation */
+} global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(64)));
 
 
 /*
@@ -210,6 +214,25 @@ u8 __bss_tail_guard[64] SEC(".bss") __attribute__((aligned(64)));
  * to eliminate hidden bpf_get_smp_processor_id() helper calls.
  * Use: &global_shadow[cpu_idx & (CAKE_MAX_CPUS - 1)]
  */
+
+/*
+ * TTAS (Test-and-Test-and-Set) Gating Macros
+ * 
+ * These wrap atomic operations with a relaxed load check. 
+ * On Zen 5, this prevents the 'LOCK' prefix from stalling the pipeline
+ * if the bit is already in the desired state.
+ */
+#define TTAS_BIT_SET(target, bit) \
+    do { \
+        if (!(cake_relaxed_load_u64(target) & (bit))) \
+            bpf_atomic_or(target, bit); \
+    } while (0)
+
+#define TTAS_BIT_CLEAR(target, bit) \
+    do { \
+        if (cake_relaxed_load_u64(target) & (bit)) \
+            bpf_atomic_and(target, ~(bit)); \
+    } while (0)
 
 static __always_inline struct cake_stats *get_local_stats(void)
 {
@@ -299,9 +322,10 @@ static __always_inline bool is_critical_kthread(struct task_struct *p)
  * 
  * COST: ~6-8 Cycles.
  */
-static __always_inline s32 find_surgical_victim_logical(u32 idx, u64 logical_mask, u64 mult)
+static __always_inline 
+s32 find_surgical_victim_logical(u32 idx, u64 logical_mask, u64 mult, const struct cpu_topology_entry *topo_base)
 {
-    const struct cpu_topology_entry *t = &cpu_topo[idx & 63];
+    const struct cpu_topology_entry *t = &topo_base[idx & 63];
 
     /* 1. Check top 3 latency-ordered peers (Fastest Isolation) */
     if (t->peer_1 < 64 && (logical_mask & (1ULL << t->peer_1)))
@@ -334,7 +358,7 @@ static __always_inline s32 find_surgical_victim_logical(u32 idx, u64 logical_mas
  * Source: Gross, "Simple is Fast" (CppCon 2022)
  */
 static __always_inline s32 select_cpu_with_arbiter(
-    struct cake_task_ctx *tctx, s32 prev_cpu, u64 l_mask, u64 p_mask, u64 db_const)
+    struct cake_task_ctx *tctx, s32 prev_cpu, u64 l_mask, u64 p_mask, u64 db_const, const struct cpu_topology_entry *topo_base)
 {
     u32 b_prev = (u32)prev_cpu & (CAKE_MAX_CPUS - 1);
     
@@ -343,37 +367,26 @@ static __always_inline s32 select_cpu_with_arbiter(
         return prev_cpu;
 
     /* 
-     * 2. Physical-First Migration (CMOV Cascade)
+     * 2. Physical-First Migration (Branchless CMOV Cascade)
      * Rank 1: Idle Physical Core (Isolation/L3 Warm)
      * Rank 2: Warm SMT Sibling (L2 Warmth)
      * Rank 3: Any Idle SMT (Throughput)
      */
-    const struct cpu_topology_entry *t = &cpu_topo[b_prev];
-    s32 target_cpu = -1;
-    u8 target_rank = 7;
-
+    const struct cpu_topology_entry *t = &topo_base[b_prev];
+    
     /* RANK 3: Any Idle SMT (Fallback) */
-    if (l_mask) {
-        target_cpu = (s32)BIT_SCAN_FORWARD_U64_RAW(l_mask, db_const);
-        target_rank = 3;
-    }
+    s32 target_cpu = l_mask ? (s32)BIT_SCAN_FORWARD_U64_RAW(l_mask, db_const) : -1;
+    u8 target_rank = l_mask ? 3 : 7;
 
     /* RANK 2: Warm SMT Sibling (Better than random SMT) */
-    if (t->sibling < 64 && (l_mask & (1ULL << t->sibling))) {
-        target_cpu = (s32)t->sibling;
-        target_rank = 2;
-    }
+    bool sib_idle = (t->sibling < 64 && (l_mask & (1ULL << t->sibling)));
+    target_cpu = sib_idle ? (s32)t->sibling : target_cpu;
+    target_rank = sib_idle ? 2 : target_rank;
 
-    /* RANK 1: Idle Physical Core (Highest Isolation)
-     * We use find_surgical_victim_logical to prioritize LOCAL CCD physical cores.
-     */
-    if (p_mask) {
-        s32 phys_cpu = find_surgical_victim_logical(b_prev, p_mask, db_const);
-        if (phys_cpu >= 0) {
-            target_cpu = phys_cpu;
-            target_rank = 1;
-        }
-    }
+    /* RANK 1: Idle Physical Core (Highest Isolation) */
+    s32 phys_cpu = p_mask ? find_surgical_victim_logical(b_prev, p_mask, 0x022FDD63CC95386DULL, topo_base) : -1;
+    target_cpu = (phys_cpu >= 0) ? phys_cpu : target_cpu;
+    target_rank = (phys_cpu >= 0) ? 1 : target_rank;
 
     /* If absolutely no idle cores even in logic mask, wait on prev */
     if (target_cpu < 0)
@@ -630,17 +643,15 @@ u32 handle_demotion_cold(u32 packed)
     return packed & ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
 }
 
-/* * COLD PATH: Update global victim mask 
- * Removes atomic RMW operations from the high-frequency tick loop.
- */
-static __always_inline
-void set_victim_status_cold(u32 cpu_id, struct cake_cpu_shadow *shadow)
+static __always_inline void set_victim_status_cold(u32 cpu_id, struct cake_cpu_shadow *shadow)
 {
     u64 cpu_bit = (1ULL << cpu_id);
-    u64 current = cake_relaxed_load_u64(&victim_mask);
     
-    /* Atomic Update to Global Mask */
-    cake_relaxed_store_u64(&victim_mask, current | cpu_bit);
+    /* 
+     * GATED ATOMIC SET: Fixes race condition on global victim_mask.
+     * TTAS gating prevents redundant RFO bus cycles.
+     */
+    TTAS_BIT_SET(&victim_mask, cpu_bit);
     
     /* Update Local Shadow */
     shadow->packed_state |= SHADOW_BIT_VICTIM;
@@ -655,13 +666,28 @@ static __always_inline void clear_victim_status(u32 cpu_id, struct cake_cpu_shad
 {
     if (shadow->packed_state & SHADOW_BIT_VICTIM) {
         u64 cpu_bit = (1ULL << cpu_id);
-        u64 current = cake_relaxed_load_u64(&victim_mask);
-        /* MESI: Only write if bit is actually set - avoids RFO on redundant clear */
-        if (current & cpu_bit) {
-            cake_relaxed_store_u64(&victim_mask, current ^ (cpu_bit & current));
-        }
-        shadow->packed_state = shadow->packed_state ^ (SHADOW_BIT_VICTIM & shadow->packed_state);
+        
+        /* 
+         * GATED ATOMIC CLEAR: Fixes race condition on global victim_mask.
+         * Although a heuristic, lost bits prevent Tier 0 from finding victims.
+         */
+        TTAS_BIT_CLEAR(&victim_mask, cpu_bit);
+        
+        /* 
+         * ZEN 5 ANDN OPTIMIZATION:
+         * The shadow status is per-CPU (no race). Using &= ~ allows the 
+         * x86 JIT to emit the single-cycle BMI1 'ANDN' instruction.
+         */
+        shadow->packed_state &= ~SHADOW_BIT_VICTIM;
     }
+}
+
+static __attribute__((noinline))
+s32 select_cpu_new_task_cold(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+    u32 tc_id = bpf_get_smp_processor_id();
+    struct cake_scratch *scr = &global_scratch[tc_id & (CAKE_MAX_CPUS - 1)];
+    return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &scr->dummy_idle);
 }
 
 static __attribute__((noinline)) 
@@ -859,21 +885,22 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
     /* 
-     * REGISTER PINNING: Pin p to r6 to avoid stack spills. 
+     * REGISTER PINNING & MAP CACHING: 
+     * Cache map bases to avoid redundant 'ld_imm64' (16-byte) instructions.
      */
     register struct task_struct *p_reg asm("r6") = p;
+    register s32 prev_cpu_reg asm("r9") = prev_cpu;
     struct cake_task_ctx *tctx;
 
-    register s32 prev_cpu_reg asm("r9") = prev_cpu;
-    /* tc_id removed from hot path to prevent spill */
-    
     tctx = get_task_ctx(p_reg, false);
     if (unlikely(!tctx)) {
-        bool dummy_idle = false;
-        return scx_bpf_select_cpu_dfl(p_reg, prev_cpu_reg, wake_flags, &dummy_idle);
+        return select_cpu_new_task_cold(p_reg, prev_cpu_reg, wake_flags);
     }
 
     register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
+    
+    /* Cache shared pointers in registers for duration of call */
+    register const struct cpu_topology_entry *topo_base asm("r8") = cpu_topo;
     
     tctx_reg->last_wake_ts = (u32)scx_bpf_now();
 
@@ -881,11 +908,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (wake_flags & SCX_WAKE_SYNC) {
         u32 tc_id = bpf_get_smp_processor_id();
         if (tc_id < CAKE_MAX_CPUS) {
-            tctx_reg->target_dsq_id = CAKE_DSQ_LC_BASE + tc_id;
+            tctx_reg->target_dsq_id = topo_base[tc_id].dsq_id;
             scx_bpf_kick_cpu(tc_id, SCX_KICK_PREEMPT);
             return (s32)tc_id;
         }
     }
+
+    u8 tier = GET_TIER(tctx_reg);
 
     /*
      * ========================================================================
@@ -903,7 +932,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * ROI: 4-10 cycle cost vs 250 cycle cross-CCD penalty = 30:1 return.
      * ========================================================================
      */
-    u8 tier = GET_TIER(tctx_reg);
 
     s32 selected_cpu = prev_cpu_reg;
     bool found_idle = false;
@@ -919,7 +947,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         found_idle = true;
     } else {
         /* SMT Sibling (Shared L2, excellent transfer) */
-        const struct cpu_topology_entry *topo_init = &cpu_topo[prev];
+        const struct cpu_topology_entry *topo_init = &topo_base[prev];
         if (topo_init->sibling < 64 && topo_init->sibling != prev) {
             if (sys_idle_log & (1ULL << topo_init->sibling)) {
                 selected_cpu = (s32)topo_init->sibling;
@@ -930,8 +958,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* PHASE 1.5: LAST-IDLE HINT (MRU Cache) */
     if (!found_idle) {
-        struct cake_cpu_shadow *shadow_prev = &global_shadow[prev];
-        u8 hint_cpu = (u8)EXTRACT_BITS_U32(shadow_prev->packed_state, SHADOW_HINT_CPU_SHIFT, 6);
+        u8 hint_cpu = (u8)EXTRACT_BITS_U32(global_shadow[prev].packed_state, SHADOW_HINT_CPU_SHIFT, 6);
         
         if (hint_cpu < 64 && (sys_idle_log & (1ULL << hint_cpu))) {
             selected_cpu = (s32)hint_cpu;
@@ -939,60 +966,57 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         }
     }
 
-    /* 
-     * TOPOLOGICAL ESCALATION
-     * Snapshot physical mask.
-     */
     u64 sys_idle_phys = cake_relaxed_load_u64(&idle_mask_physical);
     
-    /* multiplier pinning barrier */
-    u64 db_const = 0x0218a392cd3d5dbfULL;
-    asm volatile("" : "+r"(db_const));
-
     if (!found_idle) {
-        const struct cpu_topology_entry *topo = &cpu_topo[prev];
+        /* 
+         * RANK 1: Universal Clean Core Search (All Tiers)
+         *
+         * Regardless of tier, we prefer a fully idle physical core if one is 
+         * available. This maximizes L3 path efficiency and prevents SMT 
+         * interference for even the lowest-priority threads (e.g. Render).
+         */
+        if (sys_idle_phys) {
+            selected_cpu = find_surgical_victim_logical(prev, sys_idle_phys, 0x022FDD63CC95386DULL, topo_base);
+            if (selected_cpu >= 0) {
+                found_idle = true;
+            }
+        }
         
-        /* 1. System-wide candidates (Fallback) */
-        s32 cpu_sys_phys = sys_idle_phys ? find_surgical_victim_logical(prev, sys_idle_phys, db_const) : -1;
-        
-        /* 2. LLC-local candidates (Primary) */
-        s32 cpu_loc_phys = -1;
-        s32 cpu_loc_log = -1;
-        
-        if (has_multi_llc) {
-            u8 llc_id = topo->llc_id;
-            u64 my_llc_mask = (llc_id < CAKE_MAX_LLCS) ? llc_cpu_mask[llc_id] : 0;
-            if (my_llc_mask) {
-                cpu_loc_phys = (sys_idle_phys & my_llc_mask) ? find_surgical_victim_logical(prev, sys_idle_phys & my_llc_mask, db_const) : -1;
-                cpu_loc_log = (sys_idle_log & my_llc_mask) ? find_surgical_victim_logical(prev, sys_idle_log & my_llc_mask, db_const) : -1;
+        /* 
+         * RANK 2: SMT Scaling (Throughput Pool Only)
+         *
+         * If no clean cores exist, Tiers 4-6 (Render/Workers) are permitted to 
+         * "pack" onto available SMT threads. Tiers 0-3 (Input/Logic) skip this 
+         * to avoid landing on a core with existing throughput pressure.
+         */
+        if (!found_idle && tier > GAMING_DSQ && sys_idle_log) {
+            selected_cpu = find_surgical_victim_logical(prev, sys_idle_log, 0x022FDD63CC95386DULL, topo_base);
+            if (selected_cpu >= 0) {
+                found_idle = true;
             }
         }
 
-        /* Waterfall Selection (CMOV-compatible chain) */
-        s32 best_loc = (cpu_loc_phys >= 0) ? cpu_loc_phys : cpu_loc_log;
-        s32 backup = (cpu_sys_phys >= 0) ? cpu_sys_phys : -1;
-        
-        selected_cpu = (best_loc >= 0) ? best_loc : backup;
-        if (selected_cpu >= 0) found_idle = true;
-        else selected_cpu = prev_cpu_reg;
+        if (!found_idle) {
+            selected_cpu = prev_cpu_reg;
+        }
     }
 
     /* PHASE 5: Global Logical fallback */
     if (!found_idle) {
         if (sys_idle_log) {
-            selected_cpu = (s32)BIT_SCAN_FORWARD_U64_RAW(sys_idle_log, db_const);
+            selected_cpu = (s32)BIT_SCAN_FORWARD_U64(sys_idle_log);
             found_idle = true;
 
             /* Update HINT: Cache for next wakeup */
-            struct cake_cpu_shadow *shadow_prev = &global_shadow[prev];
-            shadow_prev->packed_state = (shadow_prev->packed_state & ~(SHADOW_HINT_CPU_MASK << SHADOW_HINT_CPU_SHIFT)) 
-                                      | ((u32)selected_cpu << SHADOW_HINT_CPU_SHIFT);
+            global_shadow[prev].packed_state = (global_shadow[prev].packed_state & ~(SHADOW_HINT_CPU_MASK << SHADOW_HINT_CPU_SHIFT)) 
+                                       | ((u32)selected_cpu << SHADOW_HINT_CPU_SHIFT);
         }
     }
 
     /* PHASE 6: Ultra-fallback - Arbiter with preemption logic */
     if (!found_idle) {
-        selected_cpu = select_cpu_with_arbiter(tctx_reg, prev_cpu_reg, sys_idle_log, sys_idle_phys, db_const);
+        selected_cpu = select_cpu_with_arbiter(tctx_reg, prev_cpu_reg, sys_idle_log, sys_idle_phys, 0x022FDD63CC95386DULL, topo_base);
         if (selected_cpu >= 0) found_idle = true;
     }
 
@@ -1000,14 +1024,9 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     /* Hybrid Gaming Logic - Prioritize Physical P-Cores for max isolation */
     if (has_hybrid && found_idle && tier <= GAMING_DSQ) {
         if ((u32)selected_cpu < CAKE_MAX_CPUS && !cpu_is_big[selected_cpu]) {
-             /* 
-              * UNIFIED SILICON MAP: Direct bitwise scan for P-cores.
-              * If physical_hint has bits set in big_cpu_mask, it means there's
-              * an idle physical P-core.
-              */
              u64 p_candidates = sys_idle_phys & big_cpu_mask;
              if (p_candidates) {
-                 s32 p_cpu = find_surgical_victim_logical((u32)selected_cpu, p_candidates, db_const);
+                 s32 p_cpu = find_surgical_victim_logical((u32)selected_cpu, p_candidates, 0x022FDD63CC95386DULL, topo_base);
                  if (p_cpu >= 0) {
                      selected_cpu = p_cpu;
                  }
@@ -1017,7 +1036,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* Final Dispatch */
     if (found_idle) {
-        tctx_reg->target_dsq_id = cpu_topo[selected_cpu & 63].dsq_id;
+        tctx_reg->target_dsq_id = topo_base[selected_cpu & 63].dsq_id;
         if (enable_stats) {
             u32 tc_id = bpf_get_smp_processor_id();
             (&global_stats[tc_id & 63])->nr_new_flow_dispatches++;
@@ -1033,14 +1052,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             s32 s_cpu = -1;
 
             /* ✅ TOPOLOGY OPTIMIZATION: Check for close victims first */
-            s_cpu = find_surgical_victim_logical((u32)prev_cpu_reg, spec_mask, db_const);
+            s_cpu = find_surgical_victim_logical((u32)prev_cpu_reg, spec_mask, 0x022FDD63CC95386DULL, topo_base);
 
             /* Fallback: If no close victims, pick any victim */
             if (s_cpu < 0) {
-                s_cpu = (s32)BIT_SCAN_FORWARD_U64_RAW(spec_mask, db_const);
+                s_cpu = (s32)BIT_SCAN_FORWARD_U64(spec_mask);
             }
 
-            tctx_reg->target_dsq_id = cpu_topo[s_cpu & 63].dsq_id;
+            tctx_reg->target_dsq_id = topo_base[s_cpu & 63].dsq_id;
             if (enable_stats) {
                 u32 tc_id = bpf_get_smp_processor_id();
                 (&global_stats[tc_id & 63])->nr_input_preempts++;
@@ -1157,13 +1176,15 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
         return;
 
     /* 2. Warm-Tier Short-Circuit: Try the last successful tier first.
-     * In a gaming session, this will likely be GAMING_DSQ (3).
      * Hit rate ~90% during steady-state gaming workloads.
      */
     u32 warm_tier = EXTRACT_BITS_U32(shadow->packed_state, SHADOW_WARM_TIER_SHIFT, 3);
+    u8 probed_mask = 0;
+    
     if (warm_tier < 7) {
         if (scx_bpf_dsq_move_to_local(warm_tier))
             return;
+        probed_mask |= (1 << warm_tier);
     }
 
     /* 3. Starvation Inversion: Occasionally check lower-priority queues first.
@@ -1175,17 +1196,16 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 cpu, struct task_struct *prev)
             update_warm_tier(shadow, BACKGROUND_DSQ);
             return;
         }
-        if (scx_bpf_dsq_move_to_local(INTERACTIVE_DSQ)) {
-            update_warm_tier(shadow, INTERACTIVE_DSQ);
-            return;
-        }
+        probed_mask |= (1 << BACKGROUND_DSQ);
     }
     
-    /* 4. Full Priority Scan: Deterministic fallback, updates warm-tier on hit */
+    /* 4. Full Priority Scan (Deduplicated) */
     #pragma unroll
-    for (u32 i = 0; i < 7; i++) {
+    for (u32 i = 0; i < CAKE_TIER_MAX; i++) {
+        if (probed_mask & (1 << i))
+            continue;
+        
         if (scx_bpf_dsq_move_to_local(i)) {
-            /* Update warm-tier for next dispatch */
             update_warm_tier(shadow, i);
             return;
         }
@@ -1253,30 +1273,27 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
     clear_victim_status(cpu_idx_reg, shadow);
 
     /*
-     * WAIT BUDGET CHECK (CAKE's AQM) - Restored
-     * 
-     * PHASE 1 OPTIMIZATION: Memory Load Hoisting
-     * Hoisted packed_info load to enable parallel execution with timestamps_fused.
-     * Both loads can now issue simultaneously, hiding L2 latency (~15 cycles on miss).
+     * PHASE 3 OPTIMIZATION: Wide-Load Fusion (Metadata Burst)
+     * We load the entire 64-bit fused state at once. This reduces 
+     * L1D port accesses and allows the CPU to extract packed_info 
+     * and deficit_avg in parallel with zero extra memory latency.
      */
     u64 state_ts = tctx_reg->timestamps_fused;
-    u32 packed = cake_relaxed_load_u32(&tctx_reg->packed_info);  /* HOISTED: Parallel with state_ts */
+    u64 fused_metadata = cake_relaxed_load_u64(&tctx_reg->state_fused_u64);
     u32 last_wake = EXTRACT_LAST_WAKE(state_ts);
     
     if (likely(last_wake > 0)) {
         u64 wait_time = (u64)(now_ts - last_wake);
         
-        /* 1. Extract Fields (packed already loaded) */
+        /* INTERLEAVE: Unpack budget while waiting for fused metadata usage */
+        u64 tier_cfg = tier_configs[tier & 7];
+        u32 packed = (u32)(fused_metadata >> 32); /* UNPACKED: Upper 32 bits */
         u32 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
-        
-        /* 
-         * DE-BRANCHLESS OPTIMIZATION:
-         * Explicit branches for budget check reduce register pressure.
-         */
-        u64 budget_ns = UNPACK_BUDGET_NS(tier_configs[tier & 7]);
+        u64 budget_ns = UNPACK_BUDGET_NS(tier_cfg);
+
         if (budget_ns > 0 && wait_time > budget_ns) {
             /* Increment violations (bits 4-7), clamp at 15 */
-            if ((wait_data >> 4) < 15) wait_data += 0x10;
+            if ((wait_data >> 0x4) < 15) wait_data += 0x10;
         }
         
         /* Increment checks (bits 0-3), clamp at 15 */
@@ -1295,12 +1312,12 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
              packed |= (wait_data << SHIFT_WAIT_DATA);
         }
         
-        /* Prepare 64-bit state update */
-        u32 final_deficit_avg = tctx_reg->deficit_avg_fused;
+        /* 3. Prepare 64-bit state update (fused_metadata provides baseline) */
+        u32 final_deficit_avg = (u32)fused_metadata; /* Lower 32 bits */
         u16 avg_rt = EXTRACT_AVG_RT(final_deficit_avg);
         if (wait_time > LONG_SLEEP_THRESHOLD_NS) {
             avg_rt >>= 1;
-            final_deficit_avg = PACK_DEFICIT_AVG(tctx_reg->deficit_us, avg_rt);
+            final_deficit_avg = PACK_DEFICIT_AVG((u16)fused_metadata, avg_rt);
         }
 
         u64 state_fused = ((u64)packed << 32) | final_deficit_avg;
@@ -1380,31 +1397,23 @@ void BPF_STRUCT_OPS(cake_update_idle, s32 cpu, bool idle)
     
     tiered_idle.core[core_id & 31].status = new_status;
 
-    /* LOGICAL UPDATE: 1 bit per thread (Gated Test-and-Test-and-Set) */
+    /* LOGICAL UPDATE: 1 bit per thread (Using TTAS Gating) */
     u64 target_bit = (1ULL << c);
     if (idle) {
-        if (!(cake_relaxed_load_u64(&idle_mask_logical) & target_bit)) {
-            bpf_atomic_or(&idle_mask_logical, target_bit);
-        }
+        TTAS_BIT_SET(&idle_mask_logical, target_bit);
     } else {
-        if (cake_relaxed_load_u64(&idle_mask_logical) & target_bit) {
-            bpf_atomic_and(&idle_mask_logical, ~target_bit);
-        }
+        TTAS_BIT_CLEAR(&idle_mask_logical, target_bit);
     }
 
     /* PHYSICAL UPDATE: Manage CPU bits for fully idle cores */
     u8 target_mask = core_thread_mask[core_id & 31];
     u64 core_mask = core_cpu_mask[core_id & 31];
     if (idle && new_status == target_mask) {
-        /* Core just became fully idle: set ALL its CPU bits in physical_hint (Gated TTAS) */
-        if (!(cake_relaxed_load_u64(&idle_mask_physical) & core_mask)) {
-            bpf_atomic_or(&idle_mask_physical, core_mask);
-        }
+        /* Core just became fully idle: set ALL its CPU bits in physical_hint */
+        TTAS_BIT_SET(&idle_mask_physical, core_mask);
     } else if (!idle && old_status == target_mask) {
-        /* Core is no longer fully idle: clear ALL its CPU bits in physical_hint (Gated TTAS) */
-        if (cake_relaxed_load_u64(&idle_mask_physical) & core_mask) {
-            bpf_atomic_and(&idle_mask_physical, ~core_mask);
-        }
+        /* Core is no longer fully idle: clear ALL its CPU bits in physical_hint */
+        TTAS_BIT_CLEAR(&idle_mask_physical, core_mask);
     }
 
     /* FUSION #6: Use inline helper for victim cleanup (deduplication) */
