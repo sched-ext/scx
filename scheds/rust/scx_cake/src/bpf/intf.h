@@ -33,13 +33,13 @@ typedef signed long s64;
  * Lower tiers get LARGER slices (better throughput)
  */
 enum cake_tier {
-    CAKE_TIER_CRITICAL_LATENCY = 0, /* <50us avg (Input/IRQs) */
-    CAKE_TIER_REALTIME         = 1, /* <500us avg (Audio/Video) */
-    CAKE_TIER_CRITICAL         = 2, /* Very sparse (Compositor) */
-    CAKE_TIER_GAMING           = 3, /* Sparse/Bursty (Games) */
-    CAKE_TIER_INTERACTIVE      = 4, /* Normal apps (Browser/IDE) */
-    CAKE_TIER_BATCH            = 5, /* Heavy compilation/Encoding */
-    CAKE_TIER_BACKGROUND       = 6, /* Low prio (idlers) */
+    CAKE_TIER_CRITICAL_LATENCY = 0, /* OS Input Handling / IRQs / Top-Half */
+    CAKE_TIER_REALTIME         = 1, /* Game Input / Audio / Time-Sensitive */
+    CAKE_TIER_CRITICAL         = 2, /* Compositor / Frame-Sync / Logic */
+    CAKE_TIER_GAMING           = 3, /* Primary Burst Path (Default Gaming) */
+    CAKE_TIER_INTERACTIVE      = 4, /* Game Background Workers / Asset Streaming */
+    CAKE_TIER_BATCH            = 5, /* Heavy Compilation / Physics Pre-calc */
+    CAKE_TIER_BACKGROUND       = 6, /* Game Main Render / Heavy Housekeeping */
     CAKE_TIER_IDLE             = 255,
     CAKE_TIER_MAX              = 7,
 };
