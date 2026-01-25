@@ -98,13 +98,27 @@
  * BIT SCAN FORWARD (CTZ): Deterministic bit scanning
  * Note: BPF ISA does not have a native bit-scan instruction.
  * __builtin_ctzll lowers to an efficient De Bruijn sequence in Clang/LLVM.
+ * 
+ * WORKAROUND: Clang 18 (and earlier) has a backend bug where it fails
+ * to lower __builtin_ctzll to valid BPF IR (opcode 191 crash).
+ * We provide a manual De Bruijn sequence fallback for these versions.
  */
-#define BIT_SCAN_FORWARD_U64(mask) __builtin_ctzll(mask)
-
-/*
- * CSE PROTECTION: Wrapper to prevent redundant calculation
- * if the compiler supports it.
- */
-#define BIT_SCAN_FORWARD_U64_RAW(mask, mult) __builtin_ctzll(mask)
+#if defined(__clang__) && __clang_major__ < 19
+    static __always_inline u32 cake_ctz64(u64 mask, u64 mult) {
+        static const u8 de_bruijn_bits[64] = {
+            0,  1,  2, 53,  3,  7, 54, 27, 4, 38, 41,  8, 34, 55, 48, 28,
+            62, 5, 39, 46, 44, 42, 22,  9, 24, 35, 59, 56, 49, 18, 29, 11,
+            63, 52, 6, 26, 37, 40, 33, 47, 61, 45, 43, 21, 23, 58, 17, 10,
+            51, 25, 36, 32, 60, 20, 57, 16, 50, 31, 19, 15, 30, 14, 13, 12
+        };
+        /* Use the original high-entropy multiplier matched to this table */
+        return de_bruijn_bits[((u64)((mask & -mask) * 0x022FDD63CC95386DULL)) >> 58];
+    }
+    #define BIT_SCAN_FORWARD_U64(mask) cake_ctz64(mask, 0x022FDD63CC95386DULL)
+    #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) cake_ctz64(mask, mult)
+#else
+    #define BIT_SCAN_FORWARD_U64(mask) __builtin_ctzll(mask)
+    #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) __builtin_ctzll(mask)
+#endif
 
 #endif /* __CAKE_BPF_COMPAT_H */
