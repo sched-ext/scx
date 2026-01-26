@@ -159,7 +159,6 @@ struct cake_task_ctx {
     };
     
     /* --- Read-Only / Misc [Bytes 24-63] --- */
-    u32 target_dsq_id;     /* 4B: Direct Dispatch Target (0 = None) */
     u8 preempt_floor;      /* 1B: Precomputed floor for warmth arbitration */
     u8 _reserved[3];       /* 3B: Reserved */
     u8 __pad[32];          /* Pad to 64 bytes */
@@ -220,25 +219,17 @@ struct arbiter_config {
     u8 _pad[0];        /* Pad to 64 bytes if needed */
 } __attribute__((aligned(64)));
 
-/*
- * CORE STATUS ISOLATION
- * Prevents False Sharing (MESI storms) between physical cores.
- * Each core gets a dedicated 64-byte line to avoid RFO traffic.
+/* 
+ * D2A (Direct-to-ALU) Signal Line 
+ * Moves signaling from IPI to L3 Cache Fabric.
+ * Aligned to 64 bytes to prevent false sharing.
  */
-struct cake_core_status {
-    u8 status;          /* Bit 0: thread 0 idle, Bit 1: thread 1 idle */
-    u8 _pad[63];        /* Pad to full cache line */
+struct cake_signal_mask {
+    u64 signal_mask;
+    u8 _pad[56];
 } __attribute__((aligned(64)));
 
-struct tiered_idle_mask {
-    /* Level 1: Isolated per-core status bytes */
-    struct cake_core_status core[32];
-
-    /* Level 2/3: Global atomic hints (separated from core status lines) */
-    u64 physical_hint;
-    u64 logical_hint;
-    u8 _pad0[48];       /* Pad hint line to 64 bytes */
-} __attribute__((aligned(128)));
+/* Legacy tiered idle tracking removed - leveraging kernel idle masks via kfuncs */
 
 /*
  * Statistics shared with userspace
