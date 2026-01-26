@@ -4,9 +4,9 @@
 
 #define BPF_NO_KFUNC_PROTOTYPES
 
-#include "bpf_experimental.h"
-#include "bpf_arena_common.h"
-#include "bpf_arena_spin_lock.h"
+#include <bpf_experimental.h>
+#include <bpf_arena_common.h>
+#include <bpf_arena_spin_lock.h>
 #include "bpf_helpers_local.h"
 
 #include <asm-generic/errno.h>

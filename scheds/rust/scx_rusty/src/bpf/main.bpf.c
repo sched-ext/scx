@@ -49,7 +49,7 @@
 #include "types.h"
 #include "lb_domain.h"
 
-#include <scx/bpf_arena_common.bpf.h>
+#include <bpf_arena_common.bpf.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>

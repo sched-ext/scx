@@ -2,13 +2,13 @@
 
 #ifdef __BPF__
 #include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
+#include <bpf_arena_common.bpf.h>
 
 #else /* __BPF__ */
 #define atomic_t u64
 #endif /* __BPF__ */
 
-#include <scx/bpf_arena_spin_lock.h>
+#include <bpf_arena_spin_lock.h>
 #include <lib/rbtree.h>
 
 enum scx_atq_consts {

@@ -181,7 +181,7 @@
  * Author: Changwoo Min <changwoo@igalia.com>
  */
 #include <scx/common.bpf.h>
-#include <scx/bpf_arena_common.bpf.h>
+#include <bpf_arena_common.bpf.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
