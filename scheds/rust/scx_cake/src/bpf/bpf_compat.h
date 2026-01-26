@@ -111,8 +111,17 @@
             63, 52, 6, 26, 37, 40, 33, 47, 61, 45, 43, 21, 23, 58, 17, 10,
             51, 25, 36, 32, 60, 20, 57, 16, 50, 31, 19, 15, 30, 14, 13, 12
         };
-        /* Use the original high-entropy multiplier matched to this table */
-        return de_bruijn_bits[((u64)((mask & -mask) * 0x022FDD63CC95386DULL)) >> 58];
+
+        u64 lsb = mask & -mask;
+
+        /*
+         * OBFUSCATION BARRIER: Prevents Clang 18 from 'recognizing' the
+         * De Bruijn pattern and optimizing it back into __builtin_ctzll,
+         * which triggers the Opcode 191 backend crash.
+         */
+        asm volatile("" : "+r"(lsb));
+
+        return de_bruijn_bits[(lsb * mult) >> 58];
     }
     #define BIT_SCAN_FORWARD_U64(mask) cake_ctz64(mask, 0x022FDD63CC95386DULL)
     #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) cake_ctz64(mask, mult)
