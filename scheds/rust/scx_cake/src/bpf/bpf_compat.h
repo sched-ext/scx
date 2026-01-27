@@ -130,4 +130,32 @@
     #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) __builtin_ctzll(mask)
 #endif
 
+/* 
+ * DSQ PEEK COMPATIBILITY (DARK ARTS ISOLATION)
+ * ---------------------------------------------------------------------------
+ * scx_bpf_dsq_peek was introduced in v6.19. Using it directly on older
+ * kernels fails verification. Using standard compat macros causes stack
+ * spills because of the iterator struct.
+ *
+ * We isolate the iterator-heavy fallback into a 'noinline' slowpath to 
+ * ensure the hot dispatch path remains spill-free and register-pinned.
+ * ---------------------------------------------------------------------------
+ */
+static __attribute__((noinline)) struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id) {
+    struct task_struct *p = NULL;
+    struct bpf_iter_scx_dsq it;
+
+    if (bpf_iter_scx_dsq_new(&it, dsq_id, 0) == 0) {
+        p = bpf_iter_scx_dsq_next(&it);
+        bpf_iter_scx_dsq_destroy(&it);
+    }
+    return p;
+}
+
+static __always_inline struct task_struct *cake_bpf_dsq_peek(u64 dsq_id) {
+    if (bpf_ksym_exists(scx_bpf_dsq_peek))
+        return scx_bpf_dsq_peek(dsq_id);
+    return cake_bpf_dsq_peek_legacy(dsq_id);
+}
+
 #endif /* __CAKE_BPF_COMPAT_H */
