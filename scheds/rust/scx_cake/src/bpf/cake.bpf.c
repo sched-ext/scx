@@ -1116,7 +1116,7 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
     #define CONSUME_AND_SETUP(dsq_id) ({ \
         bool __moved = scx_bpf_dsq_move_to_local(dsq_id); \
         if (__moved) { \
-            struct task_struct *__p = scx_bpf_dsq_peek(SCX_DSQ_LOCAL); \
+            struct task_struct *__p = cake_bpf_dsq_peek(SCX_DSQ_LOCAL); \
             if (__p) { \
                 struct cake_task_ctx *__tctx = get_task_ctx(__p, false); \
                 if (__tctx) { \
