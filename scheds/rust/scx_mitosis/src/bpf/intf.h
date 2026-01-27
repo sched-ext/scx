@@ -79,8 +79,36 @@ struct cgrp_ctx {
 struct cell {
 	// current vtime of the cell
 	u64 vtime_now;
+	// cgroup ID of the cell owner (0 for cell 0 or if no owner)
+	u64 owner_cgid;
 	// Whether or not the cell is used or not
 	u32 in_use;
+};
+
+/* Cell assignment entry: maps a cgroup to a cell */
+struct cell_assignment {
+	u64 cgid; /* cgroup ID (from cgroup file inode) */
+	u32 cell_id; /* cell ID to assign */
+};
+
+/* Cell cpumask data for a single cell */
+struct cell_cpumask_data {
+	unsigned char mask[MAX_CPUS_U8];
+};
+
+/*
+ * cell_config: Complete cell configuration populated by userspace.
+ *
+ * Contains all data needed to apply a cell configuration in a single
+ * BPF program invocation:
+ * - Cell-to-cgroup assignments (which cgroups own which cells)
+ * - Cell cpumasks (which CPUs belong to each cell)
+ */
+struct cell_config {
+	u32			 num_cell_assignments;
+	u32			 num_cells;
+	struct cell_assignment	 assignments[MAX_CELLS];
+	struct cell_cpumask_data cpumasks[MAX_CELLS];
 };
 
 #endif /* __INTF_H */
