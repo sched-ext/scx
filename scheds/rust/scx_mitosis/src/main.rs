@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
+use std::os::fd::AsFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,9 +23,10 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
+use nix::sys::eventfd::EventFd;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -49,6 +51,9 @@ use stats::Metrics;
 const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
+
+/// Epoll token for stats request wakeups
+const STATS_TOKEN: u64 = 2;
 
 /// scx_mitosis: A dynamic affinity scheduler
 ///
@@ -155,8 +160,12 @@ struct Scheduler<'a> {
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
     metrics: Metrics,
-    stats_server: StatsServer<(), Metrics>,
+    stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
+    /// Epoll instance for waiting on multiple fds (stats wakeup, and later inotify)
+    epoll: Epoll,
+    /// EventFd to wake up main loop when stats are requested
+    stats_waker: EventFd,
 }
 
 struct DistributionStats {
@@ -272,14 +281,31 @@ impl<'a> Scheduler<'a> {
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        // Create epoll instance for event-driven main loop
+        let epoll = Epoll::new(EpollCreateFlags::empty())?;
+
+        // Create eventfd for stats wakeup (non-blocking, semaphore mode)
+        let stats_waker = EventFd::from_value_and_flags(
+            0,
+            nix::sys::eventfd::EfdFlags::EFD_NONBLOCK | nix::sys::eventfd::EfdFlags::EFD_SEMAPHORE,
+        )?;
+
+        // Register stats_waker with epoll
+        epoll.add(
+            &stats_waker,
+            EpollEvent::new(EpollFlags::EPOLLIN, STATS_TOKEN),
+        )?;
+
         Ok(Self {
             skel,
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
             metrics: Metrics::default(),
-            stats_server,
+            stats_server: Some(stats_server),
             last_configuration_seq: None,
+            epoll,
+            stats_waker,
         })
     }
 
@@ -288,19 +314,53 @@ impl<'a> Scheduler<'a> {
 
         info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 
-        let (res_ch, req_ch) = self.stats_server.channels();
+        let (res_ch, req_ch) = self.stats_server.as_ref().unwrap().channels();
+
+        // Spawn thread to bridge stats requests to eventfd.
+        // The thread exits when the channel closes (stats_server dropped).
+        // Clone the eventfd so the thread owns its own handle to the same kernel object.
+        let stats_waker_fd = self.stats_waker.as_fd().try_clone_to_owned()?;
+        let stats_waker = unsafe { EventFd::from_owned_fd(stats_waker_fd) };
+        let stats_bridge = std::thread::spawn(move || {
+            while req_ch.recv().is_ok() {
+                // Wake up main loop via eventfd
+                let _ = stats_waker.write(1);
+            }
+        });
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
+            let mut events = [EpollEvent::empty(); 1];
+            let timeout_ms = self.monitor_interval.as_millis() as u16;
+
+            match self
+                .epoll
+                .wait(&mut events, EpollTimeout::try_from(timeout_ms)?)
+            {
+                Ok(n) => {
+                    for event in &events[..n] {
+                        match event.data() {
+                            STATS_TOKEN => {
+                                // Stats request - drain eventfd and send metrics
+                                let _ = self.stats_waker.read();
+                                res_ch.send(self.get_metrics())?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+
+            // Periodic work on every iteration
             self.refresh_bpf_cells()?;
             self.collect_metrics()?;
-
-            match req_ch.recv_timeout(self.monitor_interval) {
-                Ok(()) => res_ch.send(self.get_metrics())?,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(e) => Err(e)?,
-            }
         }
+
         drop(struct_ops);
+        // Drop stats_server to close the channel, allowing stats_bridge to exit
+        drop(self.stats_server.take());
+        let _ = stats_bridge.join();
         info!("Unregister {SCHEDULER_NAME} scheduler");
         uei_report!(&self.skel, uei)
     }
