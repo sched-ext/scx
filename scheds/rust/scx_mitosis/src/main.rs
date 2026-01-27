@@ -9,6 +9,8 @@ mod cell_manager;
 mod mitosis_topology_utils;
 mod stats;
 
+use cell_manager::CellManager;
+
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -26,6 +28,7 @@ use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::eventfd::EventFd;
 use scx_stats::prelude::*;
@@ -53,6 +56,8 @@ const SCHEDULER_NAME: &str = "scx_mitosis";
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 
+/// Epoll token for inotify events (cgroup creation/destruction)
+const INOTIFY_TOKEN: u64 = 1;
 /// Epoll token for stats request wakeups
 const STATS_TOKEN: u64 = 2;
 
@@ -133,6 +138,12 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_work_stealing: bool,
 
+    /// Parent cgroup path whose direct children become cells.
+    /// When specified, cells are created for each direct child cgroup of this parent,
+    /// with CPUs divided equally among cells. Example: --cell-parent-cgroup /workloads
+    #[clap(long)]
+    cell_parent_cgroup: Option<String>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -163,7 +174,9 @@ struct Scheduler<'a> {
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
-    /// Epoll instance for waiting on multiple fds (stats wakeup, and later inotify)
+    /// Optional cell manager for --cell-parent-cgroup mode
+    cell_manager: Option<CellManager>,
+    /// Epoll instance for waiting on multiple fds (inotify, stats wakeup)
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
@@ -261,6 +274,8 @@ impl<'a> Scheduler<'a> {
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
         rodata.enable_work_stealing = opts.enable_work_stealing;
 
+        rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
+
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
@@ -282,6 +297,14 @@ impl<'a> Scheduler<'a> {
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        // Initialize CellManager if --cell-parent-cgroup is specified
+        let cell_manager = if let Some(ref parent_cgroup) = opts.cell_parent_cgroup {
+            let nr_cpus = topology.all_cpus.len() as u32;
+            Some(CellManager::new(parent_cgroup, MAX_CELLS as u32, nr_cpus)?)
+        } else {
+            None
+        };
+
         // Create epoll instance for event-driven main loop
         let epoll = Epoll::new(EpollCreateFlags::empty())?;
 
@@ -297,6 +320,14 @@ impl<'a> Scheduler<'a> {
             EpollEvent::new(EpollFlags::EPOLLIN, STATS_TOKEN),
         )?;
 
+        // Register inotify fd if cell_manager exists
+        if let Some(ref cell_manager) = cell_manager {
+            epoll.add(
+                cell_manager,
+                EpollEvent::new(EpollFlags::EPOLLIN, INOTIFY_TOKEN),
+            )?;
+        }
+
         Ok(Self {
             skel,
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
@@ -305,6 +336,7 @@ impl<'a> Scheduler<'a> {
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
+            cell_manager,
             epoll,
             stats_waker,
         })
@@ -314,6 +346,9 @@ impl<'a> Scheduler<'a> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
 
         info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
+
+        // Apply initial cell configuration if CellManager is active
+        self.apply_initial_cells()?;
 
         let (res_ch, req_ch) = self.stats_server.as_ref().unwrap().channels();
 
@@ -331,15 +366,21 @@ impl<'a> Scheduler<'a> {
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let mut events = [EpollEvent::empty(); 1];
-            let timeout_ms = self.monitor_interval.as_millis() as u16;
+            let timeout = EpollTimeout::try_from(self.monitor_interval).with_context(|| {
+                format!(
+                    "monitor_interval {:?} exceeds maximum epoll timeout",
+                    self.monitor_interval,
+                )
+            })?;
 
-            match self
-                .epoll
-                .wait(&mut events, EpollTimeout::try_from(timeout_ms)?)
-            {
+            match self.epoll.wait(&mut events, timeout) {
                 Ok(n) => {
                     for event in &events[..n] {
                         match event.data() {
+                            INOTIFY_TOKEN => {
+                                // Cgroup event - process immediately
+                                self.process_cell_events()?;
+                            }
                             STATS_TOKEN => {
                                 // Stats request - drain eventfd and send metrics
                                 let _ = self.stats_waker.read();
@@ -364,6 +405,158 @@ impl<'a> Scheduler<'a> {
         let _ = stats_bridge.join();
         info!("Unregister {SCHEDULER_NAME} scheduler");
         uei_report!(&self.skel, uei)
+    }
+
+    /// Apply initial cell assignments discovered at startup
+    fn apply_initial_cells(&mut self) -> Result<()> {
+        if self.cell_manager.is_none() {
+            return Ok(());
+        }
+
+        let cpu_assignments = self.compute_and_apply_cell_config()?;
+
+        let cell_manager = self.cell_manager.as_ref().unwrap();
+        info!(
+            "Applied initial cell configuration: {}",
+            cell_manager.format_cell_config(&cpu_assignments)
+        );
+
+        Ok(())
+    }
+
+    /// Process cell manager events (new/destroyed cgroups)
+    fn process_cell_events(&mut self) -> Result<()> {
+        let (num_new, num_destroyed) = {
+            let Some(ref mut cell_manager) = self.cell_manager else {
+                return Ok(());
+            };
+
+            let (new_cells, destroyed_cells) = cell_manager.process_events()?;
+
+            if new_cells.is_empty() && destroyed_cells.is_empty() {
+                return Ok(());
+            }
+
+            (new_cells.len(), destroyed_cells.len())
+        };
+
+        let cpu_assignments = self.compute_and_apply_cell_config()?;
+
+        let cell_manager = self.cell_manager.as_ref().unwrap();
+        info!(
+            "Cell config updated ({} new, {} destroyed): {}",
+            num_new,
+            num_destroyed,
+            cell_manager.format_cell_config(&cpu_assignments)
+        );
+
+        Ok(())
+    }
+
+    /// Compute cell configuration from CellManager and apply it to BPF.
+    /// Returns the CPU assignments for use with `format_cell_config`.
+    fn compute_and_apply_cell_config(&mut self) -> Result<Vec<(u32, Cpumask)>> {
+        let (cell_assignments, cpu_assignments) = {
+            let cell_manager = self.cell_manager.as_ref().unwrap();
+            (
+                cell_manager.get_cell_assignments(),
+                cell_manager.compute_cpu_assignments()?,
+            )
+        };
+
+        self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
+
+        Ok(cpu_assignments)
+    }
+
+    /// Apply cell configuration to BPF.
+    ///
+    /// Writes the cell and CPU assignments to the BPF config struct and triggers
+    /// the BPF program to apply the configuration.
+    fn apply_cell_config(
+        &mut self,
+        cell_assignments: &[(u64, u32)],
+        cpu_assignments: &[(u32, Cpumask)],
+    ) -> Result<()> {
+        let bss_data = self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .expect("bss_data must be available after scheduler load");
+        let config = &mut bss_data.cell_config;
+
+        // Zero out the config struct. This is necessary because:
+        // 1. Cell IDs can be sparse (e.g., cells 0, 2, 3 if cell 1 was destroyed)
+        // 2. We only write cpumasks for active cells, leaving gaps unwritten
+        // 3. BPF iterates 0..num_cells and applies each cpumask
+        // 4. Without zeroing, a gap (e.g., cell 1) would have a stale cpumask,
+        //    causing CPUs to be assigned to an unused cell
+        // Safety: cell_config is a plain data struct with no Drop impl
+        unsafe {
+            std::ptr::write_bytes(
+                config as *mut _ as *mut u8,
+                0,
+                std::mem::size_of_val(config),
+            );
+        }
+
+        if cell_assignments.len() > bpf_intf::consts_MAX_CELLS as usize {
+            bail!(
+                "Too many cell assignments: {} > MAX_CELLS ({})",
+                cell_assignments.len(),
+                bpf_intf::consts_MAX_CELLS
+            );
+        }
+        config.num_cell_assignments = cell_assignments.len() as u32;
+
+        for (i, (cgid, cell_id)) in cell_assignments.iter().enumerate() {
+            config.assignments[i].cgid = *cgid;
+            config.assignments[i].cell_id = *cell_id;
+        }
+
+        // Set cell cpumasks
+        let mut max_cell_id: u32 = 0;
+        for (cell_id, cpumask) in cpu_assignments {
+            if *cell_id >= bpf_intf::consts_MAX_CELLS {
+                bail!(
+                    "Cell ID {} exceeds MAX_CELLS ({})",
+                    cell_id,
+                    bpf_intf::consts_MAX_CELLS
+                );
+            }
+            max_cell_id = max_cell_id.max(*cell_id + 1);
+
+            // Convert the Cpumask to bytes for this cell's cpumask
+            let raw_slice = cpumask.as_raw_slice();
+            for (word_idx, word) in raw_slice.iter().enumerate() {
+                let byte_start = word_idx * 8;
+                let bytes = word.to_le_bytes();
+                for (j, byte) in bytes.iter().enumerate() {
+                    let idx = byte_start + j;
+                    if idx < config.cpumasks[*cell_id as usize].mask.len() {
+                        config.cpumasks[*cell_id as usize].mask[idx] = *byte;
+                    }
+                }
+            }
+        }
+        config.num_cells = max_cell_id;
+
+        // Trigger the BPF program to apply the configuration
+        let prog = &mut self.skel.progs.apply_cell_config;
+        let out = prog
+            .test_run(ProgramInput::default())
+            .context("Failed to run apply_cell_config BPF program")?;
+        if out.return_value != 0 {
+            bail!(
+                "apply_cell_config BPF program returned error {} (num_assignments={}, num_cells={})",
+                out.return_value as i32,
+                cell_assignments.len(),
+                cpu_assignments.len()
+            );
+        }
+
+        Ok(())
     }
 
     fn get_metrics(&self) -> Metrics {
