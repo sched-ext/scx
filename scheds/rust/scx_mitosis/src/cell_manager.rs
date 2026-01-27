@@ -447,8 +447,11 @@ impl CellManager {
     /// Format the cell configuration as a compact string for logging.
     /// Example output: "[0: 0-7] [1(container-a): 8-15] [2(container-b): 16-23]"
     pub fn format_cell_config(&self, cpu_assignments: &[(u32, Cpumask)]) -> String {
+        let mut sorted: Vec<_> = cpu_assignments.iter().collect();
+        sorted.sort_by_key(|(cell_id, _)| *cell_id);
+
         let mut parts = Vec::new();
-        for (cell_id, cpumask) in cpu_assignments {
+        for (cell_id, cpumask) in sorted {
             let cpulist = cpumask.to_cpulist();
             if *cell_id == 0 {
                 parts.push(format!("[0: {}]", cpulist));
