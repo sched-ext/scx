@@ -45,6 +45,7 @@ const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
+const volatile bool	     userspace_managed_cell_mode     = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -72,6 +73,9 @@ struct {
 	__type(key, u32);
 	__type(value, struct debug_event);
 } debug_events SEC(".maps");
+
+/* Configuration struct for apply_cell_config, populated by userspace */
+struct cell_config cell_config;
 
 struct update_timer {
 	struct bpf_timer timer;
@@ -1449,6 +1453,9 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 	if (cpu_controller_disabled)
 		return 0;
 
+	if (userspace_managed_cell_mode)
+		return 0;
+
 	record_cgroup_exit(cgrp->kn->id);
 
 	/*
@@ -1514,6 +1521,9 @@ int BPF_PROG(tp_cgroup_rmdir, struct cgroup *cgrp, const char *cgrp_path)
 	struct cgrp_ctx *cgc;
 
 	if (!cpu_controller_disabled)
+		return 0;
+
+	if (userspace_managed_cell_mode)
 		return 0;
 
 	/*
@@ -1998,23 +2008,294 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		cell->in_use = true;
 	}
 
-	struct bpf_timer *timer = bpf_map_lookup_elem(&update_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup update timer");
-		return -ESRCH;
+	/*
+	 * Only start the update timer if not in userspace managed cell mode.
+	 * In userspace managed mode, configuration is applied via apply_cell_config.
+	 */
+	if (!userspace_managed_cell_mode) {
+		struct bpf_timer *timer =
+			bpf_map_lookup_elem(&update_timer, &key);
+		if (!timer) {
+			scx_bpf_error("Failed to lookup update timer");
+			return -ESRCH;
+		}
+		bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
+		bpf_timer_set_callback(timer, update_timer_cb);
+		if ((ret = bpf_timer_start(timer, TIMER_INTERVAL_NS, 0))) {
+			scx_bpf_error("Failed to arm update timer");
+			return ret;
+		}
 	}
-	bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
-	bpf_timer_set_callback(timer, update_timer_cb);
-	if ((ret = bpf_timer_start(timer, TIMER_INTERVAL_NS, 0))) {
-		scx_bpf_error("Failed to arm update timer");
-		return ret;
-	}
+
 	return 0;
 }
 
 void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
+}
+
+/*
+ * Apply a complete cell configuration.
+ *
+ * Configuration data is read from the cell_config global struct,
+ * which is populated by userspace before invoking this program.
+ *
+ * The function operates in five phases:
+ * 1. Mark all cells (except cell 0) as not in use
+ * 2. Apply cell assignments for owner cgroups
+ * 3. Walk cgroup hierarchy to propagate cells to children
+ * 4. Apply cell cpumasks and CPU-to-cell mappings
+ * 5. Bump applied_configuration_seq to signal completion
+ *
+ * Note: This is not atomic - tasks may observe intermediate states during
+ * execution. On error, the scheduler may be left in a partially-configured
+ * state. This is acceptable because userspace treats errors as fatal and
+ * exits, causing the scheduler to be unloaded.
+ */
+SEC("syscall")
+int apply_cell_config(void *ctx)
+{
+	struct cgrp_ctx		    *cgc;
+	struct cell		    *cell;
+	struct cpu_ctx		    *cctx;
+	struct cell_cpumask_wrapper *cpumaskw;
+	struct cgroup_subsys_state  *root_css, *pos;
+	struct cgroup		    *cur_cgrp;
+	u32			     i, cell_id;
+
+	/* Read configuration from global struct (populated by userspace) */
+	struct cell_config *config = &cell_config;
+
+	/*
+	 * Phase 1: Mark all cells (except cell 0) as not in use.
+	 * This handles cell destruction - cells not in the new config
+	 * will remain marked as not in use.
+	 */
+	bpf_for(i, 1, MAX_CELLS)
+	{
+		cell = lookup_cell(i);
+		if (!cell)
+			return -EINVAL;
+
+		WRITE_ONCE(cell->in_use, 0);
+		cell->owner_cgid = 0;
+	}
+
+	/*
+	 * Phase 2: Apply cell cpumasks and derive CPU-to-cell mappings.
+	 * For each cell, we update the cell's cpumask and set each CPU's
+	 * cell assignment based on which cell's cpumask contains it.
+	 *
+	 * This is done before cgroup assignments so that any task
+	 * initialized mid-operation that reads a new cell ID will find
+	 * correct cpumasks already in place.
+	 */
+	if (config->num_cells > MAX_CELLS)
+		return -EINVAL;
+
+	bpf_for(cell_id, 0, MAX_CELLS)
+	{
+		struct cell_cpumask_data *cpumask_data;
+
+		if (cell_id >= config->num_cells)
+			break;
+
+		cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &cell_id);
+		if (!cpumaskw)
+			continue;
+
+		cpumask_data = MEMBER_VPTR(config->cpumasks, [cell_id]);
+		if (!cpumask_data) {
+			scx_bpf_error("cell_id %d out of bounds", cell_id);
+			return -EINVAL;
+		}
+
+		/* Get the tmp_cpumask to build the new mask */
+		struct bpf_cpumask *new_cpumask __free(bpf_cpumask) =
+			bpf_kptr_xchg(&cpumaskw->tmp_cpumask, NULL);
+		if (!new_cpumask) {
+			scx_bpf_error("tmp_cpumask is NULL for cell %d",
+				      cell_id);
+			return -EINVAL;
+		}
+
+		/* Clear the cpumask and set bits based on the config data */
+		bpf_cpumask_clear(new_cpumask);
+
+		/* Set cpumask bits and CPU-to-cell mappings */
+		u32 cpu;
+		bpf_for(cpu, 0, nr_possible_cpus)
+		{
+			u32		     byte_idx = cpu / 8;
+			u32		     bit_idx  = cpu % 8;
+
+			const unsigned char *bytep =
+				MEMBER_VPTR(cpumask_data->mask, [byte_idx]);
+			if (!bytep) {
+				scx_bpf_error("byte_idx %d out of bounds",
+					      byte_idx);
+				return -EINVAL;
+			}
+
+			if (*bytep & (1 << bit_idx)) {
+				bpf_cpumask_set_cpu(cpu, new_cpumask);
+				cctx = bpf_map_lookup_percpu_elem(
+					&cpu_ctxs, &(u32){ 0 }, cpu);
+				if (!cctx)
+					return -ENOENT;
+				cctx->cell = cell_id;
+			}
+		}
+
+		/* Swap the new cpumask into place */
+		new_cpumask = bpf_kptr_xchg(&cpumaskw->cpumask,
+					    no_free_ptr(new_cpumask));
+		if (!new_cpumask) {
+			scx_bpf_error("cpumask should never be null");
+			return -EINVAL;
+		}
+
+		/* Put the old cpumask into tmp_cpumask for reuse */
+		struct bpf_cpumask *stale __free(bpf_cpumask) = bpf_kptr_xchg(
+			&cpumaskw->tmp_cpumask, no_free_ptr(new_cpumask));
+		if (stale) {
+			scx_bpf_error("tmp_cpumask should be null");
+			return -EINVAL;
+		}
+	}
+
+	/* Phase 3: Apply cell-to-cgroup assignments for owner cgroups */
+	if (config->num_cell_assignments > MAX_CELLS)
+		return -EINVAL;
+
+	bpf_for(i, 0, MAX_CELLS)
+	{
+		struct cell_assignment *assignment;
+
+		if (i >= config->num_cell_assignments)
+			break;
+
+		assignment = &config->assignments[i];
+
+		u64 cgid   = assignment->cgid;
+		cell_id	   = assignment->cell_id;
+
+		if (cell_id >= MAX_CELLS)
+			return -EINVAL;
+
+		struct cgroup *cg __free(cgroup) = bpf_cgroup_from_id(cgid);
+		if (!cg)
+			/*
+			 * The cgroup may have been deleted between when
+			 * userspace populated the config and now. Skip it;
+			 * userspace will discover the deletion via inotify
+			 * and remove it from the next config.
+			 */
+			continue;
+
+		cgc = lookup_cgrp_ctx(cg);
+		if (!cgc)
+			return -ENOENT;
+
+		cell = lookup_cell(cell_id);
+		if (!cell)
+			return -EINVAL;
+
+		cell->in_use	 = 1;
+		cell->owner_cgid = cgid;
+
+		cgc->cell	 = cell_id;
+		cgc->cell_owner	 = true;
+	}
+
+	/*
+	 * Phase 4: Walk the cgroup hierarchy to propagate cell assignments
+	 * to children. Non-owner cgroups inherit their parent's cell.
+	 */
+	scoped_guard(rcu)
+	{
+		if (!root_cgrp) {
+			scx_bpf_error("root_cgrp should not be null");
+			return -EINVAL;
+		}
+
+		struct cgroup *root_cgrp_ref __free(cgroup) =
+			bpf_cgroup_acquire(root_cgrp);
+		if (!root_cgrp_ref) {
+			scx_bpf_error(
+				"Failed to acquire reference to root_cgrp");
+			return -EINVAL;
+		}
+		root_css = &root_cgrp_ref->self;
+
+		/* Initialize level_cells[0] to cell 0 (root cell) */
+		level_cells[0] = 0;
+
+		/*
+		 * Walk all cgroups in pre-order traversal. For each cgroup:
+		 * - If it's a cell owner, record its cell in level_cells
+		 * - If not, inherit the parent's cell from level_cells[level-1]
+		 */
+		bpf_for_each(css, pos, root_css,
+			     BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+			cur_cgrp = pos->cgroup;
+
+			/*
+			 * Look up cgrp_ctx for this cgroup. For dying cgroups
+			 * or those without storage, this may fail - that's OK
+			 * since they can't have tasks anyway.
+			 */
+			struct cgrp_ctx *cgrp_ctx;
+			cgrp_ctx = lookup_cgrp_ctx_fallible(cur_cgrp);
+			if (!cgrp_ctx)
+				continue;
+
+			u32 level = cur_cgrp->level;
+			if (level >= MAX_CG_DEPTH) {
+				scx_bpf_error("Cgroup hierarchy too deep: %d",
+					      level);
+				return -EINVAL;
+			}
+
+			if (cgrp_ctx->cell_owner) {
+				/*
+				 * Check if this cell is still in use and owned
+				 * by this cgroup. If not, this cgroup was a
+				 * former owner but is no longer in the new
+				 * config (or the cell ID was reused for a
+				 * different cgroup). Clear cell_owner and
+				 * inherit from parent.
+				 */
+				cell = lookup_cell(cgrp_ctx->cell);
+				if (!cell)
+					return -EINVAL;
+				if (cell->in_use &&
+				    cell->owner_cgid == cur_cgrp->kn->id) {
+					/* Cell owner with active cell - record in level_cells */
+					level_cells[level] = cgrp_ctx->cell;
+					continue;
+				}
+				/* Former owner, cell no longer in use - clear flag and fall through */
+				cgrp_ctx->cell_owner = false;
+			}
+
+			/* Not a cell owner (or was, but cell no longer active) - inherit from parent */
+			u32 parent_cell;
+			if (level > 0)
+				parent_cell = level_cells[level - 1];
+			else
+				parent_cell = 0;
+
+			WRITE_ONCE(cgrp_ctx->cell, parent_cell);
+			level_cells[level] = parent_cell;
+		}
+	}
+
+	/* Phase 5: Bump configuration sequence to make changes visible */
+	__atomic_add_fetch(&applied_configuration_seq, 1, __ATOMIC_RELEASE);
+
+	return 0;
 }
 
 // clang-format off
