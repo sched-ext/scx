@@ -183,10 +183,9 @@ static u64 update_freq(u64 freq, u64 interval)
 }
 
 /*
- * Evaluate the task's time slice proportionally to its weight and
- * inversely proportional to the amount of contending tasks.
+ * Evaluate the task's time slice proportionally to its weight.
  */
-static u64 task_slice(struct task_struct *p, s32 cpu)
+static u64 task_slice(struct task_struct *p)
 {
 	return scale_by_task_weight(p, slice_ns);
 }
@@ -673,7 +672,7 @@ out_insert:
 	 * callback.
 	 */
 	if (!__COMPAT_scx_bpf_dsq_peek(cpu))
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, cpu), 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 
 	return cpu;
 }
@@ -692,7 +691,7 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	if (is_task_sticky(tctx)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p, prev_cpu), enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 	} else {
 		/*
 		 * Attempt a migration to an idle CPU if possible.
@@ -701,7 +700,7 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 			cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
 			if (cpu >= 0 && !__COMPAT_scx_bpf_dsq_peek(cpu)) {
 				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-						   task_slice(p, prev_cpu), enq_flags);
+						   task_slice(p), enq_flags);
 				if (prev_cpu != cpu || !scx_bpf_task_running(p))
 					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 				return;
@@ -711,7 +710,7 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 		/*
 		 * Keep running on the same CPU.
 		 */
-		scx_bpf_dsq_insert_vtime(p, prev_cpu, task_slice(p, prev_cpu),
+		scx_bpf_dsq_insert_vtime(p, prev_cpu, task_slice(p),
 					 task_dl(p, tctx), enq_flags);
 	}
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags))
@@ -780,7 +779,7 @@ void BPF_STRUCT_OPS(beerland_dispatch, s32 cpu, struct task_struct *prev)
 	 * still wants to run, let it run by refilling its time slice.
 	 */
 	if (prev && keep_running(prev, cpu)) {
-		prev->scx.slice = task_slice(prev, cpu);
+		prev->scx.slice = task_slice(prev);
 		__sync_fetch_and_add(&nr_keep_running, 1);
 	}
 }
