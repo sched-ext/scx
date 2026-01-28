@@ -5,6 +5,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod cell_manager;
 mod mitosis_topology_utils;
 mod stats;
 
