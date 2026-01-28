@@ -365,22 +365,9 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * Do not keep running if the CPU is not in the primary domain and
 	 * the task can use the primary domain).
 	 */
-	if (primary && bpf_cpumask_intersects(primary, p->cpus_ptr) &&
+	if (!primary_all && primary &&
+	    bpf_cpumask_intersects(primary, p->cpus_ptr) &&
 	    !bpf_cpumask_test_cpu(cpu, primary))
-		return false;
-
-	/*
-	 * If the task can only run on this CPU, keep it running.
-	 */
-	if (is_pcpu_task(p))
-		return true;
-
-	/*
-	 * If the task is not running in a full-idle SMT core and there are
-	 * full-idle SMT cores available in the system, give it a chance to
-	 * migrate elsewhere.
-	 */
-	if (is_smt_contended(cpu))
 		return false;
 
 	return true;
