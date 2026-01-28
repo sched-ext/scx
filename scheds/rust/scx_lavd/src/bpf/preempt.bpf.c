@@ -21,7 +21,7 @@ struct preemption_info {
 __hidden
 u64 get_est_stopping_clk(task_ctx *taskc, u64 now)
 {
-	return now + min(taskc->avg_runtime, taskc->slice);
+	return now + min(taskc->avg_runtime_wall, taskc->slice_wall);
 }
 
 static bool can_x_kick_y(struct preemption_info *prm_x,
@@ -247,8 +247,8 @@ static void ask_cpu_yield_after(struct cpu_ctx *victim_cpuc, u64 new_slice)
 __hidden
 int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 {
-	u64 dur, new_slice = 0;
-	u64 target_slice;
+	u64 duration_wall, new_slice_wall = 0;
+	u64 target_slice_wall;
 
 	/*
 	 * Shrink the time slice of the slice-boosted task into a regular
@@ -262,17 +262,17 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 	 * If pinned_slice_ns is enabled and there are pinned tasks
 	 * waiting on this CPU, use pinned slice instead of regular slice.
 	 */
-	target_slice = (pinned_slice_ns && cpuc->nr_pinned_tasks) ?
-		       pinned_slice_ns : sys_stat.slice;
+	target_slice_wall = (pinned_slice_ns && cpuc->nr_pinned_tasks) ?
+				pinned_slice_ns : sys_stat.slice_wall;
 
-	dur = time_delta(now, cpuc->running_clk);
-	if (target_slice > dur)
-		new_slice = time_delta(target_slice, dur);
+	duration_wall = time_delta(now, cpuc->running_clk);
+	if (target_slice_wall > duration_wall)
+		new_slice_wall = time_delta(target_slice_wall, duration_wall);
 
-	if (!new_slice)
+	if (!new_slice_wall)
 		scx_bpf_kick_cpu(cpuc->cpu_id, SCX_KICK_PREEMPT);
 	else
-		ask_cpu_yield_after(cpuc, new_slice);
+		ask_cpu_yield_after(cpuc, new_slice_wall);
 
 	cpuc->nr_preempt++;
 
@@ -282,41 +282,41 @@ int shrink_boosted_slice_remote(struct cpu_ctx *cpuc, u64 now)
 __hidden
 void shrink_slice_at_tick(struct task_struct *p, struct cpu_ctx *cpuc, u64 now)
 {
-	u64 ub, duration, new_slice;
+	u64 ub_wall, duration_wall, new_slice_wall;
 
 	/*
 	 * Calculate the upper bound of running this task
 	 * since it is scheduled this time.
 	 */
 	if (pinned_slice_ns)
-		ub = min(pinned_slice_ns, sys_stat.slice);
+		ub_wall = min(pinned_slice_ns, sys_stat.slice_wall);
 	else
-		ub = sys_stat.slice;
+		ub_wall = sys_stat.slice_wall;
 
 	/*
 	 * Calculate how long the task has been running
 	 * since it was scheduled.
 	 */
-	duration = time_delta(now, cpuc->running_clk);
+	duration_wall = time_delta(now, cpuc->running_clk);
 
 	/* Limit the task's time slice. */
-	if (duration >= ub) {
+	if (duration_wall >= ub_wall) {
 		/*
 		 * If the task is running beyond the current upper bound,
 		 * stop it right now. Note that it is okay to set p->scx.slice
 		 * to zero since this is supposed to be called by ops.tick(),
 		 * which is the scheduling point.
 		 */
-		new_slice = 0;
+		new_slice_wall = 0;
 	} else {
 		/*
 		 * When pinned tasks are waiting to run, any task should not
 		 * go beyond the current upper bound.
 		 */
-		new_slice = time_delta(ub, duration);
+		new_slice_wall = time_delta(ub_wall, duration_wall);
 	}
 
-	p->scx.slice = new_slice;
+	p->scx.slice = new_slice_wall;
 	reset_cpu_flag(cpuc, LAVD_FLAG_SLICE_BOOST);
 	cpuc->nr_preempt++;
 }
@@ -341,7 +341,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *cpuc_victim;
 	struct cpu_ctx *cpuc_cur = NULL;
-	u64 now, dur, cpdom_id, new_slice = 0;
+	u64 now, duration_wall, cpdom_id, new_slice_wall = 0;
 
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
@@ -366,8 +366,8 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 		 * cancel the slice boosting and kick the boosted task
 		 * immediately.
 		 */
-		dur = time_delta(now, cpuc_victim->running_clk);
-		if (dur >= sys_stat.slice) {
+		duration_wall = time_delta(now, cpuc_victim->running_clk);
+		if (duration_wall >= sys_stat.slice_wall) {
 			init_prm_by_task(&prm_t, taskc, now);
 			if (can_x_kick_cpu2(&prm_t, &prm_c, cpuc_victim)) {
 				reset_cpu_flag(cpuc_victim, LAVD_FLAG_SLICE_BOOST);
@@ -383,8 +383,11 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 		 * scheduled out, just like other regular tasks.
 		 */
 		if (test_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED)) {
-			if (sys_stat.slice > dur)
-				new_slice = time_delta(sys_stat.slice, dur);
+			if (sys_stat.slice_wall > duration_wall) {
+				new_slice_wall = time_delta(
+							sys_stat.slice_wall,
+							duration_wall);
+			}
 			reset_cpu_flag(cpuc_victim, LAVD_FLAG_SLICE_BOOST);
 			goto kick_out;
 		}
@@ -416,7 +419,7 @@ void try_find_and_kick_victim_cpu(struct task_struct *p,
 	 */
 	if (cpuc_victim) {
 kick_out:
-		ask_cpu_yield_after(cpuc_victim, new_slice);
+		ask_cpu_yield_after(cpuc_victim, new_slice_wall);
 
 		if (cpuc_cur || (cpuc_cur = get_cpu_ctx()))
 			cpuc_cur->nr_preempt++;

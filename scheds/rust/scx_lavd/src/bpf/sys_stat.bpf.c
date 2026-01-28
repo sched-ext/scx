@@ -46,13 +46,13 @@ struct {
 
 struct sys_stat_ctx {
 	u64		now;
-	u64		duration;
-	u64		duration_total;
-	u64		idle_total;
-	u64		compute_total;
-	u64		tot_svc_time;
-	u64		tot_sc_time;
-	u64		tsct_spike;
+	u64		duration_wall;
+	u64		duration_total_wall;
+	u64		idle_total_wall;
+	u64		compute_total_wall;
+	u64		tot_task_time_wwgt;
+	u64		tot_task_time_invr;
+	u64		tsct_spike_invr;
 	u64		nr_queued_task;
 	s32		max_lat_cri;
 	s32		avg_lat_cri;
@@ -84,7 +84,7 @@ static void init_sys_stat_ctx(void)
 
 	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
-	c->duration = time_delta(c->now, sys_stat.last_update_clk)? : 1;
+	c->duration_wall = time_delta(c->now, sys_stat.last_update_clk)? : 1;
 	WRITE_ONCE(sys_stat.last_update_clk, c->now);
 }
 
@@ -92,7 +92,7 @@ static void collect_sys_stat(void)
 {
 	struct sys_stat_ctx *c = &ctx;
 	struct cpdom_ctx *cpdomc;
-	u64 cpdom_id, compute = 1;
+	u64 cpdom_id, compute_wall = 1;
 	int cpu;
 
 	/*
@@ -139,10 +139,10 @@ static void collect_sys_stat(void)
 	 * one.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		u64 non_scx_time, sc_non_scx_time, cpuc_tot_sc_time;
+		u64 non_scx_time_wall, sc_non_scx_time_invr, cpuc_tot_task_time_invr;
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			c->compute_total = 0;
+			c->compute_total_wall = 0;
 			break;
 		}
 
@@ -160,8 +160,8 @@ static void collect_sys_stat(void)
 		/*
 		 * Accumulate cpus' loads.
 		 */
-		c->tot_svc_time += cpuc->tot_svc_time;
-		cpuc->tot_svc_time = 0;
+		c->tot_task_time_wwgt += cpuc->tot_task_time_wwgt;
+		cpuc->tot_task_time_wwgt = 0;
 
 		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
@@ -175,9 +175,10 @@ static void collect_sys_stat(void)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				u64 duration = time_delta(c->now, old_clk);
+				u64 duration_wall = time_delta(c->now, old_clk);
 
-				__sync_fetch_and_add(&cpuc->idle_total, duration);
+				__sync_fetch_and_add(&cpuc->idle_total_wall,
+						     duration_wall);
 				break;
 			}
 		}
@@ -185,8 +186,8 @@ static void collect_sys_stat(void)
 		/*
 		 * Calculate per-CPU utilization.
 		 */
-		compute = time_delta(c->duration, cpuc->idle_total);
-		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
+		compute_wall = time_delta(c->duration_wall, cpuc->idle_total_wall);
+		cpuc->cur_util = (compute_wall << LAVD_SHIFT) / c->duration_wall;
 		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
@@ -203,9 +204,9 @@ static void collect_sys_stat(void)
 		 * duration - idle_total). We assume the CPU frequency was at
 		 * its maximum while running non-SCX tasks.
 		 */
-		non_scx_time = time_delta(compute, cpuc->tot_task_time);
-		sc_non_scx_time = scale_cap_max_freq(non_scx_time, cpu);
-		cpuc->tot_task_time = 0;
+		non_scx_time_wall = time_delta(compute_wall, cpuc->tot_task_time_wall);
+		sc_non_scx_time_invr = scale_cap_max_freq(non_scx_time_wall, cpu);
+		cpuc->tot_task_time_wall = 0;
 
 		/*
 		 * Update scaled CPU utilization, which is capacity and
@@ -213,22 +214,23 @@ static void collect_sys_stat(void)
 		 * include everything — SCX task time, non-SCX task time
 		 * (RT/DL), IRQ times, etc.
 		 */
-		cpuc_tot_sc_time = cpuc->tot_sc_time + sc_non_scx_time;
-		cpuc->cur_sc_util = (cpuc_tot_sc_time << LAVD_SHIFT) / c->duration;
+		cpuc_tot_task_time_invr = cpuc->tot_task_time_invr + sc_non_scx_time_invr;
+		cpuc->cur_sc_util = (cpuc_tot_task_time_invr << LAVD_SHIFT) /
+				    c->duration_wall;
 		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
-		cpuc->tot_sc_time = 0;
+		cpuc->tot_task_time_invr = 0;
 
 		/*
 		 * Accumulate cpus' scaled loads,
 		 * which is capacity and frequency invariant.
 		 */
-		c->tot_sc_time += cpuc_tot_sc_time;
+		c->tot_task_time_invr += cpuc_tot_task_time_invr;
 
 		/*
 		 * Track the scaled time when the utilization spikes happened.
 		 */
 		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
-			c->tsct_spike += cpuc_tot_sc_time;
+			c->tsct_spike_invr += cpuc_tot_task_time_invr;
 	}
 
 	/*
@@ -237,7 +239,7 @@ static void collect_sys_stat(void)
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			c->compute_total = 0;
+			c->compute_total_wall = 0;
 			break;
 		}
 
@@ -294,7 +296,7 @@ static void collect_sys_stat(void)
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			c->compute_total = 0;
+			c->compute_total_wall = 0;
 			break;
 		}
 
@@ -319,15 +321,18 @@ static void collect_sys_stat(void)
 		 * irq/steal during execution times. We extrapolate that ratio to
 		 * the rest of CPU time as an approximation.
 		 */
-		cpuc->cur_stolen_est = (cpuc->stolen_time_est << LAVD_SHIFT) / compute;
-		cpuc->avg_stolen_est = calc_asym_avg(cpuc->avg_stolen_est, cpuc->cur_stolen_est);
-		cpuc->stolen_time_est = 0;
+		cpuc->cur_stolen_time_wall = (cpuc->stolen_time_wall <<
+						LAVD_SHIFT) / compute_wall;
+		cpuc->avg_stolen_time_wall = calc_asym_avg(
+						cpuc->avg_stolen_time_wall,
+						cpuc->cur_stolen_time_wall);
+		cpuc->stolen_time_wall = 0;
 
 		/*
-		 * Accmulate system-wide idle time.
+		 * Accumulate system-wide idle time.
 		 */
-		c->idle_total += cpuc->idle_total;
-		cpuc->idle_total = 0;
+		c->idle_total_wall += cpuc->idle_total_wall;
+		cpuc->idle_total_wall = 0;
 	}
 }
 
@@ -335,21 +340,21 @@ static void calc_sys_stat(void)
 {
 	struct sys_stat_ctx *c = &ctx;
 	static int cnt = 0;
-	u64 avg_svc_time = 0, cur_sc_util, scu_spike;
+	u64 avg_svc_time_wwgt = 0, cur_sc_util, scu_spike_invr;
 
 	/*
 	 * Calculate the CPU utilization that includes everything
 	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
 	 */
-	c->duration_total = c->duration * nr_cpus_onln;
-	c->compute_total = time_delta(c->duration_total, c->idle_total);
-	c->cur_util = (c->compute_total << LAVD_SHIFT) / c->duration_total;
+	c->duration_total_wall = c->duration_wall * nr_cpus_onln;
+	c->compute_total_wall = time_delta(c->duration_total_wall, c->idle_total_wall);
+	c->cur_util = (c->compute_total_wall << LAVD_SHIFT) / c->duration_total_wall;
 
 	/*
 	 * Calculate the scaled CPU utilization that includes everything
 	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
 	 */
-	cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
+	cur_sc_util = (c->tot_task_time_invr << LAVD_SHIFT) / c->duration_total_wall;
 	if (cur_sc_util > c->cur_util)
 		cur_sc_util = min(sys_stat.avg_sc_util, c->cur_util);
 
@@ -377,13 +382,14 @@ static void calc_sys_stat(void)
 	 * capacity and finally allocates more active CPUs. The over-allocated
 	 * CPUs become the breathing room.
 	 */
-	scu_spike = (c->tsct_spike << (LAVD_SHIFT - 1)) / c->duration_total;
-	c->cur_sc_util = min(cur_sc_util + scu_spike, LAVD_SCALE);
+	scu_spike_invr = (c->tsct_spike_invr << (LAVD_SHIFT - 1)) /
+				c->duration_total_wall;
+	c->cur_sc_util = min(cur_sc_util + scu_spike_invr, LAVD_SCALE);
 
 	/*
 	 * Update min/max/avg.
 	 */
-	if (c->nr_sched == 0 || c->compute_total == 0) {
+	if (c->nr_sched == 0 || c->compute_total_wall == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.
@@ -423,8 +429,9 @@ static void calc_sys_stat(void)
 	}
 
 	if (c->nr_sched > 0)
-		avg_svc_time = c->tot_svc_time / c->nr_sched;
-	sys_stat.avg_svc_time = calc_avg(sys_stat.avg_svc_time, avg_svc_time);
+		avg_svc_time_wwgt = c->tot_task_time_wwgt / c->nr_sched;
+	sys_stat.avg_svc_time_wwgt = calc_avg(sys_stat.avg_svc_time_wwgt,
+					      avg_svc_time_wwgt);
 	sys_stat.nr_queued_task = calc_avg(sys_stat.nr_queued_task, c->nr_queued_task);
 
 	/*
@@ -461,7 +468,7 @@ static void calc_sys_stat(void)
 
 static void calc_sys_time_slice(void)
 {
-	u64 nr_q, slice;
+	u64 nr_q, slice_wall;
 
 	/*
 	 * Given the updated state, recalculate the time slice for the next
@@ -471,12 +478,12 @@ static void calc_sys_time_slice(void)
 	 */
 	nr_q = sys_stat.nr_queued_task;
 	if (nr_q > 0) {
-		slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_q;
-		slice = clamp(slice, slice_min_ns, slice_max_ns);
+		slice_wall = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_q;
+		slice_wall = clamp(slice_wall, slice_min_ns, slice_max_ns);
 	} else {
-		slice = slice_max_ns;
+		slice_wall = slice_max_ns;
 	}
-	sys_stat.slice = calc_avg(sys_stat.slice, slice);
+	sys_stat.slice_wall = calc_avg(sys_stat.slice_wall, slice_wall);
 }
 
 static int do_update_sys_stat(void)
@@ -553,7 +560,7 @@ s32 init_sys_stat(u64 now)
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
-	sys_stat.slice = slice_max_ns;
+	sys_stat.slice_wall = slice_max_ns;
 	bpf_for(cpdom_id, 0, nr_cpdoms) {
 		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
 			break;
