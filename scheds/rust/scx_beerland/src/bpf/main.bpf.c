@@ -45,6 +45,16 @@ static u64 nr_cpu_ids;
 const volatile bool smt_enabled = true;
 
 /*
+ * User CPU utilization threshold to determine when the system is busy.
+ */
+const volatile u64 busy_threshold;
+
+/*
+ * Current global CPU utilization percentage in the range [0 .. 1024].
+ */
+volatile u64 cpu_util;
+
+/*
  * Subset of CPUs to prioritize.
  */
 private(BEERLAND) struct bpf_cpumask __kptr *primary_cpumask;
@@ -153,6 +163,15 @@ static inline bool is_pcpu_task(const struct task_struct *p)
 static bool is_task_sticky(const struct task_ctx *tctx)
 {
 	return tctx->avg_runtime < 10 * NSEC_PER_USEC;
+}
+
+/*
+ * Return true if the system is considered busy (user CPU utilization is
+ * above the threshold), false otherwise.
+ */
+static inline bool is_system_busy(void)
+{
+	return cpu_util >= busy_threshold;
 }
 
 /*
@@ -308,21 +327,6 @@ static bool is_smt_contended(s32 cpu)
 	scx_bpf_put_cpumask(idle_mask);
 
 	return is_contended;
-}
-
-/*
- * Return true if all the CPUs in the system are busy, false otherwise.
- */
-static bool is_system_busy(void)
-{
-	const struct cpumask *idle_mask;
-	bool is_busy;
-
-	idle_mask = scx_bpf_get_idle_cpumask();
-	is_busy = bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_cpumask(idle_mask);
-
-	return is_busy;
 }
 
 /*
@@ -625,6 +629,7 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 {
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
 	bool is_this_cpu_allowed = is_cpu_allowed(p, this_cpu);
+	bool is_dispatched = false;
 
 	/*
 	 * If there's no task queued either in the previous or the current
@@ -632,9 +637,10 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	 * directly dispatch to the local DSQ and save some unnecessary
 	 * scheduling overhead.
 	 */
-	if (!__COMPAT_scx_bpf_dsq_peek(prev_cpu) ||
-	    !__COMPAT_scx_bpf_dsq_peek(this_cpu))
+	if (!is_system_busy()) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		is_dispatched = true;
+	}
 
 	/*
 	 * Make sure @prev_cpu is usable, otherwise try to move close to
@@ -667,8 +673,23 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	 * found, keep using the same one.
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags);
+	if (cpu < 0)
+		return prev_cpu;
 
-	return cpu < 0 ? prev_cpu : cpu;
+	if (!is_dispatched) {
+		const struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(cpu);
+
+		if (!q) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
+		} else {
+			struct task_ctx *tctx = try_lookup_task_ctx(p);
+
+			if (tctx)
+				scx_bpf_dsq_insert_vtime(p, cpu, task_slice(p), task_dl(p, tctx), 0);
+		}
+	}
+
+	return cpu;
 }
 
 /*
