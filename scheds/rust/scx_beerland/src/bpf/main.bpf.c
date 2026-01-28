@@ -609,20 +609,39 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu, u64 
 }
 
 /*
+ * Return true if @p can run on @cpu, false otherwise.
+ */
+static bool is_cpu_allowed(const struct task_struct *p, s32 cpu)
+{
+	return p->nr_cpus_allowed == nr_cpu_ids ||
+	       bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
+}
+
+/*
  * Called on task wakeup to give the task a chance to migrate to an idle
  * CPU.
  */
 s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 cpu, this_cpu = bpf_get_smp_processor_id();
-	bool is_this_cpu_allowed = bpf_cpumask_test_cpu(this_cpu, p->cpus_ptr);
+	bool is_this_cpu_allowed = is_cpu_allowed(p, this_cpu);
+
+	/*
+	 * If there's no task queued either in the previous or the current
+	 * CPU's DSQ, assume the CPUs are not too contended, so we can
+	 * directly dispatch to the local DSQ and save some unnecessary
+	 * scheduling overhead.
+	 */
+	if (!__COMPAT_scx_bpf_dsq_peek(prev_cpu) ||
+	    !__COMPAT_scx_bpf_dsq_peek(this_cpu))
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
 
 	/*
 	 * Make sure @prev_cpu is usable, otherwise try to move close to
 	 * the waker's CPU. If the waker's CPU is also not usable, then
 	 * pick the first usable CPU.
 	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+	if (!is_cpu_allowed(p, prev_cpu))
 		prev_cpu = is_this_cpu_allowed ? this_cpu : bpf_cpumask_first(p->cpus_ptr);
 
 	/*
@@ -637,10 +656,8 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 		 * don't migrate.
 		 */
 		if (cpus_share_cache(this_cpu, prev_cpu) &&
-		    (!is_smt_contended(prev_cpu)) && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto out_insert;
-		}
+		    (!is_smt_contended(prev_cpu)) && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
 
 		prev_cpu = this_cpu;
 	}
@@ -650,18 +667,8 @@ s32 BPF_STRUCT_OPS(beerland_select_cpu, struct task_struct *p, s32 prev_cpu, u64
 	 * found, keep using the same one.
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu, this_cpu, wake_flags);
-	if (cpu < 0)
-		return prev_cpu;
 
-out_insert:
-	/*
-	 * The target CPU is automatically kicked when returning from this
-	 * callback.
-	 */
-	if (!__COMPAT_scx_bpf_dsq_peek(cpu))
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), 0);
-
-	return cpu;
+	return cpu < 0 ? prev_cpu : cpu;
 }
 
 /*
