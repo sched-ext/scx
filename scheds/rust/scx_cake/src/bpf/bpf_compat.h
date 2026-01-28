@@ -141,16 +141,8 @@
  * ensure the hot dispatch path remains spill-free and register-pinned.
  * ---------------------------------------------------------------------------
  */
-static __attribute__((noinline)) struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id) {
-    struct task_struct *p = NULL;
-    struct bpf_iter_scx_dsq it;
-
-    if (bpf_iter_scx_dsq_new(&it, dsq_id, 0) == 0) {
-        p = bpf_iter_scx_dsq_next(&it);
-        bpf_iter_scx_dsq_destroy(&it);
-    }
-    return p;
-}
+/* Prototype for scratch-tunneled version in cake.bpf.c */
+struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id);
 
 static __always_inline struct task_struct *cake_bpf_dsq_peek(u64 dsq_id) {
     if (bpf_ksym_exists(scx_bpf_dsq_peek))

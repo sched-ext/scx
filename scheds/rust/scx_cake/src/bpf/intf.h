@@ -60,10 +60,30 @@ enum cake_flow_flags {
  * during high-frequency tier updates. Used by Zero-Math Locality Arbiter
  * to peek at remote core tier without BPF map lookup overhead (0ns vs 25ns).
  */
-struct cake_cpu_tier {
-    u32 tier;           /* Tier currently running on this CPU */
-    u8 _pad[60];        /* Pad to 64 bytes - cache line isolation */
+/*
+ * FUSED CORE STATE (Rent's Rule / 3D Packing)
+ * 
+ * Packs all dynamic per-core metadata into a single aligned struct.
+ * One L1 fetch provides the "Global Reality" for a peer core.
+ *
+ * Layout (32-bit):
+ * [0-7]   Occupant Tier (u8)
+ * [8-15]  Warm Tier (u8)
+ * [16-23] Victim State (u8)
+ * [24-31] Pad/Commit (u8)
+ */
+struct cake_core_state {
+    u8 occupant_tier;
+    u8 warm_tier;
+    u8 victim_state;
+    u8 staging_dsq;   /* Byte 3: Speculative DSQ ID for sibling */
+    /* Pad to 64 bytes for cache line isolation */
+    u8 __reserved[60];
 } __attribute__((aligned(64)));
+
+/* Helper to extract full state in one u32 load */
+#define CORE_STATE_PACKED(occupant, warm, victim) \
+    ((u32)(occupant) | ((u32)(warm) << 8) | ((u32)(victim) << 16))
 
 /*
  * EMPIRICAL TOPOLOGY DISCOVERY (ETD)
@@ -106,7 +126,7 @@ struct cpu_topology_entry {
     u8 core_id;        /* Physical core ID (0-31) */
     u8 thread_bit;     /* Pre-computed (1 << thread_idx) */
     u32 dsq_id;        /* Pre-computed (CAKE_DSQ_LC_BASE + cpu_id) */
-    u32 _pad;          /* Pad to 16 bytes */
+    u32 peer_dsqs;     /* SPECULATIVE MAPPING: [0-7]=sib, [8-15]=p1, [16-23]=p2, [24-31]=p3 */
 } __attribute__((packed));
 
 /* Topology flags */
@@ -158,11 +178,9 @@ struct cake_task_ctx {
         u64 timestamps_fused;      /* 8B: Fused access (last_run in low 32, last_wake in high 32) */
     };
     
-    /* --- Read-Only / Misc [Bytes 24-63] --- */
-    u8 preempt_floor;      /* 1B: Precomputed floor for warmth arbitration */
     u8 _reserved[3];       /* 3B: Reserved */
     u8 __pad[32];          /* Pad to 64 bytes */
-} __attribute__((aligned(64))); /* Force cache-line alignment */
+} __attribute__((aligned(64)));
 
 /* 
  * Bitfield Offsets for packed_info
@@ -173,7 +191,8 @@ struct cake_task_ctx {
 #define SHIFT_SPARSE_SCORE  16
 #define SHIFT_TIER          23
 #define SHIFT_FLAGS         26
-/* 30-31 Reserved */
+#define SHIFT_CRITICAL      30
+/* 31 Reserved */
 
 #define MASK_KALMAN_ERROR   0xFF  /* 8 bits: 0-255 */
 #define MASK_WAIT_DATA      0xFF  /* 8 bits: violations<<4 | checks */
