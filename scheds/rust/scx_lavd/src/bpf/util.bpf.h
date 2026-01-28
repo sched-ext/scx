@@ -3,7 +3,6 @@
 #define __UTIL_H
 
 extern const volatile u64	nr_llcs;	/* number of LLC domains */
-extern const volatile u64	__nr_cpu_ids;	/* maximum CPU IDs */
 extern volatile u64		nr_cpus_onln;	/* current number of online CPUs */
 
 extern const volatile u32	cpu_sibling[LAVD_CPU_ID_MAX]; /* siblings for CPUs when SMT is active */

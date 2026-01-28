@@ -1711,6 +1711,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		set_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
 	else
 		reset_task_flag(taskc, LAVD_FLAG_IS_AFFINITIZED);
+
+	set_on_core_type(taskc, p->cpus_ptr);
 	bpf_rcu_read_unlock();
 
 	if (is_ksoftirqd(p))
@@ -1728,8 +1730,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	taskc->pinned_cpu_id = -ENOENT;
 	taskc->pid = p->pid;
 	taskc->cgrp_id = args->cgroup->kn->id;
-
-	set_on_core_type(taskc, p->cpus_ptr);
 
 	return 0;
 }
