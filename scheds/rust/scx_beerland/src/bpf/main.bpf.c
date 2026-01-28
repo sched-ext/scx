@@ -685,12 +685,17 @@ void BPF_STRUCT_OPS(beerland_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (try_migrate(p, prev_cpu, enq_flags)) {
 			cpu = pick_idle_cpu(p, prev_cpu, -ENOENT, 0);
-			if (cpu >= 0 && !__COMPAT_scx_bpf_dsq_peek(cpu)) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-						   task_slice(p), enq_flags);
-				if (prev_cpu != cpu || !scx_bpf_task_running(p))
-					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-				return;
+			if (cpu >= 0) {
+				struct task_struct *q = __COMPAT_scx_bpf_dsq_peek(cpu);
+
+				if (!q || p->scx.dsq_vtime < q->scx.dsq_vtime) {
+					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+							   task_slice(p), enq_flags);
+					if (prev_cpu != cpu || !scx_bpf_task_running(p))
+						scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+					return;
+				}
+				prev_cpu = cpu;
 			}
 		}
 
