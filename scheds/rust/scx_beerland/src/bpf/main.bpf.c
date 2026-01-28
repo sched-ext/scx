@@ -339,14 +339,6 @@ static bool try_migrate(const struct task_struct *p, s32 prev_cpu, u64 enq_flags
 		return false;
 
 	/*
-	 * Always attempt to migrate to a different CPU if the task was
-	 * re-enqueued due to a higher scheduling class stealing the CPU it
-	 * was using or queued on.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ)
-		return true;
-
-	/*
 	 * Migrate if ops.select_cpu() was skipped and one of the following
 	 * conditions is true:
 	 *  - migration was not attempted already via ops.select_cpu(),
@@ -863,16 +855,6 @@ void BPF_STRUCT_OPS(beerland_stopping, struct task_struct *p, bool runnable)
 	tctx->awake_vtime += vslice;
 }
 
-void BPF_STRUCT_OPS(beerland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
-{
-	/*
-	 * A higher scheduler class stole the CPU, re-enqueue all the tasks
-	 * that are waiting on this CPU and give them a chance to pick
-	 * another idle CPU.
-	 */
-	scx_bpf_reenqueue_local();
-}
-
 void BPF_STRUCT_OPS(beerland_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = vtime_now;
@@ -926,7 +908,6 @@ SCX_OPS_DEFINE(beerland_ops,
 	       .runnable		= (void *)beerland_runnable,
 	       .running			= (void *)beerland_running,
 	       .stopping		= (void *)beerland_stopping,
-	       .cpu_release		= (void *)beerland_cpu_release,
 	       .enable			= (void *)beerland_enable,
 	       .init_task		= (void *)beerland_init_task,
 	       .init			= (void *)beerland_init,
