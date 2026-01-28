@@ -64,14 +64,14 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.waker_pid = taskc->waker_pid;
 	for (i = 0; i < sizeof(m->taskc_x.waker_comm) && can_loop; i++)
 		((char *)m->taskc_x.waker_comm)[i] = ((char __arena *)taskc->waker_comm)[i];
-	m->taskc_x.slice = taskc->slice;
+	m->taskc_x.slice_wall = taskc->slice_wall;
 	m->taskc_x.lat_cri = taskc->lat_cri;
 	m->taskc_x.avg_lat_cri = sys_stat.avg_lat_cri;
 	m->taskc_x.static_prio = get_nice_prio(p);
-	m->taskc_x.rerunnable_interval = time_delta(taskc->last_quiescent_clk, taskc->last_runnable_clk);
-	m->taskc_x.resched_interval = taskc->resched_interval;
+	m->taskc_x.rerunnable_interval_wall = time_delta(taskc->last_quiescent_clk, taskc->last_runnable_clk);
+	m->taskc_x.resched_interval_wall = taskc->resched_interval_wall;
 	m->taskc_x.run_freq = taskc->run_freq;
-	m->taskc_x.avg_runtime = taskc->avg_runtime;
+	m->taskc_x.avg_runtime_wall = taskc->avg_runtime_wall;
 	m->taskc_x.wait_freq = taskc->wait_freq;
 	m->taskc_x.wake_freq = taskc->wake_freq;
 	m->taskc_x.perf_cri = taskc->perf_cri;
@@ -82,7 +82,7 @@ int submit_task_ctx(struct task_struct *p, task_ctx __arg_arena *taskc, u32 cpu_
 	m->taskc_x.nr_active = sys_stat.nr_active;
 	m->taskc_x.dsq_id = cpdomc->id;
 	m->taskc_x.dsq_consume_lat = cpdomc->dsq_consume_lat;
-	m->taskc_x.last_slice_used = taskc->last_slice_used;
+	m->taskc_x.last_slice_used_wall = taskc->last_slice_used_wall;
 
 	bpf_ringbuf_submit(m, 0);
 

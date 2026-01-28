@@ -134,6 +134,15 @@ enum consts_flags {
 #define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
 
 /*
+ * Suffix convention for time-related variables
+ * --------------------------------------------
+ *  - _wall: wall clock time
+ *  - _invr: CPU capacity and frequency-invariant time
+ *  - _wwgt: weighted wall clock time scaled by task's weight
+ *  - _iwgt: weighted invariant time scaled by task's weight
+ */
+
+/*
  * Task context
  */
 struct task_ctx {
@@ -146,13 +155,25 @@ struct task_ctx {
 
 	/* --- cacheline 1 boundary (64 bytes) --- */
 	volatile u64	flags;		/* LAVD_FLAG_* */
-	u64	slice;			/* time slice */
-	u64	acc_runtime;		/* accmulated runtime from runnable to quiescent state */
-	u64	avg_runtime;		/* average runtime per schedule */
-	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
+	u64	slice_wall;		/* time slice (wall clock time) */
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	last_measured_clk;	/* last time when running time was measured */
+	/*
+	 * - Accumulated runtime from runnable to quiescent state
+	 * - Used to calculate avg_runtime_wall and latency criticality
+	 */
+	u64	acc_runtime_wall;
+	/*
+	 * - Average runtime per schedule
+	 * - Used to calculate latency criticality
+	 */
+	u64	avg_runtime_wall;
+	/*
+	 * - Total CPU time consumed for this task scaled by task's weight
+	 * - Used to calculate avg_svc_time_wwgt
+	 */
+	u64	svc_time_wwgt;
 
 	/* --- cacheline 2 boundary (128 bytes) --- */
 	u64	last_runnable_clk;	/* last time when a task became runnable */
@@ -173,8 +194,8 @@ struct task_ctx {
 	u64	last_quiescent_clk;	/* last time when a task became asleep */
 	u64	last_sum_exec_clk;	/* last time when sum exec time was measured */
 	u64	cgrp_id;		/* cgroup id of this task */
-	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
-	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
+	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */
+	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
 	pid_t	pid;			/* pid for this task */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
@@ -232,15 +253,27 @@ struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p);
 struct cpu_ctx {
 	/* --- cacheline 0 boundary (0 bytes) --- */
 	volatile u64	flags;		/* cached copy of task's flags */
-	volatile u64	tot_task_time;	/* total wall-clock time this CPU has spent running scx tasks so far. */
-	volatile u64	tot_svc_time;	/* total scx tasks' service time on a CPU scaled by tasks' weights */
-	volatile u64	tot_sc_time;	/* total scaled CPU time, which is capacity and frequency invariant. */
 	volatile u64	est_stopping_clk; /* estimated stopping time */
 	volatile u64	running_clk;	/* when a task starts running */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u16	effective_capacity;/* the capacity that CPU can do right now */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
 	volatile u64	sum_lat_cri;	/* sum of latency criticality */
+	/*
+	 * Total wall-clock time this CPU has spent running scx tasks so far.
+	 * Used to calculate non_scx_time.
+	 */
+	volatile u64	tot_task_time_wall;
+	/*
+	 * Total scx tasks' service time on a CPU scaled by tasks' weights.
+	 * Used to calculate avg_svc_time_wwgt.
+	 */
+	volatile u64	tot_task_time_wwgt;
+	/*
+	 * Total scaled CPU time, which is capacity and frequency invariant.
+	 * Used to calculate util_invr.
+	 */
+	volatile u64	tot_task_time_invr;
 
 	/* --- cacheline 1 boundary (64 bytes) --- */
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
@@ -263,13 +296,24 @@ struct cpu_ctx {
 	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
 	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
-	volatile u32	avg_stolen_est;	/* Average of estimated steal/irq utilization of CPU */
-	volatile u32	cur_stolen_est;	/* Estimated irq/steal utilization of the current interval */
-	volatile u64	stolen_time_est; /* Estimated time stolen by steal/irq time on CPU */
-	volatile u64	idle_total;	/* total idle time so far */
+	volatile u64	idle_total_wall;/* total idle time so far (wall clock time) */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
 	u64		online_clk;	/* when a CPU becomes online */
 	u64		offline_clk;	/* when a CPU becomes offline */
+	/*
+	 * Average of estimated steal/irq utilization of CPU.
+	 * Will be used in the future.
+	 */
+	volatile u32	avg_stolen_time_wall;
+	/*
+	 * Estimated irq/steal utilization of the current interval.
+	 * Will be used in the future.
+	 */
+	volatile u32	cur_stolen_time_wall;
+	 /*
+	  * Estimated time stolen by steal/irq time on CPU
+	  */
+	volatile u64	stolen_time_wall;
 
 	/*
 	 * --- cacheline 3 boundary (192 bytes) ---

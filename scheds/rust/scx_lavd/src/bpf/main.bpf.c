@@ -202,9 +202,9 @@ char _license[] SEC("license") = "GPL";
 u64		cur_logical_clk = LAVD_DL_COMPETE_WINDOW;
 
 /*
- * Current service time
+ * Current service time (weighted wall clock time)
  */
-static u64		cur_svc_time;
+static u64		cur_svc_time_wwgt;
 
 
 /*
@@ -281,29 +281,30 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * all tasks to ensure pinned tasks can run promptly.
 	 */
 	if (pinned_slice_ns && cpuc->nr_pinned_tasks) {
-		taskc->slice = min(pinned_slice_ns, sys_stat.slice);
+		taskc->slice_wall = min(pinned_slice_ns, sys_stat.slice_wall);
 		reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-		return taskc->slice;
+		return taskc->slice_wall;
 	}
 
 	/*
-	 * If the task's avg_runtime is greater than the regular time slice
-	 * (i.e., taskc->avg_runtime > sys_stat.slice), that means the task
-	 * could be scheduled out due to a shorter time slice than required.
-	 * In this case, let's consider boosting task's time slice.
+	 * If the task's avg_runtime_wall is greater than the regular time
+	 * slice (i.e., taskc->avg_runtime_wall > sys_stat.slice_wall),
+	 * that means the task could be scheduled out due to a shorter time
+	 * slice than required. In this case, let's consider boosting task's
+	 * time slice.
 	 *
 	 * However, if there are pinned tasks waiting to run on this CPU,
 	 * we do not boost the task's time slice to avoid delaying the pinned
 	 * task that cannot be run on another CPU.
 	 */
 	if (!no_slice_boost && !cpuc->nr_pinned_tasks &&
-	    (taskc->avg_runtime >= sys_stat.slice)) {
+	    (taskc->avg_runtime_wall >= sys_stat.slice_wall)) {
 		/*
 		 * When the system is not heavily loaded, so it can serve all
 		 * tasks within the targeted latency (slice_max_ns <=
 		 * sys_stat.slice), we fully boost task's time slice.
 		 *
-		 * Let's set the task's time slice to its avg_runtime
+		 * Let's set the task's time slice to its avg_runtime_wall
 		 * (+ some bonus) to reduce unnecessary involuntary context
 		 * switching.
 		 *
@@ -317,11 +318,11 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 			 * Add a bit of bonus so that a task, which takes a
 			 * bit longer than average, can still finish the job.
 			 */
-			u64 s = taskc->avg_runtime + LAVD_SLICE_BOOST_BONUS;
-			taskc->slice = clamp(s, slice_min_ns,
+			u64 s = taskc->avg_runtime_wall + LAVD_SLICE_BOOST_BONUS;
+			taskc->slice_wall = clamp(s, slice_min_ns,
 					     LAVD_SLICE_BOOST_MAX);
 			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-			return taskc->slice;
+			return taskc->slice_wall;
 		}
 
 		/*
@@ -332,15 +333,15 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 		 * regular time slice.
 		 */
 		if (taskc->lat_cri > sys_stat.avg_lat_cri) {
-			u64 b = (sys_stat.slice * taskc->lat_cri) /
+			u64 b = (sys_stat.slice_wall * taskc->lat_cri) /
 				(sys_stat.avg_lat_cri + 1);
-			u64 s = sys_stat.slice + b;
-			taskc->slice = clamp(s, slice_min_ns,
-					     min(taskc->avg_runtime,
-						 sys_stat.slice * 2));
+			u64 s = sys_stat.slice_wall + b;
+			taskc->slice_wall = clamp(s, slice_min_ns,
+					     min(taskc->avg_runtime_wall,
+						 sys_stat.slice_wall * 2));
 
 			set_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-			return taskc->slice;
+			return taskc->slice_wall;
 		}
 	}
 
@@ -348,9 +349,9 @@ static u64 calc_time_slice(task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * If slice boost is either not possible, not necessary, or not
 	 * eligible, assign the regular time slice.
 	 */
-	taskc->slice = sys_stat.slice;
+	taskc->slice_wall = sys_stat.slice_wall;
 	reset_task_flag(taskc, LAVD_FLAG_SLICE_BOOST);
-	return taskc->slice;
+	return taskc->slice_wall;
 }
 
 static void update_stat_for_running(struct task_struct *p,
@@ -366,7 +367,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	if (have_scheduled(taskc)) {
 		wait_period = time_delta(now, taskc->last_quiescent_clk);
-		interval = taskc->avg_runtime + wait_period;
+		interval = taskc->avg_runtime_wall + wait_period;
 		if (interval > 0)
 			taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 	}
@@ -375,7 +376,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 * Collect additional information when the scheduler is monitored.
 	 */
 	if (is_monitored) {
-		taskc->resched_interval = time_delta(now,
+		taskc->resched_interval_wall = time_delta(now,
 						     taskc->last_running_clk);
 	}
 	taskc->prev_cpu_id = taskc->cpu_id;
@@ -450,7 +451,8 @@ static void account_task_runtime(struct task_struct *p,
 				 struct cpu_ctx *cpuc,
 				 u64 now)
 {
-	u64 sus_dur, runtime, svc_time, sc_time, task_time, exec_delta;
+	u64 suspended_wall, runtime_wall, task_time_wwgt, task_time_invr;
+	u64 task_time_wall, exec_delta_wall;
 
 	/*
 	 * Since task execution can span one or more sys_stat intervals,
@@ -459,8 +461,8 @@ static void account_task_runtime(struct task_struct *p,
 	 * the load of long-running tasks properly. So, we add up only the
 	 * execution duration since the last measured time.
 	 */
-	sus_dur = get_suspended_duration_and_reset(cpuc);
-	runtime = time_delta(now, taskc->last_measured_clk + sus_dur);
+	suspended_wall = get_suspended_duration_and_reset(cpuc);
+	runtime_wall = time_delta(now, taskc->last_measured_clk + suspended_wall);
 
 	/*
 	 * p->se.sum_exec_runtime serves as a proxy for rq->clock_task which
@@ -472,22 +474,22 @@ static void account_task_runtime(struct task_struct *p,
 	 * are available from the kernel, we can use the samples from sum_exec_runtime
 	 * to extrapolate total stolen time per CPU.
 	 */
-	task_time = task_exec_time(p);
-	exec_delta = time_delta(task_time, taskc->last_sum_exec_clk);
-	cpuc->stolen_time_est += time_delta(runtime, exec_delta);
-	runtime = exec_delta;
+	task_time_wall = task_exec_time(p);
+	exec_delta_wall = time_delta(task_time_wall, taskc->last_sum_exec_clk);
+	cpuc->stolen_time_wall += time_delta(runtime_wall, exec_delta_wall);
+	runtime_wall = exec_delta_wall;
 
-	svc_time = runtime / p->scx.weight;
-	sc_time = scale_cap_freq(runtime, cpuc);
+	task_time_wwgt = runtime_wall / p->scx.weight;
+	task_time_invr = scale_cap_freq(runtime_wall, cpuc);
 
-	WRITE_ONCE(cpuc->tot_task_time, cpuc->tot_task_time + task_time);
-	WRITE_ONCE(cpuc->tot_svc_time, cpuc->tot_svc_time + svc_time);
-	WRITE_ONCE(cpuc->tot_sc_time, cpuc->tot_sc_time + sc_time);
+	WRITE_ONCE(cpuc->tot_task_time_wall, cpuc->tot_task_time_wall + task_time_wall);
+	WRITE_ONCE(cpuc->tot_task_time_wwgt, cpuc->tot_task_time_wwgt + task_time_wwgt);
+	WRITE_ONCE(cpuc->tot_task_time_invr, cpuc->tot_task_time_invr + task_time_invr);
 
-	taskc->acc_runtime += runtime;
-	taskc->svc_time += svc_time;
+	taskc->acc_runtime_wall += runtime_wall;
+	taskc->svc_time_wwgt += task_time_wwgt;
 	taskc->last_measured_clk = now;
-	taskc->last_sum_exec_clk = task_time;
+	taskc->last_sum_exec_clk = task_time_wall;
 
 	/*
 	 * Under CPU bandwidth control using cpu.max, we also need to report
@@ -496,7 +498,7 @@ static void account_task_runtime(struct task_struct *p,
 	if (enable_cpu_bw && (p->pid != lavd_pid)) {
 		struct cgroup *cgrp = bpf_cgroup_from_id(taskc->cgrp_id);
 		if (cgrp) {
-			scx_cgroup_bw_consume(cgrp, runtime);
+			scx_cgroup_bw_consume(cgrp, runtime_wall);
 			bpf_cgroup_release(cgrp);
 		}
 	}
@@ -513,19 +515,20 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	account_task_runtime(p, taskc, cpuc, now);
 
-	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->acc_runtime);
+	taskc->avg_runtime_wall = calc_avg(taskc->avg_runtime_wall,
+					   taskc->acc_runtime_wall);
 	taskc->last_stopping_clk = now;
 
 	/*
 	 * Account for how much of the slice was used for this instance.
 	 */
-	taskc->last_slice_used = time_delta(now, taskc->last_running_clk);
+	taskc->last_slice_used_wall = time_delta(now, taskc->last_running_clk);
 
 	/*
 	 * Update the current service time if necessary.
 	 */
-	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
-		WRITE_ONCE(cur_svc_time, taskc->svc_time);
+	if (READ_ONCE(cur_svc_time_wwgt) < taskc->svc_time_wwgt)
+		WRITE_ONCE(cur_svc_time_wwgt, taskc->svc_time_wwgt);
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -546,9 +549,11 @@ static void update_stat_for_refill(struct task_struct *p,
 	account_task_runtime(p, taskc, cpuc, now);
 
 	/*
-	 * We update avg_runtime here since it is used to boost time slice.
+	 * We update avg_runtime_wall here
+	 * since it is used to boost time slice.
 	 */
-	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->acc_runtime);
+	taskc->avg_runtime_wall = calc_avg(taskc->avg_runtime_wall,
+					   taskc->acc_runtime_wall);
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -1161,7 +1166,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		scx_bpf_error("Failed to lookup task_ctx for task %d", p->pid);
 		return;
 	}
-	p_taskc->acc_runtime = 0;
+	p_taskc->acc_runtime_wall = 0;
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1566,9 +1571,10 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 				if (time_after(old_clk, now))
 					break;
 
-				u64 duration = time_delta(now, old_clk);
+				u64 duration_wall = time_delta(now, old_clk);
 
-				__sync_fetch_and_add(&cpuc->idle_total, duration);
+				__sync_fetch_and_add(&cpuc->idle_total_wall,
+						     duration_wall);
 				break;
 			}
 		}
@@ -1597,7 +1603,7 @@ void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
 		    struct scx_cpu_acquire_args *args)
 {
 	struct cpu_ctx *cpuc;
-	u64 dur, scaled_dur;
+	u64 duration_wall, duration_invr;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -1612,9 +1618,9 @@ void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
 	 * used to calculate capacity-invariant and frequency-invariant CPU
 	 * utilization.
 	 */
-	dur = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
-	scaled_dur = scale_cap_freq(dur, cpuc);
-	cpuc->tot_sc_time += scaled_dur;
+	duration_wall = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
+	duration_invr = scale_cap_freq(duration_wall, cpuc);
+	cpuc->tot_task_time_invr += duration_invr;
 
 	/*
 	 * The higher-priority scheduler class could change the CPU frequency,
@@ -1674,7 +1680,7 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 		return;
 	}
 
-	taskc->svc_time = READ_ONCE(cur_svc_time);
+	taskc->svc_time_wwgt = READ_ONCE(cur_svc_time_wwgt);
 }
 
 
@@ -1733,11 +1739,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	
 		now = scx_bpf_now();
 		taskc->last_runnable_clk = now;
-		taskc->last_running_clk = now; /* for avg_runtime */
-		taskc->last_stopping_clk = now; /* for avg_runtime */
+		taskc->last_running_clk = now; /* for avg_runtime_wall */
+		taskc->last_stopping_clk = now; /* for avg_runtime_wall */
 		taskc->last_quiescent_clk = now;
-		taskc->avg_runtime = sys_stat.slice;
-		taskc->svc_time = sys_stat.avg_svc_time;
+		taskc->avg_runtime_wall = sys_stat.slice_wall;
+		taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt;
 	}
 
 	taskc->pinned_cpu_id = -ENOENT;
@@ -2198,7 +2204,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * Initialize the current logical clock and service time.
 	 */
 	WRITE_ONCE(cur_logical_clk, 0);
-	WRITE_ONCE(cur_svc_time, 0);
+	WRITE_ONCE(cur_svc_time_wwgt, 0);
 
 	/*
 	 * Initialize cpu.max library if enabled.
