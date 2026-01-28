@@ -33,6 +33,39 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
 
 	/*
+	 * Prioritize a task woken by a hardirq or softirq.
+	 *   - hardirq: The top half of an interrupt processing (e.g., mouse
+	 *     move, keypress, disk I/O completion, or GPU V-Sync) has just
+	 *     been completed, and it hands off further processing to a fair
+	 *     task. The task that was waiting for this specific hardware
+	 *     signal gets the "Express Lane."
+	 *
+	 *   - softirq: The kernel just finished the bottom half of an
+	 *     interrupt processing, like network packets and timers. If a
+	 *     packet arrives for your Browser, or a timer expires for a
+	 *     frame refresh, the task gets a "High" boost. This keeps the
+	 *     data pipeline flowing smoothly.
+	 *
+	 * Note that the irq-boosted criticality will flow through the forward
+	 * & backward propagation mechanism, which will be described below.
+	 */
+	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ)) {
+		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ);
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGHEST;
+	} else if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ)) {
+		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ);
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
+	}
+
+	/*
+	 * Prioritize a task woken by an RT/DL task.
+	 */
+	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL)) {
+		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
+		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
+	}
+
+	/*
 	 * Prioritize a kernel task since many kernel tasks serve
 	 * latency-critical jobs.
 	 */
@@ -50,14 +83,6 @@ static u64 calc_weight_factor(struct task_struct *p, task_ctx *taskc)
 	 */
 	if (is_kernel_worker(p))
 		weight_boost += LAVD_LC_WEIGHT_BOOST_REGULAR;
-
-	/*
-	 * Prioritize a task woken by an RT/DL task.
-	 */
-	if (test_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL)) {
-		reset_task_flag(taskc, LAVD_FLAG_WOKEN_BY_RT_DL);
-		weight_boost += LAVD_LC_WEIGHT_BOOST_HIGH;
-	}
 
 	/*
 	 * Prioritize an affinitized task since it has restrictions

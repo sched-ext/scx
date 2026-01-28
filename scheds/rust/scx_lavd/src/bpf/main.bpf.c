@@ -182,6 +182,7 @@
  */
 #include <scx/common.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <bpf_experimental.h>
 #include "intf.h"
 #include "lavd.bpf.h"
 #include "util.bpf.h"
@@ -560,16 +561,42 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		.cpuc_cur = get_cpu_ctx(),
 		.wake_flags = wake_flags,
 	};
+	struct task_struct *waker;
 	bool found_idle = false;
 	s32 cpu_id;
 
 	if (!ictx.taskc || !ictx.cpuc_cur)
 		return prev_cpu;
 
+	/*
+	 * Check whether it is a synchronous wake-up to boost
+	 * latency-criticality later.
+	 */
 	if (wake_flags & SCX_WAKE_SYNC)
 		set_task_flag(ictx.taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
 	else
 		reset_task_flag(ictx.taskc, LAVD_FLAG_IS_SYNC_WAKEUP);
+
+	/*
+	 * Check whether the task is woken by an interrupt handler (either the
+	 * top or bottom half) to boost its latency-criticality later.
+	 *
+	 * WARNING: bpf_in_nmi/task/hardirq/serving_softirq() is supported only
+	 * in x86 and arm64. On the unsupported architectures (e.g., s390x),
+	 * it will always return 0. So, never use !bpf_in_xxx() and keep the
+	 * logic below optional. See more details in below link:
+	 *  - https://lore.kernel.org/bpf/20260124132706.183681-2-changwoo@igalia.com/T/#u
+	 */
+	if (unlikely((bpf_in_hardirq() || bpf_in_nmi()) &&
+		     !bpf_in_serving_softirq())) {
+		set_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ);
+		reset_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ);
+	} else if (unlikely(bpf_in_serving_softirq() ||
+			    ((waker = bpf_get_current_task_btf()) &&
+			     is_ksoftirqd(waker)))) {
+		set_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_SOFTIRQ);
+		reset_task_flag(ictx.taskc, LAVD_FLAG_WOKEN_BY_HARDIRQ);
+	}
 
 	/*
 	 * Find an idle cpu and reserve it since the task @p will run
@@ -1145,11 +1172,23 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Filter out unrelated tasks. We keep track of tasks under the same
 	 * parent process to confine the waker-wakee relationship within
 	 * closely related tasks.
+	 *
+	 * WARNING: bpf_in_nmi/task/hardirq/serving_softirq() is supported only
+	 * in x86 and arm64. On the unsupported architectures (e.g., s390x),
+	 * it will always return 0. So, never use !bpf_in_xxx() and keep the
+	 * logic below optional. See more details in below link:
+	 *  - https://lore.kernel.org/bpf/20260124132706.183681-2-changwoo@igalia.com/T/#u
 	 */
 	if (enq_flags & (SCX_ENQ_PREEMPT | SCX_ENQ_REENQ | SCX_ENQ_LAST))
 		return;
 
+	if (bpf_in_hardirq() || bpf_in_serving_softirq() || bpf_in_nmi())
+		return;
+
 	waker = bpf_get_current_task_btf();
+	if (is_ksoftirqd(waker))
+		return;
+
 	if ((p->real_parent != waker->real_parent))
 		return;
 
