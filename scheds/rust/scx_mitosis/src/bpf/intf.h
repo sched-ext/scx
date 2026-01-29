@@ -23,6 +23,7 @@ enum consts {
 
 	PCPU_BASE	      = 0x80000000,
 	MAX_CG_DEPTH	      = 256,
+	MAX_LLCS	      = 16,
 
 	DEBUG_EVENTS_BUF_SIZE = 4096,
 };
