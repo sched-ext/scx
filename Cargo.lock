@@ -3283,6 +3283,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "scxprof"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libbpf-rs",
+ "libc",
+ "log",
+ "scx_cargo",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "scxtop"
 version = "1.0.21"
 dependencies = [
