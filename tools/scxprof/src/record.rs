@@ -221,8 +221,31 @@ fn poll_fds(fds: &[RawFd], timeout_ms: i32) -> Result<PollResult> {
 }
 
 pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
+    if opts.output.exists() {
+        bail!(
+            "output directory '{}' already exists",
+            opts.output.display()
+        );
+    }
+
     fs::create_dir_all(&opts.output).context("failed to create output directory")?;
 
+    let result = run_recording(ctx, &opts);
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&opts.output);
+        return result;
+    }
+
+    if !opts.disable_archive {
+        create_archive(&opts.output)?;
+        fs::remove_dir_all(&opts.output).context("failed to remove output directory")?;
+    }
+
+    Ok(())
+}
+
+fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<()> {
     let perf_data_path = opts.output.join("perf.data");
     let perf_args = vec![
         "perf".to_string(),
@@ -278,6 +301,37 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
     }
 
     drop(hints_recorder);
+
+    Ok(())
+}
+
+fn create_archive(output_dir: &PathBuf) -> Result<()> {
+    let archive_name = format!("{}.tar.gz", output_dir.display());
+    let dir_name = output_dir
+        .file_name()
+        .context("invalid output directory name")?;
+
+    let parent = output_dir.parent().unwrap_or(std::path::Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+
+    let status = Command::new("tar")
+        .args([
+            "-czf",
+            &archive_name,
+            "-C",
+            parent.to_str().context("invalid parent path")?,
+            dir_name.to_str().context("invalid directory name")?,
+        ])
+        .status()
+        .context("failed to run tar")?;
+
+    if !status.success() {
+        bail!("tar failed with status: {}", status);
+    }
 
     Ok(())
 }
