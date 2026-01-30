@@ -13,11 +13,13 @@ pub use bpf_intf::*;
 mod stats;
 use std::collections::HashSet;
 use std::ffi::{c_int, c_ulong};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use anyhow::Context;
@@ -67,6 +69,24 @@ struct Opts {
     /// also make performance more "spikey".
     #[clap(short = 'l', long, default_value = "40000")]
     slice_us_lag: u64,
+
+    /// CPU busy threshold.
+    ///
+    /// Specifies the CPU utilization percentage (0-100%) at which the scheduler considers the
+    /// system to be busy.
+    #[clap(short = 'c', long, default_value = "75")]
+    cpu_busy_thresh: u64,
+
+    /// Polling time (ms) to refresh the CPU utilization.
+    ///
+    /// This interval determines how often the scheduler refreshes the CPU utilization that is
+    /// compared with the CPU busy threshold (option -c) to decide if the system is busy or not.
+    ///
+    /// Value is clamped to the range [10 .. 1000].
+    ///
+    /// 0 = disabled.
+    #[clap(short = 'p', long, default_value = "250")]
+    polling_ms: u64,
 
     /// Specifies a list of CPUs to prioritize.
     ///
@@ -218,8 +238,16 @@ pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
     Ok(cpus)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CpuTimes {
+    user: u64,
+    nice: u64,
+    total: u64,
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
+    opts: &'a Opts,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
 }
@@ -260,6 +288,9 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = opts.slice_us * 1000;
         rodata.slice_lag = opts.slice_us_lag * 1000;
         rodata.smt_enabled = smt_enabled;
+
+        // Normalize CPU busy threshold in the range [0 .. 1024].
+        rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
 
         // Define the primary scheduling domain.
         let primary_cpus = if let Some(ref domain) = opts.primary_domain {
@@ -325,6 +356,7 @@ impl<'a> Scheduler<'a> {
 
         Ok(Self {
             skel,
+            opts,
             struct_ops,
             stats_server,
         })
@@ -403,11 +435,78 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
+    fn compute_user_cpu_pct(prev: &CpuTimes, curr: &CpuTimes) -> Option<u64> {
+        // Evaluate total user CPU time as user + nice.
+        let user_diff = (curr.user + curr.nice).saturating_sub(prev.user + prev.nice);
+        let total_diff = curr.total.saturating_sub(prev.total);
+
+        if total_diff > 0 {
+            let user_ratio = user_diff as f64 / total_diff as f64;
+            Some((user_ratio * 1024.0).round() as u64)
+        } else {
+            None
+        }
+    }
+
+    fn read_cpu_times() -> Option<CpuTimes> {
+        let file = File::open("/proc/stat").ok()?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.starts_with("cpu ") {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() < 5 {
+                    return None;
+                }
+
+                let user: u64 = fields[1].parse().ok()?;
+                let nice: u64 = fields[2].parse().ok()?;
+
+                // Sum the first 8 fields as total time, including idle, system, etc.
+                let total: u64 = fields
+                    .iter()
+                    .skip(1)
+                    .take(8)
+                    .filter_map(|v| v.parse::<u64>().ok())
+                    .sum();
+
+                return Some(CpuTimes { user, nice, total });
+            }
+        }
+
+        None
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
+        // Periodically evaluate user CPU utilization from user-space and update a global variable
+        // in BPF.
+        //
+        // The BPF scheduler can use this value to determine when the system is busy or idle.
+        let polling_time = Duration::from_millis(self.opts.polling_ms).min(Duration::from_secs(1));
+        let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
+        let mut last_update = Instant::now();
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            match req_ch.recv_timeout(Duration::from_secs(1)) {
+            // Update CPU utilization.
+            if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
+                if let Some(curr_cputime) = Self::read_cpu_times() {
+                    Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
+                        .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
+                    prev_cputime = curr_cputime;
+                }
+                last_update = Instant::now();
+            }
+
+            // Update statistics and check for exit condition.
+            let timeout = if polling_time.is_zero() {
+                Duration::from_secs(1)
+            } else {
+                polling_time
+            };
+            match req_ch.recv_timeout(timeout) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,
