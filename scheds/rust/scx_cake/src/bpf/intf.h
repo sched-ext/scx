@@ -53,7 +53,6 @@ enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
 };
 
-
 /*
  * CPU STATE ISOLATION (Frasch, 2023)
  * Each CPU gets its own 64-byte cache line to prevent false sharing
@@ -62,7 +61,7 @@ enum cake_flow_flags {
  */
 /*
  * FUSED CORE STATE (Rent's Rule / 3D Packing)
- * 
+ *
  * Packs all dynamic per-core metadata into a single aligned struct.
  * One L1 fetch provides the "Global Reality" for a peer core.
  *
@@ -87,13 +86,13 @@ struct cake_core_state {
 
 /*
  * EMPIRICAL TOPOLOGY DISCOVERY (ETD)
- * 
+ *
  * Populated by Rust userspace at startup via CAS ping-pong measurement.
  * Each CPU stores its top 3 fastest peers (sorted by measured ns latency).
- * 
+ *
  * This enables "Surgical Seek" - the BPF hot-path checks these specific
  * cores before falling back to the generic SIMD scan.
- * 
+ *
  * Example for 9800X3D:
  *   top_peers[2] = {10, 3, 11}  → Core 2's fastest paths are to 10 (SMT),
  *                                  then 3 and 11 (ring neighbors)
@@ -101,18 +100,18 @@ struct cake_core_state {
 
 /*
  * UNIFIED CPU TOPOLOGY ENTRY (Fused ETD + Topology)
- * 
+ *
  * Single 8-byte structure per CPU containing:
  * - SMT sibling (from ETD: guaranteed fastest peer)
  * - LLC domain ID (for cross-CCD cost assessment)
  * - Next 3 fastest peers (ring neighbors, ordered by measured latency)
  * - Flags for P/E core identification
- * 
+ *
  * Benefits:
  * - Single cache line fetch for all topology info (~2-3 cycles saved)
  * - ETD "ground truth" used everywhere (no kernel/measured mismatch)
  * - Simplified code path in cake_select_cpu
- * 
+ *
  * Populated by userspace at startup after ETD calibration.
  * Stored in RODATA for zero-cost constant folding.
  */
@@ -143,19 +142,19 @@ struct cpu_topology_entry {
 /*
  * Per-task flow state tracked in BPF
  * Padded to 64B to prevent False Sharing.
- * 
+ *
  * OPTIMIZATION: Store Coalescing Layout
  * The first 16 bytes (next_slice, state_fused_u64)
  * are ALL written together in cake_stopping().
- * 
- * By placing them contiguously, the CPU Store Buffer merges these 
+ *
+ * By placing them contiguously, the CPU Store Buffer merges these
  * into a single burst write, reducing L1 bandwidth pressure by ~50%
  * during context switches.
  */
 struct cake_task_ctx {
     /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
     u64 next_slice;        /* 8B: Pre-computed slice (ns) */
-    
+
     /* STATE FUSION: Union allows atomic u64 access to both state fields */
     union {
         struct {
@@ -170,8 +169,7 @@ struct cake_task_ctx {
         };
         u64 state_fused_u64;               /* 8B: Direct burst commit */
     };
-    
-    
+
     /* --- Timestamp Group (cake_running) [Bytes 16-23] --- */
     /* LOAD FUSING: Union allows atomic u64 access to both u32 timestamp fields */
     union {
@@ -181,12 +179,12 @@ struct cake_task_ctx {
         };
         u64 timestamps_fused;      /* 8B: Fused access (last_run in low 32, last_wake in high 32) */
     };
-    
+
     u8 _reserved[3];       /* 3B: Reserved */
     u8 __pad[32];          /* Pad to 64 bytes */
 } __attribute__((aligned(64)));
 
-/* 
+/*
  * Bitfield Offsets for packed_info
  * Layout: [Flags:4][Tier:3][Score:7][Wait:8][Error:8]
  */
@@ -228,11 +226,11 @@ struct cake_task_ctx {
 #define LATENCY_GATE_CRITICAL2 500   /* < 500µs avg → Critical (tier 2) - compositor */
 
 /*
- * ZERO-MATH ARBITER LUT (Pre-computed Wait/Go Logic)
- * 
+ * Arbiter LUT (Pre-computed Wait/Go Logic)
+ *
  * Dimensions: [My_Tier (0-7)][Target_Rank (0-7)]
  * Value: Threshold Tier (If occupant <= threshold, WAIT. Else GO.)
- * 
+ *
  * Rank 0: SMT Sibling (Fastest)
  * Rank 1-3: ETD Peers
  * Rank 4+: Global / Distant
@@ -242,8 +240,8 @@ struct arbiter_config {
     u8 _pad[0];        /* Pad to 64 bytes if needed */
 } __attribute__((aligned(64)));
 
-/* 
- * D2A (Direct-to-ALU) Signal Line 
+/*
+ * D2A (Direct-to-ALU) Signal Line
  * Moves signaling from IPI to L3 Cache Fabric.
  * Aligned to 64 bytes to prevent false sharing.
  */
@@ -295,7 +293,7 @@ struct cake_stats {
  * Default tier arrays (Gaming profile - pre-computed by userspace)
  * These are the base values; profiles can scale them as needed.
  */
- 
+
 /* Per-tier starvation thresholds (nanoseconds) */
 #define CAKE_DEFAULT_STARVATION_T0  5000000    /* Critical Latency: 5ms */
 #define CAKE_DEFAULT_STARVATION_T1  3000000    /* Realtime: 3ms */
@@ -325,10 +323,10 @@ struct cake_stats {
 
 /*
  * Fused Tier Configuration (64-bit RODATA Optimization)
- * 
+ *
  * Packs 4 per-tier parameters into a single 64-bit word.
  * Optimized for Zen 5 load-to-use efficiency.
- * 
+ *
  * Layout V2 (LSB to MSB):
  * [0-11]  Multiplier (fixed-point, 1024=1.0x, 0-4095) -> 1-cycle extraction
  * [12-27] Quantum (us units, 0-65535us)
