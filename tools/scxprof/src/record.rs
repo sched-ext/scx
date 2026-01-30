@@ -20,12 +20,17 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
 pub struct RecordOpts {
     /// Output directory for recording
     #[clap(short, long, default_value = "scxprof.out")]
     pub output: PathBuf,
+
+    /// Recording duration in seconds
+    #[clap(short = 't', long, default_value = "30")]
+    pub timeout: u64,
 
     /// Path to the SCX scheduler's task hint map
     #[clap(long)]
@@ -338,10 +343,21 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
     }
 
     let mut hints_recorder = hints_recorder;
+    let timeout = Duration::from_secs(opts.timeout);
+    let start = Instant::now();
     let mut completed = true;
 
     loop {
-        match poll_fds(&fds, 100)? {
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            perf.signal(libc::SIGINT);
+            perf.wait()?;
+            break;
+        }
+
+        let remaining_ms = (timeout - elapsed).as_millis().min(100) as i32;
+
+        match poll_fds(&fds, remaining_ms)? {
             PollResult::Shutdown => {
                 perf.signal(libc::SIGKILL);
                 perf.wait()?;
@@ -352,12 +368,7 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
                 perf.wait()?;
                 break;
             }
-            PollResult::RingbufReady => {
-                if let Some(ref mut recorder) = hints_recorder {
-                    recorder.consume_and_write()?;
-                }
-            }
-            PollResult::Timeout => {
+            PollResult::RingbufReady | PollResult::Timeout => {
                 if let Some(ref mut recorder) = hints_recorder {
                     recorder.consume_and_write()?;
                 }
