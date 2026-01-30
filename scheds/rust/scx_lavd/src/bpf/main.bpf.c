@@ -709,7 +709,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * let's use the chosen CPU.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if (likely(!__COMPAT_is_enq_cpu_selected(enq_flags))) {
 		struct pick_ctx ictx = {
 			.p = p,
 			.taskc = taskc,
@@ -720,7 +720,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 		cpu = pick_idle_cpu(&ictx, &is_idle);
 	} else {
-		cpu = scx_bpf_task_cpu(p);
+		cpu = task_cpu;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
@@ -1749,8 +1749,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	if (is_ksoftirqd(p))
 		set_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
 
 	if (parent)
 		bpf_task_release(parent);
