@@ -5,6 +5,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod mitosis_topology_utils;
 mod stats;
 
 use std::cmp::max;
@@ -123,6 +124,21 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     reject_multicpu_pinning: bool,
 
+    /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
+    /// to use LLC-aware scheduling.
+    #[clap(long, default_value = "false", action = clap::ArgAction::SetFalse)]
+    enable_llc_awareness: bool,
+
+    /// Enable work stealing. This is only relevant when LLC-awareness is enabled.
+    #[clap(long, default_value = "false", action = clap::ArgAction::SetFalse)]
+    enable_work_stealing: bool,
+
+    /// Number of times to skip a steal candidate before actually stealing.
+    /// Higher values reduce cross-LLC migrations at the cost of potential idle time.
+    /// Only relevant when work stealing is enabled.
+    #[clap(long)]
+    steal_throttle: Option<u32>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -196,8 +212,24 @@ impl Display for DistributionStats {
 }
 
 impl<'a> Scheduler<'a> {
+    fn validate_args(opts: &Opts) -> Result<()> {
+        if opts.enable_work_stealing && !opts.enable_llc_awareness {
+            bail!("Work stealing requires LLC-aware mode (--enable-llc-awareness)");
+        }
+
+        if opts.steal_throttle.is_some() && !opts.enable_work_stealing {
+            bail!("--steal-throttle requires --enable-work-stealing");
+        }
+
+        Ok(())
+    }
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        Self::validate_args(opts)?;
+
         let topology = Topology::new()?;
+
+        let nr_llc = topology.all_llcs.len().max(1);
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -214,35 +246,43 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.maps.rodata_data.as_mut().unwrap().slice_ns = scx_enums.SCX_SLICE_DFL;
-        skel.maps.rodata_data.as_mut().unwrap().debug_events_enabled = opts.debug_events;
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        skel.maps.rodata_data.as_mut().unwrap().split_vtime_updates = opts.split_vtime_updates;
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .cpu_controller_disabled = opts.cpu_controller_disabled;
+        let rodata = skel.maps.rodata_data.as_mut().unwrap();
 
-        skel.maps.rodata_data.as_mut().unwrap().nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
+        rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
+        rodata.debug_events_enabled = opts.debug_events;
+        rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
+        rodata.split_vtime_updates = opts.split_vtime_updates;
+        rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
+
+        rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
-            skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            rodata.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps
-            .rodata_data
-            .as_mut()
-            .unwrap()
-            .reject_multicpu_pinning = opts.reject_multicpu_pinning;
+        rodata.reject_multicpu_pinning = opts.reject_multicpu_pinning;
+
+        // Set nr_llc in rodata
+        rodata.nr_llc = nr_llc as u32;
+        rodata.enable_llc_awareness = opts.enable_llc_awareness;
+        rodata.enable_work_stealing = opts.enable_work_stealing;
+        rodata.steal_throttle = opts.steal_throttle.unwrap_or(0);
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
         }
+
+        // Populate LLC topology arrays before load (data section is only writable before load)
+        mitosis_topology_utils::populate_topology_maps(
+            &mut skel,
+            mitosis_topology_utils::MapKind::CpuToLLC,
+            None,
+        )?;
+        mitosis_topology_utils::populate_topology_maps(
+            &mut skel,
+            mitosis_topology_utils::MapKind::LLCToCpus,
+            None,
+        )?;
 
         let skel = scx_ops_load!(skel, mitosis, uei)?;
 
