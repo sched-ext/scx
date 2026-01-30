@@ -98,7 +98,7 @@
  * BIT SCAN FORWARD (CTZ): Deterministic bit scanning
  * Note: BPF ISA does not have a native bit-scan instruction.
  * __builtin_ctzll lowers to an efficient De Bruijn sequence in Clang/LLVM.
- * 
+ *
  * WORKAROUND: Clang 18 (and earlier) has a backend bug where it fails
  * to lower __builtin_ctzll to valid BPF IR (opcode 191 crash).
  * We provide a manual De Bruijn sequence fallback for these versions.
@@ -130,14 +130,14 @@
     #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) __builtin_ctzll(mask)
 #endif
 
-/* 
- * DSQ PEEK COMPATIBILITY (DARK ARTS ISOLATION)
+/*
+ * DSQ PEEK COMPATIBILITY
  * ---------------------------------------------------------------------------
  * scx_bpf_dsq_peek was introduced in v6.19. Using it directly on older
  * kernels fails verification. Using standard compat macros causes stack
  * spills because of the iterator struct.
  *
- * We isolate the iterator-heavy fallback into a 'noinline' slowpath to 
+ * We isolate the iterator-heavy fallback into a 'noinline' slowpath to
  * ensure the hot dispatch path remains spill-free and register-pinned.
  * ---------------------------------------------------------------------------
  */
