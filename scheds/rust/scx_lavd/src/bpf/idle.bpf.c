@@ -784,6 +784,20 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/* NOTE: There is no even partially idle CPU in the sticky domain. */
 
 	/*
+	 * If aggressive migration is preferred for the task (e.g., freshly
+	 * execv()-ed task), find a partially idle CPU from the sticky
+	 * domain’s neighbor.
+	 */
+	if ((nr_cpdoms > 1) &&
+	    test_task_flag(ctx->taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE) &&
+	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
+	    READ_ONCE(cpdc->is_stealee)) {
+		cpu = migrate_to_neighbor(ctx, cpdc, 0, &sticky_cpdom, is_idle);
+		if (cpu >= 0)
+			goto unlock_out;
+	}
+
+	/*
 	 * Instead of chasing a partially idle CPU in neighboring domains,
 	 * let's stay on the previous CPU or the sticky domain for cache
 	 * locality, hoping that the load imbalance (if it exists) will be
