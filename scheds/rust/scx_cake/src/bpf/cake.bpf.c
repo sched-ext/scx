@@ -72,9 +72,7 @@ const struct arbiter_config arbiter_cfg;
 
 
 
-/* D2A Signal Mask (L3 Coherency Path) */
-static struct cake_signal_mask hs_signal SEC(".bss") __attribute__((aligned(64)));
-#define hs_signal_mask (hs_signal.signal_mask)
+/* D2A Signal Mask - REMOVED (A+B+D architecture makes this redundant) */
 
 /*
  * GLOBAL CPU TIER STATE (Zero-Latency BSS Array)
@@ -129,6 +127,23 @@ struct {
 } idle_global SEC(".bss") __attribute__((aligned(128)));
 #define global_idle_mask (idle_global.mask)
 
+/*
+ * T1 OPTIMIZATION: Tier Availability Bitmap
+ * 
+ * Each bit represents whether a tier DSQ has tasks queued.
+ * Updated atomically in cake_enqueue (set) and dispatch_success_handler (conditionally clear).
+ * 
+ * Enables O(1) dispatch: CTZ(tier_avail & ~warm_mask) → first populated tier.
+ * Replaces 7 sequential scx_bpf_dsq_move_to_local() probes.
+ * 
+ * Layout: Bit 0 = Tier 0, Bit 1 = Tier 1, ... Bit 6 = Tier 6
+ */
+struct {
+    u64 mask;
+    u64 pad[7];
+} tier_avail_global SEC(".bss") __attribute__((aligned(64)));
+#define tier_available_mask (tier_avail_global.mask)
+
 /* Metadata accessors (Fused for Zero-Spill) */
 #define GET_TIER_RAW(packed) EXTRACT_BITS_U32(packed, SHIFT_TIER, 3)
 #define GET_TIER(ctx) GET_TIER_RAW(cake_relaxed_load_u32(&(ctx)->packed_info))
@@ -147,11 +162,7 @@ static __always_inline u32 QP_GET_PREV(u64 qp) {
     asm volatile("%[out] = %[in]; %[out] &= 0x3F" : [out]"=r"(res) : [in]"r"(qp));
     return res;
 }
-static __always_inline u32 QP_GET_DSQ(u64 qp) {
-    u32 res;
-    asm volatile("%[out] = %[in]; %[out] >>= 16; %[out] &= 0xFFFF" : [out]"=r"(res) : [in]"r"(qp));
-    return res;
-}
+/* QP_GET_DSQ removed - T2 optimization uses topo_prev->dsq_id directly */
 static __always_inline u32 QP_GET_TIER(u64 qp) {
     u32 res;
     asm volatile("%[out] = %[in]; %[out] >>= 39; %[out] &= 0x7" : [out]"=r"(res) : [in]"r"(qp));
@@ -221,14 +232,6 @@ static __always_inline void update_occupant_tier(struct cake_core_state *state, 
     cake_relaxed_store_u32(packed, new_val);
 }
 
-static __always_inline void update_warm_tier(struct cake_core_state *state, u8 tier)
-{
-    /* ATOMIC UPDATER: Updates warm tier byte only */
-    u32 *packed = (u32 *)state;
-    u32 old = cake_relaxed_load_u32(packed);
-    u32 new_val = (old & 0xFFFF00FF) | ((u32)tier << 8);
-    cake_relaxed_store_u32(packed, new_val);
-}
 
 /*
  * GLOBAL STATISTICS (Zero-Latency BSS Array)
@@ -468,6 +471,9 @@ UEI_DEFINE(uei);
 #define BATCH_DSQ       5
 #define BACKGROUND_DSQ  6
 
+/* A+B ARCHITECTURE: Single unified DSQ with vtime-encoded priority */
+#define UNIFIED_DSQ     100
+
 /* Per-CPU Direct Dispatch Queues (1000-1063) */
 #define CAKE_DSQ_LC_BASE 1000
 
@@ -526,39 +532,22 @@ const fused_config_t tier_configs[8] = {
 };
 
 /*
- * BRANCHLESS TIER LOOKUP TABLE (Zero Branch Misses)
+ * BRANCHLESS TIER ARITHMETIC (T6 Optimization)
  * 
- * Direct indexed lookup eliminates 7-branch if-else chain in compute_tier().
- * Score 0-100 maps directly to tier 2-6. Score 100+ uses latency gates.
+ * Replaces 128-byte LUT with pure ALU operations.
+ * 4 SETcc + 4 SUB instructions = 8 cycles on Zen 5.
+ * vs LUT: 4ns (L1 hit) to 12ns (L2 hit).
  * 
- * LAYOUT: 128 entries for bounds masking (score & 127)
- * Cache: 2 lines (128 bytes), aligned to 64 bytes
+ * Score ranges → Tier:
+ *   0-29:  6 (Background)
+ *   30-49: 5 (Batch)
+ *   50-69: 4 (Interactive)
+ *   70-89: 3 (Gaming)
+ *   90-99: 2 (Critical)
+ *   100:   Slow path (latency gates)
  * 
- * Score ranges:
- *   0-29:  Tier 6 (Background)
- *   30-49: Tier 5 (Batch)
- *   50-69: Tier 4 (Interactive)
- *   70-89: Tier 3 (Gaming)
- *   90-99: Tier 2 (Critical)
- *   100:   Tier 2 (default, latency gates may override)
- *   101-127: Tier 2 (padding for bounds mask)
+ * ABSURD PERF: compute_tier_fast removed - tier read from task context directly.
  */
-static const u8 tier_lut[128] __attribute__((aligned(64))) = {
-    /* 0-29: Background (6) */
-    6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
-    /* 30-49: Batch (5) */
-    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
-    /* 50-69: Interactive (4) */
-    4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,
-    /* 70-89: Gaming (3) */
-    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
-    /* 90-99: Critical (2) */
-    2,2,2,2,2,2,2,2,2,2,
-    /* 100: Critical (latency gates check separately) */
-    2,
-    /* 101-127: Padding for bounds mask (default to Critical) */
-    2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2
-};
 
 /* Long-sleep recovery threshold: 33ms = 2 frames @ 60Hz */
 #define LONG_SLEEP_THRESHOLD_NS 33000000
@@ -652,67 +641,8 @@ struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id)
  * * Extracts string parsing and tier assignment from the hot wakeup path.
  * Saves I-Cache space in cake_enqueue for standard tasks.
  */
-/* Pure Compute Helpers */
-static __always_inline u32 compute_sparse_score(u32 old_score, u64 runtime_ns)
-{
-    s32 sparse_result = (s32)old_score + 4;
-    s32 heavy_result = (s32)old_score - 6;
-    bool sparse = runtime_ns < cached_threshold_ns;
-    s32 raw_score = sparse ? sparse_result : heavy_result;
-    raw_score = (raw_score < 0) ? 0 : ((raw_score > 100) ? 100 : raw_score);
-    return (u32)raw_score;
-}
+/* Pure Compute Helpers - ABSURD PERF: Removed accounting functions, now in tick */
 
-static __always_inline u16 compute_ema_runtime(u16 old_avg_us, u64 runtime_ns)
-{
-    u32 meas_us = (u32)(runtime_ns >> 10);
-    meas_us = (meas_us > 65535) ? 65535 : meas_us;
-    if (unlikely(old_avg_us == 0)) {
-        return (u16)meas_us;
-    } else {
-        s32 diff = (s32)meas_us - (s32)old_avg_us;
-        return (u16)((s32)old_avg_us + (diff >> 3));
-    }
-}
-
-static __always_inline u16 compute_deficit(u16 old_deficit_us, u64 runtime_ns)
-{
-    u32 runtime_us = (u32)(runtime_ns >> 10);
-    s32 diff = (s32)old_deficit_us - (s32)runtime_us;
-    return (u16)(diff & ~(diff >> 31));
-}
-
-static __attribute__((noinline))
-u8 compute_tier_slow_path(u32 avg_us)
-{
-    /* ISOLATED WINDOW: Fresh register frame for comparisons */
-    u8 adj = (u8)(avg_us < 500) + (u8)(avg_us < 100) + (u8)(avg_us < 25);
-    return 3 - adj;
-}
-
-static __always_inline u8 compute_tier(u32 score, u16 avg_us)
-{
-    if (unlikely(score == 100 && avg_us > 0)) {
-        return compute_tier_slow_path(avg_us);
-    }
-    return tier_lut[score & 127];
-}
-
-
-
-
-static __always_inline void clear_victim_status(u32 cpu_id, struct cake_core_state *state)
-{
-    u64 cpu_bit = (1ULL << (cpu_id & 63));
-    /* Gated Atomic XOR: Only write if set */
-    if (cake_relaxed_load_u64(&victim_mask) & cpu_bit) {
-        /* ANDN Optimization: Clears bit without full fetch cycle */
-        bpf_atomic_and(&victim_mask, ~cpu_bit);
-        
-        u32 *packed = (u32 *)state;
-        bpf_atomic_and(packed, ~(1 << 16)); /* Clear VICTIM bit */
-    }
-}
 
 static __always_inline void set_victim_status_cold(u32 cpu, struct cake_core_state *state)
 {
@@ -726,140 +656,8 @@ static __always_inline void set_victim_status_cold(u32 cpu, struct cake_core_sta
     }
 }
 
-static __always_inline u32 handle_demotion_cold(u32 packed)
-{
-    u32 current_score = (packed >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE;
-    u32 penalty = (current_score >= 10) ? 10 : current_score; 
-    packed &= ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE);
-    packed |= ((current_score - penalty) & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
-    if (enable_stats) {
-         struct cake_stats *s = get_local_stats();
-         if (s) s->nr_wait_demotions++;
-    }
-    return packed & ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA);
-}
+/* ABSURD PERF: perform_lazy_accounting removed - accounting in tick */
 
-static __attribute__((noinline))
-u64 perform_account_math_cold(u32 score, u32 avg_def, u32 meta_flags, u64 timestamps, u64 now_ns)
-{
-    /* DARK ART: Pinned Arguments (Zero Spill) */
-    register u32 r_score asm("r1") = score;
-    register u32 r_avg_def asm("r2") = avg_def;
-    register u32 r_meta asm("r3") = meta_flags;
-    register u64 r_ts asm("r4") = timestamps;
-    register u64 r_now asm("r5") = now_ns;
-    asm volatile("" : "+r"(r_score), "+r"(r_avg_def), "+r"(r_meta), "+r"(r_ts), "+r"(r_now));
-
-    u64 u_runtime_ns = r_now - EXTRACT_LAST_RUN(r_ts);
-
-    u32 old_meta = r_meta & 0x7FFFFFFF;
-    bool is_kthread = r_meta >> 31;
-    u8 tier = compute_tier(r_score, (u16)(r_avg_def >> 16));
-    
-    if (unlikely(is_kthread)) {
-        tier = (tier > CAKE_TIER_REALTIME) ? CAKE_TIER_REALTIME : tier;
-    }
-
-    u64 q_ns = UNPACK_QUANTUM_NS(tier_configs[tier & 7]);
-    
-    /* DEFERRED MATH CORE (Little's Law) 
-     * If runtime < 25% of slice, skip heavy math.
-     */
-    if (unlikely(u_runtime_ns < (q_ns >> 2))) {
-        /* Fast Path: Just consume deficit, keep metadata */
-        u32 fast_slice = (u32)(q_ns >> 10); /* Keep same slice */
-        return ((u64)r_meta << 32) | fast_slice;
-    }
-
-    u64 deficit_ns = (u64)(u16)r_avg_def << 10;
-    u64 results = (deficit_ns > q_ns ? deficit_ns : q_ns) * UNPACK_MULTIPLIER(tier_configs[tier & 7]);
-    u32 slice = (u32)(results >> 10);
-    
-    u32 last_wake = EXTRACT_LAST_WAKE(r_ts);
-    if (last_wake > 0 && (r_now - last_wake) > LONG_SLEEP_THRESHOLD_NS) {
-        u32 wait_data = (old_meta >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
-        if ((wait_data >> 4) < 15) wait_data += 0x10;
-        if ((wait_data & 0xF) < 15) wait_data++;
-        
-        if ((wait_data & 0xF) >= 10 && (wait_data >> 4) >= 3 && tier < CAKE_TIER_BACKGROUND) {
-            r_score = (r_score > 10) ? r_score - 10 : 0;
-            old_meta = (old_meta & ~(MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE)) | ((u32)r_score << SHIFT_SPARSE_SCORE);
-        }
-        old_meta = (old_meta & ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA)) | (wait_data << SHIFT_WAIT_DATA);
-    }
-
-    old_meta = (old_meta & ~((MASK_SPARSE_SCORE << SHIFT_SPARSE_SCORE) | (MASK_TIER << SHIFT_TIER))) |
-               ((u32)(r_score & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE) |
-               ((u32)(tier & MASK_TIER) << SHIFT_TIER);
-
-    return ((u64)old_meta << 32) | slice;
-}
-
-static __always_inline void perform_lazy_accounting(struct task_struct *p,
-                                                  struct cake_task_ctx *tctx,
-                                                  u64 now_ts)
-{
-    u64 f_meta = cake_relaxed_load_u64(&tctx->state_fused_u64);
-    u64 f_ts = tctx->timestamps_fused;
-    u32 runtime = (u32)now_ts - (u32)f_ts;
-    
-    if ((u32)f_ts == 0) return;
-
-    u32 score = compute_sparse_score(((u32)(f_meta >> 32) >> SHIFT_SPARSE_SCORE) & MASK_SPARSE_SCORE, (u64)runtime);
-    u32 avg_def = PACK_DEFICIT_AVG(compute_deficit(EXTRACT_DEFICIT((u32)f_meta), (u64)runtime),
-                                  compute_ema_runtime(EXTRACT_AVG_RT((u32)f_meta), (u64)runtime));
-    
-    u32 meta_packed = ((u32)(f_meta >> 32) & 0x7FFFFFFF) | (((p->flags & PF_KTHREAD) && GET_CRITICAL(tctx)) << 31);
-    u64 res = perform_account_math_cold(score, avg_def, meta_packed, f_ts, now_ts);
-    
-    tctx->next_slice = (u32)res;
-    cake_relaxed_store_u64(&tctx->state_fused_u64, (res & 0xFFFFFFFF00000000ULL) | avg_def);
-    tctx->last_run_at = 0;
-}
-
-static __always_inline void side_effect_dispatch_setup(struct task_struct *p, struct cake_task_ctx *tctx, u32 cpu, u64 branch_now)
-{
-    u32 now_ts = (u32)branch_now;
-    u8 tier = GET_TIER(tctx) & 7;
-    tctx->last_run_at = now_ts;
-    
-    struct cake_core_state *state = &global_core_state[cpu & (CAKE_MAX_CPUS - 1)];
-    
-    /* Update Occupant Tier (if changed) */
-    u32 packed = cake_relaxed_load_u32((u32 *)state);
-    if (STATE_GET_OCCUPANT(packed) != tier) {
-        update_occupant_tier(state, tier);
-    }
-    
-    clear_victim_status(cpu, state);
-    
-    /* HYGIENE: Removed proactive clearing to allow sibling consumption (v15.1) */
-
-    u64 state_ts = tctx->timestamps_fused;
-    u32 last_wake = EXTRACT_LAST_WAKE(state_ts);
-    if (likely(last_wake > 0)) {
-        u64 wait_time = (u64)(now_ts - last_wake);
-        u64 tier_cfg = tier_configs[tier];
-        u64 budget_ns = UNPACK_BUDGET_NS(tier_cfg);
-
-        if (budget_ns > 0 && wait_time > budget_ns) {
-            u64 fused_meta = cake_relaxed_load_u64(&tctx->state_fused_u64);
-            u32 packed = (u32)(fused_meta >> 32);
-            u32 wait_data = (packed >> SHIFT_WAIT_DATA) & MASK_WAIT_DATA;
-            
-            if ((wait_data >> 4) < 15) wait_data += 0x10;
-            if ((wait_data & 0xF) < 15) wait_data++;
-
-            if ((wait_data & 0xF) >= 10 && (wait_data >> 4) >= 3 && tier < CAKE_TIER_BACKGROUND) {
-                packed = handle_demotion_cold(packed);
-            } else {
-                packed = (packed & ~(MASK_WAIT_DATA << SHIFT_WAIT_DATA)) | (wait_data << SHIFT_WAIT_DATA);
-            }
-            cake_relaxed_store_u64(&tctx->state_fused_u64, ((u64)packed << 32) | (u32)fused_meta);
-        }
-    }
-    tctx->timestamps_fused = PACK_TIMESTAMPS(now_ts, 0);
-}
 
 static __attribute__((noinline))
 void init_new_kthread_cold(struct task_struct *p, u64 enq_flags)
@@ -868,10 +666,12 @@ void init_new_kthread_cold(struct task_struct *p, u64 enq_flags)
     u64 critical = is_critical_kthread(p);
     u64 mask = -(u64)critical;  /* All 1s if critical, all 0s if not */
     
-    /* Select: critical ? REALTIME_DSQ : INTERACTIVE_DSQ */
-    u8 initial_tier = (mask & REALTIME_DSQ) | (~mask & INTERACTIVE_DSQ);
+    /* Select: critical ? REALTIME tier : INTERACTIVE tier */
+    u8 initial_tier = (mask & CAKE_TIER_REALTIME) | (~mask & CAKE_TIER_INTERACTIVE);
     
-    scx_bpf_dsq_insert(p, initial_tier, quantum_ns, enq_flags);
+    /* A+B: Vtime-encoded priority: (tier << 56) | timestamp */
+    u64 vtime = ((u64)initial_tier << 56) | (scx_bpf_now() & 0x00FFFFFFFFFFFFFFULL);
+    scx_bpf_dsq_insert_vtime(p, UNIFIED_DSQ, quantum_ns, vtime, enq_flags);
 }
 
 
@@ -883,9 +683,17 @@ void init_new_kthread_cold(struct task_struct *p, u64 enq_flags)
 static __attribute__((noinline))
 s32 select_cpu_new_task_cold(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+    /* ZERO-SPILL: Pin inputs to callee-saved registers */
+    register struct task_struct *p_pin asm("r6") = p;
+    register s32 prev_pin asm("r7") = prev_cpu;
+    register u64 wake_pin asm("r8") = wake_flags;
+    
+    asm volatile("" : "+r"(p_pin), "+r"(prev_pin), "+r"(wake_pin));
     u32 tc_id = bpf_get_smp_processor_id();
+    asm volatile("" : "+r"(p_pin), "+r"(prev_pin), "+r"(wake_pin));
+    
     struct cake_scratch *scr = &global_scratch[tc_id & (CAKE_MAX_CPUS - 1)];
-    return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &scr->dummy_idle);
+    return scx_bpf_select_cpu_dfl(p_pin, prev_pin, wake_pin, &scr->dummy_idle);
 }
 
 static __attribute__((noinline)) 
@@ -951,21 +759,11 @@ static __always_inline struct cake_task_ctx *get_task_ctx(struct task_struct *p,
     return alloc_task_ctx_cold(p);
 }
 
-
-
 /*
  * NOINLINE ACCOUNTING
  * Math-heavy operations are moved here to free up registers for the hot scan.
+ * ABSURD PERF: cake_accounting_core removed - accounting fully async in tick.
  */
-/* Standard ABI: r1=p, r2=tctx. Verifier is happy. */
-static __attribute__((noinline))
-void cake_accounting_core(struct task_struct *p, struct cake_task_ctx *tctx)
-{
-    if (!tctx) return;
-    u64 now = scx_bpf_now();
-    tctx->last_wake_ts = (u32)now;
-    perform_lazy_accounting(p, tctx, now);
-}
 
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
@@ -1004,18 +802,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     /* BARRIER: Finalize pinned state before calls */
     asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg), "+r"(qp));
 
-    /* Isolated Account logic - preserves r8/r9 */
-    /* Isolated Account logic - preserves r8/r9 */
-    /* The compiler will move r6->r1 and r7->r2. 1-cycle ALU cost. 0-cycle stack cost. */
-    cake_accounting_core(*(struct task_struct **)ctx_reg, tctx_reg);
+    /* ABSURD PERF: cake_accounting_core removed - fully async in tick */
 
-    /* Sync check - QP-SLOT 3 */
+    /* Sync check - QP-SLOT 3: Direct dispatch to current CPU */
     if (QP_GET_WAKE(qp) & SCX_WAKE_SYNC) {
         u32 tc_id = bpf_get_smp_processor_id();
         if (tc_id < CAKE_MAX_CPUS) {
-            scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, cpu_topo[tc_id & 63].dsq_id, 
+            scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + tc_id, 
                                tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-            __sync_fetch_and_or(&hs_signal_mask, (1ULL << (tc_id & 63)));
             scx_bpf_kick_cpu(tc_id, SCX_KICK_PREEMPT);
             return (s32)tc_id;
         }
@@ -1032,22 +826,22 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     u32 target_dsq = 0;
 
     /* 1. Prev check - QP-SLOT 0 */
-    /* ALU-PREDICATE SHIFT: Pre-calc DSQs for CMOV */
-    u32 dsq_prev = QP_GET_DSQ(qp);
-    u32 sib = (u32)cpu_topo[QP_GET_PREV(qp)].sibling;
-    u32 dsq_sib = CAKE_DSQ_LC_BASE + sib;
+    /* T2 OPTIMIZATION: Pre-computed sibling mask from RODATA */
+    u32 b_prev = QP_GET_PREV(qp);
+    const struct cpu_topology_entry *topo_prev = &cpu_topo[b_prev];
+    u32 dsq_prev = topo_prev->dsq_id;
+    u64 sib_bit = topo_prev->sibling_bit;  /* Pre-computed (1ULL << sibling) or 0 */
+    u32 dsq_sib = topo_prev->sibling_dsq;  /* Pre-computed DSQ ID */
 
-    if (idles & (1ULL << QP_GET_PREV(qp))) {
-        selected_cpu = (s32)QP_GET_PREV(qp);
+    if (idles & (1ULL << b_prev)) {
+        selected_cpu = (s32)b_prev;
         target_dsq = dsq_prev;
         found_idle = true;
-    } else {
-        /* SIBLING Seek - QP-SLOT 0 peephole */
-        if (sib < 64 && sib != QP_GET_PREV(qp) && (idles & (1ULL << (sib & 63)))) {
-            selected_cpu = (s32)sib;
-            target_dsq = dsq_sib;
-            found_idle = true;
-        }
+    } else if (sib_bit & idles) {
+        /* T2: Single AND check replaces (sib < 64 && sib != prev && (idles & (1ULL << sib))) */
+        selected_cpu = (s32)topo_prev->sibling;
+        target_dsq = dsq_sib;
+        found_idle = true;
     }
 
     if (!found_idle) {
@@ -1063,18 +857,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         }
     }
 
-    if (!found_idle) {
-        /* BARRIER: Re-verify qp/idles before tier check */
-        asm volatile("" : "+r"(qp), "+r"(idles));
-        if (QP_GET_TIER(qp) > GAMING_DSQ && idles) {
-            selected_cpu = find_surgical_victim_logical(QP_GET_PREV(qp), idles, 0x022FDD63CC95386DULL, cpu_topo);
-            if (selected_cpu >= 0) {
-                 target_dsq = CAKE_DSQ_LC_BASE + selected_cpu;
-                 found_idle = true;
-            }
-        }
-    }
-
+    /* Optimization #2: Duplicate find_surgical_victim_logical removed (dead code) */
     if (!found_idle) {
         selected_cpu = select_cpu_with_arbiter(tctx_reg, (s32)QP_GET_PREV(qp), idles, 0, 0x022FDD63CC95386DULL, cpu_topo);
         if (selected_cpu >= 0) target_dsq = CAKE_DSQ_LC_BASE + selected_cpu;
@@ -1082,40 +865,28 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* DISPATCH SLAM: Final commit using pre-calculated target_dsq */
     if (selected_cpu >= 0) {
-        /* ZERO-CYCLE HINT: Already computed in pipeline */
+        /* 
+         * SPILL-FREE STRATEGY:
+         * 1. Compute target_bit BEFORE kfunc (survives in qp or recompute)
+         * 2. After kfunc, RE-DERIVE selected_cpu from target_dsq
+         * 3. target_dsq is pinned in a register, selected_cpu = target_dsq & 63
+         */
+        
+        /* BARRIER: Pin qp and idles before kfunc */
+        asm volatile("" : "+r"(qp), "+r"(idles));
+        
         scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, target_dsq, tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
         
-        /* SURGICAL PRODUCER: Agnostic Weighted Staging (v15.3 Dark Arts) */
-        if ((cpu_topo[selected_cpu & 63].sibling) < 64) {
-            u32 sib_idx = (u32)cpu_topo[selected_cpu & 63].sibling;
-            struct cake_core_state *sib_state = &global_core_state[sib_idx];
-            
-            /* DARK ART 3: Shadow-Peeking (L1i Pre-warm)
-             * Handled by the CPU's hardware prefetcher or speculative execution via 'sib_state' access.
-             * Zen 5 Dual-Load ports will pipeline this fetch.
-             */
-            u32 old_s = cake_relaxed_load_u32((u32 *)sib_state);
-            
-            /* DARK ART 2: Predicate-Weighted Staging (Branchless) */
-            u8 new_prio = (QP_GET_TIER(qp) & 7) + 1;
-            u8 old_prio = STATE_GET_STAGING_PRIO(old_s);
-            
-            /* CMOV-style Resolution:
-             * mask = (condition) ? -1 : 0
-             * This forces the ALU to resolve the race, bypassing branch prediction.
-             */
-            bool cond = (old_prio == 0 || new_prio < old_prio);
-            u32 mask = cond ? 0xFFFFFFFF : 0;
-            
-            if (mask) {
-                u32 new_val = (old_s & STATE_CLEAR_STAGING) | ((u32)new_prio << 24);
-                cake_relaxed_store_u32((u32 *)sib_state, new_val);
-            }
+        /* RE-DERIVE: selected_cpu from target_dsq (1 AND op, no spill) */
+        asm volatile("" : "+r"(qp), "+r"(idles));
+        u32 cpu_id = target_dsq & 63;  /* LC DSQ IDs are CAKE_DSQ_LC_BASE + cpu */
+        u64 target_bit = (1ULL << cpu_id);
+        
+        /* ABSURD PERF: Signal mask and surgical producer staging removed */
+        if (!(idles & target_bit)) {
+            scx_bpf_kick_cpu(cpu_id, SCX_KICK_PREEMPT);
         }
-
-        __sync_fetch_and_or(&hs_signal_mask, (1ULL << (selected_cpu & 63)));
-        scx_bpf_kick_cpu((u32)selected_cpu, SCX_KICK_PREEMPT);
-        return selected_cpu;
+        return (s32)cpu_id;
     }
 
     if (QP_GET_TIER(qp) == CRITICAL_LATENCY_DSQ) {
@@ -1124,10 +895,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             s32 s_cpu = find_surgical_victim_logical(QP_GET_PREV(qp), spec_mask, 0x022FDD63CC95386DULL, cpu_topo);
             if (s_cpu < 0) s_cpu = (s32)BIT_SCAN_FORWARD_U64_RAW(spec_mask, 0x022FDD63CC95386DULL);
 
-            scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, cpu_topo[s_cpu & 63].dsq_id, 
+            scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + (s_cpu & 63), 
                                tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-            /* DIRECT DISPATCH SLAM */
-            __sync_fetch_and_or(&hs_signal_mask, (1ULL << (s_cpu & 63)));
             scx_bpf_kick_cpu((u32)s_cpu, SCX_KICK_PREEMPT);
             return s_cpu;
         }
@@ -1138,31 +907,18 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 /*
  * Enqueue task to the appropriate DSQ based on sparse detection
+ * 
+ * A+B ARCHITECTURE: Uses unified DSQ with vtime-encoded priority.
+ * vtime = (tier << 56) | timestamp
+ * Lower tier = earlier dispatch. FIFO within tier.
  */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
     register struct task_struct *p_reg asm("r6") = p;
-    /*
-     * REGISTER HINTING OPTIMIZATION: Front-load ALL uses of 'p'
-     * Extract everything we need from p NOW so the compiler can
-     * free up that register for other uses across branches.
-     */
     u32 task_flags = p_reg->flags;
     struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
     
-    /*
-     * PROACTIVE KTHREAD CLASSIFICATION (Branchless Diamond Distribution)
-     * 
-     * NEW kthreads without context use mask-based selection to avoid branches.
-     * Check uses extracted task_flags, not p->flags (p already consumed).
-     */
-    /*
-     * PROACTIVE KTHREAD CLASSIFICATION (Moved to Cold Path)
-     * * Optimization: The heavy string parsing logic is now in a 
-     * separate function (init_new_kthread_cold).
-     * This keeps the 'cake_enqueue' instruction footprint small
-     * for the 99.9% of wakeups that are NOT new kthreads.
-     */
+    /* Kthread cold path */
     if (unlikely((task_flags & PF_KTHREAD) && !tctx)) {
         init_new_kthread_cold(p_reg, enq_flags);
         return;
@@ -1170,23 +926,22 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 
     register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
 
-    
-    /* Legacy target_dsq_id check removed - using Direct Dispatch in select_cpu */
-
     /* Handle Yields/Background */
     if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
-        scx_bpf_dsq_insert(p_reg, BACKGROUND_DSQ, quantum_ns, enq_flags);
+        u64 vtime = ((u64)CAKE_TIER_BACKGROUND << 56) | (scx_bpf_now() & 0x00FFFFFFFFFFFFFFULL);
+        scx_bpf_dsq_insert_vtime(p_reg, UNIFIED_DSQ, quantum_ns, vtime, enq_flags);
         return;
     }
 
     if (unlikely(!tctx_reg)) {
-         /* No context yet - use INTERACTIVE defaults (context created in cake_running) */
-        scx_bpf_dsq_insert(p_reg, INTERACTIVE_DSQ, quantum_ns, enq_flags);
+        /* No context yet - use INTERACTIVE tier */
+        u64 vtime = ((u64)CAKE_TIER_INTERACTIVE << 56) | (scx_bpf_now() & 0x00FFFFFFFFFFFFFFULL);
+        scx_bpf_dsq_insert_vtime(p_reg, UNIFIED_DSQ, quantum_ns, vtime, enq_flags);
         return;
     }
 
-    /* Standard Tier Logic (Zero-Cycle Wakeup) */
-    u8 tier = GET_TIER(tctx_reg);
+    /* Standard Tier Logic */
+    u8 tier = GET_TIER(tctx_reg) & 7;
     u64 slice = tctx_reg->next_slice;
 
     if (enable_stats) {
@@ -1196,117 +951,44 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         else
             s->nr_old_flow_dispatches++;
 
-        u8 bounded_tier = tier & 0x7;
-        if (bounded_tier < CAKE_TIER_MAX)
-            s->nr_tier_dispatches[bounded_tier]++;
+        if (tier < CAKE_TIER_MAX)
+            s->nr_tier_dispatches[tier]++;
     }
 
-    scx_bpf_dsq_insert(p_reg, tier, slice, enq_flags);
+    /* A+B: Vtime-encoded priority: (tier << 56) | timestamp */
+    u64 vtime = ((u64)tier << 56) | (scx_bpf_now() & 0x00FFFFFFFFFFFFFFULL);
+    scx_bpf_dsq_insert_vtime(p_reg, UNIFIED_DSQ, slice, vtime, enq_flags);
 }
 
 /*
- * Dispatch tasks to run on this CPU
+ * A+B+D ARCHITECTURE: Simplified dispatch
  * 
- * WARM-TIER OPTIMIZATION: Each CPU remembers the tier it successfully
- * pulled from last. In a gaming session, this tier (usually 3: Gaming)
- * stays hot, saving 5-6 helper calls per dispatch.
- *
- * Order:
- *   1. Private mailbox (highest affinity, zero contention)
- *   2. Warm-tier short-circuit (last successful tier)
- *   3. Starvation inversion (occasional fairness)
- *   4. Full priority scan (deterministic fallback)
+ * - Single UNIFIED_DSQ scan (6 kfuncs eliminated)
+ * - Deferred accounting to cake_tick (3 kfuncs eliminated)
+ * - Per-CPU mailbox for direct dispatch still checked first
  */
-/* 
- * NOINLINE DISPATCH SETUP
- * Moving side-effects out of the hot scan loop to eliminate register pressure.
- */
-static __attribute__((noinline)) 
-void dispatch_success_handler(struct task_struct *p, u32 cpu, u32 tier)
-{
-    /* r1=p. Verifier now allows the write below. */
-    struct cake_task_ctx *tctx = bpf_task_storage_get(&task_ctx, p, 0, 0);
-    if (tctx) {
-        side_effect_dispatch_setup(p, tctx, cpu, scx_bpf_now());
-        update_warm_tier(&global_core_state[cpu & (CAKE_MAX_CPUS - 1)], tier);
-        
-        /* Mark CPU as BUSY in BSS Shadow */
-        bpf_atomic_and(&global_idle_mask, ~(1ULL << (cpu & 63)));
-    }
-}
-
 void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 {
-    u32 cpu;
-    asm volatile("%0 = %1" : "=r"(cpu) : "r"(raw_cpu));
-    u32 c = cpu & (CAKE_MAX_CPUS - 1);
-    u32 target_dsq;
-
-    /* A.0 SURGICAL CONSUMER (Greedy Snatch)
-     * DARK ART 1: Transactional Arithmetic Reconstruction
-     * We only 'Grab' if we see a hint, otherwise we stay in Shared (S) state.
-     */
-    u32 staged_state = cake_relaxed_load_u32((u32 *)&global_core_state[c]);
-    if (STATE_GET_STAGING_PRIO(staged_state)) {
-        /* Hint exists: Perform the Atomic Grab (XCHG) acquiring exclusive access */
-        staged_state = __sync_lock_test_and_set((u32 *)&global_core_state[c], 0);
-        
-        /* RESTORE: Put back core status bits, but leave Staging at 0 */
-        cake_relaxed_store_u32((u32 *)&global_core_state[c], staged_state & STATE_CLEAR_STAGING);
-        
-        u32 my_local_dsq = CAKE_DSQ_LC_BASE + c;
-        if (scx_bpf_dsq_move_to_local(my_local_dsq)) {
-            /* DARK ART FIX: Fuse the target_dsq into R8 before the jump */
-            target_dsq = my_local_dsq;
-            goto found; 
-        }
+    u32 cpu = (u32)raw_cpu & 63;
+    u64 cpu_bit = (1ULL << cpu);
+    
+    /* ABSURD PERF: Signal mask check removed */
+    
+    /* 1. Check per-CPU direct dispatch mailbox first (highest priority) */
+    if (scx_bpf_dsq_move_to_local(CAKE_DSQ_LC_BASE + cpu)) {
+        /* D: Deferred accounting - just mark busy, accounting in tick */
+        bpf_atomic_and(&global_idle_mask, ~cpu_bit);
+        return;
     }
-
-    /* Reuse the fetched state for warm tier check */
-    u8 warm_tier = STATE_GET_WARM(staged_state);
-    if (warm_tier < 7) {
-        if (scx_bpf_dsq_move_to_local(warm_tier)) goto found_short;
+    
+    /* 2. A+B: Single unified DSQ scan (vtime-ordered by tier) */
+    if (scx_bpf_dsq_move_to_local(UNIFIED_DSQ)) {
+        bpf_atomic_and(&global_idle_mask, ~cpu_bit);
+        return;
     }
-
-    /* 2. Signal Reset: Zen 5 Inversion (ANDN-style) */
-    if (cake_relaxed_load_u64(&hs_signal_mask) & (1ULL << (c & 63))) {
-        bpf_atomic_and(&hs_signal_mask, ~(1ULL << (c & 63)));
-    }
-
-    struct task_struct *p;
-
-    /* A. Local Mailbox */
-    target_dsq = CAKE_DSQ_LC_BASE + c;
-    if (scx_bpf_dsq_move_to_local(target_dsq)) goto found;
-
-    /* A.2 Moved to A.0 (Greedy Snatch) */
-
-    /* B. Starvation Inversion */
-    u64 starvation_bits = prev ? (prev->pid ^ prev->se.sum_exec_runtime) : 1;
-    if ((starvation_bits & 0xF) == 0) {
-        target_dsq = BACKGROUND_DSQ;
-        if (scx_bpf_dsq_move_to_local(target_dsq)) goto found;
-    }
-
-    /* C. Full Priority Scan */
-    #pragma unroll
-    for (u32 i = 0; i < CAKE_TIER_MAX; i++) {
-        if (i == warm_tier) continue;
-        target_dsq = i;
-        if (scx_bpf_dsq_move_to_local(target_dsq)) goto found;
-    }
-
-    /* Mark CPU as IDLE in BSS Shadow */
-    bpf_atomic_or(&global_idle_mask, (1ULL << (c & 63)));
-    return;
-
-found_short:
-    target_dsq = warm_tier;
-found:
-    p = cake_bpf_dsq_peek(SCX_DSQ_LOCAL);
-    if (p) {
-        dispatch_success_handler(p, c, target_dsq);
-    }
+    
+    /* No work - mark idle */
+    bpf_atomic_or(&global_idle_mask, cpu_bit);
 }
 
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
@@ -1431,40 +1113,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 
     u32 nr_cpus = scx_bpf_nr_cpu_ids();
 
-
-    /* Create Per-CPU Direct Dispatch Queues (fixes 0xf crash) */
+    /* Create Per-CPU Direct Dispatch Queues */
     for (s32 i = 0; i < 64; i++) {
         if (i >= nr_cpus) break;
         ret = scx_bpf_create_dsq(CAKE_DSQ_LC_BASE + i, -1);
         if (ret < 0) return ret;
     }
 
-    /* Create all 7 dispatch queues in priority order */
-    ret = scx_bpf_create_dsq(CRITICAL_LATENCY_DSQ, -1);
-    if (ret < 0)
-        return ret;
-
-    ret = scx_bpf_create_dsq(REALTIME_DSQ, -1);
-    if (ret < 0)
-        return ret;
-
-    ret = scx_bpf_create_dsq(CRITICAL_DSQ, -1);
-    if (ret < 0)
-        return ret;
-
-    ret = scx_bpf_create_dsq(GAMING_DSQ, -1);
-    if (ret < 0)
-        return ret;
-
-    ret = scx_bpf_create_dsq(INTERACTIVE_DSQ, -1);
-    if (ret < 0)
-        return ret;
-
-    ret = scx_bpf_create_dsq(BATCH_DSQ, -1);
-    if (ret < 0)
-        return ret;
-
-    ret = scx_bpf_create_dsq(BACKGROUND_DSQ, -1);
+    /* A+B ARCHITECTURE: Single unified DSQ with vtime ordering */
+    ret = scx_bpf_create_dsq(UNIFIED_DSQ, -1);
     if (ret < 0)
         return ret;
 

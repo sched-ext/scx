@@ -127,6 +127,10 @@ struct cpu_topology_entry {
     u8 thread_bit;     /* Pre-computed (1 << thread_idx) */
     u32 dsq_id;        /* Pre-computed (CAKE_DSQ_LC_BASE + cpu_id) */
     u32 peer_dsqs;     /* SPECULATIVE MAPPING: [0-7]=sib, [8-15]=p1, [16-23]=p2, [24-31]=p3 */
+    /* T2 OPTIMIZATION: Pre-computed sibling mask for O(1) idle check */
+    u64 sibling_bit;   /* Pre-computed (1ULL << sibling) or 0 if no sibling */
+    u32 sibling_dsq;   /* Pre-computed (CAKE_DSQ_LC_BASE + sibling) or 0 */
+    u32 _pad_t2;       /* Align to 8-byte boundary */
 } __attribute__((packed));
 
 /* Topology flags */

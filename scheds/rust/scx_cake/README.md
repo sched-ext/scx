@@ -1,91 +1,58 @@
-# scx_cake: Low-Latency Gaming Scheduler
+# scx_cake: Low-Latency Gaming Scheduler for User Inputs & 1% Lows
 
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/GPL-2.0)
-[![Kernel: 6.16+](https://img.shields.io/badge/Kernel-6.16%2B-green.svg?style=flat-square)](https://kernel.org)
+[![Kernel: 6.12+](https://img.shields.io/badge/Kernel-6.12%2B-green.svg?style=flat-square)](https://kernel.org)
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg?style=flat-square)]()
 [![AI Usage: Verified](https://img.shields.io/badge/AI%20Usage-Verified-purple.svg?style=flat-square)]()
 
-> **ABSTRACT**: `scx_cake` is an experimental BPF CPU scheduler explicitly designed for **gaming workloads**. It prioritizes low-latency tasks—such as user inputs and game render loops—over background throughput. By utilizing a 7-tier classification system and abandoning traditional "fairness" for strict latency prioritization, it aims to eliminate stutter and maximize responsiveness.
+> **ABSTRACT**: `scx_cake` is an experimental BPF CPU scheduler designed for **gaming workloads**.
+>
+> - **7-Tier Priority System** — Classifies tasks by behavior, not nice values
+> - **Sparse Score** — Tracks task "burstiness" (0-100) to identify latency-sensitive work
+> - **ETD (Empirical Topology Discovery)** — Measures real inter-core latency at startup for surgical CPU selection
+> - **Latency Over Fairness** — Ultra-fast tasks (<50µs) preempt instantly for low input lag; lower DSQs get larger timeslices to support strong 1% lows
 
 ---
 
-> [!WARNING] > **EXPERIMENTAL SOFTWARE**
-> This scheduler is experimental and intended for use with `sched_ext` on Linux Kernel 6.16+. Usage may result in system instability.
+> [!WARNING]
+> **EXPERIMENTAL SOFTWARE**
+> This scheduler is experimental and intended for use with `sched_ext` on Linux Kernel 6.12+. Performance may vary depending on hardware and user configuration.
 
-> [!NOTE] > **AI TRANSPARENCY**
+> [!NOTE]
+> **AI TRANSPARENCY**
 > Large Language Models were used for theorycrafting and optimization pattern matching. All implementation details and logical structures have been human-verified and benchmarked for correctness.
 
 ---
 
 ## Navigation
 
-- [1. Vocabulary (Terminology)](#1-vocabulary-terminology)
+- [1. Quick Start](#1-quick-start)
 - [2. The scx_cake Philosophy](#2-the-scx_cake-philosophy)
 - [3. The 7-Tier System](#3-the-7-tier-system)
 - [4. Technical Architecture](#4-technical-architecture)
-- [5. Installation & Usage](#5-installation--usage)
-- [6. Configuration (CLI)](#6-configuration-cli)
-- [7. Expected Performance](#7-expected-performance)
+- [5. Configuration (CLI)](#5-configuration-cli)
+- [6. Expected Performance](#6-expected-performance)
+- [Appendix: Vocabulary](#appendix-vocabulary)
 
 ---
 
-## 1. Vocabulary (Terminology)
+## 1. Quick Start
 
-Understanding `scx_cake` requires familiarity with these specific terms appearing in our code and documentation.
+```bash
+# Prerequisites: Linux Kernel 6.12+ with sched_ext, Rust toolchain
 
-### Scheduler & Kernel Terms
+# Clone and build
+git clone https://github.com/sched-ext/scx.git
+cd scx && cargo build --release -p scx_cake
 
-| Term                | Definition                                                                                                            |
-| :------------------ | :-------------------------------------------------------------------------------------------------------------------- |
-| **BPF (eBPF)**      | _Berkeley Packet Filter_. A technology allowing us to run this custom scheduler inside the Linux Kernel safely.       |
-| **DSQ**             | _Dispatch Queue_. The internal queue mechanism `sched_ext` uses to hold tasks waiting for a CPU.                      |
-| **kfunc**           | _Kernel Function_. A specific function inside the Linux kernel exposed for BPF programs to call (e.g., to read time). |
-| **sched_ext (SCX)** | The Linux Kernel framework (v6.12+) that enables custom BPF schedulers like `scx_cake`.                               |
-| **UEI**             | _User Exit Info_. Standard mechanism for BPF schedulers to report exit reasons to userspace.                          |
-| **RoData**          | _Read-Only Data_. Cached configuration memory in BPF that avoids expensive variable reads.                            |
-| **Quantum**         | The time slice a task is allotted to run on the CPU before a scheduling decision is made.                             |
-| **Tier**            | A classification level assigned to a task that determines its priority and scheduling parameters.                     |
-| **Preemption**      | The act of forcibly interrupting a running task to switch to a higher-priority task immediately.                      |
-| **Context Switch**  | The expensive process of saving one task's CPU state and loading another's (~1000+ cycles).                           |
+# Run (requires root)
+sudo ./target/release/scx_cake
+```
 
-### Algorithms & Concepts
+**Modes:**
 
-| Term            | Definition                                                                                                  |
-| :-------------- | :---------------------------------------------------------------------------------------------------------- |
-| **AQM**         | _Active Queue Management_. Networking technique (preventing bufferbloat) adapted here via Wait Budgets.     |
-| **Bufferbloat** | High latency caused by large, full queues. `scx_cake` fights this on the CPU.                               |
-| **DRR++**       | _Deficit Round Robin++_. The scheduling algorithm CAKE uses to balance fair queuing with strict priority.   |
-| **EMA**         | _Exponential Moving Average_. A lightweight algorithm used to track historical runtime with minimal memory. |
-
-### Optimization & Architecture
-
-| Term                         | Definition                                                                                                      |
-| :--------------------------- | :-------------------------------------------------------------------------------------------------------------- |
-| **Hot Path**                 | The critical code path executed on _every_ scheduling decision (Wakeup → Select → Dispatch). Must be optimized. |
-| **ILP**                      | _Instruction Level Parallelism_. Optimizing code so the CPU executes multiple instructions per clock cycle.     |
-| **MLP**                      | _Memory Level Parallelism_. Structuring code to issue multiple memory loads simultaneously to hide RAM latency. |
-| **Cluster Bomb**             | _Local Term_. Strategy of issuing all independent memory loads immediately at function entry to maximize MLP.   |
-| **Fused Load-Compute-Store** | Grouping all reads, then all math, then all writes into distinct phases to hide latency (Pipeling).             |
-| **Wait-Free**                | An algorithm guarantees that every thread makes progress in a finite number of steps (no locks, no spinning).   |
-| **Store Buffer**             | Hardware component that holds pending writes, allowing "Wait-Free" visibility without locking.                  |
-| **Direct Dispatch**          | Bypassing the global DSQ to assign a task directly to a specific CPU's local queue (fastest path).              |
-| **False Sharing**            | Performance penalty when different CPUs fight over the same 64-byte "Cache Line" of memory.                     |
-| **Branchless**               | Coding style that avoids `if/else` checks to prevent CPU pipeline stalls (mispredictions).                      |
-| **Superscalar**              | CPU architecture capability to execute more than one instruction per clock cycle.                               |
-| **Tree Reduction**           | Parallelizing logical operations (like bitwise OR) to reduce dependency chain depth.                            |
-| **CTZ**                      | _Count Trailing Zeros_. CPU instruction to find the first set bit in a mask efficiently (O(1)).                 |
-
-### Gaming & Performance Metrics
-
-| Term                 | Definition                                                                                            |
-| :------------------- | :---------------------------------------------------------------------------------------------------- |
-| **Input Latency**    | The time delay between a physical input (mouse click) and the frame updating on screen.               |
-| **1% Lows**          | The average framerate of the slowest 1% of frames. A key metric for measuring "stutter".              |
-| **Frametime**        | The time it takes to render a single frame (e.g., 16.6ms for 60 FPS). Consistency is key.             |
-| **Sparse Score**     | A 0-100 metric tracking how "bursty" a task is. High score = yields often (good for latency).         |
-| **Throughput**       | The total amount of raw work done over time (e.g., compiling code). Opposite of latency optimization. |
-| **Wait Budget**      | The max time a task waits in queue before `scx_cake` intervenes to prevent starvation.                |
-| **Starvation Limit** | The hard runtime wall. If a task runs longer than this without yielding, it is killed (preempted).    |
+- **Default**: Runs silently
+- **Verbose (`-v`)**: Launches TUI showing real-time stats
 
 ---
 
@@ -106,7 +73,6 @@ Modern schedulers (like EEVDF or CFS) are designed for **Fairness** and **Throug
 `scx_cake` classifies tasks by observing their runtime behavior and assigning a **Sparse Score** (0-100).
 
 1.  **Score Calculation**:
-
     - **Growth (+4)**: If a task yields quickly (run time < sparse threshold), its score increases.
     - **Decay (-6)**: If a task runs long (run time > sparse threshold), its score decreases.
 
@@ -173,74 +139,153 @@ If a task is waking up on a CPU that is currently idle, `scx_cake` bypasses the 
 
 ---
 
-## 5. Installation & Usage
-
-### Prerequisites
-
-- Linux Kernel **6.16+** (with `CONFIG_SCHED_CLASS_EXT` enabled/module loaded).
-- Recent Rust toolchain (`cargo`).
-
-### Quick Start
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/RitzDaCat/scx_cake.git
-cd scx_cake
-
-# 2. Build the scheduler
-cargo build --release
-
-# 3. Run the scheduler (requires root/sudo)
-sudo ./target/release/scx_cake
-```
-
-### Modes
-
-- **Default**: Runs silently.
-- **Verbose (`-v`)**: Launches a terminal UI (TUI) showing real-time stats, per-tier dispatch counts, and wait times.
-
----
-
-## 6. Configuration (CLI)
+## 5. Configuration (CLI)
 
 `scx_cake` comes with built-in profiles, but every parameter can be fine-tuned via CLI arguments.
 
-### Profiles (`--profile`)
+### Profiles (`--profile, -p`)
 
-| Profile   | Description                                                          |
-| :-------- | :------------------------------------------------------------------- |
-| `gaming`  | **(Default)** Balanced 2ms quantum. Good for most games.             |
-| `esports` | Aggressive 1ms quantum. Extreme responsiveness, higher CPU overhead. |
-| `legacy`  | Relaxed 4ms quantum. Better for older CPUs or battery saving.        |
+| Profile   | Quantum | Starvation | Description                                          |
+| :-------- | :-----: | :--------: | :--------------------------------------------------- |
+| `gaming`  |   2ms   |   100ms    | **(Default)** Balanced for most games.               |
+| `esports` |   1ms   |    50ms    | Aggressive. Extreme responsiveness, higher overhead. |
+| `legacy`  |   4ms   |   200ms    | Relaxed. Better for older CPUs or battery saving.    |
+| `default` |   2ms   |   100ms    | Alias for `gaming`.                                  |
 
 ### Arguments
 
-| Argument                        | Default  | Description                                        |
-| :------------------------------ | :------- | :------------------------------------------------- |
-| `--quantum <us>`                | `2000`   | The base time slice in microseconds.               |
-| `--sparse-threshold <permille>` | `50`     | Sensitivty of "burst" detection (0-1000). 50 = 5%. |
-| `--new-flow-bonus <us>`         | `8000`   | Extra time given to new tasks to start up.         |
-| `--starvation <us>`             | `100000` | Global starvation limit (100ms).                   |
-| `--verbose`                     | `false`  | Enable the TUI monitoring interface.               |
+| Argument                        | Default       | Description                                   |
+| :------------------------------ | :------------ | :-------------------------------------------- |
+| `--profile, -p <PROFILE>`       | `gaming`      | Select a preset profile.                      |
+| `--quantum <us>`                | profile-based | Base time slice in microseconds.              |
+| `--sparse-threshold <permille>` | profile-based | Burst detection sensitivity (0-1000).         |
+| `--new-flow-bonus <us>`         | profile-based | Extra time for newly woken tasks.             |
+| `--starvation <us>`             | profile-based | Max run time before forced preemption.        |
+| `--verbose, -v`                 | `false`       | Enable TUI monitoring interface.              |
+| `--interval <secs>`             | `1`           | TUI refresh interval (only with `--verbose`). |
 
 **Example:**
 
 ```bash
-# Run with Esports settings but a custom starvation limit
-sudo ./target/release/scx_cake --profile esports --starvation 60000
+# Run with Esports profile
+sudo scx_cake -p esports
+
+# Gaming profile with custom starvation limit
+sudo scx_cake --starvation 60000 -v
 ```
 
 ---
 
-## 7. Expected Performance
+## 6. Expected Performance
 
-While performance varies by hardware, `scx_cake` generally targets:
+Performance varies by hardware and workload. `scx_cake` targets:
 
-- **Reduced Stutter**: Improved 1% and 0.1% low FPS.
-- **Input Latency**: Reduced mouse/keyboard processing delay.
-- **Throughput**: **Lower** than CFS/EEVDF. Do not use this scheduler for compiling kernels or render farms; it is designed for _responsiveness_, not maximum throughput.
+- **Better Framerate** — Reduced scheduling overhead allows more CPU time for game logic
+- **Improved 1% Lows** — Consistent frame delivery through priority-based dispatch
+- **Uninhibited User Inputs** — Mouse/keyboard processing is not blocked by game load
 
-> **Hardware Verified On**: AMD Ryzen 7 9800X3D.
+### Tested Hardware & Benchmarks
+
+| Component | Specification              |
+| :-------- | :------------------------- |
+| CPU       | AMD Ryzen 7 9800X3D        |
+| Kernel    | Linux 6.12+ with sched_ext |
+
+**Benchmarks Used:**
+
+- [schbench](https://github.com/brendangregg/schbench) — Scheduler latency microbenchmark
+- Arc Raiders — AAA game stress testing
+- Splitgate 2 — Competitive FPS latency testing
+
+> [!NOTE]
+> Throughput workloads (compilers, render farms) will perform **worse** than CFS/EEVDF. This scheduler prioritizes responsiveness over raw throughput.
+
+---
+
+## Appendix: Vocabulary
+
+Terms used throughout `scx_cake` code and documentation.
+
+### Scheduler & Kernel Terms
+
+| Term                | Definition                                                                                   |
+| :------------------ | :------------------------------------------------------------------------------------------- |
+| **BPF (eBPF)**      | _Berkeley Packet Filter_. Technology for running custom code safely inside the Linux kernel. |
+| **sched_ext (SCX)** | Linux kernel framework (v6.12+) enabling custom BPF schedulers.                              |
+| **DSQ**             | _Dispatch Queue_. Queue mechanism `sched_ext` uses to hold tasks waiting for a CPU.          |
+| **kfunc**           | _Kernel Function_. Kernel function exposed for BPF programs to call.                         |
+| **UEI**             | _User Exit Info_. Mechanism for BPF schedulers to report exit reasons to userspace.          |
+| **RoData**          | _Read-Only Data_. Constant configuration in BPF, zero-cost at runtime.                       |
+| **Quantum**         | Time slice a task is allotted before a scheduling decision is made.                          |
+| **Tier**            | Classification level determining a task's priority and scheduling parameters.                |
+| **Preemption**      | Forcibly interrupting a running task to switch to higher-priority work.                      |
+| **Context Switch**  | Saving one task's CPU state and loading another's (~1000+ cycles).                           |
+
+### CPU Topology
+
+| Term        | Definition                                                                                        |
+| :---------- | :------------------------------------------------------------------------------------------------ |
+| **ETD**     | _Empirical Topology Discovery_. Measures real inter-core latency at startup via CAS ping-pong.    |
+| **SMT**     | _Simultaneous Multi-Threading_. Two logical CPUs sharing one physical core (AMD: 2 threads/core). |
+| **CCD**     | _Core Complex Die_. Physical chiplet containing cores (9800X3D has 1 CCD with 8 cores).           |
+| **CCX**     | _Core Complex_. Subset of cores sharing L3 cache within a CCD.                                    |
+| **LLC**     | _Last Level Cache_. Typically L3 cache; cores in same LLC communicate faster.                     |
+| **Sibling** | The SMT partner of a logical CPU (shares physical core).                                          |
+
+### Algorithms & Concepts
+
+| Term             | Definition                                                                              |
+| :--------------- | :-------------------------------------------------------------------------------------- |
+| **AQM**          | _Active Queue Management_. Networking technique adapted here via Wait Budgets.          |
+| **Bufferbloat**  | High latency caused by large, full queues. `scx_cake` fights this on the CPU side.      |
+| **DRR++**        | _Deficit Round Robin++_. Algorithm balancing fair queuing with strict priority.         |
+| **EMA**          | _Exponential Moving Average_. Lightweight algorithm to track historical runtime.        |
+| **Sparse Score** | 0-100 metric tracking task "burstiness". High score = yields often (latency-sensitive). |
+
+### Data Packing & Fusion
+
+| Term             | Definition                                                                             |
+| :--------------- | :------------------------------------------------------------------------------------- |
+| **Nibble**       | 4 bits. Half a byte. Used for compact storage (e.g., tier in 3 bits).                  |
+| **Fused Config** | Multiple parameters packed into one 64-bit word for single-load access.                |
+| **Quad Packing** | Storing 4 values in one register (e.g., prev_cpu, wake_flags, tier, score in 64 bits). |
+| **State Fusion** | Combining related fields into a union for atomic 64-bit read/write.                    |
+| **Load Fusion**  | Issuing multiple independent loads simultaneously to hide memory latency.              |
+
+### Bitwise & Low-Level Optimization
+
+| Term            | Definition                                                                         |
+| :-------------- | :--------------------------------------------------------------------------------- |
+| **Bitwise Ops** | Operations on individual bits (AND, OR, XOR, shifts). 1 cycle vs 10+ for division. |
+| **Bitmask**     | Integer where each bit represents a boolean (e.g., 64-bit mask for 64 CPUs).       |
+| **CTZ**         | _Count Trailing Zeros_. Finds first set bit in O(1). Used for idle CPU scan.       |
+| **De Bruijn**   | Mathematical sequence enabling branchless bit-scan without hardware CTZ.           |
+| **TTAS**        | _Test-and-Test-and-Set_. Check before atomic to avoid cache line bouncing.         |
+| **Branchless**  | Code avoiding `if/else` to prevent CPU pipeline stalls from misprediction.         |
+
+### Performance Architecture
+
+| Term                | Definition                                                                      |
+| :------------------ | :------------------------------------------------------------------------------ |
+| **Hot Path**        | Code executed on every scheduling decision. Must be optimized.                  |
+| **Cold Path**       | Infrequent code (task init, tier recalc). Can be slower.                        |
+| **ILP**             | _Instruction Level Parallelism_. CPU executing multiple instructions per cycle. |
+| **MLP**             | _Memory Level Parallelism_. Issuing multiple memory loads to hide RAM latency.  |
+| **Wait-Free**       | Algorithm where every thread makes progress without locks or spinning.          |
+| **Direct Dispatch** | Bypassing global DSQ to assign task directly to a CPU's local queue.            |
+| **False Sharing**   | Performance penalty when CPUs fight over the same 64-byte cache line.           |
+| **Cache Line**      | 64-byte block of memory. Smallest unit CPU loads from RAM.                      |
+
+### Gaming & Performance Metrics
+
+| Term                 | Definition                                                                         |
+| :------------------- | :--------------------------------------------------------------------------------- |
+| **Input Latency**    | Time from physical input (mouse click) to frame updating on screen.                |
+| **1% Lows**          | Average framerate of slowest 1% of frames. Key metric for measuring stutter.       |
+| **Frametime**        | Time to render one frame (16.6ms = 60 FPS). Consistency matters more than average. |
+| **Throughput**       | Raw work done over time. Opposite of latency optimization.                         |
+| **Wait Budget**      | Max time a task waits in queue before intervention.                                |
+| **Starvation Limit** | Hard runtime ceiling. Tasks exceeding this are forcibly preempted.                 |
 
 ---
 

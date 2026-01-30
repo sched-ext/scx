@@ -352,7 +352,11 @@ pub struct CpuTopologyEntry {
     pub core_id: u8,    // Physical core ID (0-31)
     pub thread_bit: u8, // Pre-computed (1 << thread_idx)
     pub dsq_id: u32,    // Pre-computed (CAKE_DSQ_LC_BASE + cpu_id)
-    pub _pad: u32,      // Pad to 16 bytes
+    pub peer_dsqs: u32, // SPECULATIVE MAPPING (matches intf.h)
+    // T2 OPTIMIZATION: Pre-computed sibling mask for O(1) idle check
+    pub sibling_bit: u64, // Pre-computed (1 << sibling) or 0 if no sibling
+    pub sibling_dsq: u32, // Pre-computed (CAKE_DSQ_LC_BASE + sibling) or 0
+    pub _pad_t2: u32,     // Align to 8-byte boundary
 }
 
 /// Topology flags (must match intf.h)
@@ -404,12 +408,34 @@ pub fn generate_unified_topology(
         let has_sibling = kernel_sibling != cpu as u8 && kernel_sibling < nr_cpus as u8;
 
         // Build the entry
+        let sibling_cpu = if has_sibling {
+            kernel_sibling
+        } else {
+            CPU_TOPO_INVALID
+        };
+
+        // T2 OPTIMIZATION: Pre-compute sibling bitmask for O(1) idle check
+        let sibling_bit: u64 = if has_sibling {
+            1u64 << (kernel_sibling as u64)
+        } else {
+            0
+        };
+
+        // Pre-compute sibling DSQ ID
+        let sibling_dsq: u32 = if has_sibling {
+            1000 + kernel_sibling as u32 // CAKE_DSQ_LC_BASE + sibling
+        } else {
+            0
+        };
+
+        let cpu_dsq_id = if cpu < dsq_ids.len() {
+            dsq_ids[cpu]
+        } else {
+            1000 + cpu as u32 // Fallback CAKE_DSQ_LC_BASE + cpu
+        };
+
         result[cpu] = CpuTopologyEntry {
-            sibling: if has_sibling {
-                kernel_sibling
-            } else {
-                CPU_TOPO_INVALID
-            },
+            sibling: sibling_cpu,
             llc_id: if cpu < llc_ids.len() { llc_ids[cpu] } else { 0 },
             // Skip sibling in peer list (it's already in .sibling)
             peer_1: peers
@@ -444,12 +470,11 @@ pub fn generate_unified_topology(
             } else {
                 1
             },
-            dsq_id: if cpu < dsq_ids.len() {
-                dsq_ids[cpu]
-            } else {
-                1000 // Fallback CAKE_DSQ_LC_BASE
-            },
-            _pad: 0,
+            dsq_id: cpu_dsq_id,
+            peer_dsqs: 0, // TODO: Populate if needed for speculative mapping
+            sibling_bit,
+            sibling_dsq,
+            _pad_t2: 0,
         };
 
         debug!(
