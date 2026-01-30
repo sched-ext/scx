@@ -30,6 +30,10 @@ pub struct RecordOpts {
     #[clap(long)]
     pub hints_map: Option<PathBuf>,
 
+    /// Size of the hints ring buffer in MB
+    #[clap(long, default_value = "1")]
+    pub hints_map_ring_sz: u32,
+
     /// Disable creating a tar.gz archive after recording
     #[clap(long)]
     pub disable_archive: bool,
@@ -85,7 +89,7 @@ struct HintsEventRecord {
 
 struct HintsRecorder<'a> {
     _open_object: Box<MaybeUninit<OpenObject>>,
-    _skel: BpfSkel<'a>,
+    skel: BpfSkel<'a>,
     link: Option<libbpf_rs::Link>,
     ringbuf: libbpf_rs::RingBuffer<'a>,
     events: Rc<RefCell<Vec<HintsEventRecord>>>,
@@ -93,7 +97,7 @@ struct HintsRecorder<'a> {
 }
 
 impl HintsRecorder<'static> {
-    fn new(hints_path: PathBuf) -> Result<Self> {
+    fn new(hints_path: PathBuf, ring_sz: u32) -> Result<Self> {
         let open_object = Box::new(MaybeUninit::uninit());
         let open_object_ptr = Box::into_raw(open_object);
 
@@ -101,9 +105,16 @@ impl HintsRecorder<'static> {
             unsafe { &mut *open_object_ptr };
 
         let builder = BpfSkelBuilder::default();
-        let open_skel = builder
+        let mut open_skel = builder
             .open(open_object_ref)
             .context("failed to open BPF skeleton")?;
+
+        open_skel
+            .maps
+            .ringbuf
+            .set_max_entries(ring_sz * 1024 * 1024)
+            .context("failed to set ringbuf size")?;
+
         let skel = open_skel.load().context("failed to load BPF skeleton")?;
 
         let link = skel
@@ -141,7 +152,7 @@ impl HintsRecorder<'static> {
 
         Ok(Self {
             _open_object: unsafe { Box::from_raw(open_object_ptr) },
-            _skel: skel,
+            skel,
             link: Some(link),
             ringbuf,
             events,
@@ -176,6 +187,21 @@ impl Drop for HintsRecorder<'_> {
             }
         }
         let _ = self.writer.flush();
+
+        let dropped = self
+            .skel
+            .maps
+            .bss_data
+            .as_ref()
+            .map(|bss| bss.dropped_events)
+            .unwrap_or(0);
+        if dropped > 0 {
+            eprintln!(
+                "warning: {} hints events were dropped due to full ring buffer, \
+                 consider increasing --hints-map-ring-sz",
+                dropped
+            );
+        }
     }
 }
 
@@ -261,8 +287,8 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<()> {
     let mut perf = SpawnedProcess::spawn(&perf_args)?;
 
     let hints_recorder = if opts.hints_map.is_some() {
-        let hints_path = opts.output.join("hints.json");
-        Some(HintsRecorder::new(hints_path)?)
+        let hints_path = opts.output.join("hints.jsonl");
+        Some(HintsRecorder::new(hints_path, opts.hints_map_ring_sz)?)
     } else {
         None
     };

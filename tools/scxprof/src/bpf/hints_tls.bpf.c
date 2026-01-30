@@ -10,6 +10,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+u64 dropped_events;
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1024 * 1024);
@@ -24,8 +26,10 @@ int BPF_PROG(trace_map_update, struct bpf_map *map, void *key, void *value, u64 
         return 0;
 
     ev = bpf_ringbuf_reserve(&ringbuf, sizeof(*ev), 0);
-    if (!ev)
+    if (!ev) {
+        __sync_fetch_and_add(&dropped_events, 1);
         return 0;
+    }
 
     struct task_struct *task = bpf_get_current_task_btf();
     ev->pid = task->pid;
