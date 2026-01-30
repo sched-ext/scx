@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
@@ -42,6 +43,7 @@ pub struct RecordOpts {
 struct SpawnedProcess {
     child: Child,
     pidfd: OwnedFd,
+    waited: bool,
 }
 
 impl SpawnedProcess {
@@ -63,19 +65,46 @@ impl SpawnedProcess {
         Ok(Self {
             child,
             pidfd: unsafe { OwnedFd::from_raw_fd(fd) },
+            waited: false,
         })
+    }
+
+    fn pid(&self) -> i32 {
+        self.child.id() as i32
     }
 
     fn pidfd(&self) -> RawFd {
         self.pidfd.as_raw_fd()
     }
 
+    fn signal(&self, sig: i32) {
+        unsafe {
+            libc::kill(self.pid(), sig);
+        }
+    }
+
     fn wait(&mut self) -> Result<()> {
+        if self.waited {
+            return Ok(());
+        }
+        self.waited = true;
         let status = self.child.wait().context("failed to wait for child")?;
         if !status.success() {
+            if matches!(status.signal(), Some(libc::SIGINT) | Some(libc::SIGKILL)) {
+                return Ok(());
+            }
             bail!("perf exited with status: {}", status);
         }
         Ok(())
+    }
+}
+
+impl Drop for SpawnedProcess {
+    fn drop(&mut self) {
+        if !self.waited {
+            self.signal(libc::SIGINT);
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -226,7 +255,11 @@ fn poll_fds(fds: &[RawFd], timeout_ms: i32) -> Result<PollResult> {
     let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, timeout_ms) };
 
     if ret < 0 {
-        bail!("poll failed: {}", std::io::Error::last_os_error());
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            return Ok(PollResult::Shutdown);
+        }
+        bail!("poll failed: {}", err);
     }
 
     if ret == 0 {
@@ -256,11 +289,17 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
 
     fs::create_dir_all(&opts.output).context("failed to create output directory")?;
 
-    let result = run_recording(ctx, &opts);
+    let completed = match run_recording(ctx, &opts) {
+        Ok(completed) => completed,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&opts.output);
+            return Err(e);
+        }
+    };
 
-    if result.is_err() {
+    if !completed {
         let _ = fs::remove_dir_all(&opts.output);
-        return result;
+        return Ok(());
     }
 
     if !opts.disable_archive {
@@ -271,7 +310,7 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
     Ok(())
 }
 
-fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<()> {
+fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
     let perf_data_path = opts.output.join("perf.data");
     let perf_args = vec![
         "perf".to_string(),
@@ -299,14 +338,14 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<()> {
     }
 
     let mut hints_recorder = hints_recorder;
+    let mut completed = true;
 
     loop {
         match poll_fds(&fds, 100)? {
             PollResult::Shutdown => {
-                unsafe {
-                    libc::kill(perf.child.id() as i32, libc::SIGINT);
-                }
+                perf.signal(libc::SIGKILL);
                 perf.wait()?;
+                completed = false;
                 break;
             }
             PollResult::ProcessExited => {
@@ -328,7 +367,7 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<()> {
 
     drop(hints_recorder);
 
-    Ok(())
+    Ok(completed)
 }
 
 fn create_archive(output_dir: &PathBuf) -> Result<()> {
