@@ -32,6 +32,10 @@ pub struct RecordOpts {
     #[clap(short = 't', long, default_value = "30")]
     pub timeout: u64,
 
+    /// Load latency threshold in cycles
+    #[clap(short = 'l', long, default_value = "10")]
+    pub ldlat: u32,
+
     /// Path to the SCX scheduler's task hint map
     #[clap(long)]
     pub hints_map: Option<PathBuf>,
@@ -324,6 +328,8 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
         "--all-cgroups".to_string(),
         "-p".to_string(),
         "--data-page-size".to_string(),
+        "--ldlat".to_string(),
+        opts.ldlat.to_string(),
         "-o".to_string(),
         perf_data_path.to_string_lossy().to_string(),
     ];
