@@ -619,21 +619,6 @@ int rs_select_cpu(struct task_cpu_arg *input)
 	if (!p)
 		return -EINVAL;
 
-	/*
-	 * If the target CPU is the current one, treat it as idle when no
-	 * other tasks are queued.
-	 *
-	 * Since this function is invoked by the user-space scheduler,
-	 * which will release the CPU shortly, there is no need to migrate
-	 * the task elsewhere.
-	 */
-	if (cpu == bpf_get_smp_processor_id()) {
-		u64 nr_tasks = nr_running + nr_queued + nr_scheduled + 1;
-
-		if (nr_tasks < nr_online_cpus && !scx_bpf_dsq_nr_queued(cpu))
-			goto out_release;
-	}
-
 	bpf_rcu_read_lock();
 	/*
 	 * Kernels that don't provide scx_bpf_select_cpu_and() only allow
@@ -654,7 +639,6 @@ int rs_select_cpu(struct task_cpu_arg *input)
 	}
 	bpf_rcu_read_unlock();
 
-out_release:
 	bpf_task_release(p);
 
 	return cpu;
