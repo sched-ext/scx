@@ -1,11 +1,12 @@
+---
 name: build-and-test
 
-on:
+'on':
   pull_request:
   merge_group:
   push:
     branches-ignore:
-      - gh-readonly-queue/main/**
+      - 'gh-readonly-queue/main/**'
 
 jobs:
   build-kernels:
@@ -13,7 +14,10 @@ jobs:
     secrets: inherit
 
   lint:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +33,10 @@ jobs:
         run: nix run ./.nix#ci -- clippy
 
   build-and-test:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     needs: build-kernels
     steps:
       - uses: actions/checkout@v4
@@ -59,14 +66,19 @@ jobs:
       build-and-test,
       integration-test,
     ]
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     if: always()
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@v4
       - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
-      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
+      - run: |
+          echo "$NEEDS_CONTEXT" \
+            | jq -e 'to_entries | all(.value.result == "success")'
 
   pages:
     runs-on: ubuntu-24.04
@@ -74,7 +86,7 @@ jobs:
     permissions:
       contents: write  # To push a branch
       pages: write  # To push to a GitHub Pages site
-      id-token: write # To update the deployment status
+      id-token: write  # To update the deployment status
     steps:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
@@ -84,18 +96,32 @@ jobs:
       - uses: ./.github/actions/install-deps-action
       - name: Build Book and Linux Docs
         run: |
-          cd / && rustup component add rustfmt && cd $OLDPWD
-          RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items
-          sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
+          cd /
+          rustup component add rustfmt
+          cd "$OLDPWD"
+          export RUSTDOCFLAGS="--enable-index-page -Zunstable-options"
+          cargo +nightly doc --workspace --no-deps --bins --lib --examples \
+            --document-private-items
+          sudo apt install -y \
+            build-essential graphviz sphinx-doc python3-sphinx-rtd-theme \
+            texlive-latex-recommended python3-yaml
           cargo install htmlq
-          git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
+          LINUX_REPO='https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git'
+          git clone --single-branch -b for-next --depth 1 \
+            "$LINUX_REPO" linux
           cd linux
           make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=scheduler htmldocs
           make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=bpf htmldocs
           cd ..
           cp -a linux/Documentation/output/scheduler target/doc/
           cp -a linux/Documentation/output/bpf target/doc/
-          sed -i 's%<li><a href="server/index.html">server</a></li>%<li><a href="server/index.html">server</a></li><li><a href="scheduler/sched-ext.html">Kernel Sched Ext Docs</a></li><li><a href="bpf/helpers.html">Kernel Bpf Helpers Docs</a></li>%' target/doc/index.html
+          SED_EXPR='s%<li><a href="server/index.html">server</a></li>%'
+          SED_EXPR+='<li><a href="server/index.html">server</a></li>'
+          SED_EXPR+='<li><a href="scheduler/sched-ext.html">'
+          SED_EXPR+='Kernel Sched Ext Docs</a></li>'
+          SED_EXPR+='<li><a href="bpf/helpers.html">'
+          SED_EXPR+='Kernel Bpf Helpers Docs</a></li>%'
+          sed -i "$SED_EXPR" target/doc/index.html
       - name: Setup Pages
         uses: actions/configure-pages@v4
       - name: Upload artifact
