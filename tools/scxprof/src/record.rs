@@ -302,6 +302,8 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
 
     fs::create_dir_all(&opts.output).context("failed to create output directory")?;
 
+    save_perf_version(&opts.output)?;
+
     let completed = match run_recording(ctx, &opts) {
         Ok(completed) => completed,
         Err(e) => {
@@ -396,6 +398,23 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
     drop(hints_recorder);
 
     Ok(completed)
+}
+
+fn save_perf_version(output_dir: &Path) -> Result<()> {
+    let version_path = output_dir.join("perf.version");
+
+    let output = Command::new("perf")
+        .arg("version")
+        .output()
+        .context("failed to run perf version")?;
+
+    if !output.status.success() {
+        bail!("perf version failed");
+    }
+
+    fs::write(&version_path, &output.stdout).context("failed to write perf.version")?;
+
+    Ok(())
 }
 
 fn create_archive(output_dir: &Path) -> Result<()> {
