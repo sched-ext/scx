@@ -147,6 +147,41 @@ impl Cpumask {
         Ok(mask)
     }
 
+    /// Format the Cpumask as a compact CPU list string like "0-7,16-23".
+    /// Returns "none" if no CPUs are set.
+    pub fn to_cpulist(&self) -> String {
+        let cpus: Vec<usize> = self.iter().collect();
+        if cpus.is_empty() {
+            return String::from("none");
+        }
+
+        let mut ranges = Vec::new();
+        let mut start = cpus[0];
+        let mut end = cpus[0];
+
+        for &cpu in &cpus[1..] {
+            if cpu == end + 1 {
+                end = cpu;
+            } else {
+                ranges.push(if start == end {
+                    format!("{}", start)
+                } else {
+                    format!("{}-{}", start, end)
+                });
+                start = cpu;
+                end = cpu;
+            }
+        }
+
+        ranges.push(if start == end {
+            format!("{}", start)
+        } else {
+            format!("{}-{}", start, end)
+        });
+
+        ranges.join(",")
+    }
+
     pub fn from_vec(vec: Vec<u64>) -> Self {
         Self {
             mask: BitVec::from_vec(vec),
@@ -411,5 +446,72 @@ impl BitOrAssign<&Self> for Cpumask {
 impl BitXorAssign<&Self> for Cpumask {
     fn bitxor_assign(&mut self, rhs: &Self) {
         self.mask ^= &rhs.mask;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_cpulist_empty() {
+        let mask = Cpumask::new();
+        assert_eq!(mask.to_cpulist(), "none");
+    }
+
+    #[test]
+    fn test_to_cpulist_single_cpu() {
+        let mut mask = Cpumask::new();
+        mask.set_cpu(5).unwrap();
+        assert_eq!(mask.to_cpulist(), "5");
+    }
+
+    #[test]
+    fn test_to_cpulist_contiguous_range() {
+        let mut mask = Cpumask::new();
+        for cpu in 0..8 {
+            mask.set_cpu(cpu).unwrap();
+        }
+        assert_eq!(mask.to_cpulist(), "0-7");
+    }
+
+    #[test]
+    fn test_to_cpulist_multiple_ranges() {
+        let mut mask = Cpumask::new();
+        for cpu in 0..4 {
+            mask.set_cpu(cpu).unwrap();
+        }
+        for cpu in 8..12 {
+            mask.set_cpu(cpu).unwrap();
+        }
+        assert_eq!(mask.to_cpulist(), "0-3,8-11");
+    }
+
+    #[test]
+    fn test_to_cpulist_scattered() {
+        let mut mask = Cpumask::new();
+        mask.set_cpu(1).unwrap();
+        mask.set_cpu(3).unwrap();
+        mask.set_cpu(5).unwrap();
+        assert_eq!(mask.to_cpulist(), "1,3,5");
+    }
+
+    #[test]
+    fn test_to_cpulist_mixed() {
+        let mut mask = Cpumask::new();
+        mask.set_cpu(0).unwrap();
+        mask.set_cpu(1).unwrap();
+        mask.set_cpu(2).unwrap();
+        mask.set_cpu(5).unwrap();
+        mask.set_cpu(10).unwrap();
+        mask.set_cpu(11).unwrap();
+        assert_eq!(mask.to_cpulist(), "0-2,5,10-11");
+    }
+
+    #[test]
+    fn test_to_cpulist_roundtrip() {
+        let original = "0-3,8-11,16";
+        let mask = Cpumask::from_cpulist(original).unwrap();
+        assert_eq!(mask.to_cpulist(), original);
     }
 }
