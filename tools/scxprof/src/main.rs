@@ -9,6 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 mod record;
 mod process;
+mod extract;
 
 pub mod bpf_intf;
 pub mod bpf_skel;
@@ -64,6 +65,8 @@ enum Commands {
     Record(record::RecordOpts),
     /// Process a recorded profile
     Process(process::ProcessOpts),
+    /// Extract data from processed profile
+    Extract(extract::ExtractOpts),
 }
 
 fn main() -> Result<()> {
@@ -73,5 +76,6 @@ fn main() -> Result<()> {
     match opts.command {
         Commands::Record(record_opts) => record::cmd_record(&ctx, record_opts),
         Commands::Process(process_opts) => process::cmd_process(process_opts),
+        Commands::Extract(extract_opts) => extract::cmd_extract(extract_opts),
     }
 }

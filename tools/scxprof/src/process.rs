@@ -6,7 +6,7 @@
 use crate::record::{perf_binary, PERF_SCRIPT_FIELDS};
 use anyhow::{bail, Context as _, Result};
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ pub struct ProcessOpts {
 }
 
 /// Represents a single perf script sample record
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerfScriptRecord {
     pub comm: String,
     pub tid: u32,
