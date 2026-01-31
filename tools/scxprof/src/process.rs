@@ -259,12 +259,20 @@ fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path, verbo
     let mut writer = BufWriter::new(output_file);
 
     let mut count = 0;
+    let mut skipped = 0;
     let mut errors = 0;
 
     for line in reader.lines() {
         let line = line.context("failed to read line")?;
         match parse_perf_script_line(&line) {
             Some(record) => {
+                if record.phys_addr == "0" || record.phys_addr.is_empty() {
+                    skipped += 1;
+                    if verbose {
+                        eprintln!("skipped (no phys_addr): {}", line);
+                    }
+                    continue;
+                }
                 let json = serde_json::to_string(&record).context("failed to serialize record")?;
                 writeln!(writer, "{}", json)?;
                 count += 1;
@@ -282,7 +290,11 @@ fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path, verbo
 
     writer.flush()?;
 
-    println!("Parsed {} records ({} unparseable lines)", count, errors);
+    let total = count + skipped + errors;
+    println!(
+        "Parsed {} of {} records ({} skipped, {} unparseable)",
+        count, total, skipped, errors
+    );
 
     Ok(())
 }
