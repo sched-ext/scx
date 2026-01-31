@@ -3292,6 +3292,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
+ "regex",
  "scx_cargo",
  "serde",
  "serde_json",
