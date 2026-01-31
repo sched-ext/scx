@@ -52,9 +52,9 @@ pub struct RecordOpts {
     #[clap(long)]
     pub disable_archive: bool,
 
-    /// Disable generating perf.script file during recording
+    /// Generate perf.script file during recording
     #[clap(long)]
-    pub disable_perf_script: bool,
+    pub enable_perf_script: bool,
 }
 
 struct SpawnedProcess {
@@ -321,7 +321,7 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
         return Ok(());
     }
 
-    if !opts.disable_perf_script {
+    if opts.enable_perf_script {
         println!("Generating perf.script...");
         if let Err(e) = generate_perf_script(ctx, &opts.output) {
             eprintln!("warning: failed to generate perf.script: {}", e);
