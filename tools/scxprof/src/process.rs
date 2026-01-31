@@ -17,6 +17,10 @@ pub struct ProcessOpts {
     /// Path to profile file (tar.gz) or directory
     #[clap(short = 'f', long)]
     pub file: PathBuf,
+
+    /// Print extra information during processing
+    #[clap(short, long)]
+    pub verbose: bool,
 }
 
 /// Represents a single perf script sample record
@@ -41,7 +45,7 @@ pub fn cmd_process(opts: ProcessOpts) -> Result<()> {
     let output_dir = create_output_dir(&profile_dir)?;
     println!("Output directory: {}", output_dir.display());
 
-    match run_processing(&profile_dir, &output_dir) {
+    match run_processing(&profile_dir, &output_dir, opts.verbose) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = fs::remove_dir_all(&output_dir);
@@ -50,7 +54,7 @@ pub fn cmd_process(opts: ProcessOpts) -> Result<()> {
     }
 }
 
-fn run_processing(profile_dir: &Path, output_dir: &Path) -> Result<()> {
+fn run_processing(profile_dir: &Path, output_dir: &Path, verbose: bool) -> Result<()> {
     let perf_script_src = profile_dir.join("perf.script");
     let perf_script_dst = output_dir.join("perf.script");
     let perf_jsonl_dst = output_dir.join("perf.jsonl");
@@ -64,7 +68,7 @@ fn run_processing(profile_dir: &Path, output_dir: &Path) -> Result<()> {
     fs::copy(&perf_script_src, &perf_script_dst).context("failed to copy perf.script")?;
 
     println!("Parsing perf.script to generate perf.jsonl...");
-    parse_perf_script_to_jsonl(&perf_script_dst, &perf_jsonl_dst)?;
+    parse_perf_script_to_jsonl(&perf_script_dst, &perf_jsonl_dst, verbose)?;
 
     print_profile_contents(output_dir)?;
     Ok(())
@@ -247,7 +251,7 @@ fn parse_perf_script_line(line: &str) -> Option<PerfScriptRecord> {
     })
 }
 
-fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path) -> Result<()> {
+fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path, verbose: bool) -> Result<()> {
     let file = File::open(perf_script_path).context("failed to open perf.script")?;
     let reader = BufReader::new(file);
 
@@ -268,6 +272,9 @@ fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path) -> Re
             None => {
                 if !line.trim().is_empty() {
                     errors += 1;
+                    if verbose {
+                        eprintln!("unparseable: {}", line);
+                    }
                 }
             }
         }
