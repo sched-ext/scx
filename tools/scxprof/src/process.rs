@@ -273,6 +273,13 @@ fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path, verbo
                     }
                     continue;
                 }
+                if record.comm == "perf" || record.comm == "swapper" {
+                    skipped += 1;
+                    if verbose {
+                        eprintln!("skipped (filtered comm): {}", line);
+                    }
+                    continue;
+                }
                 let json = serde_json::to_string(&record).context("failed to serialize record")?;
                 writeln!(writer, "{}", json)?;
                 count += 1;
