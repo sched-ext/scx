@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::record::PERF_SCRIPT_FIELDS;
+use crate::record::{perf_binary, PERF_SCRIPT_FIELDS};
 use anyhow::{bail, Context as _, Result};
 use clap::Parser;
 use serde::Serialize;
@@ -132,7 +132,7 @@ fn generate_perf_script(profile_dir: &Path) -> Result<()> {
         bail!("perf.data not found in profile directory");
     }
 
-    let output = Command::new("perf")
+    let output = Command::new(perf_binary())
         .args([
             "script",
             "-F",

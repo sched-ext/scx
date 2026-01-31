@@ -22,6 +22,10 @@ use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+pub fn perf_binary() -> String {
+    std::env::var("SCXPROF_PERF").unwrap_or_else(|_| "perf".to_string())
+}
+
 #[derive(Debug, Parser)]
 pub struct RecordOpts {
     /// Output directory for recording
@@ -335,7 +339,7 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
 fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
     let perf_data_path = opts.output.join("perf.data");
     let perf_args = vec![
-        "perf".to_string(),
+        perf_binary(),
         "mem".to_string(),
         "record".to_string(),
         "--all-cgroups".to_string(),
@@ -403,7 +407,7 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
 fn save_perf_version(output_dir: &Path) -> Result<()> {
     let version_path = output_dir.join("perf.version");
 
-    let output = Command::new("perf")
+    let output = Command::new(perf_binary())
         .arg("version")
         .output()
         .context("failed to run perf version")?;
@@ -461,7 +465,7 @@ fn generate_perf_script(ctx: &Context, output_dir: &Path) -> Result<()> {
 
     let output_file = File::create(&perf_script_path).context("failed to create perf.script")?;
 
-    let child = Command::new("perf")
+    let child = Command::new(perf_binary())
         .args([
             "script",
             "-F",
