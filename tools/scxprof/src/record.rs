@@ -17,7 +17,7 @@ use std::io::{BufWriter, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -47,6 +47,10 @@ pub struct RecordOpts {
     /// Disable creating a tar.gz archive after recording
     #[clap(long)]
     pub disable_archive: bool,
+
+    /// Disable generating perf.script file during recording
+    #[clap(long)]
+    pub disable_perf_script: bool,
 }
 
 struct SpawnedProcess {
@@ -311,6 +315,13 @@ pub fn cmd_record(ctx: &Context, opts: RecordOpts) -> Result<()> {
         return Ok(());
     }
 
+    if !opts.disable_perf_script {
+        println!("Generating perf.script...");
+        if let Err(e) = generate_perf_script(ctx, &opts.output) {
+            eprintln!("warning: failed to generate perf.script: {}", e);
+        }
+    }
+
     if !opts.disable_archive {
         create_archive(&opts.output)?;
         fs::remove_dir_all(&opts.output).context("failed to remove output directory")?;
@@ -387,7 +398,7 @@ fn run_recording(ctx: &Context, opts: &RecordOpts) -> Result<bool> {
     Ok(completed)
 }
 
-fn create_archive(output_dir: &PathBuf) -> Result<()> {
+fn create_archive(output_dir: &Path) -> Result<()> {
     let archive_name = format!("{}.tar.gz", output_dir.display());
     let dir_name = output_dir
         .file_name()
@@ -413,6 +424,65 @@ fn create_archive(output_dir: &PathBuf) -> Result<()> {
 
     if !status.success() {
         bail!("tar failed with status: {}", status);
+    }
+
+    Ok(())
+}
+
+/// Fields to extract from perf script output
+pub const PERF_SCRIPT_FIELDS: &str = "comm,tid,pid,time,cgroup,ip,addr,phys_addr,data_page_size,dso,sym";
+
+fn generate_perf_script(ctx: &Context, output_dir: &Path) -> Result<()> {
+    let perf_data_path = output_dir.join("perf.data");
+    let perf_script_path = output_dir.join("perf.script");
+
+    if !perf_data_path.exists() {
+        bail!("perf.data not found in output directory");
+    }
+
+    let output_file = File::create(&perf_script_path).context("failed to create perf.script")?;
+
+    let child = Command::new("perf")
+        .args([
+            "script",
+            "-F",
+            PERF_SCRIPT_FIELDS,
+            "-i",
+            perf_data_path.to_str().context("invalid perf.data path")?,
+        ])
+        .stdout(output_file)
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to spawn perf script")?;
+
+    let pid = child.id() as i32;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
+    if fd < 0 {
+        bail!("pidfd_open failed: {}", std::io::Error::last_os_error());
+    }
+    let pidfd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let mut child = child;
+    let fds = [ctx.shutdown_fd(), pidfd.as_raw_fd()];
+
+    loop {
+        match poll_fds(&fds, 100)? {
+            PollResult::Shutdown => {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let _ = child.wait();
+                let _ = fs::remove_file(&perf_script_path);
+                bail!("perf script interrupted");
+            }
+            PollResult::ProcessExited => {
+                let status = child.wait().context("failed to wait for perf script")?;
+                if !status.success() {
+                    let _ = fs::remove_file(&perf_script_path);
+                    bail!("perf script failed with status: {}", status);
+                }
+                break;
+            }
+            PollResult::RingbufReady | PollResult::Timeout => {}
+        }
     }
 
     Ok(())
