@@ -264,7 +264,7 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 	/* lag = [-lag_max, lag_max] */
 
 	/*
-	 * penalty = [100%, 125%]
+	 * penalty = [100%, 200%]
 	 */
 	penalty = (((-lag + lag_max) << LAVD_SHIFT) / lag_max);
 	penalty = LAVD_SCALE + (penalty >> LAVD_LC_GREEDY_SHIFT);

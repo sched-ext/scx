@@ -72,9 +72,9 @@ enum consts_internal {
 	LAVD_SLICE_BOOST_BONUS		= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_SLICE_BOOST_MAX		= (500ULL * NSEC_PER_MSEC),
 	LAVD_ACC_RUNTIME_MAX		= LAVD_SLICE_MAX_NS_DFL,
-	LAVD_TASK_LAG_MAX		= (10ULL * LAVD_SLICE_MAX_NS_DFL),
-	LAVD_DL_COMPETE_WINDOW		= (LAVD_SLICE_MAX_NS_DFL >> 16), /* assuming task's latency
-									    criticality is around 1000. */
+	LAVD_TASK_LAG_MAX		= (500ULL * NSEC_PER_MSEC),
+	LAVD_DL_COMPETE_WINDOW		= ((300ULL * NSEC_PER_MSEC) >> 16), /* assuming task's latency
+									       criticality is around 1000. */
 
 	LAVD_LC_FREQ_MAX                = 100000, /* shortest interval: 10usec */
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
@@ -82,7 +82,7 @@ enum consts_internal {
 	LAVD_LC_WEIGHT_BOOST_MEDIUM	= (2 * LAVD_LC_WEIGHT_BOOST_REGULAR),
 	LAVD_LC_WEIGHT_BOOST_HIGH	= (2 * LAVD_LC_WEIGHT_BOOST_MEDIUM),
 	LAVD_LC_WEIGHT_BOOST_HIGHEST	= (2 * LAVD_LC_WEIGHT_BOOST_HIGH),
-	LAVD_LC_GREEDY_SHIFT		= 3, /* 12.5% */
+	LAVD_LC_GREEDY_SHIFT		= 1, /* 50% */
 	LAVD_LC_WAKE_INTERVAL_MIN	= LAVD_SLICE_MIN_NS_DFL,
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
