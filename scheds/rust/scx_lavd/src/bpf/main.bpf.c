@@ -1675,9 +1675,10 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
-	task_ctx *taskc;
-	u64 now;
+	task_ctx *taskc, *taskc_parent;
+	struct task_struct *parent;
 	int i;
+	u64 now;
 
 	/*
 	 * When @p becomes under the SCX control (e.g., being forked), @p's
@@ -1699,12 +1700,43 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 		return -ENOMEM;
 	}
 
-
 	/*
 	 * Initialize @p's context.
+	 *
+	 * Inherit its parent properties, if possible, to maintain the same
+	 * latency and performance-criticality initially. Otherwise (i.e.,
+	 * its parent is an RT/DL task), set its properties to the average
+	 * fair task as a best guess.
+	 *
+	 * Note that this is a hack to bypass the restriction of the
+	 * current bpf not trusting the pointer p->real_parent.
+	 *
+	 * Note that we might need to consider the semantics of
+	 * SCHED_RESET_ON_FORK. At this point, it is unclear (may not?),
+	 * so let’s revisit this when it becomes necessary.
+	 * See the details here:
+	 *   https://man7.org/linux/man-pages/man2/sched_setscheduler.2.html
 	 */
-	for (i = 0; i < sizeof(*taskc) && can_loop; i++)
-		((char __arena *)taskc)[i] = 0;
+	parent = bpf_task_from_pid(p->real_parent->pid);
+	if (parent && (taskc_parent = get_task_ctx(parent))) {
+		for (i = 0; i < sizeof(*taskc) && can_loop; i++)
+			((char __arena *)taskc)[i] = ((char __arena *)taskc_parent)[i];
+	} else {
+		for (i = 0; i < sizeof(*taskc) && can_loop; i++)
+			((char __arena *)taskc)[i] = 0;
+	
+		now = scx_bpf_now();
+		taskc->last_runnable_clk = now;
+		taskc->last_running_clk = now; /* for avg_runtime */
+		taskc->last_stopping_clk = now; /* for avg_runtime */
+		taskc->last_quiescent_clk = now;
+		taskc->avg_runtime = sys_stat.slice;
+		taskc->svc_time = sys_stat.avg_svc_time;
+	}
+
+	taskc->pinned_cpu_id = -ENOENT;
+	taskc->pid = p->pid;
+	taskc->cgrp_id = args->cgroup->kn->id;
 
 	bpf_rcu_read_lock();
 	if (bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids)
@@ -1720,17 +1752,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 	else
 		reset_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
 
-	now = scx_bpf_now();
-	taskc->last_runnable_clk = now;
-	taskc->last_running_clk = now; /* for avg_runtime */
-	taskc->last_stopping_clk = now; /* for avg_runtime */
-	taskc->last_quiescent_clk = now;
-	taskc->avg_runtime = sys_stat.slice;
-	taskc->svc_time = sys_stat.avg_svc_time;
-	taskc->pinned_cpu_id = -ENOENT;
-	taskc->pid = p->pid;
-	taskc->cgrp_id = args->cgroup->kn->id;
-
+	if (parent)
+		bpf_task_release(parent);
 	return 0;
 }
 
