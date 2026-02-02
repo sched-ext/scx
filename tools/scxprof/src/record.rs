@@ -211,7 +211,9 @@ impl HintsRecorder<'static> {
     }
 
     fn consume_and_write(&mut self) -> Result<()> {
-        self.ringbuf.consume().context("failed to consume ringbuf")?;
+        self.ringbuf
+            .consume()
+            .context("failed to consume ringbuf")?;
         let events: Vec<_> = self.events.borrow_mut().drain(..).collect();
         for ev in &events {
             let json = serde_json::to_string(ev).context("failed to serialize event")?;
@@ -269,7 +271,13 @@ fn poll_fds(fds: &[RawFd], timeout_ms: i32) -> Result<PollResult> {
         })
         .collect();
 
-    let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, timeout_ms) };
+    let ret = unsafe {
+        libc::poll(
+            pollfds.as_mut_ptr(),
+            pollfds.len() as libc::nfds_t,
+            timeout_ms,
+        )
+    };
 
     if ret < 0 {
         let err = std::io::Error::last_os_error();
@@ -453,7 +461,8 @@ fn create_archive(output_dir: &Path) -> Result<()> {
 }
 
 /// Fields to extract from perf script output
-pub const PERF_SCRIPT_FIELDS: &str = "comm,tid,pid,time,cgroup,ip,addr,phys_addr,data_page_size,dso,sym";
+pub const PERF_SCRIPT_FIELDS: &str =
+    "comm,tid,pid,time,cgroup,ip,addr,phys_addr,data_page_size,dso,sym";
 
 fn generate_perf_script(ctx: &Context, output_dir: &Path) -> Result<()> {
     let perf_data_path = output_dir.join("perf.data");

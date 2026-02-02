@@ -81,10 +81,7 @@ fn prepare_profile_dir(path: &Path) -> Result<PathBuf> {
 
     let path_str = path.to_string_lossy();
     if !path_str.ends_with(".tar.gz") {
-        bail!(
-            "'{}' is not a directory or tar.gz archive",
-            path.display()
-        );
+        bail!("'{}' is not a directory or tar.gz archive", path.display());
     }
 
     let dir_name = path_str.trim_end_matches(".tar.gz");
@@ -117,10 +114,7 @@ fn create_output_dir(profile_dir: &Path) -> Result<PathBuf> {
     let output_dir = PathBuf::from(format!("{}.out", profile_dir.display()));
 
     if output_dir.exists() {
-        bail!(
-            "output directory '{}' already exists",
-            output_dir.display()
-        );
+        bail!("output directory '{}' already exists", output_dir.display());
     }
 
     fs::create_dir_all(&output_dir).context("failed to create output directory")?;
@@ -251,7 +245,11 @@ fn parse_perf_script_line(line: &str) -> Option<PerfScriptRecord> {
     })
 }
 
-fn parse_perf_script_to_jsonl(perf_script_path: &Path, output_path: &Path, verbose: bool) -> Result<()> {
+fn parse_perf_script_to_jsonl(
+    perf_script_path: &Path,
+    output_path: &Path,
+    verbose: bool,
+) -> Result<()> {
     let file = File::open(perf_script_path).context("failed to open perf.script")?;
     let reader = BufReader::new(file);
 

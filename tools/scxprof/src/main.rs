@@ -7,9 +7,9 @@ use anyhow::{bail, Context as _, Result};
 use clap::{Parser, Subcommand};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-mod record;
-mod process;
 mod extract;
+mod process;
+mod record;
 
 pub mod bpf_intf;
 pub mod bpf_skel;

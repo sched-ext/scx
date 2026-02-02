@@ -54,7 +54,9 @@ struct GroupData {
 
 impl GroupData {
     fn new() -> Self {
-        Self { samples: Vec::new() }
+        Self {
+            samples: Vec::new(),
+        }
     }
 
     fn push(&mut self, sample: PerfScriptRecord) {
@@ -67,7 +69,12 @@ impl GroupData {
 
     fn print(&self, group_name: &str, global_total: u64, verbosity: u8) {
         let group_pct = (self.samples.len() as f64 / global_total as f64) * 100.0;
-        eprintln!("\n{}: {} samples ({:.2}%)", group_name, self.samples.len(), group_pct);
+        eprintln!(
+            "\n{}: {} samples ({:.2}%)",
+            group_name,
+            self.samples.len(),
+            group_pct
+        );
 
         let mut comm_counts: HashMap<String, u64> = HashMap::new();
         for sample in &self.samples {
@@ -196,8 +203,8 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
     let file = File::open(&opts.file).context("failed to open perf.jsonl")?;
     let reader = BufReader::new(file);
 
-    let allotment_re = Regex::new(&opts.workload_allotment_cgroup_regex)
-        .context("invalid allotment regex")?;
+    let allotment_re =
+        Regex::new(&opts.workload_allotment_cgroup_regex).context("invalid allotment regex")?;
     let workload_cgroup = &opts.workload_cgroup_regex;
 
     let mut groups: HashMap<String, GroupData> = HashMap::new();
@@ -209,16 +216,23 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
             serde_json::from_str(&line).context("failed to parse record")?;
 
         let group = classify_cgroup(&record.cgroup, workload_cgroup, &allotment_re);
-        groups.entry(group.to_string()).or_insert_with(GroupData::new).push(record);
+        groups
+            .entry(group.to_string())
+            .or_insert_with(GroupData::new)
+            .push(record);
         global_total += 1;
     }
 
     let mut group_names: Vec<_> = groups.keys().cloned().collect();
     group_names.sort_by(|a, b| {
         let order = |s: &str| -> u8 {
-            if s == "rest" { 2 }
-            else if s == workload_cgroup { 1 }
-            else { 0 }
+            if s == "rest" {
+                2
+            } else if s == workload_cgroup {
+                1
+            } else {
+                0
+            }
         };
         order(a).cmp(&order(b)).then_with(|| a.cmp(b))
     });
@@ -232,7 +246,12 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
         }
     }
 
-    let config = generate_config(&groups, &group_names, workload_cgroup, &opts.workload_allotment_cgroup_regex);
+    let config = generate_config(
+        &groups,
+        &group_names,
+        workload_cgroup,
+        &opts.workload_allotment_cgroup_regex,
+    );
     let json = serde_json::to_string_pretty(&config).context("failed to serialize config")?;
     println!("{}", json);
 
