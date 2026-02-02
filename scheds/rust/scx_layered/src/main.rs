@@ -646,6 +646,10 @@ struct Opts {
     #[clap(long)]
     run_example: bool,
 
+    /// Allocate CPUs at an SMT granularity (not core)
+    #[clap(long)]
+    allow_partial_core: bool,
+
     /// ***DEPRECATED *** Enables iteration over local LLCs first for
     /// dispatch.
     #[clap(long, default_value = "false")]
@@ -1474,10 +1478,8 @@ impl Layer {
         })
     }
 
-    fn alloc_some_cpus(&mut self, cpu_pool: &mut CpuPool) -> Result<usize> {
-        let new_cpus = match cpu_pool
-            .alloc_cpus(&self.allowed_cpus, &self.core_order)
-            .clone()
+    fn alloc_some_cpus(&mut self, cpu_pool: &mut CpuPool, max_to_alloc: usize) -> Result<usize> {
+        let new_cpus = match cpu_pool.alloc_cpus(&self.allowed_cpus, &self.core_order, max_to_alloc)
         {
             Some(ret) => ret.clone(),
             None => {
@@ -2394,7 +2396,7 @@ impl<'a> Scheduler<'a> {
             );
         };
 
-        let cpu_pool = CpuPool::new(topo.clone())?;
+        let cpu_pool = CpuPool::new(topo.clone(), opts.allow_partial_core)?;
 
         // If disabling topology awareness clear out any set NUMA/LLC configs and
         // it will fallback to using all cores.
@@ -3404,7 +3406,7 @@ impl<'a> Scheduler<'a> {
             let mut alloced = false;
 
             while nr_to_alloc > 0 {
-                let nr_alloced = layer.alloc_some_cpus(&mut self.cpu_pool)?;
+                let nr_alloced = layer.alloc_some_cpus(&mut self.cpu_pool, nr_to_alloc)?;
                 if nr_alloced == 0 {
                     break;
                 }

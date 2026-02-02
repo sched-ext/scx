@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 
 use anyhow::bail;
 use anyhow::Result;
-use bitvec::prelude::*;
 pub use config::LayerCommon;
 pub use config::LayerConfig;
 pub use config::LayerKind;
@@ -38,9 +37,9 @@ pub struct CpuPool {
 
     pub free_llcs: Vec<(usize, usize)>,
 
-    /// A bit mask representing all available physical cores.
-    /// Each bit corresponds to whether a physical core is available for task scheduling.
-    available_cores: BitVec,
+    /// A mask for available CPUs (SMT hyperthreads).
+    /// Use for sub-core allocations when turned on.
+    available_cpus: Cpumask,
 
     /// The ID of the first physical core in the system.
     /// This core is often used as a default for initializing tasks.
@@ -54,10 +53,12 @@ pub struct CpuPool {
     /// The map allows for the identification of which last-level cache
     /// corresponds to each CPU based on its core topology.
     core_topology_to_id: BTreeMap<(usize, usize, usize), usize>,
+
+    allow_partial: bool,
 }
 
 impl CpuPool {
-    pub fn new(topo: Arc<Topology>) -> Result<Self> {
+    pub fn new(topo: Arc<Topology>, allow_partial: bool) -> Result<Self> {
         if *NR_CPU_IDS > MAX_CPUS {
             bail!("NR_CPU_IDS {} > MAX_CPUS {}", *NR_CPU_IDS, MAX_CPUS);
         }
@@ -85,97 +86,135 @@ impl CpuPool {
 
         let free_llcs = topo.all_llcs.iter().map(|llc| (llc.1.id, 0)).collect();
 
+        let mut available_cpus = Cpumask::new();
+        available_cpus.set_all();
+
         let mut cpu_pool = Self {
             free_llcs,
-            available_cores: bitvec![1; topo.all_cores.len()],
+            available_cpus,
             first_cpu,
             fallback_cpu: first_cpu,
             core_topology_to_id,
             topo,
+            allow_partial,
         };
         cpu_pool.update_fallback_cpu();
         Ok(cpu_pool)
     }
 
     fn update_fallback_cpu(&mut self) {
-        match self.available_cores.first_one() {
-            Some(next) => {
-                self.fallback_cpu = *self.topo.all_cores[&next].cpus.keys().next().unwrap()
-            }
-            None => self.fallback_cpu = self.first_cpu,
+        self.fallback_cpu = match self.available_cpus.iter().next() {
+            Some(cpu) => cpu,
+            None => self.first_cpu,
+        };
+    }
+
+    fn core_cpu_available(&self, core: &Cpumask) -> usize {
+        core.iter()
+            .map(|cpu| self.available_cpus.test_cpu(cpu) as usize)
+            .sum()
+    }
+
+    fn check_partial(&self) -> Result<()> {
+        if self.allow_partial {
+            return Ok(());
         }
+
+        // Go through CPU to cores and check if any core has
+        // a span of 1. If it does, we bail.
+        for i in 0..self.topo.all_cores.len() {
+            let core_cpus = &self.topo.all_cores[&i].span;
+
+            let core_cpu_available = self.core_cpu_available(core_cpus);
+            if core_cpu_available > 0 && core_cpu_available != core_cpus.weight() {
+                bail!("Some cores only partially allocated");
+            }
+        }
+
+        Ok(())
     }
 
     pub fn alloc_cpus(
         &mut self,
         allowed_cpus: &Cpumask,
         core_alloc_order: &[usize],
-    ) -> Option<&Cpumask> {
-        let available_cpus = self.available_cpus().and(allowed_cpus);
-        let available_cores = self.cpus_to_cores(&available_cpus).ok()?;
+        mut max_to_alloc: usize,
+    ) -> Option<Cpumask> {
+        let mut allocated_cpus = Cpumask::new();
 
         for alloc_core in core_alloc_order {
-            match available_cores.get(*alloc_core) {
-                Some(bit) => {
-                    if *bit {
-                        self.available_cores.set(*alloc_core, false);
-                        self.update_fallback_cpu();
-                        return Some(&self.topo.all_cores[alloc_core].span);
-                    }
-                }
-                None => {
-                    continue;
-                }
-            }
-        }
-        None
-    }
-
-    fn cpus_to_cores(&self, cpus_to_match: &Cpumask) -> Result<BitVec> {
-        let topo = &self.topo;
-        let mut cpus = cpus_to_match.clone();
-        let mut cores = bitvec![0; topo.all_cores.len()];
-
-        while let Some(cpu) = cpus.iter().next() {
-            let core = &topo.all_cores[&topo.all_cpus[&cpu].core_id];
-
-            if core.span.and(&cpus_to_match.not()).weight() != 0 {
-                bail!(
-                    "CPUs {} partially intersect with core {:?}",
-                    cpus_to_match,
-                    core,
-                );
+            // Constrain CPUs by NUMA node or LLC. Since allowed_cpus is NUMA/LLC aligned,
+            // this operation is guaranteed to produce either the core mask or an empty mask.
+            let core_cpus = &self.topo.all_cores[alloc_core].span.and(&allowed_cpus);
+            if core_cpus.is_empty() {
+                continue;
             }
 
-            cpus &= &core.span.not();
-            cores.set(core.id, true);
+            let available_core_cpus = core_cpus.and(&self.available_cpus);
+            let core_num_available = available_core_cpus.weight();
+            if core_num_available == 0 {
+                continue;
+            }
+
+            if !self.allow_partial || max_to_alloc >= core_num_available {
+                allocated_cpus = allocated_cpus.or(&available_core_cpus);
+                self.available_cpus = self.available_cpus.and(&available_core_cpus.not());
+            } else {
+                let cpus = available_core_cpus.iter().take(max_to_alloc);
+                for cpu in cpus {
+                    allocated_cpus.set_cpu(cpu).ok()?;
+                    self.available_cpus.clear_cpu(cpu).ok()?;
+                }
+            }
+
+            // Are we done allocating CPUs?
+            if max_to_alloc <= core_num_available {
+                break;
+            }
+
+            max_to_alloc -= core_num_available;
         }
 
-        Ok(cores)
+        self.update_fallback_cpu();
+        self.check_partial().unwrap();
+
+        if !allocated_cpus.is_empty() {
+            Some(allocated_cpus)
+        } else {
+            None
+        }
     }
 
     pub fn free(&mut self, cpus_to_free: &Cpumask) -> Result<()> {
-        let cores = self.cpus_to_cores(cpus_to_free)?;
-        if (self.available_cores.clone() & &cores).any() {
+        // Whether we allow partial CPUs or not does not matter because the cpumask
+        // provided is create in next_to_free() below. If we do not allow partial
+        // partial allocations, the cpumask provided will be core-aligned.
+
+        if !self.available_cpus.and(cpus_to_free).is_empty() {
             bail!("Some of CPUs {} are already free", cpus_to_free);
         }
-        self.available_cores |= cores;
+
+        self.available_cpus = self.available_cpus.or(&cpus_to_free);
         self.update_fallback_cpu();
+
+        self.check_partial()?;
+
         Ok(())
     }
 
     pub fn mark_allocated(&mut self, cpus_to_alloc: &Cpumask) -> Result<()> {
-        let cores = self.cpus_to_cores(cpus_to_alloc)?;
-        // Check if all requested cores are available
-        let unavailable_cores = cores.clone() & !self.available_cores.clone();
-        if unavailable_cores.any() {
+        if *&cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
             bail!(
                 "Some of CPUs {} are not available to allocate",
                 cpus_to_alloc
             );
         }
-        self.available_cores &= !cores;
+
+        self.available_cpus &= &cpus_to_alloc.not();
         self.update_fallback_cpu();
+
+        self.check_partial()?;
+
         Ok(())
     }
 
@@ -183,25 +222,18 @@ impl CpuPool {
         &'a self,
         cands: &Cpumask,
         core_order: impl Iterator<Item = &'a usize>,
-    ) -> Result<Option<&'a Cpumask>> {
+    ) -> Result<Option<Cpumask>> {
         for pref_core in core_order.map(|i| &self.topo.all_cores[i]) {
-            if pref_core.span.and(cands).weight() > 0 {
-                return Ok(Some(&pref_core.span));
+            let pref_cpus = pref_core.span.and(cands);
+            if pref_cpus.weight() > 0 {
+                return Ok(Some(pref_cpus));
             }
         }
         Ok(None)
     }
 
     pub fn available_cpus(&self) -> Cpumask {
-        let mut cpus = Cpumask::new();
-        for core in self
-            .available_cores
-            .iter_ones()
-            .map(|i| &self.topo.all_cores[&i])
-        {
-            cpus |= &core.span;
-        }
-        cpus
+        self.available_cpus.clone()
     }
 
     fn get_core_topological_id(&self, core: &Core) -> usize {
