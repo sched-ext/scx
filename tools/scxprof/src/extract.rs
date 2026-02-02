@@ -5,7 +5,7 @@
 
 use crate::process::PerfScriptRecord;
 use anyhow::{Context as _, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -30,9 +30,9 @@ pub struct ExtractOpts {
     #[clap(long, default_value = DEFAULT_WORKLOAD_ALLOTMENT_CGROUP_REGEX)]
     pub workload_allotment_cgroup_regex: String,
 
-    /// Print detailed stats instead of config output
-    #[clap(short, long)]
-    pub verbose: bool,
+    /// Verbosity level (-v for summary, -vv for detailed output)
+    #[clap(short, long, action = ArgAction::Count)]
+    pub verbose: u8,
 }
 
 fn classify_cgroup<'a>(cgroup: &'a str, workload_cgroup: &'a str, allotment_re: &Regex) -> &'a str {
@@ -47,34 +47,47 @@ fn classify_cgroup<'a>(cgroup: &'a str, workload_cgroup: &'a str, allotment_re: 
     workload_cgroup
 }
 
-struct GroupStats {
-    comm_counts: HashMap<String, u64>,
-    total: u64,
+/// Samples belonging to a group, in time order
+struct GroupData {
+    samples: Vec<PerfScriptRecord>,
 }
 
-impl GroupStats {
+impl GroupData {
     fn new() -> Self {
-        Self {
-            comm_counts: HashMap::new(),
-            total: 0,
+        Self { samples: Vec::new() }
+    }
+
+    fn push(&mut self, sample: PerfScriptRecord) {
+        self.samples.push(sample);
+    }
+
+    fn samples(&self) -> &[PerfScriptRecord] {
+        &self.samples
+    }
+
+    fn print(&self, group_name: &str, global_total: u64, verbosity: u8) {
+        let group_pct = (self.samples.len() as f64 / global_total as f64) * 100.0;
+        eprintln!("\n{}: {} samples ({:.2}%)", group_name, self.samples.len(), group_pct);
+
+        let mut comm_counts: HashMap<String, u64> = HashMap::new();
+        for sample in &self.samples {
+            *comm_counts.entry(sample.comm.clone()).or_insert(0) += 1;
         }
-    }
 
-    fn add(&mut self, comm: &str) {
-        *self.comm_counts.entry(comm.to_string()).or_insert(0) += 1;
-        self.total += 1;
-    }
-
-    fn print(&self, group_name: &str, global_total: u64) {
-        let group_pct = (self.total as f64 / global_total as f64) * 100.0;
-        eprintln!("\n{}: {} samples ({:.2}%)", group_name, self.total, group_pct);
-
-        let mut counts: Vec<_> = self.comm_counts.iter().collect();
+        let mut counts: Vec<_> = comm_counts.iter().collect();
         counts.sort_by(|a, b| b.1.cmp(a.1));
 
+        let mut skipped = 0;
         for (comm, count) in counts {
-            let pct = (*count as f64 / self.total as f64) * 100.0;
-            eprintln!("  {}: {} ({:.2}%)", comm, count, pct);
+            let pct = (*count as f64 / self.samples.len() as f64) * 100.0;
+            if verbosity >= 2 || pct > 1.0 {
+                eprintln!("  {}: {} ({:.2}%)", comm, count, pct);
+            } else {
+                skipped += 1;
+            }
+        }
+        if skipped > 0 {
+            eprintln!("  ... {} more below 1%", skipped);
         }
     }
 }
@@ -85,16 +98,33 @@ struct ClusterResult {
     significant_comms: Vec<String>,
 }
 
-/// Compute clustering for a set of group stats
-fn compute_clusters(stats_list: &[&GroupStats], threshold_pct: f64) -> ClusterResult {
-    let mut comm_counts: HashMap<String, u64> = HashMap::new();
-    let mut total: u64 = 0;
+/// Group type for clustering decisions
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GroupType {
+    Allotment,
+    Workload,
+    Rest,
+}
 
-    for stats in stats_list {
-        for (comm, count) in &stats.comm_counts {
-            *comm_counts.entry(comm.clone()).or_insert(0) += count;
-        }
-        total += stats.total;
+/// Compute clustering for samples. Returns empty result for group types
+/// where clustering is not yet implemented.
+fn compute_clusters(
+    group_type: GroupType,
+    samples: &[&PerfScriptRecord],
+    threshold_pct: f64,
+) -> ClusterResult {
+    // TODO(kkd): Enable clustering for Workload and Rest
+    if group_type != GroupType::Allotment {
+        return ClusterResult {
+            significant_comms: Vec::new(),
+        };
+    }
+
+    let total = samples.len();
+
+    let mut comm_counts: HashMap<&str, u64> = HashMap::new();
+    for sample in samples {
+        *comm_counts.entry(&sample.comm).or_insert(0) += 1;
     }
 
     let mut significant_comms = Vec::new();
@@ -102,7 +132,7 @@ fn compute_clusters(stats_list: &[&GroupStats], threshold_pct: f64) -> ClusterRe
         for (comm, count) in &comm_counts {
             let pct = (*count as f64 / total as f64) * 100.0;
             if pct > threshold_pct {
-                significant_comms.push(comm.clone());
+                significant_comms.push((*comm).to_string());
             }
         }
     }
@@ -111,8 +141,12 @@ fn compute_clusters(stats_list: &[&GroupStats], threshold_pct: f64) -> ClusterRe
     ClusterResult { significant_comms }
 }
 
-/// Build child cells from clustering result
+/// Build subcells from clustering result. Returns empty if no significant comms.
 fn build_subcells_from_clusters(result: &ClusterResult) -> Vec<CellSpec> {
+    if result.significant_comms.is_empty() {
+        return Vec::new();
+    }
+
     let mut subcells = Vec::new();
 
     for comm in &result.significant_comms {
@@ -166,7 +200,7 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
         .context("invalid allotment regex")?;
     let workload_cgroup = &opts.workload_cgroup_regex;
 
-    let mut groups: HashMap<String, GroupStats> = HashMap::new();
+    let mut groups: HashMap<String, GroupData> = HashMap::new();
     let mut global_total: u64 = 0;
 
     for line in reader.lines() {
@@ -175,7 +209,7 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
             serde_json::from_str(&line).context("failed to parse record")?;
 
         let group = classify_cgroup(&record.cgroup, workload_cgroup, &allotment_re);
-        groups.entry(group.to_string()).or_insert_with(GroupStats::new).add(&record.comm);
+        groups.entry(group.to_string()).or_insert_with(GroupData::new).push(record);
         global_total += 1;
     }
 
@@ -189,11 +223,11 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
         order(a).cmp(&order(b)).then_with(|| a.cmp(b))
     });
 
-    if opts.verbose {
+    if opts.verbose > 0 {
         eprintln!("Total samples: {}", global_total);
         for name in &group_names {
-            if let Some(stats) = groups.get(name) {
-                stats.print(name, global_total);
+            if let Some(data) = groups.get(name) {
+                data.print(name, global_total, opts.verbose);
             }
         }
     }
@@ -206,50 +240,65 @@ pub fn cmd_extract(opts: ExtractOpts) -> Result<()> {
 }
 
 fn generate_config(
-    groups: &HashMap<String, GroupStats>,
+    groups: &HashMap<String, GroupData>,
     group_names: &[String],
     workload_cgroup: &str,
     allotment_regex: &str,
 ) -> CellConfig {
     let mut specs = Vec::new();
 
-    // Collect allotment group stats
-    let allotment_stats: Vec<&GroupStats> = group_names
-        .iter()
-        .filter(|n| *n != "rest" && *n != workload_cgroup)
-        .filter_map(|n| groups.get(n))
-        .collect();
+    // Process each group type uniformly
+    let group_types = [
+        (GroupType::Allotment, "allotment"),
+        (GroupType::Workload, workload_cgroup),
+        (GroupType::Rest, "rest"),
+    ];
 
-    // Compute clusters for allotments
-    if !allotment_stats.is_empty() {
-        let allotment_clusters = compute_clusters(&allotment_stats, 5.0);
-        let subcells = build_subcells_from_clusters(&allotment_clusters);
+    for (group_type, name) in group_types {
+        // Collect samples for this group type
+        let samples: Vec<&PerfScriptRecord> = match group_type {
+            GroupType::Allotment => group_names
+                .iter()
+                .filter(|n| *n != "rest" && *n != workload_cgroup)
+                .filter_map(|n| groups.get(n))
+                .flat_map(|g| g.samples())
+                .collect(),
+            GroupType::Workload => groups
+                .get(workload_cgroup)
+                .map(|g| g.samples().iter().collect())
+                .unwrap_or_default(),
+            GroupType::Rest => groups
+                .get("rest")
+                .map(|g| g.samples().iter().collect())
+                .unwrap_or_default(),
+        };
+
+        if samples.is_empty() {
+            continue;
+        }
+
+        // Compute clusters
+        let clusters = compute_clusters(group_type, &samples, 5.0);
+        let subcells = build_subcells_from_clusters(&clusters);
+
+        // Build cell match based on group type
+        let (cell_match, matches) = match group_type {
+            GroupType::Allotment => (
+                Some(CellMatch::CgroupRegex(allotment_regex.to_string())),
+                Vec::new(),
+            ),
+            GroupType::Workload => (
+                None,
+                vec![vec![CellMatch::CgroupContains(workload_cgroup.to_string())]],
+            ),
+            GroupType::Rest => (None, vec![vec![]]),
+        };
 
         specs.push(CellSpec {
-            name: "allotment".to_string(),
-            cell_match: Some(CellMatch::CgroupRegex(allotment_regex.to_string())),
-            matches: Vec::new(),
+            name: name.to_string(),
+            cell_match,
+            matches,
             subcells,
-        });
-    }
-
-    // TODO(kkd): Compute clusters for workload.slice
-    if groups.contains_key(workload_cgroup) {
-        specs.push(CellSpec {
-            name: workload_cgroup.to_string(),
-            cell_match: None,
-            matches: vec![vec![CellMatch::CgroupContains(workload_cgroup.to_string())]],
-            subcells: Vec::new(),
-        });
-    }
-
-    // TODO(kkd): Compute clusters for rest
-    if groups.contains_key("rest") {
-        specs.push(CellSpec {
-            name: "rest".to_string(),
-            cell_match: None,
-            matches: vec![vec![]],
-            subcells: Vec::new(),
         });
     }
 
