@@ -289,6 +289,18 @@ static void collect_sys_stat(void)
 	}
 
 	/*
+	 * Reset responsive CPU counts for all compute domains before phase 3.
+	 */
+	bpf_for(cpu, 0, nr_cpdoms) {
+		struct cpdom_ctx *cpdomc;
+		if (cpu >= LAVD_CPDOM_MAX_NR)
+			break;
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
+		if (cpdomc)
+			cpdomc->nr_responsive_cpus = 0;
+	}
+
+	/*
 	 * Collect statistics for each CPU (phase 3).
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
@@ -336,6 +348,15 @@ static void collect_sys_stat(void)
 		cpuc->lat_capacity = (avg_stolen_val < 1024) ? (1024 - avg_stolen_val) : 0;
 		/* Add 12.5% headroom for latency capacity */
 		cpuc->lat_capacity = cpuc->lat_capacity + (cpuc->lat_capacity >> 3);
+
+		/*
+		 * Update responsive CPU count for this CPU's compute domain.
+		 */
+		if (is_responsive(cpuc)) {
+			struct cpdom_ctx *cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+			if (cpdomc)
+				cpdomc->nr_responsive_cpus++;
+		}
 
 		cpuc->stolen_time_est = 0;
 
