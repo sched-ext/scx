@@ -1791,6 +1791,17 @@ static s32 init_cpdoms(u64 now)
 					      cpdomc->id, cpdomc->numa_id);
 				return err;
 			}
+
+			/*
+			 * Create a latency-critical DSQ for responsive cores.
+			 */
+			err = scx_bpf_create_dsq(cpdom_latcrit_dsq(cpdomc->id),
+						 cpdomc->numa_id);
+			if (err) {
+				scx_bpf_error("Failed to create latcrit DSQ for cpdom %llu on NUMA node %d",
+					      cpdomc->id, cpdomc->numa_id);
+				return err;
+			}
 		}
 
 		/*
