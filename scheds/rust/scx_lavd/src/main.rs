@@ -746,6 +746,7 @@ impl<'a> Scheduler<'a> {
                 let mseq = self.mseq_id;
                 let nr_queued_task = st.nr_queued_task;
                 let nr_active = st.nr_active;
+                let nr_responsive = st.nr_responsive;
                 let nr_sched = st.nr_sched;
                 let nr_preempt = st.nr_preempt;
                 let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
@@ -768,6 +769,7 @@ impl<'a> Scheduler<'a> {
                     mseq,
                     nr_queued_task,
                     nr_active,
+                    nr_responsive,
                     nr_sched,
                     nr_preempt,
                     pc_pc,

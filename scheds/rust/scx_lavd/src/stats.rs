@@ -28,6 +28,9 @@ pub struct SysStats {
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
 
+    #[stat(desc = "Number of responsive CPUs (lat_capacity >= threshold)")]
+    pub nr_responsive: u32,
+
     #[stat(desc = "Number of context switches")]
     pub nr_sched: u64,
 
@@ -72,10 +75,11 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:9} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "# Q TASK",
             "# ACT CPU",
+            "# RSP CPU",
             "# SCHED",
             "# PREEMPT",
             "PERF-CR%",
@@ -106,10 +110,11 @@ impl SysStats {
 
         writeln!(
             w,
-            "{color}| {:8} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "{color}| {:8} | {:9} | {:9} | {:9} | {:8} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             self.mseq,
             self.nr_queued_task,
             self.nr_active,
+            self.nr_responsive,
             self.nr_sched,
             self.nr_preempt,
             GPoint(self.pc_pc),
