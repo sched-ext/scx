@@ -87,6 +87,7 @@ enum consts_internal {
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
 	LAVD_LC_LATENCY_SENSITIVE_THRESH = 880, /* top ~14% most latency-critical tasks */
+	LAVD_LC_RESPONSIVE_THRESHOLD	= 512, /* CPU with >= 50% latency capacity is "responsive" */
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
@@ -205,6 +206,7 @@ struct cpdom_ctx {
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
+	u16	nr_responsive_cpus;		    /* number of CPUs with lat_capacity >= LAVD_LC_RESPONSIVE_THRESHOLD */
 
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -418,6 +420,18 @@ static __always_inline  bool is_per_cpu_dsq_migratable(void)
 static __always_inline bool use_cpdom_dsq(void)
 {
 	return !per_cpu_dsq;
+}
+
+/*
+ * is_responsive - Check if a CPU has sufficient latency capacity
+ * @cpuc: CPU context to check
+ *
+ * A CPU is considered "responsive" if it has enough available capacity
+ * (i.e., low IRQ/steal time) to handle latency-critical tasks promptly.
+ */
+static __always_inline bool is_responsive(struct cpu_ctx *cpuc)
+{
+	return cpuc->lat_capacity >= LAVD_LC_RESPONSIVE_THRESHOLD;
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
