@@ -28,6 +28,7 @@
 #define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
 
 #define cpdom_to_dsq(cpdom_id)		((cpdom_id) | LAVD_DSQ_TYPE_CPDOM << LAVD_DSQ_TYPE_SHFT)
+#define cpdom_latcrit_dsq(cpdom_id)	((cpdom_id) | LAVD_DSQ_TYPE_LATCRIT << LAVD_DSQ_TYPE_SHFT)
 #define dsq_to_cpdom(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_to_cpu(dsq_id)		((dsq_id) & LAVD_DSQ_ID_MASK)
 #define dsq_type(dsq_id)		(((dsq_id) & LAVD_DSQ_TYPE_MASK) >> LAVD_DSQ_TYPE_SHFT)
@@ -49,9 +50,10 @@ enum {
 	LAVD_DSQ_TYPE_MASK		= 0x3 << LAVD_DSQ_TYPE_SHFT,
 	LAVD_DSQ_ID_SHFT		= 0,
 	LAVD_DSQ_ID_MASK		= 0xfff << LAVD_DSQ_ID_SHFT,
-	LAVD_DSQ_NR_TYPES		= 2,
-	LAVD_DSQ_TYPE_CPDOM		= 1,
+	LAVD_DSQ_NR_TYPES		= 3,
 	LAVD_DSQ_TYPE_CPU		= 0,
+	LAVD_DSQ_TYPE_CPDOM		= 1,
+	LAVD_DSQ_TYPE_LATCRIT		= 2, /* latency-critical tasks DSQ (per compute domain) */
 };
 
 /*
@@ -435,7 +437,7 @@ static __always_inline bool is_responsive(struct cpu_ctx *cpuc)
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);
-u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc);
+u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *taskc);
 u16 normalize_lat_cri(u16 lat_cri);
 
 extern struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */

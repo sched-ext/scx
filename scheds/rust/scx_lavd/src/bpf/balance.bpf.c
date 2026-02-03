@@ -410,14 +410,29 @@ __hidden
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
+	struct cpu_ctx *cpuc;
 	struct task_struct *p;
-	u64 vtime = U64_MAX;
+	u64 latcrit_dsq_id;
+	bool consume_latcrit;
 
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_to_cpdom(cpdom_dsq_id)]);
 	if (!cpdomc) {
 		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_to_cpdom(cpdom_dsq_id));
 		return false;
 	}
+
+	cpuc = get_cpu_ctx();
+	if (!cpuc)
+		return false;
+
+	latcrit_dsq_id = cpdom_latcrit_dsq(cpuc->cpdom_id);
+
+	/*
+	 * Determine if this CPU should consume from the latency-critical DSQ.
+	 * Responsive cores always do. Non-responsive cores help if there are
+	 * no responsive cores available (fallback to prevent starvation).
+	 */
+	consume_latcrit = is_responsive(cpuc) || (cpdomc->nr_responsive_cpus == 0);
 
 	/*
 	 * If the current compute domain is a stealer, try to steal
@@ -429,36 +444,103 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 
 	/*
 	 * When per_cpu_dsq or pinned_slice_ns is enabled, compare vtimes
-	 * across cpu_dsq and cpdom_dsq to select the task with the lowest vtime.
+	 * across cpu_dsq, cpdom_dsq, and latcrit_dsq to select the task
+	 * with the lowest vtime.
 	 */
 	if (use_per_cpu_dsq() && use_cpdom_dsq()) {
-		u64 dsq_id = cpu_dsq_id;
-		u64 backup_dsq_id = cpdom_dsq_id;
+		u64 vtime_cpu = U64_MAX, vtime_cpdom = U64_MAX, vtime_latcrit = U64_MAX;
+		u64 dsq_order[3];
+		int nr_dsqs = 0;
 
 		p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq_id);
 		if (p)
-			vtime = p->scx.dsq_vtime;
+			vtime_cpu = p->scx.dsq_vtime;
 
 		p = __COMPAT_scx_bpf_dsq_peek(cpdom_dsq_id);
-		if (p && p->scx.dsq_vtime < vtime) {
-			dsq_id = cpdom_dsq_id;
-			backup_dsq_id = cpu_dsq_id;
+		if (p)
+			vtime_cpdom = p->scx.dsq_vtime;
+
+		if (consume_latcrit) {
+			p = __COMPAT_scx_bpf_dsq_peek(latcrit_dsq_id);
+			if (p)
+				vtime_latcrit = p->scx.dsq_vtime;
 		}
 
 		/*
-		 * There is a scenario where the task on the Cpdom DSQ has a
-		 * lower vtime, but this CPU fails to win the race and causes
-		 * the pinned task to stall and wait on the Per-CPU DSQ for the
-		 * next scheduling round. Always try consuming from the other DSQ
-		 * to prevent this scenario.
+		 * Build ordered list of DSQs to try, sorted by vtime.
+		 * Simple 3-way sort for minimal overhead.
 		 */
-		if (consume_dsq(cpdomc, dsq_id))
-			return true;
-		if (consume_dsq(cpdomc, backup_dsq_id))
-			return true;
+		if (consume_latcrit && vtime_latcrit <= vtime_cpu && vtime_latcrit <= vtime_cpdom) {
+			dsq_order[nr_dsqs++] = latcrit_dsq_id;
+			if (vtime_cpu <= vtime_cpdom) {
+				dsq_order[nr_dsqs++] = cpu_dsq_id;
+				dsq_order[nr_dsqs++] = cpdom_dsq_id;
+			} else {
+				dsq_order[nr_dsqs++] = cpdom_dsq_id;
+				dsq_order[nr_dsqs++] = cpu_dsq_id;
+			}
+		} else if (vtime_cpu <= vtime_cpdom) {
+			dsq_order[nr_dsqs++] = cpu_dsq_id;
+			if (consume_latcrit && vtime_latcrit <= vtime_cpdom) {
+				dsq_order[nr_dsqs++] = latcrit_dsq_id;
+				dsq_order[nr_dsqs++] = cpdom_dsq_id;
+			} else {
+				dsq_order[nr_dsqs++] = cpdom_dsq_id;
+				if (consume_latcrit)
+					dsq_order[nr_dsqs++] = latcrit_dsq_id;
+			}
+		} else {
+			dsq_order[nr_dsqs++] = cpdom_dsq_id;
+			if (consume_latcrit && vtime_latcrit <= vtime_cpu) {
+				dsq_order[nr_dsqs++] = latcrit_dsq_id;
+				dsq_order[nr_dsqs++] = cpu_dsq_id;
+			} else {
+				dsq_order[nr_dsqs++] = cpu_dsq_id;
+				if (consume_latcrit)
+					dsq_order[nr_dsqs++] = latcrit_dsq_id;
+			}
+		}
+
+		/*
+		 * Try consuming in vtime order. Fall back to next DSQ
+		 * if we lose the race on the first one.
+		 */
+		for (int i = 0; i < nr_dsqs && i < 3; i++) {
+			if (consume_dsq(cpdomc, dsq_order[i]))
+				return true;
+		}
 	} else if (use_cpdom_dsq()) {
-		if (consume_dsq(cpdomc, cpdom_dsq_id))
-			return true;
+		/*
+		 * Only cpdom DSQs active. Check latcrit first if responsive,
+		 * then regular cpdom DSQ.
+		 */
+		if (consume_latcrit) {
+			u64 vtime_cpdom = U64_MAX, vtime_latcrit = U64_MAX;
+
+			p = __COMPAT_scx_bpf_dsq_peek(cpdom_dsq_id);
+			if (p)
+				vtime_cpdom = p->scx.dsq_vtime;
+
+			p = __COMPAT_scx_bpf_dsq_peek(latcrit_dsq_id);
+			if (p)
+				vtime_latcrit = p->scx.dsq_vtime;
+
+			if (vtime_latcrit <= vtime_cpdom) {
+				if (consume_dsq(cpdomc, latcrit_dsq_id))
+					return true;
+				if (consume_dsq(cpdomc, cpdom_dsq_id))
+					return true;
+			} else {
+				if (consume_dsq(cpdomc, cpdom_dsq_id))
+					return true;
+				if (consume_dsq(cpdomc, latcrit_dsq_id))
+					return true;
+			}
+		} else {
+			/* Non-responsive: only consume from regular cpdom DSQ */
+			if (consume_dsq(cpdomc, cpdom_dsq_id))
+				return true;
+		}
 	} else if (use_per_cpu_dsq()) {
 		if (consume_dsq(cpdomc, cpu_dsq_id))
 			return true;
