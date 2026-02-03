@@ -109,6 +109,7 @@ struct task_ctx_x {
 	u32	lat_capacity;	/* latency capacity: 1024 - avg_stolen_est */
 	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
 	u32	nr_active;	/* number of active cores */
+	u32	nr_responsive;	/* number of responsive cores (lat_capacity >= threshold) */
 	u64	dsq_id;		/* CPU's associated DSQ */
 	u64	dsq_consume_lat; /* DSQ's consume latency */
 	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */

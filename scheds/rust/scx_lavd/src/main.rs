@@ -693,6 +693,7 @@ impl<'a> Scheduler<'a> {
             lat_capacity: tx.lat_capacity,
             cpu_sutil: tx.cpu_sutil,
             nr_active: tx.nr_active,
+            nr_responsive: tx.nr_responsive,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
             slice_used: tx.last_slice_used,
