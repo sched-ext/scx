@@ -191,6 +191,8 @@ pub struct SchedSample {
     pub cpu_sutil: u64,
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
+    #[stat(desc = "Number of responsive CPUs (lat_capacity >= threshold)")]
+    pub nr_responsive: u32,
     #[stat(desc = "DSQ ID where this task was dispatched from")]
     pub dsq_id: u64,
     #[stat(desc = "Consume latency of this DSQ (shows how contended the DSQ is)")]
@@ -201,7 +203,7 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:6} | {:10} |\x1b[0m",
+            "\x1b[93m| {:7} | {:7} | {:17} | {:5} | {:4} | {:7} | {:7} | {:8} | {:17} | {:8} | {:11} | {:7} | {:7} | {:7} | {:13} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:6} | {:7} | {:7} | {:9} | {:6} | {:6} | {:6} | {:10} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
@@ -228,6 +230,7 @@ impl SchedSample {
             "LAT_CAP",
             "CPU_SUTIL",
             "NR_ACT",
+            "NR_RSP",
             "DSQ_ID",
             "DSQ_LAT_NS",
         )?;
@@ -241,7 +244,7 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:8} | {:17} | {:8} | {:8} | {:8} | {:7} | {:8} | {:12} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:9} | {:6} | {:12} | {:12} |",
+            "| {:7} | {:7} | {:17} | {:5} | {:4} | {:7} | {:7} | {:8} | {:17} | {:8} | {:11} | {:7} | {:7} | {:7} | {:13} | {:12} | {:9} | {:9} | {:9} | {:9} | {:8} | {:6} | {:7} | {:7} | {:9} | {:6} | {:6} | {:6} | {:10} |",
             self.mseq,
             self.pid,
             self.comm,
@@ -268,6 +271,7 @@ impl SchedSample {
             self.lat_capacity,
             self.cpu_sutil,
             self.nr_active,
+            self.nr_responsive,
             self.dsq_id,
             self.dsq_consume_lat,
         )?;
