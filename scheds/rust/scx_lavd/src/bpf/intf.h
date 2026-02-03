@@ -69,6 +69,7 @@ struct sys_stat {
 	u32	nr_stealee;	/* number of compute domains to be migrated */
 	u32	nr_active;	/* number of active CPUs */
 	u32	nr_active_cpdoms; /* number of active compute domains */
+	u32	nr_responsive;	/* number of responsive CPUs (lat_capacity >= threshold) */
 
 	u64	nr_sched;	/* total scheduling so far */
 	u64	nr_preempt;	/* total number of preemption operations triggered */

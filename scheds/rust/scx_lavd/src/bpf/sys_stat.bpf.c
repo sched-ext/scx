@@ -366,6 +366,19 @@ static void collect_sys_stat(void)
 		c->idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
 	}
+
+	/*
+	 * Calculate system-wide nr_responsive as sum across all compute domains.
+	 */
+	sys_stat.nr_responsive = 0;
+	bpf_for(cpu, 0, nr_cpdoms) {
+		struct cpdom_ctx *cpdomc;
+		if (cpu >= LAVD_CPDOM_MAX_NR)
+			break;
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
+		if (cpdomc)
+			sys_stat.nr_responsive += cpdomc->nr_responsive_cpus;
+	}
 }
 
 static void calc_sys_stat(void)
