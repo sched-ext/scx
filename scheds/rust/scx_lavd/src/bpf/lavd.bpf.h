@@ -89,7 +89,7 @@ enum consts_internal {
 	LAVD_LC_INH_RECEIVER_SHIFT	= 2, /* 25.0% of receiver's latency criticality */
 	LAVD_LC_INH_GIVER_SHIFT		= 3, /* 12.5 of giver's latency criticality */
 	LAVD_LC_LATENCY_SENSITIVE_THRESH = 880, /* top ~14% most latency-critical tasks */
-	LAVD_LC_RESPONSIVE_THRESHOLD	= 512, /* CPU with >= 50% latency capacity is "responsive" */
+	LAVD_LC_RESPONSIVE_THRESHOLD	= 675, /* CPU with >= ~66% latency capacity is "responsive" */
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (10ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
