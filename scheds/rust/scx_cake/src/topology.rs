@@ -1,14 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//
-// Topology detection for scx_cake
-//
-// Detects CPU topology at startup:
-// - Number of CPUs
-// - CCD/CCX domains (via L3 cache IDs)
-// - P-cores vs E-cores (via CoreType)
-//
-// All detection happens once at startup. Results are passed to BPF
-// as const volatile so the verifier can eliminate unused code paths.
+// Topology detection - CPUs, CCDs, P/E cores. Results passed to BPF as const volatile.
 
 use anyhow::Result;
 use scx_utils::{CoreType, Topology};

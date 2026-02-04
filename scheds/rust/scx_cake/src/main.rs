@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//
-// scx_cake - A sched_ext scheduler applying CAKE bufferbloat concepts
-//
-// This is the userspace component that loads the BPF scheduler,
-// configures it, and displays statistics.
+// scx_cake - sched_ext scheduler applying CAKE bufferbloat concepts to CPU scheduling
 
 mod calibrate;
 mod stats;
@@ -154,10 +150,7 @@ impl Profile {
         }
     }
 
-    /// Consolidated tier configuration (Fused RODATA Optimization)
-    ///
-    /// Packs quantum, multiplier, budget, and starvation into a single u64
-    /// per tier. Fits all 8 tiers in 64 bytes (1 cache line).
+    /// Consolidated tier config - packs quantum/multiplier/budget/starvation into 64-bit per tier.
     fn tier_configs(&self, quantum_us: u64) -> [u64; 8] {
         let starvation = self.starvation_threshold();
         let multiplier = self.tier_multiplier();
@@ -461,17 +454,7 @@ impl<'a> Scheduler<'a> {
                 self.topology.clone(),
             )?;
         } else {
-            /*
-             * EVENT-BASED SILENT MODE (Zero CPU Usage)
-             *
-             * Instead of polling in a loop, we block on a signalfd.
-             * The kernel wakes us ONLY when a signal (SIGINT/SIGTERM) arrives.
-             *
-             * We use poll() with a 60-second timeout to periodically check
-             * if the BPF scheduler exited unexpectedly (UEI).
-             *
-             * CPU Usage: 0.00% (truly dormant between events)
-             */
+            // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
 
             // Block SIGINT and SIGTERM from normal delivery
             let mut mask = SigSet::empty();

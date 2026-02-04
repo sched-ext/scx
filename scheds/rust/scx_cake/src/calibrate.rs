@@ -1,20 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//
-// Empirical Topology Discovery (ETD) for scx_cake
-//
-// Measures inter-core latency using CAS ping-pong to discover the
-// physical topology of the CPU. This allows the scheduler to make
-// "Surgical Seek" decisions based on actual silicon characteristics.
-//
-// Algorithm adapted from core-to-core-latency by Nicolas Viennot
-// https://github.com/nviennot/core-to-core-latency
-// Licensed under the MIT License
-//
-// Key improvements over naive implementation:
-// - Padded atomics to avoid L1 cache line contention on SMT siblings
-// - compare_exchange (CAS) instead of store/load for true latency
-// - quanta::Clock (RDTSC) for nanosecond precision without syscall overhead
-// - Relaxed ordering to avoid unnecessary memory barriers
+// ETD for scx_cake - measures inter-core latency via CAS ping-pong (adapted from nviennot/core-to-core-latency)
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -73,11 +58,7 @@ impl Default for EtdConfig {
     }
 }
 
-/// Measure the round-trip latency between two CPUs using CAS ping-pong.
-///
-/// Uses padded atomics to avoid false sharing on SMT siblings.
-/// Includes warmup phase to stabilize boost clocks.
-/// Returns a vector of per-sample latencies in nanoseconds.
+/// Measure round-trip latency between two CPUs using CAS ping-pong. Returns per-sample latencies (ns).
 fn measure_pair(cpu_a: usize, cpu_b: usize, config: &EtdConfig) -> Option<Vec<f64>> {
     let state = Arc::new(SharedState {
         barrier: Barrier::new(2),
@@ -205,12 +186,7 @@ fn measure_pair(cpu_a: usize, cpu_b: usize, config: &EtdConfig) -> Option<Vec<f6
     .ok()?
 }
 
-/// Perform full topology calibration, measuring all CPU pairs.
-///
-/// Returns a matrix where `matrix[i][j]` is the latency from CPU i to CPU j.
-///
-/// The optional progress_callback is called after each pair is measured with
-/// (current_pair, total_pairs, is_complete) for progress reporting.
+/// Perform full topology calibration. Returns matrix[i][j] = latency from CPU i to CPU j.
 pub fn calibrate_full_matrix<F>(
     nr_cpus: usize,
     config: &EtdConfig,
@@ -300,9 +276,7 @@ where
     matrix
 }
 
-/// Extract the top N fastest peers for each CPU from the latency matrix.
-///
-/// Returns a vector where index = CPU, value = [peer0, peer1, peer2]
+/// Extract top N fastest peers for each CPU from the latency matrix. Returns [peer0, peer1, peer2].
 pub fn extract_top_peers(matrix: &[Vec<f64>], top_n: usize) -> Vec<[u8; 3]> {
     let nr_cpus = matrix.len();
     let mut result = vec![[0u8; 3]; nr_cpus];
@@ -364,14 +338,7 @@ pub const CPU_TOPO_FLAG_IS_BIG: u8 = 1 << 0;
 pub const CPU_TOPO_FLAG_HAS_SIBLING: u8 = 1 << 1;
 pub const CPU_TOPO_INVALID: u8 = 0xFF;
 
-/// Generate unified topology entries from ETD matrix and kernel topology.
-///
-/// Combines:
-/// - ETD measured latencies (peer ordering)
-/// - Kernel sibling map (SMT validation)
-/// - LLC IDs and P/E core flags
-///
-/// Returns array of CpuTopologyEntry for each CPU.
+/// Generate unified topology entries combining ETD latencies, kernel sibling map, and LLC/P-E flags.
 pub fn generate_unified_topology(
     matrix: &[Vec<f64>],
     sibling_map: &[u8],
@@ -496,9 +463,7 @@ pub fn generate_unified_topology(
     result
 }
 
-/// Full calibration: Returns (latency_matrix, top_peers)
-///
-/// The progress_callback is called after each CPU pair measurement with (current, total, is_complete).
+/// Full calibration: Returns (latency_matrix, top_peers). Callback: (current, total, is_complete).
 pub fn calibrate_topology_full<F>(
     nr_cpus: usize,
     progress_callback: F,

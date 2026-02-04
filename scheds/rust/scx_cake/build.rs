@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-//
 // Build script for scx_cake - compiles BPF code and generates bindings
 
 fn main() {
