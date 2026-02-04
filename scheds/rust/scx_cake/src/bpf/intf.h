@@ -1,20 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * scx_cake BPF/userspace interface definitions
- *
- * Shared data structures and constants between BPF and Rust userspace.
- */
+/* scx_cake BPF/userspace interface - shared data structures and constants */
 
 #ifndef __CAKE_INTF_H
 #define __CAKE_INTF_H
 
 #include <limits.h>
 
-/*
- * Type definitions for BPF and userspace compatibility.
- * When vmlinux.h is included (BPF context), __VMLINUX_H__ is defined
- * and types come from there. Otherwise define them here.
- */
+/* Type defs for BPF/userspace compat - defined when vmlinux.h is not included */
 #ifndef __VMLINUX_H__
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -27,11 +19,7 @@ typedef signed int s32;
 typedef signed long s64;
 #endif
 
-/*
- * Priority tiers with quantum multipliers (7-tier system)
- * * Higher tiers get SMALLER slices (more responsive)
- * Lower tiers get LARGER slices (better throughput)
- */
+/* 7-tier priority - higher=smaller slices (responsive), lower=larger slices (throughput) */
 enum cake_tier {
     CAKE_TIER_CRITICAL_LATENCY = 0, /* OS Input Handling / IRQs / Top-Half */
     CAKE_TIER_REALTIME         = 1, /* Game Input / Audio / Time-Sensitive */
@@ -46,31 +34,12 @@ enum cake_tier {
 
 #define CAKE_MAX_CPUS 64
 
-/*
- * Flow state flags (only CAKE_FLOW_NEW currently used)
- */
+/* Flow state flags (only CAKE_FLOW_NEW currently used) */
 enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
 };
 
-/*
- * CPU STATE ISOLATION (Frasch, 2023)
- * Each CPU gets its own 64-byte cache line to prevent false sharing
- * during high-frequency tier updates. Used by Zero-Math Locality Arbiter
- * to peek at remote core tier without BPF map lookup overhead (0ns vs 25ns).
- */
-/*
- * FUSED CORE STATE (Rent's Rule / 3D Packing)
- *
- * Packs all dynamic per-core metadata into a single aligned struct.
- * One L1 fetch provides the "Global Reality" for a peer core.
- *
- * Layout (32-bit):
- * [0-7]   Occupant Tier (u8)
- * [8-15]  Warm Tier (u8)
- * [16-23] Victim State (u8)
- * [24-31] Pad/Commit (u8)
- */
+/* Fused core state - packs occupant/warm/victim into 32-bit for single L1 fetch (0ns vs 25ns) */
 struct cake_core_state {
     u8 occupant_tier;
     u8 warm_tier;
@@ -84,37 +53,9 @@ struct cake_core_state {
 #define CORE_STATE_PACKED(occupant, warm, victim) \
     ((u32)(occupant) | ((u32)(warm) << 8) | ((u32)(victim) << 16))
 
-/*
- * EMPIRICAL TOPOLOGY DISCOVERY (ETD)
- *
- * Populated by Rust userspace at startup via CAS ping-pong measurement.
- * Each CPU stores its top 3 fastest peers (sorted by measured ns latency).
- *
- * This enables "Surgical Seek" - the BPF hot-path checks these specific
- * cores before falling back to the generic SIMD scan.
- *
- * Example for 9800X3D:
- *   top_peers[2] = {10, 3, 11}  → Core 2's fastest paths are to 10 (SMT),
- *                                  then 3 and 11 (ring neighbors)
- */
+/* ETD - populated at startup via CAS ping-pong, stores top 3 fastest peers per CPU */
 
-/*
- * UNIFIED CPU TOPOLOGY ENTRY (Fused ETD + Topology)
- *
- * Single 8-byte structure per CPU containing:
- * - SMT sibling (from ETD: guaranteed fastest peer)
- * - LLC domain ID (for cross-CCD cost assessment)
- * - Next 3 fastest peers (ring neighbors, ordered by measured latency)
- * - Flags for P/E core identification
- *
- * Benefits:
- * - Single cache line fetch for all topology info (~2-3 cycles saved)
- * - ETD "ground truth" used everywhere (no kernel/measured mismatch)
- * - Simplified code path in cake_select_cpu
- *
- * Populated by userspace at startup after ETD calibration.
- * Stored in RODATA for zero-cost constant folding.
- */
+/* Unified CPU topology - 8-byte struct with sibling/LLC/peers, single cache line fetch */
 struct cpu_topology_entry {
     u8 sibling;        /* SMT sibling CPU ID (0xFF if none) */
     u8 llc_id;         /* LLC/CCD domain ID (0-7) */
@@ -139,18 +80,7 @@ struct cpu_topology_entry {
 /* Invalid CPU sentinel (no sibling or peer) */
 #define CPU_TOPO_INVALID 0xFF
 
-/*
- * Per-task flow state tracked in BPF
- * Padded to 64B to prevent False Sharing.
- *
- * OPTIMIZATION: Store Coalescing Layout
- * The first 16 bytes (next_slice, state_fused_u64)
- * are ALL written together in cake_stopping().
- *
- * By placing them contiguously, the CPU Store Buffer merges these
- * into a single burst write, reducing L1 bandwidth pressure by ~50%
- * during context switches.
- */
+/* Per-task flow state - 64B aligned, first 16B coalesced for cake_stopping writes */
 struct cake_task_ctx {
     /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
     u64 next_slice;        /* 8B: Pre-computed slice (ns) */
@@ -184,10 +114,7 @@ struct cake_task_ctx {
     u8 __pad[32];          /* Pad to 64 bytes */
 } __attribute__((aligned(64)));
 
-/*
- * Bitfield Offsets for packed_info
- * Layout: [Flags:4][Tier:3][Score:7][Wait:8][Error:8]
- */
+/* Bitfield offsets for packed_info: [Flags:4][Tier:3][Score:7][Wait:8][Error:8] */
 #define SHIFT_KALMAN_ERROR  0
 #define SHIFT_WAIT_DATA     8
 #define SHIFT_SPARSE_SCORE  16
@@ -225,26 +152,13 @@ struct cake_task_ctx {
 #define LATENCY_GATE_REALTIME  100   /* < 100µs avg → Realtime (tier 1) - fast input */
 #define LATENCY_GATE_CRITICAL2 500   /* < 500µs avg → Critical (tier 2) - compositor */
 
-/*
- * Arbiter LUT (Pre-computed Wait/Go Logic)
- *
- * Dimensions: [My_Tier (0-7)][Target_Rank (0-7)]
- * Value: Threshold Tier (If occupant <= threshold, WAIT. Else GO.)
- *
- * Rank 0: SMT Sibling (Fastest)
- * Rank 1-3: ETD Peers
- * Rank 4+: Global / Distant
- */
+/* Arbiter LUT - [My_Tier][Target_Rank] = threshold (if occupant <= threshold, WAIT; else GO) */
 struct arbiter_config {
     u8 lut[8][8];      /* The decision matrix */
     u8 _pad[0];        /* Pad to 64 bytes if needed */
 } __attribute__((aligned(64)));
 
-/*
- * D2A (Direct-to-ALU) Signal Line
- * Moves signaling from IPI to L3 Cache Fabric.
- * Aligned to 64 bytes to prevent false sharing.
- */
+/* D2A signal line - moves signaling from IPI to L3 Cache Fabric, 64B aligned */
 struct cake_signal_mask {
     u64 signal_mask;
     u8 _pad[56];
@@ -252,9 +166,7 @@ struct cake_signal_mask {
 
 /* Legacy tiered idle tracking removed - leveraging kernel idle masks via kfuncs */
 
-/*
- * Statistics shared with userspace
- */
+/* Statistics shared with userspace */
 struct cake_stats {
     u64 nr_new_flow_dispatches;    /* Tasks dispatched from new-flow */
     u64 nr_old_flow_dispatches;    /* Tasks dispatched from old-flow */
@@ -272,15 +184,7 @@ struct cake_stats {
     u64 _pad[7];                   /* Pad to 256 bytes for cache line isolation in BSS array */
 } __attribute__((aligned(64)));
 
-/*
- * Topology flags - set by userspace at load time
- * * These enable zero-cost specialization. When a flag is false,
- * the BPF verifier eliminates the corresponding code path entirely.
- * * Example: On 9800X3D (single CCD, no hybrid):
- * has_dual_ccd = false      → CCD selection code eliminated
- * has_hybrid_cores = false  → P-core preference code eliminated
- * Result: Zero overhead compared to no topology support
- */
+/* Topology flags - enables zero-cost specialization (false = code path eliminated by verifier) */
 
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS         (2 * 1000 * 1000)   /* 2ms */
@@ -289,10 +193,7 @@ struct cake_stats {
 #define CAKE_DEFAULT_INIT_COUNT         20                   /* Initial sparse count */
 #define CAKE_DEFAULT_STARVATION_NS      (100 * 1000 * 1000) /* 100ms */
 
-/*
- * Default tier arrays (Gaming profile - pre-computed by userspace)
- * These are the base values; profiles can scale them as needed.
- */
+/* Default tier arrays (Gaming profile - pre-computed by userspace) */
 
 /* Per-tier starvation thresholds (nanoseconds) */
 #define CAKE_DEFAULT_STARVATION_T0  5000000    /* Critical Latency: 5ms */
@@ -321,18 +222,7 @@ struct cake_stats {
 #define CAKE_DEFAULT_WAIT_BUDGET_T5 20000000   /* Batch: 20ms */
 #define CAKE_DEFAULT_WAIT_BUDGET_T6 0          /* Background: no limit */
 
-/*
- * Fused Tier Configuration (64-bit RODATA Optimization)
- *
- * Packs 4 per-tier parameters into a single 64-bit word.
- * Optimized for Zen 5 load-to-use efficiency.
- *
- * Layout V2 (LSB to MSB):
- * [0-11]  Multiplier (fixed-point, 1024=1.0x, 0-4095) -> 1-cycle extraction
- * [12-27] Quantum (us units, 0-65535us)
- * [28-43] Wait Budget (us units, 0-65535us)
- * [44-63] Starvation Threshold (us units, 0-1,048,575us approx 1s) -> No mask needed
- */
+/* Fused tier config - packs 4 params into 64-bit: [Mult:12][Quantum:16][Budget:16][Starve:20] */
 typedef u64 fused_config_t;
 
 #define CFG_SHIFT_MULTIPLIER  0

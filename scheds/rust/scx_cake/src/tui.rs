@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//
-// TUI module for scx_cake
-//
-// Provides a ratatui-based terminal UI for real-time scheduler statistics.
+// TUI module - ratatui-based terminal UI for real-time scheduler statistics
 
 use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
