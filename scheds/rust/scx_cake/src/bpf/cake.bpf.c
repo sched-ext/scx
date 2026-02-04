@@ -75,9 +75,9 @@ struct {
 #define tier_available_mask (tier_avail_global.mask)
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * MEGA-MAILBOX: DDR5-optimized per-CPU state (128 bytes = 1 DDR5 burst)
+ * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
  * - Zero false sharing: each CPU writes ONLY to mega_mailbox[its_cpu]
- * - Prefetch-accelerated reads: issue prefetch 500 cycles before read
+ * - 50% less L1 pressure than 128B design (16 vs 32 cache lines)
  * ═══════════════════════════════════════════════════════════════════════════ */
 struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
 
@@ -162,6 +162,33 @@ u8 __bss_tail_guard[64] SEC(".bss") __attribute__((aligned(64)));
         if (cake_relaxed_load_u64(target) & (bit)) \
             bpf_atomic_and(target, ~(bit)); \
     } while (0)
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MAILBOX MASK BUILDERS: Replace atomic globals with per-CPU mailbox reads
+ * - O(16) loop but zero contention vs O(1) but 16-way atomic contention
+ * - With DDR5-6000 CL30: ~64 cycles (13ns) vs 50-200ns atomic penalty
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static __always_inline u64 build_idle_mask_from_mailbox(void)
+{
+    u64 mask = 0;
+    #pragma unroll
+    for (u32 i = 0; i < 16; i++) {
+        if (MBOX_IS_IDLE(mega_mailbox[i].flags))
+            mask |= (1ULL << i);
+    }
+    return mask;
+}
+
+static __always_inline u64 build_victim_mask_from_mailbox(void)
+{
+    u64 mask = 0;
+    #pragma unroll
+    for (u32 i = 0; i < 16; i++) {
+        if (MBOX_IS_VICTIM(mega_mailbox[i].flags))
+            mask |= (1ULL << i);
+    }
+    return mask;
+}
 
 static __always_inline struct cake_stats *get_local_stats(void)
 {
@@ -427,18 +454,7 @@ struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id)
 
 /* COLD PATH: Task allocation + kthread init - noinline keeps I-Cache tight for hot path */
 /* Removed accounting functions - now in tick */
-
-static __always_inline void set_victim_status_cold(u32 cpu, struct cake_core_state *state)
-{
-    u64 cpu_bit = (1ULL << (cpu & 63));
-
-    if (!(cake_relaxed_load_u64(&victim_mask) & cpu_bit)) {
-        bpf_atomic_or(&victim_mask, cpu_bit);
-
-        u32 *packed = (u32 *)state;
-        bpf_atomic_or(packed, 1 << 16); /* Set VICTIM bit (byte 2) */
-    }
-}
+/* set_victim_status_cold removed - mailbox handles victim status */
 
 /* perform_lazy_accounting removed - accounting in tick */
 
@@ -587,8 +603,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         }
     }
 
-    /* Idle Check - Load from BSS Shadow */
-    idles = cake_relaxed_load_u64(&global_idle_mask);
+    /* MAILBOX IDLE MASK: Built from per-CPU entries (zero contention) */
+    idles = build_idle_mask_from_mailbox();
 
     /* BARRIER: Preserve idles in r9 */
     asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg), "+r"(qp), "+r"(idles));
@@ -656,10 +672,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     }
 
     if (QP_GET_TIER(qp) == CRITICAL_LATENCY_DSQ) {
-        u64 spec_mask = cake_relaxed_load_u64(&victim_mask);
+        /* MAILBOX: Build victim mask from per-CPU entries (zero contention) */
+        u64 spec_mask = build_victim_mask_from_mailbox();
         if (spec_mask) {
-            s32 s_cpu = find_surgical_victim_logical(QP_GET_PREV(qp), spec_mask, 0x022FDD63CC95386DULL, cpu_topo);
-            if (s_cpu < 0) s_cpu = (s32)BIT_SCAN_FORWARD_U64_RAW(spec_mask, 0x022FDD63CC95386DULL);
+            s32 s_cpu = find_victim_mailbox(QP_GET_PREV(qp), spec_mask, cpu_topo);
 
             scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + (s_cpu & 63),
                                tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
@@ -740,28 +756,24 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 {
     u32 cpu = (u32)raw_cpu & 63;
-    u64 cpu_bit = (1ULL << cpu);
 
     /* Signal mask check removed */
 
     /* 1. Check per-CPU direct dispatch mailbox first (highest priority) */
     if (scx_bpf_dsq_move_to_local(CAKE_DSQ_LC_BASE + cpu)) {
-        /* D: Deferred accounting - just mark busy, accounting in tick */
-        bpf_atomic_and(&global_idle_mask, ~cpu_bit);
+        /* MAILBOX ONLY: Clear idle flag (no atomic contention) */
+        mega_mailbox[cpu].flags &= ~MBOX_IDLE_BIT;
         return;
     }
 
     /* 2. A+B: Single unified DSQ scan (vtime-ordered by tier) */
     if (scx_bpf_dsq_move_to_local(UNIFIED_DSQ)) {
-        bpf_atomic_and(&global_idle_mask, ~cpu_bit);
-        /* MEGA-MAILBOX: Clear idle flag (we have work) */
+        /* MAILBOX ONLY: Clear idle flag (no atomic contention) */
         mega_mailbox[cpu].flags &= ~MBOX_IDLE_BIT;
         return;
     }
 
-    /* No work - mark idle */
-    bpf_atomic_or(&global_idle_mask, cpu_bit);
-    /* MEGA-MAILBOX: Set idle flag (no work found) */
+    /* No work - mark idle in mailbox (no atomic contention) */
     mega_mailbox[cpu].flags |= MBOX_IDLE_BIT;
 }
 
@@ -807,20 +819,11 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
         }
     }
 
-    /* Branchless victim eligibility: runtime >= 1ms AND tier >= Interactive AND not already victim */
-    /* cpu_id_reg already hoisted above (Fusion #3) */
+    /* Victim eligibility is now computed later in mailbox update section */
+    
+    /* Update Occupant Tier (for legacy compatibility, will be removed) */
     struct cake_core_state *state = &global_core_state[cpu_id_reg];
     u32 packed = cake_relaxed_load_u32((u32 *)state);
-
-    bool is_eligible = (runtime >> VICTIM_RESIDENCY_BIT) &
-                       (tier_reg >= REALTIME_DSQ && tier_reg <= BATCH_DSQ) &
-                       !(STATE_GET_VICTIM(packed));
-
-    if (unlikely(is_eligible)) {
-        set_victim_status_cold(cpu_id_reg, state);
-    }
-
-    /* Update Occupant Tier (Atomic Byte Store) */
     if (tier_reg != STATE_GET_OCCUPANT(packed)) {
         update_occupant_tier(state, tier_reg);
     }
@@ -831,9 +834,13 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      * ═══════════════════════════════════════════════════════════════════════ */
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu_id_reg];
     
+    /* Victim eligibility: runtime >= 1ms AND tier >= Interactive */
+    bool is_victim = (runtime >> VICTIM_RESIDENCY_BIT) &&
+                     (tier_reg >= REALTIME_DSQ && tier_reg <= BATCH_DSQ);
+    
     /* Pack flags: [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
     u8 new_flags = (tier_reg & MBOX_TIER_MASK);
-    if (is_eligible)
+    if (is_victim)
         new_flags |= MBOX_VICTIM_BIT;
     if (runtime < cached_threshold_ns)
         new_flags |= MBOX_WARM_BIT;
@@ -850,47 +857,24 @@ void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
     /* No initialization needed - context created on first use */
 }
 
-/* Task stopping (yielding/blocking) - DIF REDUCTION: Clear victim status immediately */
+/* Task stopping (yielding/blocking) - MAILBOX ONLY: Zero atomic contention */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
-    /* Zero-cost victim invalidation: task is no longer preemptible */
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    u64 cpu_bit = (1ULL << cpu);
-
-    /* TTAS pattern: skip atomic if not a victim (95% of calls) */
-    if (cake_relaxed_load_u64(&victim_mask) & cpu_bit) {
-        bpf_atomic_and(&victim_mask, ~cpu_bit);
-
-        /* Also clear per-core victim flag */
-        struct cake_core_state *state = &global_core_state[cpu];
-        bpf_atomic_and((u32 *)state, ~(1 << 16));
-    }
-
-    /* MEGA-MAILBOX: Clear victim bit (no atomics - we own this entry) */
-    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
-    mbox->flags &= ~MBOX_VICTIM_BIT;
+    
+    /* MAILBOX ONLY: Clear victim bit (no atomics - we own this entry) */
+    mega_mailbox[cpu].flags &= ~MBOX_VICTIM_BIT;
 }
 
-/* Task disabled (leaving sched_ext) */
+/* Task disabled (leaving sched_ext) - MAILBOX ONLY cleanup */
 void BPF_STRUCT_OPS(cake_disable, struct task_struct *p)
 {
-    /* Register pinning */
     register struct task_struct *p_reg asm("r6") = p;
     register u32 cpu_reg asm("r8") = bpf_get_smp_processor_id();
     asm volatile("" : "+r"(p_reg), "+r"(cpu_reg));
 
-    /* L3 HYGIENE: Cleanup victim status before deleting storage */
-    u32 cpu_val;
-    asm volatile("%0 = r8" : "=r"(cpu_val));
-
-    struct cake_core_state *state = &global_core_state[cpu_val & (CAKE_MAX_CPUS - 1)];
-    u32 packed = cake_relaxed_load_u32((u32 *)state);
-
-    if (STATE_GET_VICTIM(packed)) {
-        u64 cpu_bit = (1ULL << (cpu_val & 63));
-        bpf_atomic_and(&victim_mask, ~cpu_bit);
-        bpf_atomic_and((u32 *)state, ~(1 << 16));
-    }
+    /* MAILBOX ONLY: Clear victim status */
+    mega_mailbox[cpu_reg & 63].flags &= ~MBOX_VICTIM_BIT;
 
     bpf_task_storage_delete(&task_ctx, p_reg);
 }
