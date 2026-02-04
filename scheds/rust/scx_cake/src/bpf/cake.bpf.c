@@ -751,6 +751,23 @@ void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
     /* No initialization needed - context created on first use */
 }
 
+/* Task stopping (yielding/blocking) - DIF REDUCTION: Clear victim status immediately */
+void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
+{
+    /* Zero-cost victim invalidation: task is no longer preemptible */
+    u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+    u64 cpu_bit = (1ULL << cpu);
+
+    /* TTAS pattern: skip atomic if not a victim (95% of calls) */
+    if (cake_relaxed_load_u64(&victim_mask) & cpu_bit) {
+        bpf_atomic_and(&victim_mask, ~cpu_bit);
+
+        /* Also clear per-core victim flag */
+        struct cake_core_state *state = &global_core_state[cpu];
+        bpf_atomic_and((u32 *)state, ~(1 << 16));
+    }
+}
+
 /* Task disabled (leaving sched_ext) */
 void BPF_STRUCT_OPS(cake_disable, struct task_struct *p)
 {
@@ -809,7 +826,8 @@ SCX_OPS_DEFINE(cake_ops,
                .select_cpu     = (void *)cake_select_cpu,
                .enqueue        = (void *)cake_enqueue,
                .dispatch       = (void *)cake_dispatch,
-                .tick           = (void *)cake_tick,
+               .tick           = (void *)cake_tick,
+               .stopping       = (void *)cake_stopping,
                .enable         = (void *)cake_enable,
                .disable        = (void *)cake_disable,
                .init           = (void *)cake_init,

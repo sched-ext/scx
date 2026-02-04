@@ -296,6 +296,62 @@ impl Args {
     }
 }
 
+/// Compute average migration cost (in nanoseconds) per rank from ETD latency matrix.
+/// Rank 0 = SMT sibling, Rank 1-3 = topologically close peers, Rank 4+ = global.
+fn compute_rank_costs_from_etd(latency_matrix: &[Vec<f64>], topo: &topology::TopologyInfo) -> [u64; 8] {
+    let nr_cpus = topo.nr_cpus;
+    let mut costs = [0u64; 8];
+    let mut counts = [0u64; 8];
+    
+    for src in 0..nr_cpus {
+        for dst in 0..nr_cpus {
+            if src == dst {
+                continue;
+            }
+            
+            let latency_ns = (latency_matrix[src][dst] * 1000.0) as u64; // Convert µs to ns
+            
+            // Determine rank based on topology relationship
+            let rank = if topo.cpu_sibling_map[src] == dst as u8 {
+                0 // SMT sibling
+            } else if topo.cpu_llc_id[src] == topo.cpu_llc_id[dst] {
+                // Same LLC - use latency to determine peer rank
+                if latency_ns < 100 {
+                    1 // Very close peer
+                } else if latency_ns < 200 {
+                    2 // Close peer
+                } else {
+                    3 // LLC peer
+                }
+            } else {
+                // Cross-LLC
+                if latency_ns < 500 {
+                    4
+                } else if latency_ns < 1000 {
+                    5
+                } else {
+                    6
+                }
+            };
+            
+            costs[rank] += latency_ns;
+            counts[rank] += 1;
+        }
+    }
+    
+    // Compute averages, with fallback defaults if no samples
+    let defaults = [50, 100, 200, 400, 600, 800, 1000, 1200];
+    for i in 0..8 {
+        if counts[i] > 0 {
+            costs[i] /= counts[i];
+        } else {
+            costs[i] = defaults[i];
+        }
+    }
+    
+    costs
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     args: Args,
@@ -339,39 +395,42 @@ impl<'a> Scheduler<'a> {
             rodata.sparse_threshold = sparse_threshold;
             rodata.cached_threshold_ns = (quantum * 1000 * sparse_threshold) >> 10;
 
-            // Populate Zero-Math Arbiter LUT
+            // Populate Zero-Math Arbiter LUT with ETD-informed costs + break-even analysis
+            // Strategy 1+2+3: Use actual measured latency, finer quantization, optimal thresholds
             let wait_budgets = args.profile.wait_budget();
+            
+            // Compute average migration cost per rank from ETD matrix
+            let avg_cost_per_rank = compute_rank_costs_from_etd(&latency_matrix, &topo);
+            
             for (tier, &budget) in wait_budgets.iter().enumerate().take(8) {
                 for rank in 0..8 {
-                    let migration_cost = match rank {
-                        0 => 50,   // SMT: cheap
-                        1 => 400,  // Peer 1
-                        2 => 600,  // Peer 2
-                        3 => 800,  // Peer 3
-                        _ => 1200, // Global
-                    };
-
-                    let patience_factor = if budget > migration_cost {
-                        (budget - migration_cost) / 100_000
-                    } else {
+                    // Strategy 1: Use ETD-measured latency instead of hardcoded values
+                    let migration_cost_ns = avg_cost_per_rank[rank];
+                    
+                    // Strategy 3: Break-even analysis - compute optimal threshold
+                    let threshold = if tier == 0 {
+                        // Tier 0 (Critical Latency): Always migrate, never wait
                         0
-                    };
-
-                    rodata.arbiter_cfg.lut[tier][rank] = if patience_factor > 200 {
+                    } else if migration_cost_ns >= budget {
+                        // Migration cost exceeds budget: always wait (return 6 = max)
                         6
-                    } else if patience_factor > 50 {
-                        4
-                    } else if patience_factor > 10 {
-                        3
-                    } else if patience_factor > 2 {
-                        1
                     } else {
-                        0
+                        // Compute savings ratio: how much of budget is saved by migrating?
+                        let savings_ratio = ((budget - migration_cost_ns) * 100) / budget.max(1);
+                        
+                        // Strategy 2: Finer quantization - use all 7 threshold levels
+                        match savings_ratio {
+                            0..=14 => 6,    // <15% savings: wait for tier 6+ occupant
+                            15..=28 => 5,   // 15-28% savings: wait for tier 5+ occupant
+                            29..=42 => 4,   // 29-42% savings: wait for tier 4+ occupant
+                            43..=56 => 3,   // 43-56% savings: wait for tier 3+ occupant
+                            57..=70 => 2,   // 57-70% savings: wait for tier 2+ occupant
+                            71..=85 => 1,   // 71-85% savings: wait for tier 1+ occupant
+                            _ => 0,         // >85% savings: migrate freely
+                        }
                     };
-
-                    if tier == 0 {
-                        rodata.arbiter_cfg.lut[tier][rank] = 0;
-                    }
+                    
+                    rodata.arbiter_cfg.lut[tier][rank] = threshold;
                 }
             }
 
