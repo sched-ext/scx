@@ -120,7 +120,7 @@ impl Cpumask {
                 let lsb = v.trailing_zeros() as usize;
                 v &= !(1 << lsb);
                 let cpu = index * 8 + lsb;
-                if cpu > *NR_CPU_IDS {
+                if cpu >= *NR_CPU_IDS {
                     bail!(
                         concat!(
                             "Found cpu ({}) in cpumask ({}) which is larger",
