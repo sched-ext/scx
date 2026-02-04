@@ -19,6 +19,29 @@
 
 extern const volatile u8	mig_delta_pct;
 
+/*
+ * Latcrit stealing threshold: steal latcrit tasks from another domain if
+ * their latcrit pressure (queue_len / nr_responsive) is more than this
+ * ratio times our pressure. Using fixed-point: 150 = 1.5x.
+ */
+const volatile u32 latcrit_steal_ratio = 150;
+
+/*
+ * calc_latcrit_pressure - Calculate latency-critical task pressure for a domain
+ * @queue_len: Number of tasks in the latcrit DSQ
+ * @nr_responsive: Number of responsive CPUs in the domain
+ *
+ * Returns pressure as (queue_len * 100) / nr_responsive (fixed-point).
+ * Returns U32_MAX if nr_responsive is 0 but queue_len > 0 (infinite pressure).
+ * Returns 0 if both are 0.
+ */
+static __always_inline u32 calc_latcrit_pressure(u32 queue_len, u16 nr_responsive)
+{
+	if (nr_responsive == 0)
+		return queue_len > 0 ? U32_MAX : 0;
+	return (queue_len * 100) / nr_responsive;
+}
+
 u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_sc_load, int nz_qlen)
 {
 	/*
@@ -406,6 +429,105 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 	return false;
 }
 
+/*
+ * try_to_steal_latcrit_task - Steal latcrit tasks from overloaded domains
+ * @cpuc: Current CPU context (must be responsive)
+ * @our_cpdomc: Our compute domain context
+ *
+ * Only responsive CPUs should call this. We steal latcrit tasks from
+ * neighbor domains when:
+ *   1. Their latcrit pressure > 1.0 (oversubscribed: more tasks than responsive CPUs)
+ *   2. Their latcrit pressure > latcrit_steal_ratio * our pressure (relatively worse off)
+ *
+ * This is conservative to avoid unnecessary cache misses from cross-LLC migration.
+ */
+static bool try_to_steal_latcrit_task(struct cpu_ctx *cpuc, struct cpdom_ctx *our_cpdomc)
+{
+	struct cpdom_ctx *their_cpdomc;
+	u32 our_queue_len, their_queue_len;
+	u32 our_pressure, their_pressure;
+	s64 nr_nbr, cpdom_id;
+
+	/*
+	 * Only responsive CPUs should steal latcrit tasks.
+	 */
+	if (!is_responsive(cpuc))
+		return false;
+
+	/*
+	 * Calculate our latcrit pressure.
+	 */
+	our_queue_len = scx_bpf_dsq_nr_queued(cpdom_latcrit_dsq(our_cpdomc->id));
+	our_pressure = calc_latcrit_pressure(our_queue_len, our_cpdomc->nr_responsive_cpus);
+
+	/*
+	 * Traverse neighbor domains in distance order.
+	 */
+	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
+		nr_nbr = min(our_cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		if (nr_nbr == 0)
+			break;
+
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
+			u64 threshold;
+
+			if (j >= nr_nbr)
+				break;
+
+			cpdom_id = get_neighbor_id(our_cpdomc, i, j);
+			if (cpdom_id < 0)
+				continue;
+
+			their_cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+			if (!their_cpdomc || !their_cpdomc->is_valid)
+				continue;
+
+			/*
+			 * Get their latcrit queue length.
+			 */
+			their_queue_len = scx_bpf_dsq_nr_queued(cpdom_latcrit_dsq(their_cpdomc->id));
+			if (their_queue_len == 0)
+				continue;
+
+			/*
+			 * Calculate their pressure.
+			 */
+			their_pressure = calc_latcrit_pressure(their_queue_len,
+							       their_cpdomc->nr_responsive_cpus);
+
+			/*
+			 * Check oversubscription: > 1 task per responsive CPU (pressure > 100).
+			 */
+			if (their_pressure <= 100)
+				continue;
+
+			/*
+			 * Check relative pressure: their_pressure > ratio * our_pressure.
+			 * Handle U32_MAX case (they have 0 responsive CPUs).
+			 */
+			if (their_pressure != U32_MAX) {
+				threshold = ((u64)latcrit_steal_ratio * our_pressure) / 100;
+				if (their_pressure <= threshold)
+					continue;
+			}
+
+			/*
+			 * Try to steal from their latcrit DSQ.
+			 */
+			if (consume_dsq(their_cpdomc, cpdom_latcrit_dsq(their_cpdomc->id)))
+				return true;
+		}
+
+		/*
+		 * Apply distance penalty - less likely to steal from farther domains.
+		 */
+		if (!prob_x_out_of_y(1, LAVD_CPDOM_MIG_PROB_FT))
+			break;
+	}
+
+	return false;
+}
+
 __hidden
 bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 {
@@ -545,6 +667,14 @@ bool consume_task(u64 cpu_dsq_id, u64 cpdom_dsq_id)
 		if (consume_dsq(cpdomc, cpu_dsq_id))
 			return true;
 	}
+
+	/*
+	 * Try to steal latcrit tasks from overloaded neighbor domains.
+	 * Only responsive CPUs participate, and only when the target domain
+	 * has significantly higher latcrit pressure than us.
+	 */
+	if (nr_cpdoms > 1 && try_to_steal_latcrit_task(cpuc, cpdomc))
+		goto x_domain_migration_out;
 
 	/*
 	 * If there is no task in the assssociated DSQ, traverse neighbor
