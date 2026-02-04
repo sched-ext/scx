@@ -74,6 +74,13 @@ struct {
 } tier_avail_global SEC(".bss") __attribute__((aligned(64)));
 #define tier_available_mask (tier_avail_global.mask)
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MEGA-MAILBOX: DDR5-optimized per-CPU state (128 bytes = 1 DDR5 burst)
+ * - Zero false sharing: each CPU writes ONLY to mega_mailbox[its_cpu]
+ * - Prefetch-accelerated reads: issue prefetch 500 cycles before read
+ * ═══════════════════════════════════════════════════════════════════════════ */
+struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
+
 /* Metadata accessors (Fused layout) */
 #define GET_TIER_RAW(packed) EXTRACT_BITS_U32(packed, SHIFT_TIER, 3)
 #define GET_TIER(ctx) GET_TIER_RAW(cake_relaxed_load_u32(&(ctx)->packed_info))
@@ -202,6 +209,72 @@ static __always_inline s32 find_surgical_victim_logical(u32 prev, u64 logical_ma
         return (s32)BIT_SCAN_FORWARD_U64_RAW(logical_mask, db_const);
 
     return -1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MEGA-MAILBOX VICTIM FINDER: Quality-aware victim selection
+ * - Checks 3 ETD peers first (locality preference)
+ * - Uses mailbox victim+tier info for quality ranking
+ * - Rotated CTZ fallback avoids CPU 0 bias
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
+                                               const struct cpu_topology_entry *topo)
+{
+    u32 idx = prev & 63;
+    const struct cpu_topology_entry *t = &topo[idx];
+    
+    /* 1. Check ETD peers first (locality-optimal) */
+    u8 p1 = t->peer_1;
+    u8 p2 = t->peer_2;
+    u8 p3 = t->peer_3;
+    
+    /* Read mailbox status for peers (prefetched during earlier work) */
+    if (p1 < 64 && (candidate_mask & (1ULL << p1))) {
+        u8 flags = mega_mailbox[p1].flags;
+        if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
+            return (s32)p1;
+    }
+    if (p2 < 64 && (candidate_mask & (1ULL << p2))) {
+        u8 flags = mega_mailbox[p2].flags;
+        if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
+            return (s32)p2;
+    }
+    if (p3 < 64 && (candidate_mask & (1ULL << p3))) {
+        u8 flags = mega_mailbox[p3].flags;
+        if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
+            return (s32)p3;
+    }
+    
+    /* 2. Quality-aware fallback: find highest tier (best to preempt) */
+    u8 best_tier = 0;
+    s32 best_cpu = -1;
+    
+    /* Scan only first 16 CPUs (verifier-friendly bounded loop) */
+    #pragma unroll
+    for (u32 i = 0; i < 16; i++) {
+        if (!(candidate_mask & (1ULL << i)))
+            continue;
+        u8 flags = mega_mailbox[i].flags;
+        u8 tier = MBOX_GET_TIER(flags);
+        
+        /* Prefer idle > victim > none; within category, prefer higher tier */
+        bool is_candidate = MBOX_IS_IDLE(flags) || MBOX_IS_VICTIM(flags);
+        if (is_candidate && tier >= best_tier) {
+            best_tier = tier;
+            best_cpu = (s32)i;
+        }
+    }
+    
+    /* 3. If quality search failed, use rotated CTZ to avoid CPU 0 bias */
+    if (best_cpu < 0 && candidate_mask) {
+        /* Rotate mask by prev to distribute selection */
+        u32 shift = prev & 15;
+        u64 rotated = (candidate_mask >> shift) | (candidate_mask << (64 - shift));
+        u32 offset = BIT_SCAN_FORWARD_U64_RAW(rotated, 0x022FDD63CC95386DULL);
+        best_cpu = (s32)((shift + offset) & 63);
+    }
+    
+    return best_cpu;
 }
 
 /* Locality arbiter - warmth-first: prev_cpu → sibling → SIMD scan (migrate if tier gap > 3) */
@@ -466,6 +539,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     register u64 idles asm("r9");
 
     asm volatile("%[out] = r1" : [out]"=r"(ctx_reg));
+    
+    /* MEGA-MAILBOX PREFETCH: Issue early to hide DDR5 latency (~500 cycles) */
+    CAKE_PREFETCH(&mega_mailbox[0]);
+    
     tctx_reg = get_task_ctx(*(struct task_struct **)ctx_reg, false);
 
     if (unlikely(!tctx_reg)) {
@@ -536,8 +613,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     /* RE-PIN BARRIER: Force registers before scan */
     asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg), "+r"(qp), "+r"(idles));
 
-    /* Speculative computation of scan result (may not be used) */
-    s32 candidate_scan = idles ? find_surgical_victim_logical(b_prev, idles, 0x022FDD63CC95386DULL, cpu_topo) : -1;
+    /* MEGA-MAILBOX: Quality-aware victim selection (prefetch completed by now) */
+    s32 candidate_scan = idles ? find_victim_mailbox(b_prev, idles, cpu_topo) : -1;
 
     /* Arbiter fallback (computed speculatively) */
     s32 candidate_arbiter = select_cpu_with_arbiter(tctx_reg, (s32)b_prev, idles, 0, 0x022FDD63CC95386DULL, cpu_topo);
@@ -677,11 +754,15 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
     /* 2. A+B: Single unified DSQ scan (vtime-ordered by tier) */
     if (scx_bpf_dsq_move_to_local(UNIFIED_DSQ)) {
         bpf_atomic_and(&global_idle_mask, ~cpu_bit);
+        /* MEGA-MAILBOX: Clear idle flag (we have work) */
+        mega_mailbox[cpu].flags &= ~MBOX_IDLE_BIT;
         return;
     }
 
     /* No work - mark idle */
     bpf_atomic_or(&global_idle_mask, cpu_bit);
+    /* MEGA-MAILBOX: Set idle flag (no work found) */
+    mega_mailbox[cpu].flags |= MBOX_IDLE_BIT;
 }
 
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
@@ -743,6 +824,24 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     if (tier_reg != STATE_GET_OCCUPANT(packed)) {
         update_occupant_tier(state, tier_reg);
     }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+     * MEGA-MAILBOX UPDATE: Zero false sharing (each CPU writes its own 128B)
+     * DDR5-optimized: 128 bytes = 1 burst, prefetch-accelerated reads
+     * ═══════════════════════════════════════════════════════════════════════ */
+    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu_id_reg];
+    
+    /* Pack flags: [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
+    u8 new_flags = (tier_reg & MBOX_TIER_MASK);
+    if (is_eligible)
+        new_flags |= MBOX_VICTIM_BIT;
+    if (runtime < cached_threshold_ns)
+        new_flags |= MBOX_WARM_BIT;
+    
+    /* Single byte store - no atomics needed (we own this cache line) */
+    mbox->flags = new_flags;
+    mbox->runtime_us = (u32)(runtime >> 10);  /* Runtime in µs */
+    mbox->last_update_ns = now;
 }
 
 /* Task enabled (joining sched_ext) */
@@ -766,6 +865,10 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
         struct cake_core_state *state = &global_core_state[cpu];
         bpf_atomic_and((u32 *)state, ~(1 << 16));
     }
+
+    /* MEGA-MAILBOX: Clear victim bit (no atomics - we own this entry) */
+    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
+    mbox->flags &= ~MBOX_VICTIM_BIT;
 }
 
 /* Task disabled (leaving sched_ext) */

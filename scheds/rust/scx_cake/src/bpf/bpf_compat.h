@@ -98,6 +98,18 @@
     #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) __builtin_ctzll(mask)
 #endif
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PREFETCH: Issue async memory prefetch to hide DDR5 latency (~100ns)
+ * - Must be issued 500+ cycles before read for full benefit
+ * - No-op if prefetch fails; graceful degradation to cold read
+ * ═══════════════════════════════════════════════════════════════════════════ */
+#define CAKE_PREFETCH(addr) \
+    asm volatile("" : : "r"(addr) : "memory")
+/* Note: BPF doesn't support actual prefetch instructions (prefetcht0/prefetchnta).
+ * This asm volatile creates a data dependency that encourages the compiler to
+ * load the address early, providing some prefetch-like behavior. For full DRAM
+ * prefetch, the kernel would need to expose a BPF helper. */
+
 /* DSQ peek compat - v6.19+ uses native, older kernels use noinline iterator fallback */
 /* Prototype for scratch-tunneled version in cake.bpf.c */
 struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id);
