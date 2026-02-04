@@ -720,10 +720,15 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 		goto skip_fully_idle_neighbor;
 
 	mig_cpdom = sticky_cpdom;
+	/* Optimization: Prioritize closer domains and add early exit conditions */
 	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
 		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
+
+		/* Track if we found any stealer domains at this distance */
+		bool found_stealer_at_dist = false;
+
 		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
 			if (j >= nr_nbr)
 				break;
@@ -733,6 +738,12 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 
 			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
 			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+				continue;
+
+			found_stealer_at_dist = true;
+
+			/* Quick check: skip domains without idle cores */
+			if (mig_cpdc->nr_idle_cores == 0)
 				continue;
 
 			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, SCX_PICK_IDLE_CORE, is_idle);
@@ -752,6 +763,11 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 				goto unlock_out;
 			}
 		}
+
+		/* Early exit: if we found stealer domains but no idle cores,
+		 * it's unlikely to find idle cores in farther domains */
+		if (found_stealer_at_dist && i > 0)
+			break;
 	}
 skip_fully_idle_neighbor:
 	/* NOTE: There is no fully idle CPU in the neighboring domain,
