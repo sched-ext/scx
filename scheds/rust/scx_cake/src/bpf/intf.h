@@ -158,6 +158,47 @@ struct arbiter_config {
     u8 _pad[0];        /* Pad to 64 bytes if needed */
 } __attribute__((aligned(64)));
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MEGA-MAILBOX: DDR5-optimized per-CPU state (128 bytes = 1 DDR5 burst)
+ * - Zero false sharing: each CPU writes only to its own entry
+ * - 100% DDR5 bandwidth efficiency: 128B aligned to BL16 burst size
+ * - Prefetch-accelerated reads: one prefetch loads entire CPU state
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Mailbox flags (packed in flags byte) */
+#define MBOX_TIER_MASK    0x07  /* Bits [2:0] = tier (0-6) */
+#define MBOX_VICTIM_BIT   0x08  /* Bit  [3]   = victim (preemptible) */
+#define MBOX_IDLE_BIT     0x10  /* Bit  [4]   = idle (no task running) */
+#define MBOX_WARM_BIT     0x20  /* Bit  [5]   = cache warm (recent run) */
+
+/* Mailbox flag accessors */
+#define MBOX_GET_TIER(f)   ((f) & MBOX_TIER_MASK)
+#define MBOX_IS_VICTIM(f)  ((f) & MBOX_VICTIM_BIT)
+#define MBOX_IS_IDLE(f)    ((f) & MBOX_IDLE_BIT)
+#define MBOX_IS_WARM(f)    ((f) & MBOX_WARM_BIT)
+
+/* 128-byte mega-mailbox entry (matches DDR5 BL16 burst size) */
+struct mega_mailbox_entry {
+    /* ─── HOT DATA: First 64 bytes (always read) ─── */
+    u8 flags;              /* [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
+    u8 best_victim_cpu;    /* Pre-computed best victim neighbor */
+    u8 dsq_hint;           /* Suggested DSQ with work */
+    u8 reserved1;          /* Reserved */
+    u32 runtime_us;        /* Runtime in microseconds (victim quality) */
+    u64 last_vtime;        /* Last dispatch vtime */
+    u64 deficit;           /* DRR deficit */
+    u64 peer_mask;         /* Which peers can accept work */
+    u64 last_update_ns;    /* Last update timestamp */
+    u8 pad1[24];           /* Pad to 64-byte cache line */
+    
+    /* ─── EXTENDED DATA: Second 64 bytes (prefetched free) ─── */
+    u64 llc_neighbor_mask; /* Same-LLC CPUs */
+    u64 thermal_budget;    /* Future: power/thermal state */
+    u64 queued_tasks;      /* Tasks queued on this CPU */
+    u64 cache_pressure;    /* Future: cache contention metric */
+    u8 pad2[32];           /* Pad to 128 bytes total */
+} __attribute__((packed, aligned(128)));
+
 /* D2A signal line - moves signaling from IPI to L3 Cache Fabric, 64B aligned */
 struct cake_signal_mask {
     u64 signal_mask;
