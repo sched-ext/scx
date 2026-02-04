@@ -177,27 +177,19 @@ struct arbiter_config {
 #define MBOX_IS_IDLE(f)    ((f) & MBOX_IDLE_BIT)
 #define MBOX_IS_WARM(f)    ((f) & MBOX_WARM_BIT)
 
-/* 128-byte mega-mailbox entry (matches DDR5 BL16 burst size) */
+/* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency) */
 struct mega_mailbox_entry {
-    /* ─── HOT DATA: First 64 bytes (always read) ─── */
     u8 flags;              /* [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
     u8 best_victim_cpu;    /* Pre-computed best victim neighbor */
     u8 dsq_hint;           /* Suggested DSQ with work */
     u8 reserved1;          /* Reserved */
     u32 runtime_us;        /* Runtime in microseconds (victim quality) */
     u64 last_vtime;        /* Last dispatch vtime */
-    u64 deficit;           /* DRR deficit */
-    u64 peer_mask;         /* Which peers can accept work */
+    u64 deficit;           /* DRR deficit (future) */
+    u64 peer_mask;         /* Which peers can accept work (future) */
     u64 last_update_ns;    /* Last update timestamp */
-    u8 pad1[24];           /* Pad to 64-byte cache line */
-    
-    /* ─── EXTENDED DATA: Second 64 bytes (prefetched free) ─── */
-    u64 llc_neighbor_mask; /* Same-LLC CPUs */
-    u64 thermal_budget;    /* Future: power/thermal state */
-    u64 queued_tasks;      /* Tasks queued on this CPU */
-    u64 cache_pressure;    /* Future: cache contention metric */
-    u8 pad2[32];           /* Pad to 128 bytes total */
-} __attribute__((packed, aligned(128)));
+    u8 pad[16];            /* Pad to exact 64 bytes */
+} __attribute__((packed, aligned(64)));
 
 /* D2A signal line - moves signaling from IPI to L3 Cache Fabric, 64B aligned */
 struct cake_signal_mask {
