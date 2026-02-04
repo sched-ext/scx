@@ -180,16 +180,15 @@ struct arbiter_config {
 /* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency) */
 struct mega_mailbox_entry {
     u8 flags;              /* [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
-    u8 best_victim_cpu;    /* Pre-computed best victim neighbor */
+    u8 best_idle_cpu;      /* Pre-computed best idle neighbor for fast wakeup */
     u8 dsq_hint;           /* Suggested DSQ with work */
     u8 reserved1;          /* Reserved */
     u32 runtime_us;        /* Runtime in microseconds (victim quality) */
     u32 cached_now;        /* Cached scx_bpf_now() timestamp (tick updates) */
-    u32 reserved2;         /* Reserved for alignment */
+    u32 last_kick_ns;      /* Last kick timestamp (skip redundant kicks) */
     u64 cached_idle_mask;  /* Cached idle mask snapshot (reduces loop cost) */
+    u64 cached_victim_mask;/* Cached victim mask snapshot (reduces loop cost) */
     u64 last_vtime;        /* Last dispatch vtime */
-    u64 deficit;           /* DRR deficit (future) */
-    u8 pad[24];            /* Pad to exact 64 bytes */
 } __attribute__((packed, aligned(64)));
 
 /* D2A signal line - moves signaling from IPI to L3 Cache Fabric, 64B aligned */
