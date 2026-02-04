@@ -184,11 +184,12 @@ struct mega_mailbox_entry {
     u8 dsq_hint;           /* Suggested DSQ with work */
     u8 reserved1;          /* Reserved */
     u32 runtime_us;        /* Runtime in microseconds (victim quality) */
+    u32 cached_now;        /* Cached scx_bpf_now() timestamp (tick updates) */
+    u32 reserved2;         /* Reserved for alignment */
+    u64 cached_idle_mask;  /* Cached idle mask snapshot (reduces loop cost) */
     u64 last_vtime;        /* Last dispatch vtime */
     u64 deficit;           /* DRR deficit (future) */
-    u64 peer_mask;         /* Which peers can accept work (future) */
-    u64 last_update_ns;    /* Last update timestamp */
-    u8 pad[16];            /* Pad to exact 64 bytes */
+    u8 pad[24];            /* Pad to exact 64 bytes */
 } __attribute__((packed, aligned(64)));
 
 /* D2A signal line - moves signaling from IPI to L3 Cache Fabric, 64B aligned */
