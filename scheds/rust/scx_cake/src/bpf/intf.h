@@ -45,9 +45,9 @@ struct cake_core_state {
     u8 warm_tier;
     u8 victim_state;
     u8 staging_dsq;   /* Byte 3: Speculative DSQ ID for sibling */
-    /* Pad to 64 bytes for cache line isolation */
-    u8 __reserved[60];
-} __attribute__((aligned(64)));
+    /* M1: Pad to 128 bytes for Zen 5 pair prefetch guard */
+    u8 __reserved[124];
+} __attribute__((aligned(128)));
 
 /* Helper to extract full state in one u32 load */
 #define CORE_STATE_PACKED(occupant, warm, victim) \
@@ -70,8 +70,8 @@ struct cpu_topology_entry {
     /* T2 OPTIMIZATION: Pre-computed sibling mask for O(1) idle check */
     u64 sibling_bit;   /* Pre-computed (1ULL << sibling) or 0 if no sibling */
     u32 sibling_dsq;   /* Pre-computed (CAKE_DSQ_LC_BASE + sibling) or 0 */
-    u32 _pad_t2;       /* Align to 8-byte boundary */
-} __attribute__((packed));
+    u8 __pad[8];       /* M2: Explicit pad to 32 bytes (removed packed) */
+} __attribute__((aligned(32)));
 
 /* Topology flags */
 #define CPU_TOPO_FLAG_IS_BIG      (1 << 0)
@@ -159,9 +159,8 @@ struct arbiter_config {
 } __attribute__((aligned(64)));
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * MEGA-MAILBOX: DDR5-optimized per-CPU state (128 bytes = 1 DDR5 burst)
+ * MEGA-MAILBOX: Per-CPU state (64 bytes = single cache line)
  * - Zero false sharing: each CPU writes only to its own entry
- * - 100% DDR5 bandwidth efficiency: 128B aligned to BL16 burst size
  * - Prefetch-accelerated reads: one prefetch loads entire CPU state
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -177,7 +176,8 @@ struct arbiter_config {
 #define MBOX_IS_IDLE(f)    ((f) & MBOX_IDLE_BIT)
 #define MBOX_IS_WARM(f)    ((f) & MBOX_WARM_BIT)
 
-/* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency) */
+/* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency)
+ * All fields naturally aligned - no packed needed. Explicit padding to 64B. */
 struct mega_mailbox_entry {
     u8 flags;              /* [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
     u8 best_idle_cpu;      /* Pre-computed best idle neighbor for fast wakeup */
@@ -189,15 +189,8 @@ struct mega_mailbox_entry {
     u64 cached_idle_mask;  /* Cached idle mask snapshot (reduces loop cost) */
     u64 cached_victim_mask;/* Cached victim mask snapshot (reduces loop cost) */
     u64 last_vtime;        /* Last dispatch vtime */
-} __attribute__((packed, aligned(64)));
-
-/* D2A signal line - moves signaling from IPI to L3 Cache Fabric, 64B aligned */
-struct cake_signal_mask {
-    u64 signal_mask;
-    u8 _pad[56];
+    u8 __pad[24];          /* Explicit pad to 64B cache line */
 } __attribute__((aligned(64)));
-
-/* Legacy tiered idle tracking removed - leveraging kernel idle masks via kfuncs */
 
 /* Statistics shared with userspace */
 struct cake_stats {

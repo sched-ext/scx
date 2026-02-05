@@ -54,13 +54,6 @@
 
 #endif
 
-/* BPF atomic targeting - maps to BPF_ATOMIC_OR/AND via void-cast fetch variants (single LOCK OR/AND) */
-#define bpf_atomic_or(ptr, val) \
-    ((void)__atomic_fetch_or((ptr), (val), __ATOMIC_RELAXED))
-
-#define bpf_atomic_and(ptr, val) \
-    ((void)__atomic_fetch_and((ptr), (val), __ATOMIC_RELAXED))
-
 /* BMI2 BEXTR: Extract bitfield in 1 cycle; fallback: shift + mask (2 cycles) */
 #if defined(__BMI2__) && defined(__x86_64__)
     #define EXTRACT_BITS_U32(val, start, len) \
@@ -99,16 +92,13 @@
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * PREFETCH: Issue async memory prefetch to hide DDR5 latency (~100ns)
- * - Must be issued 500+ cycles before read for full benefit
- * - No-op if prefetch fails; graceful degradation to cold read
+ * PREFETCH: Materialize address early to encourage prefetch-like behavior
+ * - Forces compiler to compute the address, enabling earlier load scheduling
+ * - No "memory" clobber: avoids acting as a compiler barrier that would
+ *   flush store buffers and inhibit register caching / ILP / MLP
  * ═══════════════════════════════════════════════════════════════════════════ */
 #define CAKE_PREFETCH(addr) \
-    asm volatile("" : : "r"(addr) : "memory")
-/* Note: BPF doesn't support actual prefetch instructions (prefetcht0/prefetchnta).
- * This asm volatile creates a data dependency that encourages the compiler to
- * load the address early, providing some prefetch-like behavior. For full DRAM
- * prefetch, the kernel would need to expose a BPF helper. */
+    asm volatile("" : : "r"(addr))
 
 /* DSQ peek compat - v6.19+ uses native, older kernels use noinline iterator fallback */
 /* Prototype for scratch-tunneled version in cake.bpf.c */
