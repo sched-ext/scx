@@ -438,6 +438,12 @@ impl<'a> Scheduler<'a> {
         Self::init_cpus(&mut skel, &order);
         Self::init_cpdoms(&mut skel, &order);
 
+        // When there are multiple domains, hook the execve() syscall family
+        // to enable aggressive cross-domain migration when execve() is called.
+        if order.cpdom_map.len() > 1 {
+            Self::attach_execve_tracepoints(&mut skel)?;
+        }
+
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &order, debug_level);
 
@@ -511,6 +517,21 @@ impl<'a> Scheduler<'a> {
             (
                 "syscalls:sys_exit_futex_wake",
                 &skel.progs.rtp_sys_exit_futex_wake,
+            ),
+        ];
+
+        compat::cond_tracepoints_enable(tracepoints)
+    }
+
+    fn attach_execve_tracepoints(skel: &mut OpenBpfSkel) -> Result<bool> {
+        let tracepoints = vec![
+            (
+                "syscalls:sys_enter_execve",
+                &skel.progs.cond_hook_sys_enter_execve,
+            ),
+            (
+                "syscalls:sys_enter_execveat",
+                &skel.progs.cond_hook_sys_enter_execveat,
             ),
         ];
 

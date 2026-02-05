@@ -709,7 +709,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * let's use the chosen CPU.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if (likely(!__COMPAT_is_enq_cpu_selected(enq_flags))) {
 		struct pick_ctx ictx = {
 			.p = p,
 			.taskc = taskc,
@@ -720,7 +720,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 		cpu = pick_idle_cpu(&ictx, &is_idle);
 	} else {
-		cpu = scx_bpf_task_cpu(p);
+		cpu = task_cpu;
 		is_idle = test_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 		reset_task_flag(taskc, LAVD_FLAG_IDLE_CPU_PICKED);
 	}
@@ -732,6 +732,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	taskc->suggested_cpu_id = cpu;
 	taskc->cpdom_id = cpuc->cpdom_id;
+
+	/*
+	 * Clean up migration flags since the task placement decision was made.
+	 */
+	if (unlikely(test_task_flag_mask(taskc, LAVD_MASK_MIGRATION)))
+		reset_task_flag(taskc, LAVD_MASK_MIGRATION);
 
 	/*
 	 * Under the CPU bandwidth control with cpu.max, check if the cgroup
@@ -1749,8 +1755,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init_task, struct task_struct *p,
 
 	if (is_ksoftirqd(p))
 		set_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
-	else
-		reset_task_flag(taskc, LAVD_FLAG_KSOFTIRQD);
 
 	if (parent)
 		bpf_task_release(parent);
@@ -2217,6 +2221,54 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 void BPF_STRUCT_OPS(lavd_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
+}
+
+static
+int set_aggressive_migration(void)
+{
+	struct task_struct *curr;
+	struct cpdom_ctx *cpdc;
+	struct cpu_ctx *cpuc;
+	task_ctx *taskc;
+	u32 cpu;
+
+	/*
+	 * When a task is about to call execv() and the current CPU is
+	 * overloaded (is_stealee), set the LAVD_FLAG_MIGRATION_AGGRESSIVE
+	 * flag and preempt itself to trigger aggressive migration right
+	 * now.
+	 *
+	 * Self-preemption is not cheap because it issues a self-IPI.
+	 * We assume calling execve() is rare and we send an IPI only when
+	 * the domain is overloaded, so it should be okay.
+	 */
+	if (nr_cpdoms == 1)
+		return 0;
+
+	cpu = bpf_get_smp_processor_id();
+	if ((curr = bpf_get_current_task_btf()) &&
+	    (taskc = get_task_ctx(curr)) &&
+	    (cpuc = get_cpu_ctx_id(cpu)) &&
+	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id])) &&
+	    READ_ONCE(cpdc->is_stealee)) {
+		set_task_flag(taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+	}
+	return 0;
+}
+
+SEC("?tracepoint/syscalls/sys_enter_execve")
+int BPF_PROG(cond_hook_sys_enter_execve)
+{
+	set_aggressive_migration();
+	return 0;
+}
+
+SEC("?tracepoint/syscalls/sys_enter_execveat")
+int BPF_PROG(cond_hook_sys_enter_execveat)
+{
+	set_aggressive_migration();
+	return 0;
 }
 
 SCX_OPS_DEFINE(lavd_ops,

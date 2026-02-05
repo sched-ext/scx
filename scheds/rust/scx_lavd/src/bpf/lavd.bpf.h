@@ -128,7 +128,10 @@ enum consts_flags {
 	LAVD_FLAG_WOKEN_BY_RT_DL	= (0x1 << 11), /* woken by a RT/DL task */
 	LAVD_FLAG_WOKEN_BY_HARDIRQ	= (0x1 << 12), /* woken by a hardware interrupt */
 	LAVD_FLAG_WOKEN_BY_SOFTIRQ	= (0x1 << 13), /* woken by a softirq */
+	LAVD_FLAG_MIGRATION_AGGRESSIVE  = (0x1 << 14), /* immediate task migration is necessary. */
 };
+
+#define LAVD_MASK_MIGRATION		(LAVD_FLAG_MIGRATION_AGGRESSIVE)
 
 /*
  * Task context
@@ -395,6 +398,7 @@ u32 cpu_to_dsq(u32 cpu);
 void set_task_flag(task_ctx *taskc, u64 flag);
 void reset_task_flag(task_ctx *taskc, u64 flag);
 bool test_task_flag(task_ctx *taskc, u64 flag);
+bool test_task_flag_mask(task_ctx __arg_arena *taskc, u64 flag);
 void reset_task_flag(task_ctx *taskc, u64 flag);
 
 static __always_inline bool use_per_cpu_dsq(void)

@@ -510,15 +510,70 @@ bool is_sync_waker_idle(struct pick_ctx * ctx, s64 *cpdom_id)
 	return true;
 }
 
-__hidden
-s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
+static
+s32 migrate_to_neighbor(struct pick_ctx *ctx, struct cpdom_ctx *cpdc,
+			u64 scope, s64 *sticky_cpdom, bool *is_idle)
+{
+	struct cpdom_ctx *mig_cpdc;
+	s64 mig_cpdom, nr_nbr;
+	s32 cpu = -ENOENT;
+	int i, j;
+
+	/*
+	 * Let's migrate a task to neighbor domain when:
+	 *  1) The sticky domain is over-loaded (cpdc->is_stealee)
+	 *  2) The target domain is under-loaded (mig_cpdc->is_stealer)
+	 *     that has a fully idle core.
+	 *
+	 * Note that when a system is under-loaded, task donation works better
+	 * than task stealing because DSQs are mostly empty (i.e., it is hard
+	 * to steal from a DSQ).
+	 */
+	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
+		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		if (nr_nbr == 0)
+			break;
+		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
+			if (j >= nr_nbr)
+				break;
+			mig_cpdom = get_neighbor_id(cpdc, i, j);
+			if (mig_cpdom < 0)
+				continue;
+
+			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
+			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+				continue;
+
+			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, scope, is_idle);
+			if (cpu >= 0) {
+				/*
+				 * If task donation is successful, mark the stealer
+				 * and the stealee's job done. By marking done,
+				 * those compute domains would not be involved in
+				 * load balancing until the end of this round,
+				 * so this helps gradual migration. It is racy
+				 * in task stealings and donations, but we don't
+				 * care because a slight over-migration does not matter.
+				 */
+				WRITE_ONCE(mig_cpdc->is_stealer, false);
+				WRITE_ONCE(cpdc->is_stealee, false);
+				*sticky_cpdom = mig_cpdom;
+				break;
+			}
+		}
+	}
+
+	return cpu;
+}
+
+__hidden __noinline
+s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
-	struct cpdom_ctx *cpdc, *mig_cpdc;
 	s32 cpu = -ENOENT, sticky_cpu;
+	s64 sticky_cpdom = -ENOENT;
+	struct cpdom_ctx *cpdc;
 	bool i_smt_empty;
-	s64 sticky_cpdom = -ENOENT, mig_cpdom, nr_nbr;
-	int i, j;
 
 	/*
 	 * At the high level, the idle CPU selection policy considers the
@@ -702,61 +757,22 @@ s32 __attribute__ ((noinline)) pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle
 	 *  2) The sticky CPU or waker CPU is not idle.
 	 *  3) But there is at least one idle CPU in active/overflow set.
 	 *
+	 * Now, let’s consider migrating the task to the sticky domain’s
+	 * neighbor. If there is only one domain, let’s stay at the sticky
+	 * domain.
+	 * 
 	 * If there is a fully idle core in the system (i.e., !is_smt_empty),
-	 * let's migrate a task to another domain when
-	 *  1) The sticky domain is over-loaded (cpdc->is_stealee)
-	 *  2) The target domain is under-loaded (mig_cpdc->is_stealer)
-	 *     that has a fully idle core.
-	 *
-	 * Note that when a system is under-loaded, task donation works better
-	 * than task stealing because DSQs are mostly empty (i.e., it is hard
-	 * to steal from a DSQ).
+	 * let's try to migrate a task to another domain.
 	 */
-	if (i_smt_empty || nr_cpdoms == 1)
-		goto skip_fully_idle_neighbor;
-
-	cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]);
-	if (!cpdc || !READ_ONCE(cpdc->is_stealee))
-		goto skip_fully_idle_neighbor;
-
-	mig_cpdom = sticky_cpdom;
-	bpf_for(i, 0, LAVD_CPDOM_MAX_DIST) {
-		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
-		if (nr_nbr == 0)
-			break;
-		bpf_for(j, 0, LAVD_CPDOM_MAX_NR) {
-			if (j >= nr_nbr)
-				break;
-			mig_cpdom = get_neighbor_id(cpdc, i, j);
-			if (mig_cpdom < 0)
-				continue;
-
-			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
-			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
-				continue;
-
-			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, SCX_PICK_IDLE_CORE, is_idle);
-			if (cpu >= 0) {
-				/*
-				 * If task donation is successful, mark the stealer
-				 * and the stealee's job done. By marking done,
-				 * those compute domains would not be involved in
-				 * load balancing until the end of this round,
-				 * so this helps gradual migration. It is racy
-				 * in task stealings and donations, but we don't
-				 * care because a slight over-migration does not matter.
-				 */
-				WRITE_ONCE(mig_cpdc->is_stealer, false);
-				WRITE_ONCE(cpdc->is_stealee, false);
-				sticky_cpdom = mig_cpdom;
-				goto unlock_out;
-			}
-		}
+	if (!i_smt_empty && (nr_cpdoms > 1) &&
+	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
+	    READ_ONCE(cpdc->is_stealee)) {
+		cpu = migrate_to_neighbor(ctx, cpdc, SCX_PICK_IDLE_CORE,
+					  &sticky_cpdom, is_idle);
+		if (cpu >= 0)
+			goto unlock_out;
 	}
-skip_fully_idle_neighbor:
-	/* NOTE: There is no fully idle CPU in the neighboring domain,
-	 * it is not worth migrating. So try to find any idle CPU from
-	 * the sticky domain. */
+	/* NOTE: There is no fully idle CPU in the neighboring domain. */
 
 	/*
 	 * If there is an (partially) idle CPU in the sticky domain, stay on it.
@@ -766,6 +782,20 @@ skip_fully_idle_neighbor:
 	if (cpu >= 0)
 		goto unlock_out;
 	/* NOTE: There is no even partially idle CPU in the sticky domain. */
+
+	/*
+	 * If aggressive migration is preferred for the task (e.g., freshly
+	 * execv()-ed task), find a partially idle CPU from the sticky
+	 * domain’s neighbor.
+	 */
+	if ((nr_cpdoms > 1) &&
+	    test_task_flag(ctx->taskc, LAVD_FLAG_MIGRATION_AGGRESSIVE) &&
+	    (cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom])) &&
+	    READ_ONCE(cpdc->is_stealee)) {
+		cpu = migrate_to_neighbor(ctx, cpdc, 0, &sticky_cpdom, is_idle);
+		if (cpu >= 0)
+			goto unlock_out;
+	}
 
 	/*
 	 * Instead of chasing a partially idle CPU in neighboring domains,

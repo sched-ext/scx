@@ -164,6 +164,12 @@ bool test_task_flag(task_ctx __arg_arena *taskc, u64 flag)
 }
 
 __hidden
+bool test_task_flag_mask(task_ctx __arg_arena *taskc, u64 flag)
+{
+	return (taskc->flags & flag);
+}
+
+__hidden
 void set_task_flag(task_ctx __arg_arena *taskc, u64 flag)
 {
 	taskc->flags |= flag;
