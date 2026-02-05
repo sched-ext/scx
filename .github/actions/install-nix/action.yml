@@ -1,9 +1,12 @@
-name: 'Install Nix with caching'
-description: 'Install Nix and configure caching on both self-hosted and GitHub Hosted runners'
+---
+name: Install Nix with caching
+description: >-
+  Install Nix and configure caching on both self-hosted and GitHub Hosted
+  runners
 inputs:
   cachix-auth-token:
+    description: Cachix auth token
     required: true
-    type: string
 
 runs:
   using: "composite"

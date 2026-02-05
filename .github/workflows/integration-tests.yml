@@ -1,6 +1,7 @@
+---
 name: build-and-test
 
-on:
+'on':
   workflow_call:
     inputs:
       repo-name:
@@ -8,7 +9,10 @@ on:
 
 jobs:
   list-tests:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
@@ -23,16 +27,18 @@ jobs:
 
       - name: List tests
         id: output
-        run: nix run ./.nix#list-integration-tests -- "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
+        run: >-
+          nix run ./.nix#list-integration-tests -- "${{ inputs.repo-name }}"
+          >> "$GITHUB_OUTPUT"
 
   integration-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: list-tests
     strategy:
-          matrix:
-            scheduler: ${{ fromJson(needs.list-tests.outputs.matrix) }}
-          fail-fast: false
+      matrix:
+        scheduler: ${{ fromJson(needs.list-tests.outputs.matrix) }}
+      fail-fast: false
     steps:
       - uses: actions/checkout@v4
 
@@ -66,9 +72,16 @@ jobs:
               ')
           fi
 
-          echo "KERNEL_NAME=$KERNEL_NAME" >> $GITHUB_ENV
-          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
-          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
+          echo "KERNEL_NAME=$KERNEL_NAME" >> "$GITHUB_ENV"
+
+          KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths \
+            "./.nix#kernel_${KERNEL_NAME}")
+          echo "KERNEL_STORE_PATH=$KERNEL_STORE_PATH" >> "$GITHUB_ENV"
+
+          KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths \
+            "./.nix#kernel_${KERNEL_NAME}.headers")
+          echo "KERNEL_HEADERS_STORE_PATH=$KERNEL_HEADERS_STORE_PATH" \
+            >> "$GITHUB_ENV"
 
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -79,39 +92,54 @@ jobs:
             /usr/lib/virtiofsd
           key: virtiofsd-binary
       - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
-        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+        run: |
+          cargo install virtiofsd
+          sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # The actual build:
       - run: |
           if [ "${{ matrix.scheduler['name'] }}" == "scx_chaos" ]; then
-            SCHED_PATH=$(nix build --print-build-logs --print-out-paths ./.nix#scx_chaos)/bin/scx_chaos
+            SCHED_PATH=$(nix build --print-build-logs --print-out-paths \
+              ./.nix#scx_chaos)/bin/scx_chaos
           else
-            cargo build -p ${{ matrix.scheduler['name'] }}
+            cargo build -p "${{ matrix.scheduler['name'] }}"
             SCHED_PATH=target/debug/${{ matrix.scheduler['name'] }}
           fi
-          echo "SCHED_PATH=$SCHED_PATH" >> $GITHUB_ENV
+          echo "SCHED_PATH=$SCHED_PATH" >> "$GITHUB_ENV"
 
       # Print CPU model before running the tests (this can be useful for
       # debugging purposes)
       - run: grep 'model name' /proc/cpuinfo | head -1
-
       # Test schedulers
-      - run: .github/include/scripts/test_sched $KERNEL_STORE_PATH/bzImage $SCHED_PATH VNG_RW=true
-      # this is where errors we want logs on start occurring, so always generate debug info and save logs
+      # this is where errors we want logs on start occurring, so always generate
+      # debug info and save logs
+      - name: Test schedulers
         if: always()
+        run: >-
+          .github/include/scripts/test_sched "$KERNEL_STORE_PATH/bzImage"
+          "$SCHED_PATH" VNG_RW=true
       # Stress schedulers
       - uses: cytopia/shell-command-retry-action@v0.1.2
         name: stress test
         if: always()
         with:
           retries: 3
-          command: .github/include/scripts/run_stress_tests -k $KERNEL_STORE_PATH/bzImage --sched ${{ matrix.scheduler['name'] }} --sched-path $SCHED_PATH --rw true --headers $KERNEL_HEADERS_STORE_PATH --extra-scheduler-args "${{ matrix.scheduler['flags'] }}"
-      - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
+          command: >-
+            .github/include/scripts/run_stress_tests
+            -k "$KERNEL_STORE_PATH/bzImage"
+            --sched "${{ matrix.scheduler['name'] }}"
+            --sched-path "$SCHED_PATH"
+            --rw true
+            --headers "$KERNEL_HEADERS_STORE_PATH"
+            --extra-scheduler-args "${{ matrix.scheduler['flags'] }}"
+      - run: sudo cat /var/log/dmesg | tee host-dmesg.ci.log > /dev/null
         if: always()
       - run: mkdir -p ./log_save/
         if: always()
       # no symlink following here (to avoid cycle`s)
-      - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
+      - run: |
+          sudo find '/home/runner/' -iname '*.ci.log' \
+            -exec mv {} ./log_save/ \;
         if: always()
       - name: Set artifact name
         if: always()
@@ -121,7 +149,12 @@ jobs:
             KERNEL_CLEAN=$(echo "${{ matrix.scheduler.kernel }}" | tr '/' '_')
             KERNEL_SUFFIX="_${KERNEL_CLEAN}"
           fi
-          echo "ARTIFACT_NAME=${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}${KERNEL_SUFFIX}_logs_${{ github.run_id }}_${{ github.run_attempt }}" >> $GITHUB_ENV
+          SCHED_NAME="${{ matrix.scheduler['name'] }}"
+          SCHED_FLAGS="${{ matrix.scheduler['flags'] }}"
+          RUN_ID="${{ github.run_id }}"
+          RUN_ATTEMPT="${{ github.run_attempt }}"
+          ARTIFACT_NAME="${SCHED_NAME}${SCHED_FLAGS}${KERNEL_SUFFIX}_logs_${RUN_ID}_${RUN_ATTEMPT}"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
       - name: upload debug logs, bpftrace, dmesg, etc.
         if: always()
         uses: actions/upload-artifact@v4
@@ -133,11 +166,16 @@ jobs:
 
   all-success:
     needs: integration-test
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     if: always()
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@v4
       - run: nix run ./.nix#nix-develop-gha -- ./.nix#gha-build-kernels
-      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success")'
+      - run: |
+          echo "$NEEDS_CONTEXT" \
+            | jq -e 'to_entries | all(.value.result == "success")'

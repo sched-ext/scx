@@ -1,12 +1,16 @@
+---
 name: update-kernels
-on:
+'on':
   workflow_dispatch:
   schedule:
     - cron: '23 3 * * *'
 
 jobs:
   list-kernels:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
@@ -24,11 +28,14 @@ jobs:
         id: output
         run: |
           matrix=$(jq -c 'keys' kernel-versions.json)
-          echo $matrix
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   update-kernels:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    runs-on: >-
+      ${{ github.repository_owner == 'sched-ext' &&
+          fromJSON('["self-hosted","linux","x64","metal:nixos"]') ||
+          'ubuntu-latest' }}
     needs: list-kernels
     strategy:
       matrix:
@@ -55,11 +62,11 @@ jobs:
           INITIAL_COMMIT=$(git rev-parse HEAD)
 
           git switch -c "deps/kernel/${{ matrix.version }}"
-          nix run ./.nix#update-kernels -- ${{ matrix.version }}
+          nix run ./.nix#update-kernels -- "${{ matrix.version }}"
 
           FINAL_COMMIT=$(git rev-parse HEAD)
           if [ "$INITIAL_COMMIT" != "$FINAL_COMMIT" ]; then
-            echo 'modified=true' >> $GITHUB_ENV
+            echo 'modified=true' >> "$GITHUB_ENV"
           fi
 
       - name: Open PR
@@ -70,11 +77,14 @@ jobs:
           # we own these branches, force push is fine
           git push --force origin "HEAD:deps/kernel/${{ matrix.version }}"
 
-          PR_IDS=$(gh pr list --head $(git rev-parse --abbrev-ref HEAD) --json id)
-          if echo $PR_IDS | jq -e '. == []'; then
+          HEAD_REF=$(git rev-parse --abbrev-ref HEAD)
+          PR_IDS=$(gh pr list --head "$HEAD_REF" --json id)
+          if echo "$PR_IDS" | jq -e '. == []'; then
             gh pr create --fill
           else
             echo "PR already exists, updating description..."
-            gh pr edit --title "$(git log -1 --pretty=%s)" --body "$(git log -1 --pretty=%b)"
+            gh pr edit \
+              --title "$(git log -1 --pretty=%s)" \
+              --body "$(git log -1 --pretty=%b)"
           fi
           gh pr merge --auto
