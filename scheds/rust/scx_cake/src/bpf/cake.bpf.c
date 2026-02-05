@@ -42,8 +42,6 @@ const struct arbiter_config arbiter_cfg;
 /* De Bruijn constant for CTZ - hoisted to RODATA for JIT immediate embedding */
 const u64 DB_MAGIC = 0x022FDD63CC95386DULL;
 
-/* D2A Signal Mask - REMOVED (A+B+D architecture makes this redundant) */
-
 /* Fused core state - replaces cpu_tier/shadow arrays, 128-byte aligned to prevent MESI storms */
 struct cake_core_state global_core_state[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 
@@ -53,29 +51,6 @@ struct cake_core_state global_core_state[CAKE_MAX_CPUS] SEC(".bss") __attribute_
 #define STATE_GET_VICTIM(s)    ((u8)(((s) >> 16) & 0xFF))
 #define STATE_GET_STAGING_PRIO(s)   ((u8)(((s) >> 24) & 0xFF))
 #define STATE_CLEAR_STAGING         0x00FFFFFF  /* Mask to zero out byte 3 */
-
-/* Global victim mask - shadow heuristic, relaxed atomics OK (missed bit = missed opportunity, safe) */
-struct {
-    u64 mask;
-    u64 pad[15]; /* Pad to 128 bytes */
-} victim_global SEC(".bss") __attribute__((aligned(128)));
-
-/* Accessor macro for victim_mask */
-#define victim_mask (victim_global.mask)
-
-/* Global idle mask shadow - tracks idle CPUs to avoid scx_bpf_get_idle_cpumask() kfunc overhead */
-struct {
-    u64 mask;
-    u64 pad[15];
-} idle_global SEC(".bss") __attribute__((aligned(128)));
-#define global_idle_mask (idle_global.mask)
-
-/* T1: Tier availability bitmap - O(1) dispatch via CTZ(tier_avail & ~warm_mask) */
-struct {
-    u64 mask;
-    u64 pad[7];
-} tier_avail_global SEC(".bss") __attribute__((aligned(64)));
-#define tier_available_mask (tier_avail_global.mask)
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
@@ -119,63 +94,34 @@ struct cake_scratch {
     u32 cached_cpu_id;                  /* Cross-callback CPU ID cache */
     u8 _pad[24]; /* Pad to 128 bytes (2 cache lines) */
 } global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
+_Static_assert(sizeof(struct cake_scratch) <= 128,
+    "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
 
-/* Per-CPU shadow state - 64-byte aligned to prevent micro-stutter from false sharing */
-struct cake_cpu_shadow {
-    u32 packed_state;  /* Bit 0: idle, Bit 1: victim (1-cycle RMW) */
-    u8 _pad[60];       /* Pad to 64 bytes - cache line isolation */
-} __attribute__((aligned(64)));
-
-/* Shadow state bit positions */
-#define SHADOW_BIT_VICTIM (1U << 1)
-#define SHADOW_HINT_CPU_SHIFT  8   /* Bits 8-13: Last-idle-core hint (logical CPU 0-63) */
-#define SHADOW_HINT_CPU_MASK   0x3F /* 6 bits for CPU 0-63 */
-#define SHADOW_WARM_TIER_SHIFT 16  /* Bits 16-18: Last successful dispatch tier (0-6) */
-#define SHADOW_WARM_TIER_MASK  0x7 /* 3 bits for tier 0-6 */
-
-/* MESI-friendly tier update - skip write if unchanged to avoid cache line invalidation */
-static __always_inline void update_occupant_tier(struct cake_core_state *state, u8 tier)
+/* MESI-friendly tier update - caller passes already-loaded packed state to avoid redundant volatile load */
+static __always_inline void update_occupant_tier(u32 *packed_ptr, u32 old_packed, u8 tier)
 {
-    /* ATOMIC UPDATER: Updates occupant tier byte only */
-    u32 *packed = (u32 *)state;
-    u32 old = cake_relaxed_load_u32(packed);
-    u32 new_val = (old & 0xFFFFFF00) | tier;
-    cake_relaxed_store_u32(packed, new_val);
+    u32 new_val = (old_packed & 0xFFFFFF00) | tier;
+    cake_relaxed_store_u32(packed_ptr, new_val);
 }
 
 /* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(256)));
 
-/* Global CPU shadow state - direct 1-cycle access, 128-byte aligned */
-
 /* BSS tail guard - absorbs BTF truncation bugs instead of corrupting real data */
 u8 __bss_tail_guard[64] SEC(".bss") __attribute__((aligned(64)));
 
-/* get_shadow_state() removed - use direct BSS: &global_shadow[cpu_idx & (CAKE_MAX_CPUS - 1)] */
-
-/* TTAS gating - prevents LOCK prefix stalling pipeline if bit already in desired state */
-#define TTAS_BIT_SET(target, bit) \
-    do { \
-        if (!(cake_relaxed_load_u64(target) & (bit))) \
-            bpf_atomic_or(target, bit); \
-    } while (0)
-
-#define TTAS_BIT_CLEAR(target, bit) \
-    do { \
-        if (cake_relaxed_load_u64(target) & (bit)) \
-            bpf_atomic_and(target, ~(bit)); \
-    } while (0)
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * MAILBOX MASK BUILDERS: Replace atomic globals with per-CPU mailbox reads
- * - O(16) loop but zero contention vs O(1) but 16-way atomic contention
- * - With DDR5-6000 CL30: ~64 cycles (13ns) vs 50-200ns atomic penalty
+ * - O(nr_cpus) loop, zero contention vs O(1) with N-way atomic contention
+ * - nr_cpus_total is RODATA: JIT constant-folds the break, eliminating
+ *   iterations beyond the actual CPU count at load time
  * ═══════════════════════════════════════════════════════════════════════════ */
 static __always_inline u64 build_idle_mask_from_mailbox(void)
 {
     u64 mask = 0;
     #pragma unroll
-    for (u32 i = 0; i < 16; i++) {
+    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
+        if (i >= nr_cpus_total) break;
         if (MBOX_IS_IDLE(mega_mailbox[i].flags))
             mask |= (1ULL << i);
     }
@@ -186,7 +132,8 @@ static __always_inline u64 build_victim_mask_from_mailbox(void)
 {
     u64 mask = 0;
     #pragma unroll
-    for (u32 i = 0; i < 16; i++) {
+    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
+        if (i >= nr_cpus_total) break;
         if (MBOX_IS_VICTIM(mega_mailbox[i].flags))
             mask |= (1ULL << i);
     }
@@ -279,19 +226,21 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
     u8 best_tier = 0;
     s32 best_cpu = -1;
 
-    /* Scan only first 16 CPUs (verifier-friendly bounded loop) */
+    /* M3: Rotate start by prev to distribute IPI load across CPUs */
     #pragma unroll
-    for (u32 i = 0; i < 16; i++) {
-        if (!(candidate_mask & (1ULL << i)))
+    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
+        if (i >= nr_cpus_total) break;
+        u32 idx = (prev + i) % nr_cpus_total;
+        if (!(candidate_mask & (1ULL << idx)))
             continue;
-        u8 flags = mega_mailbox[i].flags;
+        u8 flags = mega_mailbox[idx].flags;
         u8 tier = MBOX_GET_TIER(flags);
 
         /* Prefer idle > victim > none; within category, prefer higher tier */
         bool is_candidate = MBOX_IS_IDLE(flags) || MBOX_IS_VICTIM(flags);
-        if (is_candidate && tier >= best_tier) {
+        if (is_candidate && tier > best_tier) {
             best_tier = tier;
-            best_cpu = (s32)i;
+            best_cpu = (s32)idx;
         }
     }
 
@@ -485,7 +434,6 @@ s32 select_cpu_new_task_cold(struct task_struct *p, s32 prev_cpu, u64 wake_flags
 
     asm volatile("" : "+r"(p_pin), "+r"(prev_pin), "+r"(wake_pin));
     u32 tc_id = bpf_get_smp_processor_id();
-    asm volatile("" : "+r"(p_pin), "+r"(prev_pin), "+r"(wake_pin));
 
     struct cake_scratch *scr = &global_scratch[tc_id & (CAKE_MAX_CPUS - 1)];
     return scx_bpf_select_cpu_dfl(p_pin, prev_pin, wake_pin, &scr->dummy_idle);
@@ -502,12 +450,7 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
     if (!ctx) return NULL;
 
     /* NIBBLE SEEDING: One-time classification */
-    u64 head = *(u64 *)p->comm;
-    const char *comm = p->comm;
-    bool is_softirq = !(head ^ 0x71726974666F736BULL);
-    bool is_worker  = !(head ^ 0x2F72656B726F776BULL) & (comm[8] != 'u');
-    bool is_irq     = !((head & 0xFFFFFFFFULL) ^ 0x2F717269ULL);
-    bool critical   = is_softirq | is_worker | is_irq;
+    bool critical = is_critical_kthread(p);
 
     ctx->next_slice = quantum_ns;
     u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
@@ -614,7 +557,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         if (scratch_cpu < CAKE_MAX_CPUS) {
             scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + scratch_cpu,
                                tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-            /* NO KICK: We're on scratch_cpu, waker blocks → natural reschedule */
+            /* H1: Prevent thundering herd - clear bit so next SYNC won't pick same CPU */
+            mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scratch_cpu);
             return (s32)scratch_cpu;
         }
     }
@@ -641,7 +585,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (idles & prev_bit) {
         scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->dsq_id,
                            tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-        /* No kick needed - target is idle */
+        /* H1: Prevent thundering herd - clear bit in waker's mailbox */
+        mega_mailbox[scratch_cpu].cached_idle_mask &= ~prev_bit;
         return (s32)b_prev;
     }
 
@@ -650,12 +595,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (sib_bit & idles) {
         scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->sibling_dsq,
                            tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-        /* No kick needed - target is idle */
+        /* H1: Prevent thundering herd - clear sibling bit in waker's mailbox */
+        mega_mailbox[scratch_cpu].cached_idle_mask &= ~sib_bit;
         return (s32)topo_prev->sibling;
     }
-
-    /* RE-PIN BARRIER: Force registers before scan/arbiter */
-    asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg), "+r"(qp), "+r"(idles));
 
     /* TIER 3: Global scan - find any idle CPU */
     if (idles) {
@@ -664,7 +607,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             u32 scan_dsq = CAKE_DSQ_LC_BASE + (scan_cpu & 63);
             scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, scan_dsq,
                                tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-            /* No kick needed - found via idle mask */
+            /* H1: Prevent thundering herd - clear scanned CPU bit */
+            mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scan_cpu);
             return scan_cpu;
         }
     }
@@ -762,20 +706,26 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 
     /* 1. Check per-CPU direct dispatch mailbox first (highest priority) */
     if (scx_bpf_dsq_move_to_local(CAKE_DSQ_LC_BASE + cpu)) {
-        /* MAILBOX ONLY: Clear idle flag (no atomic contention) */
-        mega_mailbox[cpu].flags &= ~MBOX_IDLE_BIT;
+        /* H3: MESI-friendly - skip write if already not-idle */
+        u8 old_flags = mega_mailbox[cpu].flags;
+        if (old_flags & MBOX_IDLE_BIT)
+            mega_mailbox[cpu].flags = old_flags & ~MBOX_IDLE_BIT;
         return;
     }
 
     /* 2. A+B: Single unified DSQ scan (vtime-ordered by tier) */
     if (scx_bpf_dsq_move_to_local(UNIFIED_DSQ)) {
-        /* MAILBOX ONLY: Clear idle flag (no atomic contention) */
-        mega_mailbox[cpu].flags &= ~MBOX_IDLE_BIT;
+        /* H3: MESI-friendly - skip write if already not-idle */
+        u8 old_flags = mega_mailbox[cpu].flags;
+        if (old_flags & MBOX_IDLE_BIT)
+            mega_mailbox[cpu].flags = old_flags & ~MBOX_IDLE_BIT;
         return;
     }
 
-    /* No work - mark idle in mailbox (no atomic contention) */
-    mega_mailbox[cpu].flags |= MBOX_IDLE_BIT;
+    /* No work - H3: skip write if already idle */
+    u8 old_flags = mega_mailbox[cpu].flags;
+    if (!(old_flags & MBOX_IDLE_BIT))
+        mega_mailbox[cpu].flags = old_flags | MBOX_IDLE_BIT;
 }
 
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
@@ -822,11 +772,11 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
 
     /* Victim eligibility is now computed later in mailbox update section */
 
-    /* Update Occupant Tier (for legacy compatibility, will be removed) */
-    struct cake_core_state *state = &global_core_state[cpu_id_reg];
-    u32 packed = cake_relaxed_load_u32((u32 *)state);
-    if (tier_reg != STATE_GET_OCCUPANT(packed)) {
-        update_occupant_tier(state, tier_reg);
+    /* Update Occupant Tier - single load, skip write if unchanged (MESI-friendly) */
+    u32 *core_packed_ptr = (u32 *)&global_core_state[cpu_id_reg];
+    u32 core_packed = cake_relaxed_load_u32(core_packed_ptr);
+    if (tier_reg != STATE_GET_OCCUPANT(core_packed)) {
+        update_occupant_tier(core_packed_ptr, core_packed, tier_reg);
     }
 
     /* ═══════════════════════════════════════════════════════════════════════
@@ -847,24 +797,23 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     if (runtime < cached_threshold_ns)
         new_flags |= MBOX_WARM_BIT;
 
-    /* Single byte store - no atomics needed (we own this cache line) */
-    mbox->flags = new_flags;
-    mbox->runtime_us = (u32)(runtime >> 10);  /* Runtime in µs */
+    /* AMORTIZED MASK CACHING: Alternate idle/victim rebuild across ticks
+     * - Halves cross-CPU coherency traffic (N reads/tick instead of 2N)
+     * - Stale mask is at most 1 tick old -- missed idle/victim = next tick catches it
+     * - now bit 0 is ~1ms granularity, free toggle with zero branch overhead */
+    u64 idle_snap = mbox->cached_idle_mask;   /* Preserve stale as default */
+    u64 victim_snap = mbox->cached_victim_mask;
 
-    /* KFUNC CACHING: Store timestamp for cross-CPU reuse (saves 80 cycles) */
-    mbox->cached_now = now;
+    if (now & 1) {
+        idle_snap = build_idle_mask_from_mailbox();
+    } else {
+        victim_snap = build_victim_mask_from_mailbox();
+    }
 
-    /* MASK CACHING: Build once per tick, wakeup reads cached (saves 64 cycles total) */
-    u64 idle_snap = build_idle_mask_from_mailbox();
-    u64 victim_snap = build_victim_mask_from_mailbox();
-    mbox->cached_idle_mask = idle_snap;
-    mbox->cached_victim_mask = victim_snap;
-
-    /* BEST IDLE HINT: Pre-compute best idle CPU for fast wakeup (saves ~40 cycles) */
+    /* BEST IDLE HINT: Pre-compute before stores so we can write monotonically */
+    u8 hint = 0xFF;  /* Invalid = no hint */
     if (idle_snap) {
-        /* Use topology-aware selection: check our ETD peers first */
         const struct cpu_topology_entry *t = &cpu_topo[cpu_id_reg];
-        u8 hint = 0xFF;  /* Invalid = no hint */
         if (t->peer_1 < 64 && (idle_snap & (1ULL << t->peer_1)))
             hint = t->peer_1;
         else if (t->peer_2 < 64 && (idle_snap & (1ULL << t->peer_2)))
@@ -873,8 +822,17 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
             hint = t->peer_3;
         else if (idle_snap)
             hint = (u8)BIT_SCAN_FORWARD_U64_RAW(idle_snap, DB_MAGIC);
-        mbox->best_idle_cpu = hint;
     }
+
+    /* MONOTONIC STORE BURST: Ascending offsets for optimal write combining
+     * [0]=flags, [1]=best_idle_cpu, [4]=runtime_us, [8]=cached_now,
+     * [16]=cached_idle_mask, [24]=cached_victim_mask */
+    mbox->flags = new_flags;
+    mbox->best_idle_cpu = hint;
+    mbox->runtime_us = (u32)(runtime >> 10);
+    mbox->cached_now = now;
+    mbox->cached_idle_mask = idle_snap;
+    mbox->cached_victim_mask = victim_snap;
 }
 
 /* Task enabled (joining sched_ext) */
@@ -883,13 +841,15 @@ void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
     /* No initialization needed - context created on first use */
 }
 
-/* Task stopping (yielding/blocking) - MAILBOX ONLY: Zero atomic contention */
+/* Task stopping (yielding/blocking) - H2: MESI-friendly skip-if-unchanged */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
-    /* MAILBOX ONLY: Clear victim bit (no atomics - we own this entry) */
-    mega_mailbox[cpu].flags &= ~MBOX_VICTIM_BIT;
+    /* H2: Read first, skip write if victim bit already clear */
+    u8 old_flags = mega_mailbox[cpu].flags;
+    if (old_flags & MBOX_VICTIM_BIT)
+        mega_mailbox[cpu].flags = old_flags & ~MBOX_VICTIM_BIT;
 }
 
 /* Task disabled (leaving sched_ext) - MAILBOX ONLY cleanup */
