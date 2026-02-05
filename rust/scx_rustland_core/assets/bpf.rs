@@ -515,24 +515,19 @@ impl<'cb> BpfScheduler<'cb> {
     // Receive a task to be scheduled from the BPF dispatcher.
     #[allow(static_mut_refs)]
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
+        let bss_data = self.skel.maps.bss_data.as_mut().unwrap();
+        
         // Try to consume the first task from the ring buffer.
         match self.queued.consume_raw_n(1) {
             0 => {
                 // Ring buffer is empty.
-                self.skel.maps.bss_data.as_mut().unwrap().nr_queued = 0;
+                bss_data.nr_queued = 0;
                 Ok(None)
             }
             1 => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
-                self.skel.maps.bss_data.as_mut().unwrap().nr_queued = self
-                    .skel
-                    .maps
-                    .bss_data
-                    .as_ref()
-                    .unwrap()
-                    .nr_queued
-                    .saturating_sub(1);
+                bss_data.nr_queued = bss_data.nr_queued.saturating_sub(1);
 
                 Ok(Some(task))
             }
