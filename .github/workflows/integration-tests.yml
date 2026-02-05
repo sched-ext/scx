@@ -67,8 +67,8 @@ jobs:
           fi
 
           echo "KERNEL_NAME=$KERNEL_NAME" >> $GITHUB_ENV
-          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
-          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#kernel_${KERNEL_NAME})" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.nix#kernel_${KERNEL_NAME}.headers)" >> $GITHUB_ENV
 
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -82,7 +82,8 @@ jobs:
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # The actual build:
-      - run: |
+      - name: Build scheduler
+        run: |
           if [ "${{ matrix.scheduler['name'] }}" == "scx_chaos" ]; then
             SCHED_PATH=$(nix build --print-build-logs --print-out-paths ./.nix#scx_chaos)/bin/scx_chaos
           else
@@ -90,22 +91,31 @@ jobs:
             SCHED_PATH=target/debug/${{ matrix.scheduler['name'] }}
           fi
           echo "SCHED_PATH=$SCHED_PATH" >> $GITHUB_ENV
+          echo "Built scheduler at: $SCHED_PATH"
 
       # Print CPU model before running the tests (this can be useful for
       # debugging purposes)
       - run: grep 'model name' /proc/cpuinfo | head -1
 
-      # Test schedulers
-      - run: .github/include/scripts/test_sched $KERNEL_STORE_PATH/bzImage $SCHED_PATH VNG_RW=true
-      # this is where errors we want logs on start occurring, so always generate debug info and save logs
+      # Debug: print environment variables
+      - name: Debug environment variables
         if: always()
+        run: |
+          echo "KERNEL_STORE_PATH=${{ env.KERNEL_STORE_PATH }}"
+          echo "SCHED_PATH=${{ env.SCHED_PATH }}"
+          echo "KERNEL_HEADERS_STORE_PATH=${{ env.KERNEL_HEADERS_STORE_PATH }}"
+
+      # Test schedulers
+      - run: .github/include/scripts/test_sched ${{ env.KERNEL_STORE_PATH }}/bzImage ${{ env.SCHED_PATH }} VNG_RW=true
+      # this is where errors we want logs on start occurring, so always generate debug info and save logs
+        if: always() && env.SCHED_PATH != '' && env.KERNEL_STORE_PATH != ''
       # Stress schedulers
       - uses: cytopia/shell-command-retry-action@v0.1.2
         name: stress test
-        if: always()
+        if: always() && env.SCHED_PATH != '' && env.KERNEL_STORE_PATH != '' && env.KERNEL_HEADERS_STORE_PATH != ''
         with:
           retries: 3
-          command: .github/include/scripts/run_stress_tests -k $KERNEL_STORE_PATH/bzImage --sched ${{ matrix.scheduler['name'] }} --sched-path $SCHED_PATH --rw true --headers $KERNEL_HEADERS_STORE_PATH --extra-scheduler-args "${{ matrix.scheduler['flags'] }}"
+          command: .github/include/scripts/run_stress_tests -k ${{ env.KERNEL_STORE_PATH }}/bzImage --sched ${{ matrix.scheduler['name'] }} --sched-path ${{ env.SCHED_PATH }} --rw true --headers ${{ env.KERNEL_HEADERS_STORE_PATH }} --extra-scheduler-args "${{ matrix.scheduler['flags'] }}"
       - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
         if: always()
       - run: mkdir -p ./log_save/
