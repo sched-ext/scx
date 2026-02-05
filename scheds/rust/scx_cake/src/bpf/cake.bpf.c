@@ -252,12 +252,12 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
 {
     u32 idx = prev & 63;
     const struct cpu_topology_entry *t = &topo[idx];
-    
+
     /* 1. Check ETD peers first (locality-optimal) */
     u8 p1 = t->peer_1;
     u8 p2 = t->peer_2;
     u8 p3 = t->peer_3;
-    
+
     /* Read mailbox status for peers (prefetched during earlier work) */
     if (p1 < 64 && (candidate_mask & (1ULL << p1))) {
         u8 flags = mega_mailbox[p1].flags;
@@ -274,11 +274,11 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
         if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
             return (s32)p3;
     }
-    
+
     /* 2. Quality-aware fallback: find highest tier (best to preempt) */
     u8 best_tier = 0;
     s32 best_cpu = -1;
-    
+
     /* Scan only first 16 CPUs (verifier-friendly bounded loop) */
     #pragma unroll
     for (u32 i = 0; i < 16; i++) {
@@ -286,7 +286,7 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
             continue;
         u8 flags = mega_mailbox[i].flags;
         u8 tier = MBOX_GET_TIER(flags);
-        
+
         /* Prefer idle > victim > none; within category, prefer higher tier */
         bool is_candidate = MBOX_IS_IDLE(flags) || MBOX_IS_VICTIM(flags);
         if (is_candidate && tier >= best_tier) {
@@ -294,7 +294,7 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
             best_cpu = (s32)i;
         }
     }
-    
+
     /* 3. If quality search failed, use rotated CTZ to avoid CPU 0 bias */
     if (best_cpu < 0 && candidate_mask) {
         /* Rotate mask by prev to distribute selection */
@@ -303,7 +303,7 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
         u32 offset = BIT_SCAN_FORWARD_U64_RAW(rotated, DB_MAGIC);
         best_cpu = (s32)((shift + offset) & 63);
     }
-    
+
     return best_cpu;
 }
 
@@ -572,10 +572,10 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     register u64 idles asm("r9");
 
     asm volatile("%[out] = r1" : [out]"=r"(ctx_reg));
-    
+
     /* MEGA-MAILBOX PREFETCH: Issue early to hide DDR5 latency (~500 cycles) */
     CAKE_PREFETCH(&mega_mailbox[0]);
-    
+
     tctx_reg = get_task_ctx(*(struct task_struct **)ctx_reg, false);
 
     if (unlikely(!tctx_reg)) {
@@ -821,7 +821,7 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     }
 
     /* Victim eligibility is now computed later in mailbox update section */
-    
+
     /* Update Occupant Tier (for legacy compatibility, will be removed) */
     struct cake_core_state *state = &global_core_state[cpu_id_reg];
     u32 packed = cake_relaxed_load_u32((u32 *)state);
@@ -835,31 +835,31 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      * - Pre-computes best_idle_cpu hint (saves ~40 cycles on wakeup)
      * ═══════════════════════════════════════════════════════════════════════ */
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu_id_reg];
-    
+
     /* Victim eligibility: runtime >= 1ms AND tier >= Interactive */
     bool is_victim = (runtime >> VICTIM_RESIDENCY_BIT) &&
                      (tier_reg >= REALTIME_DSQ && tier_reg <= BATCH_DSQ);
-    
+
     /* Pack flags: [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
     u8 new_flags = (tier_reg & MBOX_TIER_MASK);
     if (is_victim)
         new_flags |= MBOX_VICTIM_BIT;
     if (runtime < cached_threshold_ns)
         new_flags |= MBOX_WARM_BIT;
-    
+
     /* Single byte store - no atomics needed (we own this cache line) */
     mbox->flags = new_flags;
     mbox->runtime_us = (u32)(runtime >> 10);  /* Runtime in µs */
-    
+
     /* KFUNC CACHING: Store timestamp for cross-CPU reuse (saves 80 cycles) */
     mbox->cached_now = now;
-    
+
     /* MASK CACHING: Build once per tick, wakeup reads cached (saves 64 cycles total) */
     u64 idle_snap = build_idle_mask_from_mailbox();
     u64 victim_snap = build_victim_mask_from_mailbox();
     mbox->cached_idle_mask = idle_snap;
     mbox->cached_victim_mask = victim_snap;
-    
+
     /* BEST IDLE HINT: Pre-compute best idle CPU for fast wakeup (saves ~40 cycles) */
     if (idle_snap) {
         /* Use topology-aware selection: check our ETD peers first */
@@ -887,7 +887,7 @@ void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    
+
     /* MAILBOX ONLY: Clear victim bit (no atomics - we own this entry) */
     mega_mailbox[cpu].flags &= ~MBOX_VICTIM_BIT;
 }
