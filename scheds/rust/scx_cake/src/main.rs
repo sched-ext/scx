@@ -298,19 +298,22 @@ impl Args {
 
 /// Compute average migration cost (in nanoseconds) per rank from ETD latency matrix.
 /// Rank 0 = SMT sibling, Rank 1-3 = topologically close peers, Rank 4+ = global.
-fn compute_rank_costs_from_etd(latency_matrix: &[Vec<f64>], topo: &topology::TopologyInfo) -> [u64; 8] {
+fn compute_rank_costs_from_etd(
+    latency_matrix: &[Vec<f64>],
+    topo: &topology::TopologyInfo,
+) -> [u64; 8] {
     let nr_cpus = topo.nr_cpus;
     let mut costs = [0u64; 8];
     let mut counts = [0u64; 8];
-    
+
     for src in 0..nr_cpus {
         for dst in 0..nr_cpus {
             if src == dst {
                 continue;
             }
-            
+
             let latency_ns = (latency_matrix[src][dst] * 1000.0) as u64; // Convert µs to ns
-            
+
             // Determine rank based on topology relationship
             let rank = if topo.cpu_sibling_map[src] == dst as u8 {
                 0 // SMT sibling
@@ -333,12 +336,12 @@ fn compute_rank_costs_from_etd(latency_matrix: &[Vec<f64>], topo: &topology::Top
                     6
                 }
             };
-            
+
             costs[rank] += latency_ns;
             counts[rank] += 1;
         }
     }
-    
+
     // Compute averages, with fallback defaults if no samples
     let defaults = [50, 100, 200, 400, 600, 800, 1000, 1200];
     for i in 0..8 {
@@ -348,7 +351,7 @@ fn compute_rank_costs_from_etd(latency_matrix: &[Vec<f64>], topo: &topology::Top
             costs[i] = defaults[i];
         }
     }
-    
+
     costs
 }
 
@@ -398,15 +401,15 @@ impl<'a> Scheduler<'a> {
             // Populate Zero-Math Arbiter LUT with ETD-informed costs + break-even analysis
             // Strategy 1+2+3: Use actual measured latency, finer quantization, optimal thresholds
             let wait_budgets = args.profile.wait_budget();
-            
+
             // Compute average migration cost per rank from ETD matrix
             let avg_cost_per_rank = compute_rank_costs_from_etd(&latency_matrix, &topo);
-            
+
             for (tier, &budget) in wait_budgets.iter().enumerate().take(8) {
                 for rank in 0..8 {
                     // Strategy 1: Use ETD-measured latency instead of hardcoded values
                     let migration_cost_ns = avg_cost_per_rank[rank];
-                    
+
                     // Strategy 3: Break-even analysis - compute optimal threshold
                     let threshold = if tier == 0 {
                         // Tier 0 (Critical Latency): Always migrate, never wait
@@ -417,19 +420,19 @@ impl<'a> Scheduler<'a> {
                     } else {
                         // Compute savings ratio: how much of budget is saved by migrating?
                         let savings_ratio = ((budget - migration_cost_ns) * 100) / budget.max(1);
-                        
+
                         // Strategy 2: Finer quantization - use all 7 threshold levels
                         match savings_ratio {
-                            0..=14 => 6,    // <15% savings: wait for tier 6+ occupant
-                            15..=28 => 5,   // 15-28% savings: wait for tier 5+ occupant
-                            29..=42 => 4,   // 29-42% savings: wait for tier 4+ occupant
-                            43..=56 => 3,   // 43-56% savings: wait for tier 3+ occupant
-                            57..=70 => 2,   // 57-70% savings: wait for tier 2+ occupant
-                            71..=85 => 1,   // 71-85% savings: wait for tier 1+ occupant
-                            _ => 0,         // >85% savings: migrate freely
+                            0..=14 => 6,  // <15% savings: wait for tier 6+ occupant
+                            15..=28 => 5, // 15-28% savings: wait for tier 5+ occupant
+                            29..=42 => 4, // 29-42% savings: wait for tier 4+ occupant
+                            43..=56 => 3, // 43-56% savings: wait for tier 3+ occupant
+                            57..=70 => 2, // 57-70% savings: wait for tier 2+ occupant
+                            71..=85 => 1, // 71-85% savings: wait for tier 1+ occupant
+                            _ => 0,       // >85% savings: migrate freely
                         }
                     };
-                    
+
                     rodata.arbiter_cfg.lut[tier][rank] = threshold;
                 }
             }
