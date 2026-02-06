@@ -208,7 +208,7 @@ struct cpdom_ctx {
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
-	u16	nr_responsive_cpus;		    /* number of CPUs with lat_capacity >= LAVD_LC_RESPONSIVE_THRESHOLD */
+	u16	nr_responsive_cpus;		    /* number of CPUs with lat_capacity >= latcrit_responsive_thresh */
 
 } __attribute__((aligned(CACHELINE_SIZE)));
 
@@ -424,6 +424,9 @@ static __always_inline bool use_cpdom_dsq(void)
 	return !per_cpu_dsq;
 }
 
+extern const volatile u16 latcrit_responsive_thresh;
+extern const volatile u16 latcrit_task_thresh;
+
 /*
  * is_responsive - Check if a CPU has sufficient latency capacity
  * @cpuc: CPU context to check
@@ -433,7 +436,7 @@ static __always_inline bool use_cpdom_dsq(void)
  */
 static __always_inline bool is_responsive(struct cpu_ctx *cpuc)
 {
-	return cpuc->lat_capacity >= LAVD_LC_RESPONSIVE_THRESHOLD;
+	return cpuc->lat_capacity >= latcrit_responsive_thresh;
 }
 
 bool queued_on_cpu(struct cpu_ctx *cpuc);

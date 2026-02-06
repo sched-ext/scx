@@ -46,6 +46,8 @@ const volatile bool	per_cpu_dsq;
 const volatile bool	enable_cpu_bw;
 const volatile bool	is_autopilot_on;
 const volatile u8	verbose;
+const volatile u16	latcrit_responsive_thresh = 675;
+const volatile u16	latcrit_task_thresh = 880;
 
 /*
  * Exit information
@@ -342,7 +344,7 @@ u64 get_target_dsq_id(struct task_struct *p, struct cpu_ctx *cpuc, task_ctx *tas
 	 * Route latency-critical tasks to the latency-critical DSQ.
 	 * These tasks will only be consumed by responsive cores.
 	 */
-	if (taskc && taskc->normalized_lat_cri >= LAVD_LC_LATENCY_SENSITIVE_THRESH)
+	if (taskc && taskc->normalized_lat_cri >= latcrit_task_thresh)
 		return cpdom_latcrit_dsq(cpuc->cpdom_id);
 
 	return cpdom_to_dsq(cpuc->cpdom_id);

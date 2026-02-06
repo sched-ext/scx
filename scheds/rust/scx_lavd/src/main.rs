@@ -153,6 +153,18 @@ struct Opts {
     #[clap(long = "preempt-shift", default_value = "6", value_parser=Opts::preempt_shift_range)]
     preempt_shift: u8,
 
+    /// Latency capacity threshold for marking a CPU as "responsive" (0-1200).
+    /// CPUs with lat_capacity >= this threshold are considered responsive
+    /// and eligible for latency-critical task placement. Default is 675 (~66%).
+    #[clap(long = "latcrit-responsive-thresh", default_value = "675", value_parser=Opts::latcrit_responsive_thresh_range)]
+    latcrit_responsive_thresh: u16,
+
+    /// Latency criticality threshold for marking a task as latency-sensitive (0-1024).
+    /// Tasks with normalized_lat_cri >= this threshold are routed to the
+    /// latency-critical DSQ. Default is 880 (top ~14% most latency-critical).
+    #[clap(long = "latcrit-task-thresh", default_value = "880", value_parser=Opts::latcrit_task_thresh_range)]
+    latcrit_task_thresh: u16,
+
     /// List of CPUs in preferred order (e.g., "0-3,7,6,5,4"). The scheduler
     /// uses the CPU preference mode only when the core compaction is enabled
     /// (i.e., balanced or powersave mode is specified as an option or chosen
@@ -363,6 +375,14 @@ impl Opts {
 
     fn preempt_shift_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 10)
+    }
+
+    fn latcrit_responsive_thresh_range(s: &str) -> Result<u16, String> {
+        number_range(s, 0, 1200)
+    }
+
+    fn latcrit_task_thresh_range(s: &str) -> Result<u16, String> {
+        number_range(s, 0, 1024)
     }
 
     fn mig_delta_pct_range(s: &str) -> Result<u8, String> {
@@ -618,6 +638,8 @@ impl<'a> Scheduler<'a> {
         rodata.slice_min_ns = opts.slice_min_us * 1000;
         rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
         rodata.preempt_shift = opts.preempt_shift;
+        rodata.latcrit_responsive_thresh = opts.latcrit_responsive_thresh;
+        rodata.latcrit_task_thresh = opts.latcrit_task_thresh;
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_wake_sync = opts.no_wake_sync;

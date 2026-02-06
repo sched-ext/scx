@@ -587,7 +587,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * have restricted CPU placement.
 	 */
 	if (cpu_id >= 0 &&
-	    ictx.taskc->normalized_lat_cri >= LAVD_LC_LATENCY_SENSITIVE_THRESH &&
+	    ictx.taskc->normalized_lat_cri >= latcrit_task_thresh &&
 	    !is_pinned(p)) {
 		struct bpf_cpumask *lat_avail_mask = bpf_cpumask_create();
 		if (lat_avail_mask) {
@@ -721,7 +721,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * have restricted CPU placement.
 		 */
 		if (cpu >= 0 &&
-		    taskc->normalized_lat_cri >= LAVD_LC_LATENCY_SENSITIVE_THRESH &&
+		    taskc->normalized_lat_cri >= latcrit_task_thresh &&
 		    !is_pinned(p)) {
 			struct bpf_cpumask *lat_avail_mask = bpf_cpumask_create();
 			if (lat_avail_mask) {
