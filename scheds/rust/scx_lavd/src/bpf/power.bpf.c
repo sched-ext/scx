@@ -159,7 +159,7 @@ void update_effective_capacity(struct cpu_ctx *cpuc)
 	mfo = __sync_val_compare_and_swap(&cpuc->max_freq_observed,
 					  cpuc->max_freq_observed, 0);
 	if ((mfo > 0) && ((cpuc->max_freq < mfo) ||
-	    (cpuc->cur_util >= LAVD_CPU_UTIL_THR_FOR_MAX_FREQ))) {
+	    (cpuc->cur_util_wall >= LAVD_CPU_UTIL_THR_FOR_MAX_FREQ))) {
 		cpuc->max_freq = calc_avg32(cpuc->max_freq, mfo);
 	}
 	capacity_observed = (cpuc->max_capacity * cpuc->max_freq) >> LAVD_SHIFT;
@@ -243,10 +243,10 @@ static u64 calc_required_capacity(void)
 	 * given the scaled utilization is defined as follows:
 	 *
 	 * req_cpacity = total_compute_capaticy * scaled_utilization
-	 *             = (nr_cpus_onln * 1024) * (avg_sc_util / 1024)
+	 *             = (nr_cpus_onln * 1024) * (avg_util_invr / 1024)
 	 *             = nr_cpus_only * scaled_utilization
 	 */
-	return nr_cpus_onln * sys_stat.avg_sc_util;
+	return nr_cpus_onln * sys_stat.avg_util_invr;
 }
 
 static u64 get_human_readable_avg_sc_util(u64 avg_sc_util)
@@ -548,7 +548,7 @@ static int do_set_power_profile(s32 pm)
 	/*
 	 * Change the power mode.
 	 */
-	hr_sc = get_human_readable_avg_sc_util(sys_stat.avg_sc_util);
+	hr_sc = get_human_readable_avg_sc_util(sys_stat.avg_util_invr);
 	switch (pm) {
 	case LAVD_PM_PERFORMANCE:
 		no_core_compaction = true;
@@ -836,7 +836,7 @@ unlock_out:
 __hidden
 int update_cpuperf_target(struct cpu_ctx *cpuc)
 {
-	u32 util, max_util, cpuperf_target;
+	u32 util_wall, max_util_wall, cpuperf_target;
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
@@ -845,10 +845,10 @@ int update_cpuperf_target(struct cpu_ctx *cpuc)
 	 * LAVD_CPU_UTIL_MAX_FOR_CPUPERF (85%), ceil to 100%.
 	 */
 	if (!no_freq_scaling) {
-		max_util = max(cpuc->avg_util, cpuc->cur_util);
-		util = (max_util < LAVD_CPU_UTIL_MAX_FOR_CPUPERF) ? max_util
-								  : LAVD_SCALE;
-		cpuperf_target = (util * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
+		max_util_wall = max(cpuc->avg_util_wall, cpuc->cur_util_wall);
+		util_wall = (max_util_wall < LAVD_CPU_UTIL_MAX_FOR_CPUPERF) ?
+				max_util_wall : LAVD_SCALE;
+		cpuperf_target = (util_wall * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
 	} else
 		cpuperf_target = SCX_CPUPERF_ONE;
 

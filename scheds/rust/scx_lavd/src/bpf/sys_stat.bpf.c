@@ -70,8 +70,8 @@ struct sys_stat_ctx {
 	u64		max_perf_cri;
 	u64		sum_perf_cri;
 	u32		thr_perf_cri;
-	u32		cur_util;
-	u32		cur_sc_util;
+	u32		cur_util_wall;
+	u32		cur_util_invr;
 };
 
 static struct sys_stat_ctx ctx;
@@ -104,8 +104,8 @@ static void collect_sys_stat(void)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-		cpdomc->cur_util_sum = 0;
-		cpdomc->avg_util_sum = 0;
+		cpdomc->cur_util_wall_sum = 0;
+		cpdomc->avg_util_wall_sum = 0;
 		cpdomc->nr_queued_task = 0;
 
 		if (use_cpdom_dsq())
@@ -187,13 +187,13 @@ static void collect_sys_stat(void)
 		 * Calculate per-CPU utilization.
 		 */
 		compute_wall = time_delta(c->duration_wall, cpuc->idle_total_wall);
-		cpuc->cur_util = (compute_wall << LAVD_SHIFT) / c->duration_wall;
-		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
+		cpuc->cur_util_wall = (compute_wall << LAVD_SHIFT) / c->duration_wall;
+		cpuc->avg_util_wall = calc_asym_avg(cpuc->avg_util_wall, cpuc->cur_util_wall);
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 		if (cpdomc) {
-			cpdomc->cur_util_sum += cpuc->cur_util;
-			cpdomc->avg_util_sum += cpuc->avg_util;
+			cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
+			cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
 		}
 
 		/*
@@ -215,9 +215,9 @@ static void collect_sys_stat(void)
 		 * (RT/DL), IRQ times, etc.
 		 */
 		cpuc_tot_task_time_invr = cpuc->tot_task_time_invr + sc_non_scx_time_invr;
-		cpuc->cur_sc_util = (cpuc_tot_task_time_invr << LAVD_SHIFT) /
-				    c->duration_wall;
-		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
+		cpuc->cur_util_invr = (cpuc_tot_task_time_invr << LAVD_SHIFT) /
+					c->duration_wall;
+		cpuc->avg_util_invr = calc_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
 		cpuc->tot_task_time_invr = 0;
 
 		/*
@@ -229,7 +229,7 @@ static void collect_sys_stat(void)
 		/*
 		 * Track the scaled time when the utilization spikes happened.
 		 */
-		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
+		if (cpuc->cur_util_wall > LAVD_CC_UTIL_SPIKE)
 			c->tsct_spike_invr += cpuc_tot_task_time_invr;
 	}
 
@@ -340,7 +340,7 @@ static void calc_sys_stat(void)
 {
 	struct sys_stat_ctx *c = &ctx;
 	static int cnt = 0;
-	u64 avg_svc_time_wwgt = 0, cur_sc_util, scu_spike_invr;
+	u64 avg_svc_time_wwgt = 0, cur_util_invr, scu_spike_invr;
 
 	/*
 	 * Calculate the CPU utilization that includes everything
@@ -348,15 +348,15 @@ static void calc_sys_stat(void)
 	 */
 	c->duration_total_wall = c->duration_wall * nr_cpus_onln;
 	c->compute_total_wall = time_delta(c->duration_total_wall, c->idle_total_wall);
-	c->cur_util = (c->compute_total_wall << LAVD_SHIFT) / c->duration_total_wall;
+	c->cur_util_wall = (c->compute_total_wall << LAVD_SHIFT) / c->duration_total_wall;
 
 	/*
 	 * Calculate the scaled CPU utilization that includes everything
 	 * — scx tasks, non-scx tasks (e.g., RT/DL), IRQ, etc.
 	 */
-	cur_sc_util = (c->tot_task_time_invr << LAVD_SHIFT) / c->duration_total_wall;
-	if (cur_sc_util > c->cur_util)
-		cur_sc_util = min(sys_stat.avg_sc_util, c->cur_util);
+	cur_util_invr = (c->tot_task_time_invr << LAVD_SHIFT) / c->duration_total_wall;
+	if (cur_util_invr > c->cur_util_wall)
+		cur_util_invr = min(sys_stat.avg_util_invr, c->cur_util_wall);
 
 	/*
 	 *
@@ -384,7 +384,7 @@ static void calc_sys_stat(void)
 	 */
 	scu_spike_invr = (c->tsct_spike_invr << (LAVD_SHIFT - 1)) /
 				c->duration_total_wall;
-	c->cur_sc_util = min(cur_sc_util + scu_spike_invr, LAVD_SCALE);
+	c->cur_util_invr = min(cur_util_invr + scu_spike_invr, LAVD_SCALE);
 
 	/*
 	 * Update min/max/avg.
@@ -412,8 +412,8 @@ static void calc_sys_stat(void)
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
-	sys_stat.avg_util = calc_asym_avg(sys_stat.avg_util, c->cur_util);
-	sys_stat.avg_sc_util = calc_asym_avg(sys_stat.avg_sc_util, c->cur_sc_util);
+	sys_stat.avg_util_wall = calc_asym_avg(sys_stat.avg_util_wall, c->cur_util_wall);
+	sys_stat.avg_util_invr = calc_asym_avg(sys_stat.avg_util_invr, c->cur_util_invr);
 	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
 	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
 	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -
