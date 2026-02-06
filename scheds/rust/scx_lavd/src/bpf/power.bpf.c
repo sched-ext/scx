@@ -885,18 +885,18 @@ u16 get_cpuperf_cap(s32 cpu)
 	return 0;
 }
 
-u64 scale_cap_max_freq(u64 dur, s32 cpu)
+u64 conv_wall_to_invr_max_freq(u64 duration_wall, s32 cpu)
 {
-	u64 cap, scaled_dur;
+	u64 cap, duration_invr;
 
 	/*
 	 * Scale the duration by CPU capacity and its max frequency,
 	 * so calculate capacity-invariant time duration.
 	 */
 	cap = get_cpuperf_cap(cpu);
-	scaled_dur = (dur * cap) >> LAVD_SHIFT;
+	duration_invr = (duration_wall * cap) >> LAVD_SHIFT;
 
-	return scaled_dur;
+	return duration_invr;
 }
 
 static void do_update_autopilot_high_cap(void)

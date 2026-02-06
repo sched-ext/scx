@@ -480,7 +480,7 @@ static void account_task_runtime(struct task_struct *p,
 	runtime_wall = exec_delta_wall;
 
 	task_time_wwgt = runtime_wall / p->scx.weight;
-	task_time_invr = scale_cap_freq(runtime_wall, cpuc);
+	task_time_invr = conv_wall_to_invr(runtime_wall, cpuc);
 
 	WRITE_ONCE(cpuc->tot_task_time_wall, cpuc->tot_task_time_wall + task_time_wall);
 	WRITE_ONCE(cpuc->tot_task_time_wwgt, cpuc->tot_task_time_wwgt + task_time_wwgt);
@@ -1619,7 +1619,7 @@ void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
 	 * utilization.
 	 */
 	duration_wall = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
-	duration_invr = scale_cap_freq(duration_wall, cpuc);
+	duration_invr = conv_wall_to_invr(duration_wall, cpuc);
 	cpuc->tot_task_time_invr += duration_invr;
 
 	/*
