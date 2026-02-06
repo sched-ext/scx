@@ -181,9 +181,9 @@ pub struct SchedSample {
     #[stat(desc = "Target performance level of this CPU")]
     pub cpuperf_cur: u32,
     #[stat(desc = "CPU utilization of this CPU")]
-    pub cpu_util: u64,
-    #[stat(desc = "Scaled CPU utilization of this CPU")]
-    pub cpu_sutil: u64,
+    pub cpu_util_wall: u64,
+    #[stat(desc = "Invariant CPU utilization of this CPU scaled by CPU capacity and frequency")]
+    pub cpu_util_invr: u64,
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
     #[stat(desc = "DSQ ID where this task was dispatched from")]
@@ -260,8 +260,8 @@ impl SchedSample {
             self.perf_cri,
             self.thr_perf_cri,
             self.cpuperf_cur,
-            self.cpu_util,
-            self.cpu_sutil,
+            self.cpu_util_wall,
+            self.cpu_util_invr,
             self.nr_active,
             self.dsq_id,
             self.dsq_consume_lat,

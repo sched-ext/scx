@@ -233,7 +233,7 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 	if (!cpuc0 || !cpuc1)
 		return ctx->prev_cpu;
 
-	return (cpuc0->cur_sc_util < cpuc1->cur_sc_util) ? cpu0 : cpu1;
+	return (cpuc0->cur_util_invr < cpuc1->cur_util_invr) ? cpu0 : cpu1;
 }
 
 static

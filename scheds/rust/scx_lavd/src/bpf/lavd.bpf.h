@@ -224,8 +224,8 @@ struct cpdom_ctx {
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
 	u32	sc_load;			    /* scaled load considering DSQ length and CPU utilization */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
-	u32	cur_util_sum;			    /* the sum of CPU utilization in the current interval */
-	u32	avg_util_sum;			    /* the sum of average CPU utilization */
+	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
+	u32	avg_util_wall_sum;		    /* the sum of average CPU utilization */
 	u32	cap_sum_active_cpus;		    /* the sum of capacities of active CPUs in this domain */
 	u32	cap_sum_temp;			    /* temp for cap_sum_active_cpus */
 	u32	dsq_consume_lat;		    /* latency to consume from dsq, shows how contended the dsq is */
@@ -288,13 +288,13 @@ struct cpu_ctx {
 	volatile u32	nr_lat_cri;
 	volatile u32	nr_pinned_tasks; /* the number of pinned tasks waiting for running on this CPU */
 	volatile s32	futex_op;	/* futex op in futex V1 */
-	volatile u32	avg_util;	/* average of the CPU utilization */
-	volatile u32	cur_util;	/* CPU utilization of the current interval */
+	volatile u32	avg_util_wall;	/* average of the CPU utilization (based on wall clock time) */
+	volatile u32	cur_util_wall;	/* CPU utilization of the current interval (based on wall clock time) */
 	u32		cpuperf_cur;	/* CPU's current performance target */
 
 	/* --- cacheline 2 boundary (128 bytes) --- */
-	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
-	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
+	volatile u32	avg_util_invr;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
+	volatile u32	cur_util_invr;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
 	volatile u64	idle_total_wall;/* total idle time so far (wall clock time) */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */

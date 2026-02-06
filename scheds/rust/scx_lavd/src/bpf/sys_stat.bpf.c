@@ -104,8 +104,8 @@ static void collect_sys_stat(void)
 			break;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-		cpdomc->cur_util_sum = 0;
-		cpdomc->avg_util_sum = 0;
+		cpdomc->cur_util_wall_sum = 0;
+		cpdomc->avg_util_wall_sum = 0;
 		cpdomc->nr_queued_task = 0;
 
 		if (use_cpdom_dsq())
@@ -187,13 +187,13 @@ static void collect_sys_stat(void)
 		 * Calculate per-CPU utilization.
 		 */
 		compute_wall = time_delta(c->duration_wall, cpuc->idle_total_wall);
-		cpuc->cur_util = (compute_wall << LAVD_SHIFT) / c->duration_wall;
-		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
+		cpuc->cur_util_wall = (compute_wall << LAVD_SHIFT) / c->duration_wall;
+		cpuc->avg_util_wall = calc_asym_avg(cpuc->avg_util_wall, cpuc->cur_util_wall);
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 		if (cpdomc) {
-			cpdomc->cur_util_sum += cpuc->cur_util;
-			cpdomc->avg_util_sum += cpuc->avg_util;
+			cpdomc->cur_util_wall_sum += cpuc->cur_util_wall;
+			cpdomc->avg_util_wall_sum += cpuc->avg_util_wall;
 		}
 
 		/*
@@ -215,9 +215,9 @@ static void collect_sys_stat(void)
 		 * (RT/DL), IRQ times, etc.
 		 */
 		cpuc_tot_task_time_invr = cpuc->tot_task_time_invr + sc_non_scx_time_invr;
-		cpuc->cur_sc_util = (cpuc_tot_task_time_invr << LAVD_SHIFT) /
-				    c->duration_wall;
-		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
+		cpuc->cur_util_invr = (cpuc_tot_task_time_invr << LAVD_SHIFT) /
+					c->duration_wall;
+		cpuc->avg_util_invr = calc_avg(cpuc->avg_util_invr, cpuc->cur_util_invr);
 		cpuc->tot_task_time_invr = 0;
 
 		/*
@@ -229,7 +229,7 @@ static void collect_sys_stat(void)
 		/*
 		 * Track the scaled time when the utilization spikes happened.
 		 */
-		if (cpuc->cur_util > LAVD_CC_UTIL_SPIKE)
+		if (cpuc->cur_util_wall > LAVD_CC_UTIL_SPIKE)
 			c->tsct_spike_invr += cpuc_tot_task_time_invr;
 	}
 
