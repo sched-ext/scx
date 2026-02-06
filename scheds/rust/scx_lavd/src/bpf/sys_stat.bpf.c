@@ -205,7 +205,7 @@ static void collect_sys_stat(void)
 		 * its maximum while running non-SCX tasks.
 		 */
 		non_scx_time_wall = time_delta(compute_wall, cpuc->tot_task_time_wall);
-		sc_non_scx_time_invr = scale_cap_max_freq(non_scx_time_wall, cpu);
+		sc_non_scx_time_invr = conv_wall_to_invr_max_freq(non_scx_time_wall, cpu);
 		cpuc->tot_task_time_wall = 0;
 
 		/*
