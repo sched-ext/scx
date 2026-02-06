@@ -65,34 +65,13 @@ struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
 #define GET_CRITICAL_RAW(packed) EXTRACT_BITS_U32(packed, SHIFT_CRITICAL, 1)
 #define GET_CRITICAL(ctx) GET_CRITICAL_RAW(cake_relaxed_load_u32(&(ctx)->packed_info))
 
-/* QUAD-PACK: r8 as 4x16-bit vector [prev:6|dsq:16|pinfo:16|wake:16] */
-static __always_inline u32 QP_GET_PREV(u64 qp) {
-    u32 res;
-    asm volatile("%[out] = %[in]; %[out] &= 0x3F" : [out]"=r"(res) : [in]"r"(qp));
-    return res;
-}
-/* QP_GET_DSQ removed - T2 optimization uses topo_prev->dsq_id directly */
-static __always_inline u32 QP_GET_TIER(u64 qp) {
-    u32 res;
-    asm volatile("%[out] = %[in]; %[out] >>= 39; %[out] &= 0x7" : [out]"=r"(res) : [in]"r"(qp));
-    return res;
-}
-static __always_inline u32 QP_GET_WAKE(u64 qp) {
-    u32 res;
-    asm volatile("%[out] = %[in]; %[out] >>= 48; %[out] &= 0xFFFF" : [out]"=r"(res) : [in]"r"(qp));
-    return res;
-}
-
 /* Per-CPU scratch area - BSS-tunneled helper outputs, isolated to prevent MESI contention */
 struct cake_scratch {
     bool dummy_idle;
     u32 init_tier;
     u32 init_critical;
     struct bpf_iter_scx_dsq it; /* BSS-Tunneling for iterators */
-    struct cake_task_ctx *cached_tctx;  /* Kfunc yo-yo reduction: cache between select_cpu→enqueue */
-    struct task_struct *cached_task;    /* Validate cache belongs to same task */
-    u32 cached_cpu_id;                  /* Cross-callback CPU ID cache */
-    u8 _pad[24]; /* Pad to 128 bytes (2 cache lines) */
+    u8 _pad[44]; /* Pad to 128 bytes (2 cache lines) */
 } global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
@@ -230,7 +209,8 @@ static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
     #pragma unroll
     for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
         if (i >= nr_cpus_total) break;
-        u32 idx = (prev + i) % nr_cpus_total;
+        u32 idx = (prev + i) & (CAKE_MAX_CPUS - 1);
+        if (idx >= nr_cpus_total) idx -= nr_cpus_total;
         if (!(candidate_mask & (1ULL << idx)))
             continue;
         u8 flags = mega_mailbox[idx].flags;
@@ -508,11 +488,9 @@ s32 select_cpu_t0_victim_cold(void *ctx_reg, struct cake_task_ctx *tctx, u32 scr
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
-    /* Register layout: r6=ctx, r7=tctx, r8=QUAD-PACK, r9=idle_mask */
+    /* Register layout: r6=ctx, r7=tctx (r8-r9 free for compiler allocation) */
     register void *ctx_reg asm("r6");
     register struct cake_task_ctx *tctx_reg asm("r7");
-    register u64 qp asm("r8");
-    register u64 idles asm("r9");
 
     asm volatile("%[out] = r1" : [out]"=r"(ctx_reg));
 
@@ -527,94 +505,74 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                                       *(u64 *)((u8 *)ctx_reg + 16));
     }
 
-    /* KFUNC YO-YO REDUCTION: Cache tctx + CPU ID for enqueue/sync-wake to reuse */
-    u32 scratch_cpu;
-    {
-        scratch_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-        struct cake_scratch *scr = &global_scratch[scratch_cpu];
-        scr->cached_tctx = tctx_reg;
-        scr->cached_task = *(struct task_struct **)ctx_reg;
-        scr->cached_cpu_id = scratch_cpu;  /* Cache for cross-callback reuse */
-    }
+    u32 scratch_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
 
-    /* ATOMIC QUAD-PACK INITIALIZATION [R6.1] Removed dead dsq_id slot */
-    {
-        u32 b_p = (u32)*(s32 *)((u8 *)ctx_reg + 8) & (CAKE_MAX_CPUS - 1);
-        u32 pinf = tctx_reg->packed_info;
-        qp =  (u64)b_p;                                    /* Slot 0: prev_cpu (6 bits) */
-        qp |= (u64)(pinf >> 16) << 32;                     /* Slot 2: tier+flags (16 bits) */
-        qp |= (u64)(u16)*(u64 *)((u8 *)ctx_reg + 16) << 48; /* Slot 3: wake_flags (16 bits) */
-    }
+    /* BARRIER: Refresh r6/r7 after kfunc calls */
+    asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg));
 
-    /* BARRIER: Finalize pinned state before calls */
-    asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg), "+r"(qp));
-
-    /* cake_accounting_core removed - fully async in tick */
-
-    /* Sync check - QP-SLOT 3: Direct dispatch to current CPU */
-    if (QP_GET_WAKE(qp) & SCX_WAKE_SYNC) {
-        /* Reuse cached CPU ID instead of second kfunc call */
-        if (scratch_cpu < CAKE_MAX_CPUS) {
-            scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + scratch_cpu,
-                               tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-            /* H1: Prevent thundering herd - clear bit so next SYNC won't pick same CPU */
-            mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scratch_cpu);
-            return (s32)scratch_cpu;
-        }
-    }
-
-    /* CACHED IDLE MASK: Read from any CPU's mailbox (tick updates it) - saves 28 cycles */
-    idles = mega_mailbox[scratch_cpu].cached_idle_mask;
-
-    /* BARRIER: Preserve idles in r9 */
-    asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg), "+r"(qp), "+r"(idles));
-
-    /* Variables removed - branchless selection doesn't need them */
+    u64 wake = *(u64 *)((u8 *)ctx_reg + 16);
 
     /* ═══════════════════════════════════════════════════════════════════════════
-     * OPT-2: TIERED SHORT-CIRCUIT (Zen 5 Dual-Path Speculation Optimized)
-     * - Prev/sibling idle = 90% of wakeups → skip arbiter entirely
-     * - Zen 5 speculates both branch paths in parallel, ~1-2 cycle branch cost
-     * - Net savings: ~15-20 cycles when fast path taken
+     * SYNC FAST PATH: Direct dispatch to waker's CPU (~69ns)
+     * - Checked first: skips b_prev/idle_mask/topo loads for ~60% of wakeups
      * ═══════════════════════════════════════════════════════════════════════════ */
-    u32 b_prev = QP_GET_PREV(qp);
-    const struct cpu_topology_entry *topo_prev = &cpu_topo[b_prev];
-    u64 prev_bit = (1ULL << b_prev);
+    if (wake & SCX_WAKE_SYNC) {
+        scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + scratch_cpu,
+                           tctx_reg->next_slice, wake);
+        /* H1: Prevent thundering herd - clear bit so next SYNC won't pick same CPU */
+        mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scratch_cpu);
+        return (s32)scratch_cpu;
+    }
 
-    /* TIER 1: Prev CPU idle - highest priority, ~60 cycle path */
+    /* ═══════════════════════════════════════════════════════════════════════════
+     * IDLE CPU SELECTION: Prev → Sibling → Global scan → Victim → Arbiter
+     * ═══════════════════════════════════════════════════════════════════════════ */
+    u32 b_prev = (u32)*(s32 *)((u8 *)ctx_reg + 8) & (CAKE_MAX_CPUS - 1);
+    const struct cpu_topology_entry *topo_prev = &cpu_topo[b_prev];
+    u64 idles = mega_mailbox[scratch_cpu].cached_idle_mask;
+
+    /* TIER 1: Prev CPU idle - highest priority */
+    u64 prev_bit = (1ULL << b_prev);
     if (idles & prev_bit) {
         scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->dsq_id,
-                           tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-        /* H1: Prevent thundering herd - clear bit in waker's mailbox */
+                           tctx_reg->next_slice, wake);
         mega_mailbox[scratch_cpu].cached_idle_mask &= ~prev_bit;
         return (s32)b_prev;
     }
 
-    /* TIER 2: Sibling idle - second priority, ~60 cycle path */
+    /* TIER 2: Sibling idle */
     u64 sib_bit = topo_prev->sibling_bit;
     if (sib_bit & idles) {
         scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->sibling_dsq,
-                           tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-        /* H1: Prevent thundering herd - clear sibling bit in waker's mailbox */
+                           tctx_reg->next_slice, wake);
         mega_mailbox[scratch_cpu].cached_idle_mask &= ~sib_bit;
         return (s32)topo_prev->sibling;
     }
 
-    /* TIER 3: Global scan - find any idle CPU */
+    /* TIER 3: Global scan - hint fast path then O(N) fallback */
     if (idles) {
-        s32 scan_cpu = find_victim_mailbox(b_prev, idles, cpu_topo);
+        s32 scan_cpu = -1;
+
+        /* Fast path: use pre-computed best_idle_cpu hint (~1 byte load vs O(N) scan) */
+        u8 hint = mega_mailbox[scratch_cpu].best_idle_cpu;
+        if (hint < 64 && (idles & (1ULL << hint)))
+            scan_cpu = (s32)hint;
+
+        /* Slow path: full quality-aware scan only if hint missed */
+        if (scan_cpu < 0)
+            scan_cpu = find_victim_mailbox(b_prev, idles, cpu_topo);
+
         if (scan_cpu >= 0) {
             u32 scan_dsq = CAKE_DSQ_LC_BASE + (scan_cpu & 63);
             scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, scan_dsq,
-                               tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-            /* H1: Prevent thundering herd - clear scanned CPU bit */
+                               tctx_reg->next_slice, wake);
             mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scan_cpu);
             return scan_cpu;
         }
     }
 
     /* T0 VICTIM FALLBACK: Critical Latency tasks try victim steal before arbiter */
-    if (QP_GET_TIER(qp) == CRITICAL_LATENCY_DSQ) {
+    if ((GET_TIER(tctx_reg) & 7) == CRITICAL_LATENCY_DSQ) {
         s32 victim_cpu = select_cpu_t0_victim_cold(ctx_reg, tctx_reg, scratch_cpu, b_prev);
         if (victim_cpu >= 0)
             return victim_cpu;
@@ -625,7 +583,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     u32 arbiter_dsq = cpu_topo[arbiter_cpu & 63].dsq_id;
 
     scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, arbiter_dsq,
-                       tctx_reg->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
+                       tctx_reg->next_slice, wake);
 
     /* Arbiter path always needs kick - no idle CPUs available */
     scx_bpf_kick_cpu((u32)arbiter_cpu & 63, SCX_KICK_PREEMPT);
@@ -641,19 +599,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
     /* KFUNC CACHING: Single scx_bpf_now() call for entire function */
     u64 now_cached = scx_bpf_now();
 
-    /* KFUNC YO-YO REDUCTION: Check cache from select_cpu first */
-    struct cake_task_ctx *tctx;
-    u32 scratch_cpu;
-    {
-        scratch_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-        struct cake_scratch *scr = &global_scratch[scratch_cpu];
-        if (scr->cached_task == p_reg && scr->cached_tctx) {
-            tctx = scr->cached_tctx;
-            scr->cached_task = NULL;  /* Single store invalidation (sentinel check) */
-        } else {
-            tctx = get_task_ctx(p_reg, false);  /* Fallback: kfunc call */
-        }
-    }
+    struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
 
     /* Kthread cold path */
     if (unlikely((task_flags & PF_KTHREAD) && !tctx)) {
@@ -797,18 +743,12 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     if (runtime < cached_threshold_ns)
         new_flags |= MBOX_WARM_BIT;
 
-    /* AMORTIZED MASK CACHING: Alternate idle/victim rebuild across ticks
-     * - Halves cross-CPU coherency traffic (N reads/tick instead of 2N)
-     * - Stale mask is at most 1 tick old -- missed idle/victim = next tick catches it
-     * - now bit 0 is ~1ms granularity, free toggle with zero branch overhead */
-    u64 idle_snap = mbox->cached_idle_mask;   /* Preserve stale as default */
-    u64 victim_snap = mbox->cached_victim_mask;
-
-    if (now & 1) {
-        idle_snap = build_idle_mask_from_mailbox();
-    } else {
-        victim_snap = build_victim_mask_from_mailbox();
-    }
+    /* FULL MASK REBUILD: Both masks every tick for maximum freshness
+     * - 2N cross-CPU byte reads per tick (~16 extra loads for 16 CPUs)
+     * - Eliminates stale-mask-induced wrong dispatch decisions
+     * - Critical for fast ping-pong workloads where idle state changes sub-ms */
+    u64 idle_snap = build_idle_mask_from_mailbox();
+    u64 victim_snap = build_victim_mask_from_mailbox();
 
     /* BEST IDLE HINT: Pre-compute before stores so we can write monotonically */
     u8 hint = 0xFF;  /* Invalid = no hint */
@@ -833,6 +773,14 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     mbox->cached_now = now;
     mbox->cached_idle_mask = idle_snap;
     mbox->cached_victim_mask = victim_snap;
+}
+
+/* Task started running - reset last_run_at to exclude sleep time from runtime calculations */
+void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
+{
+    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    if (tctx)
+        tctx->last_run_at = (u32)scx_bpf_now();
 }
 
 /* Task enabled (joining sched_ext) */
@@ -900,6 +848,7 @@ SCX_OPS_DEFINE(cake_ops,
                .enqueue        = (void *)cake_enqueue,
                .dispatch       = (void *)cake_dispatch,
                .tick           = (void *)cake_tick,
+               .running        = (void *)cake_running,
                .stopping       = (void *)cake_stopping,
                .enable         = (void *)cake_enable,
                .disable        = (void *)cake_disable,
