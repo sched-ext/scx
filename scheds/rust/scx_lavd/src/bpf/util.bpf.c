@@ -223,7 +223,7 @@ bool have_scheduled(task_ctx __arg_arena *taskc)
 	 * If task's time slice hasn't been updated, that means the task has
 	 * been scheduled by this scheduler.
 	 */
-	return taskc->slice != 0;
+	return taskc->slice_wall != 0;
 }
 
 __hidden

@@ -233,7 +233,7 @@ s32 pick_random_cpu(struct pick_ctx *ctx)
 	if (!cpuc0 || !cpuc1)
 		return ctx->prev_cpu;
 
-	return (cpuc0->cur_sc_util < cpuc1->cur_sc_util) ? cpu0 : cpu1;
+	return (cpuc0->cur_util_invr < cpuc1->cur_util_invr) ? cpu0 : cpu1;
 }
 
 static
@@ -393,7 +393,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 		d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
 		d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
 
-		if ((p0 != p1) && (d0 && d1) && (d0->sc_load > d1->sc_load)) {
+		if ((p0 != p1) && (d0 && d1) && (d0->load_invr > d1->load_invr)) {
 			/*
 			 * When a waker's compute domain is chosen, let's just
 			 * stick to the waker's domain. Let's not decide to
@@ -430,7 +430,7 @@ s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 			d0 = MEMBER_VPTR(cpdom_ctxs, [p0->cpdom_id]);
 			d1 = MEMBER_VPTR(cpdom_ctxs, [p1->cpdom_id]);
 			if (d0 && d1) {
-				if (d0->sc_load > d1->sc_load) {
+				if (d0->load_invr > d1->load_invr) {
 					*sticky_cpdom = p1->cpdom_id;
 					return -ENOENT;
 				}
