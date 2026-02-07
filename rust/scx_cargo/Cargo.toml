@@ -1,6 +1,6 @@
 [package]
 name = "scx_cargo"
-version = "1.0.26"
+version = "1.0.27"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"

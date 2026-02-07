@@ -1,6 +1,6 @@
 [package]
 name = "scx_bpf_compat"
-version = "1.0.19"
+version = "1.0.20"
 edition = "2021"
 description = "BPF compatibility testing utilities for sched_ext"
 license = "GPL-2.0-only"
@@ -12,7 +12,7 @@ homepage = "https://github.com/sched-ext/scx"
 ci.use_clippy = true
 
 [dependencies]
-scx_utils = { path = "../scx_utils", version = "1.0.25" }
+scx_utils = { path = "../scx_utils", version = "1.0.26" }
 
 anyhow = "1.0.65"
 libbpf-rs = "=0.26.0-beta.1"
@@ -20,4 +20,4 @@ log = "0.4.17"
 once_cell = "1.20.2"
 
 [build-dependencies]
-scx_cargo = { path = "../scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../scx_cargo", version = "1.0.27" }

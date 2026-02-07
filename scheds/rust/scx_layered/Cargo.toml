@@ -1,6 +1,6 @@
 [package]
 name = "scx_layered"
-version = "1.0.22"
+version = "1.0.23"
 authors = ["Tejun Heo <htejun@meta.com>", "Meta"]
 edition = "2021"
 description = "A highly configurable multi-layer BPF / user space hybrid scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
@@ -21,11 +21,11 @@ lazy_static = "1.5.0"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
 regex = "1.11.2"
-scx_bpf_compat = { path = "../../../rust/scx_bpf_compat", version = "1.0.19" }
-scx_raw_pmu = { path = "../../../rust/scx_raw_pmu", version = "0.1.3" }
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.20" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.20" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
+scx_bpf_compat = { path = "../../../rust/scx_bpf_compat", version = "1.0.20" }
+scx_raw_pmu = { path = "../../../rust/scx_raw_pmu", version = "0.1.4" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.22" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.21" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
 tracing = "0.1"
@@ -37,7 +37,7 @@ nix = { version = "0.30.1", features = ["sched"] }
 sysinfo = "0.35.2"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
 
 [features]
 enable_backtrace = []

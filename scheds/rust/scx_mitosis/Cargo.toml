@@ -1,6 +1,6 @@
 [package]
 name = "scx_mitosis"
-version = "0.0.16"
+version = "0.0.17"
 authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
 edition = "2021"
 description = "A dynamic affinity scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
@@ -21,16 +21,16 @@ libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
 crossbeam = "0.8.4"
 maplit = "1.0.2"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.20" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.20" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.22" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.21" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
 serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
 
 [features]
 enable_backtrace = []

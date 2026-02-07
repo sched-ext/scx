@@ -1,6 +1,6 @@
 [package]
 name = "scx_arena"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Crate for setting up the BPF arena library for sched-ext schedulers."
 license = "GPL-2.0-only"
@@ -10,7 +10,7 @@ anyhow = "1.0.65"
 libbpf-rs = "=0.26.0-beta.1"
 libbpf-sys = "=1.6.1"
 simplelog = "0.12"
-scx_utils = { path = "../../scx_utils", version = "1.0.25" }
+scx_utils = { path = "../../scx_utils", version = "1.0.26" }
 
 [build-dependencies]
-scx_cargo = { path = "../../scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../scx_cargo", version = "1.0.27" }

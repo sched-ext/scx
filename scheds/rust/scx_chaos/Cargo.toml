@@ -1,6 +1,6 @@
 [package]
 name = "scx_chaos"
-version = "1.0.22"
+version = "1.0.23"
 edition = "2021"
 authors = ["Jake Hillion <jake@hillion.co.uk>"]
 description = "scx_chaos A general purpose sched_ext scheduler designed to amplify race conditions"
@@ -10,12 +10,12 @@ license = "GPL-2.0-only"
 ci.use_clippy = true
 
 [dependencies]
-scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.3" }
-scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.19" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
-scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.24" }
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.20" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.20" }
+scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.4" }
+scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.20" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
+scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.25" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.22" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.21" }
 
 anyhow = "1.0.65"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
@@ -29,4 +29,4 @@ serde = { version = "1.0.215", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }

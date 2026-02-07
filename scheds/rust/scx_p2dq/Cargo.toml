@@ -1,6 +1,6 @@
 [package]
 name = "scx_p2dq"
-version = "1.0.24"
+version = "1.0.25"
 authors = ["Daniel Hodges <hodges.daniel.scott@gmail.com>"]
 edition = "2021"
 description = "scx_p2dq A simple pick two load balancing scheduler in BPF"
@@ -15,7 +15,7 @@ blocklist = [
 ]
 
 [dependencies]
-scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.3" }
+scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1.4" }
 anyhow = "1.0.65"
 chrono = "0.4"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
@@ -26,9 +26,9 @@ lazy_static = "1.5.0"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
 ordered-float = "3.4.0"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.20" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.20" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.22" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.21" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
 serde = { version = "1.0.215", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parking_lot", "tracing-log"] }
@@ -36,7 +36,7 @@ sorted-vec = "0.8.3"
 static_assertions = "1.1.0"
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
 
 [features]
 enable_backtrace = []
