@@ -2778,7 +2778,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scx_arena"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "scx_arena_selftests"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "scx_beerland"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpf_compat"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2831,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpf_unittests"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "cc",
  "indoc",
@@ -2841,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "clap",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cargo"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "bindgen 0.72.0",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "scx_chaos"
-version = "1.0.22"
+version = "1.0.23"
 dependencies = [
  "anyhow",
  "clap",
@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "scx_cosmos"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flash"
-version = "1.0.17"
+version = "1.0.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.0.20"
+version = "1.0.21"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2972,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.22"
+version = "1.0.23"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "scx_p2dq"
-version = "1.0.24"
+version = "1.0.25"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "scx_raw_pmu"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "csv",
@@ -3074,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "clap",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.4.9"
+version = "2.4.10"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.20"
+version = "1.0.21"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3175,7 +3175,7 @@ dependencies = [
 
 [[package]]
 name = "scx_tickless"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "affinity",
  "anyhow",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "scx_userspace_arena"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "buddy_system_allocator",
@@ -3205,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.25"
+version = "1.0.26"
 dependencies = [
  "anyhow",
  "bindgen 0.72.0",
@@ -3241,7 +3241,7 @@ dependencies = [
 
 [[package]]
 name = "scx_wd40"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3266,7 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "scxcash"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "scxtop"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "anyhow",
  "blazesym",
@@ -4085,7 +4085,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmlinux_docify"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "walkdir",
@@ -4704,7 +4704,7 @@ checksum = "a67300977d3dc3f8034dae89778f502b6ba20b269527b3223ba59c0cf393bb8a"
 
 [[package]]
 name = "xtask"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.23.0",

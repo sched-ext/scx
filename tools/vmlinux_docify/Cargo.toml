@@ -1,6 +1,6 @@
 [package]
 name = "vmlinux_docify"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["Pat S <patso@likewhatevs.io>"]
 description = "A tool to annotate vmlinux.h with documentation from kernel sources"

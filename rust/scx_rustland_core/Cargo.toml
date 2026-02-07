@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustland_core"
-version = "2.4.9"
+version = "2.4.10"
 edition = "2021"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 license = "GPL-2.0-only"
@@ -13,7 +13,7 @@ plain = "0.2.3"
 libbpf-rs = "=0.26.0-beta.1"
 libc = "0.2.175"
 seccomp = "0.1"
-scx_cargo = { path = "../scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../scx_cargo", version = "1.0.27" }
 
 [lib]
 name = "scx_rustland_core"

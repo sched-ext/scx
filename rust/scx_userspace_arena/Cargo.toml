@@ -1,6 +1,6 @@
 [package]
 name = "scx_userspace_arena"
-version = "1.0.19"
+version = "1.0.20"
 edition = "2021"
 authors = ["Jake Hillion <jake@hillion.co.uk>"]
 license = "GPL-2.0-only"
@@ -11,11 +11,11 @@ description = "Utilities for interacting with BPF arenas from userspace in sched
 ci.use_clippy = true
 
 [dependencies]
-scx_utils = { path = "../scx_utils", version = "1.0.25" }
+scx_utils = { path = "../scx_utils", version = "1.0.26" }
 
 anyhow = "1.0.65"
 buddy_system_allocator = { version = "0.11.0", default-features = false }
 libbpf-rs = "=0.26.0-beta.1"
 
 [build-dependencies]
-scx_cargo = { path = "../scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../scx_cargo", version = "1.0.27" }
