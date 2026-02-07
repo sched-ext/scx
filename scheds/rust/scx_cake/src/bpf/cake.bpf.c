@@ -481,7 +481,7 @@ s32 select_cpu_t0_victim_cold(void *ctx_reg, struct cake_task_ctx *tctx, u32 scr
     s32 s_cpu = find_victim_mailbox(prev, spec_mask, cpu_topo);
     scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + (s_cpu & 63),
                        tctx->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-    scx_bpf_kick_cpu((u32)s_cpu, SCX_KICK_PREEMPT);
+    /* sched_ext core auto-kicks the CPU returned from select_cpu */
     return s_cpu;
 }
 
