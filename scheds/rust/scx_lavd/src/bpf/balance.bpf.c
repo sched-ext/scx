@@ -121,24 +121,8 @@ int plan_x_cpdom_migration(void)
 	 * [stealer_threshold ... avg_sc_load ... max_sc_load ... stealee_threshold]
 	 *            -------------------------------------->
 	 */
-	if ((stealee_threshold > max_sc_load) && !overflow_running) {
-		/*
-		 * To avoid the expensive reset loop, only reset if there exists
-		 * stealers/stealees in the previous round.
-		 */
-		if (sys_stat.nr_stealee > 0) {
-			bpf_for(cpdom_id, 0, nr_cpdoms) {
-				if (cpdom_id >= LAVD_CPDOM_MAX_NR)
-					break;
-
-				cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
-				WRITE_ONCE(cpdomc->is_stealer, false);
-				WRITE_ONCE(cpdomc->is_stealee, false);
-			}
-			sys_stat.nr_stealee = 0;
-		}
-		return 0;
-	}
+	if ((stealee_threshold > max_sc_load) && !overflow_running)
+		goto reset_and_skip_lb;
 
 	/*
 	 * At this point, there is at least one overloaded domain (stealee),
@@ -197,6 +181,24 @@ int plan_x_cpdom_migration(void)
 
 	sys_stat.nr_stealee = nr_stealee;
 
+	return 0;
+
+reset_and_skip_lb:
+	/*
+	 * To avoid the expensive reset loop, only reset if there exists
+	 * stealers/stealees in the previous round.
+	 */
+	if (sys_stat.nr_stealee > 0) {
+		bpf_for(cpdom_id, 0, nr_cpdoms) {
+			if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+				break;
+
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+			WRITE_ONCE(cpdomc->is_stealer, false);
+			WRITE_ONCE(cpdomc->is_stealee, false);
+		}
+		sys_stat.nr_stealee = 0;
+	}
 	return 0;
 }
 
