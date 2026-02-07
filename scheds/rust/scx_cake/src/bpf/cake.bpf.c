@@ -585,8 +585,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, arbiter_dsq,
                        tctx_reg->next_slice, wake);
 
-    /* Arbiter path always needs kick - no idle CPUs available */
-    scx_bpf_kick_cpu((u32)arbiter_cpu & 63, SCX_KICK_PREEMPT);
+    /* sched_ext core auto-kicks the CPU returned from select_cpu */
     return arbiter_cpu;
 }
 
