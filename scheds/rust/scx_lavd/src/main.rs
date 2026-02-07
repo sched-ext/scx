@@ -127,8 +127,7 @@ struct Opts {
     slice_min_us: u64,
 
     /// Migration delta threshold percentage (0-100). When set to a non-zero value,
-    /// uses average utilization for threshold calculation instead of current
-    /// utilization, and the threshold is calculated as: avg_load * (mig-delta-pct / 100).
+    /// the migration threshold is mig-delta-pct percent of the average load.
     /// Additionally, disables force task stealing in the consume path, relying only
     /// on the is_stealer/is_stealee thresholds for more predictable load balancing.
     /// Default is 0 (disabled, uses dynamic threshold based on load with both
