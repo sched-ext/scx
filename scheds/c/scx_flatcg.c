@@ -102,7 +102,12 @@ static float read_cpu_util(__u64 *last_sum, __u64 *last_idle)
 
 static void fcg_read_stats(struct scx_flatcg *skel, __u64 *stats)
 {
-	__u64 cnts[FCG_NR_STATS][skel->rodata->nr_cpus];
+	/*
+	 * Per-CPU BPF maps are sized by libbpf_num_possible_cpus(),
+	 * not the number of online CPUs.
+	 */
+	int nr_possible_cpus = libbpf_num_possible_cpus();
+	__u64 cnts[FCG_NR_STATS][nr_possible_cpus];
 	__u32 idx;
 
 	memset(stats, 0, sizeof(stats[0]) * FCG_NR_STATS);
@@ -114,7 +119,7 @@ static void fcg_read_stats(struct scx_flatcg *skel, __u64 *stats)
 					  &idx, cnts[idx]);
 		if (ret < 0)
 			continue;
-		for (cpu = 0; cpu < skel->rodata->nr_cpus; cpu++)
+		for (cpu = 0; cpu < nr_possible_cpus; cpu++)
 			stats[idx] += cnts[idx][cpu];
 	}
 }
@@ -137,7 +142,12 @@ int main(int argc, char **argv)
 restart:
 	skel = SCX_OPS_OPEN(flatcg_ops, scx_flatcg);
 
-	skel->rodata->nr_cpus = libbpf_num_possible_cpus();
+	/*
+	 * Use online CPUs, not possible CPUs. A task's nr_cpus_allowed
+	 * is set to the number of online CPUs, so we need to match that
+	 * to avoid routing all tasks to FALLBACK_DSQ.
+	 */
+	skel->rodata->nr_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 	assert(skel->rodata->nr_cpus > 0);
 	skel->rodata->cgrp_slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
