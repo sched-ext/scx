@@ -222,7 +222,7 @@ struct cpdom_ctx {
 	u8	is_stealee;			    /* stealer domain should steal tasks from this domain */
 	u16	nr_active_cpus;			    /* the number of active CPUs in this compute domain */
 	u16	nr_acpus_temp;			    /* temp for nr_active_cpus */
-	u32	sc_load;			    /* scaled load considering DSQ length and CPU utilization */
+	u32	load_invr;			    /* invariant load considering DSQ length and invariant CPU utilization */
 	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
 	u32	cur_util_wall_sum;		    /* the sum of CPU utilization in the current interval */
 	u32	avg_util_wall_sum;		    /* the sum of average CPU utilization */
