@@ -78,12 +78,9 @@ int plan_x_cpdom_migration(void)
 		}
 
 		/*
-		 * Use avg_util_sum when mig_delta_pct is set, otherwise use cur_util_sum.
+		 * Use avg_util_sum for stable load balancing decisions.
 		 */
-		if (mig_delta_pct > 0)
-			util = (cpdomc->avg_util_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
-		else
-			util = (cpdomc->cur_util_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
+		util = (cpdomc->avg_util_sum << LAVD_SHIFT) / cpdomc->nr_active_cpus;
 		qlen = cpdomc->nr_queued_task;
 		sc_qlen = (qlen << (LAVD_SHIFT * 3)) / cpdomc->cap_sum_active_cpus;
 		cpdomc->sc_load = util + sc_qlen;
