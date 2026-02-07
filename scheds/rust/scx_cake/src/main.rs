@@ -476,6 +476,7 @@ impl<'a> Scheduler<'a> {
                 rodata.cpu_topo[cpu].core_id = entry.core_id;
                 rodata.cpu_topo[cpu].thread_bit = entry.thread_bit;
                 rodata.cpu_topo[cpu].dsq_id = entry.dsq_id;
+                rodata.cpu_topo[cpu].self_cpu = cpu as u8;
 
                 if entry.thread_bit & 1 != 0 && entry.core_id < 32 {
                     core_to_cpu[entry.core_id as usize] = cpu as u8;

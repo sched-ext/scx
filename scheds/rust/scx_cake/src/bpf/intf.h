@@ -70,7 +70,8 @@ struct cpu_topology_entry {
     /* T2 OPTIMIZATION: Pre-computed sibling mask for O(1) idle check */
     u64 sibling_bit;   /* Pre-computed (1ULL << sibling) or 0 if no sibling */
     u32 sibling_dsq;   /* Pre-computed (CAKE_DSQ_LC_BASE + sibling) or 0 */
-    u8 __pad[8];       /* M2: Explicit pad to 32 bytes (removed packed) */
+    u8 self_cpu;       /* Own CPU ID — allows reading b_prev from topo_prev without separate reg */
+    u8 __pad[7];       /* M2: Explicit pad to 32 bytes (removed packed) */
 } __attribute__((aligned(32)));
 
 /* Topology flags */

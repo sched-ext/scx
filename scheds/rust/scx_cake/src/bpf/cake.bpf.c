@@ -532,12 +532,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     u64 idles = mega_mailbox[scratch_cpu].cached_idle_mask;
 
     /* TIER 1: Prev CPU idle - highest priority */
-    u64 prev_bit = (1ULL << b_prev);
+    u64 prev_bit = (1ULL << topo_prev->self_cpu);
     if (idles & prev_bit) {
         scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->dsq_id,
                            tctx_reg->next_slice, wake);
         mega_mailbox[scratch_cpu].cached_idle_mask &= ~prev_bit;
-        return (s32)b_prev;
+        return (s32)topo_prev->self_cpu;
     }
 
     /* TIER 2: Sibling idle */
@@ -560,7 +560,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
         /* Slow path: full quality-aware scan only if hint missed */
         if (scan_cpu < 0)
-            scan_cpu = find_victim_mailbox(b_prev, idles, cpu_topo);
+            scan_cpu = find_victim_mailbox(topo_prev->self_cpu, idles, cpu_topo);
 
         if (scan_cpu >= 0) {
             u32 scan_dsq = CAKE_DSQ_LC_BASE + (scan_cpu & 63);
@@ -573,13 +573,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     /* T0 VICTIM FALLBACK: Critical Latency tasks try victim steal before arbiter */
     if ((GET_TIER(tctx_reg) & 7) == CRITICAL_LATENCY_DSQ) {
-        s32 victim_cpu = select_cpu_t0_victim_cold(ctx_reg, tctx_reg, scratch_cpu, b_prev);
+        s32 victim_cpu = select_cpu_t0_victim_cold(ctx_reg, tctx_reg, scratch_cpu, topo_prev->self_cpu);
         if (victim_cpu >= 0)
             return victim_cpu;
     }
 
     /* TIER 4: Arbiter - all CPUs busy, use quality-based selection */
-    s32 arbiter_cpu = select_cpu_with_arbiter(tctx_reg, (s32)b_prev, idles, 0, topo_prev);
+    s32 arbiter_cpu = select_cpu_with_arbiter(tctx_reg, (s32)topo_prev->self_cpu, idles, 0, topo_prev);
     u32 arbiter_dsq = cpu_topo[arbiter_cpu & 63].dsq_id;
 
     scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, arbiter_dsq,
