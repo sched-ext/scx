@@ -803,14 +803,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 /* Task disabled (leaving sched_ext) - MAILBOX ONLY cleanup */
 void BPF_STRUCT_OPS(cake_disable, struct task_struct *p)
 {
-    register struct task_struct *p_reg asm("r6") = p;
-    register u32 cpu_reg asm("r8") = bpf_get_smp_processor_id();
-    asm volatile("" : "+r"(p_reg), "+r"(cpu_reg));
-
-    /* MAILBOX ONLY: Clear victim status */
-    mega_mailbox[cpu_reg & 63].flags &= ~MBOX_VICTIM_BIT;
-
-    bpf_task_storage_delete(&task_ctx, p_reg);
+    u32 cpu = bpf_get_smp_processor_id();
+    mega_mailbox[cpu & 63].flags &= ~MBOX_VICTIM_BIT;
 }
 
 /* Initialize the scheduler */
