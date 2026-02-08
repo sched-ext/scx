@@ -135,6 +135,14 @@ struct Opts {
     #[clap(long = "mig-delta-pct", default_value = "0", value_parser=Opts::mig_delta_pct_range)]
     mig_delta_pct: u8,
 
+    /// Low utilization threshold percentage (0-100) for periodic load balancing.
+    /// When set to a non-zero value, periodic load balancing is skipped when
+    /// average system utilization is below this percentage.
+    /// Default is 25 (skip periodic LB below 25% utilization).
+    /// Set to 0 to disable. Set to 100 to always skip periodic LB.
+    #[clap(long = "lb-low-util-pct", default_value = "25", value_parser=Opts::lb_low_util_pct_range)]
+    lb_low_util_pct: u8,
+
     /// Slice duration in microseconds to use for all tasks when pinned tasks
     /// are running on a CPU. Must be between slice-min-us and slice-max-us.
     /// When this option is enabled, pinned tasks are always enqueued to per-CPU DSQs
@@ -371,6 +379,10 @@ impl Opts {
     }
 
     fn mig_delta_pct_range(s: &str) -> Result<u8, String> {
+        number_range(s, 0, 100)
+    }
+
+    fn lb_low_util_pct_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 100)
     }
 }
@@ -645,6 +657,7 @@ impl<'a> Scheduler<'a> {
         rodata.pinned_slice_ns = opts.pinned_slice_us.map(|v| v * 1000).unwrap_or(0);
         rodata.preempt_shift = opts.preempt_shift;
         rodata.mig_delta_pct = opts.mig_delta_pct;
+        rodata.lb_low_util = ((opts.lb_low_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;

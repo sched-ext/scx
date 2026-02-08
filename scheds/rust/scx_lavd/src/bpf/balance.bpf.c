@@ -18,6 +18,7 @@
 
 
 extern const volatile u8	mig_delta_pct;
+extern const volatile u64	lb_low_util;
 
 u64 __attribute__ ((noinline)) calc_mig_delta(u64 avg_load_invr, int nz_qlen)
 {
@@ -54,6 +55,13 @@ int plan_x_cpdom_migration(void)
 	 * tasks to the powerful compute domains. This helps to maintain high
 	 * throughput when the system is overloaded.
 	 */
+
+	/*
+	 * When system utilization is low, periodic load balancing across
+	 * LLC domains is unnecessary since there is plenty of idle capacity.
+	 */
+	if (lb_low_util > 0 && sys_stat.avg_util_wall < lb_low_util)
+		goto reset_and_skip_lb;
 
 	/*
 	 * Calculate scaled load for each active compute domain.
