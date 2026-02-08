@@ -219,6 +219,12 @@ const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
 const volatile u8	mig_delta_pct = 0;
 
 /*
+ * Skip periodic load balancing when average system utilization is below this
+ * percentage. 0 = disabled. Default: 25.
+ */
+const volatile u8	lb_low_util_pct = 25;
+
+/*
  * Slice time for all tasks when pinned tasks are running on the CPU.
  * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
  * the dispatch logic compares vtimes across DSQs.
