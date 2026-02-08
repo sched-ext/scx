@@ -143,6 +143,15 @@ struct Opts {
     #[clap(long = "lb-low-util-pct", default_value = "25", value_parser=Opts::lb_low_util_pct_range)]
     lb_low_util_pct: u8,
 
+    /// Low utilization threshold percentage (0-100) for bypassing deadline
+    /// scheduling. When set to a non-zero value, tasks are dispatched directly
+    /// to the local DSQ (FIFO) instead of using deadline-based ordering when
+    /// average system utilization is below this percentage.
+    /// Default is 10 (bypass deadline scheduling below 10% utilization).
+    /// Set to 0 to disable. Set to 100 to always bypass deadline scheduling.
+    #[clap(long = "lb-local-dsq-util-pct", default_value = "10", value_parser=Opts::lb_local_dsq_util_pct_range)]
+    lb_local_dsq_util_pct: u8,
+
     /// Slice duration in microseconds to use for all tasks when pinned tasks
     /// are running on a CPU. Must be between slice-min-us and slice-max-us.
     /// When this option is enabled, pinned tasks are always enqueued to per-CPU DSQs
@@ -383,6 +392,10 @@ impl Opts {
     }
 
     fn lb_low_util_pct_range(s: &str) -> Result<u8, String> {
+        number_range(s, 0, 100)
+    }
+
+    fn lb_local_dsq_util_pct_range(s: &str) -> Result<u8, String> {
         number_range(s, 0, 100)
     }
 }
@@ -658,6 +671,7 @@ impl<'a> Scheduler<'a> {
         rodata.preempt_shift = opts.preempt_shift;
         rodata.mig_delta_pct = opts.mig_delta_pct;
         rodata.lb_low_util = ((opts.lb_low_util_pct as u64) << 10) / 100;
+        rodata.lb_local_dsq_util = ((opts.lb_local_dsq_util_pct as u64) << 10) / 100;
         rodata.no_use_em = opts.no_use_em as u8;
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.no_slice_boost = opts.no_slice_boost;
