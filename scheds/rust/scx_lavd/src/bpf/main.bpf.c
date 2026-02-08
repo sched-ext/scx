@@ -225,6 +225,13 @@ const volatile u8	mig_delta_pct = 0;
 const volatile u8	lb_low_util_pct = 25;
 
 /*
+ * Bypass deadline-based scheduling and dispatch directly to local DSQ
+ * when average system utilization is below this percentage.
+ * 0 = disabled. Default: 10.
+ */
+const volatile u8	lb_local_dsq_util_pct = 10;
+
+/*
  * Slice time for all tasks when pinned tasks are running on the CPU.
  * When this is set (non-zero), pinned tasks always use per-CPU DSQs and
  * the dispatch logic compares vtimes across DSQs.
@@ -783,7 +790,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When pinned_slice_ns is enabled, pinned tasks always use per-CPU DSQ
 	 * to enable vtime comparison across DSQs during dispatch.
 	 */
-	if (is_idle && !queued_on_cpu(cpuc)) {
+	if ((is_idle && !queued_on_cpu(cpuc)) ||
+	    (lb_local_dsq_util_pct > 0 &&
+	     sys_stat.avg_util < ((u64)lb_local_dsq_util_pct << LAVD_SHIFT) / 100)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
 				   enq_flags);
 	} else {
