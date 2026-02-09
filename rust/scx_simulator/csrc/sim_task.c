@@ -1,0 +1,112 @@
+/*
+ * sim_task.c - task_struct accessor implementations
+ *
+ * These functions provide safe field access to the kernel's task_struct
+ * from Rust code, avoiding the need to replicate the full struct layout
+ * in Rust or use bindgen on the massive vmlinux.h.
+ *
+ * NOTE: We cannot include <stdlib.h> or <string.h> here because they
+ * conflict with vmlinux.h type definitions. Instead, we forward-declare
+ * the few libc functions we need.
+ */
+#include "sim_wrapper.h"
+
+/* Forward declarations for libc functions to avoid stdlib.h/vmlinux.h conflicts */
+extern void *calloc(unsigned long nmemb, unsigned long size);
+extern void free(void *ptr);
+extern void *memcpy(void *dst, const void *src, unsigned long n);
+
+/* Provide the LINUX_KERNEL_VERSION symbol that common.bpf.h declares as extern */
+int LINUX_KERNEL_VERSION = 0;
+
+struct task_struct *sim_task_alloc(void)
+{
+	struct task_struct *p = calloc(1, sizeof(struct task_struct));
+	return p;
+}
+
+void sim_task_free(struct task_struct *p)
+{
+	free(p);
+}
+
+unsigned long sim_task_struct_size(void)
+{
+	return sizeof(struct task_struct);
+}
+
+/* Identity */
+void sim_task_set_pid(struct task_struct *p, int pid)
+{
+	p->pid = pid;
+}
+
+int sim_task_get_pid(struct task_struct *p)
+{
+	return p->pid;
+}
+
+void sim_task_set_comm(struct task_struct *p, const char *comm)
+{
+	int i;
+	for (i = 0; i < (int)sizeof(p->comm) - 1 && comm[i]; i++)
+		p->comm[i] = comm[i];
+	p->comm[i] = '\0';
+}
+
+/* Scheduling parameters */
+void sim_task_set_weight(struct task_struct *p, u32 weight)
+{
+	p->scx.weight = weight;
+}
+
+u32 sim_task_get_weight(struct task_struct *p)
+{
+	return p->scx.weight;
+}
+
+void sim_task_set_static_prio(struct task_struct *p, int prio)
+{
+	p->static_prio = prio;
+}
+
+void sim_task_set_flags(struct task_struct *p, unsigned int flags)
+{
+	p->flags = flags;
+}
+
+void sim_task_set_nr_cpus_allowed(struct task_struct *p, int nr)
+{
+	p->nr_cpus_allowed = nr;
+}
+
+/* SCX entity fields */
+u64 sim_task_get_dsq_vtime(struct task_struct *p)
+{
+	return p->scx.dsq_vtime;
+}
+
+void sim_task_set_dsq_vtime(struct task_struct *p, u64 vtime)
+{
+	p->scx.dsq_vtime = vtime;
+}
+
+u64 sim_task_get_slice(struct task_struct *p)
+{
+	return p->scx.slice;
+}
+
+void sim_task_set_slice(struct task_struct *p, u64 slice)
+{
+	p->scx.slice = slice;
+}
+
+u32 sim_task_get_scx_weight(struct task_struct *p)
+{
+	return p->scx.weight;
+}
+
+void sim_task_set_scx_weight(struct task_struct *p, u32 weight)
+{
+	p->scx.weight = weight;
+}

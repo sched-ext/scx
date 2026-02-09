@@ -4040,6 +4040,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_simulator"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libbpf-sys",
+]
+
+[[package]]
 name = "scx_stats"
 version = "1.0.22"
 dependencies = [

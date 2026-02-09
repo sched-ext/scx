@@ -3,6 +3,7 @@ members = [
     "rust/scx_arena/scx_arena",
     "rust/scx_arena/selftests",
     "rust/scx_bpf_unittests",
+    "rust/scx_simulator",
     "rust/scx_cargo",
     "rust/scx_raw_pmu",
     "rust/scx_rustland_core",
