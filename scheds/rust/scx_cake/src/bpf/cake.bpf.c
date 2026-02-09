@@ -288,11 +288,18 @@ static __always_inline struct cake_task_ctx *get_task_ctx(struct task_struct *p,
  * leave r8,r9 free. Single kfunc call (get_smp_id) + dispatch.
  * Splitting this out lets the main function avoid hoisting
  * bpf_get_smp_processor_id above the SYNC branch, which was the
- * root cause of Spill A (p had to survive across the shared call). */
+ * root cause of Spill A (p had to survive across the shared call).
+ *
+ * CPUMASK GUARD: Check inside cold path (Rule 5/13: no extra work on
+ * inline hot path). Wine/Proton threadpools use sched_setaffinity —
+ * waker's CPU may not be in woken task's cpumask. Returns -1 to signal
+ * fallthrough to kernel path which handles cpumask correctly. */
 static __attribute__((noinline))
 s32 dispatch_sync_cold(struct task_struct *p, u64 wake_flags)
 {
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+    if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+        return -1;
     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, quantum_ns, wake_flags);
     return (s32)cpu;
 }
@@ -301,9 +308,13 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
     /* SYNC FAST PATH: Direct dispatch to waker's CPU.
-     * Noinline helper gets its own register frame (2 args = 0 spills). */
-    if (wake_flags & SCX_WAKE_SYNC)
-        return dispatch_sync_cold(p, wake_flags);
+     * Cold helper checks cpumask internally (Rule 5: zero extra hot-path
+     * instructions). Returns -1 if cpumask disallows → fall through. */
+    if (wake_flags & SCX_WAKE_SYNC) {
+        s32 sync_cpu = dispatch_sync_cold(p, wake_flags);
+        if (sync_cpu >= 0)
+            return sync_cpu;
+    }
 
     /* KERNEL-DELEGATED IDLE SELECTION: One call replaces the entire
      * TIER 1→2→3→4 cascade. scx_bpf_select_cpu_dfl() internally does:
@@ -331,56 +342,51 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     return prev_cpu;
 }
 
-/* ENQUEUE-TIME KICK: When a high-priority task (T0/T1) arrives and all cores are
- * busy, immediately preempt the core running the lowest-priority task in our LLC.
- * This completes the CAKE philosophy: saturation degrades throughput, not latency.
+/* ENQUEUE-TIME KICK (T3-ONLY): When a high-priority task (T0/T1) arrives and
+ * all cores are busy, preempt a core running a T3 BULK task (compilation,
+ * background indexing, updates). Game threads (T0/T1/T2) are NEVER kicked.
  *
- * Without this, T0 input events wait up to 4ms (tick interval) in the DSQ when
- * all cores are saturated (e.g., 5000 enemies, make -j8). With it, T0 gets a
- * core within ~2-5µs via IPI.
+ * Why T3-only: Unlimited kicking destroyed Arc Raiders 1% lows (250→70fps)
+ * because kicked game workers (T2/T3 render helpers) create GPU pipeline
+ * bubbles. Each kick = cache cold restart + GPU command queue drain.
+ * 8000Hz mouse = 8000 kicks/sec = 80ms/sec of pipeline disruption.
+ *
+ * With T3-only: kick only targets tasks that CAN'T hurt the frame pipeline.
+ * If all 8 cores run game work (no T3), no kick fires — T0 gets the next
+ * natural slice boundary (~100-600µs). This IS the safety net: kicks only
+ * fire when background work (make -j8, updates) is stealing game CPU time.
  *
  * Cost: ~15-30ns mailbox scan on the "all busy" slow path.
- * Benefit: T0 max scheduling latency 4000µs → 5µs under saturation.
  * Fast path (idle core found): zero cost — this code is never reached.
  *
- * Optimizations applied (Rule 38 — no pragmatic filtering):
+ * Optimizations:
  *   Rule 39: nr_cpus early-exit eliminates dead loop space (64→8 on 9800X3D)
- *   Rule 5:  Single-LLC fast path skips cpu_llc_id load (JIT dead-code via nr_llcs)
- *   Rule 2:  CAKE_PREFETCH overlaps next cache line load with current compare (MLP)
- *   Rule 6:  Early-exit on T3 found — no tier can be worse, stop scanning */
+ *   Rule 5:  Single-LLC fast path skips cpu_llc_id load (JIT dead-code)
+ *   Rule 2:  CAKE_PREFETCH overlaps next cache line load with current compare
+ *   Rule 6:  Early-exit on T3 found — first T3 is good enough, stop scanning */
 static __attribute__((noinline))
-void kick_lowest_priority_cold(u8 arriving_tier, u32 llc_id)
+void kick_lowest_priority_cold(u32 llc_id)
 {
     s32 victim = -1;
-    u8 worst_tier = arriving_tier;
 
     for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
         if (i >= nr_cpus)
             break;
 
-        /* Rule 2 (MLP): Prefetch next mailbox entry to overlap its cache
-         * line load with the current iteration's compare. Each entry is
-         * 64B-aligned = 1 cache line, so without prefetch these are serial
-         * L1/L2 loads. With prefetch, the next load starts while we compare. */
         if (i + 1 < nr_cpus)
             CAKE_PREFETCH(&mega_mailbox[i + 1].flags);
 
-        /* Rule 5: Single-LLC systems (9800X3D) skip the cpu_llc_id check
-         * entirely — all CPUs are in LLC 0. JIT eliminates this branch
-         * when nr_llcs==1 (RODATA constant-folded). Saves 1 RODATA array
-         * load per iteration on the most common desktop topology. */
         if (nr_llcs > 1 && cpu_llc_id[i] != llc_id)
             continue;
 
         u8 running_tier = MBOX_GET_TIER(mega_mailbox[i].flags);
-        if (running_tier > worst_tier) {
-            worst_tier = running_tier;
-            victim = (s32)i;
 
-            /* Rule 6: T3 (BULK) is the lowest priority possible.
-             * Once found, no remaining core can be worse — stop scanning. */
-            if (worst_tier >= CAKE_TIER_BULK)
-                break;
+        /* T3-ONLY: Only kick BULK tasks. Game threads (T0/T1/T2) are
+         * sacred — interrupting them starves the GPU pipeline.
+         * First T3 found is good enough — stop scanning immediately. */
+        if (running_tier >= CAKE_TIER_BULK) {
+            victim = (s32)i;
+            break;
         }
     }
 
@@ -456,7 +462,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * core so it pulls our task immediately instead of waiting for tick.
      * Only for wakeups — yields and preempts don't need urgent dispatch. */
     if (tier <= CAKE_TIER_INTERACT && (enq_flags & SCX_ENQ_WAKEUP))
-        kick_lowest_priority_cold(tier, enq_llc);
+        kick_lowest_priority_cold(enq_llc);
 }
 
 /* Dispatch: per-LLC DSQ scan with cross-LLC stealing fallback.
