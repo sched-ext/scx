@@ -42,18 +42,30 @@ pub struct CellManager {
     next_cell_id: u32,
     max_cells: u32,
     nr_cpus: u32,
+    /// Cgroup directory names to exclude from cell creation
+    exclude_names: HashSet<String>,
 }
 
 impl CellManager {
-    pub fn new(cell_parent_path: &str, max_cells: u32, nr_cpus: u32) -> Result<Self> {
+    pub fn new(
+        cell_parent_path: &str,
+        max_cells: u32,
+        nr_cpus: u32,
+        exclude: HashSet<String>,
+    ) -> Result<Self> {
         let path = PathBuf::from(format!("/sys/fs/cgroup{}", cell_parent_path));
         if !path.exists() {
             bail!("Cell parent cgroup path does not exist: {}", path.display());
         }
-        Self::new_with_path(path, max_cells, nr_cpus)
+        Self::new_with_path(path, max_cells, nr_cpus, exclude)
     }
 
-    fn new_with_path(path: PathBuf, max_cells: u32, nr_cpus: u32) -> Result<Self> {
+    fn new_with_path(
+        path: PathBuf,
+        max_cells: u32,
+        nr_cpus: u32,
+        exclude: HashSet<String>,
+    ) -> Result<Self> {
         let inotify = Inotify::init().context("Failed to initialize inotify")?;
         inotify
             .watches()
@@ -69,6 +81,7 @@ impl CellManager {
             next_cell_id: 1, // Cell 0 is reserved for root
             max_cells,
             nr_cpus,
+            exclude_names: exclude,
         };
 
         // Insert cell 0 as a permanent entry. cgid 0 is a safe sentinel —
@@ -88,6 +101,13 @@ impl CellManager {
         mgr.scan_existing_children()
             .context("Failed to scan existing child cgroups at startup")?;
         Ok(mgr)
+    }
+
+    fn should_exclude(&self, path: &Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| self.exclude_names.contains(name))
+            .unwrap_or(false)
     }
 
     fn scan_existing_children(&mut self) -> Result<Vec<(u64, u32)>> {
@@ -110,6 +130,9 @@ impl CellManager {
             })?;
             if file_type.is_dir() {
                 let path = entry.path();
+                if self.should_exclude(&path) {
+                    continue;
+                }
                 let cgid = path.metadata()?.ino();
                 let (cgid, cell_id) =
                     self.create_cell_for_cgroup(&path, cgid).with_context(|| {
@@ -180,7 +203,10 @@ impl CellManager {
                 format!("Failed to get file type for: {}", entry.path().display())
             })?;
             if file_type.is_dir() {
-                current_paths.insert(entry.path());
+                let path = entry.path();
+                if !self.should_exclude(&path) {
+                    current_paths.insert(path);
+                }
             }
         }
 
@@ -521,7 +547,8 @@ mod tests {
     #[test]
     fn test_scan_empty_directory() {
         let tmp = TempDir::new().unwrap();
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
 
         assert_eq!(mgr.cell_count(), 0);
     }
@@ -534,7 +561,8 @@ mod tests {
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
 
         assert_eq!(mgr.cell_count(), 2);
 
@@ -550,7 +578,8 @@ mod tests {
 
         // Start with one directory
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
-        let mut mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mut mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         assert_eq!(mgr.cell_count(), 1);
 
         // Add another directory
@@ -570,7 +599,8 @@ mod tests {
         // Start with two directories
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
-        let mut mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mut mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         assert_eq!(mgr.cell_count(), 2);
 
         // Remove one directory
@@ -592,7 +622,8 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
         std::fs::create_dir(tmp.path().join("cell3")).unwrap();
 
-        let mut mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mut mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
 
         // Find cell2's ID
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
@@ -615,7 +646,8 @@ mod tests {
     #[test]
     fn test_cpu_assignments_no_cells() {
         let tmp = TempDir::new().unwrap();
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
 
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
@@ -630,7 +662,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join("container")).unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // 16 CPUs / 2 cells = 8 each
@@ -649,7 +682,8 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell1")).unwrap();
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 10).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 10, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // 10 CPUs / 3 cells = 3 each + 1 remainder to cell 0
@@ -667,7 +701,8 @@ mod tests {
         }
 
         // Only 4 CPUs but 6 cells (cell 0 + 5 user cells)
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 4).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 4, HashSet::new()).unwrap();
         let result = mgr.compute_cpu_assignments();
 
         assert!(result.is_err());
@@ -693,7 +728,8 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "8-11\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // Should have 3 assignments: cell1, cell2, and cell0
@@ -748,7 +784,8 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "8-15\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         let result = mgr.compute_cpu_assignments();
 
         // Should error because cell 0 has no CPUs
@@ -771,7 +808,8 @@ mod tests {
         std::fs::create_dir(&cell1_path).unwrap();
         std::fs::write(cell1_path.join("cpuset.cpus"), "0,2,4,6\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         assert_eq!(assignments.len(), 2);
@@ -801,7 +839,8 @@ mod tests {
         std::fs::create_dir(&cell_path).unwrap();
         std::fs::write(cell_path.join("cpuset.cpus"), "0-3,8-11,16\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 32).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 32, HashSet::new()).unwrap();
 
         // Find the cell and verify its cpuset was parsed correctly
         let cell_info = mgr.find_cell_by_name("cell1").unwrap();
@@ -830,7 +869,8 @@ mod tests {
         let cell2_path = tmp.path().join("cell2");
         std::fs::create_dir(&cell2_path).unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
 
         // Verify cell1 has cpuset, cell2 doesn't
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
@@ -879,7 +919,8 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "4-11\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
@@ -952,7 +993,8 @@ mod tests {
         std::fs::create_dir(&cell_c_path).unwrap();
         std::fs::write(cell_c_path.join("cpuset.cpus"), "0-5\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 12).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 12, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
@@ -1006,7 +1048,8 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "0-2\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
@@ -1049,7 +1092,8 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "0-7\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
@@ -1096,7 +1140,8 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "4-7\n").unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
         let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
@@ -1135,7 +1180,8 @@ mod tests {
     #[test]
     fn test_format_cell_config_only_cell0() {
         let tmp = TempDir::new().unwrap();
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8, HashSet::new()).unwrap();
 
         let mut mask = Cpumask::new();
         for cpu in 0..8 {
@@ -1153,7 +1199,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
 
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16).unwrap();
+        let mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
 
         let mut mask0 = Cpumask::new();
         for cpu in 0..8 {
@@ -1182,7 +1229,8 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell1")).unwrap();
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
 
-        let mut mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 3, 16).unwrap();
+        let mut mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 3, 16, HashSet::new()).unwrap();
         assert_eq!(mgr.cell_count(), 2); // cell1 + cell2
 
         // Adding a third cell should fail due to exhaustion
@@ -1207,7 +1255,8 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell1")).unwrap();
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
 
-        let mut mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 3, 16).unwrap();
+        let mut mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 3, 16, HashSet::new()).unwrap();
         assert_eq!(mgr.cell_count(), 2);
 
         // Remove cell1 to free up its ID
@@ -1219,6 +1268,54 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell3")).unwrap();
         let result = mgr.reconcile_cells();
         assert!(result.is_ok());
+        assert_eq!(mgr.cell_count(), 2);
+    }
+
+    // ==================== Exclusion tests ====================
+
+    #[test]
+    fn test_scan_excludes_named_cgroups() {
+        let tmp = TempDir::new().unwrap();
+
+        std::fs::create_dir(tmp.path().join("container-a")).unwrap();
+        std::fs::create_dir(tmp.path().join("systemd-workaround.service")).unwrap();
+        std::fs::create_dir(tmp.path().join("container-b")).unwrap();
+
+        let exclude = HashSet::from(["systemd-workaround.service".to_string()]);
+        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, exclude).unwrap();
+
+        // Only 2 cells — the excluded cgroup is not a cell
+        assert_eq!(mgr.cell_count(), 2);
+        assert!(mgr.find_cell_by_name("container-a").is_some());
+        assert!(mgr.find_cell_by_name("container-b").is_some());
+        assert!(mgr
+            .find_cell_by_name("systemd-workaround.service")
+            .is_none());
+    }
+
+    #[test]
+    fn test_reconcile_excludes_named_cgroups() {
+        let tmp = TempDir::new().unwrap();
+
+        std::fs::create_dir(tmp.path().join("container-a")).unwrap();
+
+        let exclude = HashSet::from(["ignored-service".to_string()]);
+        let mut mgr =
+            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, exclude).unwrap();
+        assert_eq!(mgr.cell_count(), 1);
+
+        // Add an excluded cgroup — should not become a cell
+        std::fs::create_dir(tmp.path().join("ignored-service")).unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        assert_eq!(new_cells.len(), 0);
+        assert_eq!(destroyed_cells.len(), 0);
+        assert_eq!(mgr.cell_count(), 1);
+
+        // Add a non-excluded cgroup — should become a cell
+        std::fs::create_dir(tmp.path().join("container-b")).unwrap();
+        let (new_cells, destroyed_cells) = mgr.reconcile_cells().unwrap();
+        assert_eq!(new_cells.len(), 1);
+        assert_eq!(destroyed_cells.len(), 0);
         assert_eq!(mgr.cell_count(), 2);
     }
 }

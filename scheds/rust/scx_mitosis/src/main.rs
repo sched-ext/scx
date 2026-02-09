@@ -144,6 +144,13 @@ struct Opts {
     #[clap(long)]
     cell_parent_cgroup: Option<String>,
 
+    /// Exact directory name of a direct child cgroup to exclude from cell creation
+    /// (excluded cgroups remain in cell 0). Matched against the directory basename,
+    /// not the full path. Can be specified multiple times. Requires --cell-parent-cgroup.
+    /// Example: --cell-exclude systemd-workaround.service
+    #[clap(long)]
+    cell_exclude: Vec<String>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -298,9 +305,18 @@ impl<'a> Scheduler<'a> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         // Initialize CellManager if --cell-parent-cgroup is specified
+        if !opts.cell_exclude.is_empty() && opts.cell_parent_cgroup.is_none() {
+            bail!("--cell-exclude requires --cell-parent-cgroup");
+        }
         let cell_manager = if let Some(ref parent_cgroup) = opts.cell_parent_cgroup {
             let nr_cpus = topology.all_cpus.len() as u32;
-            Some(CellManager::new(parent_cgroup, MAX_CELLS as u32, nr_cpus)?)
+            let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
+            Some(CellManager::new(
+                parent_cgroup,
+                MAX_CELLS as u32,
+                nr_cpus,
+                exclude,
+            )?)
         } else {
             None
         };
