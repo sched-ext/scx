@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* scx_cake - CAKE DRR++ adapted for CPU scheduling: sparse detection, direct dispatch, tiered DSQ */
+/* scx_cake - CAKE DRR++ adapted for CPU scheduling: avg_runtime classification, direct dispatch, tiered DSQ */
 
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
@@ -11,46 +11,21 @@ char _license[] SEC("license") = "GPL";
 /* Scheduler RODATA config - JIT constant-folds these for ~200 cycle savings per decision */
 const u64 quantum_ns = CAKE_DEFAULT_QUANTUM_NS;
 const u64 new_flow_bonus_ns = CAKE_DEFAULT_NEW_FLOW_BONUS_NS;
-const u64 sparse_threshold = CAKE_DEFAULT_SPARSE_THRESHOLD;
-const u64 starvation_ns = CAKE_DEFAULT_STARVATION_NS;
 const bool enable_stats = false;
-const u64 cached_threshold_ns = 0;
 
 /* Topology config - JIT eliminates unused P/E-core steering when has_hybrid=false */
-const bool has_multi_llc = false;
 const bool has_hybrid = false;
-const bool smt_enabled = false;
 
-#define CAKE_MAX_LLCS 8
-const u8 cpu_llc_id[CAKE_MAX_CPUS];
-const u8 cpu_is_big[CAKE_MAX_CPUS];
-const u8 cpu_sibling_map[CAKE_MAX_CPUS];
-const u64 llc_cpu_mask[CAKE_MAX_LLCS];
-const u64 big_cpu_mask = 0;
+/* Per-LLC DSQ partitioning — populated by loader from topology detection.
+ * Eliminates cross-CCD lock contention: each LLC has its own DSQ.
+ * Single-CCD (9800X3D): nr_llcs=1, identical to single-DSQ behavior.
+ * Multi-CCD (9950X): nr_llcs=2, halves contention, eliminates cross-CCD atomics. */
+const u32 nr_llcs = 1;
+const u32 nr_cpus = 8;  /* Set by loader — bounds kick scan loop (Rule 39) */
+const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
 
-/* Unified CPU topology - 8-byte struct per CPU with sibling/LLC/peers from ETD calibration */
-const struct cpu_topology_entry cpu_topo[CAKE_MAX_CPUS];
-const u8 core_to_cpu[32]; /* Physical Core -> Primary Logical CPU mapping */
-const u8 nr_cores;        /* Actual detected core count */
-const u8 nr_cpus_total;   /* Actual detected CPU count */
-const u8 core_thread_mask[32]; /* Bitmask of SMT threads per core (e.g. 3 for dual-thread) */
-const u64 core_cpu_mask[32];   /* Pre-computed 64-bit mask of all CPUs in a core */
 
-/* Zero-Math Arbiter LUT (populated by userspace) */
-const struct arbiter_config arbiter_cfg;
 
-/* De Bruijn constant for CTZ - hoisted to RODATA for JIT immediate embedding */
-const u64 DB_MAGIC = 0x022FDD63CC95386DULL;
-
-/* Fused core state - replaces cpu_tier/shadow arrays, 128-byte aligned to prevent MESI storms */
-struct cake_core_state global_core_state[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
-
-/* Bit-Scan Helpers - state packed as [Occ:8][Warm:8][Victim:8][Pad:8] */
-#define STATE_GET_OCCUPANT(s)  ((u8)((s) & 0xFF))
-#define STATE_GET_WARM(s)      ((u8)(((s) >> 8) & 0xFF))
-#define STATE_GET_VICTIM(s)    ((u8)(((s) >> 16) & 0xFF))
-#define STATE_GET_STAGING_PRIO(s)   ((u8)(((s) >> 24) & 0xFF))
-#define STATE_CLEAR_STAGING         0x00FFFFFF  /* Mask to zero out byte 3 */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
@@ -60,28 +35,20 @@ struct cake_core_state global_core_state[CAKE_MAX_CPUS] SEC(".bss") __attribute_
 struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
 
 /* Metadata accessors (Fused layout) */
-#define GET_TIER_RAW(packed) EXTRACT_BITS_U32(packed, SHIFT_TIER, 3)
+#define GET_TIER_RAW(packed) EXTRACT_BITS_U32(packed, SHIFT_TIER, 2)
 #define GET_TIER(ctx) GET_TIER_RAW(cake_relaxed_load_u32(&(ctx)->packed_info))
-#define GET_CRITICAL_RAW(packed) EXTRACT_BITS_U32(packed, SHIFT_CRITICAL, 1)
-#define GET_CRITICAL(ctx) GET_CRITICAL_RAW(cake_relaxed_load_u32(&(ctx)->packed_info))
 
 /* Per-CPU scratch area - BSS-tunneled helper outputs, isolated to prevent MESI contention */
 struct cake_scratch {
     bool dummy_idle;
     u32 init_tier;
-    u32 init_critical;
     struct bpf_iter_scx_dsq it; /* BSS-Tunneling for iterators */
-    u8 _pad[44]; /* Pad to 128 bytes (2 cache lines) */
+    u8 _pad[48]; /* Pad to 128 bytes (2 cache lines) */
 } global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
 
-/* MESI-friendly tier update - caller passes already-loaded packed state to avoid redundant volatile load */
-static __always_inline void update_occupant_tier(u32 *packed_ptr, u32 old_packed, u8 tier)
-{
-    u32 new_val = (old_packed & 0xFFFFFF00) | tier;
-    cake_relaxed_store_u32(packed_ptr, new_val);
-}
+
 
 /* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(256)));
@@ -89,35 +56,9 @@ struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned
 /* BSS tail guard - absorbs BTF truncation bugs instead of corrupting real data */
 u8 __bss_tail_guard[64] SEC(".bss") __attribute__((aligned(64)));
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * MAILBOX MASK BUILDERS: Replace atomic globals with per-CPU mailbox reads
- * - O(nr_cpus) loop, zero contention vs O(1) with N-way atomic contention
- * - nr_cpus_total is RODATA: JIT constant-folds the break, eliminating
- *   iterations beyond the actual CPU count at load time
- * ═══════════════════════════════════════════════════════════════════════════ */
-static __always_inline u64 build_idle_mask_from_mailbox(void)
-{
-    u64 mask = 0;
-    #pragma unroll
-    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
-        if (i >= nr_cpus_total) break;
-        if (MBOX_IS_IDLE(mega_mailbox[i].flags))
-            mask |= (1ULL << i);
-    }
-    return mask;
-}
-
-static __always_inline u64 build_victim_mask_from_mailbox(void)
-{
-    u64 mask = 0;
-    #pragma unroll
-    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
-        if (i >= nr_cpus_total) break;
-        if (MBOX_IS_VICTIM(mega_mailbox[i].flags))
-            mask |= (1ULL << i);
-    }
-    return mask;
-}
+/* Mailbox mask builders removed — select_cpu now delegates idle detection
+ * to scx_bpf_select_cpu_dfl() which uses the kernel's authoritative idle
+ * tracking (zero staleness, atomic claiming). */
 
 static __always_inline struct cake_stats *get_local_stats(void)
 {
@@ -125,154 +66,15 @@ static __always_inline struct cake_stats *get_local_stats(void)
     return &global_stats[cpu & (CAKE_MAX_CPUS - 1)];
 }
 
-/* Branchless kthread classification - single 8-byte load + XOR/OR (ksoftirqd/worker/irq) */
-static __always_inline bool is_critical_kthread(struct task_struct *p)
-{
-    const char *comm = p->comm;
 
-    /* Direct 8-byte load - eliminates stack usage from __builtin_memcpy */
-    u64 head = *(u64 *)p->comm;
 
-    /* Branchless: all comparisons parallel, combined with OR = zero branch misses */
-    u64 is_softirq = !(head ^ 0x71726974666F736BULL);  /* "ksoftirq" */
-    u64 is_worker  = !(head ^ 0x2F72656B726F776BULL) & (comm[8] != 'u');  /* bound kworker */
-    u64 is_irq     = !((head & 0xFFFFFFFFULL) ^ 0x2F717269ULL);  /* "irq/" */
+/* ETD surgical seek / find_surgical_victim_logical removed — select_cpu
+ * now delegates idle selection to scx_bpf_select_cpu_dfl() which does
+ * prev → sibling → LLC cascade internally with kernel-native topology. */
 
-    return is_softirq | is_worker | is_irq;
-}
-
-/* ETD surgical seek - check 3 lowest-latency peers (~8 cycles) before blind global scan (30:1 ROI) */
-
-/* find_surgical_victim - uses cpu_topo[] RODATA, ~6-8 cycles per lookup */
-
-/* find_surgical_victim_logical - checks LOGICAL mask instead of PHYSICAL, ~6-8 cycles */
-static __always_inline s32 find_surgical_victim_logical(u32 prev, u64 logical_mask, u64 db_const,
-                                 const struct cpu_topology_entry *topo)
-{
-    u32 idx;
-    asm volatile("%0 = %1" : "=r"(idx) : "r"(prev));
-
-    const struct cpu_topology_entry *t = &topo[idx & 63];
-
-    if (t->peer_1 < 64 && (logical_mask & (1ULL << t->peer_1)))
-        return (s32)t->peer_1;
-    if (t->peer_2 < 64 && (logical_mask & (1ULL << t->peer_2)))
-        return (s32)t->peer_2;
-    if (t->peer_3 < 64 && (logical_mask & (1ULL << t->peer_3)))
-        return (s32)t->peer_3;
-
-    if (logical_mask)
-        return (s32)BIT_SCAN_FORWARD_U64_RAW(logical_mask, db_const);
-
-    return -1;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * MEGA-MAILBOX VICTIM FINDER: Quality-aware victim selection
- * - Checks 3 ETD peers first (locality preference)
- * - Uses mailbox victim+tier info for quality ranking
- * - Rotated CTZ fallback avoids CPU 0 bias
- * ═══════════════════════════════════════════════════════════════════════════ */
-static __always_inline s32 find_victim_mailbox(u32 prev, u64 candidate_mask,
-                                               const struct cpu_topology_entry *topo)
-{
-    u32 idx = prev & 63;
-    const struct cpu_topology_entry *t = &topo[idx];
-
-    /* 1. Check ETD peers first (locality-optimal) */
-    u8 p1 = t->peer_1;
-    u8 p2 = t->peer_2;
-    u8 p3 = t->peer_3;
-
-    /* Read mailbox status for peers (prefetched during earlier work) */
-    if (p1 < 64 && (candidate_mask & (1ULL << p1))) {
-        u8 flags = mega_mailbox[p1].flags;
-        if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
-            return (s32)p1;
-    }
-    if (p2 < 64 && (candidate_mask & (1ULL << p2))) {
-        u8 flags = mega_mailbox[p2].flags;
-        if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
-            return (s32)p2;
-    }
-    if (p3 < 64 && (candidate_mask & (1ULL << p3))) {
-        u8 flags = mega_mailbox[p3].flags;
-        if (MBOX_IS_VICTIM(flags) || MBOX_IS_IDLE(flags))
-            return (s32)p3;
-    }
-
-    /* 2. Quality-aware fallback: find highest tier (best to preempt) */
-    u8 best_tier = 0;
-    s32 best_cpu = -1;
-
-    /* M3: Rotate start by prev to distribute IPI load across CPUs */
-    #pragma unroll
-    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
-        if (i >= nr_cpus_total) break;
-        u32 idx = (prev + i) & (CAKE_MAX_CPUS - 1);
-        if (idx >= nr_cpus_total) idx -= nr_cpus_total;
-        if (!(candidate_mask & (1ULL << idx)))
-            continue;
-        u8 flags = mega_mailbox[idx].flags;
-        u8 tier = MBOX_GET_TIER(flags);
-
-        /* Prefer idle > victim > none; within category, prefer higher tier */
-        bool is_candidate = MBOX_IS_IDLE(flags) || MBOX_IS_VICTIM(flags);
-        if (is_candidate && tier > best_tier) {
-            best_tier = tier;
-            best_cpu = (s32)idx;
-        }
-    }
-
-    /* 3. If quality search failed, use rotated CTZ to avoid CPU 0 bias */
-    if (best_cpu < 0 && candidate_mask) {
-        /* Rotate mask by prev to distribute selection */
-        u32 shift = prev & 15;
-        u64 rotated = (candidate_mask >> shift) | (candidate_mask << (64 - shift));
-        u32 offset = BIT_SCAN_FORWARD_U64_RAW(rotated, DB_MAGIC);
-        best_cpu = (s32)((shift + offset) & 63);
-    }
-
-    return best_cpu;
-}
-
-/* Locality arbiter - warmth-first: prev_cpu → sibling → SIMD scan (migrate if tier gap > 3) */
-static __always_inline s32 select_cpu_with_arbiter(struct cake_task_ctx *tctx, s32 prev_cpu,
-                            u64 l_mask, u64 p_mask,
-                            const struct cpu_topology_entry *topo_prev)
-{
-    u32 b_prev = (u32)prev_cpu & (CAKE_MAX_CPUS - 1);
-
-    if (l_mask & (1ULL << b_prev))
-        return prev_cpu;
-
-    /* [R3.2] Use pre-fetched topo_prev instead of re-indexing */
-    s32 target_cpu = l_mask ? (s32)BIT_SCAN_FORWARD_U64_RAW(l_mask, DB_MAGIC) : -1;
-    u8 target_rank = l_mask ? 3 : 7;
-
-    bool sib_idle = (topo_prev->sibling < 64 && (l_mask & (1ULL << topo_prev->sibling)));
-    target_cpu = sib_idle ? (s32)topo_prev->sibling : target_cpu;
-    target_rank = sib_idle ? 2 : target_rank;
-
-    s32 phys_cpu = p_mask ? find_surgical_victim_logical(b_prev, p_mask, DB_MAGIC, cpu_topo) : -1;
-    target_cpu = (phys_cpu >= 0) ? phys_cpu : target_cpu;
-    target_rank = (phys_cpu >= 0) ? 1 : target_rank;
-
-    if (target_cpu < 0)
-        return prev_cpu;
-
-    /* Arbiter decision (fused state lookup) */
-    u32 state = cake_relaxed_load_u32((u32 *)&global_core_state[b_prev]);
-    u8 occupant_tier = STATE_GET_OCCUPANT(state);
-    u8 my_tier = GET_TIER(tctx) & 7;
-
-    u8 threshold = arbiter_cfg.lut[my_tier][target_rank];
-
-    if (occupant_tier <= threshold)
-        return prev_cpu;
-
-    return target_cpu;
-}
+/* Victim finder / arbiter removed — select_cpu now uses kernel-delegated
+ * idle selection. When all CPUs are busy, enqueue handles placement via
+ * per-LLC DSQs with vtime-encoded tier priority. */
 
 /* User exit info for graceful scheduler exit */
 UEI_DEFINE(uei);
@@ -283,67 +85,49 @@ UEI_DEFINE(uei);
 /* BTF fix: Non-static + aligned(8) prevents tail truncation bug */
 /* Cached threshold moved to RODATA */
 
-/* Seven DSQs: T0-Critical(IRQ) > T1-Realtime > T2-Critical > T3-Gaming > T4-Interactive > T5-Batch > T6-Background */
-#define CRITICAL_LATENCY_DSQ 0
-#define REALTIME_DSQ    1
-#define CRITICAL_DSQ    2
-#define GAMING_DSQ      3
-#define INTERACTIVE_DSQ 4
-#define BATCH_DSQ       5
-#define BACKGROUND_DSQ  6
-
-/* A+B ARCHITECTURE: Single unified DSQ with vtime-encoded priority */
-#define UNIFIED_DSQ     100
+/* A+B ARCHITECTURE: Per-LLC DSQs with vtime-encoded priority.
+ * DSQ IDs: LLC_DSQ_BASE + 0, LLC_DSQ_BASE + 1, ... (one per LLC). */
 
 /* Per-CPU Direct Dispatch Queues (1000-1063) */
 #define CAKE_DSQ_LC_BASE 1000
 
-/* Sparse score threshold for gaming detection */
-#define THRESHOLD_GAMING 70
-
-/* Latency gate thresholds for score=100 sub-classification (in µs) */
-#define LATENCY_GATE_CRITICAL   25   /* <25µs avg → Critical Latency (tier 0) - true IRQ */
-#define LATENCY_GATE_REALTIME  100   /* <100µs avg → Realtime (tier 1) - fast input */
-#define LATENCY_GATE_CRITICAL2 500   /* <500µs avg → Critical (tier 2) - compositor */
-
-/* Special tier value for idle CPU scoreboard */
-#define CAKE_TIER_IDLE 255
-
-/* Tier config table - AoS layout: single cache line fetch vs 3 separate arrays, 2 tiers/64B line */
+/* Tier config table - 4 tiers + padding, AoS layout: single cache line fetch */
 const fused_config_t tier_configs[8] = {
-    /* Tier 0: Critical Latency */
+    /* T0: Critical (<100µs) — IRQ, input, audio */
     PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T0,
                 CAKE_DEFAULT_WAIT_BUDGET_T0 >> 10, CAKE_DEFAULT_STARVATION_T0 >> 10),
-    /* Tier 1: Realtime */
+    /* T1: Interactive (<2ms) — compositor, physics */
     PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T1,
                 CAKE_DEFAULT_WAIT_BUDGET_T1 >> 10, CAKE_DEFAULT_STARVATION_T1 >> 10),
-    /* Tier 2: Critical */
+    /* T2: Frame Producer (<8ms) — game render, encoding */
     PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T2,
                 CAKE_DEFAULT_WAIT_BUDGET_T2 >> 10, CAKE_DEFAULT_STARVATION_T2 >> 10),
-    /* Tier 3: Gaming */
+    /* T3: Bulk (≥8ms) — compilation, background */
     PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T3,
                 CAKE_DEFAULT_WAIT_BUDGET_T3 >> 10, CAKE_DEFAULT_STARVATION_T3 >> 10),
-    /* Tier 4: Interactive */
-    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T4,
-                CAKE_DEFAULT_WAIT_BUDGET_T4 >> 10, CAKE_DEFAULT_STARVATION_T4 >> 10),
-    /* Tier 5: Batch */
-    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T5,
-                CAKE_DEFAULT_WAIT_BUDGET_T5 >> 10, CAKE_DEFAULT_STARVATION_T5 >> 10),
-    /* Tier 6: Background */
-    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T6,
-                CAKE_DEFAULT_WAIT_BUDGET_T6 >> 10, CAKE_DEFAULT_STARVATION_T6 >> 10),
-    /* Tier 7: Padding */
+    /* Padding (copies of T3 for safe & 7 access) */
     PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T3,
-                0, CAKE_DEFAULT_STARVATION_T6 >> 10),
+                CAKE_DEFAULT_WAIT_BUDGET_T3 >> 10, CAKE_DEFAULT_STARVATION_T3 >> 10),
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T3,
+                CAKE_DEFAULT_WAIT_BUDGET_T3 >> 10, CAKE_DEFAULT_STARVATION_T3 >> 10),
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T3,
+                CAKE_DEFAULT_WAIT_BUDGET_T3 >> 10, CAKE_DEFAULT_STARVATION_T3 >> 10),
+    PACK_CONFIG(CAKE_DEFAULT_QUANTUM_NS >> 10, CAKE_DEFAULT_MULTIPLIER_T3,
+                CAKE_DEFAULT_WAIT_BUDGET_T3 >> 10, CAKE_DEFAULT_STARVATION_T3 >> 10),
 };
 
-/* Branchless tier arithmetic - 8 cycles (4 SETcc + 4 SUB) vs 4-12ns LUT lookup */
+/* Per-tier graduated backoff recheck masks (RODATA)
+ * Lower tiers (more stable) recheck less often.
+ * T0 IRQs almost never change behavior → every 1024th stop.
+ * T3 bulk tasks may transition → every 16th stop. */
+static const u16 tier_recheck_mask[] = {
+    1023,  /* T0: every 1024th stop */
+    127,   /* T1: every 128th  */
+    31,    /* T2: every 32nd   */
+    15,    /* T3: every 16th   */
+    15, 15, 15, 15,  /* padding */
+};
 
-/* Long-sleep recovery threshold: 33ms = 2 frames @ 60Hz */
-#define LONG_SLEEP_THRESHOLD_NS 33000000
-
-/* Minimum victim residency: 2^20 ns (~1ms) - 1-cycle bit test instead of SUB+CMP */
-#define VICTIM_RESIDENCY_BIT 20  /* 2^20 ns ≈ 1ms */
 
 /* Vtime table removed - FIFO DSQs don't use dsq_vtime, saved 160B + 30 cycles */
 
@@ -376,10 +160,7 @@ struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id)
     return p;
 }
 
-/* Bitfield accessors - relaxed atomics prevent tearing, SET_* macros use manual skip-if-unchanged RMW */
-
-/* Sparse Score accessor (0-100 with asymmetric adaptation) */
-#define GET_SPARSE_SCORE(ctx) EXTRACT_BITS_U32(cake_relaxed_load_u32(&(ctx)->packed_info), SHIFT_SPARSE_SCORE, 7)
+/* Bitfield accessors - relaxed atomics prevent tearing */
 
 /* Metadata Accessors - Definitions moved to top */
 
@@ -389,35 +170,11 @@ struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id)
 
 /* perform_lazy_accounting removed - accounting in tick */
 
-static __attribute__((noinline))
-void init_new_kthread_cold(struct task_struct *p, u64 enq_flags)
-{
-    /* Branchless tier selection using mask */
-    u64 critical = is_critical_kthread(p);
-    u64 mask = -(u64)critical;  /* All 1s if critical, all 0s if not */
+/* init_new_kthread_cold inlined into cake_enqueue — reuses hoisted
+ * now_cached + enq_llc, saving 2 kfunc calls per kthread enqueue. */
 
-    /* Select: critical ? REALTIME tier : INTERACTIVE tier */
-    u8 initial_tier = (mask & CAKE_TIER_REALTIME) | (~mask & CAKE_TIER_INTERACTIVE);
-
-    /* A+B: Vtime-encoded priority: (tier << 56) | timestamp */
-    u64 vtime = ((u64)initial_tier << 56) | (scx_bpf_now() & 0x00FFFFFFFFFFFFFFULL);
-    scx_bpf_dsq_insert_vtime(p, UNIFIED_DSQ, quantum_ns, vtime, enq_flags);
-}
-
-static __attribute__((noinline))
-s32 select_cpu_new_task_cold(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
-{
-    /* Pin inputs to callee-saved registers */
-    register struct task_struct *p_pin asm("r6") = p;
-    register s32 prev_pin asm("r7") = prev_cpu;
-    register u64 wake_pin asm("r8") = wake_flags;
-
-    asm volatile("" : "+r"(p_pin), "+r"(prev_pin), "+r"(wake_pin));
-    u32 tc_id = bpf_get_smp_processor_id();
-
-    struct cake_scratch *scr = &global_scratch[tc_id & (CAKE_MAX_CPUS - 1)];
-    return scx_bpf_select_cpu_dfl(p_pin, prev_pin, wake_pin, &scr->dummy_idle);
-}
+/* select_cpu_new_task_cold removed — new tasks go through the same
+ * scx_bpf_select_cpu_dfl path as all other tasks. */
 
 static __attribute__((noinline))
 struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
@@ -429,21 +186,58 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
                                BPF_LOCAL_STORAGE_GET_F_CREATE);
     if (!ctx) return NULL;
 
-    /* NIBBLE SEEDING: One-time classification */
-    bool critical = is_critical_kthread(p);
-
     ctx->next_slice = quantum_ns;
     u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
     ctx->deficit_avg_fused = PACK_DEFICIT_AVG(init_deficit, 0);
-    ctx->timestamps_fused = 0;
+    ctx->last_run_at = 0;
+    ctx->reclass_counter = 0;
+
+    /* MULTI-SIGNAL INITIAL CLASSIFICATION
+     *
+     * Two cheap signals set the starting point; avg_runtime classification
+     * takes over after the first few execution bouts and is authoritative.
+     *
+     * Signal 1: Nice value (u32 field read, ~2 cycles)
+     *   - nice < 0 (prio < 120): OS/user explicitly prioritized
+     *     System services (-20), pipewire (-11), games with nice (-5)
+     *     → T0 initially, avg_runtime reclassifies after first runs
+     *   - nice > 10 (prio > 130): explicitly deprioritized
+     *     Background builds, indexers → T3, stays if bulk
+     *   - nice 0-10: default → T1, avg_runtime adjusts naturally
+     *
+     * Signal 2: PF_KTHREAD flag (1 bit test, already known by caller)
+     *   Kthreads with nice < 0 get T0 from Signal 1 automatically.
+     *   Kthreads with nice 0 start at T1 like all other nice-0 tasks.
+     *   No pin — reclassify based on actual avg_runtime behavior:
+     *   - ksoftirqd: ~10μs bursts → T0 within 3 stops
+     *   - kcompactd: long runs → T2-T3 naturally
+     *
+     * Signal 3: Runtime behavior (ongoing, ~15ns/stop — authoritative)
+     *   Pure avg_runtime → tier mapping in reclassify_task_cold(). */
+
+    /* Nice value: static_prio 100 = nice -20, 120 = nice 0, 139 = nice 19 */
+    u32 prio = p->static_prio;
+    u8 init_tier;
+
+    if (prio < 120) {
+        /* Negative nice: OS or user explicitly prioritized.
+         * avg_runtime=0 at init → T0 until first reclassify. */
+        init_tier = CAKE_TIER_CRITICAL;
+    } else if (prio > 130) {
+        /* High nice (>10): explicitly deprioritized.
+         * Background builds, indexers, low-priority daemons. */
+        init_tier = CAKE_TIER_BULK;
+    } else {
+        /* Default (nice 0-10): start at Interactive.
+         * avg_runtime reclassifies to correct tier within ~3 stops. */
+        init_tier = CAKE_TIER_INTERACT;
+    }
 
     u32 packed = 0;
     packed |= (255 & MASK_KALMAN_ERROR) << SHIFT_KALMAN_ERROR;
-    packed |= (0 & MASK_WAIT_DATA) << SHIFT_WAIT_DATA;
-    packed |= (50 & MASK_SPARSE_SCORE) << SHIFT_SPARSE_SCORE;
-    packed |= (critical ? CAKE_TIER_INTERACTIVE : CAKE_TIER_BATCH) << SHIFT_TIER;
-    packed |= (CAKE_FLOW_NEW & MASK_FLAGS) << SHIFT_FLAGS;
-    packed |= (critical ? 1 : 0) << SHIFT_CRITICAL;
+    /* Fused TIER+FLAGS: bits [29:24] = [tier:2][flags:4] (Rule 37 coalescing) */
+    packed |= (((u32)(init_tier & MASK_TIER) << 4) | (CAKE_FLOW_NEW & MASK_FLAGS)) << SHIFT_FLAGS;
+    /* stable=0, wait_data=0: implicit from packed=0 */
 
     ctx->packed_info = packed;
 
@@ -470,139 +264,148 @@ static __always_inline struct cake_task_ctx *get_task_ctx(struct task_struct *p,
 
 /* Noinline accounting - math-heavy ops moved here to free registers (now fully async in tick) */
 
-/* T0 VICTIM COLD PATH: Rare path for Critical Latency tasks when no idle CPU found */
-static __attribute__((noinline))
-s32 select_cpu_t0_victim_cold(void *ctx_reg, struct cake_task_ctx *tctx, u32 scratch_cpu, u32 prev)
-{
-    u64 spec_mask = mega_mailbox[scratch_cpu].cached_victim_mask;
-    if (!spec_mask)
-        return -1;  /* No victims available */
+/* T0 victim cold path removed — when all CPUs are busy, tasks go through
+ * enqueue → per-LLC DSQ where vtime ordering ensures T0 tasks get pulled
+ * first. Preemption handled by cake_tick starvation checks. */
 
-    s32 s_cpu = find_victim_mailbox(prev, spec_mask, cpu_topo);
-    scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + (s_cpu & 63),
-                       tctx->next_slice, *(u64 *)((u8 *)ctx_reg + 16));
-    /* sched_ext core auto-kicks the CPU returned from select_cpu */
-    return s_cpu;
+/* ═══════════════════════════════════════════════════════════════════════════
+ * KERNEL-FIRST FLAT SELECT_CPU: ~20 instructions vs ~200+ in the old cascade.
+ *
+ * Architecture: delegate idle detection to the kernel's authoritative
+ * scx_bpf_select_cpu_dfl() which does prev → sibling → LLC cascade internally
+ * with zero staleness and atomic claiming. When all CPUs are busy, return
+ * prev_cpu and let cake_enqueue handle via per-LLC DSQ with vtime ordering.
+ *
+ * Benefits (tier-agnostic by design — all tiers equally important):
+ * - All tiers 0-3 take the same placement path (tiers define latency, not affinity)
+ * - Zero bpf_task_storage_get in select_cpu (no tier/slice needed)
+ * - Zero mailbox reads (kernel has authoritative idle data)
+ * - Zero stale mask cascades (kernel idle bitmap is real-time)
+ * - ~90-110 cycles vs ~200-500 cycles (~20-40ns p50 improvement)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+/* SYNC fast-path dispatch: waker's CPU is by definition running.
+ * Noinline: only 2 args (p, wake_flags) → r1→r6, r2→r7 saves
+ * leave r8,r9 free. Single kfunc call (get_smp_id) + dispatch.
+ * Splitting this out lets the main function avoid hoisting
+ * bpf_get_smp_processor_id above the SYNC branch, which was the
+ * root cause of Spill A (p had to survive across the shared call). */
+static __attribute__((noinline))
+s32 dispatch_sync_cold(struct task_struct *p, u64 wake_flags)
+{
+    u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, quantum_ns, wake_flags);
+    return (s32)cpu;
 }
 
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
-    /* Register layout: r6=ctx, r7=tctx (r8-r9 free for compiler allocation) */
-    register void *ctx_reg asm("r6");
-    register struct cake_task_ctx *tctx_reg asm("r7");
+    /* SYNC FAST PATH: Direct dispatch to waker's CPU.
+     * Noinline helper gets its own register frame (2 args = 0 spills). */
+    if (wake_flags & SCX_WAKE_SYNC)
+        return dispatch_sync_cold(p, wake_flags);
 
-    asm volatile("%[out] = r1" : [out]"=r"(ctx_reg));
+    /* KERNEL-DELEGATED IDLE SELECTION: One call replaces the entire
+     * TIER 1→2→3→4 cascade. scx_bpf_select_cpu_dfl() internally does:
+     * 1. Check prev_cpu idle (authoritative, not stale mailbox)
+     * 2. Check sibling idle (SMT-aware)
+     * 3. LLC-local scan (topology-aware)
+     * 4. Global scan (if needed)
+     * All with atomic claiming — no double-dispatch possible. */
+    u32 tc_id = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+    struct cake_scratch *scr = &global_scratch[tc_id];
+    s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &scr->dummy_idle);
 
-    /* MEGA-MAILBOX PREFETCH: Issue early to hide DDR5 latency (~500 cycles) */
-    CAKE_PREFETCH(&mega_mailbox[0]);
-
-    tctx_reg = get_task_ctx(*(struct task_struct **)ctx_reg, false);
-
-    if (unlikely(!tctx_reg)) {
-        return select_cpu_new_task_cold(*(struct task_struct **)ctx_reg,
-                                      *(s32 *)((u8 *)ctx_reg + 8),
-                                      *(u64 *)((u8 *)ctx_reg + 16));
+    if (scr->dummy_idle) {
+        /* Kernel found & claimed an idle CPU — direct dispatch to built-in
+         * local DSQ. SCX_DSQ_LOCAL_ON skips dispatch callback entirely
+         * (~85cy saved vs user DSQ rhashtable lookup). */
+        scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, quantum_ns, wake_flags);
+        return cpu;
     }
 
-    u32 scratch_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+    /* ALL BUSY: return prev_cpu, let cake_enqueue handle via per-LLC DSQ.
+     * Tier priority preserved by vtime encoding: (tier << 56) | timestamp.
+     * Load balance preserved: any CPU pulling from its LLC DSQ gets the task.
+     * Cache warmth preserved: prev_cpu is the natural first puller. */
+    return prev_cpu;
+}
 
-    /* BARRIER: Refresh r6/r7 after kfunc calls */
-    asm volatile("" : "+r"(ctx_reg), "+r"(tctx_reg));
+/* ENQUEUE-TIME KICK: When a high-priority task (T0/T1) arrives and all cores are
+ * busy, immediately preempt the core running the lowest-priority task in our LLC.
+ * This completes the CAKE philosophy: saturation degrades throughput, not latency.
+ *
+ * Without this, T0 input events wait up to 4ms (tick interval) in the DSQ when
+ * all cores are saturated (e.g., 5000 enemies, make -j8). With it, T0 gets a
+ * core within ~2-5µs via IPI.
+ *
+ * Cost: ~15-30ns mailbox scan on the "all busy" slow path.
+ * Benefit: T0 max scheduling latency 4000µs → 5µs under saturation.
+ * Fast path (idle core found): zero cost — this code is never reached.
+ *
+ * Optimizations applied (Rule 38 — no pragmatic filtering):
+ *   Rule 39: nr_cpus early-exit eliminates dead loop space (64→8 on 9800X3D)
+ *   Rule 5:  Single-LLC fast path skips cpu_llc_id load (JIT dead-code via nr_llcs)
+ *   Rule 2:  CAKE_PREFETCH overlaps next cache line load with current compare (MLP)
+ *   Rule 6:  Early-exit on T3 found — no tier can be worse, stop scanning */
+static __attribute__((noinline))
+void kick_lowest_priority_cold(u8 arriving_tier, u32 llc_id)
+{
+    s32 victim = -1;
+    u8 worst_tier = arriving_tier;
 
-    u64 wake = *(u64 *)((u8 *)ctx_reg + 16);
+    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
+        if (i >= nr_cpus)
+            break;
 
-    /* ═══════════════════════════════════════════════════════════════════════════
-     * SYNC FAST PATH: Direct dispatch to waker's CPU (~69ns)
-     * - Checked first: skips b_prev/idle_mask/topo loads for ~60% of wakeups
-     * ═══════════════════════════════════════════════════════════════════════════ */
-    if (wake & SCX_WAKE_SYNC) {
-        scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, CAKE_DSQ_LC_BASE + scratch_cpu,
-                           tctx_reg->next_slice, wake);
-        /* H1: Prevent thundering herd - clear bit so next SYNC won't pick same CPU */
-        mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scratch_cpu);
-        return (s32)scratch_cpu;
-    }
+        /* Rule 2 (MLP): Prefetch next mailbox entry to overlap its cache
+         * line load with the current iteration's compare. Each entry is
+         * 64B-aligned = 1 cache line, so without prefetch these are serial
+         * L1/L2 loads. With prefetch, the next load starts while we compare. */
+        if (i + 1 < nr_cpus)
+            CAKE_PREFETCH(&mega_mailbox[i + 1].flags);
 
-    /* ═══════════════════════════════════════════════════════════════════════════
-     * IDLE CPU SELECTION: Prev → Sibling → Global scan → Victim → Arbiter
-     * ═══════════════════════════════════════════════════════════════════════════ */
-    u32 b_prev = (u32)*(s32 *)((u8 *)ctx_reg + 8) & (CAKE_MAX_CPUS - 1);
-    const struct cpu_topology_entry *topo_prev = &cpu_topo[b_prev];
-    u64 idles = mega_mailbox[scratch_cpu].cached_idle_mask;
+        /* Rule 5: Single-LLC systems (9800X3D) skip the cpu_llc_id check
+         * entirely — all CPUs are in LLC 0. JIT eliminates this branch
+         * when nr_llcs==1 (RODATA constant-folded). Saves 1 RODATA array
+         * load per iteration on the most common desktop topology. */
+        if (nr_llcs > 1 && cpu_llc_id[i] != llc_id)
+            continue;
 
-    /* TIER 1: Prev CPU idle - highest priority */
-    u64 prev_bit = (1ULL << topo_prev->self_cpu);
-    if (idles & prev_bit) {
-        scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->dsq_id,
-                           tctx_reg->next_slice, wake);
-        mega_mailbox[scratch_cpu].cached_idle_mask &= ~prev_bit;
-        return (s32)topo_prev->self_cpu;
-    }
+        u8 running_tier = MBOX_GET_TIER(mega_mailbox[i].flags);
+        if (running_tier > worst_tier) {
+            worst_tier = running_tier;
+            victim = (s32)i;
 
-    /* TIER 2: Sibling idle */
-    u64 sib_bit = topo_prev->sibling_bit;
-    if (sib_bit & idles) {
-        scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, topo_prev->sibling_dsq,
-                           tctx_reg->next_slice, wake);
-        mega_mailbox[scratch_cpu].cached_idle_mask &= ~sib_bit;
-        return (s32)topo_prev->sibling;
-    }
-
-    /* TIER 3: Global scan - hint fast path then O(N) fallback */
-    if (idles) {
-        s32 scan_cpu = -1;
-
-        /* Fast path: use pre-computed best_idle_cpu hint (~1 byte load vs O(N) scan) */
-        u8 hint = mega_mailbox[scratch_cpu].best_idle_cpu;
-        if (hint < 64 && (idles & (1ULL << hint)))
-            scan_cpu = (s32)hint;
-
-        /* Slow path: full quality-aware scan only if hint missed */
-        if (scan_cpu < 0)
-            scan_cpu = find_victim_mailbox(topo_prev->self_cpu, idles, cpu_topo);
-
-        if (scan_cpu >= 0) {
-            u32 scan_dsq = CAKE_DSQ_LC_BASE + (scan_cpu & 63);
-            scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, scan_dsq,
-                               tctx_reg->next_slice, wake);
-            mega_mailbox[scratch_cpu].cached_idle_mask &= ~(1ULL << scan_cpu);
-            return scan_cpu;
+            /* Rule 6: T3 (BULK) is the lowest priority possible.
+             * Once found, no remaining core can be worse — stop scanning. */
+            if (worst_tier >= CAKE_TIER_BULK)
+                break;
         }
     }
 
-    /* T0 VICTIM FALLBACK: Critical Latency tasks try victim steal before arbiter */
-    if ((GET_TIER(tctx_reg) & 7) == CRITICAL_LATENCY_DSQ) {
-        s32 victim_cpu = select_cpu_t0_victim_cold(ctx_reg, tctx_reg, scratch_cpu, topo_prev->self_cpu);
-        if (victim_cpu >= 0)
-            return victim_cpu;
-    }
-
-    /* TIER 4: Arbiter - all CPUs busy, use quality-based selection */
-    s32 arbiter_cpu = select_cpu_with_arbiter(tctx_reg, (s32)topo_prev->self_cpu, idles, 0, topo_prev);
-    u32 arbiter_dsq = cpu_topo[arbiter_cpu & 63].dsq_id;
-
-    scx_bpf_dsq_insert(*(struct task_struct **)ctx_reg, arbiter_dsq,
-                       tctx_reg->next_slice, wake);
-
-    /* sched_ext core auto-kicks the CPU returned from select_cpu */
-    return arbiter_cpu;
+    if (victim >= 0)
+        scx_bpf_kick_cpu(victim, SCX_KICK_PREEMPT);
 }
 
-/* Enqueue - A+B architecture: unified DSQ with vtime = (tier << 56) | timestamp */
+/* Enqueue - A+B architecture: per-LLC DSQ with vtime = (tier << 56) | timestamp */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
     register struct task_struct *p_reg asm("r6") = p;
     u32 task_flags = p_reg->flags;
 
-    /* KFUNC CACHING: Single scx_bpf_now() call for entire function */
+    /* KFUNC CACHING: Single scx_bpf_now() + bpf_get_smp_processor_id()
+     * call for entire function. Hoisted LLC lookup eliminates 2 redundant
+     * bpf_get_smp_processor_id() calls from the per-branch dispatch sites. */
     u64 now_cached = scx_bpf_now();
+    u32 enq_llc = cpu_llc_id[bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1)];
 
     struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
 
-    /* Kthread cold path */
+    /* Kthread cold path (inlined — reuses now_cached + enq_llc) */
     if (unlikely((task_flags & PF_KTHREAD) && !tctx)) {
-        init_new_kthread_cold(p_reg, enq_flags);
+        u64 vtime = ((u64)CAKE_TIER_CRITICAL << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
+        scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, quantum_ns, vtime, enq_flags);
         return;
     }
 
@@ -610,20 +413,20 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 
     /* Handle Yields/Background */
     if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
-        u64 vtime = ((u64)CAKE_TIER_BACKGROUND << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
-        scx_bpf_dsq_insert_vtime(p_reg, UNIFIED_DSQ, quantum_ns, vtime, enq_flags);
+        u64 vtime = ((u64)CAKE_TIER_BULK << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
+        scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, quantum_ns, vtime, enq_flags);
         return;
     }
 
     if (unlikely(!tctx_reg)) {
-        /* No context yet - use INTERACTIVE tier */
-        u64 vtime = ((u64)CAKE_TIER_INTERACTIVE << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
-        scx_bpf_dsq_insert_vtime(p_reg, UNIFIED_DSQ, quantum_ns, vtime, enq_flags);
+        /* No context yet - use Frame tier */
+        u64 vtime = ((u64)CAKE_TIER_FRAME << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
+        scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, quantum_ns, vtime, enq_flags);
         return;
     }
 
     /* Standard Tier Logic */
-    u8 tier = GET_TIER(tctx_reg) & 7;
+    u8 tier = GET_TIER(tctx_reg) & 3;
     u64 slice = tctx_reg->next_slice;
 
     if (enable_stats) {
@@ -637,41 +440,67 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
             s->nr_tier_dispatches[tier]++;
     }
 
-    /* A+B: Vtime-encoded priority: (tier << 56) | timestamp */
+    /* A+B: Vtime-encoded priority: (tier << 56) | timestamp
+     * DRR++ NEW FLOW BONUS: Tasks with CAKE_FLOW_NEW get a vtime reduction,
+     * making them drain before established same-tier tasks. This gives
+     * newly spawned threads instant responsiveness (e.g., game launching a
+     * new worker). Cleared by reclassify_task_cold when deficit exhausts. */
     u64 vtime = ((u64)tier << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
-    scx_bpf_dsq_insert_vtime(p_reg, UNIFIED_DSQ, slice, vtime, enq_flags);
+    u32 task_packed = cake_relaxed_load_u32(&tctx_reg->packed_info);
+    if (task_packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS))
+        vtime -= new_flow_bonus_ns;
+    scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, slice, vtime, enq_flags);
+
+    /* ENQUEUE-TIME KICK: If this is a T0/T1 wakeup and we reached the DSQ
+     * path (all cores were busy in select_cpu), kick the lowest-priority
+     * core so it pulls our task immediately instead of waiting for tick.
+     * Only for wakeups — yields and preempts don't need urgent dispatch. */
+    if (tier <= CAKE_TIER_INTERACT && (enq_flags & SCX_ENQ_WAKEUP))
+        kick_lowest_priority_cold(tier, enq_llc);
 }
 
-/* A+B+D dispatch - single UNIFIED_DSQ scan, deferred accounting, per-CPU mailbox priority */
+/* Dispatch: per-LLC DSQ scan with cross-LLC stealing fallback.
+ * Direct-dispatched tasks (SCX_DSQ_LOCAL_ON) bypass this callback entirely —
+ * kernel handles them natively. Only tasks that went through
+ * cake_enqueue → per-LLC DSQ arrive here. */
 void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 {
-    u32 cpu = (u32)raw_cpu & 63;
+    u32 my_llc = cpu_llc_id[raw_cpu & (CAKE_MAX_CPUS - 1)];
 
-    /* Signal mask check removed */
-
-    /* 1. Check per-CPU direct dispatch mailbox first (highest priority) */
-    if (scx_bpf_dsq_move_to_local(CAKE_DSQ_LC_BASE + cpu)) {
-        /* H3: MESI-friendly - skip write if already not-idle */
-        u8 old_flags = mega_mailbox[cpu].flags;
-        if (old_flags & MBOX_IDLE_BIT)
-            mega_mailbox[cpu].flags = old_flags & ~MBOX_IDLE_BIT;
+    /* Local LLC first — zero cross-CCD contention in steady state */
+    if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + my_llc))
         return;
-    }
 
-    /* 2. A+B: Single unified DSQ scan (vtime-ordered by tier) */
-    if (scx_bpf_dsq_move_to_local(UNIFIED_DSQ)) {
-        /* H3: MESI-friendly - skip write if already not-idle */
-        u8 old_flags = mega_mailbox[cpu].flags;
-        if (old_flags & MBOX_IDLE_BIT)
-            mega_mailbox[cpu].flags = old_flags & ~MBOX_IDLE_BIT;
+    /* Steal from other LLCs (only when local is empty).
+     * RODATA gate: Clang doesn't constant-fold RODATA globals, so without
+     * this check, single-LLC systems (9800X3D) execute 7 unrolled
+     * load+branch pairs that always break immediately. (Rule 5) */
+    if (nr_llcs <= 1)
         return;
-    }
 
-    /* No work - H3: skip write if already idle */
-    u8 old_flags = mega_mailbox[cpu].flags;
-    if (!(old_flags & MBOX_IDLE_BIT))
-        mega_mailbox[cpu].flags = old_flags | MBOX_IDLE_BIT;
+    for (u32 i = 1; i < CAKE_MAX_LLCS; i++) {
+        if (i >= nr_llcs)
+            break;
+        u32 victim = my_llc + i;
+        if (victim >= nr_llcs)
+            victim -= nr_llcs;
+        if (scx_bpf_dsq_move_to_local(LLC_DSQ_BASE + victim))
+            return;
+    }
 }
+
+/* DVFS RODATA LUT: Tier → CPU performance target (branchless via array index)
+ * SCX_CPUPERF_ONE = 1024 = max hardware frequency. JIT constant-folds the array.
+ * ALL tiers can contain gaming workloads — tiers control latency priority, not
+ * execution speed. Conservative targets: never below 75% to avoid starving
+ * game-critical work. */
+const u32 tier_perf_target[8] = {
+    1024,  /* T0 Critical: 100% — IRQ, input, audio, network (<100µs) */
+    1024,  /* T1 Interactive: 100% — compositor, physics, AI (<2ms) */
+    1024,  /* T2 Frame: 100% — game render, encoding (<8ms) */
+    768,   /* T3 Bulk: 75% — compilation, background (≥8ms) */
+    768, 768, 768, 768,  /* padding */
+};
 
 void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
 {
@@ -682,150 +511,241 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
 
     u32 now = (u32)scx_bpf_now();
 
-    /* SYMPHONY OF 2: SAFETY GATE & CONTINUATION CHECK */
+    /* SAFETY GATE: tctx must exist and have been stamped */
     if (unlikely(!tctx_reg || tctx_reg->last_run_at == 0)) {
         if (tctx_reg) tctx_reg->last_run_at = now;
         return;
     }
 
-    /* PHASE 1: COMPUTE RUNTIME & THRESHOLDS */
+    /* PHASE 1: COMPUTE RUNTIME */
     register u8 tier_reg asm("r9") = GET_TIER(tctx_reg);
     u32 last_run = tctx_reg->last_run_at;
     u64 runtime = (u64)(now - last_run);
 
-    /* Continuation: if task exceeded slice, force context switch */
+    /* Slice exceeded: force context switch */
     if (unlikely(runtime > tctx_reg->next_slice)) {
         scx_bpf_kick_cpu(cpu_id_reg, SCX_KICK_PREEMPT);
         return;
     }
 
-    u64 threshold = UNPACK_STARVATION_NS(tier_configs[tier_reg & 7]);
+    /* PHASE 2: STARVATION CHECK — skip if this CPU has only 1 runnable task.
+     * cake_get_rq() → scx_bpf_cpu_rq() (~10-15ns). rq->scx.nr_running is
+     * authoritative kernel state. When == 1, no other task can starve — skip
+     * threshold math entirely. */
+    struct rq *rq = cake_get_rq(cpu_id_reg);
+    if (rq && rq->scx.nr_running > 1) {
+        u64 threshold = UNPACK_STARVATION_NS(tier_configs[tier_reg & 7]);
 
-    /* Reduced jitter: 0x0F = 15 * 1024ns = ~15.3µs range (Minimizes lockstep without bloating frame times) */
-    threshold += (u64)((now & 0x0F) << 10);
+        if (unlikely(runtime > threshold)) {
+            scx_bpf_kick_cpu(cpu_id_reg, SCX_KICK_PREEMPT);
 
-    /* Starvation check - unavoidable branch (helper has side effects) */
-    bool needs_kick = (runtime > threshold);
-    if (unlikely(needs_kick)) {
-        scx_bpf_kick_cpu(cpu_id_reg, SCX_KICK_PREEMPT);  /* FUSION #3: Use hoisted cpu_id_reg */
-
-        if (enable_stats && tier_reg < CAKE_TIER_MAX) {
-            struct cake_stats *s = get_local_stats();
-            if (s) s->nr_starvation_preempts_tier[tier_reg]++;
+            if (enable_stats && tier_reg < CAKE_TIER_MAX) {
+                struct cake_stats *s = get_local_stats();
+                if (s) s->nr_starvation_preempts_tier[tier_reg]++;
+            }
         }
     }
 
-    /* Victim eligibility is now computed later in mailbox update section */
-
-    /* Update Occupant Tier - single load, skip write if unchanged (MESI-friendly) */
-    u32 *core_packed_ptr = (u32 *)&global_core_state[cpu_id_reg];
-    u32 core_packed = cake_relaxed_load_u32(core_packed_ptr);
-    if (tier_reg != STATE_GET_OCCUPANT(core_packed)) {
-        update_occupant_tier(core_packed_ptr, core_packed, tier_reg);
-    }
-
-    /* ═══════════════════════════════════════════════════════════════════════
-     * MEGA-MAILBOX UPDATE: Zero false sharing + kfunc/mask caching
-     * - Caches timestamp, idle_mask, victim_mask for fast wakeup reads
-     * - Pre-computes best_idle_cpu hint (saves ~40 cycles on wakeup)
-     * ═══════════════════════════════════════════════════════════════════════ */
+    /* MEGA-MAILBOX UPDATE: tier for dispatch to consume (MESI-guarded) */
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu_id_reg];
-
-    /* Victim eligibility: runtime >= 1ms AND tier >= Interactive */
-    bool is_victim = (runtime >> VICTIM_RESIDENCY_BIT) &&
-                     (tier_reg >= REALTIME_DSQ && tier_reg <= BATCH_DSQ);
-
-    /* Pack flags: [2:0]=tier, [3]=victim, [4]=idle, [5]=warm */
     u8 new_flags = (tier_reg & MBOX_TIER_MASK);
-    if (is_victim)
-        new_flags |= MBOX_VICTIM_BIT;
-    if (runtime < cached_threshold_ns)
-        new_flags |= MBOX_WARM_BIT;
+    if (mbox->flags != new_flags)
+        mbox->flags = new_flags;
 
-    /* FULL MASK REBUILD: Both masks every tick for maximum freshness
-     * - 2N cross-CPU byte reads per tick (~16 extra loads for 16 CPUs)
-     * - Eliminates stale-mask-induced wrong dispatch decisions
-     * - Critical for fast ping-pong workloads where idle state changes sub-ms */
-    u64 idle_snap = build_idle_mask_from_mailbox();
-    u64 victim_snap = build_victim_mask_from_mailbox();
-
-    /* BEST IDLE HINT: Pre-compute before stores so we can write monotonically */
-    u8 hint = 0xFF;  /* Invalid = no hint */
-    if (idle_snap) {
-        const struct cpu_topology_entry *t = &cpu_topo[cpu_id_reg];
-        if (t->peer_1 < 64 && (idle_snap & (1ULL << t->peer_1)))
-            hint = t->peer_1;
-        else if (t->peer_2 < 64 && (idle_snap & (1ULL << t->peer_2)))
-            hint = t->peer_2;
-        else if (t->peer_3 < 64 && (idle_snap & (1ULL << t->peer_3)))
-            hint = t->peer_3;
-        else if (idle_snap)
-            hint = (u8)BIT_SCAN_FORWARD_U64_RAW(idle_snap, DB_MAGIC);
+    /* DVFS: Tier-proportional CPU frequency steering.
+     * Runs in tick (rq-locked) = ~15-20ns vs ~30-80ns unlocked in running.
+     * Hysteresis: skip kfunc if perf target unchanged (MESI-friendly).
+     *
+     * Hybrid scaling: on Intel P/E-core systems, scale target by each core's
+     * cpuperf_cap so E-cores don't get over-requested. JIT eliminates this
+     * branch entirely on non-hybrid CPUs (has_hybrid = false in RODATA). */
+    u32 target = tier_perf_target[tier_reg & 7];
+    if (has_hybrid) {
+        u32 cap = scx_bpf_cpuperf_cap(cpu_id_reg);
+        target = (target * cap) >> 10;  /* scale by capability (1024 = 100%) */
     }
-
-    /* MONOTONIC STORE BURST: Ascending offsets for optimal write combining
-     * [0]=flags, [1]=best_idle_cpu, [4]=runtime_us, [8]=cached_now,
-     * [16]=cached_idle_mask, [24]=cached_victim_mask */
-    mbox->flags = new_flags;
-    mbox->best_idle_cpu = hint;
-    mbox->runtime_us = (u32)(runtime >> 10);
-    mbox->cached_now = now;
-    mbox->cached_idle_mask = idle_snap;
-    mbox->cached_victim_mask = victim_snap;
+    u8 cached_perf = mbox->dsq_hint;
+    u8 target_cached = (u8)(target >> 2);
+    if (cached_perf != target_cached) {
+        scx_bpf_cpuperf_set(cpu_id_reg, target);
+        mbox->dsq_hint = target_cached;
+    }
 }
 
-/* Task started running - reset last_run_at to exclude sleep time from runtime calculations */
+
+
+/* Task started running - stamp last_run_at for runtime measurement.
+ * DVFS moved to cake_tick where rq lock is held (cpuperf_set ~15-20ns vs
+ * ~30-80ns unlocked here). Saves ~44-84 cycles per context switch. */
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
     struct cake_task_ctx *tctx = get_task_ctx(p, false);
-    if (tctx)
-        tctx->last_run_at = (u32)scx_bpf_now();
+    if (!tctx)
+        return;
+    tctx->last_run_at = (u32)scx_bpf_now();
 }
 
-/* Task enabled (joining sched_ext) */
-void BPF_STRUCT_OPS(cake_enable, struct task_struct *p)
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * AVG_RUNTIME CLASSIFICATION + DRR++: Dynamic tier reclassification on every stop.
+ * CPU analog of network CAKE's flow classification:
+ * - Sparse flows (audio, input) → short bursts + yield → settle at T0-T1
+ * - Bulk flows (compilation, renders) → run until preempted → demote to T2-T3
+ * - Mixed flows (game logic) → medium bursts → settle at T1-T2
+ *
+ * This is the engine that makes tier-encoded vtime and per-tier starvation
+ * actually differentiate traffic. Without it, all userspace tasks compete
+ * at the same tier.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+static __attribute__((noinline))
+void reclassify_task_cold(struct cake_task_ctx *tctx)
 {
-    /* No initialization needed - context created on first use */
+    u32 packed = cake_relaxed_load_u32(&tctx->packed_info);
+
+    /* ── RUNTIME MEASUREMENT ── */
+    u32 now = (u32)scx_bpf_now();
+    u32 last_run = tctx->last_run_at;
+    if (!last_run)
+        return;  /* Never ran — skip (safety gate) */
+
+    u32 runtime_raw = now - last_run;
+    u32 runtime_us = runtime_raw >> 10;  /* ns → ~μs (÷1024 ≈ ÷1000) */
+
+    /* Clamp to u16 max for EWMA field (65ms max, more than any reasonable burst) */
+    u16 rt_clamped = runtime_us > 0xFFFF ? 0xFFFF : (u16)runtime_us;
+
+    /* ── GRADUATED BACKOFF ──
+     * When tier has been stable for 3+ consecutive stops, throttle reclassify
+     * frequency based on current tier. T0 tasks (IRQ/input) almost never
+     * change → recheck every 1024th stop. T3 tasks (bulk) may transition
+     * → recheck every 16th stop. Uses per-task counter + RODATA masks. */
+    u8 stable = (packed >> SHIFT_STABLE) & 3;
+    if (stable == 3) {
+        /* Fast path: update EWMA + deficit without full tier mapping */
+        u32 old_fused = tctx->deficit_avg_fused;
+        u16 avg_rt = EXTRACT_AVG_RT(old_fused);
+        u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_clamped >> 3);
+        u16 deficit = EXTRACT_DEFICIT(old_fused);
+        deficit = (rt_clamped >= deficit) ? 0 : deficit - rt_clamped;
+        u32 new_fused = PACK_DEFICIT_AVG(deficit, new_avg);
+        if (new_fused != old_fused)
+            tctx->deficit_avg_fused = new_fused;
+
+        /* Per-tier recheck: increment counter, check against tier mask */
+        u8 tier = (packed >> SHIFT_TIER) & MASK_TIER;
+        u16 mask = tier_recheck_mask[tier & 3];
+        u16 counter = tctx->reclass_counter + 1;
+        tctx->reclass_counter = counter;
+        if (counter & mask) {
+            /* Not time for recheck yet — spot-check for behavior change.
+             * If avg shifted >50µs in either direction, reset stability
+             * so next stop does full reclassify with fresh data. */
+            s16 avg_delta = (s16)new_avg - (s16)avg_rt;
+            if (avg_delta > 50 || avg_delta < -50) {
+                u32 reset = packed & ~((u32)3 << SHIFT_STABLE);
+                cake_relaxed_store_u32(&tctx->packed_info, reset);
+                tctx->reclass_counter = 0;
+            }
+            return;
+        }
+        /* Fall through → periodic full reclassify */
+    }
+
+    /* ── FULL RECLASSIFICATION ── */
+
+    /* ── EWMA RUNTIME UPDATE ── */
+    /* Decay 7/8: responds in ~8 execution bouts. Smooth enough to ignore
+     * single outliers, fast enough to detect behavior changes within 50ms. */
+    u32 old_fused = tctx->deficit_avg_fused;
+    u16 avg_rt = EXTRACT_AVG_RT(old_fused);
+    u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_clamped >> 3);
+
+    /* ── DRR++ DEFICIT TRACKING ── */
+    /* Each execution bout consumes deficit. When deficit exhausts, clear the
+     * new-flow flag → task loses its priority bonus within the tier.
+     * Initial deficit = quantum + new_flow_bonus ≈ 10ms of credit. */
+    u16 deficit = EXTRACT_DEFICIT(old_fused);
+    deficit = (rt_clamped >= deficit) ? 0 : deficit - rt_clamped;
+
+    /* Pre-compute deficit_exhausted before rt_clamped/deficit die (Rule 36) */
+    bool deficit_exhausted = (deficit == 0 && (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)));
+
+    /* Write fused deficit + avg_runtime (MESI-friendly: skip if unchanged) */
+    u32 new_fused = PACK_DEFICIT_AVG(deficit, new_avg);
+    if (new_fused != old_fused)
+        tctx->deficit_avg_fused = new_fused;
+
+    /* ── PURE avg_runtime → TIER (3 comparisons) ──
+     * Direct classification by EWMA avg_runtime:
+     *   < 100µs → T0 (Critical: IRQ, input, audio, network)
+     *   < 2ms   → T1 (Interactive: compositor, physics, AI)
+     *   < 8ms   → T2 (Frame: game render, encoding)
+     *   ≥ 8ms   → T3 (Bulk: compilation, background) */
+    u8 new_tier;
+    if      (new_avg < TIER_GATE_T0) new_tier = 0;
+    else if (new_avg < TIER_GATE_T1) new_tier = 1;
+    else if (new_avg < TIER_GATE_T2) new_tier = 2;
+    else                             new_tier = 3;
+
+    /* ── WRITE PACKED_INFO (MESI-friendly: skip if unchanged) ── */
+    u8 old_tier = (packed >> SHIFT_TIER) & MASK_TIER;
+    bool tier_changed = (new_tier != old_tier);
+
+    /* Tier-stability counter: increment toward 3 if tier held, reset on change.
+     * When stable==3, subsequent calls take the graduated backoff path. */
+    u8 new_stable = tier_changed ? 0 : ((stable < 3) ? stable + 1 : 3);
+
+    if (tier_changed || deficit_exhausted || new_stable != stable) {
+        u32 new_packed = packed;
+        /* Fused tier+stable: bits [31:28] = [stable:2][tier:2]
+         * Bitfield coalescing — 2 ops instead of 4 (Rule 24 mask fusion) */
+        new_packed &= ~((u32)0xF << 28);
+        new_packed |= (((u32)new_stable << 2) | (u32)new_tier) << 28;
+        /* DRR++: Clear new-flow flag when deficit exhausted */
+        if (deficit_exhausted)
+            new_packed &= ~((u32)CAKE_FLOW_NEW << SHIFT_FLAGS);
+
+        cake_relaxed_store_u32(&tctx->packed_info, new_packed);
+    }
+
+    /* ── SLICE RECALCULATION on tier change ── */
+    /* When tier changes, the quantum multiplier changes (T0=0.75x → T3=1.4x).
+     * Update next_slice so the next execution bout uses the correct quantum. */
+    if (tier_changed) {
+        u64 cfg = tier_configs[new_tier & 7];
+        u64 mult = UNPACK_MULTIPLIER(cfg);
+        tctx->next_slice = (quantum_ns * mult) >> 10;
+        tctx->reclass_counter = 0;
+    }
 }
 
-/* Task stopping (yielding/blocking) - H2: MESI-friendly skip-if-unchanged */
+/* Task stopping — avg_runtime reclassification + DRR++ deficit tracking */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
-    u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-
-    /* H2: Read first, skip write if victim bit already clear */
-    u8 old_flags = mega_mailbox[cpu].flags;
-    if (old_flags & MBOX_VICTIM_BIT)
-        mega_mailbox[cpu].flags = old_flags & ~MBOX_VICTIM_BIT;
+    struct cake_task_ctx *tctx = get_task_ctx(p, false);
+    if (tctx)
+        reclassify_task_cold(tctx);
 }
 
-/* Task disabled (leaving sched_ext) - MAILBOX ONLY cleanup */
-void BPF_STRUCT_OPS(cake_disable, struct task_struct *p)
-{
-    u32 cpu = bpf_get_smp_processor_id();
-    mega_mailbox[cpu & 63].flags &= ~MBOX_VICTIM_BIT;
-}
+
 
 /* Initialize the scheduler */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 {
-    s32 ret;
-
-    /* cached_threshold_ns now populated by userspace via rodata */
-
-    u32 nr_cpus = scx_bpf_nr_cpu_ids();
-
-    /* Create Per-CPU Direct Dispatch Queues */
-    for (s32 i = 0; i < 64; i++) {
-        if (i >= nr_cpus) break;
-        ret = scx_bpf_create_dsq(CAKE_DSQ_LC_BASE + i, -1);
-        if (ret < 0) return ret;
+    /* Per-CPU DSQs eliminated — SCX_DSQ_LOCAL_ON dispatches directly to
+     * the kernel's built-in local DSQ, skipping dispatch callback entirely.
+     * Per-LLC DSQs used for enqueue → dispatch path. */
+    /* Create per-LLC DSQs — one per cache domain.
+     * Single-CCD: 1 DSQ (single per-LLC DSQ).
+     * Multi-CCD: N DSQs (eliminates cross-CCD lock contention). */
+    for (u32 i = 0; i < CAKE_MAX_LLCS; i++) {
+        if (i >= nr_llcs)
+            break;
+        s32 ret = scx_bpf_create_dsq(LLC_DSQ_BASE + i, -1);
+        if (ret < 0)
+            return ret;
     }
-
-    /* A+B ARCHITECTURE: Single unified DSQ with vtime ordering */
-    ret = scx_bpf_create_dsq(UNIFIED_DSQ, -1);
-    if (ret < 0)
-        return ret;
 
     return 0;
 }
@@ -843,8 +763,6 @@ SCX_OPS_DEFINE(cake_ops,
                .tick           = (void *)cake_tick,
                .running        = (void *)cake_running,
                .stopping       = (void *)cake_stopping,
-               .enable         = (void *)cake_enable,
-               .disable        = (void *)cake_disable,
                .init           = (void *)cake_init,
                .exit           = (void *)cake_exit,
                .flags          = SCX_OPS_KEEP_BUILTIN_IDLE,

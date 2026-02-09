@@ -47,13 +47,13 @@ pub struct EtdConfig {
 impl Default for EtdConfig {
     fn default() -> Self {
         Self {
-            // 5000 iterations @ 300 samples (matches reference tool)
-            iterations: 5000,
-            samples: 250,
-            // 2000 warmup iters to stabilize 9800X3D boost clocks
-            warmup: 2000,
-            // Discard samples with σ > 5ns (OS interference)
-            max_stddev: 5.0,
+            // Display-grade: 500 iterations @ 50 samples (sufficient for heatmap accuracy)
+            iterations: 500,
+            samples: 50,
+            // 200 warmup iters to stabilize boost clocks
+            warmup: 200,
+            // Discard samples with σ > 15ns (relaxed for faster calibration)
+            max_stddev: 15.0,
         }
     }
 }
@@ -276,206 +276,8 @@ where
     matrix
 }
 
-/// Extract top N fastest peers for each CPU from the latency matrix. Returns [peer0, peer1, peer2].
-pub fn extract_top_peers(matrix: &[Vec<f64>], top_n: usize) -> Vec<[u8; 3]> {
-    let nr_cpus = matrix.len();
-    let mut result = vec![[0u8; 3]; nr_cpus];
 
-    for cpu in 0..nr_cpus {
-        // Collect (peer_cpu, latency) pairs, excluding self
-        let mut peers: Vec<(usize, f64)> = matrix[cpu]
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != cpu)
-            .map(|(j, &lat)| (j, lat))
-            .collect();
 
-        // Sort by latency (fastest first)
-        peers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-        // Take top N
-        for (i, (peer, _)) in peers.iter().take(top_n).enumerate() {
-            if i < 3 {
-                result[cpu][i] = *peer as u8;
-            }
-        }
-
-        debug!(
-            "ETD: CPU {:2} top peers: {:?} (latencies: {:.1}ns, {:.1}ns, {:.1}ns)",
-            cpu,
-            result[cpu],
-            peers.first().map(|p| p.1).unwrap_or(0.0),
-            peers.get(1).map(|p| p.1).unwrap_or(0.0),
-            peers.get(2).map(|p| p.1).unwrap_or(0.0)
-        );
-    }
-
-    result
-}
-
-/// Unified CPU topology entry matching BPF struct cpu_topology_entry
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CpuTopologyEntry {
-    pub sibling: u8,    // SMT sibling CPU ID (0xFF if none)
-    pub llc_id: u8,     // LLC/CCD domain ID
-    pub peer_1: u8,     // 2nd fastest peer
-    pub peer_2: u8,     // 3rd fastest peer
-    pub peer_3: u8,     // 4th fastest peer
-    pub flags: u8,      // Bit 0: is_big, Bit 1: has_sibling
-    pub core_id: u8,    // Physical core ID (0-31)
-    pub thread_bit: u8, // Pre-computed (1 << thread_idx)
-    pub dsq_id: u32,    // Pre-computed (CAKE_DSQ_LC_BASE + cpu_id)
-    pub peer_dsqs: u32, // SPECULATIVE MAPPING (matches intf.h)
-    // T2 OPTIMIZATION: Pre-computed sibling mask for O(1) idle check
-    pub sibling_bit: u64, // Pre-computed (1 << sibling) or 0 if no sibling
-    pub sibling_dsq: u32, // Pre-computed (CAKE_DSQ_LC_BASE + sibling) or 0
-    pub _pad_t2: u32,     // Align to 8-byte boundary
-}
-
-/// Topology flags (must match intf.h)
-pub const CPU_TOPO_FLAG_IS_BIG: u8 = 1 << 0;
-pub const CPU_TOPO_FLAG_HAS_SIBLING: u8 = 1 << 1;
-pub const CPU_TOPO_INVALID: u8 = 0xFF;
-
-/// Generate unified topology entries combining ETD latencies, kernel sibling map, and LLC/P-E flags.
-pub fn generate_unified_topology(
-    matrix: &[Vec<f64>],
-    sibling_map: &[u8],
-    llc_ids: &[u8],
-    is_big: &[u8],
-    core_ids: &[u8],
-    thread_bits: &[u8],
-    dsq_ids: &[u32],
-) -> Vec<CpuTopologyEntry> {
-    let nr_cpus = matrix.len();
-    let mut result = vec![CpuTopologyEntry::default(); nr_cpus];
-
-    for cpu in 0..nr_cpus {
-        // Collect (peer_cpu, latency) pairs, excluding self
-        let mut peers: Vec<(usize, f64)> = matrix[cpu]
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != cpu)
-            .map(|(j, &lat)| (j, lat))
-            .collect();
-
-        // Sort by latency (fastest first)
-        peers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Get sibling from kernel topology (validated against ETD)
-        let kernel_sibling = if cpu < sibling_map.len() {
-            sibling_map[cpu]
-        } else {
-            CPU_TOPO_INVALID
-        };
-
-        // ETD's fastest peer should be the SMT sibling (if exists)
-        // Use kernel sibling as primary source, ETD validates
-        let has_sibling = kernel_sibling != cpu as u8 && kernel_sibling < nr_cpus as u8;
-
-        // Build the entry
-        let sibling_cpu = if has_sibling {
-            kernel_sibling
-        } else {
-            CPU_TOPO_INVALID
-        };
-
-        // T2 OPTIMIZATION: Pre-compute sibling bitmask for O(1) idle check
-        let sibling_bit: u64 = if has_sibling {
-            1u64 << (kernel_sibling as u64)
-        } else {
-            0
-        };
-
-        // Pre-compute sibling DSQ ID
-        let sibling_dsq: u32 = if has_sibling {
-            1000 + kernel_sibling as u32 // CAKE_DSQ_LC_BASE + sibling
-        } else {
-            0
-        };
-
-        let cpu_dsq_id = if cpu < dsq_ids.len() {
-            dsq_ids[cpu]
-        } else {
-            1000 + cpu as u32 // Fallback CAKE_DSQ_LC_BASE + cpu
-        };
-
-        result[cpu] = CpuTopologyEntry {
-            sibling: sibling_cpu,
-            llc_id: if cpu < llc_ids.len() { llc_ids[cpu] } else { 0 },
-            // Skip sibling in peer list (it's already in .sibling)
-            peer_1: peers
-                .get(if has_sibling { 1 } else { 0 })
-                .map(|p| p.0 as u8)
-                .unwrap_or(CPU_TOPO_INVALID),
-            peer_2: peers
-                .get(if has_sibling { 2 } else { 1 })
-                .map(|p| p.0 as u8)
-                .unwrap_or(CPU_TOPO_INVALID),
-            peer_3: peers
-                .get(if has_sibling { 3 } else { 2 })
-                .map(|p| p.0 as u8)
-                .unwrap_or(CPU_TOPO_INVALID),
-            flags: {
-                let mut f = 0u8;
-                if cpu < is_big.len() && is_big[cpu] != 0 {
-                    f |= CPU_TOPO_FLAG_IS_BIG;
-                }
-                if has_sibling {
-                    f |= CPU_TOPO_FLAG_HAS_SIBLING;
-                }
-                f
-            },
-            core_id: if cpu < core_ids.len() {
-                core_ids[cpu]
-            } else {
-                0
-            },
-            thread_bit: if cpu < thread_bits.len() {
-                thread_bits[cpu]
-            } else {
-                1
-            },
-            dsq_id: cpu_dsq_id,
-            peer_dsqs: 0, // TODO: Populate if needed for speculative mapping
-            sibling_bit,
-            sibling_dsq,
-            _pad_t2: 0,
-        };
-
-        debug!(
-            "ETD: CPU {:2} unified: sibling={}, llc={}, peers=[{},{},{}], flags=0x{:02x}",
-            cpu,
-            if result[cpu].sibling == CPU_TOPO_INVALID {
-                "none".to_string()
-            } else {
-                result[cpu].sibling.to_string()
-            },
-            result[cpu].llc_id,
-            result[cpu].peer_1,
-            result[cpu].peer_2,
-            result[cpu].peer_3,
-            result[cpu].flags
-        );
-    }
-
-    result
-}
-
-/// Full calibration: Returns (latency_matrix, top_peers). Callback: (current, total, is_complete).
-pub fn calibrate_topology_full<F>(
-    nr_cpus: usize,
-    progress_callback: F,
-) -> (Vec<Vec<f64>>, Vec<[u8; 3]>)
-where
-    F: FnMut(usize, usize, bool),
-{
-    let config = EtdConfig::default();
-    let matrix = calibrate_full_matrix(nr_cpus, &config, progress_callback);
-    let top_peers = extract_top_peers(&matrix, 3);
-    (matrix, top_peers)
-}
 
 #[cfg(test)]
 mod tests {

@@ -41,17 +41,7 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
                 total.nr_starvation_preempts_tier[i] += s.nr_starvation_preempts_tier[i];
             }
 
-            total.nr_sparse_promotions += s.nr_sparse_promotions;
-            total.nr_sparse_demotions += s.nr_sparse_demotions;
-            total.nr_input_preempts += s.nr_input_preempts;
-            total.nr_etd_hits += s.nr_etd_hits;
 
-            total.nr_wait_demotions += s.nr_wait_demotions;
-            total.total_wait_ns += s.total_wait_ns;
-            total.nr_waits += s.nr_waits;
-            if s.max_wait_ns > total.max_wait_ns {
-                total.max_wait_ns = s.max_wait_ns;
-            }
         }
     }
 
@@ -184,7 +174,6 @@ pub struct StartupParams<'a> {
     pub latency_matrix: &'a [Vec<f64>],
     pub profile: &'a str,
     pub quantum: u64,
-    pub sparse_threshold: u64,
     pub starvation: u64,
 }
 
@@ -490,9 +479,9 @@ fn render_startup_widgets(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Sparse: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Tiers:  ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                format!("{}‰", params.sparse_threshold),
+                "4 (avg_runtime)",
                 Style::default().fg(Color::White),
             ),
         ]),
@@ -860,26 +849,7 @@ fn format_stats_for_clipboard(stats: &cake_stats, uptime: &str) -> String {
         ));
     }
 
-    output.push_str(&format!(
-        "\nSparse flow: +{} promotions, -{} demotions\n",
-        stats.nr_sparse_promotions, stats.nr_sparse_demotions
-    ));
-    output.push_str(&format!(
-        "Input: {} preempts fired\n",
-        stats.nr_input_preempts
-    ));
 
-    let avg_wait = if stats.nr_waits > 0 {
-        stats.total_wait_ns as f64 / stats.nr_waits as f64 / 1000.0
-    } else {
-        0.0
-    };
-    output.push_str(&format!(
-        "\nWait Stats: Avg {:.1}µs, Max {}µs, Demotions: {}\n",
-        avg_wait,
-        stats.max_wait_ns / 1000,
-        stats.nr_wait_demotions
-    ));
 
     output
 }
@@ -989,22 +959,13 @@ fn draw_ui(frame: &mut Frame, app: &TuiApp, stats: &cake_stats) {
     frame.render_widget(table, layout[1]);
 
     // --- Summary ---
-    let avg_wait = if stats.nr_waits > 0 {
-        stats.total_wait_ns as f64 / stats.nr_waits as f64 / 1000.0
-    } else {
-        0.0
-    };
-
+    let total_starvation: u64 = stats.nr_starvation_preempts_tier.iter().sum();
     let summary_text = format!(
-        " Sparse: +{} promo, -{} demo | Input Preempts: {}\n \
-          Wait: Avg {:.1}µs, Max {}µs | Demotions: {}",
-        stats.nr_sparse_promotions,
-        stats.nr_sparse_demotions,
-        stats.nr_input_preempts,
-        avg_wait,
-        stats.max_wait_ns / 1000,
-        stats.nr_wait_demotions
+        " Dispatches: {} | Starvation preempts: {}",
+        stats.nr_new_flow_dispatches + stats.nr_old_flow_dispatches,
+        total_starvation
     );
+
     let summary = Paragraph::new(summary_text).block(
         Block::default()
             .title(" Summary ")
@@ -1038,13 +999,10 @@ fn tier_style(tier: usize) -> Style {
     match tier {
         0 => Style::default()
             .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD), // CritLatency - highest priority
-        1 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD), // Realtime
-        2 => Style::default().fg(Color::Magenta),                          // Critical
-        3 => Style::default().fg(Color::Green),                            // Gaming
-        4 => Style::default().fg(Color::Yellow),                           // Interactive
-        5 => Style::default().fg(Color::Blue),                             // Batch
-        6 => Style::default().fg(Color::DarkGray),                         // Background
+            .add_modifier(Modifier::BOLD), // Critical (<100µs)
+        1 => Style::default().fg(Color::Green),                            // Interactive (<2ms)
+        2 => Style::default().fg(Color::Yellow),                           // Frame (<8ms)
+        3 => Style::default().fg(Color::DarkGray),                         // Bulk (≥8ms)
         _ => Style::default(),
     }
 }

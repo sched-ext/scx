@@ -54,18 +54,11 @@
 
 #endif
 
-/* BMI2 BEXTR: Extract bitfield in 1 cycle; fallback: shift + mask (2 cycles) */
-#if defined(__BMI2__) && defined(__x86_64__)
-    #define EXTRACT_BITS_U32(val, start, len) \
-        __builtin_ia32_bextr_u32((val), ((len) << 8) | (start))
-    #define EXTRACT_BITS_U64(val, start, len) \
-        __builtin_ia32_bextr_u64((val), ((len) << 8) | (start))
-#else
-    #define EXTRACT_BITS_U32(val, start, len) \
-        (((u32)(val) >> (start)) & ((1U << (len)) - 1))
-    #define EXTRACT_BITS_U64(val, start, len) \
-        (((u64)(val) >> (start)) & ((1ULL << (len)) - 1))
-#endif
+/* Bitfield extraction: shift + mask (2 cycles) — BMI2 BEXTR unavailable in BPF ISA */
+#define EXTRACT_BITS_U32(val, start, len) \
+    (((u32)(val) >> (start)) & ((1U << (len)) - 1))
+#define EXTRACT_BITS_U64(val, start, len) \
+    (((u64)(val) >> (start)) & ((1ULL << (len)) - 1))
 
 /* BIT SCAN FORWARD (CTZ): Clang <19 fallback uses De Bruijn to avoid opcode 191 crash */
 #if defined(__clang__) && __clang_major__ < 19
@@ -108,6 +101,17 @@ static __always_inline struct task_struct *cake_bpf_dsq_peek(u64 dsq_id) {
     if (bpf_ksym_exists(scx_bpf_dsq_peek))
         return scx_bpf_dsq_peek(dsq_id);
     return cake_bpf_dsq_peek_legacy(dsq_id);
+}
+
+/* rq access — scx_bpf_cpu_rq() is universally available (~10-15ns).
+ *
+ * scx_bpf_rq_locked() would be ~3-5ns faster (skips RCU + bounds check) but
+ * common.bpf.h declares it as strong __ksym — libbpf fails to load if the
+ * kernel doesn't export it. A __weak redeclaration CANNOT override the strong
+ * one already seen from common.bpf.h. Until the scx team makes it __weak or
+ * all kernels export it, we use cpu_rq. */
+static __always_inline struct rq *cake_get_rq(s32 cpu) {
+    return scx_bpf_cpu_rq(cpu);
 }
 
 #endif /* __CAKE_BPF_COMPAT_H */

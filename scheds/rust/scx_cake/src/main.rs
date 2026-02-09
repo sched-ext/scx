@@ -43,109 +43,83 @@ pub enum Profile {
 }
 
 impl Profile {
-    /// Returns (quantum_us, new_flow_bonus_us, sparse_threshold_permille, starvation_us)
-    fn values(&self) -> (u64, u64, u64, u64) {
+    /// Returns (quantum_us, new_flow_bonus_us, starvation_us)
+    fn values(&self) -> (u64, u64, u64) {
         match self {
             // Esports: Ultra-aggressive, 1ms quantum for maximum responsiveness
-            Profile::Esports => (1000, 4000, 50, 50000),
+            Profile::Esports => (1000, 4000, 50000),
             // Legacy: High efficiency, 4ms quantum to reduce overhead on older CPUs
-            Profile::Legacy => (4000, 12000, 30, 200000),
-            // Gaming: Aggressive latency, 2ms quantum, sensitive sparse detection
-            Profile::Gaming => (2000, 8000, 50, 100000),
+            Profile::Legacy => (4000, 12000, 200000),
+            // Gaming: Aggressive latency, 2ms quantum
+            Profile::Gaming => (2000, 8000, 100000),
             // Default: Same as gaming for now
-            Profile::Default => (2000, 8000, 50, 100000),
+            Profile::Default => (2000, 8000, 100000),
         }
     }
 
-    /// Per-tier starvation thresholds in nanoseconds (pre-computed, zero overhead)
+    /// Per-tier starvation thresholds in nanoseconds (4 tiers + padding)
     fn starvation_threshold(&self) -> [u64; 8] {
         match self {
-            // Esports: Tighter starvation for faster preemption
             Profile::Esports => [
-                2_500_000,  // Tier 0: Critical Latency - 2.5ms
-                1_500_000,  // Tier 1: Realtime - 1.5ms
-                2_000_000,  // Tier 2: Critical - 2ms
-                4_000_000,  // Tier 3: Gaming - 4ms
-                8_000_000,  // Tier 4: Interactive - 8ms
-                20_000_000, // Tier 5: Batch - 20ms
-                50_000_000, // Tier 6: Background - 50ms
-                50_000_000, // Padding
+                1_500_000,   // T0 Critical: 1.5ms
+                4_000_000,   // T1 Interactive: 4ms
+                20_000_000,  // T2 Frame: 20ms
+                50_000_000,  // T3 Bulk: 50ms
+                50_000_000, 50_000_000, 50_000_000, 50_000_000, // Padding
             ],
-            // Legacy: Relaxed starvation for older hardware
             Profile::Legacy => [
-                10_000_000,  // Tier 0: 10ms
-                6_000_000,   // Tier 1: 6ms
-                8_000_000,   // Tier 2: 8ms
-                16_000_000,  // Tier 3: 16ms
-                32_000_000,  // Tier 4: 32ms
-                80_000_000,  // Tier 5: 80ms
-                200_000_000, // Tier 6: 200ms
-                200_000_000, // Padding
+                6_000_000,    // T0 Critical: 6ms
+                16_000_000,   // T1 Interactive: 16ms
+                80_000_000,   // T2 Frame: 80ms
+                200_000_000,  // T3 Bulk: 200ms
+                200_000_000, 200_000_000, 200_000_000, 200_000_000, // Padding
             ],
             Profile::Gaming | Profile::Default => [
-                5_000_000,   // Tier 0: Critical Latency - 5ms
-                3_000_000,   // Tier 1: Realtime - 3ms
-                4_000_000,   // Tier 2: Critical - 4ms
-                8_000_000,   // Tier 3: Gaming - 8ms
-                16_000_000,  // Tier 4: Interactive - 16ms
-                40_000_000,  // Tier 5: Batch - 40ms
-                100_000_000, // Tier 6: Background - 100ms
-                100_000_000, // Padding
+                3_000_000,    // T0 Critical: 3ms
+                8_000_000,    // T1 Interactive: 8ms
+                40_000_000,   // T2 Frame: 40ms
+                100_000_000,  // T3 Bulk: 100ms
+                100_000_000, 100_000_000, 100_000_000, 100_000_000, // Padding
             ],
         }
     }
 
-    /// Tier quantum multipliers (fixed-point, 1024 = 1.0x)
+    /// Tier quantum multipliers (fixed-point, 1024 = 1.0x) — 4 tiers + padding
     fn tier_multiplier(&self) -> [u32; 8] {
         match self {
-            // All profiles currently use standard DRR++ scaling
             Profile::Esports | Profile::Legacy | Profile::Gaming | Profile::Default => [
-                717,  // Critical Latency: 0.7x
-                819,  // Realtime: 0.8x
-                922,  // Critical: 0.9x
-                1024, // Gaming: 1.0x
-                1126, // Interactive: 1.1x
-                1229, // Batch: 1.2x
-                1331, // Background: 1.3x
-                1024, // Padding
+                768,   // T0 Critical: 0.75x
+                1024,  // T1 Interactive: 1.0x
+                1229,  // T2 Frame: 1.2x
+                1434,  // T3 Bulk: 1.4x
+                1434, 1434, 1434, 1434,  // Padding
             ],
         }
     }
 
-    /// Wait budget per tier in nanoseconds
+    /// Wait budget per tier in nanoseconds — 4 tiers + padding
     fn wait_budget(&self) -> [u64; 8] {
         match self {
-            // Esports: Tighter wait budgets
             Profile::Esports => [
-                50_000,     // Critical Latency: 50µs
-                375_000,    // Realtime: 375µs
-                1_000_000,  // Critical: 1ms
-                2_000_000,  // Gaming: 2ms
-                4_000_000,  // Interactive: 4ms
-                10_000_000, // Batch: 10ms
-                0,          // Background: no limit
-                0,          // Padding
+                50_000,     // T0 Critical: 50µs
+                1_000_000,  // T1 Interactive: 1ms
+                4_000_000,  // T2 Frame: 4ms
+                0,          // T3 Bulk: no limit
+                0, 0, 0, 0, // Padding
             ],
-            // Legacy: Very relaxed budgets for high-latency hardware
             Profile::Legacy => [
-                200_000,    // Critical Latency: 200µs
-                1_500_000,  // Realtime: 1.5ms
-                4_000_000,  // Critical: 4ms
-                8_000_000,  // Gaming: 8ms
-                16_000_000, // Interactive: 16ms
-                40_000_000, // Batch: 40ms
-                0,          // Background: no limit
-                0,          // Padding
+                200_000,     // T0 Critical: 200µs
+                4_000_000,   // T1 Interactive: 4ms
+                16_000_000,  // T2 Frame: 16ms
+                0,           // T3 Bulk: no limit
+                0, 0, 0, 0,  // Padding
             ],
             Profile::Gaming | Profile::Default => [
-                100_000,    // Critical Latency: 100µs
-                750_000,    // Realtime: 750µs
-                2_000_000,  // Critical: 2ms
-                4_000_000,  // Gaming: 4ms
-                8_000_000,  // Interactive: 8ms
-                20_000_000, // Batch: 20ms
-                0,          // Background: no limit
-                0,          // Padding
+                100_000,    // T0 Critical: 100µs
+                2_000_000,  // T1 Interactive: 2ms
+                8_000_000,  // T2 Frame: 8ms
+                0,          // T3 Bulk: no limit
+                0, 0, 0, 0, // Padding
             ],
         }
     }
@@ -175,11 +149,11 @@ impl Profile {
 ///
 /// PROFILES set all tuning parameters at once. Individual options override profile defaults.
 ///
-/// SPARSE SCORE SYSTEM:
-///   Tasks are scored 0-100 based on CPU usage behavior.
-///   - GROWTH: +4 points per sparse run (runtime < threshold)
-///   - DECAY:  -6 points per heavy run (runtime >= threshold)
-///   - Threshold = quantum × sparse_threshold / 1024
+/// 4-TIER SYSTEM (classified by avg_runtime):
+///   T0 Critical  (<100µs): IRQ, input, audio, network
+///   T1 Interact  (<2ms):   compositor, physics, AI
+///   T2 Frame     (<8ms):   game render, encoding
+///   T3 Bulk      (≥8ms):   compilation, background
 ///
 /// EXAMPLES:
 ///   scx_cake                          # Run with gaming profile (default)
@@ -200,18 +174,13 @@ struct Args {
     /// Individual CLI options (--quantum, etc.) override profile values.
     ///
     /// ESPORTS: Ultra-low-latency for competitive gaming.
-    ///   - Quantum: 1000µs, Sparse threshold: 50‰, Starvation: 50ms
-    ///   - Sparse cutoff: ~49µs (1ms × 50 / 1024)
-    ///   - Tighter wait budgets, faster preemption
+    ///   - Quantum: 1000µs, Starvation: 50ms
     ///
     /// LEGACY: Optimized for older/lower-power hardware.
-    ///   - Quantum: 4000µs, Sparse threshold: 30‰, Starvation: 200ms
-    ///   - Sparse cutoff: ~117µs (4ms × 30 / 1024)
-    ///   - Relaxed requirements to reduce scheduling overhead
+    ///   - Quantum: 4000µs, Starvation: 200ms
     ///
     /// GAMING: Optimized for low-latency gaming and interactive workloads.
-    ///   - Quantum: 2000µs, Sparse threshold: 50‰, Starvation: 100ms
-    ///   - Sparse cutoff: ~98µs (2ms × 50 / 1024)
+    ///   - Quantum: 2000µs, Starvation: 100ms
     ///
     /// DEFAULT: Balanced profile for general desktop use.
     ///   - Currently same as gaming; will diverge in future versions
@@ -220,8 +189,7 @@ struct Args {
 
     /// Base scheduling time slice in MICROSECONDS [default: 2000].
     ///
-    /// How long a task runs before potentially yielding. Affects sparse detection:
-    ///   Sparse cutoff = quantum × sparse_threshold / 1024
+    /// How long a task runs before potentially yielding.
     ///
     /// Smaller quantum = more responsive but higher overhead.
     /// Esports: 1000µs | Gaming: 2000µs | Legacy: 4000µs
@@ -239,22 +207,6 @@ struct Args {
     #[arg(long, verbatim_doc_comment)]
     new_flow_bonus: Option<u64>,
 
-    /// Sparse flow threshold in PERMILLE (0-1000) [default: 50].
-    ///
-    /// Tasks using less than (quantum × threshold / 1024) nanoseconds
-    /// are classified as "sparse" and gain +4 score points.
-    /// Tasks above this lose -6 points (asymmetric for stability).
-    ///
-    /// Example with default values (Gaming profile):
-    ///   2,000,000ns × 50 / 1024 = 97,656ns (~98µs)
-    ///   Task running <98µs = sparse (+4), >=98µs = heavy (-6)
-    ///
-    /// Legacy: 40,000ns (4000µs * 30 / 1024 approx 117µs cutoff)
-    /// Lower values = stricter sparse classification.
-    /// Recommended range: 30-200
-    #[arg(long, verbatim_doc_comment)]
-    sparse_threshold: Option<u64>,
-
     /// Max run time before forced preemption in MICROSECONDS [default: 100000].
     ///
     /// Safety limit: tasks running longer than this are forcibly preempted.
@@ -267,7 +219,7 @@ struct Args {
 
     /// Enable live TUI (Terminal User Interface) with real-time statistics.
     ///
-    /// Shows dispatch counts per tier, sparse promotions/demotions,
+    /// Shows dispatch counts per tier, tier transitions,
     /// wait time stats, and system topology information.
     /// Press 'q' to exit TUI mode.
     #[arg(long, short, verbatim_doc_comment)]
@@ -285,75 +237,16 @@ struct Args {
 
 impl Args {
     /// Get effective values (profile defaults with CLI overrides applied)
-    fn effective_values(&self) -> (u64, u64, u64, u64) {
-        let (q, nfb, st, starv) = self.profile.values();
+    fn effective_values(&self) -> (u64, u64, u64) {
+        let (q, nfb, starv) = self.profile.values();
         (
             self.quantum.unwrap_or(q),
             self.new_flow_bonus.unwrap_or(nfb),
-            self.sparse_threshold.unwrap_or(st),
             self.starvation.unwrap_or(starv),
         )
     }
 }
 
-/// Compute average migration cost (in nanoseconds) per rank from ETD latency matrix.
-/// Rank 0 = SMT sibling, Rank 1-3 = topologically close peers, Rank 4+ = global.
-fn compute_rank_costs_from_etd(
-    latency_matrix: &[Vec<f64>],
-    topo: &topology::TopologyInfo,
-) -> [u64; 8] {
-    let nr_cpus = topo.nr_cpus;
-    let mut costs = [0u64; 8];
-    let mut counts = [0u64; 8];
-
-    for src in 0..nr_cpus {
-        for dst in 0..nr_cpus {
-            if src == dst {
-                continue;
-            }
-
-            let latency_ns = (latency_matrix[src][dst] * 1000.0) as u64; // Convert µs to ns
-
-            // Determine rank based on topology relationship
-            let rank = if topo.cpu_sibling_map[src] == dst as u8 {
-                0 // SMT sibling
-            } else if topo.cpu_llc_id[src] == topo.cpu_llc_id[dst] {
-                // Same LLC - use latency to determine peer rank
-                if latency_ns < 100 {
-                    1 // Very close peer
-                } else if latency_ns < 200 {
-                    2 // Close peer
-                } else {
-                    3 // LLC peer
-                }
-            } else {
-                // Cross-LLC
-                if latency_ns < 500 {
-                    4
-                } else if latency_ns < 1000 {
-                    5
-                } else {
-                    6
-                }
-            };
-
-            costs[rank] += latency_ns;
-            counts[rank] += 1;
-        }
-    }
-
-    // Compute averages, with fallback defaults if no samples
-    let defaults = [50, 100, 200, 400, 600, 800, 1000, 1200];
-    for i in 0..8 {
-        if counts[i] > 0 {
-            costs[i] /= counts[i];
-        } else {
-            costs[i] = defaults[i];
-        }
-    }
-
-    costs
-}
 
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
@@ -376,18 +269,20 @@ impl<'a> Scheduler<'a> {
             .open(open_object)
             .context("Failed to open BPF skeleton")?;
 
+        // Populate SCX enum RODATA from kernel BTF (SCX_DSQ_LOCAL_ON, SCX_KICK_PREEMPT, etc.)
+        scx_utils::import_enums!(open_skel);
+
         // Detect system topology (CCDs, P/E cores)
         let topo = topology::detect()?;
 
         // Get effective values (profile + CLI overrides)
-        let (quantum, new_flow_bonus, sparse_threshold, starvation) = args.effective_values();
+        let (quantum, new_flow_bonus, _starvation) = args.effective_values();
 
-        // ETD: Empirical Topology Discovery (BEFORE BPF load for RODATA population)
-        // Measure inter-core latency via CAS ping-pong
+        // ETD: Empirical Topology Discovery — display-grade measurement
+        // Measures inter-core CAS latency for startup heatmap and TUI display
         info!("Starting ETD calibration...");
-        let (latency_matrix, _top_peers) =
-            calibrate::calibrate_topology_full(topo.nr_cpus, |current, total, is_complete| {
-                // Update progress gauge inline
+        let latency_matrix =
+            calibrate::calibrate_full_matrix(topo.nr_cpus, &calibrate::EtdConfig::default(), |current, total, is_complete| {
                 tui::render_calibration_progress(current, total, is_complete);
             });
 
@@ -395,95 +290,19 @@ impl<'a> Scheduler<'a> {
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
             rodata.quantum_ns = quantum * 1000;
             rodata.new_flow_bonus_ns = new_flow_bonus * 1000;
-            rodata.sparse_threshold = sparse_threshold;
-            rodata.cached_threshold_ns = (quantum * 1000 * sparse_threshold) >> 10;
-
-            // Populate Zero-Math Arbiter LUT with ETD-informed costs + break-even analysis
-            // Strategy 1+2+3: Use actual measured latency, finer quantization, optimal thresholds
-            let wait_budgets = args.profile.wait_budget();
-
-            // Compute average migration cost per rank from ETD matrix
-            let avg_cost_per_rank = compute_rank_costs_from_etd(&latency_matrix, &topo);
-
-            for (tier, &budget) in wait_budgets.iter().enumerate().take(8) {
-                for rank in 0..8 {
-                    // Strategy 1: Use ETD-measured latency instead of hardcoded values
-                    let migration_cost_ns = avg_cost_per_rank[rank];
-
-                    // Strategy 3: Break-even analysis - compute optimal threshold
-                    let threshold = if tier == 0 {
-                        // Tier 0 (Critical Latency): Always migrate, never wait
-                        0
-                    } else if migration_cost_ns >= budget {
-                        // Migration cost exceeds budget: always wait (return 6 = max)
-                        6
-                    } else {
-                        // Compute savings ratio: how much of budget is saved by migrating?
-                        let savings_ratio = ((budget - migration_cost_ns) * 100) / budget.max(1);
-
-                        // Strategy 2: Finer quantization - use all 7 threshold levels
-                        match savings_ratio {
-                            0..=14 => 6,  // <15% savings: wait for tier 6+ occupant
-                            15..=28 => 5, // 15-28% savings: wait for tier 5+ occupant
-                            29..=42 => 4, // 29-42% savings: wait for tier 4+ occupant
-                            43..=56 => 3, // 43-56% savings: wait for tier 3+ occupant
-                            57..=70 => 2, // 57-70% savings: wait for tier 2+ occupant
-                            71..=85 => 1, // 71-85% savings: wait for tier 1+ occupant
-                            _ => 0,       // >85% savings: migrate freely
-                        }
-                    };
-
-                    rodata.arbiter_cfg.lut[tier][rank] = threshold;
-                }
-            }
-
-            rodata.starvation_ns = starvation * 1000;
             rodata.enable_stats = args.verbose;
             rodata.tier_configs = args.profile.tier_configs(quantum);
 
-            // Topology logic
-            rodata.has_multi_llc = topo.has_dual_ccd;
+            // Topology: only has_hybrid is live (DVFS scaling in cake_tick)
             rodata.has_hybrid = topo.has_hybrid_cores;
-            rodata.smt_enabled = topo.smt_enabled;
-            rodata.core_thread_mask = topo.core_thread_mask;
-            rodata.cpu_llc_id = topo.cpu_llc_id;
-            rodata.cpu_is_big = topo.cpu_is_big;
-            rodata.cpu_sibling_map = topo.cpu_sibling_map;
-            rodata.llc_cpu_mask = topo.llc_cpu_mask;
-            rodata.big_cpu_mask = topo.big_cpu_mask;
 
-            let unified_topo = calibrate::generate_unified_topology(
-                &latency_matrix,
-                &topo.cpu_sibling_map,
-                &topo.cpu_llc_id,
-                &topo.cpu_is_big,
-                &topo.cpu_core_id,
-                &topo.cpu_thread_bit,
-                &topo.cpu_dsq_id,
-            );
-
-            rodata.nr_cores = topo.nr_cpus as u8 / if topo.smt_enabled { 2 } else { 1 };
-            rodata.nr_cpus_total = topo.nr_cpus as u8;
-
-            let mut core_to_cpu = [0xFFu8; 32];
-            for (cpu, entry) in unified_topo.iter().enumerate().take(64) {
-                rodata.cpu_topo[cpu].sibling = entry.sibling;
-                rodata.cpu_topo[cpu].llc_id = entry.llc_id;
-                rodata.cpu_topo[cpu].peer_1 = entry.peer_1;
-                rodata.cpu_topo[cpu].peer_2 = entry.peer_2;
-                rodata.cpu_topo[cpu].peer_3 = entry.peer_3;
-                rodata.cpu_topo[cpu].flags = entry.flags;
-                rodata.cpu_topo[cpu].core_id = entry.core_id;
-                rodata.cpu_topo[cpu].thread_bit = entry.thread_bit;
-                rodata.cpu_topo[cpu].dsq_id = entry.dsq_id;
-                rodata.cpu_topo[cpu].self_cpu = cpu as u8;
-
-                if entry.thread_bit & 1 != 0 && entry.core_id < 32 {
-                    core_to_cpu[entry.core_id as usize] = cpu as u8;
-                }
+            // Per-LLC DSQ partitioning: populate CPU→LLC mapping
+            let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
+            rodata.nr_llcs = llc_count.max(1);
+            rodata.nr_cpus = topo.nr_cpus.min(64) as u32; // Rule 39: bounds kick scan loop
+            for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
+                rodata.cpu_llc_id[i] = llc_id as u32;
             }
-            rodata.core_to_cpu = core_to_cpu;
-            rodata.core_cpu_mask = topo.core_cpu_mask;
         }
 
         // Load the BPF program
@@ -584,7 +403,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn show_startup_splash(&self) -> Result<()> {
-        let (q, _nfb, st, starv) = self.args.effective_values();
+        let (q, _nfb, starv) = self.args.effective_values();
         let profile_str = format!("{:?}", self.args.profile).to_uppercase();
 
         tui::render_startup_screen(tui::StartupParams {
@@ -592,7 +411,6 @@ impl<'a> Scheduler<'a> {
             latency_matrix: &self.latency_matrix,
             profile: &profile_str,
             quantum: q,
-            sparse_threshold: st,
             starvation: starv,
         })
     }
