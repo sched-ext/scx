@@ -1,0 +1,306 @@
+//! Kfunc implementations for the simulator.
+//!
+//! These are `#[no_mangle] extern "C"` functions that the compiled scheduler
+//! C code calls. They access the simulator state via a thread-local pointer.
+//!
+//! The pattern is:
+//! 1. Before calling any scheduler ops, the simulator installs a pointer
+//!    to its state via `enter_sim()`.
+//! 2. When the scheduler calls a kfunc, the kfunc accesses the simulator
+//!    state via `with_sim()`.
+//! 3. After the ops call returns, the simulator calls `exit_sim()`.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr;
+
+use crate::cpu::SimCpu;
+use crate::dsq::{DsqManager, SCX_DSQ_LOCAL, SCX_DSQ_LOCAL_CPU_MASK, SCX_DSQ_LOCAL_ON};
+use crate::ffi;
+use crate::trace::Trace;
+
+/// The subset of simulator state that kfuncs need access to.
+pub struct SimulatorState {
+    pub cpus: Vec<SimCpu>,
+    pub dsqs: DsqManager,
+    pub current_cpu: i32,
+    pub direct_dispatch_cpu: Option<u32>,
+    pub trace: Trace,
+    pub clock: u64,
+    /// Maps raw task_struct pointers to PIDs for reverse lookup.
+    pub task_raw_to_pid: HashMap<usize, i32>,
+    /// Deterministic PRNG state (xorshift32).
+    pub prng_state: u32,
+}
+
+impl SimulatorState {
+    pub fn cpu_is_idle(&self, cpu: u32) -> bool {
+        self.cpus
+            .get(cpu as usize)
+            .map_or(false, |c| c.is_idle() && c.local_dsq.is_empty())
+    }
+
+    pub fn find_any_idle_cpu(&self) -> Option<u32> {
+        self.cpus
+            .iter()
+            .find(|c| c.is_idle() && c.local_dsq.is_empty())
+            .map(|c| c.id)
+    }
+
+    pub fn task_pid_from_raw(&self, p: *mut c_void) -> i32 {
+        *self
+            .task_raw_to_pid
+            .get(&(p as usize))
+            .unwrap_or_else(|| panic!("unknown task_struct pointer {:?}", p))
+    }
+
+    /// Deterministic PRNG (xorshift32).
+    pub fn next_prng(&mut self) -> u32 {
+        let mut x = self.prng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.prng_state = x;
+        x
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread-local simulator state access
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static SIM_STATE: RefCell<Option<*mut SimulatorState>> = const { RefCell::new(None) };
+}
+
+/// Install a simulator state pointer for the duration of ops callbacks.
+///
+/// # Safety
+/// The caller must ensure `state` remains valid and unaliased for the
+/// duration between `enter_sim` and `exit_sim`.
+pub unsafe fn enter_sim(state: &mut SimulatorState) {
+    SIM_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(state as *mut SimulatorState);
+    });
+}
+
+/// Remove the simulator state pointer after ops callbacks complete.
+pub fn exit_sim() {
+    SIM_STATE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Access the simulator state from within a kfunc.
+///
+/// # Panics
+/// Panics if called outside of an `enter_sim`/`exit_sim` scope.
+fn with_sim<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut SimulatorState) -> R,
+{
+    SIM_STATE.with(|cell| {
+        let ptr = cell
+            .borrow()
+            .expect("kfunc called outside of simulator context");
+        // SAFETY: We hold a valid pointer installed by enter_sim, and
+        // the simulation is single-threaded.
+        let sim = unsafe { &mut *ptr };
+        f(sim)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SCX kfunc implementations
+// ---------------------------------------------------------------------------
+
+/// Create a dispatch queue.
+#[no_mangle]
+pub extern "C" fn scx_bpf_create_dsq(dsq_id: u64, _node: i32) -> i32 {
+    with_sim(|sim| sim.dsqs.create(dsq_id))
+}
+
+/// Default CPU selection: find an idle CPU, preferring prev_cpu.
+#[no_mangle]
+pub extern "C" fn scx_bpf_select_cpu_dfl(
+    _p: *mut c_void,
+    prev_cpu: i32,
+    _wake_flags: u64,
+    is_idle: *mut bool,
+) -> i32 {
+    with_sim(|sim| {
+        let prev = prev_cpu as u32;
+        // Prefer prev_cpu if it's idle
+        if (prev as usize) < sim.cpus.len() && sim.cpu_is_idle(prev) {
+            unsafe { *is_idle = true };
+            return prev_cpu;
+        }
+        // Find any idle CPU
+        if let Some(cpu) = sim.find_any_idle_cpu() {
+            unsafe { *is_idle = true };
+            return cpu as i32;
+        }
+        unsafe { *is_idle = false };
+        prev_cpu
+    })
+}
+
+/// Insert a task into a DSQ (FIFO ordering).
+#[no_mangle]
+pub extern "C" fn scx_bpf_dsq_insert(
+    p: *mut c_void,
+    dsq_id: u64,
+    slice: u64,
+    _enq_flags: u64,
+) {
+    with_sim(|sim| {
+        let pid = sim.task_pid_from_raw(p);
+        unsafe { ffi::sim_task_set_slice(p, slice) };
+
+        if dsq_id == SCX_DSQ_LOCAL {
+            let cpu = sim.current_cpu as u32;
+            sim.cpus[cpu as usize].local_dsq.push_back(pid);
+            sim.direct_dispatch_cpu = Some(cpu);
+        } else if dsq_id & SCX_DSQ_LOCAL_ON == SCX_DSQ_LOCAL_ON {
+            let cpu = (dsq_id & SCX_DSQ_LOCAL_CPU_MASK) as u32;
+            if (cpu as usize) < sim.cpus.len() {
+                sim.cpus[cpu as usize].local_dsq.push_back(pid);
+            }
+        } else {
+            sim.dsqs.insert_fifo(dsq_id, pid);
+        }
+    })
+}
+
+/// Insert a task into a DSQ with vtime ordering.
+#[no_mangle]
+pub extern "C" fn scx_bpf_dsq_insert_vtime(
+    p: *mut c_void,
+    dsq_id: u64,
+    slice: u64,
+    vtime: u64,
+    _enq_flags: u64,
+) {
+    with_sim(|sim| {
+        let pid = sim.task_pid_from_raw(p);
+        unsafe { ffi::sim_task_set_slice(p, slice) };
+
+        if dsq_id == SCX_DSQ_LOCAL {
+            let cpu = sim.current_cpu as u32;
+            sim.cpus[cpu as usize].local_dsq.push_back(pid);
+            sim.direct_dispatch_cpu = Some(cpu);
+        } else if dsq_id & SCX_DSQ_LOCAL_ON == SCX_DSQ_LOCAL_ON {
+            let cpu = (dsq_id & SCX_DSQ_LOCAL_CPU_MASK) as u32;
+            if (cpu as usize) < sim.cpus.len() {
+                sim.cpus[cpu as usize].local_dsq.push_back(pid);
+            }
+        } else {
+            sim.dsqs.insert_vtime(dsq_id, pid, vtime);
+        }
+    })
+}
+
+/// Move the head of a DSQ to the current CPU's local DSQ.
+#[no_mangle]
+pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
+    with_sim(|sim| {
+        let cpu_idx = sim.current_cpu as usize;
+        // Need to split borrow: extract cpu mutably, pass dsqs mutably
+        let cpus_ptr = sim.cpus.as_mut_ptr();
+        let cpu = unsafe { &mut *cpus_ptr.add(cpu_idx) };
+        sim.dsqs.move_to_local(dsq_id, cpu)
+    })
+}
+
+/// Query the number of tasks queued in a DSQ.
+#[no_mangle]
+pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
+    with_sim(|sim| sim.dsqs.nr_queued(dsq_id))
+}
+
+/// Kick a CPU (send scheduling IPI). In the simulator, this is mostly a no-op
+/// for now. The simulation engine handles idle CPU dispatch separately.
+#[no_mangle]
+pub extern "C" fn scx_bpf_kick_cpu(_cpu: i32, _flags: u64) {
+    // Phase 2: generate dispatch events for kicked CPUs
+}
+
+/// Get the current simulated time.
+#[no_mangle]
+pub extern "C" fn scx_bpf_now() -> u64 {
+    with_sim(|sim| sim.clock)
+}
+
+/// Get the current CPU ID.
+#[no_mangle]
+pub extern "C" fn bpf_get_smp_processor_id() -> u32 {
+    with_sim(|sim| sim.current_cpu as u32)
+}
+
+/// Deterministic PRNG replacement for bpf_get_prandom_u32.
+#[no_mangle]
+pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {
+    with_sim(|sim| sim.next_prng())
+}
+
+/// Get the CPU a task is assigned to.
+#[no_mangle]
+pub extern "C" fn scx_bpf_task_cpu(_p: *const c_void) -> i32 {
+    with_sim(|sim| sim.current_cpu)
+}
+
+/// Report a scheduler error. In the simulator, we panic.
+#[no_mangle]
+pub extern "C" fn scx_bpf_error_bstr(
+    fmt: *const i8,
+    _data: *const u64,
+    _data_sz: u32,
+) {
+    let msg = if fmt.is_null() {
+        "scheduler error (null fmt)".to_string()
+    } else {
+        let cstr = unsafe { std::ffi::CStr::from_ptr(fmt) };
+        format!("scheduler error: {}", cstr.to_string_lossy())
+    };
+    eprintln!("scx_bpf_error: {msg}");
+}
+
+/// Reenqueue all tasks from the local DSQ. No-op for now.
+#[no_mangle]
+pub extern "C" fn scx_bpf_reenqueue_local() -> u32 {
+    0
+}
+
+/// No-op stubs for cpumask ref counting in simulator.
+#[no_mangle]
+pub extern "C" fn scx_bpf_put_cpumask(_cpumask: *const c_void) {}
+
+#[no_mangle]
+pub extern "C" fn scx_bpf_put_idle_cpumask(_cpumask: *const c_void) {}
+
+/// Destroy a DSQ. No-op in simulator.
+#[no_mangle]
+pub extern "C" fn scx_bpf_destroy_dsq(_dsq_id: u64) {}
+
+/// No-op for bpf_ktime_get_ns -- use sim clock instead.
+#[no_mangle]
+pub extern "C" fn bpf_ktime_get_ns() -> u64 {
+    with_sim(|sim| sim.clock)
+}
+
+// RCU stubs -- no-op in simulator
+#[no_mangle]
+pub extern "C" fn bpf_rcu_read_lock() {}
+
+#[no_mangle]
+pub extern "C" fn bpf_rcu_read_unlock() {}
+
+// Task reference stubs
+#[no_mangle]
+pub extern "C" fn bpf_task_release(_p: *mut c_void) {}
+
+#[no_mangle]
+pub extern "C" fn bpf_task_from_pid(_pid: i32) -> *mut c_void {
+    ptr::null_mut()
+}
