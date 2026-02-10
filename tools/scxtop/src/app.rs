@@ -2416,6 +2416,118 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Renders the scheduler view.
+    fn render_scheduler(&mut self, frame: &mut Frame) -> Result<()> {
+        let area = frame.area();
+        if self.has_capability_warnings() {
+            self.render_capability_warnings(frame, area)?;
+            return Ok(());
+        }
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+        let [left_top, left_center, left_bottom] = Layout::vertical([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .areas(left);
+        let [right_top, right_bottom] =
+            Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+                .areas(right);
+
+        let sample_rate = self
+            .skel
+            .as_ref()
+            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+            .unwrap_or(0);
+
+        let params1 = SchedulerViewParams {
+            event: "dsq_lat_us",
+            scheduler_name: &self.scheduler,
+            dsq_data: &self.dsq_data,
+            sample_rate,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: true,
+        };
+        let new_max = SchedulerRenderer::render_scheduler_view(
+            frame,
+            left_top,
+            &self.view_state,
+            self.max_sched_events,
+            &params1,
+        )?;
+        self.max_sched_events = new_max;
+
+        let params2 = SchedulerViewParams {
+            event: "dsq_slice_consumed",
+            scheduler_name: &self.scheduler,
+            dsq_data: &self.dsq_data,
+            sample_rate,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: false,
+        };
+        SchedulerRenderer::render_scheduler_view(
+            frame,
+            left_center,
+            &self.view_state,
+            self.max_sched_events,
+            &params2,
+        )?;
+
+        let params3 = SchedulerViewParams {
+            event: "dsq_vtime",
+            scheduler_name: &self.scheduler,
+            dsq_data: &self.dsq_data,
+            sample_rate,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: false,
+        };
+        SchedulerRenderer::render_scheduler_view(
+            frame,
+            left_bottom,
+            &self.view_state,
+            self.max_sched_events,
+            &params3,
+        )?;
+
+        let params4 = SchedulerViewParams {
+            event: "dsq_nr_queued",
+            scheduler_name: &self.scheduler,
+            dsq_data: &self.dsq_data,
+            sample_rate,
+            localize: self.localize,
+            locale: &self.locale,
+            theme: self.theme(),
+            render_title: false,
+            render_sample_rate: false,
+        };
+        SchedulerRenderer::render_scheduler_view(
+            frame,
+            right_bottom,
+            &self.view_state,
+            self.max_sched_events,
+            &params4,
+        )?;
+
+        let stats_params = SchedulerStatsParams {
+            scheduler_name: &self.scheduler,
+            sched_stats_raw: &self.sched_stats_raw,
+            tick_rate_ms: self.config.tick_rate_ms(),
+            dispatch_keep_last: self.scx_stats.dispatch_keep_last,
+            select_cpu_fallback: self.scx_stats.select_cpu_fallback,
+            theme: self.theme(),
+        };
+        SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
+    }
+
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
@@ -2511,114 +2623,7 @@ impl<'a> App<'a> {
             AppState::Llc => self.render_llc(frame),
             AppState::PerfTop => self.render_perf_top(frame),
             AppState::Power => self.render_power(frame),
-            AppState::Scheduler => {
-                if self.has_capability_warnings() {
-                    self.render_capability_warnings(frame, area)?;
-                    return Ok(());
-                }
-                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-                let [left_top, left_center, left_bottom] = Layout::vertical([
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                ])
-                .areas(left);
-                let [right_top, right_bottom] =
-                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
-                        .areas(right);
-
-                let sample_rate = self
-                    .skel
-                    .as_ref()
-                    .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
-                    .unwrap_or(0);
-
-                let params1 = SchedulerViewParams {
-                    event: "dsq_lat_us",
-                    scheduler_name: &self.scheduler,
-                    dsq_data: &self.dsq_data,
-                    sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: true,
-                };
-                let new_max = SchedulerRenderer::render_scheduler_view(
-                    frame,
-                    left_top,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params1,
-                )?;
-                self.max_sched_events = new_max;
-
-                let params2 = SchedulerViewParams {
-                    event: "dsq_slice_consumed",
-                    scheduler_name: &self.scheduler,
-                    dsq_data: &self.dsq_data,
-                    sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: false,
-                };
-                SchedulerRenderer::render_scheduler_view(
-                    frame,
-                    left_center,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params2,
-                )?;
-
-                let params3 = SchedulerViewParams {
-                    event: "dsq_vtime",
-                    scheduler_name: &self.scheduler,
-                    dsq_data: &self.dsq_data,
-                    sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: false,
-                };
-                SchedulerRenderer::render_scheduler_view(
-                    frame,
-                    left_bottom,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params3,
-                )?;
-
-                let params4 = SchedulerViewParams {
-                    event: "dsq_nr_queued",
-                    scheduler_name: &self.scheduler,
-                    dsq_data: &self.dsq_data,
-                    sample_rate,
-                    localize: self.localize,
-                    locale: &self.locale,
-                    theme: self.theme(),
-                    render_title: false,
-                    render_sample_rate: false,
-                };
-                SchedulerRenderer::render_scheduler_view(
-                    frame,
-                    right_bottom,
-                    &self.view_state,
-                    self.max_sched_events,
-                    &params4,
-                )?;
-                let stats_params = SchedulerStatsParams {
-                    scheduler_name: &self.scheduler,
-                    sched_stats_raw: &self.sched_stats_raw,
-                    tick_rate_ms: self.config.tick_rate_ms(),
-                    dispatch_keep_last: self.scx_stats.dispatch_keep_last,
-                    select_cpu_fallback: self.scx_stats.select_cpu_fallback,
-                    theme: self.theme(),
-                };
-                SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
-            }
+            AppState::Scheduler => self.render_scheduler(frame),
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
         }
@@ -3873,282 +3878,275 @@ impl<'a> App<'a> {
         )
     }
 
+    /// Returns the list of BPF programs to display, either filtered or sorted by avg runtime.
+    fn bpf_programs_to_display(&self) -> Vec<(u32, crate::bpf_prog_data::BpfProgData)> {
+        if self.filtering {
+            self.filtered_bpf_programs.clone()
+        } else {
+            let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                .bpf_program_stats
+                .programs
+                .iter()
+                .map(|(id, data)| (*id, data.clone()))
+                .collect();
+            programs.sort_by(|a, b| {
+                b.1.avg_runtime_ns()
+                    .partial_cmp(&a.1.avg_runtime_ns())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            programs
+        }
+    }
+
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        if self.state == AppState::BpfPrograms {
-            // Handle navigation for BPF programs view
-            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
-                if self.filtering {
-                    self.filtered_bpf_programs.clone()
-                } else {
-                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
-                        .bpf_program_stats
-                        .programs
-                        .iter()
-                        .map(|(id, data)| (*id, data.clone()))
-                        .collect();
-                    programs.sort_by(|a, b| {
-                        b.1.avg_runtime_ns()
-                            .partial_cmp(&a.1.avg_runtime_ns())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    programs
-                };
+        match self.state {
+            AppState::BpfPrograms => self.on_down_bpf_programs(),
+            AppState::BpfProgramDetail => self.on_down_bpf_detail(),
+            AppState::PerfTop => self.on_down_perf_top(),
+            _ => self.on_down_filtered(),
+        }
+    }
 
-            if !programs_to_display.is_empty() {
-                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-                let new_selected = if current_selected < programs_to_display.len() - 1 {
-                    current_selected + 1
-                } else {
-                    0 // Wrap to top
-                };
-                self.bpf_program_table_state.select(Some(new_selected));
+    fn on_down_bpf_programs(&mut self) {
+        let programs_to_display = self.bpf_programs_to_display();
 
-                // Update selected program ID to preserve selection across refreshes
-                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                    self.selected_bpf_program_id = Some(*prog_id);
-                }
+        if !programs_to_display.is_empty() {
+            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+            let new_selected = if current_selected < programs_to_display.len() - 1 {
+                current_selected + 1
+            } else {
+                0 // Wrap to top
+            };
+            self.bpf_program_table_state.select(Some(new_selected));
+
+            // Update selected program ID to preserve selection across refreshes
+            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                self.selected_bpf_program_id = Some(*prog_id);
             }
-        } else if self.state == AppState::BpfProgramDetail {
-            // Handle navigation for BPF program detail symbol table
-            let symbols_count = self.bpf_program_filtered_symbols.len();
-            if symbols_count > 0 {
-                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
-                let new_selected = if current_selected < symbols_count - 1 {
-                    current_selected + 1
-                } else {
-                    0 // Wrap to top
-                };
-                self.bpf_program_symbol_table_state
-                    .select(Some(new_selected));
-            }
-        } else if self.state == AppState::PerfTop {
-            // Handle PerfTop navigation separately
-            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
-            if self.selected_symbol_index < max_index {
-                self.selected_symbol_index += 1;
-                self.perf_top_table_state
-                    .select(Some(self.selected_symbol_index));
-            }
-        } else {
-            let mut filtered_state = self.filtered_state.lock().unwrap();
-            if (self.state == AppState::PerfEvent
-                || self.state == AppState::KprobeEvent
-                || self.state == AppState::Default
-                || self.state == AppState::Llc
-                || self.state == AppState::Node
-                || self.state == AppState::Process)
-                && filtered_state.scroll < filtered_state.count - 1
-            {
-                filtered_state.scroll += 1;
-                filtered_state.selected += 1;
-            }
+        }
+    }
+
+    fn on_down_bpf_detail(&mut self) {
+        let symbols_count = self.bpf_program_filtered_symbols.len();
+        if symbols_count > 0 {
+            let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+            let new_selected = if current_selected < symbols_count - 1 {
+                current_selected + 1
+            } else {
+                0 // Wrap to top
+            };
+            self.bpf_program_symbol_table_state
+                .select(Some(new_selected));
+        }
+    }
+
+    fn on_down_perf_top(&mut self) {
+        let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+        if self.selected_symbol_index < max_index {
+            self.selected_symbol_index += 1;
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        }
+    }
+
+    fn on_down_filtered(&mut self) {
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
+            && filtered_state.scroll < filtered_state.count - 1
+        {
+            filtered_state.scroll += 1;
+            filtered_state.selected += 1;
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        if self.state == AppState::BpfPrograms {
-            // Handle navigation for BPF programs view
-            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
-                if self.filtering {
-                    self.filtered_bpf_programs.clone()
-                } else {
-                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
-                        .bpf_program_stats
-                        .programs
-                        .iter()
-                        .map(|(id, data)| (*id, data.clone()))
-                        .collect();
-                    programs.sort_by(|a, b| {
-                        b.1.avg_runtime_ns()
-                            .partial_cmp(&a.1.avg_runtime_ns())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    programs
-                };
+        match self.state {
+            AppState::BpfPrograms => self.on_up_bpf_programs(),
+            AppState::BpfProgramDetail => self.on_up_bpf_detail(),
+            AppState::PerfTop => self.on_up_perf_top(),
+            AppState::Help => {}
+            _ => self.on_up_filtered(),
+        }
+    }
 
-            if !programs_to_display.is_empty() {
-                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-                let new_selected = if current_selected > 0 {
-                    current_selected - 1
-                } else {
-                    programs_to_display.len() - 1 // Wrap to bottom
-                };
-                self.bpf_program_table_state.select(Some(new_selected));
+    fn on_up_bpf_programs(&mut self) {
+        let programs_to_display = self.bpf_programs_to_display();
 
-                // Update selected program ID to preserve selection across refreshes
-                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                    self.selected_bpf_program_id = Some(*prog_id);
-                }
+        if !programs_to_display.is_empty() {
+            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+            let new_selected = if current_selected > 0 {
+                current_selected - 1
+            } else {
+                programs_to_display.len() - 1 // Wrap to bottom
+            };
+            self.bpf_program_table_state.select(Some(new_selected));
+
+            // Update selected program ID to preserve selection across refreshes
+            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                self.selected_bpf_program_id = Some(*prog_id);
             }
-        } else if self.state == AppState::BpfProgramDetail {
-            // Handle navigation for BPF program detail symbol table
-            let symbols_count = self.bpf_program_filtered_symbols.len();
-            if symbols_count > 0 {
-                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
-                let new_selected = if current_selected > 0 {
-                    current_selected - 1
-                } else {
-                    symbols_count - 1 // Wrap to bottom
-                };
-                self.bpf_program_symbol_table_state
-                    .select(Some(new_selected));
-            }
-        } else if self.state == AppState::PerfTop {
-            // Handle navigation for PerfTop view
-            if self.selected_symbol_index > 0 {
-                self.selected_symbol_index -= 1;
-            }
-            self.perf_top_table_state
-                .select(Some(self.selected_symbol_index));
-        } else if self.state == AppState::Help {
-        } else {
-            let mut filtered_state = self.filtered_state.lock().unwrap();
-            if (self.state == AppState::PerfEvent
-                || self.state == AppState::KprobeEvent
-                || self.state == AppState::Default
-                || self.state == AppState::Llc
-                || self.state == AppState::Node
-                || self.state == AppState::Process)
-                && filtered_state.selected > 0
-            {
-                filtered_state.scroll -= 1;
-                filtered_state.selected -= 1;
-            }
+        }
+    }
+
+    fn on_up_bpf_detail(&mut self) {
+        let symbols_count = self.bpf_program_filtered_symbols.len();
+        if symbols_count > 0 {
+            let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+            let new_selected = if current_selected > 0 {
+                current_selected - 1
+            } else {
+                symbols_count - 1 // Wrap to bottom
+            };
+            self.bpf_program_symbol_table_state
+                .select(Some(new_selected));
+        }
+    }
+
+    fn on_up_perf_top(&mut self) {
+        if self.selected_symbol_index > 0 {
+            self.selected_symbol_index -= 1;
+        }
+        self.perf_top_table_state
+            .select(Some(self.selected_symbol_index));
+    }
+
+    fn on_up_filtered(&mut self) {
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
+            && filtered_state.selected > 0
+        {
+            filtered_state.scroll -= 1;
+            filtered_state.selected -= 1;
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        if self.state == AppState::BpfPrograms {
-            // Handle page down for BPF programs view
-            let page_size = 10;
-            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
-                if self.filtering {
-                    self.filtered_bpf_programs.clone()
-                } else {
-                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
-                        .bpf_program_stats
-                        .programs
-                        .iter()
-                        .map(|(id, data)| (*id, data.clone()))
-                        .collect();
-                    programs.sort_by(|a, b| {
-                        b.1.avg_runtime_ns()
-                            .partial_cmp(&a.1.avg_runtime_ns())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    programs
-                };
+        match self.state {
+            AppState::BpfPrograms => self.on_pg_down_bpf_programs(),
+            AppState::PerfTop => self.on_pg_down_perf_top(),
+            _ => self.on_pg_down_filtered(),
+        }
+    }
 
-            if !programs_to_display.is_empty() {
-                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-                let max_index = programs_to_display.len() - 1;
+    fn on_pg_down_bpf_programs(&mut self) {
+        let page_size = 10;
+        let programs_to_display = self.bpf_programs_to_display();
 
-                let new_selected = if current_selected + page_size <= max_index {
-                    current_selected + page_size
-                } else {
-                    max_index
-                };
+        if !programs_to_display.is_empty() {
+            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+            let max_index = programs_to_display.len() - 1;
 
-                self.bpf_program_table_state.select(Some(new_selected));
-
-                // Update selected program ID to preserve selection across refreshes
-                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                    self.selected_bpf_program_id = Some(*prog_id);
-                }
-            }
-        } else if self.state == AppState::PerfTop {
-            // Handle page down for PerfTop view
-            let page_size = 10;
-            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
-
-            if self.selected_symbol_index + page_size <= max_index {
-                self.selected_symbol_index += page_size;
+            let new_selected = if current_selected + page_size <= max_index {
+                current_selected + page_size
             } else {
-                self.selected_symbol_index = max_index;
-            }
-            self.perf_top_table_state
-                .select(Some(self.selected_symbol_index));
-        } else {
-            let mut filtered_state = self.filtered_state.lock().unwrap();
-            if (self.state == AppState::PerfEvent
-                || self.state == AppState::KprobeEvent
-                || self.state == AppState::Default
-                || self.state == AppState::Llc
-                || self.state == AppState::Node
-                || self.state == AppState::Process)
-                && filtered_state.scroll <= filtered_state.count - self.events_list_size
-            {
-                filtered_state.scroll += self.events_list_size - 1;
-                filtered_state.selected += (self.events_list_size - 1) as usize;
+                max_index
+            };
+
+            self.bpf_program_table_state.select(Some(new_selected));
+
+            // Update selected program ID to preserve selection across refreshes
+            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                self.selected_bpf_program_id = Some(*prog_id);
             }
         }
     }
+
+    fn on_pg_down_perf_top(&mut self) {
+        let page_size = 10;
+        let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+
+        if self.selected_symbol_index + page_size <= max_index {
+            self.selected_symbol_index += page_size;
+        } else {
+            self.selected_symbol_index = max_index;
+        }
+        self.perf_top_table_state
+            .select(Some(self.selected_symbol_index));
+    }
+
+    fn on_pg_down_filtered(&mut self) {
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
+            && filtered_state.scroll <= filtered_state.count - self.events_list_size
+        {
+            filtered_state.scroll += self.events_list_size - 1;
+            filtered_state.selected += (self.events_list_size - 1) as usize;
+        }
+    }
+
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        if self.state == AppState::BpfPrograms {
-            // Handle page up for BPF programs view
-            let page_size = 10;
-            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
-                if self.filtering {
-                    self.filtered_bpf_programs.clone()
-                } else {
-                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
-                        .bpf_program_stats
-                        .programs
-                        .iter()
-                        .map(|(id, data)| (*id, data.clone()))
-                        .collect();
-                    programs.sort_by(|a, b| {
-                        b.1.avg_runtime_ns()
-                            .partial_cmp(&a.1.avg_runtime_ns())
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    programs
-                };
+        match self.state {
+            AppState::BpfPrograms => self.on_pg_up_bpf_programs(),
+            AppState::PerfTop => self.on_pg_up_perf_top(),
+            _ => self.on_pg_up_filtered(),
+        }
+    }
 
-            if !programs_to_display.is_empty() {
-                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+    fn on_pg_up_bpf_programs(&mut self) {
+        let page_size = 10;
+        let programs_to_display = self.bpf_programs_to_display();
 
-                let new_selected = current_selected.saturating_sub(page_size);
+        if !programs_to_display.is_empty() {
+            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
 
-                self.bpf_program_table_state.select(Some(new_selected));
+            let new_selected = current_selected.saturating_sub(page_size);
 
-                // Update selected program ID to preserve selection across refreshes
-                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                    self.selected_bpf_program_id = Some(*prog_id);
-                }
+            self.bpf_program_table_state.select(Some(new_selected));
+
+            // Update selected program ID to preserve selection across refreshes
+            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                self.selected_bpf_program_id = Some(*prog_id);
             }
-        } else if self.state == AppState::PerfTop {
-            // Handle page up for PerfTop view
-            let page_size = 10;
+        }
+    }
 
-            if self.selected_symbol_index >= page_size {
-                self.selected_symbol_index -= page_size;
-            } else {
-                self.selected_symbol_index = 0;
-            }
-            self.perf_top_table_state
-                .select(Some(self.selected_symbol_index));
+    fn on_pg_up_perf_top(&mut self) {
+        let page_size = 10;
+
+        if self.selected_symbol_index >= page_size {
+            self.selected_symbol_index -= page_size;
         } else {
-            let mut filtered_state = self.filtered_state.lock().unwrap();
-            if (self.state == AppState::PerfEvent
-                || self.state == AppState::KprobeEvent
-                || self.state == AppState::Default
-                || self.state == AppState::Llc
-                || self.state == AppState::Node
-                || self.state == AppState::Process)
-                && filtered_state.scroll > 0
-            {
-                if filtered_state.scroll >= (self.events_list_size - 1) {
-                    filtered_state.scroll -= self.events_list_size - 1;
-                    filtered_state.selected -= (self.events_list_size - 1) as usize;
-                } else {
-                    filtered_state.selected -= filtered_state.scroll as usize;
-                    filtered_state.scroll = 0;
-                }
+            self.selected_symbol_index = 0;
+        }
+        self.perf_top_table_state
+            .select(Some(self.selected_symbol_index));
+    }
+
+    fn on_pg_up_filtered(&mut self) {
+        let mut filtered_state = self.filtered_state.lock().unwrap();
+        if (self.state == AppState::PerfEvent
+            || self.state == AppState::KprobeEvent
+            || self.state == AppState::Default
+            || self.state == AppState::Llc
+            || self.state == AppState::Node
+            || self.state == AppState::Process)
+            && filtered_state.scroll > 0
+        {
+            if filtered_state.scroll >= (self.events_list_size - 1) {
+                filtered_state.scroll -= self.events_list_size - 1;
+                filtered_state.selected -= (self.events_list_size - 1) as usize;
+            } else {
+                filtered_state.selected -= filtered_state.scroll as usize;
+                filtered_state.scroll = 0;
             }
         }
     }
