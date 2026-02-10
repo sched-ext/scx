@@ -28,18 +28,48 @@ use crate::ffi;
 use crate::trace::Trace;
 use crate::types::{CpuId, DsqId, Pid, TimeNs};
 
+/// Which scheduler callback is currently executing.
+///
+/// The kernel defers `scx_bpf_dsq_insert` — it never inserts immediately.
+/// During `select_cpu`/`enqueue` the intent is recorded on the task and
+/// executed after the callback returns. During `dispatch` inserts are
+/// buffered and flushed after the callback. We track the context so
+/// the engine can resolve `SCX_DSQ_LOCAL` correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpsContext {
+    None,
+    SelectCpu,
+    Enqueue,
+    Dispatch,
+}
+
+/// A deferred dispatch request recorded by `scx_bpf_dsq_insert[_vtime]`.
+///
+/// Mirrors the kernel's `p->scx.ddsp_dsq_id` / `ddsp_enq_flags` fields.
+#[derive(Debug, Clone)]
+pub struct PendingDispatch {
+    pub pid: Pid,
+    pub dsq_id: DsqId,
+    pub enq_flags: u64,
+    pub vtime: Option<u64>,
+}
+
 /// The subset of simulator state that kfuncs need access to.
 pub struct SimulatorState {
     pub cpus: Vec<SimCpu>,
     pub dsqs: DsqManager,
     pub current_cpu: CpuId,
-    pub direct_dispatch_cpu: Option<CpuId>,
     pub trace: Trace,
     pub clock: TimeNs,
     /// Maps raw task_struct pointers to PIDs for reverse lookup.
     pub task_raw_to_pid: HashMap<usize, Pid>,
     /// Deterministic PRNG state (xorshift32).
     pub prng_state: u32,
+    /// Which ops callback we are currently inside.
+    pub ops_context: OpsContext,
+    /// Deferred dispatch recorded during `select_cpu` or `enqueue`.
+    /// The engine resolves `SCX_DSQ_LOCAL` and executes after the callback.
+    pub pending_dispatch: Option<PendingDispatch>,
 }
 
 impl SimulatorState {
@@ -71,6 +101,41 @@ impl SimulatorState {
         x ^= x << 5;
         self.prng_state = x;
         x
+    }
+
+    /// Execute a pending deferred dispatch, resolving `SCX_DSQ_LOCAL` to
+    /// the given `local_cpu`.
+    ///
+    /// This mirrors the kernel's post-callback dispatch resolution:
+    /// after `select_cpu`, `local_cpu` is the CPU that `select_cpu` returned;
+    /// after `enqueue`, it is the task's assigned CPU.
+    ///
+    /// Returns the CPU if a local DSQ dispatch was resolved (the engine
+    /// should try to run on that CPU), or None.
+    pub fn resolve_pending_dispatch(&mut self, local_cpu: CpuId) -> Option<CpuId> {
+        let pd = self.pending_dispatch.take()?;
+
+        let dsq = pd.dsq_id;
+        if dsq.is_local() {
+            self.cpus[local_cpu.0 as usize].local_dsq.push_back(pd.pid);
+            debug!(
+                pid = pd.pid.0, cpu = local_cpu.0,
+                "resolved SCX_DSQ_LOCAL"
+            );
+            Some(local_cpu)
+        } else if dsq.is_local_on() {
+            let cpu = dsq.local_on_cpu();
+            if (cpu.0 as usize) < self.cpus.len() {
+                self.cpus[cpu.0 as usize].local_dsq.push_back(pd.pid);
+            }
+            Some(cpu)
+        } else if let Some(vtime) = pd.vtime {
+            self.dsqs.insert_vtime(dsq, pd.pid, vtime);
+            None
+        } else {
+            self.dsqs.insert_fifo(dsq, pd.pid);
+            None
+        }
     }
 }
 
@@ -162,61 +227,53 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
 }
 
 /// Insert a task into a DSQ (FIFO ordering).
+///
+/// Like the kernel, this records intent but does NOT insert immediately.
+/// The engine resolves the pending dispatch after the callback returns,
+/// at which point `SCX_DSQ_LOCAL` is mapped to the correct CPU.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_insert(
     p: *mut c_void,
     dsq_id: u64,
     slice: u64,
-    _enq_flags: u64,
+    enq_flags: u64,
 ) {
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
         debug!(pid = pid.0, dsq_id, slice, "kfunc dsq_insert");
 
-        let dsq = DsqId(dsq_id);
-        if dsq.is_local() {
-            let cpu = sim.current_cpu;
-            sim.cpus[cpu.0 as usize].local_dsq.push_back(pid);
-            sim.direct_dispatch_cpu = Some(cpu);
-        } else if dsq.is_local_on() {
-            let cpu = dsq.local_on_cpu();
-            if (cpu.0 as usize) < sim.cpus.len() {
-                sim.cpus[cpu.0 as usize].local_dsq.push_back(pid);
-            }
-        } else {
-            sim.dsqs.insert_fifo(dsq, pid);
-        }
+        sim.pending_dispatch = Some(PendingDispatch {
+            pid,
+            dsq_id: DsqId(dsq_id),
+            enq_flags,
+            vtime: None,
+        });
     })
 }
 
 /// Insert a task into a DSQ with vtime ordering.
+///
+/// Deferred like `scx_bpf_dsq_insert` — see its doc comment.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_insert_vtime(
     p: *mut c_void,
     dsq_id: u64,
     slice: u64,
     vtime: u64,
-    _enq_flags: u64,
+    enq_flags: u64,
 ) {
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
         debug!(pid = pid.0, dsq_id, slice, vtime, "kfunc dsq_insert_vtime");
 
-        let dsq = DsqId(dsq_id);
-        if dsq.is_local() {
-            let cpu = sim.current_cpu;
-            sim.cpus[cpu.0 as usize].local_dsq.push_back(pid);
-            sim.direct_dispatch_cpu = Some(cpu);
-        } else if dsq.is_local_on() {
-            let cpu = dsq.local_on_cpu();
-            if (cpu.0 as usize) < sim.cpus.len() {
-                sim.cpus[cpu.0 as usize].local_dsq.push_back(pid);
-            }
-        } else {
-            sim.dsqs.insert_vtime(dsq, pid, vtime);
-        }
+        sim.pending_dispatch = Some(PendingDispatch {
+            pid,
+            dsq_id: DsqId(dsq_id),
+            enq_flags,
+            vtime: Some(vtime),
+        });
     })
 }
 
