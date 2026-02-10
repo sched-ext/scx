@@ -6,6 +6,8 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
+use tracing::{debug, info};
+
 use crate::cpu::SimCpu;
 use crate::dsq::DsqManager;
 use crate::ffi::Scheduler;
@@ -201,6 +203,7 @@ impl<S: Scheduler> Simulator<S> {
 
             let selected_cpu_raw = self.scheduler.select_cpu(raw, prev_cpu.0 as i32, SCX_ENQ_WAKEUP);
             let selected_cpu = CpuId(selected_cpu_raw as u32);
+            debug!(pid = pid.0, prev_cpu = prev_cpu.0, selected_cpu = selected_cpu.0, "select_cpu");
 
             if let Some(dd_cpu) = state.direct_dispatch_cpu.take() {
                 // Task was directly dispatched to a local DSQ in select_cpu
@@ -215,6 +218,7 @@ impl<S: Scheduler> Simulator<S> {
                 );
             } else {
                 // Task was not directly dispatched; call enqueue
+                debug!(pid = pid.0, enq_flags = SCX_ENQ_WAKEUP, "enqueue");
                 self.scheduler.enqueue(raw, SCX_ENQ_WAKEUP);
                 kfuncs::exit_sim();
 
@@ -263,6 +267,9 @@ impl<S: Scheduler> Simulator<S> {
 
         state.trace.record(state.clock, cpu, TraceKind::TaskPreempted { pid });
 
+        let task_name = task.name.as_str();
+        info!(cpu = cpu.0, task = task_name, pid = pid.0, ran_ns = slice, "PREEMPTED");
+
         // Stop the task - entire slice was consumed
         let raw = task.raw();
         task.state = TaskState::Runnable;
@@ -275,8 +282,10 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            debug!(pid = pid.0, cpu = cpu.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
             // Re-enqueue the preempted task
+            debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
             kfuncs::exit_sim();
         }
@@ -327,6 +336,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
             kfuncs::exit_sim();
         }
@@ -336,12 +346,14 @@ impl<S: Scheduler> Simulator<S> {
             let task = tasks.get_mut(&pid).unwrap();
             task.state = TaskState::Exited;
             state.trace.record(state.clock, cpu, TraceKind::TaskCompleted { pid });
+            info!(cpu = cpu.0, task = task.name.as_str(), pid = pid.0, "COMPLETED");
         } else {
             match next_phase {
                 Some(Phase::Sleep(sleep_ns)) => {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Sleeping;
                     state.trace.record(state.clock, cpu, TraceKind::TaskSlept { pid });
+                    info!(cpu = cpu.0, task = task.name.as_str(), pid = pid.0, "SLEEPING");
 
                     // Schedule wake event
                     let wake_time = state.clock + sleep_ns;
@@ -457,6 +469,7 @@ impl<S: Scheduler> Simulator<S> {
             unsafe {
                 kfuncs::enter_sim(state);
                 state.current_cpu = cpu;
+                debug!(cpu = cpu.0, "dispatch");
                 self.scheduler.dispatch(cpu.0 as i32, std::ptr::null_mut());
                 kfuncs::exit_sim();
             }
@@ -468,6 +481,7 @@ impl<S: Scheduler> Simulator<S> {
         } else {
             // CPU is idle
             state.trace.record(state.clock, cpu, TraceKind::CpuIdle);
+            info!(cpu = cpu.0, "IDLE");
         }
     }
 
@@ -504,6 +518,7 @@ impl<S: Scheduler> Simulator<S> {
             unsafe {
                 kfuncs::enter_sim(state);
                 state.current_cpu = cpu;
+                debug!(pid = pid.0, cpu = cpu.0, "enable");
                 self.scheduler.enable(raw);
                 kfuncs::exit_sim();
             }
@@ -513,6 +528,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            debug!(pid = pid.0, cpu = cpu.0, "running");
             self.scheduler.running(raw);
             kfuncs::exit_sim();
         }
@@ -523,6 +539,8 @@ impl<S: Scheduler> Simulator<S> {
         let task = tasks.get(&pid).unwrap();
         let slice = task.get_slice();
         let remaining = task.run_remaining_ns;
+
+        info!(cpu = cpu.0, task = task.name.as_str(), pid = pid.0, slice_ns = slice, "STARTED");
 
         if remaining == 0 {
             // Task has no remaining work -- complete immediately

@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
 
+use tracing::debug;
+
 use crate::cpu::SimCpu;
 use crate::dsq::DsqManager;
 use crate::ffi;
@@ -119,7 +121,11 @@ where
 /// Create a dispatch queue.
 #[no_mangle]
 pub extern "C" fn scx_bpf_create_dsq(dsq_id: u64, _node: i32) -> i32 {
-    with_sim(|sim| if sim.dsqs.create(DsqId(dsq_id)) { 0 } else { -1 })
+    with_sim(|sim| {
+        let result = if sim.dsqs.create(DsqId(dsq_id)) { 0 } else { -1 };
+        debug!(dsq_id, result, "kfunc create_dsq");
+        result
+    })
 }
 
 /// Default CPU selection: find an idle CPU, preferring prev_cpu.
@@ -135,14 +141,17 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
         // Prefer prev_cpu if it's idle
         if (prev.0 as usize) < sim.cpus.len() && sim.cpu_is_idle(prev) {
             unsafe { *is_idle = true };
+            debug!(prev_cpu, cpu = prev_cpu, idle = true, "kfunc select_cpu_dfl");
             return prev_cpu;
         }
         // Find any idle CPU
         if let Some(cpu) = sim.find_any_idle_cpu() {
             unsafe { *is_idle = true };
+            debug!(prev_cpu, cpu = cpu.0, idle = true, "kfunc select_cpu_dfl");
             return cpu.0 as i32;
         }
         unsafe { *is_idle = false };
+        debug!(prev_cpu, cpu = prev_cpu, idle = false, "kfunc select_cpu_dfl");
         prev_cpu
     })
 }
@@ -158,6 +167,7 @@ pub extern "C" fn scx_bpf_dsq_insert(
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
+        debug!(pid = pid.0, dsq_id, slice, "kfunc dsq_insert");
 
         let dsq = DsqId(dsq_id);
         if dsq.is_local() {
@@ -187,6 +197,7 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
+        debug!(pid = pid.0, dsq_id, slice, vtime, "kfunc dsq_insert_vtime");
 
         let dsq = DsqId(dsq_id);
         if dsq.is_local() {
@@ -212,14 +223,20 @@ pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
         // Need to split borrow: extract cpu mutably, pass dsqs mutably
         let cpus_ptr = sim.cpus.as_mut_ptr();
         let cpu = unsafe { &mut *cpus_ptr.add(cpu_idx) };
-        sim.dsqs.move_to_local(DsqId(dsq_id), cpu)
+        let result = sim.dsqs.move_to_local(DsqId(dsq_id), cpu);
+        debug!(dsq_id, result, "kfunc dsq_move_to_local");
+        result
     })
 }
 
 /// Query the number of tasks queued in a DSQ.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
-    with_sim(|sim| sim.dsqs.nr_queued(DsqId(dsq_id)) as i32)
+    with_sim(|sim| {
+        let n = sim.dsqs.nr_queued(DsqId(dsq_id)) as i32;
+        debug!(dsq_id, n, "kfunc dsq_nr_queued");
+        n
+    })
 }
 
 /// Kick a CPU (send scheduling IPI). In the simulator, this is mostly a no-op

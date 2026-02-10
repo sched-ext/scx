@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 libbpf-sys = "=1.6.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 cc = "1.2.29"
