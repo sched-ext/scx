@@ -40,8 +40,6 @@ fn aggregate_stats(skel: &BpfSkel) -> cake_stats {
                 total.nr_tier_dispatches[i] += s.nr_tier_dispatches[i];
                 total.nr_starvation_preempts_tier[i] += s.nr_starvation_preempts_tier[i];
             }
-
-
         }
     }
 
@@ -800,8 +798,6 @@ fn format_stats_for_clipboard(stats: &cake_stats, uptime: &str) -> String {
         ));
     }
 
-
-
     output
 }
 
@@ -951,9 +947,9 @@ fn tier_style(tier: usize) -> Style {
         0 => Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD), // Critical (<100µs)
-        1 => Style::default().fg(Color::Green),                            // Interactive (<2ms)
-        2 => Style::default().fg(Color::Yellow),                           // Frame (<8ms)
-        3 => Style::default().fg(Color::DarkGray),                         // Bulk (≥8ms)
+        1 => Style::default().fg(Color::Green), // Interactive (<2ms)
+        2 => Style::default().fg(Color::Yellow), // Frame (<8ms)
+        3 => Style::default().fg(Color::DarkGray), // Bulk (≥8ms)
         _ => Style::default(),
     }
 }

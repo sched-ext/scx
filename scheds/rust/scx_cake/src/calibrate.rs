@@ -276,9 +276,6 @@ where
     matrix
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

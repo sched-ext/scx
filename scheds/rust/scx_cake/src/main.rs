@@ -61,25 +61,31 @@ impl Profile {
     fn starvation_threshold(&self) -> [u64; 8] {
         match self {
             Profile::Esports => [
-                1_500_000,   // T0 Critical: 1.5ms
-                4_000_000,   // T1 Interactive: 4ms
-                20_000_000,  // T2 Frame: 20ms
-                50_000_000,  // T3 Bulk: 50ms
+                1_500_000,  // T0 Critical: 1.5ms
+                4_000_000,  // T1 Interactive: 4ms
+                20_000_000, // T2 Frame: 20ms
+                50_000_000, // T3 Bulk: 50ms
                 50_000_000, 50_000_000, 50_000_000, 50_000_000, // Padding
             ],
             Profile::Legacy => [
-                6_000_000,    // T0 Critical: 6ms
-                16_000_000,   // T1 Interactive: 16ms
-                80_000_000,   // T2 Frame: 80ms
-                200_000_000,  // T3 Bulk: 200ms
-                200_000_000, 200_000_000, 200_000_000, 200_000_000, // Padding
+                6_000_000,   // T0 Critical: 6ms
+                16_000_000,  // T1 Interactive: 16ms
+                80_000_000,  // T2 Frame: 80ms
+                200_000_000, // T3 Bulk: 200ms
+                200_000_000,
+                200_000_000,
+                200_000_000,
+                200_000_000, // Padding
             ],
             Profile::Gaming | Profile::Default => [
-                3_000_000,    // T0 Critical: 3ms
-                8_000_000,    // T1 Interactive: 8ms
-                40_000_000,   // T2 Frame: 40ms
-                100_000_000,  // T3 Bulk: 100ms
-                100_000_000, 100_000_000, 100_000_000, 100_000_000, // Padding
+                3_000_000,   // T0 Critical: 3ms
+                8_000_000,   // T1 Interactive: 8ms
+                40_000_000,  // T2 Frame: 40ms
+                100_000_000, // T3 Bulk: 100ms
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_000_000, // Padding
             ],
         }
     }
@@ -88,11 +94,11 @@ impl Profile {
     fn tier_multiplier(&self) -> [u32; 8] {
         match self {
             Profile::Esports | Profile::Legacy | Profile::Gaming | Profile::Default => [
-                768,   // T0 Critical: 0.75x
-                1024,  // T1 Interactive: 1.0x
-                1229,  // T2 Frame: 1.2x
-                1434,  // T3 Bulk: 1.4x
-                1434, 1434, 1434, 1434,  // Padding
+                768,  // T0 Critical: 0.75x
+                1024, // T1 Interactive: 1.0x
+                1229, // T2 Frame: 1.2x
+                1434, // T3 Bulk: 1.4x
+                1434, 1434, 1434, 1434, // Padding
             ],
         }
     }
@@ -101,24 +107,24 @@ impl Profile {
     fn wait_budget(&self) -> [u64; 8] {
         match self {
             Profile::Esports => [
-                50_000,     // T0 Critical: 50µs
-                1_000_000,  // T1 Interactive: 1ms
-                4_000_000,  // T2 Frame: 4ms
-                0,          // T3 Bulk: no limit
+                50_000,    // T0 Critical: 50µs
+                1_000_000, // T1 Interactive: 1ms
+                4_000_000, // T2 Frame: 4ms
+                0,         // T3 Bulk: no limit
                 0, 0, 0, 0, // Padding
             ],
             Profile::Legacy => [
-                200_000,     // T0 Critical: 200µs
-                4_000_000,   // T1 Interactive: 4ms
-                16_000_000,  // T2 Frame: 16ms
-                0,           // T3 Bulk: no limit
-                0, 0, 0, 0,  // Padding
+                200_000,    // T0 Critical: 200µs
+                4_000_000,  // T1 Interactive: 4ms
+                16_000_000, // T2 Frame: 16ms
+                0,          // T3 Bulk: no limit
+                0, 0, 0, 0, // Padding
             ],
             Profile::Gaming | Profile::Default => [
-                100_000,    // T0 Critical: 100µs
-                2_000_000,  // T1 Interactive: 2ms
-                8_000_000,  // T2 Frame: 8ms
-                0,          // T3 Bulk: no limit
+                100_000,   // T0 Critical: 100µs
+                2_000_000, // T1 Interactive: 2ms
+                8_000_000, // T2 Frame: 8ms
+                0,         // T3 Bulk: no limit
                 0, 0, 0, 0, // Padding
             ],
         }
@@ -247,7 +253,6 @@ impl Args {
     }
 }
 
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     args: Args,
@@ -281,10 +286,13 @@ impl<'a> Scheduler<'a> {
         // ETD: Empirical Topology Discovery — display-grade measurement
         // Measures inter-core CAS latency for startup heatmap and TUI display
         info!("Starting ETD calibration...");
-        let latency_matrix =
-            calibrate::calibrate_full_matrix(topo.nr_cpus, &calibrate::EtdConfig::default(), |current, total, is_complete| {
+        let latency_matrix = calibrate::calibrate_full_matrix(
+            topo.nr_cpus,
+            &calibrate::EtdConfig::default(),
+            |current, total, is_complete| {
                 tui::render_calibration_progress(current, total, is_complete);
-            });
+            },
+        );
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
