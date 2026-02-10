@@ -3,6 +3,7 @@ use scx_simulator::*;
 /// Two tasks with equal weight on 1 CPU should get roughly equal runtime.
 #[test]
 fn test_equal_weight_fairness() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {
@@ -51,6 +52,7 @@ fn test_equal_weight_fairness() {
 /// A task with 2x weight should get ~2x the runtime of a task with 1x weight.
 #[test]
 fn test_weighted_fairness() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {
@@ -95,6 +97,7 @@ fn test_weighted_fairness() {
 /// Three tasks with weights 100, 200, 300 should get proportional runtime.
 #[test]
 fn test_three_way_weighted_fairness() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {

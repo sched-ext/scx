@@ -3,6 +3,7 @@ use scx_simulator::*;
 /// Task that sleeps and wakes should produce correct timing.
 #[test]
 fn test_sleep_wake_cycle() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {
@@ -41,6 +42,7 @@ fn test_sleep_wake_cycle() {
 /// Slice expiry: task with long Run phase should be preempted by slice.
 #[test]
 fn test_slice_preemption() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {
@@ -79,6 +81,7 @@ fn test_slice_preemption() {
 /// Two CPU-hungry tasks contending on 1 CPU: preemption interleaving.
 #[test]
 fn test_preemption_interleaving() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {

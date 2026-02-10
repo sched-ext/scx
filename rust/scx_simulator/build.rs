@@ -24,9 +24,14 @@ fn main() {
             .into(),
     ];
 
+    // Common compiler: BPF scheduler code compiled as userspace C has
+    // inherently unused parameters (fixed BPF ops signatures) and unknown
+    // attributes (preserve_access_index from vmlinux.h).
+    let compiler = env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into());
+
     // Build the scxtest support library (map emulation, cpumask, overrides)
     cc::Build::new()
-        .compiler(env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into()))
+        .compiler(&compiler)
         .files([
             root_dir.join("lib/scxtest/scx_test.c"),
             root_dir.join("lib/scxtest/overrides.c"),
@@ -35,22 +40,28 @@ fn main() {
         ])
         .define("SCX_BPF_UNITTEST", None)
         .includes(&include_paths)
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unknown-attributes")
         .compile("scxtest");
 
     // Build the task_struct accessor library
     cc::Build::new()
-        .compiler(env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into()))
+        .compiler(&compiler)
         .file(manifest_dir.join("csrc/sim_task.c"))
         .define("SCX_BPF_UNITTEST", None)
         .includes(&include_paths)
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unknown-attributes")
         .compile("sim_task");
 
     // Build the scx_simple scheduler as userspace C
     cc::Build::new()
-        .compiler(env::var("BPF_CLANG").unwrap_or_else(|_| "clang".into()))
+        .compiler(&compiler)
         .file(manifest_dir.join("csrc/simple_wrapper.c"))
         .define("SCX_BPF_UNITTEST", None)
         .includes(&include_paths)
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unknown-attributes")
         .compile("scx_simple");
 
     // Rebuild triggers

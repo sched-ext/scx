@@ -3,6 +3,7 @@ use scx_simulator::*;
 /// Smoke test: single task on single CPU runs to completion.
 #[test]
 fn test_single_task_single_cpu() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {
@@ -44,6 +45,7 @@ fn test_single_task_single_cpu() {
 /// Multiple tasks on a single CPU should all get scheduled.
 #[test]
 fn test_multiple_tasks_single_cpu() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(1)
         .task(TaskDef {
@@ -86,6 +88,7 @@ fn test_multiple_tasks_single_cpu() {
 /// Tasks on multiple CPUs should spread across CPUs.
 #[test]
 fn test_multiple_cpus() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let scenario = Scenario::builder()
         .cpus(4)
         .task(TaskDef {
@@ -121,6 +124,7 @@ fn test_multiple_cpus() {
 /// Determinism: same scenario should produce identical traces.
 #[test]
 fn test_determinism() {
+    let _lock = SIM_LOCK.lock().unwrap();
     let make_scenario = || {
         Scenario::builder()
             .cpus(2)
