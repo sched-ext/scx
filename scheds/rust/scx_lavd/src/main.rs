@@ -194,6 +194,12 @@ struct Opts {
     #[clap(long = "enable-cpu-bw", action = clap::ArgAction::SetTrue)]
     enable_cpu_bw: bool,
 
+    /// If specified, only tasks which have their scheduling policy set to
+    /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
+    /// tasks are switched.
+    #[clap(long = "partial", action = clap::ArgAction::SetTrue)]
+    partial: bool,
+
     ///
     /// Disable core compaction so the scheduler uses all the online CPUs.
     /// The core compaction attempts to minimize the number of actively used
@@ -655,6 +661,10 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
             | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
+
+        if opts.partial {
+            skel.struct_ops.lavd_ops_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
     }
 
     fn get_msg_seq_id() -> u64 {
