@@ -46,3 +46,14 @@ pub use scenario::Scenario;
 pub use task::{Phase, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
 pub use types::{CpuId, DsqId, Pid, TimeNs, Vtime, Weight};
+
+use std::sync::Mutex;
+
+/// Global lock for serializing simulator tests.
+///
+/// The compiled C scheduler has global mutable state, so only one
+/// simulation can run at a time within a process. Tests that use
+/// `cargo test` (threads in a single process) must hold this lock.
+/// `cargo nextest` (separate processes) works without it, but holding
+/// the lock is harmless.
+pub static SIM_LOCK: Mutex<()> = Mutex::new(());
