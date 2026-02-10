@@ -1406,13 +1406,14 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
 	}
 
-	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
-		u64 *cell_cycles = MEMBER_VPTR(cctx->cell_cycles, [cidx]);
-		if (!cell_cycles) {
-			scx_bpf_error("Cell index is too large: %d", cidx);
+	{
+		u64 *running = MEMBER_VPTR(cctx->running_ns, [tctx->cell]);
+		if (!running) {
+			scx_bpf_error("Task cell index too large: %d",
+				      tctx->cell);
 			return;
 		}
-		*cell_cycles += used;
+		*running += used;
 	}
 }
 

@@ -184,6 +184,10 @@ struct Scheduler<'a> {
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
+    // Per-cell running_ns tracking for demand metrics
+    prev_cell_running_ns: [u64; MAX_CELLS],
+    prev_cell_own_ns: [u64; MAX_CELLS],
+    prev_cell_lent_ns: [u64; MAX_CELLS],
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
@@ -360,6 +364,9 @@ impl<'a> Scheduler<'a> {
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
+            prev_cell_running_ns: [0; MAX_CELLS],
+            prev_cell_own_ns: [0; MAX_CELLS],
+            prev_cell_lent_ns: [0; MAX_CELLS],
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
@@ -766,11 +773,11 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn calculate_cell_stat_delta(&mut self) -> Result<[[u64; NR_CSTATS]; MAX_CELLS]> {
+    fn calculate_cell_stat_delta(
+        &mut self,
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+    ) -> Result<[[u64; NR_CSTATS]; MAX_CELLS]> {
         let mut cell_stats_delta = [[0 as u64; NR_CSTATS]; MAX_CELLS];
-
-        // Read CPU contexts
-        let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
 
         // Loop over cells and stats first, then CPU contexts
         // TODO: We should loop over the in_use cells only.
@@ -793,9 +800,15 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
-        let cell_stats_delta = self.calculate_cell_stat_delta()?;
+        let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
+
+        let cell_stats_delta = self.calculate_cell_stat_delta(&cpu_ctxs)?;
 
         self.log_all_queue_stats(&cell_stats_delta)?;
+
+        if self.cell_manager.is_some() {
+            self.collect_demand_metrics(&cpu_ctxs)?;
+        }
 
         for (cell_id, cell) in &self.cells {
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
@@ -809,6 +822,121 @@ impl<'a> Scheduler<'a> {
                 .and_modify(|cell_metrics| cell_metrics.num_cpus = cell.cpus.weight() as u32);
         }
         self.metrics.num_cells = self.cells.len() as u32;
+
+        Ok(())
+    }
+
+    /// Compute per-cell demand metrics (utilization, borrowed, lent) from BPF running_ns counters.
+    fn collect_demand_metrics(&mut self, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Result<()> {
+        // Per-cell cumulative counters derived from BPF per-CPU running_ns:
+        //   total_running_ns[c] = total time tasks in cell c ran (on any CPU)
+        //   on_own_ns[c]        = time tasks in cell c ran on CPUs owned by cell c
+        //   lent_ns[c]          = time foreign tasks ran on CPUs owned by cell c
+        let mut total_running_ns = [0u64; MAX_CELLS];
+        let mut on_own_ns = [0u64; MAX_CELLS];
+        let mut lent_ns = [0u64; MAX_CELLS];
+
+        for cpu_ctx in cpu_ctxs.iter() {
+            let owner = cpu_ctx.cell as usize;
+            for cell in 0..MAX_CELLS {
+                let ns = cpu_ctx.running_ns[cell];
+                total_running_ns[cell] += ns;
+                if owner == cell {
+                    on_own_ns[cell] += ns;
+                }
+            }
+            if owner >= MAX_CELLS {
+                bail!(
+                    "CPU has invalid cell assignment {} (MAX_CELLS={})",
+                    owner,
+                    MAX_CELLS
+                );
+            }
+            // Lent time: non-owner cell tasks running on this CPU
+            let total_on_cpu: u64 = cpu_ctx.running_ns.iter().sum();
+            let owner_on_cpu = cpu_ctx.running_ns[owner];
+            lent_ns[owner] += total_on_cpu - owner_on_cpu;
+        }
+
+        // Compute deltas since last collection interval
+        let interval_ns = self.monitor_interval.as_nanos() as u64;
+
+        let mut global_running_delta = 0u64;
+        let mut global_borrowed_delta = 0u64;
+        let mut global_lent_delta = 0u64;
+        let mut global_capacity = 0u64;
+
+        for cell in 0..MAX_CELLS {
+            let delta_running =
+                total_running_ns[cell].wrapping_sub(self.prev_cell_running_ns[cell]);
+            let delta_on_own = on_own_ns[cell].wrapping_sub(self.prev_cell_own_ns[cell]);
+            let delta_lent = lent_ns[cell].wrapping_sub(self.prev_cell_lent_ns[cell]);
+
+            self.prev_cell_running_ns[cell] = total_running_ns[cell];
+            self.prev_cell_own_ns[cell] = on_own_ns[cell];
+            self.prev_cell_lent_ns[cell] = lent_ns[cell];
+
+            if delta_running == 0 && delta_lent == 0 {
+                continue;
+            }
+
+            // Borrowed = ran somewhere other than own CPUs
+            let delta_borrowed = delta_running.saturating_sub(delta_on_own);
+
+            // After a cell is destroyed, BPF may still report residual
+            // running_ns from the previous interval. Skip stale cells.
+            let Some(cell_info) = self.cells.get(&(cell as u32)) else {
+                continue;
+            };
+
+            let nr_cpus = cell_info.cpus.weight() as u64;
+            if nr_cpus == 0 {
+                bail!("Cell {} has 0 CPUs assigned", cell);
+            }
+
+            // capacity = total available CPU-time this interval
+            let capacity = nr_cpus * interval_ns;
+            // util: fraction of own capacity consumed by own tasks
+            let util_pct = 100.0 * (delta_running as f64) / (capacity as f64);
+            // demand_borrow: fraction of running time that was borrowed from other cells
+            let demand_borrow_pct = if delta_running > 0 {
+                100.0 * (delta_borrowed as f64) / (delta_running as f64)
+            } else {
+                0.0
+            };
+            // lent: fraction of own capacity used by foreign tasks
+            let lent_pct = 100.0 * (delta_lent as f64) / (capacity as f64);
+
+            self.metrics
+                .cells
+                .entry(cell as u32)
+                .or_default()
+                .update_demand(util_pct, demand_borrow_pct, lent_pct);
+
+            global_running_delta += delta_running;
+            global_borrowed_delta += delta_borrowed;
+            global_lent_delta += delta_lent;
+            global_capacity += capacity;
+        }
+
+        let global_util_pct = if global_capacity > 0 {
+            100.0 * (global_running_delta as f64) / (global_capacity as f64)
+        } else {
+            0.0
+        };
+        let global_borrow_pct = if global_running_delta > 0 {
+            100.0 * (global_borrowed_delta as f64) / (global_running_delta as f64)
+        } else {
+            0.0
+        };
+        let global_lent_pct = if global_capacity > 0 {
+            100.0 * (global_lent_delta as f64) / (global_capacity as f64)
+        } else {
+            0.0
+        };
+
+        self.metrics
+            .update_demand(global_util_pct, global_borrow_pct, global_lent_pct);
 
         Ok(())
     }
