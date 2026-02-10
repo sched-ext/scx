@@ -125,22 +125,10 @@ impl<S: Scheduler> Simulator<S> {
 
             match event.kind {
                 EventKind::TaskWake { pid } => {
-                    self.handle_task_wake(
-                        pid,
-                        &mut state,
-                        &mut tasks,
-                        &mut events,
-                        &mut seq,
-                    );
+                    self.handle_task_wake(pid, &mut state, &mut tasks, &mut events, &mut seq);
                 }
                 EventKind::SliceExpired { cpu } => {
-                    self.handle_slice_expired(
-                        cpu,
-                        &mut state,
-                        &mut tasks,
-                        &mut events,
-                        &mut seq,
-                    );
+                    self.handle_slice_expired(cpu, &mut state, &mut tasks, &mut events, &mut seq);
                 }
                 EventKind::TaskPhaseComplete { cpu } => {
                     self.handle_task_phase_complete(
@@ -191,7 +179,9 @@ impl<S: Scheduler> Simulator<S> {
             return;
         }
 
-        state.trace.record(state.clock, CpuId(0), TraceKind::TaskWoke { pid });
+        state
+            .trace
+            .record(state.clock, CpuId(0), TraceKind::TaskWoke { pid });
 
         // Call select_cpu
         let prev_cpu = task.prev_cpu;
@@ -203,10 +193,17 @@ impl<S: Scheduler> Simulator<S> {
             state.ops_context = OpsContext::SelectCpu;
             state.current_cpu = prev_cpu;
 
-            let selected_cpu_raw = self.scheduler.select_cpu(raw, prev_cpu.0 as i32, SCX_ENQ_WAKEUP);
+            let selected_cpu_raw =
+                self.scheduler
+                    .select_cpu(raw, prev_cpu.0 as i32, SCX_ENQ_WAKEUP);
             let selected_cpu = CpuId(selected_cpu_raw as u32);
             state.ops_context = OpsContext::None;
-            debug!(pid = pid.0, prev_cpu = prev_cpu.0, selected_cpu = selected_cpu.0, "select_cpu");
+            debug!(
+                pid = pid.0,
+                prev_cpu = prev_cpu.0,
+                selected_cpu = selected_cpu.0,
+                "select_cpu"
+            );
 
             // Resolve deferred dispatch: SCX_DSQ_LOCAL -> selected_cpu
             // (kernel semantics: LOCAL resolves to the CPU select_cpu returned)
@@ -218,9 +215,7 @@ impl<S: Scheduler> Simulator<S> {
 
             if let Some(dd_cpu) = direct_dispatched {
                 // Task was directly dispatched — skip enqueue (kernel semantics)
-                self.try_dispatch_and_run(
-                    dd_cpu, state, tasks, events, seq,
-                );
+                self.try_dispatch_and_run(dd_cpu, state, tasks, events, seq);
             } else {
                 // Task was not directly dispatched; call enqueue
                 kfuncs::enter_sim(state);
@@ -243,9 +238,7 @@ impl<S: Scheduler> Simulator<S> {
                     .collect();
 
                 for cpu in idle_cpus {
-                    self.try_dispatch_and_run(
-                        cpu, state, tasks, events, seq,
-                    );
+                    self.try_dispatch_and_run(cpu, state, tasks, events, seq);
                 }
             }
         }
@@ -274,10 +267,18 @@ impl<S: Scheduler> Simulator<S> {
         let slice = task.get_slice();
         task.run_remaining_ns = task.run_remaining_ns.saturating_sub(slice);
 
-        state.trace.record(state.clock, cpu, TraceKind::TaskPreempted { pid });
+        state
+            .trace
+            .record(state.clock, cpu, TraceKind::TaskPreempted { pid });
 
         let task_name = task.name.as_str();
-        info!(cpu = cpu.0, task = task_name, pid = pid.0, ran_ns = slice, "PREEMPTED");
+        info!(
+            cpu = cpu.0,
+            task = task_name,
+            pid = pid.0,
+            ran_ns = slice,
+            "PREEMPTED"
+        );
 
         // Stop the task - entire slice was consumed
         let raw = task.raw();
@@ -293,7 +294,7 @@ impl<S: Scheduler> Simulator<S> {
             state.current_cpu = cpu;
             debug!(pid = pid.0, cpu = cpu.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
-            // Re-enqueue the preempted task
+                                                // Re-enqueue the preempted task
             state.ops_context = OpsContext::Enqueue;
             debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
@@ -357,15 +358,29 @@ impl<S: Scheduler> Simulator<S> {
             // Task has completed all phases
             let task = tasks.get_mut(&pid).unwrap();
             task.state = TaskState::Exited;
-            state.trace.record(state.clock, cpu, TraceKind::TaskCompleted { pid });
-            info!(cpu = cpu.0, task = task.name.as_str(), pid = pid.0, "COMPLETED");
+            state
+                .trace
+                .record(state.clock, cpu, TraceKind::TaskCompleted { pid });
+            info!(
+                cpu = cpu.0,
+                task = task.name.as_str(),
+                pid = pid.0,
+                "COMPLETED"
+            );
         } else {
             match next_phase {
                 Some(Phase::Sleep(sleep_ns)) => {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Sleeping;
-                    state.trace.record(state.clock, cpu, TraceKind::TaskSlept { pid });
-                    info!(cpu = cpu.0, task = task.name.as_str(), pid = pid.0, "SLEEPING");
+                    state
+                        .trace
+                        .record(state.clock, cpu, TraceKind::TaskSlept { pid });
+                    info!(
+                        cpu = cpu.0,
+                        task = task.name.as_str(),
+                        pid = pid.0,
+                        "SLEEPING"
+                    );
 
                     // Schedule wake event
                     let wake_time = state.clock + sleep_ns;
@@ -398,7 +413,9 @@ impl<S: Scheduler> Simulator<S> {
                 Some(Phase::Wake(target_pid)) => {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Sleeping;
-                    state.trace.record(state.clock, cpu, TraceKind::TaskSlept { pid });
+                    state
+                        .trace
+                        .record(state.clock, cpu, TraceKind::TaskSlept { pid });
 
                     // Immediately wake the target
                     events.push(Reverse(Event {
@@ -455,7 +472,9 @@ impl<S: Scheduler> Simulator<S> {
                 None => {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Exited;
-                    state.trace.record(state.clock, cpu, TraceKind::TaskCompleted { pid });
+                    state
+                        .trace
+                        .record(state.clock, cpu, TraceKind::TaskCompleted { pid });
                 }
             }
         }
@@ -553,14 +572,22 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
-        state.trace.record(state.clock, cpu, TraceKind::TaskScheduled { pid });
+        state
+            .trace
+            .record(state.clock, cpu, TraceKind::TaskScheduled { pid });
 
         // Determine how long this task will run
         let task = tasks.get(&pid).unwrap();
         let slice = task.get_slice();
         let remaining = task.run_remaining_ns;
 
-        info!(cpu = cpu.0, task = task.name.as_str(), pid = pid.0, slice_ns = slice, "STARTED");
+        info!(
+            cpu = cpu.0,
+            task = task.name.as_str(),
+            pid = pid.0,
+            slice_ns = slice,
+            "STARTED"
+        );
 
         if remaining == 0 {
             // Task has no remaining work -- complete immediately
