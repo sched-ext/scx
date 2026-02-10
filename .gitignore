@@ -16,3 +16,4 @@ CLAUDE.md
 **/*.ll
 **/*.s
 **/*.tmp
+.agent/
