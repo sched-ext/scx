@@ -1167,19 +1167,6 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                                 let action = get_action(&app, &keymap, ev);
                                 action_tx.send(action)?;
                             }
-                            Event::Mouse(mouse_event) => {
-                                use ratatui::crossterm::event::{MouseEventKind, MouseButton};
-                                let action = match mouse_event.kind {
-                                    MouseEventKind::Down(MouseButton::Left) =>
-                                        Action::MouseClick { col: mouse_event.column, row: mouse_event.row },
-                                    MouseEventKind::ScrollUp =>
-                                        Action::MouseScrollUp { col: mouse_event.column, row: mouse_event.row },
-                                    MouseEventKind::ScrollDown =>
-                                        Action::MouseScrollDown { col: mouse_event.column, row: mouse_event.row },
-                                    _ => Action::None,
-                                };
-                                action_tx.send(action)?;
-                            }
                             _ => {}
                     }}
 

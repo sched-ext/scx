@@ -282,10 +282,6 @@ pub fn action_to_mcp_event(action: &Action) -> Option<Value> {
         | Action::ToggleLocalization
         | Action::ToggleHwPressure
         | Action::ToggleUncoreFreq
-        | Action::Up
-        | Action::FocusNext
-        | Action::MouseClick { .. }
-        | Action::MouseScrollDown { .. }
-        | Action::MouseScrollUp { .. } => None,
+        | Action::Up => None,
     }
 }

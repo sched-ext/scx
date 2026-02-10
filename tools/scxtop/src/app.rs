@@ -158,9 +158,6 @@ pub struct App<'a> {
     bpf_overhead_history: VecDeque<f64>,
     terminal_width: u16,
 
-    // Pane focus and scroll management
-    pane_focus: crate::pane::PaneFocusManager,
-
     // BPF program detail view perf data
     #[allow(dead_code)]
     bpf_program_symbol_data: SymbolData,
@@ -404,7 +401,6 @@ impl<'a> App<'a> {
             prev_bpf_total_runtime_ns: 0,
             bpf_overhead_history: VecDeque::new(),
             terminal_width: 80, // Default value, will be updated on first render
-            pane_focus: crate::pane::PaneFocusManager::new(2), // Default view has 2 panes
 
             // BPF program detail view perf data
             bpf_program_symbol_data: SymbolData::new(),
@@ -650,7 +646,6 @@ impl<'a> App<'a> {
             prev_bpf_total_runtime_ns: 0,
             bpf_overhead_history: VecDeque::new(),
             terminal_width: 80, // Default value, will be updated on first render
-            pane_focus: crate::pane::PaneFocusManager::new(2), // Default view has 2 panes
 
             // BPF program detail view perf data
             bpf_program_symbol_data: SymbolData::new(),
@@ -730,14 +725,6 @@ impl<'a> App<'a> {
             self.prev_state = self.state.clone();
         }
         self.state = state;
-
-        // Reconfigure pane focus for the new view
-        let pane_count = match self.state {
-            AppState::Default | AppState::Llc | AppState::Node | AppState::PerfTop => 2,
-            AppState::Scheduler => 5,
-            _ => 1,
-        };
-        self.pane_focus.reconfigure(pane_count);
 
         // Handle perf sampling attachment/detachment for PerfTop view
         match (self.prev_state.clone(), self.state.clone()) {
@@ -1435,26 +1422,7 @@ impl<'a> App<'a> {
             self.resize_events(area_events);
         }
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-
-        // Register pane areas for focus management
-        self.pane_focus.register_area(0, left);
-        self.pane_focus.register_area(1, right);
-
-        // Update right pane scroll state: content = LLCs, visible = right pane height
         let num_llcs = self.topo.all_llcs.len();
-        self.pane_focus.scroll_states[1].set_content_and_visible(num_llcs, right.height as usize);
-
-        // Compute focus-aware border styles
-        let left_border = if self.pane_focus.is_focused(0) {
-            self.theme().focused_border_style()
-        } else {
-            self.theme().border_style()
-        };
-        let right_border = if self.pane_focus.is_focused(1) {
-            self.theme().focused_border_style()
-        } else {
-            self.theme().border_style()
-        };
 
         let llc_iter = self
             .llc_data
@@ -1510,7 +1478,7 @@ impl<'a> App<'a> {
                             .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .style(right_border);
+                    .style(self.theme().border_style());
 
                 frame.render_widget(llc_block, llcs_verticle[0]);
 
@@ -1551,7 +1519,7 @@ impl<'a> App<'a> {
                             .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .style(right_border)
+                    .style(self.theme().border_style())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
@@ -1595,8 +1563,7 @@ impl<'a> App<'a> {
                             .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .border_type(BorderType::Rounded)
-                    .border_style(right_border);
+                    .border_type(BorderType::Rounded);
 
                 let inner_area = llc_block.inner(right);
                 let num_llcs = self.topo.all_llcs.len();
@@ -1665,7 +1632,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table_with_border(frame, left, false, Some(left_border))
+        self.render_table(frame, left, false)
     }
 
     /// Renders the node application state.
@@ -1676,26 +1643,7 @@ impl<'a> App<'a> {
             self.resize_events(area_events);
         }
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-
-        // Register pane areas for focus management
-        self.pane_focus.register_area(0, left);
-        self.pane_focus.register_area(1, right);
-
-        // Update right pane scroll state: content = nodes, visible = right pane height
         let num_nodes = self.topo.nodes.len();
-        self.pane_focus.scroll_states[1].set_content_and_visible(num_nodes, right.height as usize);
-
-        // Compute focus-aware border styles
-        let left_border = if self.pane_focus.is_focused(0) {
-            self.theme().focused_border_style()
-        } else {
-            self.theme().border_style()
-        };
-        let right_border = if self.pane_focus.is_focused(1) {
-            self.theme().focused_border_style()
-        } else {
-            self.theme().border_style()
-        };
 
         let node_iter = self
             .node_data
@@ -1760,7 +1708,7 @@ impl<'a> App<'a> {
                             .right_aligned(),
                     )
                     .border_type(BorderType::Rounded)
-                    .style(right_border);
+                    .style(self.theme().border_style());
 
                 frame.render_widget(node_block, nodes_verticle[0]);
                 node_sparklines
@@ -1798,7 +1746,7 @@ impl<'a> App<'a> {
                             .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .style(right_border)
+                    .style(self.theme().border_style())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
@@ -1842,8 +1790,7 @@ impl<'a> App<'a> {
                             .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .border_type(BorderType::Rounded)
-                    .border_style(right_border);
+                    .border_type(BorderType::Rounded);
 
                 let inner_area = node_block.inner(right);
                 let num_nodes = self.topo.nodes.len();
@@ -1912,7 +1859,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_table_with_border(frame, left, false, Some(left_border))
+        self.render_table(frame, left, false)
     }
 
     /// Returns the gradient color.
@@ -2469,195 +2416,11 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Renders the scheduler view.
-    fn render_scheduler(&mut self, frame: &mut Frame) -> Result<()> {
-        let area = frame.area();
-        if self.has_capability_warnings() {
-            self.render_capability_warnings(frame, area)?;
-            return Ok(());
-        }
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
-        let [left_top, left_center, left_bottom] = Layout::vertical([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .areas(left);
-        let [right_top, right_bottom] =
-            Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
-                .areas(right);
-
-        // Register pane areas for focus management
-        // Pane 0: dsq_lat_us (left_top)
-        // Pane 1: dsq_slice_consumed (left_center)
-        // Pane 2: dsq_vtime (left_bottom)
-        // Pane 3: stats (right_top)
-        // Pane 4: dsq_nr_queued (right_bottom)
-        self.pane_focus.register_area(0, left_top);
-        self.pane_focus.register_area(1, left_center);
-        self.pane_focus.register_area(2, left_bottom);
-        self.pane_focus.register_area(3, right_top);
-        self.pane_focus.register_area(4, right_bottom);
-
-        // Update scroll state content/visible counts for DSQ panes
-        let num_dsqs = self.dsq_data.len();
-        // Each DSQ pane shows sparklines/bars, estimate visible DSQs from pane height
-        // Panes 0,1,2 use left_top/center/bottom, pane 4 uses right_bottom
-        for (pane_idx, pane_area) in [(0, left_top), (1, left_center), (2, left_bottom), (4, right_bottom)] {
-            let visible = pane_area.height as usize;
-            self.pane_focus.scroll_states[pane_idx].set_content_and_visible(num_dsqs, visible);
-        }
-
-        // Compute focus-aware border styles per pane
-        let focused_style = self.theme().focused_border_style();
-        let border_styles: Vec<Option<ratatui::style::Style>> = (0..5)
-            .map(|idx| {
-                if self.pane_focus.is_focused(idx) {
-                    Some(focused_style)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let sample_rate = self
-            .skel
-            .as_ref()
-            .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
-            .unwrap_or(0);
-
-        let params1 = SchedulerViewParams {
-            event: "dsq_lat_us",
-            scheduler_name: &self.scheduler,
-            dsq_data: &self.dsq_data,
-            sample_rate,
-            localize: self.localize,
-            locale: &self.locale,
-            theme: self.theme(),
-            render_title: false,
-            render_sample_rate: true,
-            border_style_override: border_styles[0],
-            scroll_offset: self.pane_focus.scroll_states[0].offset,
-            scroll_visible: self.pane_focus.scroll_states[0].visible_len,
-        };
-        let new_max = SchedulerRenderer::render_scheduler_view(
-            frame,
-            left_top,
-            &self.view_state,
-            self.max_sched_events,
-            &params1,
-        )?;
-        self.max_sched_events = new_max;
-
-        let params2 = SchedulerViewParams {
-            event: "dsq_slice_consumed",
-            scheduler_name: &self.scheduler,
-            dsq_data: &self.dsq_data,
-            sample_rate,
-            localize: self.localize,
-            locale: &self.locale,
-            theme: self.theme(),
-            render_title: false,
-            render_sample_rate: false,
-            border_style_override: border_styles[1],
-            scroll_offset: self.pane_focus.scroll_states[1].offset,
-            scroll_visible: self.pane_focus.scroll_states[1].visible_len,
-        };
-        SchedulerRenderer::render_scheduler_view(
-            frame,
-            left_center,
-            &self.view_state,
-            self.max_sched_events,
-            &params2,
-        )?;
-
-        let params3 = SchedulerViewParams {
-            event: "dsq_vtime",
-            scheduler_name: &self.scheduler,
-            dsq_data: &self.dsq_data,
-            sample_rate,
-            localize: self.localize,
-            locale: &self.locale,
-            theme: self.theme(),
-            render_title: false,
-            render_sample_rate: false,
-            border_style_override: border_styles[2],
-            scroll_offset: self.pane_focus.scroll_states[2].offset,
-            scroll_visible: self.pane_focus.scroll_states[2].visible_len,
-        };
-        SchedulerRenderer::render_scheduler_view(
-            frame,
-            left_bottom,
-            &self.view_state,
-            self.max_sched_events,
-            &params3,
-        )?;
-
-        let params4 = SchedulerViewParams {
-            event: "dsq_nr_queued",
-            scheduler_name: &self.scheduler,
-            dsq_data: &self.dsq_data,
-            sample_rate,
-            localize: self.localize,
-            locale: &self.locale,
-            theme: self.theme(),
-            render_title: false,
-            render_sample_rate: false,
-            border_style_override: border_styles[4],
-            scroll_offset: self.pane_focus.scroll_states[4].offset,
-            scroll_visible: self.pane_focus.scroll_states[4].visible_len,
-        };
-        SchedulerRenderer::render_scheduler_view(
-            frame,
-            right_bottom,
-            &self.view_state,
-            self.max_sched_events,
-            &params4,
-        )?;
-
-        let stats_params = SchedulerStatsParams {
-            scheduler_name: &self.scheduler,
-            sched_stats_raw: &self.sched_stats_raw,
-            tick_rate_ms: self.config.tick_rate_ms(),
-            dispatch_keep_last: self.scx_stats.dispatch_keep_last,
-            select_cpu_fallback: self.scx_stats.select_cpu_fallback,
-            theme: self.theme(),
-            border_style_override: border_styles[3],
-        };
-        SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
-    }
-
     /// Renders the default application state.
     fn render_default(&mut self, frame: &mut Frame) -> Result<()> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
 
-        // Register pane areas for focus management (hit testing)
-        self.pane_focus.register_area(0, left);
-        self.pane_focus.register_area(1, right);
-
-        // Update right pane scroll state: content = nodes, visible = right pane height
-        let num_nodes = self.topo.nodes.len();
-        self.pane_focus.scroll_states[1].set_content_and_visible(num_nodes, right.height as usize);
-
-        // Compute focus-aware border styles
-        let left_border = if self.pane_focus.is_focused(0) {
-            self.theme().focused_border_style()
-        } else {
-            self.theme().border_style()
-        };
-        let right_border = if self.pane_focus.is_focused(1) {
-            self.theme().focused_border_style()
-        } else {
-            self.theme().border_style()
-        };
-
-        // Right pane: wrap events in a focus-aware outer block
-        let right_block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(right_border);
-        let right_inner = right_block.inner(right);
-        frame.render_widget(right_block, right);
-        self.render_event(frame, right_inner)?;
+        self.render_event(frame, right)?;
 
         // Determine how to split the left area based on memory and network view states
         let show_memory = self.memory_view_state == ComponentViewState::Default;
@@ -2666,20 +2429,20 @@ impl<'a> App<'a> {
         match (show_memory, show_network) {
             (false, false) => {
                 // Neither memory nor network summary shown, process table takes the entire left side
-                self.render_table_with_border(frame, left, false, Some(left_border))?;
+                self.render_table(frame, left, false)?;
             }
             (true, false) => {
                 // Only memory summary is shown, split between table and memory
                 let [table_area, memory_area] =
                     Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
-                self.render_table_with_border(frame, table_area, false, Some(left_border))?;
+                self.render_table(frame, table_area, false)?;
                 self.render_memory_summary(frame, memory_area)?;
             }
             (false, true) => {
                 // Only network summary is shown, split between table and network
                 let [table_area, network_area] =
                     Layout::vertical([Constraint::Fill(10), Constraint::Min(8)]).areas(left);
-                self.render_table_with_border(frame, table_area, false, Some(left_border))?;
+                self.render_table(frame, table_area, false)?;
                 self.render_network_summary(frame, network_area)?;
             }
             (true, true) => {
@@ -2690,7 +2453,7 @@ impl<'a> App<'a> {
                     Constraint::Min(8),
                 ])
                 .areas(left);
-                self.render_table_with_border(frame, table_area, false, Some(left_border))?;
+                self.render_table(frame, table_area, false)?;
                 self.render_memory_summary(frame, memory_area)?;
                 self.render_network_summary(frame, network_area)?;
             }
@@ -2748,7 +2511,114 @@ impl<'a> App<'a> {
             AppState::Llc => self.render_llc(frame),
             AppState::PerfTop => self.render_perf_top(frame),
             AppState::Power => self.render_power(frame),
-            AppState::Scheduler => self.render_scheduler(frame),
+            AppState::Scheduler => {
+                if self.has_capability_warnings() {
+                    self.render_capability_warnings(frame, area)?;
+                    return Ok(());
+                }
+                let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
+                let [left_top, left_center, left_bottom] = Layout::vertical([
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                    Constraint::Ratio(1, 3),
+                ])
+                .areas(left);
+                let [right_top, right_bottom] =
+                    Layout::vertical(vec![Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)])
+                        .areas(right);
+
+                let sample_rate = self
+                    .skel
+                    .as_ref()
+                    .map(|s| s.maps.data_data.as_ref().unwrap().sample_rate)
+                    .unwrap_or(0);
+
+                let params1 = SchedulerViewParams {
+                    event: "dsq_lat_us",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: true,
+                };
+                let new_max = SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_top,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params1,
+                )?;
+                self.max_sched_events = new_max;
+
+                let params2 = SchedulerViewParams {
+                    event: "dsq_slice_consumed",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_center,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params2,
+                )?;
+
+                let params3 = SchedulerViewParams {
+                    event: "dsq_vtime",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    left_bottom,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params3,
+                )?;
+
+                let params4 = SchedulerViewParams {
+                    event: "dsq_nr_queued",
+                    scheduler_name: &self.scheduler,
+                    dsq_data: &self.dsq_data,
+                    sample_rate,
+                    localize: self.localize,
+                    locale: &self.locale,
+                    theme: self.theme(),
+                    render_title: false,
+                    render_sample_rate: false,
+                };
+                SchedulerRenderer::render_scheduler_view(
+                    frame,
+                    right_bottom,
+                    &self.view_state,
+                    self.max_sched_events,
+                    &params4,
+                )?;
+                let stats_params = SchedulerStatsParams {
+                    scheduler_name: &self.scheduler,
+                    sched_stats_raw: &self.sched_stats_raw,
+                    tick_rate_ms: self.config.tick_rate_ms(),
+                    dispatch_keep_last: self.scx_stats.dispatch_keep_last,
+                    select_cpu_fallback: self.scx_stats.select_cpu_fallback,
+                    theme: self.theme(),
+                };
+                SchedulerRenderer::render_scheduler_stats(frame, right_top, &stats_params)
+            }
             AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
         }
@@ -3303,9 +3173,6 @@ impl<'a> App<'a> {
             theme: self.theme(),
             render_title: false,
             render_sample_rate: true,
-            border_style_override: None,
-            scroll_offset: 0,
-            scroll_visible: 0,
         };
         SchedulerRenderer::render_scheduler_view(
             frame,
@@ -3325,9 +3192,6 @@ impl<'a> App<'a> {
             theme: self.theme(),
             render_title: false,
             render_sample_rate: false,
-            border_style_override: None,
-            scroll_offset: 0,
-            scroll_visible: 0,
         };
         SchedulerRenderer::render_scheduler_view(
             frame,
@@ -3354,7 +3218,6 @@ impl<'a> App<'a> {
         frame: &mut Frame,
         area: Rect,
         render_tick_rate: bool,
-        border_style_override: Option<ratatui::style::Style>,
     ) -> Result<()> {
         let visible_columns: Vec<_> = self.process_columns.visible_columns().collect();
         let filtered_state = self.filtered_state.lock().unwrap();
@@ -3378,7 +3241,6 @@ impl<'a> App<'a> {
             render_tick_rate,
             theme,
             self.events_list_size,
-            border_style_override,
         )?;
 
         self.events_list_size = new_size;
@@ -3394,7 +3256,6 @@ impl<'a> App<'a> {
         frame: &mut Frame,
         area: Rect,
         render_tick_rate: bool,
-        border_style_override: Option<ratatui::style::Style>,
     ) -> Result<()> {
         let error_str = format!(
             "Process has been killed. Press escape or {} to return to process view.",
@@ -3433,7 +3294,6 @@ impl<'a> App<'a> {
             render_tick_rate,
             theme,
             self.events_list_size,
-            border_style_override,
         )?;
 
         self.events_list_size = new_size;
@@ -3446,20 +3306,10 @@ impl<'a> App<'a> {
         area: Rect,
         render_tick_rate: bool,
     ) -> Result<()> {
-        self.render_table_with_border(frame, area, render_tick_rate, None)
-    }
-
-    fn render_table_with_border(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        render_tick_rate: bool,
-        border_style_override: Option<ratatui::style::Style>,
-    ) -> Result<()> {
         if self.in_thread_view {
-            self.render_thread_table(frame, area, render_tick_rate, border_style_override)
+            self.render_thread_table(frame, area, render_tick_rate)
         } else {
-            self.render_process_table(frame, area, render_tick_rate, border_style_override)
+            self.render_process_table(frame, area, render_tick_rate)
         }
     }
 
@@ -4023,344 +3873,282 @@ impl<'a> App<'a> {
         )
     }
 
-    /// Returns the sorted list of BPF programs to display.
-    fn bpf_programs_to_display(&self) -> Vec<(u32, crate::bpf_prog_data::BpfProgData)> {
-        if self.filtering {
-            self.filtered_bpf_programs.clone()
-        } else {
-            let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
-                .bpf_program_stats
-                .programs
-                .iter()
-                .map(|(id, data)| (*id, data.clone()))
-                .collect();
-            programs.sort_by(|a, b| {
-                b.1.avg_runtime_ns()
-                    .partial_cmp(&a.1.avg_runtime_ns())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            programs
-        }
-    }
-
-    /// Handles mouse scroll up on the focused pane.
-    fn on_scroll_up(&mut self) {
-        // For multi-pane views with a table pane at index 0,
-        // route to existing table logic if table pane is focused
-        if matches!(
-            self.state,
-            AppState::Default | AppState::Llc | AppState::Node
-        ) && self.pane_focus.focused == 0
-        {
-            self.on_up_filtered();
-        } else if self.pane_focus.focused < self.pane_focus.pane_count {
-            self.pane_focus.focused_scroll_mut().scroll_up(1);
-        }
-    }
-
-    /// Handles mouse scroll down on the focused pane.
-    fn on_scroll_down(&mut self) {
-        if matches!(
-            self.state,
-            AppState::Default | AppState::Llc | AppState::Node
-        ) && self.pane_focus.focused == 0
-        {
-            self.on_down_filtered();
-        } else if self.pane_focus.focused < self.pane_focus.pane_count {
-            self.pane_focus.focused_scroll_mut().scroll_down(1);
-        }
-    }
-
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        // For multi-pane views, if a non-table pane is focused, scroll it
-        if matches!(
-            self.state,
-            AppState::Default | AppState::Llc | AppState::Node
-        ) && self.pane_focus.focused != 0
-        {
-            self.pane_focus.focused_scroll_mut().scroll_down(1);
-            return;
-        }
-        if self.state == AppState::Scheduler {
-            self.pane_focus.focused_scroll_mut().scroll_down(1);
-            return;
-        }
-        match self.state {
-            AppState::BpfPrograms => self.on_down_bpf_programs(),
-            AppState::BpfProgramDetail => self.on_down_bpf_detail(),
-            AppState::PerfTop => self.on_down_perf_top(),
-            _ => self.on_down_filtered(),
-        }
-    }
+        if self.state == AppState::BpfPrograms {
+            // Handle navigation for BPF programs view
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
 
-    fn on_down_bpf_programs(&mut self) {
-        let programs_to_display = self.bpf_programs_to_display();
-        if !programs_to_display.is_empty() {
-            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-            let new_selected = if current_selected < programs_to_display.len() - 1 {
-                current_selected + 1
-            } else {
-                0 // Wrap to top
-            };
-            self.bpf_program_table_state.select(Some(new_selected));
-            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                self.selected_bpf_program_id = Some(*prog_id);
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected < programs_to_display.len() - 1 {
+                    current_selected + 1
+                } else {
+                    0 // Wrap to top
+                };
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
             }
-        }
-    }
-
-    fn on_down_bpf_detail(&mut self) {
-        let symbols_count = self.bpf_program_filtered_symbols.len();
-        if symbols_count > 0 {
-            let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
-            let new_selected = if current_selected < symbols_count - 1 {
-                current_selected + 1
-            } else {
-                0 // Wrap to top
-            };
-            self.bpf_program_symbol_table_state
-                .select(Some(new_selected));
-        }
-    }
-
-    fn on_down_perf_top(&mut self) {
-        let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
-        if self.selected_symbol_index < max_index {
-            self.selected_symbol_index += 1;
-            self.perf_top_table_state
-                .select(Some(self.selected_symbol_index));
-        }
-    }
-
-    fn on_down_filtered(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if matches!(
-            self.state,
-            AppState::PerfEvent
-                | AppState::KprobeEvent
-                | AppState::Default
-                | AppState::Llc
-                | AppState::Node
-                | AppState::Process
-        ) && filtered_state.scroll < filtered_state.count - 1
-        {
-            filtered_state.scroll += 1;
-            filtered_state.selected += 1;
+        } else if self.state == AppState::BpfProgramDetail {
+            // Handle navigation for BPF program detail symbol table
+            let symbols_count = self.bpf_program_filtered_symbols.len();
+            if symbols_count > 0 {
+                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected < symbols_count - 1 {
+                    current_selected + 1
+                } else {
+                    0 // Wrap to top
+                };
+                self.bpf_program_symbol_table_state
+                    .select(Some(new_selected));
+            }
+        } else if self.state == AppState::PerfTop {
+            // Handle PerfTop navigation separately
+            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+            if self.selected_symbol_index < max_index {
+                self.selected_symbol_index += 1;
+                self.perf_top_table_state
+                    .select(Some(self.selected_symbol_index));
+            }
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll < filtered_state.count - 1
+            {
+                filtered_state.scroll += 1;
+                filtered_state.selected += 1;
+            }
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        if matches!(
-            self.state,
-            AppState::Default | AppState::Llc | AppState::Node
-        ) && self.pane_focus.focused != 0
-        {
-            self.pane_focus.focused_scroll_mut().scroll_up(1);
-            return;
-        }
-        if self.state == AppState::Scheduler {
-            self.pane_focus.focused_scroll_mut().scroll_up(1);
-            return;
-        }
-        match self.state {
-            AppState::BpfPrograms => self.on_up_bpf_programs(),
-            AppState::BpfProgramDetail => self.on_up_bpf_detail(),
-            AppState::PerfTop => self.on_up_perf_top(),
-            AppState::Help => {}
-            _ => self.on_up_filtered(),
-        }
-    }
+        if self.state == AppState::BpfPrograms {
+            // Handle navigation for BPF programs view
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
 
-    fn on_up_bpf_programs(&mut self) {
-        let programs_to_display = self.bpf_programs_to_display();
-        if !programs_to_display.is_empty() {
-            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-            let new_selected = if current_selected > 0 {
-                current_selected - 1
-            } else {
-                programs_to_display.len() - 1 // Wrap to bottom
-            };
-            self.bpf_program_table_state.select(Some(new_selected));
-            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                self.selected_bpf_program_id = Some(*prog_id);
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected > 0 {
+                    current_selected - 1
+                } else {
+                    programs_to_display.len() - 1 // Wrap to bottom
+                };
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
             }
-        }
-    }
-
-    fn on_up_bpf_detail(&mut self) {
-        let symbols_count = self.bpf_program_filtered_symbols.len();
-        if symbols_count > 0 {
-            let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
-            let new_selected = if current_selected > 0 {
-                current_selected - 1
-            } else {
-                symbols_count - 1 // Wrap to bottom
-            };
-            self.bpf_program_symbol_table_state
-                .select(Some(new_selected));
-        }
-    }
-
-    fn on_up_perf_top(&mut self) {
-        if self.selected_symbol_index > 0 {
-            self.selected_symbol_index -= 1;
-        }
-        self.perf_top_table_state
-            .select(Some(self.selected_symbol_index));
-    }
-
-    fn on_up_filtered(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if matches!(
-            self.state,
-            AppState::PerfEvent
-                | AppState::KprobeEvent
-                | AppState::Default
-                | AppState::Llc
-                | AppState::Node
-                | AppState::Process
-        ) && filtered_state.selected > 0
-        {
-            filtered_state.scroll -= 1;
-            filtered_state.selected -= 1;
+        } else if self.state == AppState::BpfProgramDetail {
+            // Handle navigation for BPF program detail symbol table
+            let symbols_count = self.bpf_program_filtered_symbols.len();
+            if symbols_count > 0 {
+                let current_selected = self.bpf_program_symbol_table_state.selected().unwrap_or(0);
+                let new_selected = if current_selected > 0 {
+                    current_selected - 1
+                } else {
+                    symbols_count - 1 // Wrap to bottom
+                };
+                self.bpf_program_symbol_table_state
+                    .select(Some(new_selected));
+            }
+        } else if self.state == AppState::PerfTop {
+            // Handle navigation for PerfTop view
+            if self.selected_symbol_index > 0 {
+                self.selected_symbol_index -= 1;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else if self.state == AppState::Help {
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.selected > 0
+            {
+                filtered_state.scroll -= 1;
+                filtered_state.selected -= 1;
+            }
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        // For multi-pane views, if a non-table pane is focused, page-scroll it
-        if matches!(
-            self.state,
-            AppState::Default | AppState::Llc | AppState::Node
-        ) && self.pane_focus.focused != 0
-        {
-            self.pane_focus.focused_scroll_mut().page_down();
-            return;
-        }
-        if self.state == AppState::Scheduler {
-            self.pane_focus.focused_scroll_mut().page_down();
-            return;
-        }
-        match self.state {
-            AppState::BpfPrograms => self.on_pg_down_bpf_programs(),
-            AppState::PerfTop => self.on_pg_down_perf_top(),
-            _ => self.on_pg_down_filtered(),
-        }
-    }
+        if self.state == AppState::BpfPrograms {
+            // Handle page down for BPF programs view
+            let page_size = 10;
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
 
-    fn on_pg_down_bpf_programs(&mut self) {
-        let page_size = 10;
-        let programs_to_display = self.bpf_programs_to_display();
-        if !programs_to_display.is_empty() {
-            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-            let max_index = programs_to_display.len() - 1;
-            let new_selected = if current_selected + page_size <= max_index {
-                current_selected + page_size
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+                let max_index = programs_to_display.len() - 1;
+
+                let new_selected = if current_selected + page_size <= max_index {
+                    current_selected + page_size
+                } else {
+                    max_index
+                };
+
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
+            }
+        } else if self.state == AppState::PerfTop {
+            // Handle page down for PerfTop view
+            let page_size = 10;
+            let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
+
+            if self.selected_symbol_index + page_size <= max_index {
+                self.selected_symbol_index += page_size;
             } else {
-                max_index
-            };
-            self.bpf_program_table_state.select(Some(new_selected));
-            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                self.selected_bpf_program_id = Some(*prog_id);
+                self.selected_symbol_index = max_index;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll <= filtered_state.count - self.events_list_size
+            {
+                filtered_state.scroll += self.events_list_size - 1;
+                filtered_state.selected += (self.events_list_size - 1) as usize;
             }
         }
     }
-
-    fn on_pg_down_perf_top(&mut self) {
-        let page_size = 10;
-        let max_index = self.perf_top_filtered_symbols.len().saturating_sub(1);
-        if self.selected_symbol_index + page_size <= max_index {
-            self.selected_symbol_index += page_size;
-        } else {
-            self.selected_symbol_index = max_index;
-        }
-        self.perf_top_table_state
-            .select(Some(self.selected_symbol_index));
-    }
-
-    fn on_pg_down_filtered(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if matches!(
-            self.state,
-            AppState::PerfEvent
-                | AppState::KprobeEvent
-                | AppState::Default
-                | AppState::Llc
-                | AppState::Node
-                | AppState::Process
-        ) && filtered_state.scroll <= filtered_state.count - self.events_list_size
-        {
-            filtered_state.scroll += self.events_list_size - 1;
-            filtered_state.selected += (self.events_list_size - 1) as usize;
-        }
-    }
-
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        // For multi-pane views, if a non-table pane is focused, page-scroll it
-        if matches!(
-            self.state,
-            AppState::Default | AppState::Llc | AppState::Node
-        ) && self.pane_focus.focused != 0
-        {
-            self.pane_focus.focused_scroll_mut().page_up();
-            return;
-        }
-        if self.state == AppState::Scheduler {
-            self.pane_focus.focused_scroll_mut().page_up();
-            return;
-        }
-        match self.state {
-            AppState::BpfPrograms => self.on_pg_up_bpf_programs(),
-            AppState::PerfTop => self.on_pg_up_perf_top(),
-            _ => self.on_pg_up_filtered(),
-        }
-    }
+        if self.state == AppState::BpfPrograms {
+            // Handle page up for BPF programs view
+            let page_size = 10;
+            let programs_to_display: Vec<(u32, crate::bpf_prog_data::BpfProgData)> =
+                if self.filtering {
+                    self.filtered_bpf_programs.clone()
+                } else {
+                    let mut programs: Vec<(u32, crate::bpf_prog_data::BpfProgData)> = self
+                        .bpf_program_stats
+                        .programs
+                        .iter()
+                        .map(|(id, data)| (*id, data.clone()))
+                        .collect();
+                    programs.sort_by(|a, b| {
+                        b.1.avg_runtime_ns()
+                            .partial_cmp(&a.1.avg_runtime_ns())
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    programs
+                };
 
-    fn on_pg_up_bpf_programs(&mut self) {
-        let page_size = 10;
-        let programs_to_display = self.bpf_programs_to_display();
-        if !programs_to_display.is_empty() {
-            let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
-            let new_selected = current_selected.saturating_sub(page_size);
-            self.bpf_program_table_state.select(Some(new_selected));
-            if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
-                self.selected_bpf_program_id = Some(*prog_id);
+            if !programs_to_display.is_empty() {
+                let current_selected = self.bpf_program_table_state.selected().unwrap_or(0);
+
+                let new_selected = current_selected.saturating_sub(page_size);
+
+                self.bpf_program_table_state.select(Some(new_selected));
+
+                // Update selected program ID to preserve selection across refreshes
+                if let Some((prog_id, _)) = programs_to_display.get(new_selected) {
+                    self.selected_bpf_program_id = Some(*prog_id);
+                }
             }
-        }
-    }
+        } else if self.state == AppState::PerfTop {
+            // Handle page up for PerfTop view
+            let page_size = 10;
 
-    fn on_pg_up_perf_top(&mut self) {
-        let page_size = 10;
-        if self.selected_symbol_index >= page_size {
-            self.selected_symbol_index -= page_size;
-        } else {
-            self.selected_symbol_index = 0;
-        }
-        self.perf_top_table_state
-            .select(Some(self.selected_symbol_index));
-    }
-
-    fn on_pg_up_filtered(&mut self) {
-        let mut filtered_state = self.filtered_state.lock().unwrap();
-        if matches!(
-            self.state,
-            AppState::PerfEvent
-                | AppState::KprobeEvent
-                | AppState::Default
-                | AppState::Llc
-                | AppState::Node
-                | AppState::Process
-        ) && filtered_state.scroll > 0
-        {
-            if filtered_state.scroll >= (self.events_list_size - 1) {
-                filtered_state.scroll -= self.events_list_size - 1;
-                filtered_state.selected -= (self.events_list_size - 1) as usize;
+            if self.selected_symbol_index >= page_size {
+                self.selected_symbol_index -= page_size;
             } else {
-                filtered_state.selected -= filtered_state.scroll as usize;
-                filtered_state.scroll = 0;
+                self.selected_symbol_index = 0;
+            }
+            self.perf_top_table_state
+                .select(Some(self.selected_symbol_index));
+        } else {
+            let mut filtered_state = self.filtered_state.lock().unwrap();
+            if (self.state == AppState::PerfEvent
+                || self.state == AppState::KprobeEvent
+                || self.state == AppState::Default
+                || self.state == AppState::Llc
+                || self.state == AppState::Node
+                || self.state == AppState::Process)
+                && filtered_state.scroll > 0
+            {
+                if filtered_state.scroll >= (self.events_list_size - 1) {
+                    filtered_state.scroll -= self.events_list_size - 1;
+                    filtered_state.selected -= (self.events_list_size - 1) as usize;
+                } else {
+                    filtered_state.selected -= filtered_state.scroll as usize;
+                    filtered_state.scroll = 0;
+                }
             }
         }
     }
@@ -5625,20 +5413,6 @@ impl<'a> App<'a> {
             Action::Up => self.on_up(),
             Action::PageUp => self.on_pg_up(),
             Action::PageDown => self.on_pg_down(),
-            Action::FocusNext => self.pane_focus.focus_next(),
-            Action::MouseClick { col, row } => {
-                self.pane_focus.focus_at_position(*col, *row);
-            }
-            Action::MouseScrollUp { col, row } => {
-                if self.pane_focus.focus_at_position(*col, *row) {
-                    self.on_scroll_up();
-                }
-            }
-            Action::MouseScrollDown { col, row } => {
-                if self.pane_focus.focus_at_position(*col, *row) {
-                    self.on_scroll_down();
-                }
-            }
             Action::Enter => {
                 self.on_enter()?;
             }

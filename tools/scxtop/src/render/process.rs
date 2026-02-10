@@ -57,7 +57,6 @@ impl ProcessRenderer {
         render_tick_rate: bool,
         theme: &AppTheme,
         _events_list_size: u16,
-        border_style_override: Option<ratatui::style::Style>,
     ) -> Result<(Option<i32>, u16)> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
@@ -74,7 +73,7 @@ impl ProcessRenderer {
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(border_style_override.unwrap_or_else(|| theme.border_style()))
+            .border_style(theme.border_style())
             .title_top(
                 Line::from(format!("Processes (total: {})", proc_data.len()))
                     .style(theme.title_style())
@@ -177,7 +176,6 @@ impl ProcessRenderer {
         render_tick_rate: bool,
         theme: &AppTheme,
         _events_list_size: u16,
-        border_style_override: Option<ratatui::style::Style>,
     ) -> Result<u16> {
         let [scroll_area, data_area] =
             Layout::horizontal(vec![Constraint::Min(1), Constraint::Percentage(100)]).areas(area);
@@ -194,7 +192,7 @@ impl ProcessRenderer {
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(border_style_override.unwrap_or_else(|| theme.border_style()))
+            .border_style(theme.border_style())
             .title_top(
                 Line::from(format!(
                     "Process: {:.15} [{}] (total threads: {})",

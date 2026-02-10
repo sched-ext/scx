@@ -101,26 +101,6 @@ impl AppTheme {
         }
     }
 
-    /// Returns the border style for the focused pane.
-    pub fn focused_border_style(&self) -> Style {
-        match self {
-            AppTheme::MidnightGreen => Style::default().fg(Color::LightGreen),
-            AppTheme::IAmBlue => Style::default().fg(Color::LightBlue),
-            AppTheme::SolarizedDark => Style::default().fg(Color::Rgb(38, 139, 210)), // Solarized blue
-            AppTheme::Greyscale => Style::default().fg(Color::Rgb(255, 255, 255)),    // White
-            AppTheme::Nord => Style::default().fg(Color::Rgb(136, 192, 208)),         // Nord Frost cyan
-            AppTheme::Dracula => Style::default().fg(Color::Rgb(189, 147, 249)),      // Dracula purple
-            AppTheme::Monokai => Style::default().fg(Color::Rgb(249, 38, 114)),       // Monokai magenta
-            AppTheme::Gruvbox => Style::default().fg(Color::Rgb(250, 189, 47)),       // Gruvbox yellow
-            AppTheme::TokyoNight => Style::default().fg(Color::Rgb(187, 154, 247)),   // Tokyo Night purple
-            AppTheme::CatppuccinMocha => Style::default().fg(Color::Rgb(203, 166, 247)), // Catppuccin mauve
-            AppTheme::OneDark => Style::default().fg(Color::Rgb(97, 175, 239)),       // One Dark blue
-            AppTheme::AyuDark => Style::default().fg(Color::Rgb(255, 204, 102)),      // Ayu Dark yellow
-            AppTheme::USA => Style::default().fg(Color::Rgb(255, 255, 255)),          // White for USA
-            AppTheme::Default => Style::default().fg(Color::Yellow),
-        }
-    }
-
     /// Returns the default text enabled color for the theme.
     pub fn text_enabled_color(&self) -> Color {
         match self {
