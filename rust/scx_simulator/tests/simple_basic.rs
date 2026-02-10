@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use scx_simulator::*;
 
 mod common;
@@ -121,6 +123,22 @@ fn test_multiple_cpus() {
     // Both tasks should get runtime
     assert!(trace.total_runtime(Pid(1)) > 0);
     assert!(trace.total_runtime(Pid(2)) > 0);
+
+    // Tasks should actually run on different CPUs
+    let cpus_used: HashSet<CpuId> = trace
+        .events()
+        .iter()
+        .filter_map(|e| match e.kind {
+            TraceKind::TaskScheduled { .. } => Some(e.cpu),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        cpus_used.len() >= 2,
+        "expected tasks to spread across CPUs, but only used {:?}",
+        cpus_used
+    );
 }
 
 /// Determinism: same scenario should produce identical traces.
