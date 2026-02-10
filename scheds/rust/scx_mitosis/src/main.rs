@@ -9,7 +9,7 @@ mod cell_manager;
 mod mitosis_topology_utils;
 mod stats;
 
-use cell_manager::CellManager;
+use cell_manager::{CellManager, CpuAssignment};
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -151,6 +151,11 @@ struct Opts {
     #[clap(long)]
     cell_exclude: Vec<String>,
 
+    /// Enable CPU borrowing: cells can use idle CPUs from other cells.
+    /// Only meaningful with --cell-parent-cgroup and multiple cells.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_borrowing: bool,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -159,10 +164,11 @@ struct Opts {
 // Local + Default + Hi + Lo = Total Decisions
 // Affinity violations are not queue decisions, but
 // will be calculated separately and reported as a percent of the total
-const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 3] = [
+const QUEUE_STATS_IDX: [bpf_intf::cell_stat_idx; 4] = [
     bpf_intf::cell_stat_idx_CSTAT_LOCAL,
     bpf_intf::cell_stat_idx_CSTAT_CPU_DSQ,
     bpf_intf::cell_stat_idx_CSTAT_CELL_DSQ,
+    bpf_intf::cell_stat_idx_CSTAT_BORROWED,
 ];
 
 // Per cell book-keeping
@@ -183,6 +189,8 @@ struct Scheduler<'a> {
     last_configuration_seq: Option<u32>,
     /// Optional cell manager for --cell-parent-cgroup mode
     cell_manager: Option<CellManager>,
+    /// Whether CPU borrowing is enabled
+    enable_borrowing: bool,
     /// Epoll instance for waiting on multiple fds (inotify, stats wakeup)
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
@@ -195,6 +203,7 @@ struct DistributionStats {
     local_q_pct: f64,
     cpu_q_pct: f64,
     cell_q_pct: f64,
+    borrowed_pct: f64,
     affn_viol_pct: f64,
     steal_pct: f64,
 
@@ -218,12 +227,13 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}% S:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
             self.cpu_q_pct,
             self.cell_q_pct,
+            self.borrowed_pct,
             self.affn_viol_pct,
             self.steal_pct,
             width = descisions_width,
@@ -283,6 +293,8 @@ impl<'a> Scheduler<'a> {
 
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
+        rodata.enable_borrowing = opts.enable_borrowing;
+
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.mitosis_mut().flags |= v,
@@ -309,12 +321,11 @@ impl<'a> Scheduler<'a> {
             bail!("--cell-exclude requires --cell-parent-cgroup");
         }
         let cell_manager = if let Some(ref parent_cgroup) = opts.cell_parent_cgroup {
-            let nr_cpus = topology.all_cpus.len() as u32;
             let exclude: HashSet<String> = opts.cell_exclude.iter().cloned().collect();
             Some(CellManager::new(
                 parent_cgroup,
                 MAX_CELLS as u32,
-                nr_cpus,
+                topology.span.clone(),
                 exclude,
             )?)
         } else {
@@ -353,6 +364,7 @@ impl<'a> Scheduler<'a> {
             stats_server: Some(stats_server),
             last_configuration_seq: None,
             cell_manager,
+            enable_borrowing: opts.enable_borrowing,
             epoll,
             stats_waker,
         })
@@ -471,12 +483,12 @@ impl<'a> Scheduler<'a> {
 
     /// Compute cell configuration from CellManager and apply it to BPF.
     /// Returns the CPU assignments for use with `format_cell_config`.
-    fn compute_and_apply_cell_config(&mut self) -> Result<Vec<(u32, Cpumask)>> {
+    fn compute_and_apply_cell_config(&mut self) -> Result<Vec<CpuAssignment>> {
         let (cell_assignments, cpu_assignments) = {
             let cell_manager = self.cell_manager.as_ref().unwrap();
             (
                 cell_manager.get_cell_assignments(),
-                cell_manager.compute_cpu_assignments()?,
+                cell_manager.compute_cpu_assignments(self.enable_borrowing)?,
             )
         };
 
@@ -492,7 +504,7 @@ impl<'a> Scheduler<'a> {
     fn apply_cell_config(
         &mut self,
         cell_assignments: &[(u64, u32)],
-        cpu_assignments: &[(u32, Cpumask)],
+        cpu_assignments: &[CpuAssignment],
     ) -> Result<()> {
         let bss_data = self
             .skel
@@ -531,29 +543,25 @@ impl<'a> Scheduler<'a> {
             config.assignments[i].cell_id = *cell_id;
         }
 
-        // Set cell cpumasks
+        // Set cell cpumasks and borrowable cpumasks
         let mut max_cell_id: u32 = 0;
-        for (cell_id, cpumask) in cpu_assignments {
-            if *cell_id >= bpf_intf::consts_MAX_CELLS {
+        for a in cpu_assignments {
+            if a.cell_id >= bpf_intf::consts_MAX_CELLS {
                 bail!(
                     "Cell ID {} exceeds MAX_CELLS ({})",
-                    cell_id,
+                    a.cell_id,
                     bpf_intf::consts_MAX_CELLS
                 );
             }
-            max_cell_id = max_cell_id.max(*cell_id + 1);
+            max_cell_id = max_cell_id.max(a.cell_id + 1);
 
-            // Convert the Cpumask to bytes for this cell's cpumask
-            let raw_slice = cpumask.as_raw_slice();
-            for (word_idx, word) in raw_slice.iter().enumerate() {
-                let byte_start = word_idx * 8;
-                let bytes = word.to_le_bytes();
-                for (j, byte) in bytes.iter().enumerate() {
-                    let idx = byte_start + j;
-                    if idx < config.cpumasks[*cell_id as usize].mask.len() {
-                        config.cpumasks[*cell_id as usize].mask[idx] = *byte;
-                    }
-                }
+            write_cpumask_to_config(&a.primary, &mut config.cpumasks[a.cell_id as usize].mask);
+
+            if let Some(ref borrowable) = a.borrowable {
+                write_cpumask_to_config(
+                    borrowable,
+                    &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
+                );
             }
         }
         config.num_cells = max_cell_id;
@@ -616,7 +624,7 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_steals as f64) / (scope_queue_decisions as f64)
         };
 
-        const EXPECTED_QUEUES: usize = 3;
+        const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
                 "Expected {} queues, got {}",
@@ -631,6 +639,7 @@ impl<'a> Scheduler<'a> {
             local_q_pct: queue_pct[0],
             cpu_q_pct: queue_pct[1],
             cell_q_pct: queue_pct[2],
+            borrowed_pct: queue_pct[3],
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
             global_queue_decisions,
@@ -870,6 +879,20 @@ impl<'a> Scheduler<'a> {
         self.last_configuration_seq = Some(applied_configuration);
 
         Ok(())
+    }
+}
+
+fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
+    let raw_slice = cpumask.as_raw_slice();
+    for (word_idx, word) in raw_slice.iter().enumerate() {
+        let byte_start = word_idx * 8;
+        let bytes = word.to_le_bytes();
+        for (j, byte) in bytes.iter().enumerate() {
+            let idx = byte_start + j;
+            if idx < dest.len() {
+                dest[idx] = *byte;
+            }
+        }
     }
 }
 

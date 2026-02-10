@@ -71,6 +71,7 @@ enum cell_stat_idx {
 	CSTAT_CPU_DSQ,
 	CSTAT_CELL_DSQ,
 	CSTAT_AFFN_VIOL,
+	CSTAT_BORROWED,
 	CSTAT_STEAL,
 	NR_CSTATS,
 };
@@ -183,6 +184,7 @@ struct cell_config {
 	u32			 num_cells;
 	struct cell_assignment	 assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
+	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
 };
 
 #endif /* __INTF_H */

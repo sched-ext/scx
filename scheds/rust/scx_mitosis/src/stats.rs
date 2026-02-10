@@ -28,6 +28,8 @@ pub struct CellMetrics {
     pub cpu_q_pct: f64,
     #[stat(desc = "Cell queue %")]
     pub cell_q_pct: f64,
+    #[stat(desc = "Borrowed CPU %")]
+    pub borrowed_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
@@ -43,6 +45,7 @@ impl CellMetrics {
         self.local_q_pct = ds.local_q_pct;
         self.cpu_q_pct = ds.cpu_q_pct;
         self.cell_q_pct = ds.cell_q_pct;
+        self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
@@ -62,6 +65,8 @@ pub struct Metrics {
     pub cpu_q_pct: f64,
     #[stat(desc = "Cell queue %")]
     pub cell_q_pct: f64,
+    #[stat(desc = "Borrowed CPU %")]
+    pub borrowed_pct: f64,
     #[stat(desc = "Affinity violations % of global")]
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
@@ -79,6 +84,7 @@ impl Metrics {
         self.local_q_pct = ds.local_q_pct;
         self.cpu_q_pct = ds.cpu_q_pct;
         self.cell_q_pct = ds.cell_q_pct;
+        self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
