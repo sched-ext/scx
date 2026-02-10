@@ -55,6 +55,9 @@ fn test_render_scheduler_view_sparkline() {
                 theme: &theme,
                 render_title: true,
                 render_sample_rate: true,
+                border_style_override: None,
+                scroll_offset: 0,
+                scroll_visible: 0,
             };
             let result = SchedulerRenderer::render_scheduler_view(
                 frame,
@@ -92,6 +95,9 @@ fn test_render_scheduler_view_barchart() {
                 theme: &theme,
                 render_title: true,
                 render_sample_rate: true,
+                border_style_override: None,
+                scroll_offset: 0,
+                scroll_visible: 0,
             };
             let result = SchedulerRenderer::render_scheduler_view(
                 frame,
@@ -129,6 +135,9 @@ fn test_render_scheduler_view_no_scheduler() {
                 theme: &theme,
                 render_title: true,
                 render_sample_rate: true,
+                border_style_override: None,
+                scroll_offset: 0,
+                scroll_visible: 0,
             };
             let result = SchedulerRenderer::render_scheduler_view(
                 frame,
@@ -166,6 +175,9 @@ fn test_render_scheduler_view_no_dsqs() {
                 theme: &theme,
                 render_title: true,
                 render_sample_rate: true,
+                border_style_override: None,
+                scroll_offset: 0,
+                scroll_visible: 0,
             };
             let result = SchedulerRenderer::render_scheduler_view(
                 frame,
@@ -203,6 +215,9 @@ fn test_render_scheduler_view_with_localization() {
                 theme: &theme,
                 render_title: true,
                 render_sample_rate: true,
+                border_style_override: None,
+                scroll_offset: 0,
+                scroll_visible: 0,
             };
             let result = SchedulerRenderer::render_scheduler_view(
                 frame,
@@ -235,6 +250,7 @@ fn test_render_scheduler_stats() {
                 dispatch_keep_last: 100,
                 select_cpu_fallback: 50,
                 theme: &theme,
+                border_style_override: None,
             };
             let result = SchedulerRenderer::render_scheduler_stats(frame, area, &params);
 
@@ -262,6 +278,7 @@ fn test_render_scheduler_stats_different_themes() {
                     dispatch_keep_last: 100,
                     select_cpu_fallback: 50,
                     theme: &theme,
+                    border_style_override: None,
                 };
                 let result = SchedulerRenderer::render_scheduler_stats(frame, area, &params);
 
@@ -301,6 +318,9 @@ fn test_render_scheduler_view_different_events() {
                     theme: &theme,
                     render_title: true,
                     render_sample_rate: true,
+                    border_style_override: None,
+                    scroll_offset: 0,
+                    scroll_visible: 0,
                 };
                 let result = SchedulerRenderer::render_scheduler_view(
                     frame,

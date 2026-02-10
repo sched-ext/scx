@@ -23,6 +23,7 @@ pub mod mcp;
 mod mem_stats;
 pub mod network_stats;
 mod node_data;
+pub mod pane;
 mod perfetto_trace;
 mod power_data;
 mod proc_data;
@@ -52,6 +53,7 @@ pub use llc_data::LlcData;
 pub use mem_stats::MemStatSnapshot;
 pub use network_stats::NetworkStatSnapshot;
 pub use node_data::NodeData;
+pub use pane::{PaneFocusManager, PaneScrollState};
 pub use perfetto_trace::PerfettoTraceManager;
 pub use power_data::{
     CStateInfo, CorePowerData, PowerDataCollector, PowerSnapshot, SystemPowerData,
@@ -459,6 +461,7 @@ pub enum Action {
     Exec(ExecAction),
     Exit(ExitAction),
     Filter,
+    FocusNext,
     Fork(ForkAction),
     Kprobe(KprobeAction),
     GpuMem(GpuMemAction),
@@ -469,6 +472,9 @@ pub enum Action {
     InputEntry(String),
     IPI(IPIAction),
     MangoApp(MangoAppAction),
+    MouseClick { col: u16, row: u16 },
+    MouseScrollDown { col: u16, row: u16 },
+    MouseScrollUp { col: u16, row: u16 },
     NextEvent,
     NextViewState,
     PageDown,
@@ -829,6 +835,10 @@ impl std::fmt::Display for Action {
             Action::Down => write!(f, "Down"),
             Action::Up => write!(f, "Up"),
             Action::Enter => write!(f, "Enter"),
+            Action::FocusNext => write!(f, "FocusNext"),
+            Action::MouseClick { .. } => write!(f, "MouseClick"),
+            Action::MouseScrollUp { .. } => write!(f, "MouseScrollUp"),
+            Action::MouseScrollDown { .. } => write!(f, "MouseScrollDown"),
             _ => write!(f, "{self:?}"),
         }
     }

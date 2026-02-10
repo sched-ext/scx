@@ -72,7 +72,7 @@ impl Tui {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let cancellation_token = CancellationToken::new();
         let task = tokio::spawn(async {});
-        let mouse = false;
+        let mouse = true;
         let paste = false;
         Ok(Self {
             terminal,
