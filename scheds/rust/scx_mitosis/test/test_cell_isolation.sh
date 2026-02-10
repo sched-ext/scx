@@ -621,7 +621,7 @@ test_borrowing() {
     sudo pkill -9 stress-ng 2>/dev/null || true
     sleep 1
 
-    # Validate: check that borrowed_pct > 0 (CSTAT_BORROWED incremented by BPF)
+    # Validate: check borrowing and usage tracking metrics from monitor JSON
     local result
     result=$(python3 -c "
 import json, sys
@@ -649,12 +649,33 @@ if last_obj is None:
     sys.exit(0)
 
 borrowed_pct = last_obj.get('borrowed_pct', 0)
+cells = last_obj.get('cells', {})
 
 if borrowed_pct <= 0:
     print('FAIL:borrowed_pct is 0 (CSTAT_BORROWED not incremented)')
     sys.exit(0)
 
-msg = 'PASS:borrowed_pct=%.2f' % borrowed_pct
+# Find busy cell (highest util) and idle cell (lowest util)
+busy_id = max(cells, key=lambda c: cells[c].get('util_pct', 0))
+idle_id = min(cells, key=lambda c: cells[c].get('util_pct', 0))
+busy = cells[busy_id]
+idle = cells[idle_id]
+
+if busy.get('util_pct', 0) <= 0:
+    print('FAIL:no cell has util_pct > 0')
+    sys.exit(0)
+
+if busy.get('demand_borrow_pct', 0) <= 0:
+    print('FAIL:busy cell %s has demand_borrow_pct=0 (should be borrowing)' % busy_id)
+    sys.exit(0)
+
+if idle.get('lent_pct', 0) <= 0:
+    print('FAIL:idle cell %s has lent_pct=0 (should be lending)' % idle_id)
+    sys.exit(0)
+
+msg = 'PASS:borrowed=%.2f,busy=%s(util=%.1f,borrow=%.1f),idle=%s(lent=%.1f)' % (
+    borrowed_pct, busy_id, busy['util_pct'], busy['demand_borrow_pct'],
+    idle_id, idle['lent_pct'])
 print(msg)
 " 2>&1)
 

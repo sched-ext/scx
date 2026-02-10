@@ -38,6 +38,12 @@ pub struct CellMetrics {
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
     total_decisions: u64,
+    #[stat(desc = "CPU utilization %")]
+    pub util_pct: f64,
+    #[stat(desc = "Borrowed CPU time % of running")]
+    pub demand_borrow_pct: f64,
+    #[stat(desc = "Lent CPU time %")]
+    pub lent_pct: f64,
 }
 
 impl CellMetrics {
@@ -50,6 +56,12 @@ impl CellMetrics {
         self.steal_pct = ds.steal_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
+    }
+
+    pub fn update_demand(&mut self, util_pct: f64, demand_borrow_pct: f64, lent_pct: f64) {
+        self.util_pct = util_pct;
+        self.demand_borrow_pct = demand_borrow_pct;
+        self.lent_pct = lent_pct;
     }
 }
 
@@ -75,6 +87,12 @@ pub struct Metrics {
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
     total_decisions: u64,
+    #[stat(desc = "CPU utilization %")]
+    pub util_pct: f64,
+    #[stat(desc = "Borrowed CPU time % of running")]
+    pub demand_borrow_pct: f64,
+    #[stat(desc = "Lent CPU time %")]
+    pub lent_pct: f64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,
 }
@@ -89,6 +107,12 @@ impl Metrics {
         self.steal_pct = ds.steal_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
+    }
+
+    pub fn update_demand(&mut self, util_pct: f64, demand_borrow_pct: f64, lent_pct: f64) {
+        self.util_pct = util_pct;
+        self.demand_borrow_pct = demand_borrow_pct;
+        self.lent_pct = lent_pct;
     }
 
     fn delta(&self, _: &Self) -> Self {
