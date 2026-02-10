@@ -7,7 +7,7 @@ fn test_equal_weight_fairness() {
         .cpus(1)
         .task(TaskDef {
             name: "t1".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)], // 100ms - always has work
@@ -17,7 +17,7 @@ fn test_equal_weight_fairness() {
         })
         .task(TaskDef {
             name: "t2".into(),
-            pid: 2,
+            pid: Pid(2),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -31,8 +31,8 @@ fn test_equal_weight_fairness() {
     let trace = Simulator::new(ScxSimple).run(scenario);
     trace.dump();
 
-    let rt1 = trace.total_runtime(1);
-    let rt2 = trace.total_runtime(2);
+    let rt1 = trace.total_runtime(Pid(1));
+    let rt2 = trace.total_runtime(Pid(2));
 
     eprintln!("t1 runtime: {rt1}ns, t2 runtime: {rt2}ns");
 
@@ -55,7 +55,7 @@ fn test_weighted_fairness() {
         .cpus(1)
         .task(TaskDef {
             name: "heavy".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 200,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -65,7 +65,7 @@ fn test_weighted_fairness() {
         })
         .task(TaskDef {
             name: "light".into(),
-            pid: 2,
+            pid: Pid(2),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -79,8 +79,8 @@ fn test_weighted_fairness() {
     let trace = Simulator::new(ScxSimple).run(scenario);
     trace.dump();
 
-    let rt1 = trace.total_runtime(1); // weight 200
-    let rt2 = trace.total_runtime(2); // weight 100
+    let rt1 = trace.total_runtime(Pid(1)); // weight 200
+    let rt2 = trace.total_runtime(Pid(2)); // weight 100
 
     eprintln!("heavy(w=200) runtime: {rt1}ns, light(w=100) runtime: {rt2}ns");
 
@@ -99,7 +99,7 @@ fn test_three_way_weighted_fairness() {
         .cpus(1)
         .task(TaskDef {
             name: "w100".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -109,7 +109,7 @@ fn test_three_way_weighted_fairness() {
         })
         .task(TaskDef {
             name: "w200".into(),
-            pid: 2,
+            pid: Pid(2),
             weight: 200,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -119,7 +119,7 @@ fn test_three_way_weighted_fairness() {
         })
         .task(TaskDef {
             name: "w300".into(),
-            pid: 3,
+            pid: Pid(3),
             weight: 300,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -132,9 +132,9 @@ fn test_three_way_weighted_fairness() {
 
     let trace = Simulator::new(ScxSimple).run(scenario);
 
-    let rt1 = trace.total_runtime(1);
-    let rt2 = trace.total_runtime(2);
-    let rt3 = trace.total_runtime(3);
+    let rt1 = trace.total_runtime(Pid(1));
+    let rt2 = trace.total_runtime(Pid(2));
+    let rt3 = trace.total_runtime(Pid(3));
 
     eprintln!("w100={rt1}ns, w200={rt2}ns, w300={rt3}ns");
 

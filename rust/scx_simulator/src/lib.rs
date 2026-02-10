@@ -37,6 +37,7 @@ pub mod kfuncs;
 pub mod scenario;
 pub mod task;
 pub mod trace;
+pub mod types;
 
 // Re-export the main public types for convenience.
 pub use engine::Simulator;
@@ -44,3 +45,4 @@ pub use ffi::{Scheduler, ScxSimple};
 pub use scenario::Scenario;
 pub use task::{Phase, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
+pub use types::{CpuId, DsqId, Pid, TimeNs, Vtime, Weight};

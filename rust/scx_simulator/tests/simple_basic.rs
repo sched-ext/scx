@@ -7,7 +7,7 @@ fn test_single_task_single_cpu() {
         .cpus(1)
         .task(TaskDef {
             name: "worker".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(5_000_000)], // 5ms
@@ -22,19 +22,19 @@ fn test_single_task_single_cpu() {
     trace.dump();
 
     // Task should have been scheduled at least once
-    assert!(trace.schedule_count(1) > 0, "task was never scheduled");
+    assert!(trace.schedule_count(Pid(1)) > 0, "task was never scheduled");
 
     // Task should have completed
     assert!(
         trace.events().iter().any(|e| matches!(
             e.kind,
-            TraceKind::TaskCompleted { pid: 1 }
+            TraceKind::TaskCompleted { pid } if pid == Pid(1)
         )),
         "task did not complete"
     );
 
     // Runtime should be approximately 5ms
-    let runtime = trace.total_runtime(1);
+    let runtime = trace.total_runtime(Pid(1));
     assert!(
         runtime == 5_000_000,
         "expected 5ms runtime, got {runtime}ns"
@@ -48,7 +48,7 @@ fn test_multiple_tasks_single_cpu() {
         .cpus(1)
         .task(TaskDef {
             name: "t1".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(20_000_000)], // 20ms
@@ -58,7 +58,7 @@ fn test_multiple_tasks_single_cpu() {
         })
         .task(TaskDef {
             name: "t2".into(),
-            pid: 2,
+            pid: Pid(2),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(20_000_000)], // 20ms
@@ -73,12 +73,12 @@ fn test_multiple_tasks_single_cpu() {
     trace.dump();
 
     // Both tasks should have been scheduled
-    assert!(trace.schedule_count(1) > 0, "task 1 was never scheduled");
-    assert!(trace.schedule_count(2) > 0, "task 2 was never scheduled");
+    assert!(trace.schedule_count(Pid(1)) > 0, "task 1 was never scheduled");
+    assert!(trace.schedule_count(Pid(2)) > 0, "task 2 was never scheduled");
 
     // Both should get significant runtime
-    let rt1 = trace.total_runtime(1);
-    let rt2 = trace.total_runtime(2);
+    let rt1 = trace.total_runtime(Pid(1));
+    let rt2 = trace.total_runtime(Pid(2));
     assert!(rt1 > 0, "task 1 got no runtime");
     assert!(rt2 > 0, "task 2 got no runtime");
 }
@@ -90,7 +90,7 @@ fn test_multiple_cpus() {
         .cpus(4)
         .task(TaskDef {
             name: "t1".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)], // 50ms
@@ -100,7 +100,7 @@ fn test_multiple_cpus() {
         })
         .task(TaskDef {
             name: "t2".into(),
-            pid: 2,
+            pid: Pid(2),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)], // 50ms
@@ -114,8 +114,8 @@ fn test_multiple_cpus() {
     let trace = Simulator::new(ScxSimple).run(scenario);
 
     // Both tasks should get runtime
-    assert!(trace.total_runtime(1) > 0);
-    assert!(trace.total_runtime(2) > 0);
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
 }
 
 /// Determinism: same scenario should produce identical traces.
@@ -126,7 +126,7 @@ fn test_determinism() {
             .cpus(2)
             .task(TaskDef {
                 name: "t1".into(),
-                pid: 1,
+                pid: Pid(1),
                 weight: 100,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(10_000_000)],
@@ -136,7 +136,7 @@ fn test_determinism() {
             })
             .task(TaskDef {
                 name: "t2".into(),
-                pid: 2,
+                pid: Pid(2),
                 weight: 200,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(10_000_000)],
@@ -170,7 +170,7 @@ fn test_determinism() {
         );
         assert_eq!(
             e1.cpu, e2.cpu,
-            "event {i}: CPUs differ: {} vs {}",
+            "event {i}: CPUs differ: {:?} vs {:?}",
             e1.cpu, e2.cpu
         );
         assert_eq!(

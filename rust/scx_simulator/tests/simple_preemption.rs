@@ -7,7 +7,7 @@ fn test_sleep_wake_cycle() {
         .cpus(1)
         .task(TaskDef {
             name: "sleeper".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![
@@ -25,12 +25,12 @@ fn test_sleep_wake_cycle() {
     trace.dump();
 
     // Should have been scheduled multiple times
-    let count = trace.schedule_count(1);
+    let count = trace.schedule_count(Pid(1));
     assert!(count > 1, "expected multiple schedules, got {count}");
 
     // Runtime should be about 5ms per cycle, ~6-7 cycles in 100ms
     // (15ms per cycle = ~6.6 cycles, each contributing 5ms = ~33ms)
-    let runtime = trace.total_runtime(1);
+    let runtime = trace.total_runtime(Pid(1));
     eprintln!("sleeper runtime: {runtime}ns, schedule_count: {count}");
     assert!(
         runtime > 20_000_000 && runtime < 40_000_000,
@@ -45,7 +45,7 @@ fn test_slice_preemption() {
         .cpus(1)
         .task(TaskDef {
             name: "long_runner".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 // Run much longer than a single slice (SCX_SLICE_DFL = 20ms)
@@ -62,14 +62,14 @@ fn test_slice_preemption() {
 
     // With a single task, it should be rescheduled after each slice expiry
     // 100ms run / 20ms slice = 5 scheduling events
-    let count = trace.schedule_count(1);
+    let count = trace.schedule_count(Pid(1));
     assert!(
         count >= 3,
         "expected multiple schedule events due to slice expiry, got {count}"
     );
 
     // Total runtime should be 100ms (it completes its phase)
-    let runtime = trace.total_runtime(1);
+    let runtime = trace.total_runtime(Pid(1));
     assert_eq!(
         runtime, 100_000_000,
         "expected exactly 100ms runtime, got {runtime}ns"
@@ -83,7 +83,7 @@ fn test_preemption_interleaving() {
         .cpus(1)
         .task(TaskDef {
             name: "t1".into(),
-            pid: 1,
+            pid: Pid(1),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -93,7 +93,7 @@ fn test_preemption_interleaving() {
         })
         .task(TaskDef {
             name: "t2".into(),
-            pid: 2,
+            pid: Pid(2),
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
@@ -107,8 +107,8 @@ fn test_preemption_interleaving() {
     let trace = Simulator::new(ScxSimple).run(scenario);
 
     // Both tasks should be scheduled multiple times (interleaving)
-    let count1 = trace.schedule_count(1);
-    let count2 = trace.schedule_count(2);
+    let count1 = trace.schedule_count(Pid(1));
+    let count2 = trace.schedule_count(Pid(2));
 
     assert!(
         count1 >= 2 && count2 >= 2,
@@ -116,7 +116,7 @@ fn test_preemption_interleaving() {
     );
 
     // Check that tasks alternate: look for interleaving in the trace
-    let sched_events: Vec<i32> = trace
+    let sched_events: Vec<Pid> = trace
         .events()
         .iter()
         .filter_map(|e| match e.kind {

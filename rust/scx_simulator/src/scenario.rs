@@ -1,21 +1,22 @@
 //! Scenario definition and builder API.
 
 use crate::task::{TaskBehavior, TaskDef};
+use crate::types::{Pid, TimeNs, Weight};
 
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
     pub nr_cpus: u32,
     pub tasks: Vec<TaskDef>,
-    pub duration_ns: u64,
+    pub duration_ns: TimeNs,
 }
 
 /// Builder for constructing scenarios.
 pub struct ScenarioBuilder {
     nr_cpus: u32,
     tasks: Vec<TaskDef>,
-    duration_ns: u64,
-    next_pid: i32,
+    duration_ns: TimeNs,
+    next_pid: Pid,
 }
 
 impl Scenario {
@@ -24,7 +25,7 @@ impl Scenario {
             nr_cpus: 1,
             tasks: Vec::new(),
             duration_ns: 100_000_000, // 100ms default
-            next_pid: 1,
+            next_pid: Pid(1),
         }
     }
 }
@@ -46,11 +47,11 @@ impl ScenarioBuilder {
     pub fn add_task(
         mut self,
         name: &str,
-        weight: u32,
+        weight: Weight,
         behavior: TaskBehavior,
     ) -> Self {
         let pid = self.next_pid;
-        self.next_pid += 1;
+        self.next_pid = Pid(pid.0 + 1);
         self.tasks.push(TaskDef {
             name: name.to_string(),
             pid,
@@ -62,7 +63,7 @@ impl ScenarioBuilder {
     }
 
     /// Set the simulation duration in nanoseconds.
-    pub fn duration_ns(mut self, ns: u64) -> Self {
+    pub fn duration_ns(mut self, ns: TimeNs) -> Self {
         self.duration_ns = ns;
         self
     }

@@ -6,6 +6,7 @@
 use std::ffi::c_void;
 
 use crate::ffi;
+use crate::types::{CpuId, Pid, TimeNs, Weight};
 
 /// The state a simulated task can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum TaskState {
     /// Task is runnable but not currently executing on any CPU.
     Runnable,
     /// Task is currently executing on the given CPU.
-    Running { cpu: u32 },
+    Running { cpu: CpuId },
     /// Task has completed all its phases and exited.
     Exited,
 }
@@ -24,11 +25,11 @@ pub enum TaskState {
 #[derive(Debug, Clone)]
 pub enum Phase {
     /// Run (consume CPU) for the given number of nanoseconds.
-    Run(u64),
+    Run(TimeNs),
     /// Sleep (block) for the given number of nanoseconds.
-    Sleep(u64),
+    Sleep(TimeNs),
     /// Wake another task by PID (instantaneous).
-    Wake(i32),
+    Wake(Pid),
 }
 
 /// The scripted behavior for a task: a sequence of phases, optionally repeating.
@@ -42,11 +43,11 @@ pub struct TaskBehavior {
 #[derive(Debug, Clone)]
 pub struct TaskDef {
     pub name: String,
-    pub pid: i32,
-    pub weight: u32,
+    pub pid: Pid,
+    pub weight: Weight,
     pub behavior: TaskBehavior,
     /// When the task first becomes runnable (simulated ns).
-    pub start_time_ns: u64,
+    pub start_time_ns: TimeNs,
 }
 
 /// A simulated task at runtime.
@@ -54,7 +55,7 @@ pub struct SimTask {
     /// Raw pointer to the heap-allocated C task_struct.
     raw: *mut c_void,
     /// Task PID (also stored in the raw task_struct).
-    pub pid: i32,
+    pub pid: Pid,
     /// The task's name.
     pub name: String,
     /// Scripted behavior phases.
@@ -63,13 +64,13 @@ pub struct SimTask {
     pub phase_idx: usize,
     /// Remaining nanoseconds in the current Run phase (only meaningful
     /// when the current phase is `Phase::Run`).
-    pub run_remaining_ns: u64,
+    pub run_remaining_ns: TimeNs,
     /// Current task state.
     pub state: TaskState,
     /// Whether `enable` has been called for this task.
     pub enabled: bool,
     /// The last CPU the task ran on (for select_cpu prev_cpu).
-    pub prev_cpu: i32,
+    pub prev_cpu: CpuId,
 }
 
 impl SimTask {
@@ -79,7 +80,7 @@ impl SimTask {
         assert!(!raw.is_null(), "sim_task_alloc returned null");
 
         unsafe {
-            ffi::sim_task_set_pid(raw, def.pid);
+            ffi::sim_task_set_pid(raw, def.pid.0);
             ffi::sim_task_set_weight(raw, def.weight);
             ffi::sim_task_set_scx_weight(raw, def.weight);
             // Default: task can run on all CPUs
@@ -103,7 +104,7 @@ impl SimTask {
             run_remaining_ns,
             state: TaskState::Sleeping,
             enabled: false,
-            prev_cpu: 0,
+            prev_cpu: CpuId(0),
         }
     }
 
