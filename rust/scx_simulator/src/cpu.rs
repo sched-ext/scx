@@ -2,19 +2,21 @@
 
 use std::collections::VecDeque;
 
+use crate::types::{CpuId, Pid};
+
 /// A simulated CPU.
 #[derive(Debug)]
 pub struct SimCpu {
     /// CPU ID.
-    pub id: u32,
+    pub id: CpuId,
     /// PID of the currently running task, or None if idle.
-    pub current_task: Option<i32>,
+    pub current_task: Option<Pid>,
     /// The CPU's local dispatch queue (FIFO).
-    pub local_dsq: VecDeque<i32>,
+    pub local_dsq: VecDeque<Pid>,
 }
 
 impl SimCpu {
-    pub fn new(id: u32) -> Self {
+    pub fn new(id: CpuId) -> Self {
         SimCpu {
             id,
             current_task: None,
