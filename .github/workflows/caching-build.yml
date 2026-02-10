@@ -98,6 +98,8 @@ jobs:
           sed -i 's%<li><a href="server/index.html">server</a></li>%<li><a href="server/index.html">server</a></li><li><a href="scheduler/sched-ext.html">Kernel Sched Ext Docs</a></li><li><a href="bpf/helpers.html">Kernel Bpf Helpers Docs</a></li>%' target/doc/index.html
       - name: Setup Pages
         uses: actions/configure-pages@v4
+        with:
+          enablement: true
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
