@@ -756,10 +756,13 @@ static inline u64 __sqrt_u64(u64 x)
  */
 static inline int ctzll(u64 v)
 {
-#ifdef __SCX_TARGET_ARCH_x86
+#if (!defined(__BPF__) && defined(__SCX_TARGET_ARCH_x86)) || \
+	(defined(__BPF__) && defined(__clang_major__) && __clang_major__ >= 19)
 	/*
-	 * If the target architecture and tool chains support ctzll,
-	 * let's use a single instruction.
+	 * Use the ctz builtin when: (1) building for native x86, or
+	 * (2) building for BPF with clang >= 19 (BPF backend supports
+	 * the intrinsic from clang 19 onward; earlier versions hit
+	 * "unimplemented opcode" in the backend).
 	 */
 	return __builtin_ctzll(v);
 #else
