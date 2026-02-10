@@ -8,7 +8,8 @@
 #
 # Usage:
 #   ./test_cell_isolation.sh [--cpuset] [--proportional] [--num-cells N] [--workers N]
-#                            [--test-dynamic] [--test-all]
+#                            [--test-dynamic] [--test-borrowing]
+#                            [--test-enqueue-borrowing] [--test-all]
 #
 # Options:
 #   --cpuset        Test cpuset-based cell isolation (requires cpuset configuration)
@@ -16,7 +17,7 @@
 #   --num-cells N   Number of test cells to create (default: 2)
 #   --workers N     Number of stress-ng workers per cell (default: 5)
 #   --test-dynamic  Run dynamic cell creation/destruction tests
-#   --test-all      Run all tests (basic + dynamic)
+#   --test-all      Run all tests (basic + dynamic + borrowing)
 #   --help          Show this help message
 #
 
@@ -34,6 +35,8 @@ WORKERS_PER_CELL=5
 SAMPLE_COUNT=5
 SAMPLE_INTERVAL=1
 TEST_DYNAMIC=0
+TEST_BORROWING=0
+TEST_ENQUEUE_BORROWING=0
 TEST_ALL=0
 
 # Test result tracking
@@ -85,6 +88,14 @@ while [[ $# -gt 0 ]]; do
             TEST_DYNAMIC=1
             shift
             ;;
+        --test-borrowing)
+            TEST_BORROWING=1
+            shift
+            ;;
+        --test-enqueue-borrowing)
+            TEST_ENQUEUE_BORROWING=1
+            shift
+            ;;
         --test-all)
             TEST_ALL=1
             shift
@@ -119,20 +130,20 @@ cleanup() {
         cell_name="test_cell_${i}"
         cell_path="$CGROUP_BASE/$cell_name"
         if [[ -d "$cell_path" ]]; then
-            # Move any remaining processes to parent
+            # Kill any remaining processes
             for pid in $(cat "$cell_path/cgroup.procs" 2>/dev/null); do
-                echo "$pid" > "$CGROUP_BASE/cgroup.procs" 2>/dev/null || true
+                sudo kill -9 "$pid" 2>/dev/null || true
             done
             sudo rmdir "$cell_path" 2>/dev/null || true
         fi
     done
 
     # Remove dynamic test cgroups
-    for cell_name in test_cell_dynamic test_cell_temp test_cell_3 test_cell_reuse_a test_cell_reuse_b; do
+    for cell_name in test_cell_dynamic test_cell_temp test_cell_3 test_cell_reuse_a test_cell_reuse_b test_cell_borrow_busy test_cell_borrow_idle; do
         cell_path="$CGROUP_BASE/$cell_name"
         if [[ -d "$cell_path" ]]; then
             for pid in $(cat "$cell_path/cgroup.procs" 2>/dev/null); do
-                echo "$pid" > "$CGROUP_BASE/cgroup.procs" 2>/dev/null || true
+                sudo kill -9 "$pid" 2>/dev/null || true
             done
             sudo rmdir "$cell_path" 2>/dev/null || true
         fi
@@ -140,9 +151,9 @@ cleanup() {
 
     # Remove the parent test.slice cgroup
     if [[ -d "$CGROUP_BASE" ]]; then
-        # Move any remaining processes to root cgroup
+        # Kill any remaining processes
         for pid in $(cat "$CGROUP_BASE/cgroup.procs" 2>/dev/null); do
-            echo "$pid" > "/sys/fs/cgroup/cgroup.procs" 2>/dev/null || true
+            sudo kill -9 "$pid" 2>/dev/null || true
         done
         sudo rmdir "$CGROUP_BASE" 2>/dev/null || true
     fi
@@ -210,10 +221,11 @@ create_cgroups() {
 
 # Start the scheduler
 start_scheduler() {
-    log_info "Starting scx_mitosis scheduler (mode: $MODE)..."
+    log_info "Starting scx_mitosis scheduler (mode: $MODE, extra flags: $@)..."
 
     sudo "$SCHEDULER_BIN" \
         --cell-parent-cgroup /test.slice \
+        "$@" \
         > "$LOG_FILE" 2>&1 &
     SCHED_PID=$!
 
@@ -553,6 +565,125 @@ test_cell_id_reuse() {
     fi
 }
 
+# Test: CPU borrowing - verify that a busy cell borrows CPUs from idle cells.
+# Args:
+#   $1 - stressor type: "pipe" (wakeup-heavy, select_cpu path) or
+#                        "cpu" (CPU spinners, enqueue path)
+#   $2 - test name for result recording
+test_borrowing() {
+    local stressor="$1"
+    local test_name="$2"
+    log_info "=== Running test: CPU Borrowing ($stressor stressor) ==="
+
+    # Kill existing scheduler if running
+    if [[ -n "$SCHED_PID" ]] && ps -p "$SCHED_PID" > /dev/null 2>&1; then
+        sudo kill "$SCHED_PID" 2>/dev/null || true
+        sleep 2
+    fi
+    sudo pkill -9 scx_mitosis 2>/dev/null || true
+    sleep 2
+
+    # Create two test cells
+    local busy_path="$CGROUP_BASE/test_cell_borrow_busy"
+    local idle_path="$CGROUP_BASE/test_cell_borrow_idle"
+
+    for path in "$busy_path" "$idle_path"; do
+        if [[ -d "$path" ]]; then
+            for pid in $(cat "$path/cgroup.procs" 2>/dev/null); do
+                sudo kill -9 "$pid" 2>/dev/null || true
+            done
+            sudo rmdir "$path" 2>/dev/null || true
+        fi
+    done
+
+    sudo mkdir -p "$busy_path"
+    sudo mkdir -p "$idle_path"
+
+    # Start scheduler with borrowing
+    start_scheduler --enable-borrowing
+
+    # Use more workers than the busy cell has CPUs to force borrowing
+    local workers=$(nproc)
+
+    log_info "Starting $workers stress-ng $stressor workers in busy cell..."
+    sudo bash -c "echo \$\$ > $busy_path/cgroup.procs && \
+        exec stress-ng --$stressor $workers --timeout 60s --quiet" &
+
+    # Wait for stats to accumulate
+    sleep 5
+
+    # Capture monitor output
+    local monitor_output="/tmp/scx_mitosis_monitor_borrow.json"
+    log_info "Capturing monitor output..."
+    timeout 4 "$SCHEDULER_BIN" --monitor 1 > "$monitor_output" 2>/dev/null || true
+
+    # Kill workloads
+    sudo pkill -9 stress-ng 2>/dev/null || true
+    sleep 1
+
+    # Validate: check that borrowed_pct > 0 (CSTAT_BORROWED incremented by BPF)
+    local result
+    result=$(python3 -c "
+import json, sys
+
+with open('$monitor_output', 'r') as f:
+    text = f.read()
+
+decoder = json.JSONDecoder()
+last_obj = None
+pos = 0
+while pos < len(text):
+    while pos < len(text) and text[pos] in ' \t\n\r':
+        pos += 1
+    if pos >= len(text):
+        break
+    try:
+        obj, end = decoder.raw_decode(text, pos)
+        last_obj = obj
+        pos = end
+    except json.JSONDecodeError:
+        break
+
+if last_obj is None:
+    print('NO_DATA')
+    sys.exit(0)
+
+borrowed_pct = last_obj.get('borrowed_pct', 0)
+
+if borrowed_pct <= 0:
+    print('FAIL:borrowed_pct is 0 (CSTAT_BORROWED not incremented)')
+    sys.exit(0)
+
+msg = 'PASS:borrowed_pct=%.2f' % borrowed_pct
+print(msg)
+" 2>&1)
+
+    log_info "Borrowing ($stressor) result: $result"
+
+    case "$result" in
+        PASS:*)
+            record_result "$test_name" "PASSED"
+            return 0
+            ;;
+        FAIL:*)
+            local reason="${result#FAIL:}"
+            log_error "Borrowing test ($stressor) failed: $reason"
+            record_result "$test_name" "FAILED"
+            return 1
+            ;;
+        NO_DATA)
+            log_error "Borrowing test ($stressor): no monitor data captured"
+            record_result "$test_name" "FAILED"
+            return 1
+            ;;
+        *)
+            log_error "Borrowing test ($stressor): unexpected result: $result"
+            record_result "$test_name" "FAILED"
+            return 1
+            ;;
+    esac
+}
+
 # Run dynamic tests
 run_dynamic_tests() {
     log_info ""
@@ -612,6 +743,8 @@ main() {
     echo "Number of cells: $NUM_CELLS"
     echo "Workers per cell: $WORKERS_PER_CELL"
     echo "Test dynamic: $TEST_DYNAMIC"
+    echo "Test borrowing: $TEST_BORROWING"
+    echo "Test enqueue borrowing: $TEST_ENQUEUE_BORROWING"
     echo "Test all: $TEST_ALL"
     echo ""
 
@@ -622,13 +755,23 @@ main() {
     # Determine which tests to run
     local run_basic=1
     local run_dynamic=0
+    local run_borrowing=0
+    local run_enqueue_borrowing=0
 
     if [[ $TEST_ALL -eq 1 ]]; then
         run_basic=1
         run_dynamic=1
+        run_borrowing=1
+        run_enqueue_borrowing=1
     elif [[ $TEST_DYNAMIC -eq 1 ]]; then
         run_basic=0
         run_dynamic=1
+    elif [[ $TEST_BORROWING -eq 1 ]]; then
+        run_basic=0
+        run_borrowing=1
+    elif [[ $TEST_ENQUEUE_BORROWING -eq 1 ]]; then
+        run_basic=0
+        run_enqueue_borrowing=1
     fi
 
     # Run basic isolation test
@@ -639,6 +782,16 @@ main() {
     # Run dynamic tests
     if [[ $run_dynamic -eq 1 ]]; then
         run_dynamic_tests
+    fi
+
+    # Run borrowing test (pipe stressor → select_cpu path)
+    if [[ $run_borrowing -eq 1 ]]; then
+        test_borrowing pipe cpu_borrowing
+    fi
+
+    # Run enqueue borrowing test (cpu stressor → enqueue path)
+    if [[ $run_enqueue_borrowing -eq 1 ]]; then
+        test_borrowing cpu enqueue_borrowing
     fi
 
     # Print summary and exit

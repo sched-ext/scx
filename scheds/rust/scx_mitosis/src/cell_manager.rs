@@ -29,6 +29,14 @@ pub struct CellInfo {
     pub cpuset: Option<Cpumask>,
 }
 
+/// Result of CPU assignment computation, containing both primary and optional borrowable masks.
+#[derive(Debug)]
+pub struct CpuAssignment {
+    pub cell_id: u32,
+    pub primary: Cpumask,
+    pub borrowable: Option<Cpumask>,
+}
+
 /// Manages cells for direct child cgroups of a specified parent
 pub struct CellManager {
     cell_parent_path: PathBuf,
@@ -41,7 +49,8 @@ pub struct CellManager {
     free_cell_ids: Vec<u32>,
     next_cell_id: u32,
     max_cells: u32,
-    nr_cpus: u32,
+    /// Cpumask of all CPUs in the system (from topology)
+    all_cpus: Cpumask,
     /// Cgroup directory names to exclude from cell creation
     exclude_names: HashSet<String>,
 }
@@ -50,20 +59,20 @@ impl CellManager {
     pub fn new(
         cell_parent_path: &str,
         max_cells: u32,
-        nr_cpus: u32,
+        all_cpus: Cpumask,
         exclude: HashSet<String>,
     ) -> Result<Self> {
         let path = PathBuf::from(format!("/sys/fs/cgroup{}", cell_parent_path));
         if !path.exists() {
             bail!("Cell parent cgroup path does not exist: {}", path.display());
         }
-        Self::new_with_path(path, max_cells, nr_cpus, exclude)
+        Self::new_with_path(path, max_cells, all_cpus, exclude)
     }
 
     fn new_with_path(
         path: PathBuf,
         max_cells: u32,
-        nr_cpus: u32,
+        all_cpus: Cpumask,
         exclude: HashSet<String>,
     ) -> Result<Self> {
         let inotify = Inotify::init().context("Failed to initialize inotify")?;
@@ -80,7 +89,7 @@ impl CellManager {
             free_cell_ids: Vec::new(),
             next_cell_id: 1, // Cell 0 is reserved for root
             max_cells,
-            nr_cpus,
+            all_cpus,
             exclude_names: exclude,
         };
 
@@ -327,9 +336,12 @@ impl CellManager {
     /// When cpusets overlap, contested CPUs are divided proportionally among claimants.
     /// Unclaimed CPUs go to cell 0 and any unpinned cells (cells without cpusets).
     ///
-    /// Returns a Vec of (cell_id, Cpumask), or an error if any cell would
+    /// If `compute_borrowable` is true, each assignment includes a borrowable cpumask
+    /// (all system CPUs minus the cell's own, intersected with cpuset if present).
+    ///
+    /// Returns a Vec of CpuAssignment, or an error if any cell would
     /// receive zero CPUs (which indicates too many cells for available CPUs).
-    pub fn compute_cpu_assignments(&self) -> Result<Vec<(u32, Cpumask)>> {
+    pub fn compute_cpu_assignments(&self, compute_borrowable: bool) -> Result<Vec<CpuAssignment>> {
         // Phase 1: Build contention map - for each CPU, track which cells claim it
         let mut contention: HashMap<usize, Vec<u32>> = HashMap::new();
         for cell_info in self.cells.values() {
@@ -348,7 +360,7 @@ impl CellManager {
         let mut contested_cpus: Vec<usize> = Vec::new();
         let mut unclaimed_cpus: Vec<usize> = Vec::new();
 
-        for cpu in 0..self.nr_cpus as usize {
+        for cpu in self.all_cpus.iter() {
             match contention.get(&cpu) {
                 None => unclaimed_cpus.push(cpu),
                 Some(claimants) if claimants.len() == 1 => {
@@ -446,13 +458,39 @@ impl CellManager {
                 bail!(
                     "Cell {} has no CPUs assigned (nr_cpus={}, num_cells={})",
                     info.cell_id,
-                    self.nr_cpus,
+                    self.all_cpus.weight(),
                     self.cells.len()
                 );
             }
         }
 
-        Ok(cell_cpus.into_iter().collect())
+        // Phase 6: Build CpuAssignment results, optionally computing borrowable masks
+        let assignments: Vec<CpuAssignment> = cell_cpus
+            .into_iter()
+            .map(|(cell_id, primary)| {
+                let borrowable = if compute_borrowable {
+                    let mut borrow_mask = self.all_cpus.and(&primary.not());
+
+                    // If this cell has a cpuset, restrict borrowable to it
+                    if let Some(cell_info) = self.cells.values().find(|c| c.cell_id == cell_id) {
+                        if let Some(ref cpuset) = cell_info.cpuset {
+                            borrow_mask = borrow_mask.and(cpuset);
+                        }
+                    }
+
+                    Some(borrow_mask)
+                } else {
+                    None
+                };
+                CpuAssignment {
+                    cell_id,
+                    primary,
+                    borrowable,
+                }
+            })
+            .collect();
+
+        Ok(assignments)
     }
 
     /// Returns all cell assignments as (cgid, cell_id) pairs.
@@ -472,28 +510,28 @@ impl CellManager {
 
     /// Format the cell configuration as a compact string for logging.
     /// Example output: "[0: 0-7] [1(container-a): 8-15] [2(container-b): 16-23]"
-    pub fn format_cell_config(&self, cpu_assignments: &[(u32, Cpumask)]) -> String {
+    pub fn format_cell_config(&self, cpu_assignments: &[CpuAssignment]) -> String {
         let mut sorted: Vec<_> = cpu_assignments.iter().collect();
-        sorted.sort_by_key(|(cell_id, _)| *cell_id);
+        sorted.sort_by_key(|a| a.cell_id);
 
         let mut parts = Vec::new();
-        for (cell_id, cpumask) in sorted {
-            let cpulist = cpumask.to_cpulist();
-            if *cell_id == 0 {
+        for assignment in sorted {
+            let cpulist = assignment.primary.to_cpulist();
+            if assignment.cell_id == 0 {
                 parts.push(format!("[0: {}]", cpulist));
             } else {
                 // Find cgroup name for this cell
                 let name = self
                     .cells
                     .values()
-                    .find(|info| info.cell_id == *cell_id)
+                    .find(|info| info.cell_id == assignment.cell_id)
                     .and_then(|info| {
                         info.cgroup_path
                             .as_ref()
                             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                     })
                     .unwrap_or_else(|| "?".to_string());
-                parts.push(format!("[{}({}): {}]", cell_id, name, cpulist));
+                parts.push(format!("[{}({}): {}]", assignment.cell_id, name, cpulist));
             }
         }
         parts.join(" ")
@@ -542,13 +580,26 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn cpumask_for_range(nr_cpus: usize) -> Cpumask {
+        let mut mask = Cpumask::new();
+        for cpu in 0..nr_cpus {
+            mask.set_cpu(cpu).unwrap();
+        }
+        mask
+    }
+
     // ==================== Cell scanning and creation tests ====================
 
     #[test]
     fn test_scan_empty_directory() {
         let tmp = TempDir::new().unwrap();
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
 
         assert_eq!(mgr.cell_count(), 0);
     }
@@ -561,8 +612,13 @@ mod tests {
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
 
         assert_eq!(mgr.cell_count(), 2);
 
@@ -578,8 +634,13 @@ mod tests {
 
         // Start with one directory
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
-        let mut mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(mgr.cell_count(), 1);
 
         // Add another directory
@@ -599,8 +660,13 @@ mod tests {
         // Start with two directories
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
-        let mut mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(mgr.cell_count(), 2);
 
         // Remove one directory
@@ -622,8 +688,13 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
         std::fs::create_dir(tmp.path().join("cell3")).unwrap();
 
-        let mut mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
 
         // Find cell2's ID
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
@@ -646,15 +717,20 @@ mod tests {
     #[test]
     fn test_cpu_assignments_no_cells() {
         let tmp = TempDir::new().unwrap();
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
 
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         // Only cell 0 with all CPUs
         assert_eq!(assignments.len(), 1);
-        assert_eq!(assignments[0].0, 0);
-        assert_eq!(assignments[0].1.weight(), 16);
+        assert_eq!(assignments[0].cell_id, 0);
+        assert_eq!(assignments[0].primary.weight(), 16);
     }
 
     #[test]
@@ -662,18 +738,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join("container")).unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         // 16 CPUs / 2 cells = 8 each
         assert_eq!(assignments.len(), 2);
 
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
-        let cell1 = assignments.iter().find(|(id, _)| *id == 1).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell1 = assignments.iter().find(|a| a.cell_id == 1).unwrap();
 
-        assert_eq!(cell0.1.weight(), 8);
-        assert_eq!(cell1.1.weight(), 8);
+        assert_eq!(cell0.primary.weight(), 8);
+        assert_eq!(cell1.primary.weight(), 8);
     }
 
     #[test]
@@ -682,13 +763,18 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell1")).unwrap();
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 10, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(10),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         // 10 CPUs / 3 cells = 3 each + 1 remainder to cell 0
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
-        assert_eq!(cell0.1.weight(), 4); // 3 + 1 remainder
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        assert_eq!(cell0.primary.weight(), 4); // 3 + 1 remainder
     }
 
     #[test]
@@ -701,9 +787,14 @@ mod tests {
         }
 
         // Only 4 CPUs but 6 cells (cell 0 + 5 user cells)
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 4, HashSet::new()).unwrap();
-        let result = mgr.compute_cpu_assignments();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(4),
+            HashSet::new(),
+        )
+        .unwrap();
+        let result = mgr.compute_cpu_assignments(false);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -728,9 +819,14 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "8-11\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         // Should have 3 assignments: cell1, cell2, and cell0
         assert_eq!(assignments.len(), 3);
@@ -739,35 +835,35 @@ mod tests {
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
 
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
         let cell1 = assignments
             .iter()
-            .find(|(id, _)| *id == cell1_info.cell_id)
+            .find(|a| a.cell_id == cell1_info.cell_id)
             .unwrap();
         let cell2 = assignments
             .iter()
-            .find(|(id, _)| *id == cell2_info.cell_id)
+            .find(|a| a.cell_id == cell2_info.cell_id)
             .unwrap();
 
         // cell1 gets CPUs 0-3
-        assert_eq!(cell1.1.weight(), 4);
+        assert_eq!(cell1.primary.weight(), 4);
         for cpu in 0..4 {
-            assert!(cell1.1.test_cpu(cpu));
+            assert!(cell1.primary.test_cpu(cpu));
         }
 
         // cell2 gets CPUs 8-11
-        assert_eq!(cell2.1.weight(), 4);
+        assert_eq!(cell2.primary.weight(), 4);
         for cpu in 8..12 {
-            assert!(cell2.1.test_cpu(cpu));
+            assert!(cell2.primary.test_cpu(cpu));
         }
 
         // cell0 gets remaining CPUs: 4-7, 12-15
-        assert_eq!(cell0.1.weight(), 8);
+        assert_eq!(cell0.primary.weight(), 8);
         for cpu in 4..8 {
-            assert!(cell0.1.test_cpu(cpu));
+            assert!(cell0.primary.test_cpu(cpu));
         }
         for cpu in 12..16 {
-            assert!(cell0.1.test_cpu(cpu));
+            assert!(cell0.primary.test_cpu(cpu));
         }
     }
 
@@ -784,9 +880,14 @@ mod tests {
         std::fs::create_dir(&cell2_path).unwrap();
         std::fs::write(cell2_path.join("cpuset.cpus"), "8-15\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
-        let result = mgr.compute_cpu_assignments();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let result = mgr.compute_cpu_assignments(false);
 
         // Should error because cell 0 has no CPUs
         assert!(result.is_err());
@@ -808,25 +909,30 @@ mod tests {
         std::fs::create_dir(&cell1_path).unwrap();
         std::fs::write(cell1_path.join("cpuset.cpus"), "0,2,4,6\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(8),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         assert_eq!(assignments.len(), 2);
 
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
-        let cell1 = assignments.iter().find(|(id, _)| *id != 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        let cell1 = assignments.iter().find(|a| a.cell_id != 0).unwrap();
 
         // cell1 gets even CPUs
-        assert_eq!(cell1.1.weight(), 4);
+        assert_eq!(cell1.primary.weight(), 4);
         for cpu in [0, 2, 4, 6] {
-            assert!(cell1.1.test_cpu(cpu));
+            assert!(cell1.primary.test_cpu(cpu));
         }
 
         // cell0 gets odd CPUs
-        assert_eq!(cell0.1.weight(), 4);
+        assert_eq!(cell0.primary.weight(), 4);
         for cpu in [1, 3, 5, 7] {
-            assert!(cell0.1.test_cpu(cpu));
+            assert!(cell0.primary.test_cpu(cpu));
         }
     }
 
@@ -839,8 +945,13 @@ mod tests {
         std::fs::create_dir(&cell_path).unwrap();
         std::fs::write(cell_path.join("cpuset.cpus"), "0-3,8-11,16\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 32, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(32),
+            HashSet::new(),
+        )
+        .unwrap();
 
         // Find the cell and verify its cpuset was parsed correctly
         let cell_info = mgr.find_cell_by_name("cell1").unwrap();
@@ -869,8 +980,13 @@ mod tests {
         let cell2_path = tmp.path().join("cell2");
         std::fs::create_dir(&cell2_path).unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
 
         // Verify cell1 has cpuset, cell2 doesn't
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
@@ -878,7 +994,7 @@ mod tests {
         assert!(cell1_info.cpuset.is_some());
         assert!(cell2_info.cpuset.is_none());
 
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         // cell1 (pinned) gets its cpuset: 0-3 (4 CPUs)
         // Remaining 12 CPUs (4-15) are divided between cell2 and cell0
@@ -888,20 +1004,20 @@ mod tests {
         // cell1 gets its cpuset (0-3)
         let cell1_assignment = assignments
             .iter()
-            .find(|(id, _)| *id == cell1_info.cell_id)
+            .find(|a| a.cell_id == cell1_info.cell_id)
             .unwrap();
-        assert_eq!(cell1_assignment.1.weight(), 4);
+        assert_eq!(cell1_assignment.primary.weight(), 4);
 
         // cell0 gets 6 CPUs (half of remaining, plus any remainder)
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
-        assert_eq!(cell0.1.weight(), 6);
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
+        assert_eq!(cell0.primary.weight(), 6);
 
         // cell2 (unpinned) gets 6 CPUs
         let cell2_assignment = assignments
             .iter()
-            .find(|(id, _)| *id == cell2_info.cell_id)
+            .find(|a| a.cell_id == cell2_info.cell_id)
             .unwrap();
-        assert_eq!(cell2_assignment.1.weight(), 6);
+        assert_eq!(cell2_assignment.primary.weight(), 6);
     }
 
     // ==================== Overlapping cpuset tests ====================
@@ -919,57 +1035,74 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "4-11\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
 
         let cell_a = assignments
             .iter()
-            .find(|(id, _)| *id == cell_a_info.cell_id)
+            .find(|a| a.cell_id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|(id, _)| *id == cell_b_info.cell_id)
+            .find(|a| a.cell_id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
 
         // Cell A gets exclusive 0-3 (4 CPUs) + half of contested 4-7 (2 CPUs) = 6 CPUs
         // Cell B gets half of contested 4-7 (2 CPUs) + exclusive 8-11 (4 CPUs) = 6 CPUs
         // Cell 0 gets unclaimed 12-15 (4 CPUs)
-        assert_eq!(cell_a.1.weight(), 6);
-        assert_eq!(cell_b.1.weight(), 6);
-        assert_eq!(cell0.1.weight(), 4);
+        assert_eq!(cell_a.primary.weight(), 6);
+        assert_eq!(cell_b.primary.weight(), 6);
+        assert_eq!(cell0.primary.weight(), 4);
 
         // Verify exclusive CPUs went to correct cells
         for cpu in 0..4 {
-            assert!(cell_a.1.test_cpu(cpu), "CPU {} should be in cell_a", cpu);
+            assert!(
+                cell_a.primary.test_cpu(cpu),
+                "CPU {} should be in cell_a",
+                cpu
+            );
         }
         for cpu in 8..12 {
-            assert!(cell_b.1.test_cpu(cpu), "CPU {} should be in cell_b", cpu);
+            assert!(
+                cell_b.primary.test_cpu(cpu),
+                "CPU {} should be in cell_b",
+                cpu
+            );
         }
         for cpu in 12..16 {
-            assert!(cell0.1.test_cpu(cpu), "CPU {} should be in cell0", cpu);
+            assert!(
+                cell0.primary.test_cpu(cpu),
+                "CPU {} should be in cell0",
+                cpu
+            );
         }
 
         // Verify contested CPUs 4-7 are split - each cell gets exactly 2
-        let cell_a_contested: Vec<_> = (4..8).filter(|&cpu| cell_a.1.test_cpu(cpu)).collect();
-        let cell_b_contested: Vec<_> = (4..8).filter(|&cpu| cell_b.1.test_cpu(cpu)).collect();
+        let cell_a_contested: Vec<_> = (4..8).filter(|&cpu| cell_a.primary.test_cpu(cpu)).collect();
+        let cell_b_contested: Vec<_> = (4..8).filter(|&cpu| cell_b.primary.test_cpu(cpu)).collect();
         assert_eq!(cell_a_contested.len(), 2);
         assert_eq!(cell_b_contested.len(), 2);
 
         // No CPU should be assigned to multiple cells
         for cpu in 0..16 {
             let mut count = 0;
-            if cell_a.1.test_cpu(cpu) {
+            if cell_a.primary.test_cpu(cpu) {
                 count += 1;
             }
-            if cell_b.1.test_cpu(cpu) {
+            if cell_b.primary.test_cpu(cpu) {
                 count += 1;
             }
-            if cell0.1.test_cpu(cpu) {
+            if cell0.primary.test_cpu(cpu) {
                 count += 1;
             }
             assert!(count <= 1, "CPU {} is assigned to {} cells", cpu, count);
@@ -993,9 +1126,14 @@ mod tests {
         std::fs::create_dir(&cell_c_path).unwrap();
         std::fs::write(cell_c_path.join("cpuset.cpus"), "0-5\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 12, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(12),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
@@ -1003,33 +1141,35 @@ mod tests {
 
         let cell_a = assignments
             .iter()
-            .find(|(id, _)| *id == cell_a_info.cell_id)
+            .find(|a| a.cell_id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|(id, _)| *id == cell_b_info.cell_id)
+            .find(|a| a.cell_id == cell_b_info.cell_id)
             .unwrap();
         let cell_c = assignments
             .iter()
-            .find(|(id, _)| *id == cell_c_info.cell_id)
+            .find(|a| a.cell_id == cell_c_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
 
         // 6 contested CPUs / 3 cells = 2 each
-        assert_eq!(cell_a.1.weight(), 2);
-        assert_eq!(cell_b.1.weight(), 2);
-        assert_eq!(cell_c.1.weight(), 2);
+        assert_eq!(cell_a.primary.weight(), 2);
+        assert_eq!(cell_b.primary.weight(), 2);
+        assert_eq!(cell_c.primary.weight(), 2);
 
         // Cell 0 gets unclaimed 6-11 (6 CPUs)
-        assert_eq!(cell0.1.weight(), 6);
+        assert_eq!(cell0.primary.weight(), 6);
         for cpu in 6..12 {
-            assert!(cell0.1.test_cpu(cpu));
+            assert!(cell0.primary.test_cpu(cpu));
         }
 
         // Verify total contested CPUs assigned = 6 (no duplicates)
         let total_contested: usize = (0..6)
             .filter(|&cpu| {
-                cell_a.1.test_cpu(cpu) || cell_b.1.test_cpu(cpu) || cell_c.1.test_cpu(cpu)
+                cell_a.primary.test_cpu(cpu)
+                    || cell_b.primary.test_cpu(cpu)
+                    || cell_c.primary.test_cpu(cpu)
             })
             .count();
         assert_eq!(total_contested, 6);
@@ -1048,33 +1188,38 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "0-2\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(8),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
 
         let cell_a = assignments
             .iter()
-            .find(|(id, _)| *id == cell_a_info.cell_id)
+            .find(|a| a.cell_id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|(id, _)| *id == cell_b_info.cell_id)
+            .find(|a| a.cell_id == cell_b_info.cell_id)
             .unwrap();
 
         // 3 CPUs / 2 cells = 1 each + 1 remainder
         // One cell gets 2, the other gets 1
-        let total = cell_a.1.weight() + cell_b.1.weight();
+        let total = cell_a.primary.weight() + cell_b.primary.weight();
         assert_eq!(total, 3);
-        assert!(cell_a.1.weight() >= 1 && cell_a.1.weight() <= 2);
-        assert!(cell_b.1.weight() >= 1 && cell_b.1.weight() <= 2);
+        assert!(cell_a.primary.weight() >= 1 && cell_a.primary.weight() <= 2);
+        assert!(cell_b.primary.weight() >= 1 && cell_b.primary.weight() <= 2);
 
         // No overlap in assignments
         for cpu in 0..3 {
-            let a_has = cell_a.1.test_cpu(cpu);
-            let b_has = cell_b.1.test_cpu(cpu);
+            let a_has = cell_a.primary.test_cpu(cpu);
+            let b_has = cell_b.primary.test_cpu(cpu);
             assert!(!(a_has && b_has), "CPU {} assigned to both cells", cpu);
         }
     }
@@ -1092,37 +1237,42 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "0-7\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
 
         let cell_a = assignments
             .iter()
-            .find(|(id, _)| *id == cell_a_info.cell_id)
+            .find(|a| a.cell_id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|(id, _)| *id == cell_b_info.cell_id)
+            .find(|a| a.cell_id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
 
         // 8 contested CPUs / 2 cells = 4 each
-        assert_eq!(cell_a.1.weight(), 4);
-        assert_eq!(cell_b.1.weight(), 4);
+        assert_eq!(cell_a.primary.weight(), 4);
+        assert_eq!(cell_b.primary.weight(), 4);
 
         // Cell 0 gets unclaimed 8-15 (8 CPUs)
-        assert_eq!(cell0.1.weight(), 8);
+        assert_eq!(cell0.primary.weight(), 8);
         for cpu in 8..16 {
-            assert!(cell0.1.test_cpu(cpu));
+            assert!(cell0.primary.test_cpu(cpu));
         }
 
         // Verify no overlap between cell_a and cell_b
         for cpu in 0..8 {
-            let a_has = cell_a.1.test_cpu(cpu);
-            let b_has = cell_b.1.test_cpu(cpu);
+            let a_has = cell_a.primary.test_cpu(cpu);
+            let b_has = cell_b.primary.test_cpu(cpu);
             assert!(!(a_has && b_has), "CPU {} assigned to both cells", cpu);
         }
     }
@@ -1140,38 +1290,43 @@ mod tests {
         std::fs::create_dir(&cell_b_path).unwrap();
         std::fs::write(cell_b_path.join("cpuset.cpus"), "4-7\n").unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
-        let assignments = mgr.compute_cpu_assignments().unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(false).unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
 
         let cell_a = assignments
             .iter()
-            .find(|(id, _)| *id == cell_a_info.cell_id)
+            .find(|a| a.cell_id == cell_a_info.cell_id)
             .unwrap();
         let cell_b = assignments
             .iter()
-            .find(|(id, _)| *id == cell_b_info.cell_id)
+            .find(|a| a.cell_id == cell_b_info.cell_id)
             .unwrap();
-        let cell0 = assignments.iter().find(|(id, _)| *id == 0).unwrap();
+        let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
 
         // No overlap - each cell gets its exact cpuset
-        assert_eq!(cell_a.1.weight(), 4);
+        assert_eq!(cell_a.primary.weight(), 4);
         for cpu in 0..4 {
-            assert!(cell_a.1.test_cpu(cpu));
+            assert!(cell_a.primary.test_cpu(cpu));
         }
 
-        assert_eq!(cell_b.1.weight(), 4);
+        assert_eq!(cell_b.primary.weight(), 4);
         for cpu in 4..8 {
-            assert!(cell_b.1.test_cpu(cpu));
+            assert!(cell_b.primary.test_cpu(cpu));
         }
 
         // Cell 0 gets remaining 8-15
-        assert_eq!(cell0.1.weight(), 8);
+        assert_eq!(cell0.primary.weight(), 8);
         for cpu in 8..16 {
-            assert!(cell0.1.test_cpu(cpu));
+            assert!(cell0.primary.test_cpu(cpu));
         }
     }
 
@@ -1180,15 +1335,24 @@ mod tests {
     #[test]
     fn test_format_cell_config_only_cell0() {
         let tmp = TempDir::new().unwrap();
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 8, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(8),
+            HashSet::new(),
+        )
+        .unwrap();
 
         let mut mask = Cpumask::new();
         for cpu in 0..8 {
             mask.set_cpu(cpu).unwrap();
         }
 
-        let assignments = vec![(0u32, mask)];
+        let assignments = vec![CpuAssignment {
+            cell_id: 0,
+            primary: mask,
+            borrowable: None,
+        }];
         let result = mgr.format_cell_config(&assignments);
 
         assert_eq!(result, "[0: 0-7]");
@@ -1199,8 +1363,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
 
-        let mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, HashSet::new()).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
 
         let mut mask0 = Cpumask::new();
         for cpu in 0..8 {
@@ -1212,7 +1381,18 @@ mod tests {
             mask1.set_cpu(cpu).unwrap();
         }
 
-        let assignments = vec![(0u32, mask0), (1u32, mask1)];
+        let assignments = vec![
+            CpuAssignment {
+                cell_id: 0,
+                primary: mask0,
+                borrowable: None,
+            },
+            CpuAssignment {
+                cell_id: 1,
+                primary: mask1,
+                borrowable: None,
+            },
+        ];
         let result = mgr.format_cell_config(&assignments);
 
         assert_eq!(result, "[0: 0-7] [1(container-a): 8-15]");
@@ -1229,8 +1409,13 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell1")).unwrap();
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
 
-        let mut mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 3, 16, HashSet::new()).unwrap();
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            3,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(mgr.cell_count(), 2); // cell1 + cell2
 
         // Adding a third cell should fail due to exhaustion
@@ -1255,8 +1440,13 @@ mod tests {
         std::fs::create_dir(tmp.path().join("cell1")).unwrap();
         std::fs::create_dir(tmp.path().join("cell2")).unwrap();
 
-        let mut mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 3, 16, HashSet::new()).unwrap();
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            3,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(mgr.cell_count(), 2);
 
         // Remove cell1 to free up its ID
@@ -1282,7 +1472,13 @@ mod tests {
         std::fs::create_dir(tmp.path().join("container-b")).unwrap();
 
         let exclude = HashSet::from(["systemd-workaround.service".to_string()]);
-        let mgr = CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, exclude).unwrap();
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            exclude,
+        )
+        .unwrap();
 
         // Only 2 cells — the excluded cgroup is not a cell
         assert_eq!(mgr.cell_count(), 2);
@@ -1300,8 +1496,13 @@ mod tests {
         std::fs::create_dir(tmp.path().join("container-a")).unwrap();
 
         let exclude = HashSet::from(["ignored-service".to_string()]);
-        let mut mgr =
-            CellManager::new_with_path(tmp.path().to_path_buf(), 256, 16, exclude).unwrap();
+        let mut mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            exclude,
+        )
+        .unwrap();
         assert_eq!(mgr.cell_count(), 1);
 
         // Add an excluded cgroup — should not become a cell
@@ -1317,5 +1518,144 @@ mod tests {
         assert_eq!(new_cells.len(), 1);
         assert_eq!(destroyed_cells.len(), 0);
         assert_eq!(mgr.cell_count(), 2);
+    }
+
+    // ==================== Borrowable cpumask tests ====================
+
+    #[test]
+    fn test_borrowable_cpumasks_basic() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create 2 cells without cpusets
+        std::fs::create_dir(tmp.path().join("cell1")).unwrap();
+        std::fs::create_dir(tmp.path().join("cell2")).unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(true).unwrap();
+
+        // Each cell should be able to borrow CPUs from other cells
+        for assignment in &assignments {
+            let borrow_mask = assignment.borrowable.as_ref().unwrap();
+            // borrowable should have no overlap with primary
+            let overlap = borrow_mask.and(&assignment.primary);
+            assert_eq!(
+                overlap.weight(),
+                0,
+                "Cell {} borrowable overlaps with primary",
+                assignment.cell_id
+            );
+            // borrowable + primary should cover all CPUs
+            let union = borrow_mask.or(&assignment.primary);
+            assert_eq!(
+                union.weight(),
+                16,
+                "Cell {} union doesn't cover all CPUs",
+                assignment.cell_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_borrowable_cpumasks_no_overlap() {
+        let tmp = TempDir::new().unwrap();
+
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0-3\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "8-11\n").unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(16),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(true).unwrap();
+
+        // Verify no cell's borrowable mask overlaps with its own primary
+        for assignment in &assignments {
+            let borrow_mask = assignment.borrowable.as_ref().unwrap();
+            let overlap = borrow_mask.and(&assignment.primary);
+            assert_eq!(
+                overlap.weight(),
+                0,
+                "Cell {} borrowable overlaps with primary",
+                assignment.cell_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_borrowable_cpumasks_respects_cpuset() {
+        let tmp = TempDir::new().unwrap();
+
+        // Cell 1 has cpuset 0-7, Cell 2 has cpuset 8-15
+        let cell1_path = tmp.path().join("cell1");
+        std::fs::create_dir(&cell1_path).unwrap();
+        std::fs::write(cell1_path.join("cpuset.cpus"), "0-7\n").unwrap();
+
+        let cell2_path = tmp.path().join("cell2");
+        std::fs::create_dir(&cell2_path).unwrap();
+        std::fs::write(cell2_path.join("cpuset.cpus"), "8-15\n").unwrap();
+
+        let mgr = CellManager::new_with_path(
+            tmp.path().to_path_buf(),
+            256,
+            cpumask_for_range(32),
+            HashSet::new(),
+        )
+        .unwrap();
+        let assignments = mgr.compute_cpu_assignments(true).unwrap();
+
+        let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
+        let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
+
+        // Cell 1's borrowable should be restricted to its cpuset (0-7),
+        // minus its own CPUs. Since cell1 gets some of 0-7 as primary,
+        // the borrowable within 0-7 is whatever it doesn't own.
+        let cell1_assignment = assignments
+            .iter()
+            .find(|a| a.cell_id == cell1_info.cell_id)
+            .unwrap();
+        let cell1_borrow = cell1_assignment.borrowable.as_ref().unwrap();
+        // Cell 1's borrowable should NOT include CPUs outside its cpuset (0-7)
+        for cpu in 8..32 {
+            assert!(
+                !cell1_borrow.test_cpu(cpu),
+                "Cell 1 borrowable should not include CPU {} (outside cpuset)",
+                cpu
+            );
+        }
+
+        // Cell 2's borrowable should be restricted to its cpuset (8-15)
+        let cell2_assignment = assignments
+            .iter()
+            .find(|a| a.cell_id == cell2_info.cell_id)
+            .unwrap();
+        let cell2_borrow = cell2_assignment.borrowable.as_ref().unwrap();
+        for cpu in 0..8 {
+            assert!(
+                !cell2_borrow.test_cpu(cpu),
+                "Cell 2 borrowable should not include CPU {} (outside cpuset)",
+                cpu
+            );
+        }
+        for cpu in 16..32 {
+            assert!(
+                !cell2_borrow.test_cpu(cpu),
+                "Cell 2 borrowable should not include CPU {} (outside cpuset)",
+                cpu
+            );
+        }
     }
 }

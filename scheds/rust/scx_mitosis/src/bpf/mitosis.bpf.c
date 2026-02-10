@@ -46,6 +46,7 @@ const volatile bool	     exiting_task_workaround_enabled = true;
 const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
 const volatile bool	     userspace_managed_cell_mode     = false;
+const volatile bool	     enable_borrowing		     = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -329,6 +330,9 @@ struct cell_cpumask_wrapper {
 	 * can just do an xchg on.
 	 */
 	struct bpf_cpumask __kptr *tmp_cpumask;
+	/* Borrowable cpumask: CPUs this cell can borrow from other cells */
+	struct bpf_cpumask __kptr *borrowable_cpumask;
+	struct bpf_cpumask __kptr *borrowable_tmp_cpumask;
 };
 
 struct {
@@ -354,6 +358,18 @@ static inline const struct cpumask *lookup_cell_cpumask(int idx)
 	}
 
 	return (const struct cpumask *)cpumaskw->cpumask;
+}
+
+static inline const struct cpumask *lookup_cell_borrowable_cpumask(int idx)
+{
+	struct cell_cpumask_wrapper *cpumaskw;
+
+	if (!(cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &idx))) {
+		scx_bpf_error("no cell cpumask wrapper for cell %d", idx);
+		return NULL;
+	}
+
+	return (const struct cpumask *)cpumaskw->borrowable_cpumask;
 }
 
 /*
@@ -393,6 +409,15 @@ static inline int update_task_cpumask(struct task_struct *p,
 	if (cell_cpumask)
 		tctx->all_cell_cpus_allowed =
 			bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
+
+	if (tctx->all_cell_cpus_allowed && enable_borrowing) {
+		const struct cpumask *borrowable =
+			lookup_cell_borrowable_cpumask(tctx->cell);
+		if (!borrowable)
+			return -ENOENT;
+		if (!bpf_cpumask_subset(borrowable, p->cpus_ptr))
+			tctx->all_cell_cpus_allowed = false;
+	}
 
 	/*
 	* Single-CPU pinning is fine (even if outside this cell).
@@ -603,10 +628,12 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 }
 
 /*
- * Try to find an idle CPU for a task within its cell.
+ * Try to find an idle CPU for a task. First searches within the cell's
+ * own CPUs, then tries borrowing from other cells if enabled.
  *
- * On success, bumps CSTAT_LOCAL, dispatches the task to SCX_DSQ_LOCAL,
- * and optionally kicks the idle CPU (if @kick is true).
+ * On success, bumps CSTAT_LOCAL or CSTAT_BORROWED as appropriate and
+ * dispatches the task to SCX_DSQ_LOCAL. If @kick is true, the idle CPU
+ * is also kicked.
  *
  * Returns: CPU number >= 0 on success, -1 on error, -EBUSY if no idle CPU found.
  */
@@ -622,9 +649,34 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		if (kick)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		return cpu;
+	}
+	if (cpu == -1)
+		return -1; /* error from pick_idle_cpu, propagate */
+
+	/* cpu == -EBUSY: no idle CPU in cell, try borrowing */
+	if (enable_borrowing) {
+		const struct cpumask *borrowable =
+			lookup_cell_borrowable_cpumask(tctx->cell);
+		if (!borrowable)
+			return -1;
+		const struct cpumask *idle_smtmask __free(idle_cpumask) =
+			scx_bpf_get_idle_smtmask();
+		if (!idle_smtmask) {
+			scx_bpf_error("Failed to get idle smtmask");
+			return -1;
+		}
+		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
+		if (cpu >= 0) {
+			cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			if (kick)
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			return cpu;
+		}
 	}
 
-	return cpu;
+	return -EBUSY;
 }
 
 /*
@@ -1328,8 +1380,31 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
-	/* Advance cell and cpu dsq vtime to keep in sync with task vtime. */
-	advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
+	if (tctx->cell != cidx) {
+		/*
+		 * Task is on a borrowed CPU from a different cell.
+		 * Advance the task's (borrowing) cell's vtime_now,
+		 * not the CPU's (lending) cell. Skip cctx->vtime_now
+		 * since the per-CPU DSQ vtime is unrelated to the
+		 * borrowed task.
+		 */
+		struct cell *task_cell = lookup_cell(tctx->cell);
+		if (task_cell) {
+			u32 llc_idx = enable_llc_awareness &&
+						      llc_is_valid(tctx->llc) ?
+					      tctx->llc :
+					      FAKE_FLAT_CELL_LLC;
+			if (time_before(
+				    READ_ONCE(
+					    task_cell->llcs[llc_idx].vtime_now),
+				    p->scx.dsq_vtime))
+				WRITE_ONCE(task_cell->llcs[llc_idx].vtime_now,
+					   p->scx.dsq_vtime);
+		}
+	} else {
+		/* Advance cell and cpu dsq vtime to keep in sync with task vtime. */
+		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
+	}
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
 		u64 *cell_cycles = MEMBER_VPTR(cctx->cell_cycles, [cidx]);
@@ -2014,6 +2089,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			bpf_cpumask_release(cpumask);
 			return -EINVAL;
 		}
+
+		if (enable_borrowing) {
+			cpumask = bpf_cpumask_create();
+			if (!cpumask)
+				return -ENOMEM;
+
+			/* Start with empty borrowable masks */
+			cpumask = bpf_kptr_xchg(&cpumaskw->borrowable_cpumask,
+						cpumask);
+			if (cpumask) {
+				bpf_cpumask_release(cpumask);
+				return -EINVAL;
+			}
+
+			cpumask = bpf_cpumask_create();
+			if (!cpumask)
+				return -ENOMEM;
+			cpumask = bpf_kptr_xchg(
+				&cpumaskw->borrowable_tmp_cpumask, cpumask);
+			if (cpumask) {
+				bpf_cpumask_release(cpumask);
+				return -EINVAL;
+			}
+		}
 	}
 
 	if (enable_llc_awareness) {
@@ -2186,6 +2285,68 @@ int apply_cell_config(void *ctx)
 		if (stale) {
 			scx_bpf_error("tmp_cpumask should be null");
 			return -EINVAL;
+		}
+
+		/* Apply borrowable cpumask for this cell */
+		if (enable_borrowing) {
+			struct cell_cpumask_data *borrowable_data;
+
+			borrowable_data = MEMBER_VPTR(
+				config->borrowable_cpumasks, [cell_id]);
+			if (!borrowable_data) {
+				scx_bpf_error(
+					"cell_id %d out of bounds for borrowable",
+					cell_id);
+				return -EINVAL;
+			}
+
+			struct bpf_cpumask *bmask __free(bpf_cpumask) =
+				bpf_kptr_xchg(&cpumaskw->borrowable_tmp_cpumask,
+					      NULL);
+			if (!bmask) {
+				scx_bpf_error(
+					"borrowable_tmp_cpumask is NULL for cell %d",
+					cell_id);
+				return -EINVAL;
+			}
+
+			bpf_cpumask_clear(bmask);
+
+			u32 bcpu;
+			bpf_for(bcpu, 0, nr_possible_cpus)
+			{
+				u32		     byte_idx = bcpu / 8;
+				u32		     bit_idx  = bcpu % 8;
+
+				const unsigned char *bytep    = MEMBER_VPTR(
+					   borrowable_data->mask, [byte_idx]);
+				if (!bytep) {
+					scx_bpf_error(
+						"byte_idx %d out of bounds",
+						byte_idx);
+					return -EINVAL;
+				}
+
+				if (*bytep & (1 << bit_idx))
+					bpf_cpumask_set_cpu(bcpu, bmask);
+			}
+
+			bmask = bpf_kptr_xchg(&cpumaskw->borrowable_cpumask,
+					      no_free_ptr(bmask));
+			if (!bmask) {
+				scx_bpf_error(
+					"borrowable cpumask should never be null");
+				return -EINVAL;
+			}
+
+			struct bpf_cpumask *bstale __free(bpf_cpumask) =
+				bpf_kptr_xchg(&cpumaskw->borrowable_tmp_cpumask,
+					      no_free_ptr(bmask));
+			if (bstale) {
+				scx_bpf_error(
+					"borrowable tmp_cpumask should be null");
+				return -EINVAL;
+			}
 		}
 	}
 
