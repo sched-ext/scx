@@ -700,7 +700,7 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     }
 
     /* ── SLICE RECALCULATION on tier change ── */
-    /* When tier changes, the quantum multiplier changes (T0=0.25x → T3=4.0x).
+    /* When tier changes, the quantum multiplier changes (T0=0.75x → T3=1.4x).
      * Update next_slice so the next execution bout uses the correct quantum. */
     if (tier_changed) {
         u64 cfg = tier_configs[new_tier & 7];

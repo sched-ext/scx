@@ -360,9 +360,9 @@ fn render_startup_widgets(
     let dashboard_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(22), // System intelligence (Increased for titles)
-            Constraint::Percentage(39), // Empirical fabric (Heatmap)
-            Constraint::Percentage(39), // Calibration results (Raw Data)
+            Constraint::Percentage(22), // System info
+            Constraint::Percentage(39), // Latency heatmap
+            Constraint::Fill(1),        // Latency data (fills all remaining space)
         ])
         .split(outer_layout[1]);
 
@@ -397,11 +397,11 @@ fn render_startup_widgets(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("v1.01", Style::default().fg(Color::White)),
+            Span::styled("v1.02", Style::default().fg(Color::White)),
             Span::styled(
                 " │ Gaming Oriented Scheduler",
                 Style::default()
-                    .fg(Color::LightCyan)
+                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -449,14 +449,10 @@ fn render_startup_widgets(
     let hardware_block = Table::new(hardware_rows, [Constraint::Length(10), Constraint::Min(10)])
         .block(
             Block::default()
-                .title(" System Architecture ")
+                .title(" System ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                ),
+                .border_style(Style::default().fg(Color::Cyan).dim()),
         );
     Widget::render(hardware_block, left_layout[0], buffer);
 
@@ -479,13 +475,6 @@ fn render_startup_widgets(
             ),
         ]),
         Line::from(vec![
-            Span::styled("Tiers:  ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "4 (avg_runtime)",
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
             Span::styled("Preempt: ", Style::default().fg(Color::Cyan)),
             Span::styled(
                 format!("{}ms", params.starvation / 1000),
@@ -495,7 +484,7 @@ fn render_startup_widgets(
     ])
     .block(
         Block::default()
-            .title(" Profile Intelligence ")
+            .title(" Profile ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan).dim()),
@@ -533,7 +522,7 @@ fn render_startup_widgets(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Green).dim()),
+            .border_style(Style::default().fg(Color::Cyan).dim()),
     )
     .alignment(Alignment::Center);
 
@@ -545,16 +534,6 @@ fn build_cpu_topology_grid_compact(topology: &TopologyInfo) -> Paragraph<'static
     let nr_cpus = topology.nr_cpus.min(64);
     let mut lines = Vec::new();
 
-    // Title line with icon
-    lines.push(Line::from(vec![
-        Span::styled(" ⚙ ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            "Silicon Topology",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
     lines.push(Line::from(""));
 
     let mut current_line = Vec::new();
@@ -596,13 +575,10 @@ fn build_cpu_topology_grid_compact(topology: &TopologyInfo) -> Paragraph<'static
 
     Paragraph::new(lines).block(
         Block::default()
+            .title(" Topology ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )
+            .border_style(Style::default().fg(Color::Cyan).dim())
             .padding(Padding::horizontal(1)),
     )
 }
@@ -624,26 +600,10 @@ impl<'a> Widget for LatencyHeatmap<'a> {
         let nr_cpus = self.matrix.len();
 
         let block = Block::default()
-            .title(vec![
-                Span::styled(" ✦ ", Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    "Empirical Latency Fabric",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " (Dense Matrix View)",
-                    Style::default().fg(Color::Gray).dim(),
-                ),
-            ])
+            .title(" Latency Heatmap ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            );
+            .border_style(Style::default().fg(Color::Cyan).dim());
 
         let inner_area = block.inner(area);
         block.render(area, buf);
@@ -660,7 +620,7 @@ impl<'a> Widget for LatencyHeatmap<'a> {
                     x,
                     inner_area.y,
                     format!("{:1}", j % 10),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Cyan).dim(),
                 );
             }
         }
@@ -676,7 +636,7 @@ impl<'a> Widget for LatencyHeatmap<'a> {
                 inner_area.x + 1,
                 y,
                 format!("C{:02}", i),
-                Style::default().fg(Color::Yellow).dim(),
+                Style::default().fg(Color::Cyan).dim(),
             );
 
             for j in 0..nr_cpus {
@@ -699,9 +659,8 @@ impl<'a> Widget for LatencyHeatmap<'a> {
                     Style::default().fg(Color::Rgb(255, 180, 0)) // Amber
                 };
 
-                // Use a block symbol for the dense matrix look
                 buf.set_string(x, y, "█", style);
-                buf.set_string(x + 1, y, " ", Style::default()); // Spacing
+                buf.set_string(x + 1, y, " ", Style::default());
             }
         }
 
@@ -748,15 +707,7 @@ impl<'a> Widget for LatencyTable<'a> {
         let nr_cpus = self.matrix.len();
 
         let block = Block::default()
-            .title(vec![
-                Span::styled(" 📝 ", Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    "Raw Latency (ns)",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
+            .title(" Latency Data ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Cyan).dim());
@@ -768,7 +719,7 @@ impl<'a> Widget for LatencyTable<'a> {
             return;
         }
 
-        // Header for Target CPUs (Compact: 0, 1...)
+        // Header for Target CPUs
         for j in 0..nr_cpus {
             let x = inner_area.x + 5 + (j as u16 * 3);
             if x < inner_area.right() {
@@ -791,7 +742,7 @@ impl<'a> Widget for LatencyTable<'a> {
                 inner_area.x + 1,
                 y,
                 format!("C{:02}", i),
-                Style::default().fg(Color::Yellow).dim(),
+                Style::default().fg(Color::Cyan).dim(),
             );
 
             for j in 0..nr_cpus {
