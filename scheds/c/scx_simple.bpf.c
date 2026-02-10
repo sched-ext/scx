@@ -131,6 +131,7 @@ void BPF_STRUCT_OPS(simple_enable, struct task_struct *p)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(simple_init)
 {
+	vtime_now = 0;
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
