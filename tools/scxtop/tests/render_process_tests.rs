@@ -198,6 +198,7 @@ fn test_render_process_table_empty_data() {
                 false,
                 &theme,
                 events_list_size,
+                None,
             );
 
             assert!(result.is_ok());
@@ -261,6 +262,7 @@ fn test_render_process_table_with_data() {
                 true,
                 &theme,
                 events_list_size,
+                None,
             );
 
             assert!(result.is_ok());
@@ -308,6 +310,7 @@ fn test_render_process_table_with_filtering() {
                 false,
                 &theme,
                 events_list_size,
+                None,
             );
 
             assert!(result.is_ok());
@@ -359,6 +362,7 @@ fn test_render_thread_table_basic() {
                 false,
                 &theme,
                 events_list_size,
+                None,
             );
 
             assert!(result.is_ok());
@@ -429,6 +433,7 @@ fn test_render_thread_table_sorted_by_cpu() {
                 false,
                 &theme,
                 events_list_size,
+                None,
             );
 
             assert!(result.is_ok());
@@ -480,6 +485,7 @@ fn test_render_process_table_selection() {
                 false,
                 &theme,
                 events_list_size,
+                None,
             );
 
             assert!(result.is_ok());

@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Paragraph, RenderDirection,
-    Sparkline,
+    Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
 };
 use ratatui::Frame;
 use std::collections::BTreeMap;
@@ -28,6 +28,11 @@ pub struct SchedulerViewParams<'a> {
     pub theme: &'a AppTheme,
     pub render_title: bool,
     pub render_sample_rate: bool,
+    pub border_style_override: Option<Style>,
+    /// Scroll offset (number of DSQs to skip from the top)
+    pub scroll_offset: usize,
+    /// Maximum number of DSQs visible in the pane area (0 = no limit)
+    pub scroll_visible: usize,
 }
 
 /// Parameters for DSQ visualization
@@ -50,6 +55,7 @@ pub struct SchedulerStatsParams<'a> {
     pub dispatch_keep_last: i64,
     pub select_cpu_fallback: i64,
     pub theme: &'a AppTheme,
+    pub border_style_override: Option<Style>,
 }
 
 /// Renderer for scheduler views
@@ -111,7 +117,7 @@ impl SchedulerRenderer {
                     .style(params.theme.text_important_color())
                     .left_aligned(),
             )
-            .style(params.theme.border_style())
+            .style(params.border_style_override.unwrap_or_else(|| params.theme.border_style()))
             .border_type(BorderType::Rounded);
 
         frame.render_widget(paragraph.block(block), area);
@@ -133,8 +139,6 @@ impl SchedulerRenderer {
             .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(params.event))
             .count();
 
-        let mut dsq_constraints = Vec::new();
-
         let area_width = area.width as usize;
         let new_max_sched_events = if area_width != max_sched_events {
             area_width
@@ -151,15 +155,25 @@ impl SchedulerRenderer {
                 } else {
                     Line::from("".to_string())
                 })
-                .style(params.theme.border_style())
+                .style(params.border_style_override.unwrap_or_else(|| params.theme.border_style()))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
             return Ok(new_max_sched_events);
         }
 
-        for _ in 0..num_dsqs {
-            dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
+        // Apply scroll: determine which DSQs to show
+        let scroll_offset = params.scroll_offset.min(num_dsqs.saturating_sub(1));
+        let visible_count = if params.scroll_visible > 0 {
+            params.scroll_visible.min(num_dsqs - scroll_offset)
+        } else {
+            num_dsqs
+        };
+        let visible_dsqs = visible_count.max(1);
+
+        let mut dsq_constraints = Vec::new();
+        for _ in 0..visible_dsqs {
+            dsq_constraints.push(Constraint::Ratio(1, visible_dsqs as u32));
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
@@ -175,11 +189,22 @@ impl SchedulerRenderer {
         };
 
         Self::dsq_sparklines(&dsq_params)
-            .iter()
+            .into_iter()
+            .skip(scroll_offset)
+            .take(visible_dsqs)
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
                 frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
             });
+
+        // Render scrollbar if content overflows
+        if num_dsqs > visible_dsqs {
+            let mut scrollbar_state = ScrollbarState::new(num_dsqs)
+                .position(scroll_offset)
+                .viewport_content_length(visible_dsqs);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        }
 
         Ok(new_max_sched_events)
     }
@@ -201,7 +226,7 @@ impl SchedulerRenderer {
                 } else {
                     Line::from("".to_string())
                 })
-                .style(params.theme.border_style())
+                .style(params.border_style_override.unwrap_or_else(|| params.theme.border_style()))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
@@ -241,7 +266,7 @@ impl SchedulerRenderer {
             } else {
                 Line::from("")
             })
-            .style(params.theme.border_style())
+            .style(params.border_style_override.unwrap_or_else(|| params.theme.border_style()))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
@@ -253,8 +278,21 @@ impl SchedulerRenderer {
             params.theme,
         );
 
+        // Apply scroll to bars
+        let scroll_offset = params.scroll_offset.min(dsq_bars.len().saturating_sub(1));
+        let visible_count = if params.scroll_visible > 0 {
+            params.scroll_visible.min(dsq_bars.len() - scroll_offset)
+        } else {
+            dsq_bars.len()
+        };
+        let visible_bars: Vec<Bar> = dsq_bars
+            .into_iter()
+            .skip(scroll_offset)
+            .take(visible_count)
+            .collect();
+
         let barchart = BarChart::default()
-            .data(BarGroup::default().bars(&dsq_bars))
+            .data(BarGroup::default().bars(&visible_bars))
             .block(bar_block)
             .max(stats.max)
             .direction(Direction::Horizontal)
@@ -262,6 +300,16 @@ impl SchedulerRenderer {
             .bar_width(1);
 
         frame.render_widget(barchart, area);
+
+        // Render scrollbar if content overflows
+        if num_dsqs > visible_count {
+            let mut scrollbar_state = ScrollbarState::new(num_dsqs)
+                .position(scroll_offset)
+                .viewport_content_length(visible_count);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        }
+
         Ok(0)
     }
 
