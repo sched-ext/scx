@@ -603,6 +603,31 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 }
 
 /*
+ * Try to find an idle CPU for a task within its cell.
+ *
+ * On success, bumps CSTAT_LOCAL, dispatches the task to SCX_DSQ_LOCAL,
+ * and optionally kicks the idle CPU (if @kick is true).
+ *
+ * Returns: CPU number >= 0 on success, -1 on error, -EBUSY if no idle CPU found.
+ */
+static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
+					     s32 prev_cpu, struct cpu_ctx *cctx,
+					     struct task_ctx *tctx, bool kick)
+{
+	s32 cpu;
+
+	cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx);
+	if (cpu >= 0) {
+		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		if (kick)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
+
+	return cpu;
+}
+
+/*
  * select_cpu is where we update each task's cell assignment and then try to
  * dispatch to an idle core in the cell if possible
  */
@@ -630,11 +655,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return cpu;
 	}
 
-	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
-		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0)
 		return cpu;
-	}
 
 	if (!tctx->cpumask) {
 		scx_bpf_error("tctx->cpumask should never be NULL");
@@ -679,11 +701,13 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
-		 * idle CPU. Let's do the lookup now and kick at the end.
+		 * idle CPU. Let's do the lookup now.
 		 */
 		if (!(cctx = lookup_cpu_ctx(-1)))
 			return;
-		cpu = pick_idle_cpu(p, task_cpu, cctx, tctx);
+		cpu = try_pick_idle_cpu(p, task_cpu, cctx, tctx, true);
+		if (cpu >= 0)
+			return;
 		if (cpu == -1)
 			return;
 		if (cpu == -EBUSY) {
