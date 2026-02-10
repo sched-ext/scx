@@ -10,6 +10,11 @@
 //!    state via `with_sim()`.
 //! 3. After the ops call returns, the simulator calls `exit_sim()`.
 
+// These are extern "C" FFI entry points called from C code — the C caller
+// is responsible for passing valid pointers, so marking them `unsafe` in Rust
+// would be meaningless.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -41,7 +46,7 @@ impl SimulatorState {
     pub fn cpu_is_idle(&self, cpu: CpuId) -> bool {
         self.cpus
             .get(cpu.0 as usize)
-            .map_or(false, |c| c.is_idle() && c.local_dsq.is_empty())
+            .is_some_and(|c| c.is_idle() && c.local_dsq.is_empty())
     }
 
     pub fn find_any_idle_cpu(&self) -> Option<CpuId> {

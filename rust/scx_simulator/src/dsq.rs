@@ -57,6 +57,17 @@ impl Dsq {
     pub fn len(&self) -> usize {
         self.vtime_entries.len() + self.fifo_entries.len()
     }
+
+    /// Whether the queue is empty.
+    pub fn is_empty(&self) -> bool {
+        self.vtime_entries.is_empty() && self.fifo_entries.is_empty()
+    }
+}
+
+impl Default for Dsq {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Manages all dispatch queues in the simulation.
@@ -111,5 +122,11 @@ impl DsqManager {
     /// Get the number of queued tasks in a DSQ.
     pub fn nr_queued(&self, dsq_id: DsqId) -> usize {
         self.dsqs.get(&dsq_id).map_or(0, |dsq| dsq.len())
+    }
+}
+
+impl Default for DsqManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
