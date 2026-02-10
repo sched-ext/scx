@@ -118,10 +118,7 @@ impl SimulatorState {
         let dsq = pd.dsq_id;
         if dsq.is_local() {
             self.cpus[local_cpu.0 as usize].local_dsq.push_back(pd.pid);
-            debug!(
-                pid = pd.pid.0, cpu = local_cpu.0,
-                "resolved SCX_DSQ_LOCAL"
-            );
+            debug!(pid = pd.pid.0, cpu = local_cpu.0, "resolved SCX_DSQ_LOCAL");
             Some(local_cpu)
         } else if dsq.is_local_on() {
             let cpu = dsq.local_on_cpu();
@@ -192,7 +189,11 @@ where
 #[no_mangle]
 pub extern "C" fn scx_bpf_create_dsq(dsq_id: u64, _node: i32) -> i32 {
     with_sim(|sim| {
-        let result = if sim.dsqs.create(DsqId(dsq_id)) { 0 } else { -1 };
+        let result = if sim.dsqs.create(DsqId(dsq_id)) {
+            0
+        } else {
+            -1
+        };
         debug!(dsq_id, result, "kfunc create_dsq");
         result
     })
@@ -211,7 +212,12 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
         // Prefer prev_cpu if it's idle
         if (prev.0 as usize) < sim.cpus.len() && sim.cpu_is_idle(prev) {
             unsafe { *is_idle = true };
-            debug!(prev_cpu, cpu = prev_cpu, idle = true, "kfunc select_cpu_dfl");
+            debug!(
+                prev_cpu,
+                cpu = prev_cpu,
+                idle = true,
+                "kfunc select_cpu_dfl"
+            );
             return prev_cpu;
         }
         // Find any idle CPU
@@ -221,7 +227,12 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
             return cpu.0 as i32;
         }
         unsafe { *is_idle = false };
-        debug!(prev_cpu, cpu = prev_cpu, idle = false, "kfunc select_cpu_dfl");
+        debug!(
+            prev_cpu,
+            cpu = prev_cpu,
+            idle = false,
+            "kfunc select_cpu_dfl"
+        );
         prev_cpu
     })
 }
@@ -232,12 +243,7 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
 /// The engine resolves the pending dispatch after the callback returns,
 /// at which point `SCX_DSQ_LOCAL` is mapped to the correct CPU.
 #[no_mangle]
-pub extern "C" fn scx_bpf_dsq_insert(
-    p: *mut c_void,
-    dsq_id: u64,
-    slice: u64,
-    enq_flags: u64,
-) {
+pub extern "C" fn scx_bpf_dsq_insert(p: *mut c_void, dsq_id: u64, slice: u64, enq_flags: u64) {
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
@@ -334,11 +340,7 @@ pub extern "C" fn scx_bpf_task_cpu(_p: *const c_void) -> i32 {
 
 /// Report a scheduler error. In the simulator, we panic.
 #[no_mangle]
-pub extern "C" fn scx_bpf_error_bstr(
-    fmt: *const i8,
-    _data: *const u64,
-    _data_sz: u32,
-) {
+pub extern "C" fn scx_bpf_error_bstr(fmt: *const i8, _data: *const u64, _data_sz: u32) {
     let msg = if fmt.is_null() {
         "scheduler error (null fmt)".to_string()
     } else {

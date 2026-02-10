@@ -79,8 +79,14 @@ fn test_multiple_tasks_single_cpu() {
     trace.dump();
 
     // Both tasks should have been scheduled
-    assert!(trace.schedule_count(Pid(1)) > 0, "task 1 was never scheduled");
-    assert!(trace.schedule_count(Pid(2)) > 0, "task 2 was never scheduled");
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "task 1 was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "task 2 was never scheduled"
+    );
 
     // Both should get significant runtime
     let rt1 = trace.total_runtime(Pid(1));

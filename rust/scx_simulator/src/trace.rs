@@ -109,10 +109,7 @@ impl Trace {
                 TraceKind::TaskCompleted { pid } => format!("COMPLETE pid={}", pid.0),
                 TraceKind::CpuIdle => "IDLE".to_string(),
             };
-            eprintln!(
-                "[{:>12} ns] cpu={:<3} {}",
-                event.time_ns, event.cpu.0, desc
-            );
+            eprintln!("[{:>12} ns] cpu={:<3} {}", event.time_ns, event.cpu.0, desc);
         }
     }
 }

@@ -14,7 +14,7 @@ fn test_sleep_wake_cycle() {
             weight: 100,
             behavior: TaskBehavior {
                 phases: vec![
-                    Phase::Run(5_000_000),   // run 5ms
+                    Phase::Run(5_000_000),    // run 5ms
                     Phase::Sleep(10_000_000), // sleep 10ms
                 ],
                 repeat: true,
@@ -131,10 +131,7 @@ fn test_preemption_interleaving() {
         .collect();
 
     // There should be at least one transition between tasks
-    let transitions = sched_events
-        .windows(2)
-        .filter(|w| w[0] != w[1])
-        .count();
+    let transitions = sched_events.windows(2).filter(|w| w[0] != w[1]).count();
 
     assert!(
         transitions >= 2,

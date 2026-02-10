@@ -44,12 +44,7 @@ impl ScenarioBuilder {
     }
 
     /// Convenience: add a task with auto-assigned PID.
-    pub fn add_task(
-        mut self,
-        name: &str,
-        weight: Weight,
-        behavior: TaskBehavior,
-    ) -> Self {
+    pub fn add_task(mut self, name: &str, weight: Weight, behavior: TaskBehavior) -> Self {
         let pid = self.next_pid;
         self.next_pid = Pid(pid.0 + 1);
         self.tasks.push(TaskDef {
@@ -76,7 +71,10 @@ impl ScenarioBuilder {
 
     /// Build the scenario.
     pub fn build(self) -> Scenario {
-        assert!(!self.tasks.is_empty(), "scenario must have at least one task");
+        assert!(
+            !self.tasks.is_empty(),
+            "scenario must have at least one task"
+        );
         assert!(self.nr_cpus > 0, "scenario must have at least one CPU");
         Scenario {
             nr_cpus: self.nr_cpus,
