@@ -44,8 +44,6 @@ enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
 };
 
-
-
 /* Per-task flow state - 64B aligned, first 16B coalesced for cake_stopping writes */
 struct cake_task_ctx {
     /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
@@ -95,15 +93,11 @@ struct cake_task_ctx {
 #define EXTRACT_AVG_RT(fused)   ((u16)((fused) >> 16))
 #define PACK_DEFICIT_AVG(deficit, avg)  (((u32)(deficit) & 0xFFFF) | ((u32)(avg) << 16))
 
-
-
 /* Pure avg_runtime tier gates (µs) */
 #define TIER_GATE_T0   100   /* < 100µs  → T0 Critical: IRQ, input, audio */
 #define TIER_GATE_T1   2000  /* < 2000µs → T1 Interact: compositor, physics */
 #define TIER_GATE_T2   8000  /* < 8000µs → T2 Frame:    game render, encode */
                              /* ≥ 8000µs → T3 Bulk:     compilation, bg */
-
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: Per-CPU state (64 bytes = single cache line)
@@ -130,7 +124,8 @@ struct cake_task_ctx {
 struct mega_mailbox_entry {
     u8 flags;              /* [1:0]=tier — written by cake_tick */
     u8 dsq_hint;           /* DVFS perf target cache — written by cake_tick */
-    u8 __reserved[62];     /* Pad to 64B cache line, available for future use */
+    u8 tick_counter;       /* 2-tick starvation gate — alternates rq lookup */
+    u8 __reserved[61];     /* Pad to 64B cache line, available for future use */
 } __attribute__((aligned(64)));
 
 /* Statistics shared with userspace */
@@ -157,11 +152,14 @@ struct cake_stats {
 #define CAKE_DEFAULT_STARVATION_T2  40000000   /* Frame: 40ms */
 #define CAKE_DEFAULT_STARVATION_T3  100000000  /* Bulk: 100ms */
 
-/* Tier quantum multipliers (fixed-point, 1024 = 1.0x) */
-#define CAKE_DEFAULT_MULTIPLIER_T0  512    /* Critical: 0.5x = 1ms (10x safety over 100µs gate) */
-#define CAKE_DEFAULT_MULTIPLIER_T1  1024   /* Interact: 1.0x */
-#define CAKE_DEFAULT_MULTIPLIER_T2  1229   /* Frame: 1.2x */
-#define CAKE_DEFAULT_MULTIPLIER_T3  1434   /* Bulk: 1.4x */
+/* Tier quantum multipliers (fixed-point, 1024 = 1.0x)
+ * Power-of-4 progression: each tier gets 4x the quantum of the tier above.
+ * T2 at 4ms lets 300fps+ render threads complete entire frames without preemption.
+ * T0 at 0.5ms releases cores to game work faster (T0 runs <100µs anyway). */
+#define CAKE_DEFAULT_MULTIPLIER_T0  256    /* Critical: 0.25x = 0.5ms */
+#define CAKE_DEFAULT_MULTIPLIER_T1  1024   /* Interact: 1.0x  = 2.0ms */
+#define CAKE_DEFAULT_MULTIPLIER_T2  2048   /* Frame:    2.0x  = 4.0ms */
+#define CAKE_DEFAULT_MULTIPLIER_T3  4095   /* Bulk:     ~4.0x = 8.0ms (12-bit max = 4095) */
 
 /* Wait budget per tier (nanoseconds) */
 #define CAKE_DEFAULT_WAIT_BUDGET_T0 100000     /* Critical: 100µs */

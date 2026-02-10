@@ -24,9 +24,6 @@ const u32 nr_llcs = 1;
 const u32 nr_cpus = 8;  /* Set by loader — bounds kick scan loop (Rule 39) */
 const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
 
-
-
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
  * - Zero false sharing: each CPU writes ONLY to mega_mailbox[its_cpu]
@@ -42,13 +39,13 @@ struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
 struct cake_scratch {
     bool dummy_idle;
     u32 init_tier;
+    u32 cached_llc;            /* LLC ID tunneled from select_cpu → enqueue (saves 1 kfunc) */
+    u64 cached_now;            /* scx_bpf_now() tunneled from select_cpu → enqueue (saves 1 kfunc) */
     struct bpf_iter_scx_dsq it; /* BSS-Tunneling for iterators */
-    u8 _pad[48]; /* Pad to 128 bytes (2 cache lines) */
+    u8 _pad[36]; /* Pad to 128 bytes (2 cache lines) */
 } global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
-
-
 
 /* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(256)));
@@ -65,8 +62,6 @@ static __always_inline struct cake_stats *get_local_stats(void)
     u32 cpu = bpf_get_smp_processor_id();
     return &global_stats[cpu & (CAKE_MAX_CPUS - 1)];
 }
-
-
 
 /* ETD surgical seek / find_surgical_victim_logical removed — select_cpu
  * now delegates idle selection to scx_bpf_select_cpu_dfl() which does
@@ -127,7 +122,6 @@ static const u16 tier_recheck_mask[] = {
     15,    /* T3: every 16th   */
     15, 15, 15, 15,  /* padding */
 };
-
 
 /* Vtime table removed - FIFO DSQs don't use dsq_vtime, saved 160B + 30 cycles */
 
@@ -300,7 +294,14 @@ s32 dispatch_sync_cold(struct task_struct *p, u64 wake_flags)
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
         return -1;
-    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, quantum_ns, wake_flags);
+
+    /* Use tier-adjusted slice, not raw quantum. Without this, the kernel's
+     * slice countdown preempts at 2ms before cake_tick can check the
+     * tier-adjusted threshold — making multipliers dead code for SYNC. */
+    struct cake_task_ctx *tctx = bpf_task_storage_get(&task_ctx, p, 0, 0);
+    u64 slice = tctx ? tctx->next_slice : quantum_ns;
+
+    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
     return (s32)cpu;
 }
 
@@ -316,83 +317,34 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             return sync_cpu;
     }
 
-    /* KERNEL-DELEGATED IDLE SELECTION: One call replaces the entire
-     * TIER 1→2→3→4 cascade. scx_bpf_select_cpu_dfl() internally does:
-     * 1. Check prev_cpu idle (authoritative, not stale mailbox)
-     * 2. Check sibling idle (SMT-aware)
-     * 3. LLC-local scan (topology-aware)
-     * 4. Global scan (if needed)
-     * All with atomic claiming — no double-dispatch possible. */
     u32 tc_id = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     struct cake_scratch *scr = &global_scratch[tc_id];
     s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &scr->dummy_idle);
 
     if (scr->dummy_idle) {
-        /* Kernel found & claimed an idle CPU — direct dispatch to built-in
-         * local DSQ. SCX_DSQ_LOCAL_ON skips dispatch callback entirely
-         * (~85cy saved vs user DSQ rhashtable lookup). */
-        scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, quantum_ns, wake_flags);
+        /* Kernel found & claimed an idle CPU — direct dispatch.
+         * Use tier-adjusted slice so kernel preemption matches tick's check.
+         * Falls back to raw quantum for unclassified tasks (first wakeup).
+         * No tunnel needed — enqueue never runs on this path. */
+        struct cake_task_ctx *tctx = bpf_task_storage_get(&task_ctx, p, 0, 0);
+        u64 slice = tctx ? tctx->next_slice : quantum_ns;
+        scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
         return cpu;
     }
 
-    /* ALL BUSY: return prev_cpu, let cake_enqueue handle via per-LLC DSQ.
-     * Tier priority preserved by vtime encoding: (tier << 56) | timestamp.
-     * Load balance preserved: any CPU pulling from its LLC DSQ gets the task.
-     * Cache warmth preserved: prev_cpu is the natural first puller. */
+    /* ALL BUSY: tunnel LLC ID + timestamp for enqueue (~22ns saved on
+     * the 90% idle path above where these were previously wasted).
+     * select_cpu runs on same CPU as enqueue — safe to tunnel. */
+    scr->cached_llc = cpu_llc_id[tc_id];
+    scr->cached_now = scx_bpf_now();
     return prev_cpu;
 }
 
-/* ENQUEUE-TIME KICK (T3-ONLY): When a high-priority task (T0/T1) arrives and
- * all cores are busy, preempt a core running a T3 BULK task (compilation,
- * background indexing, updates). Game threads (T0/T1/T2) are NEVER kicked.
- *
- * Why T3-only: Unlimited kicking destroyed Arc Raiders 1% lows (250→70fps)
- * because kicked game workers (T2/T3 render helpers) create GPU pipeline
- * bubbles. Each kick = cache cold restart + GPU command queue drain.
- * 8000Hz mouse = 8000 kicks/sec = 80ms/sec of pipeline disruption.
- *
- * With T3-only: kick only targets tasks that CAN'T hurt the frame pipeline.
- * If all 8 cores run game work (no T3), no kick fires — T0 gets the next
- * natural slice boundary (~100-600µs). This IS the safety net: kicks only
- * fire when background work (make -j8, updates) is stealing game CPU time.
- *
- * Cost: ~15-30ns mailbox scan on the "all busy" slow path.
- * Fast path (idle core found): zero cost — this code is never reached.
- *
- * Optimizations:
- *   Rule 39: nr_cpus early-exit eliminates dead loop space (64→8 on 9800X3D)
- *   Rule 5:  Single-LLC fast path skips cpu_llc_id load (JIT dead-code)
- *   Rule 2:  CAKE_PREFETCH overlaps next cache line load with current compare
- *   Rule 6:  Early-exit on T3 found — first T3 is good enough, stop scanning */
-static __attribute__((noinline))
-void kick_lowest_priority_cold(u32 llc_id)
-{
-    s32 victim = -1;
-
-    for (u32 i = 0; i < CAKE_MAX_CPUS; i++) {
-        if (i >= nr_cpus)
-            break;
-
-        if (i + 1 < nr_cpus)
-            CAKE_PREFETCH(&mega_mailbox[i + 1].flags);
-
-        if (nr_llcs > 1 && cpu_llc_id[i] != llc_id)
-            continue;
-
-        u8 running_tier = MBOX_GET_TIER(mega_mailbox[i].flags);
-
-        /* T3-ONLY: Only kick BULK tasks. Game threads (T0/T1/T2) are
-         * sacred — interrupting them starves the GPU pipeline.
-         * First T3 found is good enough — stop scanning immediately. */
-        if (running_tier >= CAKE_TIER_BULK) {
-            victim = (s32)i;
-            break;
-        }
-    }
-
-    if (victim >= 0)
-        scx_bpf_kick_cpu(victim, SCX_KICK_PREEMPT);
-}
+/* ENQUEUE-TIME KICK: DISABLED.
+ * A/B testing confirmed kicks cause 16fps 1% low regression in Arc Raiders
+ * (252fps without kick, 236fps with T3-only kick). Even T3-only kicks create
+ * cache pollution and GPU pipeline bubbles. Tick-based starvation detection
+ * is sufficient for gaming workloads. */
 
 /* Enqueue - A+B architecture: per-LLC DSQ with vtime = (tier << 56) | timestamp */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
@@ -400,11 +352,13 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
     register struct task_struct *p_reg asm("r6") = p;
     u32 task_flags = p_reg->flags;
 
-    /* KFUNC CACHING: Single scx_bpf_now() + bpf_get_smp_processor_id()
-     * call for entire function. Hoisted LLC lookup eliminates 2 redundant
-     * bpf_get_smp_processor_id() calls from the per-branch dispatch sites. */
-    u64 now_cached = scx_bpf_now();
-    u32 enq_llc = cpu_llc_id[bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1)];
+    /* KFUNC TUNNELING: Reuse LLC ID + timestamp cached by select_cpu in scratch.
+     * Eliminates 2 kfunc trampolines (~40-60ns) — select_cpu always runs on
+     * the same CPU immediately before enqueue, so values are fresh. */
+    u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
+    struct cake_scratch *scr = &global_scratch[enq_cpu];
+    u64 now_cached = scr->cached_now;
+    u32 enq_llc = scr->cached_llc;
 
     struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
 
@@ -456,13 +410,6 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
     if (task_packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS))
         vtime -= new_flow_bonus_ns;
     scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, slice, vtime, enq_flags);
-
-    /* ENQUEUE-TIME KICK: If this is a T0/T1 wakeup and we reached the DSQ
-     * path (all cores were busy in select_cpu), kick the lowest-priority
-     * core so it pulls our task immediately instead of waiting for tick.
-     * Only for wakeups — yields and preempts don't need urgent dispatch. */
-    if (tier <= CAKE_TIER_INTERACT && (enq_flags & SCX_ENQ_WAKEUP))
-        kick_lowest_priority_cold(enq_llc);
 }
 
 /* Dispatch: per-LLC DSQ scan with cross-LLC stealing fallback.
@@ -534,26 +481,45 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
         return;
     }
 
-    /* PHASE 2: STARVATION CHECK — skip if this CPU has only 1 runnable task.
-     * cake_get_rq() → scx_bpf_cpu_rq() (~10-15ns). rq->scx.nr_running is
-     * authoritative kernel state. When == 1, no other task can starve — skip
-     * threshold math entirely. */
-    struct rq *rq = cake_get_rq(cpu_id_reg);
-    if (rq && rq->scx.nr_running > 1) {
-        u64 threshold = UNPACK_STARVATION_NS(tier_configs[tier_reg & 7]);
+    /* PHASE 2: STARVATION CHECK — graduated confidence backoff.
+     * tick_counter tracks consecutive ticks without contention (nr_running <= 1).
+     * As confidence grows, check frequency drops:
+     *   counter < 8:  check every tick     (settling, ~8ms)
+     *   counter < 16: check every 2nd tick (warming, max 1ms delay)
+     *   counter < 32: check every 4th tick (confident, max 3ms delay)
+     *   counter >= 32: check every 8th tick (high confidence, max 7ms delay)
+     * Any contention (nr_running > 1) resets to 0 → full alertness.
+     * Core ideology: good scheduling earns reduced overhead. */
+    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu_id_reg];
+    u8 tc = mbox->tick_counter;
+    u8 skip_mask = tc < 8 ? 0 : tc < 16 ? 1 : tc < 32 ? 3 : 7;
 
-        if (unlikely(runtime > threshold)) {
-            scx_bpf_kick_cpu(cpu_id_reg, SCX_KICK_PREEMPT);
+    if (!(tc & skip_mask)) {
+        struct rq *rq = cake_get_rq(cpu_id_reg);
+        if (rq && rq->scx.nr_running > 1) {
+            /* Contention detected — reset confidence immediately */
+            mbox->tick_counter = 0;
 
-            if (enable_stats && tier_reg < CAKE_TIER_MAX) {
-                struct cake_stats *s = get_local_stats();
-                if (s) s->nr_starvation_preempts_tier[tier_reg]++;
+            u64 threshold = UNPACK_STARVATION_NS(tier_configs[tier_reg & 7]);
+            if (unlikely(runtime > threshold)) {
+                scx_bpf_kick_cpu(cpu_id_reg, SCX_KICK_PREEMPT);
+
+                if (enable_stats && tier_reg < CAKE_TIER_MAX) {
+                    struct cake_stats *s = get_local_stats();
+                    if (s) s->nr_starvation_preempts_tier[tier_reg]++;
+                }
+                return;  /* Already kicked — skip mailbox/DVFS */
             }
+        } else {
+            /* No contention — grow confidence (saturate at 255) */
+            if (tc < 255) mbox->tick_counter = tc + 1;
         }
+    } else {
+        /* Skipped check — still increment counter for next mask eval */
+        if (tc < 255) mbox->tick_counter = tc + 1;
     }
 
     /* MEGA-MAILBOX UPDATE: tier for dispatch to consume (MESI-guarded) */
-    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu_id_reg];
     u8 new_flags = (tier_reg & MBOX_TIER_MASK);
     if (mbox->flags != new_flags)
         mbox->flags = new_flags;
@@ -578,8 +544,6 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
     }
 }
 
-
-
 /* Task started running - stamp last_run_at for runtime measurement.
  * DVFS moved to cake_tick where rq lock is held (cpuperf_set ~15-20ns vs
  * ~30-80ns unlocked here). Saves ~44-84 cycles per context switch. */
@@ -590,8 +554,6 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
         return;
     tctx->last_run_at = (u32)scx_bpf_now();
 }
-
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * AVG_RUNTIME CLASSIFICATION + DRR++: Dynamic tier reclassification on every stop.
@@ -644,11 +606,21 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
         u16 counter = tctx->reclass_counter + 1;
         tctx->reclass_counter = counter;
         if (counter & mask) {
-            /* Not time for recheck yet — spot-check for behavior change.
-             * If avg shifted >50µs in either direction, reset stability
-             * so next stop does full reclassify with fresh data. */
-            s16 avg_delta = (s16)new_avg - (s16)avg_rt;
-            if (avg_delta > 50 || avg_delta < -50) {
+            /* Not time for full recheck — spot-check: would new EWMA
+             * classify to a different tier? Uses hysteresis-adjusted gates
+             * so spot-check agrees exactly with full reclassify logic.
+             * Only resets stability when a genuine tier change is imminent.
+             * Zero false triggers from normal frame variance. */
+            u16 g0 = tier <= 0 ? TIER_GATE_T0 : TIER_GATE_T0 - TIER_GATE_T0 / 10;
+            u16 g1 = tier <= 1 ? TIER_GATE_T1 : TIER_GATE_T1 - TIER_GATE_T1 / 10;
+            u16 g2 = tier <= 2 ? TIER_GATE_T2 : TIER_GATE_T2 - TIER_GATE_T2 / 10;
+            u8 spot_tier;
+            if      (new_avg < g0) spot_tier = 0;
+            else if (new_avg < g1) spot_tier = 1;
+            else if (new_avg < g2) spot_tier = 2;
+            else                   spot_tier = 3;
+
+            if (spot_tier != tier) {
                 u32 reset = packed & ~((u32)3 << SHIFT_STABLE);
                 cake_relaxed_store_u32(&tctx->packed_info, reset);
                 tctx->reclass_counter = 0;
@@ -682,20 +654,32 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     if (new_fused != old_fused)
         tctx->deficit_avg_fused = new_fused;
 
-    /* ── PURE avg_runtime → TIER (3 comparisons) ──
-     * Direct classification by EWMA avg_runtime:
-     *   < 100µs → T0 (Critical: IRQ, input, audio, network)
-     *   < 2ms   → T1 (Interactive: compositor, physics, AI)
-     *   < 8ms   → T2 (Frame: game render, encoding)
-     *   ≥ 8ms   → T3 (Bulk: compilation, background) */
+    /* ── HYSTERESIS TIER CLASSIFICATION ──
+     * Promote-only deadband prevents oscillation at tier boundaries.
+     * To PROMOTE (lower tier): avg must be 10% below the gate.
+     * To DEMOTE  (higher tier): standard gate (no barrier — fast demotion).
+     * Asymmetric by design: give more CPU time quickly, take it back cautiously.
+     *
+     * Example at T1/T2 gate (2000µs):
+     *   Current T1, avg=2100 → demotes to T2 (standard gate)
+     *   Current T2, avg=1900 → stays T2 (promote needs <1800)
+     *   Current T2, avg=1750 → promotes to T1 */
+    u8 old_tier = (packed >> SHIFT_TIER) & MASK_TIER;
     u8 new_tier;
-    if      (new_avg < TIER_GATE_T0) new_tier = 0;
-    else if (new_avg < TIER_GATE_T1) new_tier = 1;
-    else if (new_avg < TIER_GATE_T2) new_tier = 2;
-    else                             new_tier = 3;
+
+    /* Gate values with 10% hysteresis applied per-direction.
+     * Promote gates (10% below): task must clearly be in the faster tier.
+     * Demote gates  (10% above): task must clearly be in the slower tier. */
+    u16 g0 = old_tier <= 0 ? TIER_GATE_T0 : TIER_GATE_T0 - TIER_GATE_T0 / 10;  /* 100 or 90 */
+    u16 g1 = old_tier <= 1 ? TIER_GATE_T1 : TIER_GATE_T1 - TIER_GATE_T1 / 10;  /* 2000 or 1800 */
+    u16 g2 = old_tier <= 2 ? TIER_GATE_T2 : TIER_GATE_T2 - TIER_GATE_T2 / 10;  /* 8000 or 7200 */
+
+    if      (new_avg < g0) new_tier = 0;
+    else if (new_avg < g1) new_tier = 1;
+    else if (new_avg < g2) new_tier = 2;
+    else                   new_tier = 3;
 
     /* ── WRITE PACKED_INFO (MESI-friendly: skip if unchanged) ── */
-    u8 old_tier = (packed >> SHIFT_TIER) & MASK_TIER;
     bool tier_changed = (new_tier != old_tier);
 
     /* Tier-stability counter: increment toward 3 if tier held, reset on change.
@@ -716,7 +700,7 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     }
 
     /* ── SLICE RECALCULATION on tier change ── */
-    /* When tier changes, the quantum multiplier changes (T0=0.75x → T3=1.4x).
+    /* When tier changes, the quantum multiplier changes (T0=0.25x → T3=4.0x).
      * Update next_slice so the next execution bout uses the correct quantum. */
     if (tier_changed) {
         u64 cfg = tier_configs[new_tier & 7];
@@ -733,8 +717,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
     if (tctx)
         reclassify_task_cold(tctx);
 }
-
-
 
 /* Initialize the scheduler */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
