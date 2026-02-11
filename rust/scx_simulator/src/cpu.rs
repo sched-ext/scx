@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use crate::types::{CpuId, Pid};
+use crate::types::{CpuId, Pid, TimeNs};
 
 /// A simulated CPU.
 #[derive(Debug)]
@@ -13,6 +13,12 @@ pub struct SimCpu {
     pub current_task: Option<Pid>,
     /// The CPU's local dispatch queue (FIFO).
     pub local_dsq: VecDeque<Pid>,
+    /// Per-CPU logical clock (nanoseconds).
+    ///
+    /// Advances when this CPU processes events. With no scheduler overhead,
+    /// equals the event queue time. When overhead is modeled, local clocks
+    /// diverge across CPUs.
+    pub local_clock: TimeNs,
 }
 
 impl SimCpu {
@@ -21,6 +27,7 @@ impl SimCpu {
             id,
             current_task: None,
             local_dsq: VecDeque::new(),
+            local_clock: 0,
         }
     }
 

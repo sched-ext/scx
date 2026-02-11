@@ -123,7 +123,18 @@ impl<S: Scheduler> Simulator<S> {
             }
 
             state.clock = event.time_ns;
-            kfuncs::set_sim_clock(event.time_ns);
+
+            // Advance per-CPU clock for CPU-specific events
+            match &event.kind {
+                EventKind::SliceExpired { cpu } | EventKind::TaskPhaseComplete { cpu } => {
+                    state.advance_cpu_clock(*cpu);
+                    kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock);
+                }
+                EventKind::TaskWake { .. } => {
+                    // No specific CPU yet; use event queue time for tracing
+                    kfuncs::set_sim_clock(state.clock);
+                }
+            }
 
             match event.kind {
                 EventKind::TaskWake { pid } => {
@@ -269,9 +280,11 @@ impl<S: Scheduler> Simulator<S> {
         let slice = task.get_slice();
         task.run_remaining_ns = task.run_remaining_ns.saturating_sub(slice);
 
-        state
-            .trace
-            .record(state.clock, cpu, TraceKind::TaskPreempted { pid });
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::TaskPreempted { pid },
+        );
 
         let task_name = task.name.as_str();
         info!(
@@ -360,9 +373,11 @@ impl<S: Scheduler> Simulator<S> {
             // Task has completed all phases
             let task = tasks.get_mut(&pid).unwrap();
             task.state = TaskState::Exited;
-            state
-                .trace
-                .record(state.clock, cpu, TraceKind::TaskCompleted { pid });
+            state.trace.record(
+                state.cpus[cpu.0 as usize].local_clock,
+                cpu,
+                TraceKind::TaskCompleted { pid },
+            );
             info!(
                 cpu = cpu.0,
                 task = task.name.as_str(),
@@ -374,9 +389,10 @@ impl<S: Scheduler> Simulator<S> {
                 Some(Phase::Sleep(sleep_ns)) => {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Sleeping;
+                    let local_t = state.cpus[cpu.0 as usize].local_clock;
                     state
                         .trace
-                        .record(state.clock, cpu, TraceKind::TaskSlept { pid });
+                        .record(local_t, cpu, TraceKind::TaskSlept { pid });
                     info!(
                         cpu = cpu.0,
                         task = task.name.as_str(),
@@ -385,7 +401,7 @@ impl<S: Scheduler> Simulator<S> {
                     );
 
                     // Schedule wake event
-                    let wake_time = state.clock + sleep_ns;
+                    let wake_time = local_t + sleep_ns;
                     if wake_time <= duration_ns {
                         events.push(Reverse(Event {
                             time_ns: wake_time,
@@ -400,9 +416,11 @@ impl<S: Scheduler> Simulator<S> {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Runnable;
 
-                    state
-                        .trace
-                        .record(state.clock, cpu, TraceKind::TaskYielded { pid });
+                    state.trace.record(
+                        state.cpus[cpu.0 as usize].local_clock,
+                        cpu,
+                        TraceKind::TaskYielded { pid },
+                    );
                     info!(
                         cpu = cpu.0,
                         task = task.name.as_str(),
@@ -423,15 +441,16 @@ impl<S: Scheduler> Simulator<S> {
                     }
                 }
                 Some(Phase::Wake(target_pid)) => {
+                    let local_t = state.cpus[cpu.0 as usize].local_clock;
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Sleeping;
                     state
                         .trace
-                        .record(state.clock, cpu, TraceKind::TaskSlept { pid });
+                        .record(local_t, cpu, TraceKind::TaskSlept { pid });
 
                     // Immediately wake the target
                     events.push(Reverse(Event {
-                        time_ns: state.clock,
+                        time_ns: local_t,
                         seq: *seq,
                         kind: EventKind::TaskWake { pid: target_pid },
                     }));
@@ -445,7 +464,7 @@ impl<S: Scheduler> Simulator<S> {
                             Some(Phase::Sleep(ns)) => {
                                 let ns = *ns;
                                 task.state = TaskState::Sleeping;
-                                let wake_time = state.clock + ns;
+                                let wake_time = local_t + ns;
                                 if wake_time <= duration_ns {
                                     events.push(Reverse(Event {
                                         time_ns: wake_time,
@@ -458,7 +477,7 @@ impl<S: Scheduler> Simulator<S> {
                             Some(Phase::Run(_)) => {
                                 task.state = TaskState::Runnable;
                                 events.push(Reverse(Event {
-                                    time_ns: state.clock,
+                                    time_ns: local_t,
                                     seq: *seq,
                                     kind: EventKind::TaskWake { pid },
                                 }));
@@ -467,7 +486,7 @@ impl<S: Scheduler> Simulator<S> {
                             Some(Phase::Wake(_)) => {
                                 // Chain of wakes - schedule immediate re-processing
                                 events.push(Reverse(Event {
-                                    time_ns: state.clock,
+                                    time_ns: local_t,
                                     seq: *seq,
                                     kind: EventKind::TaskWake { pid },
                                 }));
@@ -484,9 +503,11 @@ impl<S: Scheduler> Simulator<S> {
                 None => {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Exited;
-                    state
-                        .trace
-                        .record(state.clock, cpu, TraceKind::TaskCompleted { pid });
+                    state.trace.record(
+                        state.cpus[cpu.0 as usize].local_clock,
+                        cpu,
+                        TraceKind::TaskCompleted { pid },
+                    );
                 }
             }
         }
@@ -508,6 +529,9 @@ impl<S: Scheduler> Simulator<S> {
         if state.cpus[cpu.0 as usize].current_task.is_some() {
             return;
         }
+
+        // Advance this CPU's clock to at least the event queue time
+        state.advance_cpu_clock(cpu);
 
         // Check if local DSQ has tasks
         if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
@@ -531,7 +555,9 @@ impl<S: Scheduler> Simulator<S> {
             self.start_running(cpu, pid, state, tasks, events, seq);
         } else {
             // CPU is idle
-            state.trace.record(state.clock, cpu, TraceKind::CpuIdle);
+            let local_t = state.cpus[cpu.0 as usize].local_clock;
+            kfuncs::set_sim_clock(local_t);
+            state.trace.record(local_t, cpu, TraceKind::CpuIdle);
             info!(cpu = cpu.0, "IDLE");
         }
     }
@@ -584,9 +610,12 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
+        let local_t = state.cpus[cpu.0 as usize].local_clock;
+        kfuncs::set_sim_clock(local_t);
+
         state
             .trace
-            .record(state.clock, cpu, TraceKind::TaskScheduled { pid });
+            .record(local_t, cpu, TraceKind::TaskScheduled { pid });
 
         // Determine how long this task will run
         let task = tasks.get(&pid).unwrap();
@@ -604,7 +633,7 @@ impl<S: Scheduler> Simulator<S> {
         if remaining == 0 {
             // Task has no remaining work -- complete immediately
             events.push(Reverse(Event {
-                time_ns: state.clock,
+                time_ns: local_t,
                 seq: *seq,
                 kind: EventKind::TaskPhaseComplete { cpu },
             }));
@@ -612,7 +641,7 @@ impl<S: Scheduler> Simulator<S> {
         } else if slice > 0 && slice <= remaining {
             // Slice expires before the phase completes
             events.push(Reverse(Event {
-                time_ns: state.clock + slice,
+                time_ns: local_t + slice,
                 seq: *seq,
                 kind: EventKind::SliceExpired { cpu },
             }));
@@ -620,7 +649,7 @@ impl<S: Scheduler> Simulator<S> {
         } else {
             // Phase completes before the slice
             events.push(Reverse(Event {
-                time_ns: state.clock + remaining,
+                time_ns: local_t + remaining,
                 seq: *seq,
                 kind: EventKind::TaskPhaseComplete { cpu },
             }));

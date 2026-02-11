@@ -7,7 +7,7 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
-use scx_simulator::{sim_clock, FmtN, SIM_LOCK};
+use scx_simulator::{sim_clock, FmtTs, SIM_LOCK};
 
 /// Acquire the simulator lock and initialize tracing from `RUST_LOG`.
 ///
@@ -40,7 +40,7 @@ where
     ) -> fmt::Result {
         // Simulated timestamp
         let clock = sim_clock();
-        write!(writer, "[{:>12}] ", FmtN(clock))?;
+        write!(writer, "[{}] ", FmtTs::local(clock))?;
 
         // Level with color (no italic, no background)
         let level = *event.metadata().level();
