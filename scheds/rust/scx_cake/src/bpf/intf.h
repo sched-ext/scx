@@ -104,22 +104,33 @@ struct cake_task_ctx {
 
 /* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency)
  * Per-CPU write isolation: each CPU writes ONLY its own entry.
- * dsq_hint: DVFS perf target cache, only active when enable_dvfs=true.
- * tick_counter: confidence-based starvation check gating.
  *
  * TICK DATA STAGING (Rule 41): cake_running writes the currently-running
- * task's tier, last_run_at, and slice here. cake_tick reads them from
- * the SAME cache line it already loads for tick_counter — eliminates
- * bpf_task_storage_get (~25ns kfunc overhead) from both callbacks. */
+ * task's tier, last_run_at, and slice. cake_tick reads from SAME cache line.
+ *
+ * RECLASSIFY CACHE (Rule 40): cake_stopping caches reclassify outputs here.
+ * Next stopping on SAME CPU reads cached state if task pointer matches AND
+ * tier is stable — skips bpf_task_storage_get entirely (~25ns kfunc saved).
+ * Periodic tctx sync every 16th fast-path stop prevents stale migration. */
 struct mega_mailbox_entry {
-    u8 flags;              /* Reserved (previously tier cache, now unused) */
-    u8 dsq_hint;           /* DVFS perf target cache — written by cake_tick */
+    /* --- Tick staging (bytes 0-16) --- */
+    u8 flags;              /* Reserved */
+    u8 dsq_hint;           /* DVFS perf target cache */
     u8 tick_counter;       /* Confidence-based starvation skip mask counter */
     u8 tick_tier;          /* Tier of currently-running task (set by running) */
     u32 tick_last_run_at;  /* Timestamp when task started (set by running) */
     u64 tick_slice;        /* Slice of currently-running task (set by running) */
-    u8 tick_ctx_valid;     /* 1 = running stamped fields, 0 = cleared by stopping */
-    u8 __reserved[45];     /* Pad to 64B cache line */
+    u8 tick_ctx_valid;     /* 1 = running stamped, 0 = cleared by stopping */
+    u8 _pad1;              /* alignment */
+
+    /* --- Reclassify cache (bytes 18-41) --- */
+    u16 rc_counter;        /* reclass_counter snapshot (2B-aligned) */
+    u32 _pad2;             /* alignment for rc_task_ptr */
+    u64 rc_task_ptr;       /* Task pointer for identity (8B-aligned, in reg) */
+    u64 rc_state_fused;    /* [63:32]=packed_info, [31:0]=deficit_avg_fused */
+    u64 rc_slice;          /* next_slice snapshot */
+    u16 rc_sync_counter;   /* Periodic tctx writeback counter */
+    u8 __reserved[6];      /* Pad to 64B */
 } __attribute__((aligned(64)));
 
 /* Statistics shared with userspace */
