@@ -6,7 +6,7 @@
 use ratatui::layout::Rect;
 
 /// Scroll state for a single pane.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PaneScrollState {
     /// Current scroll offset (number of items scrolled past).
     pub offset: usize,
@@ -14,16 +14,6 @@ pub struct PaneScrollState {
     pub content_len: usize,
     /// Number of items that fit in the visible area.
     pub visible_len: usize,
-}
-
-impl Default for PaneScrollState {
-    fn default() -> Self {
-        Self {
-            offset: 0,
-            content_len: 0,
-            visible_len: 0,
-        }
-    }
 }
 
 impl PaneScrollState {
