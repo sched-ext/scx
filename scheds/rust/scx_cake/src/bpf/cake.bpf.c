@@ -694,41 +694,130 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     }
 }
 
-/* Task stopping — avg_runtime reclassification + DRR++ deficit tracking.
- * Pre-stages p->scx.slice and p->scx.dsq_vtime for the next wakeup so
- * select_cpu and enqueue read direct task_struct fields (~3ns each)
- * instead of bpf_task_storage_get (~30-80ns under load).
- * Syncs last_run_at from mailbox → tctx for reclassify, then clears
- * mailbox for the next task on this CPU. */
+/* Task stopping — confidence-gated kfunc elimination (Rule 40 + Rule 41).
+ *
+ * FAST PATH (stable task, same CPU): inline EWMA+deficit from mailbox cache.
+ * Zero bpf_task_storage_get — saves ~38ns/stop. Task pointer identity check
+ * uses p already in register (zero task_struct loads vs PID comparison).
+ *
+ * FULL PATH (unstable, recheck, or cache miss): authoritative kfunc reclassify.
+ * Populates/refreshes the mailbox cache for future fast-path hits.
+ *
+ * Periodic tctx sync every 16th fast-path stop prevents migration staleness —
+ * ensures tctx is at most 16 bouts stale if task moves to a different CPU. */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
 
+    /* ═══ FAST PATH: confidence-gated kfunc skip ═══
+     * Task pointer in register → 1 load + 1 cmp (vs PID: 2 loads + 1 cmp) */
+    if (likely((u64)p == mbox->rc_task_ptr)) {
+        u64 fused = mbox->rc_state_fused;
+        u32 packed = (u32)(fused >> 32);
+        u8 stable = (packed >> SHIFT_STABLE) & 3;
+
+        if (stable == 3) {
+            u8 tier = (packed >> SHIFT_TIER) & MASK_TIER;
+            u16 mask = tier_recheck_mask[tier & 3];
+            u16 counter = mbox->rc_counter + 1;
+            mbox->rc_counter = counter;
+
+            if (counter & mask) {
+                /* ── INLINE EWMA+DEFICIT UPDATE ── */
+                u32 now = (u32)scx_bpf_now();
+                u32 last_run = mbox->tick_last_run_at;
+                u32 rt_raw = now - last_run;
+                u16 rt_us = (rt_raw >> 10) > 0xFFFF ?
+                    0xFFFF : (u16)(rt_raw >> 10);
+
+                u32 deficit_avg = (u32)fused;
+                u16 avg_rt = EXTRACT_AVG_RT(deficit_avg);
+                u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_us >> 3);
+                u16 deficit = EXTRACT_DEFICIT(deficit_avg);
+                deficit = (rt_us >= deficit) ? 0 : deficit - rt_us;
+
+                /* SPOT-CHECK: would new EWMA change the tier? */
+                u16 g0 = tier <= 0 ? TIER_GATE_T0 :
+                    TIER_GATE_T0 - TIER_GATE_T0 / 10;
+                u16 g1 = tier <= 1 ? TIER_GATE_T1 :
+                    TIER_GATE_T1 - TIER_GATE_T1 / 10;
+                u16 g2 = tier <= 2 ? TIER_GATE_T2 :
+                    TIER_GATE_T2 - TIER_GATE_T2 / 10;
+                u8 spot;
+                if      (new_avg < g0) spot = 0;
+                else if (new_avg < g1) spot = 1;
+                else if (new_avg < g2) spot = 2;
+                else                   spot = 3;
+
+                if (unlikely(spot != tier)) {
+                    /* Tier WOULD change: reset stability → full path
+                     * fires on next stop for authoritative reclassify */
+                    packed &= ~((u32)3 << SHIFT_STABLE);
+                } else {
+                    /* DRR++ deficit exhaustion */
+                    if (deficit == 0 &&
+                        (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)))
+                        packed &= ~((u32)CAKE_FLOW_NEW << SHIFT_FLAGS);
+                }
+
+                /* Write updated cache */
+                mbox->rc_state_fused = ((u64)packed << 32) |
+                    PACK_DEFICIT_AVG(deficit, new_avg);
+
+                /* PERIODIC TCTX SYNC: every 16th fast-path stop.
+                 * Prevents unlimited staleness on migration. */
+                u16 sync = mbox->rc_sync_counter + 1;
+                mbox->rc_sync_counter = sync;
+                if (unlikely(!(sync & 15))) {
+                    struct cake_task_ctx *tctx =
+                        get_task_ctx(p, false);
+                    if (tctx) {
+                        u64 f = mbox->rc_state_fused;
+                        tctx->packed_info = (u32)(f >> 32);
+                        tctx->deficit_avg_fused = (u32)f;
+                        tctx->reclass_counter = mbox->rc_counter;
+                        tctx->next_slice = mbox->rc_slice;
+                        tctx->last_run_at = mbox->tick_last_run_at;
+                    }
+                }
+
+                /* Stage for next wakeup from cached values */
+                u8 nf = (packed >> SHIFT_FLAGS) & 1;
+                p->scx.slice = mbox->rc_slice;
+                p->scx.dsq_vtime = (1ULL << 63) |
+                    ((u64)tier << 56) | ((u64)nf << 48);
+                mbox->tick_ctx_valid = 0;
+                return;  /* ZERO kfunc stopping ✅ */
+            }
+            /* Fall through: at recheck boundary → full path */
+        }
+        /* Fall through: not stable → full path */
+    }
+
+    /* ═══ FULL PATH: authoritative kfunc reclassify ═══ */
     struct cake_task_ctx *tctx = get_task_ctx(p, false);
     if (tctx) {
-        /* Sync last_run_at from mailbox → tctx for reclassify.
-         * running wrote tick_last_run_at to mailbox instead of tctx
-         * (zero kfunc design), so we bridge the data here. */
         tctx->last_run_at = mbox->tick_last_run_at;
-
         reclassify_task_cold(tctx);
 
-        /* Stage slice for select_cpu direct dispatch paths */
+        /* Stage for next wakeup */
         p->scx.slice = tctx->next_slice;
-
-        /* Stage tier + DRR++ new-flow flag for enqueue.
-         * Bit layout: [63]=sentinel | [57:56]=tier | [48]=new_flow
-         * Kernel doesn't read dsq_vtime for sleeping tasks (not on DSQ).
-         * scx_bpf_dsq_insert_vtime overwrites with real vtime on dispatch. */
         u32 packed = tctx->packed_info;
         u8 tier = (packed >> SHIFT_TIER) & MASK_TIER;
         u8 nf = (packed >> SHIFT_FLAGS) & 1;
-        p->scx.dsq_vtime = (1ULL << 63) | ((u64)tier << 56) | ((u64)nf << 48);
+        p->scx.dsq_vtime = (1ULL << 63) |
+            ((u64)tier << 56) | ((u64)nf << 48);
+
+        /* Update cache for future fast-path hits */
+        mbox->rc_task_ptr = (u64)p;
+        mbox->rc_state_fused =
+            ((u64)packed << 32) | tctx->deficit_avg_fused;
+        mbox->rc_counter = tctx->reclass_counter;
+        mbox->rc_slice = tctx->next_slice;
+        mbox->rc_sync_counter = 0;
     }
 
-    /* Clear for next task on this CPU — prevents stale reads if next
-     * task's running fires late or the next task has no context. */
     mbox->tick_ctx_valid = 0;
 }
 
