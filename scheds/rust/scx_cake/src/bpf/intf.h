@@ -74,17 +74,14 @@ struct cake_task_ctx {
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
- * [Stable:2][Tier:2][Flags:4][Rsvd:8][Wait:8][Error:8]
- *  31-30     29-28   27-24    23-16   15-8     7-0
- * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify (2 ops vs 4) */
-#define SHIFT_KALMAN_ERROR  0
-#define SHIFT_WAIT_DATA     8
+ * [Stable:2][Tier:2][Flags:4][Rsvd:16][Rsvd:8]
+ *  31-30     29-28   27-24    23-8      7-0
+ * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify (2 ops vs 4)
+ * Bits [15:0] reserved for future use (Kalman error + wait data removed). */
 #define SHIFT_FLAGS         24  /* 4 bits: flow flags */
 #define SHIFT_TIER          28  /* 2 bits: tier 0-3 (coalesced with STABLE) */
 #define SHIFT_STABLE        30  /* 2 bits: tier-stability counter (0-3) */
 
-#define MASK_KALMAN_ERROR   0xFF  /* 8 bits: 0-255 */
-#define MASK_WAIT_DATA      0xFF  /* 8 bits: violations<<4 | checks */
 #define MASK_TIER           0x03  /* 2 bits: 0-3 */
 #define MASK_FLAGS          0x0F  /* 4 bits */
 
@@ -105,26 +102,14 @@ struct cake_task_ctx {
  * - Prefetch-accelerated reads: one prefetch loads entire CPU state
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Mailbox flags (packed in flags byte) */
-#define MBOX_TIER_MASK    0x03  /* Bits [1:0] = tier (0-3) */
-#define MBOX_VICTIM_BIT   0x08  /* Bit  [3]   = victim (preemptible) */
-#define MBOX_IDLE_BIT     0x10  /* Bit  [4]   = idle (no task running) */
-#define MBOX_WARM_BIT     0x20  /* Bit  [5]   = cache warm (recent run) */
-
-/* Mailbox flag accessors */
-#define MBOX_GET_TIER(f)   ((f) & MBOX_TIER_MASK)
-#define MBOX_IS_VICTIM(f)  ((f) & MBOX_VICTIM_BIT)
-#define MBOX_IS_IDLE(f)    ((f) & MBOX_IDLE_BIT)
-#define MBOX_IS_WARM(f)    ((f) & MBOX_WARM_BIT)
-
 /* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency)
  * Per-CPU write isolation: each CPU writes ONLY its own entry.
- * Only flags (tier) and dsq_hint (DVFS cache) are actively used.
- * Reserved space kept at 64B for future per-CPU-write features. */
+ * dsq_hint: DVFS perf target cache, only active when enable_dvfs=true.
+ * tick_counter: confidence-based starvation check gating. */
 struct mega_mailbox_entry {
-    u8 flags;              /* [1:0]=tier — written by cake_tick */
+    u8 flags;              /* Reserved (previously tier cache, now unused) */
     u8 dsq_hint;           /* DVFS perf target cache — written by cake_tick */
-    u8 tick_counter;       /* 2-tick starvation gate — alternates rq lookup */
+    u8 tick_counter;       /* Confidence-based starvation skip mask counter */
     u8 __reserved[61];     /* Pad to 64B cache line, available for future use */
 } __attribute__((aligned(64)));
 
