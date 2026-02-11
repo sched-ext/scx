@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use crate::cpu::SimCpu;
 use crate::dsq::DsqManager;
 use crate::ffi::Scheduler;
+use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::scenario::Scenario;
 use crate::task::{Phase, SimTask, TaskState};
@@ -122,6 +123,7 @@ impl<S: Scheduler> Simulator<S> {
             }
 
             state.clock = event.time_ns;
+            kfuncs::set_sim_clock(event.time_ns);
 
             match event.kind {
                 EventKind::TaskWake { pid } => {
@@ -276,7 +278,7 @@ impl<S: Scheduler> Simulator<S> {
             cpu = cpu.0,
             task = task_name,
             pid = pid.0,
-            ran_ns = slice,
+            ran_ns = %FmtN(slice),
             "PREEMPTED"
         );
 
@@ -585,7 +587,7 @@ impl<S: Scheduler> Simulator<S> {
             cpu = cpu.0,
             task = task.name.as_str(),
             pid = pid.0,
-            slice_ns = slice,
+            slice_ns = %FmtN(slice),
             "STARTED"
         );
 

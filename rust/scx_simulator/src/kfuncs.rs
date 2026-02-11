@@ -25,6 +25,7 @@ use tracing::debug;
 use crate::cpu::SimCpu;
 use crate::dsq::DsqManager;
 use crate::ffi;
+use crate::fmt::FmtN;
 use crate::trace::Trace;
 use crate::types::{CpuId, DsqId, Pid, TimeNs};
 
@@ -142,6 +143,7 @@ impl SimulatorState {
 
 thread_local! {
     static SIM_STATE: RefCell<Option<*mut SimulatorState>> = const { RefCell::new(None) };
+    static SIM_CLOCK: std::cell::Cell<TimeNs> = const { std::cell::Cell::new(0) };
 }
 
 /// Install a simulator state pointer for the duration of ops callbacks.
@@ -160,6 +162,20 @@ pub fn exit_sim() {
     SIM_STATE.with(|cell| {
         *cell.borrow_mut() = None;
     });
+}
+
+/// Read the simulator clock from the thread-local state.
+///
+/// Returns the current simulated time in nanoseconds.
+/// Used by the custom trace formatter to show simulated time.
+pub fn sim_clock() -> TimeNs {
+    SIM_CLOCK.with(|c| c.get())
+}
+
+/// Update the simulator clock thread-local. Called by the engine on
+/// every event loop iteration so the trace formatter always has access.
+pub fn set_sim_clock(t: TimeNs) {
+    SIM_CLOCK.with(|c| c.set(t));
 }
 
 /// Access the simulator state from within a kfunc.
@@ -247,7 +263,7 @@ pub extern "C" fn scx_bpf_dsq_insert(p: *mut c_void, dsq_id: u64, slice: u64, en
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
-        debug!(pid = pid.0, dsq_id, slice, "kfunc dsq_insert");
+        debug!(pid = pid.0, dsq_id, slice = %FmtN(slice), "kfunc dsq_insert");
 
         sim.pending_dispatch = Some(PendingDispatch {
             pid,
@@ -272,7 +288,7 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
-        debug!(pid = pid.0, dsq_id, slice, vtime, "kfunc dsq_insert_vtime");
+        debug!(pid = pid.0, dsq_id, slice = %FmtN(slice), vtime, "kfunc dsq_insert_vtime");
 
         sim.pending_dispatch = Some(PendingDispatch {
             pid,
