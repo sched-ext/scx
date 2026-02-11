@@ -36,7 +36,6 @@ use std::sync::Mutex;
 ///
 /// The following code is strongly based on <https://github.com/jjyr/buddy-alloc> and imported
 /// directly here to make packaging easier.
-
 const OOM_MSG: &str = "requires more memory space to initialize BuddyAlloc";
 const LEAF_ALIGN_ERROR_MSG: &str = "leaf size must be align to 16 bytes";
 /// required align to 16 bytes, since Node takes 16 bytes on 64-bits machine.
@@ -141,7 +140,7 @@ impl Node {
     }
 
     fn is_empty(list: *const Node) -> bool {
-        unsafe { (*list).next as *const Node == list }
+        unsafe { std::ptr::eq((*list).next, list) }
     }
 }
 

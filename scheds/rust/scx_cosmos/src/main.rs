@@ -66,10 +66,12 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
     let map = &skel.maps.perf_events;
 
     // Create a raw perf event for the perf counter.
-    let mut attrs = sys::bindings::perf_event_attr::default();
-    attrs.type_ = sys::bindings::PERF_TYPE_RAW;
-    attrs.config = perf_config;
-    attrs.size = std::mem::size_of::<sys::bindings::perf_event_attr>() as u32;
+    let mut attrs = sys::bindings::perf_event_attr {
+        type_: sys::bindings::PERF_TYPE_RAW,
+        config: perf_config,
+        size: std::mem::size_of::<sys::bindings::perf_event_attr>() as u32,
+        ..Default::default()
+    };
     attrs.set_disabled(0);
     attrs.set_inherit(0);
 
@@ -666,8 +668,9 @@ impl<'a> Scheduler<'a> {
             // Update CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
                 if let Some(curr_cputime) = Self::read_cpu_times() {
-                    Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                        .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
+                    if let Some(util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime) {
+                        self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util;
+                    }
                     prev_cputime = curr_cputime;
                 }
                 last_update = Instant::now();

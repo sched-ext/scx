@@ -186,7 +186,7 @@ impl<'a> Scheduler<'a> {
         if timer_cpu.is_none() {
             bail!("primary cpumask is empty");
         }
-        if let Err(e) = set_thread_affinity(&[timer_cpu.unwrap() as usize]) {
+        if let Err(e) = set_thread_affinity([timer_cpu.unwrap()]) {
             bail!("cannot set central CPU affinity: {}", e);
         }
 

@@ -163,7 +163,7 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
     Ok(())
 }
 
-fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
+fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) {
     let mut buf = vec![0u8; 4096];
     let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
     let mut started = false;

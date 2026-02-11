@@ -71,6 +71,12 @@ pub struct Cpumask {
     mask: BitVec<u64, Lsb0>,
 }
 
+impl Default for Cpumask {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Cpumask {
     fn check_cpu(&self, cpu: usize) -> Result<()> {
         if cpu >= *NR_CPU_IDS {
@@ -88,6 +94,7 @@ impl Cpumask {
     }
 
     /// Build a Cpumask object from a hexadecimal string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(cpumask: &str) -> Result<Cpumask> {
         match cpumask {
             "none" => {
@@ -105,7 +112,7 @@ impl Cpumask {
                 .strip_prefix("0x")
                 .unwrap_or(cpumask)
                 .replace('_', "");
-            if tmp_str.len() % 2 != 0 {
+            if !tmp_str.len().is_multiple_of(2) {
                 tmp_str = "0".to_string() + &tmp_str;
             }
             tmp_str

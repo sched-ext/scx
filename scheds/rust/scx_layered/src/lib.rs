@@ -145,7 +145,7 @@ impl CpuPool {
         for alloc_core in core_alloc_order {
             // Constrain CPUs by NUMA node or LLC. Since allowed_cpus is NUMA/LLC aligned,
             // this operation is guaranteed to produce either the core mask or an empty mask.
-            let core_cpus = &self.topo.all_cores[alloc_core].span.and(&allowed_cpus);
+            let core_cpus = &self.topo.all_cores[alloc_core].span.and(allowed_cpus);
             if core_cpus.is_empty() {
                 continue;
             }
@@ -194,7 +194,7 @@ impl CpuPool {
             bail!("Some of CPUs {} are already free", cpus_to_free);
         }
 
-        self.available_cpus = self.available_cpus.or(&cpus_to_free);
+        self.available_cpus = self.available_cpus.or(cpus_to_free);
         self.update_fallback_cpu();
 
         self.check_partial()?;
@@ -203,7 +203,7 @@ impl CpuPool {
     }
 
     pub fn mark_allocated(&mut self, cpus_to_alloc: &Cpumask) -> Result<()> {
-        if *&cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
+        if cpus_to_alloc.and(&self.available_cpus.not()).weight() > 0 {
             bail!(
                 "Some of CPUs {} are not available to allocate",
                 cpus_to_alloc

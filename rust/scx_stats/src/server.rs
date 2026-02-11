@@ -72,6 +72,7 @@ pub struct StatsOps<Req, Res> {
 }
 
 struct StatsOpenOps<Req, Res> {
+    #[allow(clippy::type_complexity)]
     map: BTreeMap<
         String,
         (
@@ -174,6 +175,16 @@ where
     top: Option<String>,
     meta: BTreeMap<String, StatsMeta>,
     ops: BTreeMap<String, Arc<Mutex<StatsOps<Req, Res>>>>,
+}
+
+impl<Req, Res> Default for StatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<Req, Res> StatsServerData<Req, Res>

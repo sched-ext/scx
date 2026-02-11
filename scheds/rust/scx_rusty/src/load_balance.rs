@@ -564,7 +564,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let load_half_life = self.skel.maps.rodata_data.as_ref().unwrap().load_half_life;
 
         let mut aggregator =
-            LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
+            LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight);
 
         for (dom_id, dom) in self.dom_group.doms() {
             aggregator.init_domain(*dom_id);
@@ -742,7 +742,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             ),
         ) {
             (None, None) => {
-                std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
+                push_dom.tasks = SortedVec::from_unsorted(tasks);
                 return Ok(None);
             }
             (Some(task), None) | (None, Some(task)) => (task, calc_new_imbal(*task.load)),
@@ -761,14 +761,14 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         // to do for this pair.
         let old_imbal = to_push + to_pull;
         if old_imbal < new_imbal {
-            std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
+            push_dom.tasks = SortedVec::from_unsorted(tasks);
             return Ok(None);
         }
 
         let load = *(task.load);
         let taskc_p = task.taskc_p;
         task.migrated.set(true);
-        std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
+        push_dom.tasks = SortedVec::from_unsorted(tasks);
 
         push_dom.transfer_load(load, unsafe { &mut *taskc_p }, pull_dom);
         Ok(Some(load))
@@ -798,7 +798,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let mut pullers = Vec::with_capacity(pull_node.domains.len());
         let mut pushed = 0f64;
 
-        while push_node.domains.len() > 0 {
+        while !push_node.domains.is_empty() {
             // Push from the busiest node
             let mut push_dom = push_node.domains.pop().unwrap();
             if push_dom.load.state() != BalanceState::NeedsPush {
@@ -806,7 +806,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 break;
             }
 
-            while pull_node.domains.len() > 0 {
+            while !pull_node.domains.is_empty() {
                 let mut pull_dom = pull_node.domains.remove_index(0);
                 if pull_dom.load.state() != BalanceState::NeedsPull {
                     pull_node.domains.insert(pull_dom);
@@ -909,7 +909,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
             let push_cutoff = push_node.load.push_cutoff();
             let mut pushed = 0f64;
-            while self.nodes.len() > 0 && pushed < push_cutoff {
+            while !self.nodes.is_empty() && pushed < push_cutoff {
                 // To the least busy node
                 let mut pull_node = self.nodes.remove_index(0);
                 let pull_id = pull_node.id;
@@ -964,7 +964,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         while node.domains.len() >= 2 {
             let mut push_dom = node.domains.pop().unwrap();
-            if node.domains.len() == 0 || push_dom.load.state() != BalanceState::NeedsPush {
+            if node.domains.is_empty() || push_dom.load.state() != BalanceState::NeedsPush {
                 node.domains.insert(push_dom);
                 break;
             }
@@ -981,7 +981,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 );
             }
 
-            while node.domains.len() > 0 && pushed < push_cutoff {
+            while !node.domains.is_empty() && pushed < push_cutoff {
                 let mut pull_dom = node.domains.remove_index(0);
                 if pull_dom.load.state() != BalanceState::NeedsPull {
                     node.domains.push(pull_dom);
@@ -1067,7 +1067,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         for node in nodes.iter_mut() {
             self.balance_within_node(node)?;
         }
-        std::mem::swap(&mut self.nodes, &mut SortedVec::from_unsorted(nodes));
+        self.nodes = SortedVec::from_unsorted(nodes);
 
         Ok(())
     }

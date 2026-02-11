@@ -324,7 +324,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        return Ok(DistributionStats {
+        Ok(DistributionStats {
             total_decisions: scope_queue_decisions,
             share_of_decisions_pct: share_of_global,
             local_q_pct: queue_pct[0],
@@ -332,7 +332,7 @@ impl<'a> Scheduler<'a> {
             cell_q_pct: queue_pct[2],
             affn_viol_pct: affinity_violations_percent,
             global_queue_decisions,
-        });
+        })
     }
 
     // Queue stats for the whole node
@@ -343,9 +343,9 @@ impl<'a> Scheduler<'a> {
     ) -> Result<()> {
         // Get total of each queue summed over all cells
         let mut queue_counts = [0; QUEUE_STATS_IDX.len()];
-        for cells in 0..MAX_CELLS {
+        for cell_stat in cell_stats_delta.iter().take(MAX_CELLS) {
             for (i, stat) in QUEUE_STATS_IDX.iter().enumerate() {
-                queue_counts[i] += cell_stats_delta[cells][*stat as usize];
+                queue_counts[i] += cell_stat[*stat as usize];
             }
         }
 
@@ -378,10 +378,10 @@ impl<'a> Scheduler<'a> {
         global_queue_decisions: u64,
         cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS],
     ) -> Result<()> {
-        for cell in 0..MAX_CELLS {
+        for (cell, cell_stat) in cell_stats_delta.iter().enumerate().take(MAX_CELLS) {
             let cell_queue_decisions = QUEUE_STATS_IDX
                 .iter()
-                .map(|&stat| cell_stats_delta[cell][stat as usize])
+                .map(|&stat| cell_stat[stat as usize])
                 .sum::<u64>();
 
             // FIXME: This should really query if the cell is enabled or not.
@@ -391,7 +391,7 @@ impl<'a> Scheduler<'a> {
 
             let mut queue_counts = [0; QUEUE_STATS_IDX.len()];
             for (i, &stat) in QUEUE_STATS_IDX.iter().enumerate() {
-                queue_counts[i] = cell_stats_delta[cell][stat as usize];
+                queue_counts[i] = cell_stat[stat as usize];
             }
 
             const MIN_CELL_WIDTH: usize = 2;
@@ -401,7 +401,7 @@ impl<'a> Scheduler<'a> {
 
             // Sum affinity violations for this cell
             let scope_affn_viols: u64 =
-                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
+                cell_stat[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
 
             let stats = self.calculate_distribution_stats(
                 &queue_counts,
@@ -436,23 +436,23 @@ impl<'a> Scheduler<'a> {
             bail!("Error: No queueing decisions made globally");
         }
 
-        self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_global_queue_stats(global_queue_decisions, cell_stats_delta)?;
 
-        self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+        self.update_and_log_cell_queue_stats(global_queue_decisions, cell_stats_delta)?;
 
         Ok(())
     }
 
     fn calculate_cell_stat_delta(&mut self) -> Result<[[u64; NR_CSTATS]; MAX_CELLS]> {
-        let mut cell_stats_delta = [[0 as u64; NR_CSTATS]; MAX_CELLS];
+        let mut cell_stats_delta = [[0_u64; NR_CSTATS]; MAX_CELLS];
 
         // Read CPU contexts
         let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
 
         // Loop over cells and stats first, then CPU contexts
         // TODO: We should loop over the in_use cells only.
-        for cell in 0..MAX_CELLS {
-            for stat in 0..NR_CSTATS {
+        for (cell, cell_delta) in cell_stats_delta.iter_mut().enumerate().take(MAX_CELLS) {
+            for (stat, delta_val) in cell_delta.iter_mut().enumerate().take(NR_CSTATS) {
                 let mut cur_cell_stat = 0;
 
                 // Accumulate stats from all CPUs
@@ -461,7 +461,7 @@ impl<'a> Scheduler<'a> {
                 }
 
                 // Calculate delta and update previous stat
-                cell_stats_delta[cell][stat] = cur_cell_stat - self.prev_cell_stats[cell][stat];
+                *delta_val = cur_cell_stat - self.prev_cell_stats[cell][stat];
                 self.prev_cell_stats[cell][stat] = cur_cell_stat;
             }
         }
@@ -516,7 +516,7 @@ impl<'a> Scheduler<'a> {
         for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
             cell_to_cpus
                 .entry(cpu_ctx.cell)
-                .or_insert_with(|| Cpumask::new())
+                .or_default()
                 .set_cpu(i)
                 .expect("set cpu in existing mask");
         }
@@ -539,7 +539,7 @@ impl<'a> Scheduler<'a> {
             let cpus = cell_to_cpus
                 .get(cell_idx)
                 .cloned()
-                .unwrap_or_else(|| Cpumask::new());
+                .unwrap_or_else(Cpumask::new);
             self.cells
                 .entry(*cell_idx)
                 .or_insert_with(|| Cell {
@@ -574,9 +574,9 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
             *NR_CPUS_POSSIBLE
         );
     }
-    for cpu in 0..*NR_CPUS_POSSIBLE {
+    for cpu_ctx_val in cpu_ctxs_vec.iter().take(*NR_CPUS_POSSIBLE) {
         cpu_ctxs.push(*unsafe {
-            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
+            &*(cpu_ctx_val.as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
         });
     }
     Ok(cpu_ctxs)

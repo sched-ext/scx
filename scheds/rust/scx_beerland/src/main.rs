@@ -493,8 +493,9 @@ impl<'a> Scheduler<'a> {
             // Update CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
                 if let Some(curr_cputime) = Self::read_cpu_times() {
-                    Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime)
-                        .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
+                    if let Some(util) = Self::compute_user_cpu_pct(&prev_cputime, &curr_cputime) {
+                        self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util;
+                    }
                     prev_cputime = curr_cputime;
                 }
                 last_update = Instant::now();

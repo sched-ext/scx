@@ -650,7 +650,7 @@ fn get_capacity_source() -> Option<CapacitySource> {
     'outer: for src in sources {
         let path_str = [prefix.clone(), src.to_string()].join("/");
         let path = Path::new(&path_str);
-        raw_capacity = read_from_file(&path).unwrap_or(0_usize);
+        raw_capacity = read_from_file(path).unwrap_or(0_usize);
         if raw_capacity > 0 {
             // It would be an okay source...
             suffix = src;
@@ -743,7 +743,7 @@ fn replace_with_virt_llcs(
             let core_type = core.core_type == CoreType::Little;
             cores_by_type
                 .entry(core_type)
-                .or_insert(Vec::new())
+                .or_default()
                 .push(*core_id);
         }
 

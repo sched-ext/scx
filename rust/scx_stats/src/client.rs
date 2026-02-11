@@ -25,6 +25,12 @@ pub struct StatsClient {
     reader: Option<BufReader<UnixStream>>,
 }
 
+impl Default for StatsClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatsClient {
     pub fn new() -> Self {
         Self {

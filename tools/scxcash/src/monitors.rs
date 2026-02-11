@@ -201,11 +201,13 @@ impl<'a> PerfSampleMonitor<'a> {
 
         let mut links = Vec::new();
         let mut failures = 0u32;
-        let mut attr = perf::bindings::perf_event_attr::default();
-        attr.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
-        attr.type_ = perf::bindings::PERF_TYPE_RAW;
-        attr.config = 0x076;
-        attr.__bindgen_anon_1.sample_freq = period as u64;
+        let mut attr = perf::bindings::perf_event_attr {
+            size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
+            type_: perf::bindings::PERF_TYPE_RAW,
+            config: 0x076,
+            ..Default::default()
+        };
+        attr.__bindgen_anon_1.sample_freq = period;
         attr.set_freq(1); // frequency mode
         attr.sample_type = perf::bindings::PERF_SAMPLE_ADDR as u64
             | perf::bindings::PERF_SAMPLE_PHYS_ADDR as u64
@@ -251,7 +253,7 @@ impl<'a> PerfSampleMonitor<'a> {
 
             let map_fd =
                 unsafe { libbpf_sys::bpf_map__fd(perf_events_map.as_libbpf_object().as_ptr()) };
-            let key = cpu as u32;
+            let key = cpu;
             let val = fd as u32;
             let ret = unsafe {
                 libbpf_sys::bpf_map_update_elem(

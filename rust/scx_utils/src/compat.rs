@@ -91,9 +91,9 @@ fn btf_name_str_by_offset(btf: &btf, name_off: u32) -> Result<&str> {
     if n.is_null() {
         bail!("btf__name_by_offset() returned NULL");
     }
-    Ok(unsafe { CStr::from_ptr(n) }
+    unsafe { CStr::from_ptr(n) }
         .to_str()
-        .with_context(|| format!("Failed to convert {:?} to string", n))?)
+        .with_context(|| format!("Failed to convert {:?} to string", n))
 }
 
 pub fn read_enum(type_name: &str, name: &str) -> Result<u64> {
@@ -268,7 +268,7 @@ pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result
 pub fn cond_kprobes_enable<T>(kprobes: Vec<(&str, &OpenProgramImpl<T>)>) -> Result<bool> {
     // Check if all the symbols exist.
     for (sym, _) in kprobes.iter() {
-        if in_kallsyms(sym)? == false {
+        if !in_kallsyms(sym)? {
             warn!("symbol {sym} is missing, kprobe not loaded");
             return Ok(false);
         }
@@ -327,7 +327,7 @@ pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>
 pub fn cond_tracepoints_enable<T>(tracepoints: Vec<(&str, &OpenProgramImpl<T>)>) -> Result<bool> {
     // Check if all the tracepoints exist.
     for (tp, _) in tracepoints.iter() {
-        if tracepoint_exists(tp)? == false {
+        if !tracepoint_exists(tp)? {
             warn!("tracepoint {tp} is missing, tracepoint not loaded");
             return Ok(false);
         }

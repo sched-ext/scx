@@ -176,7 +176,7 @@ pub fn find_best_split_size(total_items: usize, min_size: usize, max_size: usize
     let mut optimal_size = min_size;
 
     for size in min_size..=max_size {
-        if total_items % size == 0 {
+        if total_items.is_multiple_of(size) {
             optimal_size = size;
             break;
         }

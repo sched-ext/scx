@@ -161,7 +161,7 @@ impl PMUManager {
         Ok(())
     }
 
-    pub fn list_metadata(&self) -> () {
+    pub fn list_metadata(&self) {
         println!("Dataroot {}", self.dataroot.to_string_lossy());
         println!("Arch: {}", self.arch);
         println!("Tuple: {}", self.tuple);

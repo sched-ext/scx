@@ -92,7 +92,7 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     let max_cpu_id = *cpus.iter().max().unwrap();
 
     // Create a byte vector with enough bytes to cover all CPU IDs.
-    let mut bitmask = vec![0u8; (max_cpu_id + 1 + 7) / 8];
+    let mut bitmask = vec![0u8; (max_cpu_id + 1).div_ceil(8)];
 
     // Set the appropriate bits for each CPU ID.
     for cpu_id in cpus {
@@ -633,12 +633,12 @@ impl<'a> Scheduler<'a> {
     // Update hint for the cpufreq governor.
     fn init_cpufreq_perf(
         skel: &mut BpfSkel<'_>,
-        primary_domain: &String,
+        primary_domain: &str,
         auto: bool,
     ) -> Result<()> {
         // If we are using the powersave profile always scale the CPU frequency to the minimum,
         // otherwise use the maximum, unless automatic frequency scaling is enabled.
-        let perf_lvl: i64 = match primary_domain.as_str() {
+        let perf_lvl: i64 = match primary_domain {
             "powersave" => 0,
             _ if auto => -1,
             _ => 1024,
@@ -744,6 +744,7 @@ impl<'a> Scheduler<'a> {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     fn init_cache_domains(
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
@@ -906,12 +907,10 @@ impl Drop for Scheduler<'_> {
         info!("Unregister {SCHEDULER_NAME} scheduler");
 
         // Restore default CPU idle QoS resume latency.
-        if self.opts.idle_resume_us >= 0 {
-            if cpu_idle_resume_latency_supported() {
-                for cpu in self.topo.all_cpus.values() {
-                    update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
-                        .unwrap();
-                }
+        if self.opts.idle_resume_us >= 0 && cpu_idle_resume_latency_supported() {
+            for cpu in self.topo.all_cpus.values() {
+                update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
+                    .unwrap();
             }
         }
     }

@@ -254,7 +254,7 @@ impl LayerStats {
                         .iter()
                         .take(LAYER_USAGE_SUM_UPTO + 1)
                         .sum::<f64>()
-                        / ((*membw_limit_gb * (1024_u64.pow(3) as f64)) as f64)
+                        / (*membw_limit_gb * (1024_u64.pow(3) as f64))
                 } else {
                     0.0
                 }
@@ -283,7 +283,7 @@ impl LayerStats {
             enq_reenq: lstat_pct(LSTAT_ENQ_REENQ),
             enq_dsq: lstat_pct(LSTAT_ENQ_DSQ),
             min_exec: lstat_pct(LSTAT_MIN_EXEC),
-            min_exec_us: (lstat(LSTAT_MIN_EXEC_NS) / 1000) as u64,
+            min_exec_us: (lstat(LSTAT_MIN_EXEC_NS) / 1000),
             open_idle: lstat_pct(LSTAT_OPEN_IDLE),
             preempt: lstat_pct(LSTAT_PREEMPT),
             preempt_xllc: lstat_pct(LSTAT_PREEMPT_XLLC),
@@ -299,7 +299,7 @@ impl LayerStats {
             excl_collision: lstat_pct(LSTAT_EXCL_COLLISION),
             excl_preempt: lstat_pct(LSTAT_EXCL_PREEMPT),
             yielded: lstat_pct(LSTAT_YIELD),
-            yield_ignore: lstat(LSTAT_YIELD_IGNORE) as u64,
+            yield_ignore: lstat(LSTAT_YIELD_IGNORE),
             migration: lstat_pct(LSTAT_MIGRATION),
             xnuma_migration: lstat_pct(LSTAT_XNUMA_MIGRATION),
             xlayer_wake: lstat_pct(LSTAT_XLAYER_WAKE),
@@ -446,7 +446,7 @@ impl LayerStats {
 
         for (i, (&frac, &lat)) in self.llc_fracs.iter().zip(self.llc_lats.iter()).enumerate() {
             if (i % 4) == 0 {
-                writeln!(w, "")?;
+                writeln!(w)?;
                 write!(w, "  {:<width$}  [{:03}]", "", i, width = header_width)?;
             } else {
                 write!(w, " |")?;
@@ -459,7 +459,7 @@ impl LayerStats {
                 lat * 1_000.0
             )?;
         }
-        writeln!(w, "")?;
+        writeln!(w)?;
 
         if self.is_excl != 0 {
             writeln!(
@@ -682,14 +682,14 @@ impl SysStats {
 #[derive(Debug)]
 pub enum StatsReq {
     Hello(ThreadId),
-    Refresh(ThreadId, Stats),
+    Refresh(ThreadId, Box<Stats>),
     Bye(ThreadId),
 }
 
 #[derive(Debug)]
 pub enum StatsRes {
-    Hello(Stats),
-    Refreshed((Stats, SysStats)),
+    Hello(Box<Stats>),
+    Refreshed(Box<(Stats, SysStats)>),
     Bye,
 }
 
@@ -698,15 +698,15 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         let tid = current().id();
         req_ch.send(StatsReq::Hello(tid))?;
         let mut stats = Some(match res_ch.recv()? {
-            StatsRes::Hello(v) => v,
+            StatsRes::Hello(v) => *v,
             res => bail!("invalid response to Hello: {:?}", res),
         });
 
         let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
             Box::new(move |_args, (req_ch, res_ch)| {
-                req_ch.send(StatsReq::Refresh(tid, stats.take().unwrap()))?;
+                req_ch.send(StatsReq::Refresh(tid, Box::new(stats.take().unwrap())))?;
                 let (new_stats, sys_stats) = match res_ch.recv()? {
-                    StatsRes::Refreshed(v) => v,
+                    StatsRes::Refreshed(v) => *v,
                     res => bail!("invalid response to Refresh: {:?}", res),
                 };
                 stats = Some(new_stats);

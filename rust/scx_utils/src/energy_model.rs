@@ -25,6 +25,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct PerfState {
     pub cost: usize,
     pub frequency: usize,
@@ -34,6 +35,7 @@ pub struct PerfState {
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct PerfDomain {
     /// Monotonically increasing unique id.
     pub id: usize,

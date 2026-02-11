@@ -43,6 +43,7 @@ pub unsafe fn perf_event_open(
 }
 
 pub mod bindings {
+    #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/perf_bindings.rs"));
 }
 

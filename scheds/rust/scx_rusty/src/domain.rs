@@ -40,6 +40,7 @@ impl Domain {
         self.mask.weight()
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn ctx(&self) -> Option<&mut types::dom_ctx> {
         let domc = self.ctx.lock().unwrap();
 
@@ -80,6 +81,7 @@ impl DomainGroup {
                     Domain {
                         id: dom_id,
                         mask,
+                        #[allow(clippy::arc_with_non_send_sync)]
                         ctx: Arc::new(Mutex::new(None)),
                     },
                 );
@@ -98,6 +100,7 @@ impl DomainGroup {
                         Domain {
                             id: dom_id,
                             mask,
+                            #[allow(clippy::arc_with_non_send_sync)]
                             ctx: Arc::new(Mutex::new(None)),
                         },
                     );

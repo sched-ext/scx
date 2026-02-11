@@ -15,10 +15,11 @@ use crate::bpf_intf;
 use crate::CpuPool;
 use crate::LayerSpec;
 
-#[derive(Clone, Debug, PartialEq, Parser, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Parser, Serialize, Deserialize)]
 #[clap(rename_all = "snake_case")]
 pub enum LayerGrowthAlgo {
     /// Sticky attempts to place layers evenly spaced across cores.
+    #[default]
     Sticky,
     /// Linear starts with the lowest number CPU and grows towards the total
     /// number of CPUs.
@@ -113,12 +114,10 @@ fn parse_cpu_ranges(s: &str) -> Result<BTreeSet<usize>> {
 fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>> {
     let mut result = BTreeSet::new();
 
-    for entry in WalkDir::new("/sys/fs/cgroup") {
-        if let Ok(entry) = entry {
-            if entry.file_name() == "cpuset.cpus.effective" {
-                if let Ok(content) = fs::read_to_string(entry.path()) {
-                    result.insert(parse_cpu_ranges(&content)?);
-                }
+    for entry in WalkDir::new("/sys/fs/cgroup").into_iter().flatten() {
+        if entry.file_name() == "cpuset.cpus.effective" {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                result.insert(parse_cpu_ranges(&content)?);
             }
         }
     }
@@ -227,7 +226,7 @@ impl LayerGrowthAlgo {
             spec,
             layer_idx,
             topo,
-            cpusets: &get_cpusets(&topo)?,
+            cpusets: &get_cpusets(topo)?,
         };
         Ok(match self {
             LayerGrowthAlgo::Sticky => generator.grow_sticky(),
@@ -250,11 +249,6 @@ impl LayerGrowthAlgo {
     }
 }
 
-impl Default for LayerGrowthAlgo {
-    fn default() -> Self {
-        LayerGrowthAlgo::Sticky
-    }
-}
 
 struct LayerCoreOrderGenerator<'a> {
     cpu_pool: &'a CpuPool,
@@ -267,7 +261,7 @@ struct LayerCoreOrderGenerator<'a> {
 
 impl<'a> LayerCoreOrderGenerator<'a> {
     fn has_topology_preference(&self) -> bool {
-        self.spec.nodes().len() > 0 || self.spec.llcs().len() > 0
+        !self.spec.nodes().is_empty() || !self.spec.llcs().is_empty()
     }
 
     fn rotate_layer_offset(&self, vec: &'a mut Vec<usize>) -> &Vec<usize> {
@@ -280,7 +274,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     fn grow_sticky(&self) -> Vec<usize> {
         let mut core_order = vec![];
 
-        let is_left = self.layer_idx % 2 == 0;
+        let is_left = self.layer_idx.is_multiple_of(2);
         let rot_by = |layer_idx, len| -> usize {
             if layer_idx <= len {
                 layer_idx
@@ -390,7 +384,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                                     node_id, llc_id, core_id, cpu_id
                                 );
                             }
-                            core_id.clone()
+                            *core_id
                         })
                         .collect::<Vec<usize>>()
                 })
@@ -400,8 +394,8 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         }
 
         if make_random {
-            for mut core_vec in &mut node_core_vecs {
-                fastrand::shuffle(&mut core_vec);
+            for core_vec in &mut node_core_vecs {
+                fastrand::shuffle(core_vec);
             }
         }
 
@@ -423,11 +417,11 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_node_spread(&self) -> Vec<usize> {
-        return self.grow_node_spread_inner(false);
+        self.grow_node_spread_inner(false)
     }
 
     fn grow_node_spread_random(&self) -> Vec<usize> {
-        return self.grow_node_spread_inner(true);
+        self.grow_node_spread_inner(true)
     }
 
     fn grow_cpuset_spread_inner(&self, make_random: bool) -> Vec<usize> {
@@ -437,13 +431,13 @@ impl<'a> LayerCoreOrderGenerator<'a> {
 
         for cpuset in self.cpusets {
             max_cpuset_cores = std::cmp::max(cpuset_core_vecs.len(), max_cpuset_cores);
-            let cpuset_core_vec: Vec<&usize> = cpuset.cores.iter().map(|x| x).collect();
+            let cpuset_core_vec: Vec<&usize> = cpuset.cores.iter().collect();
             cpuset_core_vecs.push(cpuset_core_vec);
         }
 
         if make_random {
-            for mut core_vec in &mut cpuset_core_vecs {
-                fastrand::shuffle(&mut core_vec);
+            for core_vec in &mut cpuset_core_vecs {
+                fastrand::shuffle(core_vec);
             }
         }
 
@@ -466,11 +460,11 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_cpuset_spread(&self) -> Vec<usize> {
-        return self.grow_cpuset_spread_inner(false);
+        self.grow_cpuset_spread_inner(false)
     }
 
     fn grow_cpuset_spread_random(&self) -> Vec<usize> {
-        return self.grow_cpuset_spread_inner(true);
+        self.grow_cpuset_spread_inner(true)
     }
 
     fn grow_little_big(&self) -> Vec<usize> {
