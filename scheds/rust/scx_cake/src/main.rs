@@ -353,6 +353,15 @@ impl<'a> Scheduler<'a> {
             rodata.enable_stats = args.verbose;
             rodata.tier_configs = args.profile.tier_configs(quantum);
 
+            // P16: Pre-computed tier slices (single RODATA load vs multiply+shift)
+            let multipliers = args.profile.tier_multiplier();
+            let q_ns = quantum * 1000;
+            let mut slices = [0u64; 8];
+            for i in 0..8 {
+                slices[i] = (q_ns * multipliers[i] as u64) >> 10;
+            }
+            rodata.tier_slice_ns = slices;
+
             // DVFS: Battery profile enables per-tier CPU frequency steering
             rodata.enable_dvfs = args.profile.dvfs_enabled();
             if let Some(targets) = args.profile.dvfs_targets() {

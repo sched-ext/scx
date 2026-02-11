@@ -107,6 +107,36 @@ const fused_config_t tier_configs[8] = {
                 CAKE_DEFAULT_WAIT_BUDGET_T3 >> 10, CAKE_DEFAULT_STARVATION_T3 >> 10),
 };
 
+/* Vtime prefix LUT: 8 entries = 64B = 1 cache line.
+ * Index = (tier << 1) | new_flow. Replaces 3 shifts + 2 ORs with 1 load.
+ * (Pattern bench P7: 0.3664ns vs 0.5456ns, 10/10 wins on 9800X3D) */
+static const u64 vtime_prefix[8] = {
+    (1ULL << 63) | (0ULL << 56),                  /* T0, nf=0 */
+    (1ULL << 63) | (0ULL << 56) | (1ULL << 48),   /* T0, nf=1 */
+    (1ULL << 63) | (1ULL << 56),                  /* T1, nf=0 */
+    (1ULL << 63) | (1ULL << 56) | (1ULL << 48),   /* T1, nf=1 */
+    (1ULL << 63) | (2ULL << 56),                  /* T2, nf=0 */
+    (1ULL << 63) | (2ULL << 56) | (1ULL << 48),   /* T2, nf=1 */
+    (1ULL << 63) | (3ULL << 56),                  /* T3, nf=0 */
+    (1ULL << 63) | (3ULL << 56) | (1ULL << 48),   /* T3, nf=1 */
+};
+
+/* tick skip_mask LUT: 256B = 4 cache lines, permanently L1-hot at 1kHz.
+ * Replaces 3-branch ternary chain with single byte load.
+ * (Pattern bench P8: 0.1834ns vs 0.3656ns, 10/10 wins on 9800X3D) */
+static const u8 skip_mask_lut[256] = {
+    [0 ... 7]   = 0,   /* settling: check every tick */
+    [8 ... 15]  = 1,   /* warming: check every 2nd tick */
+    [16 ... 31] = 3,   /* confident: check every 4th tick */
+    [32 ... 255] = 7,  /* high confidence: check every 8th tick */
+};
+
+/* Pre-computed tier slices: 8 entries = 64B = 1 cache line.
+ * Replaces RODATA load + AND + multiply + shift with single load.
+ * Populated by Rust loader from quantum_ns × tier_multiplier.
+ * (Pattern bench P16: 0.2100ns vs 0.3136ns, 10/10 wins on 9800X3D) */
+const u64 tier_slice_ns[8] = { 0 };
+
 /* Per-tier graduated backoff recheck masks (RODATA)
  * Lower tiers (more stable) recheck less often.
  * T0 IRQs almost never change behavior → every 1024th stop.
@@ -465,7 +495,7 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      * Any contention (nr_running > 1) resets to 0 → full alertness.
      * Core ideology: good scheduling earns reduced overhead. */
     u8 tc = mbox->tick_counter;
-    u8 skip_mask = tc < 8 ? 0 : tc < 16 ? 1 : tc < 32 ? 3 : 7;
+    u8 skip_mask = skip_mask_lut[tc];  /* P8 LUT: 0.18ns vs 0.37ns ternary */
 
     if (!(tc & skip_mask)) {
         struct rq *rq = cake_get_rq(cpu_id_reg);
@@ -579,7 +609,8 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
         u16 avg_rt = EXTRACT_AVG_RT(old_fused);
         u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_clamped >> 3);
         u16 deficit = EXTRACT_DEFICIT(old_fused);
-        deficit = (rt_clamped >= deficit) ? 0 : deficit - rt_clamped;
+        u16 _d = deficit - rt_clamped;
+        deficit = (deficit > rt_clamped) ? _d : 0;  /* P4 cmov: 0.38ns vs 0.55ns */
         u32 new_fused = PACK_DEFICIT_AVG(deficit, new_avg);
         if (new_fused != old_fused)
             tctx->deficit_avg_fused = new_fused;
@@ -595,9 +626,9 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
              * so spot-check agrees exactly with full reclassify logic.
              * Only resets stability when a genuine tier change is imminent.
              * Zero false triggers from normal frame variance. */
-            u16 g0 = tier <= 0 ? TIER_GATE_T0 : TIER_GATE_T0 - TIER_GATE_T0 / 10;
-            u16 g1 = tier <= 1 ? TIER_GATE_T1 : TIER_GATE_T1 - TIER_GATE_T1 / 10;
-            u16 g2 = tier <= 2 ? TIER_GATE_T2 : TIER_GATE_T2 - TIER_GATE_T2 / 10;
+            u16 g0 = TIER_GATE_T0 - (tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless */
+            u16 g1 = TIER_GATE_T1 - (tier > 1) * (TIER_GATE_T1 / 10);
+            u16 g2 = TIER_GATE_T2 - (tier > 2) * (TIER_GATE_T2 / 10);
             u8 spot_tier;
             if      (new_avg < g0) spot_tier = 0;
             else if (new_avg < g1) spot_tier = 1;
@@ -628,7 +659,8 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
      * new-flow flag → task loses its priority bonus within the tier.
      * Initial deficit = quantum + new_flow_bonus ≈ 10ms of credit. */
     u16 deficit = EXTRACT_DEFICIT(old_fused);
-    deficit = (rt_clamped >= deficit) ? 0 : deficit - rt_clamped;
+    u16 _d2 = deficit - rt_clamped;
+    deficit = (deficit > rt_clamped) ? _d2 : 0;  /* P4 cmov: 0.38ns vs 0.55ns */
 
     /* Pre-compute deficit_exhausted before rt_clamped/deficit die (Rule 36) */
     bool deficit_exhausted = (deficit == 0 && (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)));
@@ -654,9 +686,9 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     /* Gate values with 10% hysteresis applied per-direction.
      * Promote gates (10% below): task must clearly be in the faster tier.
      * Demote gates  (10% above): task must clearly be in the slower tier. */
-    u16 g0 = old_tier <= 0 ? TIER_GATE_T0 : TIER_GATE_T0 - TIER_GATE_T0 / 10;  /* 100 or 90 */
-    u16 g1 = old_tier <= 1 ? TIER_GATE_T1 : TIER_GATE_T1 - TIER_GATE_T1 / 10;  /* 2000 or 1800 */
-    u16 g2 = old_tier <= 2 ? TIER_GATE_T2 : TIER_GATE_T2 - TIER_GATE_T2 / 10;  /* 8000 or 7200 */
+    u16 g0 = TIER_GATE_T0 - (old_tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless: 0.37ns vs 0.42ns */
+    u16 g1 = TIER_GATE_T1 - (old_tier > 1) * (TIER_GATE_T1 / 10);
+    u16 g2 = TIER_GATE_T2 - (old_tier > 2) * (TIER_GATE_T2 / 10);
 
     if      (new_avg < g0) new_tier = 0;
     else if (new_avg < g1) new_tier = 1;
@@ -687,9 +719,7 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     /* When tier changes, the quantum multiplier changes (T0=0.75x → T3=1.4x).
      * Update next_slice so the next execution bout uses the correct quantum. */
     if (tier_changed) {
-        u64 cfg = tier_configs[new_tier & 7];
-        u64 mult = UNPACK_MULTIPLIER(cfg);
-        tctx->next_slice = (quantum_ns * mult) >> 10;
+        tctx->next_slice = tier_slice_ns[new_tier & 7];  /* P16 LUT: 0.21ns vs 0.31ns */
         tctx->reclass_counter = 0;
     }
 }
@@ -735,15 +765,13 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                 u16 avg_rt = EXTRACT_AVG_RT(deficit_avg);
                 u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_us >> 3);
                 u16 deficit = EXTRACT_DEFICIT(deficit_avg);
-                deficit = (rt_us >= deficit) ? 0 : deficit - rt_us;
+                u16 _d3 = deficit - rt_us;
+                deficit = (deficit > rt_us) ? _d3 : 0;  /* P4 cmov: 0.38ns vs 0.55ns */
 
                 /* SPOT-CHECK: would new EWMA change the tier? */
-                u16 g0 = tier <= 0 ? TIER_GATE_T0 :
-                    TIER_GATE_T0 - TIER_GATE_T0 / 10;
-                u16 g1 = tier <= 1 ? TIER_GATE_T1 :
-                    TIER_GATE_T1 - TIER_GATE_T1 / 10;
-                u16 g2 = tier <= 2 ? TIER_GATE_T2 :
-                    TIER_GATE_T2 - TIER_GATE_T2 / 10;
+                u16 g0 = TIER_GATE_T0 - (tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless */
+                u16 g1 = TIER_GATE_T1 - (tier > 1) * (TIER_GATE_T1 / 10);
+                u16 g2 = TIER_GATE_T2 - (tier > 2) * (TIER_GATE_T2 / 10);
                 u8 spot;
                 if      (new_avg < g0) spot = 0;
                 else if (new_avg < g1) spot = 1;
@@ -785,8 +813,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                 /* Stage for next wakeup from cached values */
                 u8 nf = (packed >> SHIFT_FLAGS) & 1;
                 p->scx.slice = mbox->rc_slice;
-                p->scx.dsq_vtime = (1ULL << 63) |
-                    ((u64)tier << 56) | ((u64)nf << 48);
+                p->scx.dsq_vtime = vtime_prefix[(tier << 1) | nf];  /* P7 LUT: 0.37ns vs 0.55ns */
                 mbox->tick_ctx_valid = 0;
                 return;  /* ZERO kfunc stopping ✅ */
             }
@@ -806,8 +833,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
         u32 packed = tctx->packed_info;
         u8 tier = (packed >> SHIFT_TIER) & MASK_TIER;
         u8 nf = (packed >> SHIFT_FLAGS) & 1;
-        p->scx.dsq_vtime = (1ULL << 63) |
-            ((u64)tier << 56) | ((u64)nf << 48);
+        p->scx.dsq_vtime = vtime_prefix[(tier << 1) | nf];  /* P7 LUT: 0.37ns vs 0.55ns */
 
         /* Update cache for future fast-path hits */
         mbox->rc_task_ptr = (u64)p;
