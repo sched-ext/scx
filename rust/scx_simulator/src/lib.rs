@@ -33,6 +33,7 @@ pub mod cpu;
 pub mod dsq;
 pub mod engine;
 pub mod ffi;
+pub mod fmt;
 pub mod kfuncs;
 pub mod scenario;
 pub mod task;
@@ -42,6 +43,8 @@ pub mod types;
 // Re-export the main public types for convenience.
 pub use engine::Simulator;
 pub use ffi::{Scheduler, ScxSimple};
+pub use fmt::FmtN;
+pub use kfuncs::sim_clock;
 pub use scenario::Scenario;
 pub use task::{Phase, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
