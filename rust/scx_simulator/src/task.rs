@@ -129,8 +129,9 @@ impl SimTask {
             }
         }
         // Reset run_remaining for the new phase
-        if let Some(Phase::Run(ns)) = self.current_phase() {
-            self.run_remaining_ns = *ns;
+        match self.current_phase() {
+            Some(Phase::Run(ns)) => self.run_remaining_ns = *ns,
+            _ => self.run_remaining_ns = 0,
         }
         true
     }

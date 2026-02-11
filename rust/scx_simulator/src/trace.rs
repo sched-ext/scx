@@ -23,6 +23,8 @@ pub enum TraceKind {
     TaskScheduled { pid: Pid },
     /// A task was preempted (slice expired) on this CPU.
     TaskPreempted { pid: Pid },
+    /// A task yielded (phase complete but still runnable) on this CPU.
+    TaskYielded { pid: Pid },
     /// A task voluntarily slept on this CPU.
     TaskSlept { pid: Pid },
     /// A task woke up.
@@ -67,6 +69,7 @@ impl Trace {
                     running_since = Some(event.time_ns);
                 }
                 TraceKind::TaskPreempted { pid: p }
+                | TraceKind::TaskYielded { pid: p }
                 | TraceKind::TaskSlept { pid: p }
                 | TraceKind::TaskCompleted { pid: p }
                     if *p == pid =>
@@ -104,6 +107,7 @@ impl Trace {
             let desc = match &event.kind {
                 TraceKind::TaskScheduled { pid } => format!("SCHED    pid={}", pid.0),
                 TraceKind::TaskPreempted { pid } => format!("PREEMPT  pid={}", pid.0),
+                TraceKind::TaskYielded { pid } => format!("YIELD    pid={}", pid.0),
                 TraceKind::TaskSlept { pid } => format!("SLEEP    pid={}", pid.0),
                 TraceKind::TaskWoke { pid } => format!("WAKE     pid={}", pid.0),
                 TraceKind::TaskCompleted { pid } => format!("COMPLETE pid={}", pid.0),

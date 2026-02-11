@@ -400,6 +400,16 @@ impl<S: Scheduler> Simulator<S> {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Runnable;
 
+                    state
+                        .trace
+                        .record(state.clock, cpu, TraceKind::TaskYielded { pid });
+                    info!(
+                        cpu = cpu.0,
+                        task = task.name.as_str(),
+                        pid = pid.0,
+                        "YIELDED"
+                    );
+
                     // Re-enqueue
                     let raw = task.raw();
                     unsafe {
