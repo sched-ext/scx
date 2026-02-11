@@ -60,29 +60,7 @@
 #define EXTRACT_BITS_U64(val, start, len) \
     (((u64)(val) >> (start)) & ((1ULL << (len)) - 1))
 
-/* BIT SCAN FORWARD (CTZ): Clang <19 fallback uses De Bruijn to avoid opcode 191 crash */
-#if defined(__clang__) && __clang_major__ < 19
-    static __always_inline u32 cake_ctz64(u64 mask, u64 mult) {
-        static const u8 de_bruijn_bits[64] = {
-            0,  1,  2, 53,  3,  7, 54, 27, 4, 38, 41,  8, 34, 55, 48, 28,
-            62, 5, 39, 46, 44, 42, 22,  9, 24, 35, 59, 56, 49, 18, 29, 11,
-            63, 52, 6, 26, 37, 40, 33, 47, 61, 45, 43, 21, 23, 58, 17, 10,
-            51, 25, 36, 32, 60, 20, 57, 16, 50, 31, 19, 15, 30, 14, 13, 12
-        };
 
-        u64 lsb = mask & -mask;
-
-        /* Obfuscation barrier: prevents Clang 18 from optimizing back to __builtin_ctzll */
-        asm volatile("" : "+r"(lsb));
-
-        return de_bruijn_bits[(lsb * mult) >> 58];
-    }
-    #define BIT_SCAN_FORWARD_U64(mask) cake_ctz64(mask, 0x022FDD63CC95386DULL)
-    #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) cake_ctz64(mask, mult)
-#else
-    #define BIT_SCAN_FORWARD_U64(mask) __builtin_ctzll(mask)
-    #define BIT_SCAN_FORWARD_U64_RAW(mask, mult) __builtin_ctzll(mask)
-#endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * PREFETCH: Materialize address early to encourage prefetch-like behavior
@@ -93,15 +71,7 @@
 #define CAKE_PREFETCH(addr) \
     asm volatile("" : : "r"(addr))
 
-/* DSQ peek compat - v6.19+ uses native, older kernels use noinline iterator fallback */
-/* Prototype for scratch-tunneled version in cake.bpf.c */
-struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id);
 
-static __always_inline struct task_struct *cake_bpf_dsq_peek(u64 dsq_id) {
-    if (bpf_ksym_exists(scx_bpf_dsq_peek))
-        return scx_bpf_dsq_peek(dsq_id);
-    return cake_bpf_dsq_peek_legacy(dsq_id);
-}
 
 /* rq access — scx_bpf_cpu_rq() is universally available (~10-15ns).
  *
