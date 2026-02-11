@@ -317,7 +317,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
  * cache pollution and GPU pipeline bubbles. Tick-based starvation detection
  * is sufficient for gaming workloads. */
 
-/* Enqueue - A+B architecture: per-LLC DSQ with vtime = (tier << 56) | timestamp */
+/* Enqueue - A+B architecture: per-LLC DSQ with vtime = (tier << 56) | timestamp
+ *
+ * ZERO bpf_task_storage_get: tier + CAKE_FLOW_NEW flag are pre-staged in
+ * p->scx.dsq_vtime by cake_stopping (Rule 41: locality promotion). Slice is
+ * pre-staged in p->scx.slice. Both are direct task_struct field reads (~3ns)
+ * vs the 30-80ns cold-memory lookup under heavy load. The kernel does not
+ * read p->scx.dsq_vtime for sleeping tasks (not on any DSQ), so the staging
+ * bits are inert until we consume them here. */
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
     register struct task_struct *p_reg asm("r6") = p;
@@ -331,34 +338,32 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
     u64 now_cached = scr->cached_now;
     u32 enq_llc = scr->cached_llc;
 
-    struct cake_task_ctx *tctx = get_task_ctx(p_reg, false);
+    /* Read staged context from task_struct fields (~3ns each, always L1).
+     * Bit 63 = sentinel: set by cake_stopping = context exists.
+     * Clear = first dispatch or kthread without context → fallback. */
+    u64 staged = p_reg->scx.dsq_vtime;
 
-    /* Kthread cold path (inlined — reuses now_cached + enq_llc) */
-    if (unlikely((task_flags & PF_KTHREAD) && !tctx)) {
-        u64 vtime = ((u64)CAKE_TIER_CRITICAL << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
-        scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, quantum_ns, vtime, enq_flags);
+    if (unlikely(!(staged & (1ULL << 63)))) {
+        /* No staged context: first dispatch or kthread without alloc */
+        u8 fallback_tier = (task_flags & PF_KTHREAD) ?
+            CAKE_TIER_CRITICAL : CAKE_TIER_FRAME;
+        u64 vtime = ((u64)fallback_tier << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
+        scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc,
+                                 quantum_ns, vtime, enq_flags);
         return;
     }
 
-    register struct cake_task_ctx *tctx_reg asm("r7") = tctx;
-
-    /* Handle Yields/Background */
+    /* Handle Yields/Background — check before extracting tier */
     if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
         u64 vtime = ((u64)CAKE_TIER_BULK << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, quantum_ns, vtime, enq_flags);
         return;
     }
 
-    if (unlikely(!tctx_reg)) {
-        /* No context yet - use Frame tier */
-        u64 vtime = ((u64)CAKE_TIER_FRAME << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
-        scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, quantum_ns, vtime, enq_flags);
-        return;
-    }
-
-    /* Standard Tier Logic */
-    u8 tier = GET_TIER(tctx_reg) & 3;
-    u64 slice = tctx_reg->next_slice;
+    /* Extract staged fields — zero bpf_task_storage_get */
+    u8 tier = (staged >> 56) & 3;
+    u8 new_flow = (staged >> 48) & 1;
+    u64 slice = p_reg->scx.slice ?: quantum_ns;
 
     if (enable_stats) {
         struct cake_stats *s = get_local_stats();
@@ -377,8 +382,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * newly spawned threads instant responsiveness (e.g., game launching a
      * new worker). Cleared by reclassify_task_cold when deficit exhausts. */
     u64 vtime = ((u64)tier << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
-    u32 task_packed = cake_relaxed_load_u32(&tctx_reg->packed_info);
-    if (task_packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS))
+    if (new_flow)
         vtime -= new_flow_bonus_ns;
     scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc, slice, vtime, enq_flags);
 }
@@ -677,15 +681,27 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     }
 }
 
-/* Task stopping — avg_runtime reclassification + DRR++ deficit tracking */
+/* Task stopping — avg_runtime reclassification + DRR++ deficit tracking.
+ * Pre-stages p->scx.slice and p->scx.dsq_vtime for the next wakeup so
+ * select_cpu and enqueue read direct task_struct fields (~3ns each)
+ * instead of bpf_task_storage_get (~30-80ns under load). */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
     struct cake_task_ctx *tctx = get_task_ctx(p, false);
     if (tctx) {
         reclassify_task_cold(tctx);
-        /* Pre-stage slice for next wakeup — select_cpu reads p->scx.slice
-         * directly (~3ns) instead of bpf_task_storage_get (~30ns). */
+
+        /* Stage slice for select_cpu direct dispatch paths */
         p->scx.slice = tctx->next_slice;
+
+        /* Stage tier + DRR++ new-flow flag for enqueue.
+         * Bit layout: [63]=sentinel | [57:56]=tier | [48]=new_flow
+         * Kernel doesn't read dsq_vtime for sleeping tasks (not on DSQ).
+         * scx_bpf_dsq_insert_vtime overwrites with real vtime on dispatch. */
+        u32 packed = tctx->packed_info;
+        u8 tier = (packed >> SHIFT_TIER) & MASK_TIER;
+        u8 nf = (packed >> SHIFT_FLAGS) & 1;
+        p->scx.dsq_vtime = (1ULL << 63) | ((u64)tier << 56) | ((u64)nf << 48);
     }
 }
 
