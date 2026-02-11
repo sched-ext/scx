@@ -12,6 +12,7 @@ char _license[] SEC("license") = "GPL";
 const u64 quantum_ns = CAKE_DEFAULT_QUANTUM_NS;
 const u64 new_flow_bonus_ns = CAKE_DEFAULT_NEW_FLOW_BONUS_NS;
 const bool enable_stats = false;
+const bool enable_dvfs = false;  /* RODATA — JIT eliminates DVFS block when false (default gaming) */
 
 /* Topology config - JIT eliminates unused P/E-core steering when has_hybrid=false */
 const bool has_hybrid = false;
@@ -38,11 +39,9 @@ struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
 /* Per-CPU scratch area - BSS-tunneled helper outputs, isolated to prevent MESI contention */
 struct cake_scratch {
     bool dummy_idle;
-    u32 init_tier;
     u32 cached_llc;            /* LLC ID tunneled from select_cpu → enqueue (saves 1 kfunc) */
     u64 cached_now;            /* scx_bpf_now() tunneled from select_cpu → enqueue (saves 1 kfunc) */
-    struct bpf_iter_scx_dsq it; /* BSS-Tunneling for iterators */
-    u8 _pad[36]; /* Pad to 128 bytes (2 cache lines) */
+    u8 _pad[111]; /* Pad to 128 bytes (2 cache lines) */
 } global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
 _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
@@ -82,9 +81,6 @@ UEI_DEFINE(uei);
 
 /* A+B ARCHITECTURE: Per-LLC DSQs with vtime-encoded priority.
  * DSQ IDs: LLC_DSQ_BASE + 0, LLC_DSQ_BASE + 1, ... (one per LLC). */
-
-/* Per-CPU Direct Dispatch Queues (1000-1063) */
-#define CAKE_DSQ_LC_BASE 1000
 
 /* Tier config table - 4 tiers + padding, AoS layout: single cache line fetch */
 const fused_config_t tier_configs[8] = {
@@ -133,26 +129,7 @@ struct {
     __type(value, struct cake_task_ctx);
 } task_ctx SEC(".maps");
 
-/* RESTORE peek_legacy via scratch tunnel */
-__attribute__((noinline))
-struct task_struct *cake_bpf_dsq_peek_legacy(u64 dsq_id)
-{
-    /* Preserve dsq_id across helper call */
-    register u64 dsq_reg asm("r9") = dsq_id;
-    asm volatile("" : "+r"(dsq_reg));
 
-    u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    asm volatile("" : "+r"(dsq_reg)); /* Refresh liveness */
-
-    struct cake_scratch *scr = &global_scratch[cpu];
-    struct task_struct *p = NULL;
-
-    if (bpf_iter_scx_dsq_new(&scr->it, dsq_reg, 0) == 0) {
-        p = bpf_iter_scx_dsq_next(&scr->it);
-        bpf_iter_scx_dsq_destroy(&scr->it);
-    }
-    return p;
-}
 
 /* Bitfield accessors - relaxed atomics prevent tearing */
 
@@ -228,10 +205,9 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
     }
 
     u32 packed = 0;
-    packed |= (255 & MASK_KALMAN_ERROR) << SHIFT_KALMAN_ERROR;
     /* Fused TIER+FLAGS: bits [29:24] = [tier:2][flags:4] (Rule 37 coalescing) */
     packed |= (((u32)(init_tier & MASK_TIER) << 4) | (CAKE_FLOW_NEW & MASK_FLAGS)) << SHIFT_FLAGS;
-    /* stable=0, wait_data=0: implicit from packed=0 */
+    /* stable=0: implicit from packed=0 */
 
     ctx->packed_info = packed;
 
@@ -295,11 +271,9 @@ s32 dispatch_sync_cold(struct task_struct *p, u64 wake_flags)
     if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
         return -1;
 
-    /* Use tier-adjusted slice, not raw quantum. Without this, the kernel's
-     * slice countdown preempts at 2ms before cake_tick can check the
-     * tier-adjusted threshold — making multipliers dead code for SYNC. */
-    struct cake_task_ctx *tctx = bpf_task_storage_get(&task_ctx, p, 0, 0);
-    u64 slice = tctx ? tctx->next_slice : quantum_ns;
+    /* p->scx.slice pre-staged by cake_stopping — direct field read (~3ns)
+     * vs bpf_task_storage_get (~30ns). Fallback for first-ever dispatch. */
+    u64 slice = p->scx.slice ?: quantum_ns;
 
     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
     return (s32)cpu;
@@ -323,11 +297,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
     if (scr->dummy_idle) {
         /* Kernel found & claimed an idle CPU — direct dispatch.
-         * Use tier-adjusted slice so kernel preemption matches tick's check.
-         * Falls back to raw quantum for unclassified tasks (first wakeup).
-         * No tunnel needed — enqueue never runs on this path. */
-        struct cake_task_ctx *tctx = bpf_task_storage_get(&task_ctx, p, 0, 0);
-        u64 slice = tctx ? tctx->next_slice : quantum_ns;
+         * p->scx.slice pre-staged by cake_stopping (~3ns direct read). */
+        u64 slice = p->scx.slice ?: quantum_ns;
         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
         return cpu;
     }
@@ -519,28 +490,24 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
         if (tc < 255) mbox->tick_counter = tc + 1;
     }
 
-    /* MEGA-MAILBOX UPDATE: tier for dispatch to consume (MESI-guarded) */
-    u8 new_flags = (tier_reg & MBOX_TIER_MASK);
-    if (mbox->flags != new_flags)
-        mbox->flags = new_flags;
 
-    /* DVFS: Tier-proportional CPU frequency steering.
-     * Runs in tick (rq-locked) = ~15-20ns vs ~30-80ns unlocked in running.
-     * Hysteresis: skip kfunc if perf target unchanged (MESI-friendly).
-     *
-     * Hybrid scaling: on Intel P/E-core systems, scale target by each core's
-     * cpuperf_cap so E-cores don't get over-requested. JIT eliminates this
-     * branch entirely on non-hybrid CPUs (has_hybrid = false in RODATA). */
-    u32 target = tier_perf_target[tier_reg & 7];
-    if (has_hybrid) {
-        u32 cap = scx_bpf_cpuperf_cap(cpu_id_reg);
-        target = (target * cap) >> 10;  /* scale by capability (1024 = 100%) */
-    }
-    u8 cached_perf = mbox->dsq_hint;
-    u8 target_cached = (u8)(target >> 2);
-    if (cached_perf != target_cached) {
-        scx_bpf_cpuperf_set(cpu_id_reg, target);
-        mbox->dsq_hint = target_cached;
+    /* DVFS: Tier-proportional CPU frequency steering (default OFF for gaming).
+     * Disabled by default: (1) T3 at 75% makes bulk tasks run 33% longer on-core,
+     * competing with game threads. (2) performance governor makes cpuperf_set a no-op.
+     * (3) CPPC2 beats cake's 1ms tick granularity. (4) Per-tick overhead wasted.
+     * JIT eliminates this entire block when enable_dvfs = false. */
+    if (enable_dvfs) {
+        u32 target = tier_perf_target[tier_reg & 7];
+        if (has_hybrid) {
+            u32 cap = scx_bpf_cpuperf_cap(cpu_id_reg);
+            target = (target * cap) >> 10;
+        }
+        u8 cached_perf = mbox->dsq_hint;
+        u8 target_cached = (u8)(target >> 3);  /* 1024>>3=128, fits u8 (was >>2=256 overflow) */
+        if (cached_perf != target_cached) {
+            scx_bpf_cpuperf_set(cpu_id_reg, target);
+            mbox->dsq_hint = target_cached;
+        }
     }
 }
 
@@ -714,8 +681,12 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
     struct cake_task_ctx *tctx = get_task_ctx(p, false);
-    if (tctx)
+    if (tctx) {
         reclassify_task_cold(tctx);
+        /* Pre-stage slice for next wakeup — select_cpu reads p->scx.slice
+         * directly (~3ns) instead of bpf_task_storage_get (~30ns). */
+        p->scx.slice = tctx->next_slice;
+    }
 }
 
 /* Initialize the scheduler */
