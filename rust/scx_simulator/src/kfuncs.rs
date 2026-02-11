@@ -104,6 +104,16 @@ impl SimulatorState {
         x
     }
 
+    /// Advance a CPU's local clock to at least the event queue time.
+    ///
+    /// Uses Lamport-style max: `local_clock = max(local_clock, clock)`.
+    /// When there's no scheduler overhead, this keeps local clocks in sync
+    /// with the event queue. With overhead, local clocks advance further.
+    pub fn advance_cpu_clock(&mut self, cpu: CpuId) {
+        let idx = cpu.0 as usize;
+        self.cpus[idx].local_clock = self.cpus[idx].local_clock.max(self.clock);
+    }
+
     /// Execute a pending deferred dispatch, resolving `SCX_DSQ_LOCAL` to
     /// the given `local_cpu`.
     ///
@@ -143,7 +153,7 @@ impl SimulatorState {
 
 thread_local! {
     static SIM_STATE: RefCell<Option<*mut SimulatorState>> = const { RefCell::new(None) };
-    static SIM_CLOCK: std::cell::Cell<TimeNs> = const { std::cell::Cell::new(0) };
+    static SIM_LOCAL_CLOCK: std::cell::Cell<TimeNs> = const { std::cell::Cell::new(0) };
 }
 
 /// Install a simulator state pointer for the duration of ops callbacks.
@@ -164,18 +174,18 @@ pub fn exit_sim() {
     });
 }
 
-/// Read the simulator clock from the thread-local state.
+/// Read the current CPU's local clock from the thread-local.
 ///
-/// Returns the current simulated time in nanoseconds.
+/// Returns the local clock set by the engine for the current event's CPU.
 /// Used by the custom trace formatter to show simulated time.
 pub fn sim_clock() -> TimeNs {
-    SIM_CLOCK.with(|c| c.get())
+    SIM_LOCAL_CLOCK.with(|c| c.get())
 }
 
-/// Update the simulator clock thread-local. Called by the engine on
-/// every event loop iteration so the trace formatter always has access.
-pub fn set_sim_clock(t: TimeNs) {
-    SIM_CLOCK.with(|c| c.set(t));
+/// Update the local clock thread-local. Called by the engine before
+/// `info!`/`debug!` calls so the trace formatter has access.
+pub fn set_sim_clock(local: TimeNs) {
+    SIM_LOCAL_CLOCK.with(|c| c.set(local));
 }
 
 /// Access the simulator state from within a kfunc.
@@ -330,10 +340,13 @@ pub extern "C" fn scx_bpf_kick_cpu(_cpu: i32, _flags: u64) {
     // Phase 2: generate dispatch events for kicked CPUs
 }
 
-/// Get the current simulated time.
+/// Get the current simulated time (per-CPU local clock).
 #[no_mangle]
 pub extern "C" fn scx_bpf_now() -> u64 {
-    with_sim(|sim| sim.clock)
+    with_sim(|sim| {
+        let cpu = sim.current_cpu.0 as usize;
+        sim.cpus[cpu].local_clock
+    })
 }
 
 /// Get the current CPU ID.
@@ -383,10 +396,13 @@ pub extern "C" fn scx_bpf_put_idle_cpumask(_cpumask: *const c_void) {}
 #[no_mangle]
 pub extern "C" fn scx_bpf_destroy_dsq(_dsq_id: u64) {}
 
-/// No-op for bpf_ktime_get_ns -- use sim clock instead.
+/// No-op for bpf_ktime_get_ns -- use per-CPU local clock.
 #[no_mangle]
 pub extern "C" fn bpf_ktime_get_ns() -> u64 {
-    with_sim(|sim| sim.clock)
+    with_sim(|sim| {
+        let cpu = sim.current_cpu.0 as usize;
+        sim.cpus[cpu].local_clock
+    })
 }
 
 // RCU stubs -- no-op in simulator

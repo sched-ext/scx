@@ -3,6 +3,7 @@
 //! Every scheduling action (task scheduled, preempted, slept, woke, CPU idle)
 //! is recorded as a `TraceEvent` with a simulated timestamp and CPU ID.
 
+use crate::fmt::FmtTs;
 use crate::types::{CpuId, Pid, TimeNs};
 
 /// A single trace event produced by the simulator.
@@ -113,7 +114,12 @@ impl Trace {
                 TraceKind::TaskCompleted { pid } => format!("COMPLETE pid={}", pid.0),
                 TraceKind::CpuIdle => "IDLE".to_string(),
             };
-            eprintln!("[{:>12} ns] cpu={:<3} {}", event.time_ns, event.cpu.0, desc);
+            eprintln!(
+                "[{}] cpu={:<3} {}",
+                FmtTs::local(event.time_ns),
+                event.cpu.0,
+                desc
+            );
         }
     }
 }
