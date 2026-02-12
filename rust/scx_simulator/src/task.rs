@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 
 use crate::ffi;
-use crate::types::{CpuId, Pid, TimeNs, Weight};
+use crate::types::{CpuId, Pid, TimeNs, Vtime, Weight};
 
 /// The state a simulated task can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +142,8 @@ impl SimTask {
     }
 
     /// Read the task's dsq_vtime from the C task_struct.
-    pub fn get_dsq_vtime(&self) -> u64 {
-        unsafe { ffi::sim_task_get_dsq_vtime(self.raw) }
+    pub fn get_dsq_vtime(&self) -> Vtime {
+        Vtime(unsafe { ffi::sim_task_get_dsq_vtime(self.raw) })
     }
 }
 
