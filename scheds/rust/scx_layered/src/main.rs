@@ -609,10 +609,6 @@ struct Opts {
     #[arg(short = 't', long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     disable_topology: Option<bool>,
 
-    /// Enable cross NUMA preemption.
-    #[clap(long)]
-    xnuma_preemption: bool,
-
     /// Disable monitor
     #[clap(long)]
     monitor_disable: bool,
@@ -2514,7 +2510,6 @@ impl<'a> Scheduler<'a> {
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         rodata.smt_enabled = topo.smt_enabled;
         rodata.has_little_cores = topo.has_little_cores();
-        rodata.xnuma_preemption = opts.xnuma_preemption;
         rodata.antistall_sec = opts.antistall_sec;
         rodata.monitor_disable = opts.monitor_disable;
         rodata.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;

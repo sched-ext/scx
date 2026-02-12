@@ -60,7 +60,6 @@ const LSTAT_KEEP_FAIL_BUSY: usize = bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_BUSY
 const LSTAT_PREEMPT: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT as usize;
 const LSTAT_PREEMPT_FIRST: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FIRST as usize;
 const LSTAT_PREEMPT_XLLC: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XLLC as usize;
-const LSTAT_PREEMPT_XNUMA: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XNUMA as usize;
 const LSTAT_PREEMPT_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE as usize;
 const LSTAT_PREEMPT_FAIL: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL as usize;
 const LSTAT_EXCL_COLLISION: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION as usize;
@@ -150,8 +149,6 @@ pub struct LayerStats {
     pub preempt: f64,
     #[stat(desc = "% preempted XLLC tasks")]
     pub preempt_xllc: f64,
-    #[stat(desc = "% preempted XNUMA tasks")]
-    pub preempt_xnuma: f64,
     #[stat(desc = "% first-preempted other tasks")]
     pub preempt_first: f64,
     #[stat(desc = "% idle-preempted other tasks")]
@@ -287,7 +284,6 @@ impl LayerStats {
             open_idle: lstat_pct(LSTAT_OPEN_IDLE),
             preempt: lstat_pct(LSTAT_PREEMPT),
             preempt_xllc: lstat_pct(LSTAT_PREEMPT_XLLC),
-            preempt_xnuma: lstat_pct(LSTAT_PREEMPT_XNUMA),
             preempt_first: lstat_pct(LSTAT_PREEMPT_FIRST),
             preempt_idle: lstat_pct(LSTAT_PREEMPT_IDLE),
             preempt_fail: lstat_pct(LSTAT_PREEMPT_FAIL),
@@ -391,12 +387,11 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{}",
+            "  {:<width$}  preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
             "",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
             fmt_pct(self.preempt_xllc),
-            fmt_pct(self.preempt_xnuma),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
             width = header_width,

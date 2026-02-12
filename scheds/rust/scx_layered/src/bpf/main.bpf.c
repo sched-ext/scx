@@ -42,7 +42,6 @@ const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = true;
-const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
