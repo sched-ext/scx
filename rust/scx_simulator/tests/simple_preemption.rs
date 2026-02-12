@@ -11,7 +11,7 @@ fn test_sleep_wake_cycle() {
         .task(TaskDef {
             name: "sleeper".into(),
             pid: Pid(1),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![
                     Phase::Run(5_000_000),    // run 5ms
@@ -50,7 +50,7 @@ fn test_slice_preemption() {
         .task(TaskDef {
             name: "long_runner".into(),
             pid: Pid(1),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 // Run much longer than a single slice (SCX_SLICE_DFL = 20ms)
                 phases: vec![Phase::Run(100_000_000)], // 100ms
@@ -89,7 +89,7 @@ fn test_preemption_interleaving() {
         .task(TaskDef {
             name: "t1".into(),
             pid: Pid(1),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
                 repeat: true,
@@ -99,7 +99,7 @@ fn test_preemption_interleaving() {
         .task(TaskDef {
             name: "t2".into(),
             pid: Pid(2),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
                 repeat: true,
