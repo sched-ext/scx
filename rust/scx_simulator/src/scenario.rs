@@ -1,7 +1,7 @@
 //! Scenario definition and builder API.
 
 use crate::task::{TaskBehavior, TaskDef};
-use crate::types::{Pid, TimeNs, Weight};
+use crate::types::{Pid, TimeNs};
 
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
@@ -44,13 +44,13 @@ impl ScenarioBuilder {
     }
 
     /// Convenience: add a task with auto-assigned PID.
-    pub fn add_task(mut self, name: &str, weight: Weight, behavior: TaskBehavior) -> Self {
+    pub fn add_task(mut self, name: &str, nice: i8, behavior: TaskBehavior) -> Self {
         let pid = self.next_pid;
         self.next_pid = Pid(pid.0 + 1);
         self.tasks.push(TaskDef {
             name: name.to_string(),
             pid,
-            weight,
+            nice,
             behavior,
             start_time_ns: 0,
         });

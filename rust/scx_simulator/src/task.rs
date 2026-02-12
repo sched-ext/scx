@@ -6,7 +6,29 @@
 use std::ffi::c_void;
 
 use crate::ffi;
-use crate::types::{CpuId, Pid, TimeNs, Vtime, Weight};
+use crate::types::{CpuId, Pid, TimeNs, Vtime};
+
+/// Kernel sched_prio_to_weight table from kernel/sched/core.c.
+/// Maps nice levels -20..19 (indices 0..39) to scheduler weights.
+const SCHED_PRIO_TO_WEIGHT: [u32; 40] = [
+    /* -20 */ 88761, 71755, 56483, 46273, 36291,
+    /* -15 */ 29154, 23254, 18705, 14949, 11916,
+    /* -10 */ 9548, 7620, 6100, 4904, 3906,
+    /*  -5 */ 3121, 2501, 1991, 1586, 1277,
+    /*   0 */ 1024, 820, 655, 526, 423,
+    /*   5 */ 335, 272, 215, 172, 137,
+    /*  10 */ 110, 87, 70, 56, 45,
+    /*  15 */ 36, 29, 23, 18, 15,
+];
+
+/// Convert a nice value (-20..=19) to a kernel scheduler weight.
+pub fn nice_to_weight(nice: i8) -> u32 {
+    assert!(
+        (-20..=19).contains(&nice),
+        "nice value {nice} out of range -20..=19"
+    );
+    SCHED_PRIO_TO_WEIGHT[(nice + 20) as usize]
+}
 
 /// The state a simulated task can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +66,7 @@ pub struct TaskBehavior {
 pub struct TaskDef {
     pub name: String,
     pub pid: Pid,
-    pub weight: Weight,
+    pub nice: i8,
     pub behavior: TaskBehavior,
     /// When the task first becomes runnable (simulated ns).
     pub start_time_ns: TimeNs,
@@ -79,14 +101,16 @@ impl SimTask {
         let raw = unsafe { ffi::sim_task_alloc() };
         assert!(!raw.is_null(), "sim_task_alloc returned null");
 
+        let weight = nice_to_weight(def.nice);
+
         unsafe {
             ffi::sim_task_set_pid(raw, def.pid.0);
-            ffi::sim_task_set_weight(raw, def.weight);
-            ffi::sim_task_set_scx_weight(raw, def.weight);
+            ffi::sim_task_set_weight(raw, weight);
+            ffi::sim_task_set_scx_weight(raw, weight);
             // Default: task can run on all CPUs
             ffi::sim_task_set_nr_cpus_allowed(raw, nr_cpus as i32);
-            // Default nice 0 = static_prio 120
-            ffi::sim_task_set_static_prio(raw, 120);
+            // static_prio = nice + 120
+            ffi::sim_task_set_static_prio(raw, def.nice as i32 + 120);
         }
 
         // Initialize run_remaining from the first phase if it's a Run

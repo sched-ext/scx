@@ -2,8 +2,8 @@
 //!
 //! Newtypes for identifiers (DSQ IDs, PIDs, CPU IDs) and virtual time
 //! prevent silent type confusion. Type aliases for plain quantities
-//! (timestamps, weights) provide self-documenting code without the
-//! boilerplate of implementing arithmetic traits.
+//! (timestamps) provide self-documenting code without the boilerplate
+//! of implementing arithmetic traits.
 
 /// Dispatch queue identifier. Wraps u64 with kernel bit-flag conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -44,5 +44,3 @@ pub type TimeNs = u64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Vtime(pub u64);
 
-/// Scheduler weight (higher = more CPU share).
-pub type Weight = u32;

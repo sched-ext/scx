@@ -13,7 +13,7 @@ fn test_single_task_single_cpu() {
         .task(TaskDef {
             name: "worker".into(),
             pid: Pid(1),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(5_000_000)], // 5ms
                 repeat: false,
@@ -55,7 +55,7 @@ fn test_multiple_tasks_single_cpu() {
         .task(TaskDef {
             name: "t1".into(),
             pid: Pid(1),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(20_000_000)], // 20ms
                 repeat: true,
@@ -65,7 +65,7 @@ fn test_multiple_tasks_single_cpu() {
         .task(TaskDef {
             name: "t2".into(),
             pid: Pid(2),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(20_000_000)], // 20ms
                 repeat: true,
@@ -104,7 +104,7 @@ fn test_multiple_cpus() {
         .task(TaskDef {
             name: "t1".into(),
             pid: Pid(1),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)], // 50ms
                 repeat: true,
@@ -114,7 +114,7 @@ fn test_multiple_cpus() {
         .task(TaskDef {
             name: "t2".into(),
             pid: Pid(2),
-            weight: 100,
+            nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)], // 50ms
                 repeat: true,
@@ -157,7 +157,7 @@ fn test_determinism() {
             .task(TaskDef {
                 name: "t1".into(),
                 pid: Pid(1),
-                weight: 100,
+                nice: 0,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(10_000_000)],
                     repeat: true,
@@ -167,7 +167,7 @@ fn test_determinism() {
             .task(TaskDef {
                 name: "t2".into(),
                 pid: Pid(2),
-                weight: 200,
+                nice: -3,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(10_000_000)],
                     repeat: true,

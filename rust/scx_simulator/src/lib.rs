@@ -18,7 +18,7 @@
 //!
 //! let scenario = Scenario::builder()
 //!     .cpus(2)
-//!     .add_task("worker", 100, TaskBehavior {
+//!     .add_task("worker", 0, TaskBehavior {
 //!         phases: vec![Phase::Run(10_000_000)],
 //!         repeat: true,
 //!     })
@@ -46,9 +46,9 @@ pub use ffi::{Scheduler, ScxSimple, ScxTickless};
 pub use fmt::{FmtN, FmtTs};
 pub use kfuncs::sim_clock;
 pub use scenario::Scenario;
-pub use task::{Phase, TaskBehavior, TaskDef};
+pub use task::{Phase, TaskBehavior, TaskDef, nice_to_weight};
 pub use trace::{Trace, TraceEvent, TraceKind};
-pub use types::{CpuId, DsqId, Pid, TimeNs, Vtime, Weight};
+pub use types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
 use std::sync::Mutex;
 
