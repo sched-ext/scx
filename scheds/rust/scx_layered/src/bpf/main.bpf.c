@@ -42,7 +42,6 @@ const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = true;
-const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
@@ -2954,7 +2953,6 @@ static s32 create_node(u32 node_id)
 
 			cpuc->node_id = node_id;
 			nodec->nr_cpus++;
-			nodec->llc_mask |= (1LLU << node_id);
 		}
 	}
 
@@ -3597,9 +3595,6 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		}
 
 		bpf_for(j, 0, nr_llcs) {
-			if (!(layer->llc_mask & (1 << j)))
-				continue;
-
 			dsq_id = layer_dsq_id(layer->id, j);
 			scx_bpf_dump("LAYER[%d](%s)-DSQ[%llx] nr_cpus=%u nr_queued=%d %+lldms\n",
 				     i, layer->name, dsq_id, layer->nr_cpus,

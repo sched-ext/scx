@@ -138,7 +138,6 @@ enum layer_stat_id {
 	LSTAT_PREEMPT,
 	LSTAT_PREEMPT_FIRST,
 	LSTAT_PREEMPT_XLLC,
-	LSTAT_PREEMPT_XNUMA,
 	LSTAT_PREEMPT_IDLE,
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
@@ -246,7 +245,6 @@ struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_llcs;
 	u32			nr_cpus;
-	u64			llc_mask;
 };
 
 enum layer_match_kind {
@@ -364,8 +362,6 @@ struct layer {
 	u64			nr_tasks;
 
 	u64			cpus_seq;
-	u64			node_mask;
-	u64			llc_mask;
 	bool			check_no_idle;
 	u32			perf;
 	u64			refresh_cpus;
