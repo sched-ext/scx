@@ -44,6 +44,8 @@ pub struct CellMetrics {
     pub demand_borrow_pct: f64,
     #[stat(desc = "Lent CPU time %")]
     pub lent_pct: f64,
+    #[stat(desc = "EWMA-smoothed utilization %")]
+    pub smoothed_util_pct: f64,
 }
 
 impl CellMetrics {
@@ -93,6 +95,8 @@ pub struct Metrics {
     pub demand_borrow_pct: f64,
     #[stat(desc = "Lent CPU time %")]
     pub lent_pct: f64,
+    #[stat(desc = "Number of rebalancing events")]
+    pub rebalance_count: u64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,
 }

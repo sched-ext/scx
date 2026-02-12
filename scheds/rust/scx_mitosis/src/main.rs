@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -156,6 +157,22 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_borrowing: bool,
 
+    /// Enable demand-based CPU rebalancing between cells.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_rebalancing: bool,
+
+    /// Utilization spread (max - min) that triggers rebalancing (default: 20%)
+    #[clap(long, default_value = "20.0")]
+    rebalance_threshold: f64,
+
+    /// Minimum seconds between rebalancing events (default: 5)
+    #[clap(long, default_value = "5")]
+    rebalance_cooldown_s: u64,
+
+    /// EWMA smoothing factor for demand tracking. Higher = more responsive (default: 0.3)
+    #[clap(long, default_value = "0.3")]
+    demand_smoothing: f64,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -195,6 +212,20 @@ struct Scheduler<'a> {
     cell_manager: Option<CellManager>,
     /// Whether CPU borrowing is enabled
     enable_borrowing: bool,
+    /// Whether demand-based rebalancing is enabled
+    enable_rebalancing: bool,
+    /// Utilization spread threshold for triggering rebalancing
+    rebalance_threshold: f64,
+    /// Minimum duration between rebalancing events
+    rebalance_cooldown: Duration,
+    /// EWMA smoothing factor for demand tracking
+    demand_smoothing: f64,
+    /// EWMA-smoothed utilization per cell
+    smoothed_util: [f64; MAX_CELLS],
+    /// Last time rebalancing was performed
+    last_rebalance: Instant,
+    /// Number of rebalancing events
+    rebalance_count: u64,
     /// Epoll instance for waiting on multiple fds (inotify, stats wakeup)
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
@@ -376,6 +407,13 @@ impl<'a> Scheduler<'a> {
             last_configuration_seq: None,
             cell_manager,
             enable_borrowing: opts.enable_borrowing,
+            enable_rebalancing: opts.enable_rebalancing,
+            rebalance_threshold: opts.rebalance_threshold,
+            rebalance_cooldown: Duration::from_secs(opts.rebalance_cooldown_s),
+            demand_smoothing: opts.demand_smoothing,
+            smoothed_util: [0.0; MAX_CELLS],
+            last_rebalance: Instant::now(),
+            rebalance_count: 0,
             epoll,
             stats_waker,
         })
@@ -436,6 +474,10 @@ impl<'a> Scheduler<'a> {
             // Periodic work on every iteration
             self.refresh_bpf_cells()?;
             self.collect_metrics()?;
+
+            if self.enable_rebalancing && self.cell_manager.is_some() {
+                self.maybe_rebalance()?;
+            }
         }
 
         drop(struct_ops);
@@ -495,17 +537,104 @@ impl<'a> Scheduler<'a> {
     /// Compute cell configuration from CellManager and apply it to BPF.
     /// Returns the CPU assignments for use with `format_cell_config`.
     fn compute_and_apply_cell_config(&mut self) -> Result<Vec<CpuAssignment>> {
+        self.compute_and_apply_cell_config_inner(None)
+    }
+
+    /// Compute cell configuration with demand-weighted CPU assignments.
+    fn compute_and_apply_cell_config_demand(
+        &mut self,
+        cell_demands: &HashMap<u32, f64>,
+    ) -> Result<Vec<CpuAssignment>> {
+        self.compute_and_apply_cell_config_inner(Some(cell_demands))
+    }
+
+    /// Internal implementation for computing and applying cell configuration.
+    fn compute_and_apply_cell_config_inner(
+        &mut self,
+        cell_demands: Option<&HashMap<u32, f64>>,
+    ) -> Result<Vec<CpuAssignment>> {
         let (cell_assignments, cpu_assignments) = {
             let cell_manager = self.cell_manager.as_ref().unwrap();
-            (
-                cell_manager.get_cell_assignments(),
-                cell_manager.compute_cpu_assignments(self.enable_borrowing)?,
-            )
+            let cpu_assignments = match cell_demands {
+                Some(demands) => {
+                    cell_manager.compute_demand_cpu_assignments(demands, self.enable_borrowing)?
+                }
+                None => cell_manager.compute_cpu_assignments(self.enable_borrowing)?,
+            };
+            (cell_manager.get_cell_assignments(), cpu_assignments)
         };
 
         self.apply_cell_config(&cell_assignments, &cpu_assignments)?;
 
         Ok(cpu_assignments)
+    }
+
+    /// Check if rebalancing should be triggered and apply demand-weighted CPU assignments.
+    fn maybe_rebalance(&mut self) -> Result<()> {
+        // Check cooldown
+        if self.last_rebalance.elapsed() < self.rebalance_cooldown {
+            return Ok(());
+        }
+
+        // Compute min/max smoothed utilization across active cells
+        let active_cells: Vec<u32> = self.cells.keys().copied().collect();
+        if active_cells.len() < 2 {
+            return Ok(());
+        }
+
+        let mut min_util = f64::MAX;
+        let mut max_util = f64::MIN;
+        for &cell_id in &active_cells {
+            let util = self.smoothed_util[cell_id as usize];
+            if util < min_util {
+                min_util = util;
+            }
+            if util > max_util {
+                max_util = util;
+            }
+        }
+
+        let spread = max_util - min_util;
+        if spread < self.rebalance_threshold {
+            return Ok(());
+        }
+
+        // Build demand map from smoothed utilization
+        let cell_demands: HashMap<u32, f64> = active_cells
+            .iter()
+            .map(|&cell_id| (cell_id, self.smoothed_util[cell_id as usize]))
+            .collect();
+
+        // Compute new assignments and check if they differ from current
+        let cell_manager = self.cell_manager.as_ref().unwrap();
+        let new_assignments =
+            cell_manager.compute_demand_cpu_assignments(&cell_demands, self.enable_borrowing)?;
+
+        let changed = new_assignments.iter().any(|a| {
+            self.cells
+                .get(&a.cell_id)
+                .map_or(true, |cell| cell.cpus != a.primary)
+        });
+
+        if !changed {
+            return Ok(());
+        }
+
+        let cpu_assignments = self.compute_and_apply_cell_config_demand(&cell_demands)?;
+
+        self.last_rebalance = Instant::now();
+        self.rebalance_count += 1;
+        self.metrics.rebalance_count = self.rebalance_count;
+
+        let cell_manager = self.cell_manager.as_ref().unwrap();
+        info!(
+            "Rebalanced CPUs (spread={:.1}%, count={}): {}",
+            spread,
+            self.rebalance_count,
+            cell_manager.format_cell_config(&cpu_assignments)
+        );
+
+        Ok(())
     }
 
     /// Apply cell configuration to BPF.
@@ -911,11 +1040,26 @@ impl<'a> Scheduler<'a> {
             // lent: fraction of own capacity used by foreign tasks
             let lent_pct = 100.0 * (delta_lent as f64) / (capacity as f64);
 
+            // Update EWMA-smoothed utilization
+            if self.enable_rebalancing {
+                self.smoothed_util[cell] = self.demand_smoothing * util_pct
+                    + (1.0 - self.demand_smoothing) * self.smoothed_util[cell];
+            }
+
             self.metrics
                 .cells
                 .entry(cell as u32)
                 .or_default()
                 .update_demand(util_pct, demand_borrow_pct, lent_pct);
+
+            // Update smoothed_util_pct in metrics
+            if self.enable_rebalancing {
+                self.metrics
+                    .cells
+                    .entry(cell as u32)
+                    .or_default()
+                    .smoothed_util_pct = self.smoothed_util[cell];
+            }
 
             global_running_delta += delta_running;
             global_borrowed_delta += delta_borrowed;

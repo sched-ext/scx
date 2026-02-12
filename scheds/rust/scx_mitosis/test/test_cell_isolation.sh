@@ -9,7 +9,8 @@
 # Usage:
 #   ./test_cell_isolation.sh [--cpuset] [--proportional] [--num-cells N] [--workers N]
 #                            [--test-dynamic] [--test-borrowing]
-#                            [--test-enqueue-borrowing] [--test-all]
+#                            [--test-enqueue-borrowing]
+#                            [--test-rebalancing] [--test-all]
 #
 # Options:
 #   --cpuset        Test cpuset-based cell isolation (requires cpuset configuration)
@@ -17,7 +18,8 @@
 #   --num-cells N   Number of test cells to create (default: 2)
 #   --workers N     Number of stress-ng workers per cell (default: 5)
 #   --test-dynamic  Run dynamic cell creation/destruction tests
-#   --test-all      Run all tests (basic + dynamic + borrowing)
+#   --test-rebalancing Run demand-based CPU rebalancing test
+#   --test-all      Run all tests (basic + dynamic + borrowing + rebalancing)
 #   --help          Show this help message
 #
 
@@ -37,6 +39,7 @@ SAMPLE_INTERVAL=1
 TEST_DYNAMIC=0
 TEST_BORROWING=0
 TEST_ENQUEUE_BORROWING=0
+TEST_REBALANCING=0
 TEST_ALL=0
 
 # Test result tracking
@@ -96,6 +99,10 @@ while [[ $# -gt 0 ]]; do
             TEST_ENQUEUE_BORROWING=1
             shift
             ;;
+        --test-rebalancing)
+            TEST_REBALANCING=1
+            shift
+            ;;
         --test-all)
             TEST_ALL=1
             shift
@@ -139,7 +146,7 @@ cleanup() {
     done
 
     # Remove dynamic test cgroups
-    for cell_name in test_cell_dynamic test_cell_temp test_cell_3 test_cell_reuse_a test_cell_reuse_b test_cell_borrow_busy test_cell_borrow_idle; do
+    for cell_name in test_cell_dynamic test_cell_temp test_cell_3 test_cell_reuse_a test_cell_reuse_b test_cell_borrow_busy test_cell_borrow_idle test_cell_rebal_busy test_cell_rebal_idle; do
         cell_path="$CGROUP_BASE/$cell_name"
         if [[ -d "$cell_path" ]]; then
             for pid in $(cat "$cell_path/cgroup.procs" 2>/dev/null); do
@@ -705,6 +712,215 @@ print(msg)
     esac
 }
 
+# Test: Demand-based CPU rebalancing - busy cell should get more CPUs
+test_cpu_rebalancing_demand() {
+    log_info "=== Running test: Demand-Based CPU Rebalancing ==="
+
+    # Kill existing scheduler if running
+    if [[ -n "$SCHED_PID" ]] && ps -p "$SCHED_PID" > /dev/null 2>&1; then
+        sudo kill "$SCHED_PID" 2>/dev/null || true
+        sleep 2
+    fi
+    sudo pkill -9 scx_mitosis 2>/dev/null || true
+    sleep 2
+
+    # Create two test cells
+    local busy_path="$CGROUP_BASE/test_cell_rebal_busy"
+    local idle_path="$CGROUP_BASE/test_cell_rebal_idle"
+
+    for path in "$busy_path" "$idle_path"; do
+        if [[ -d "$path" ]]; then
+            for pid in $(cat "$path/cgroup.procs" 2>/dev/null); do
+                sudo kill -9 "$pid" 2>/dev/null || true
+            done
+            sudo rmdir "$path" 2>/dev/null || true
+        fi
+    done
+
+    sudo mkdir -p "$busy_path"
+    sudo mkdir -p "$idle_path"
+
+    # Start scheduler with borrowing and rebalancing enabled
+    log_info "Starting scx_mitosis with --enable-borrowing --enable-rebalancing..."
+    sudo "$SCHEDULER_BIN" \
+        --cell-parent-cgroup /test.slice \
+        --enable-borrowing \
+        --enable-rebalancing \
+        --rebalance-cooldown-s 3 \
+        --rebalance-threshold 10 \
+        > "$LOG_FILE" 2>&1 &
+    SCHED_PID=$!
+
+    sleep 3
+
+    # Verify scheduler is running
+    if ! ps -p "$SCHED_PID" > /dev/null 2>&1; then
+        log_error "Scheduler failed to start. Log output:"
+        cat "$LOG_FILE"
+        record_result "cpu_rebalancing_demand" "FAILED"
+        return 1
+    fi
+
+    local state=$(cat /sys/kernel/sched_ext/state 2>/dev/null)
+    if [[ "$state" != "enabled" ]]; then
+        log_error "sched_ext not enabled. State: $state"
+        cat "$LOG_FILE"
+        record_result "cpu_rebalancing_demand" "FAILED"
+        return 1
+    fi
+
+    # Capture baseline CPU counts before workload (equal distribution)
+    local baseline_output="/tmp/scx_mitosis_monitor_baseline.json"
+    log_info "Capturing baseline CPU counts (before workload)..."
+    timeout 4 "$SCHEDULER_BIN" --monitor 1 > "$baseline_output" 2>/dev/null || true
+
+    # Start heavy workload only in busy cell
+    local workers=$(nproc)
+    log_info "Starting $workers stress-ng pipe workers in busy cell..."
+    sudo bash -c "echo \$\$ > $busy_path/cgroup.procs && \
+        exec stress-ng --pipe $workers --timeout 60s --quiet" &
+
+    # Wait for demand stats and rebalancing to trigger
+    # Need ~5s warmup for EWMA + 3s cooldown
+    log_info "Waiting for rebalancing to trigger..."
+    sleep 10
+
+    # Capture monitor output while workload is still running
+    local monitor_output="/tmp/scx_mitosis_monitor_rebal.json"
+    log_info "Capturing monitor output..."
+    timeout 4 "$SCHEDULER_BIN" --monitor 1 > "$monitor_output" 2>/dev/null || true
+
+    # Kill stress-ng workers
+    sudo pkill -9 stress-ng 2>/dev/null || true
+    sleep 1
+
+    # Validate using the scheduler log (cell-to-name mapping) and monitor output (CPU counts)
+    local result
+    result=$(python3 -c "
+import json, sys, re
+
+def parse_last_json(path):
+    try:
+        with open(path, 'r') as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    decoder = json.JSONDecoder()
+    last_obj = None
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r':
+            pos += 1
+        if pos >= len(text):
+            break
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+            last_obj = obj
+            pos = end
+        except json.JSONDecodeError:
+            break
+    return last_obj
+
+def parse_first_json(path):
+    try:
+        with open(path, 'r') as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text) and text[pos] in ' \t\n\r':
+        pos += 1
+    if pos >= len(text):
+        return None
+    try:
+        obj, _ = decoder.raw_decode(text, pos)
+        return obj
+    except json.JSONDecodeError:
+        return None
+
+# Parse cell-to-name mapping from scheduler log
+cell_name_map = {}
+with open('$LOG_FILE', 'r') as f:
+    for line in f:
+        m = re.search(r'Created cell (\d+) for cgroup \S+/(test_cell_rebal_\w+)', line)
+        if m:
+            cell_name_map[m.group(1)] = m.group(2)
+
+busy_cell_id = None
+idle_cell_id = None
+for cid, name in cell_name_map.items():
+    if 'busy' in name:
+        busy_cell_id = cid
+    elif 'idle' in name:
+        idle_cell_id = cid
+
+if busy_cell_id is None or idle_cell_id is None:
+    print('FAIL:could not find busy/idle cell IDs in scheduler log (found: %s)' % cell_name_map)
+    sys.exit(0)
+
+# Use the first monitor snapshot (workload is still hot)
+after = parse_first_json('$monitor_output')
+baseline = parse_last_json('$baseline_output')
+
+if after is None:
+    print('NO_DATA')
+    sys.exit(0)
+
+rebalance_count = after.get('rebalance_count', 0)
+cells = after.get('cells', {})
+
+if rebalance_count == 0:
+    print('FAIL:rebalance_count is 0 (no rebalancing occurred)')
+    sys.exit(0)
+
+busy_cpus = cells.get(busy_cell_id, {}).get('num_cpus', 0)
+idle_cpus = cells.get(idle_cell_id, {}).get('num_cpus', 0)
+
+if busy_cpus <= idle_cpus:
+    print('FAIL:busy cell (%s) has %d CPUs, idle cell (%s) has %d CPUs (expected busy > idle)' % (busy_cell_id, busy_cpus, idle_cell_id, idle_cpus))
+    sys.exit(0)
+
+# Check that CPU counts actually changed from baseline (utilization caused re-assignment)
+if baseline is not None:
+    baseline_cells = baseline.get('cells', {})
+    if busy_cell_id in baseline_cells:
+        baseline_busy_cpus = baseline_cells[busy_cell_id].get('num_cpus', 0)
+        if baseline_busy_cpus > 0 and busy_cpus <= baseline_busy_cpus:
+            print('FAIL:busy cell CPUs did not increase from baseline (%d -> %d)' % (baseline_busy_cpus, busy_cpus))
+            sys.exit(0)
+
+msg = 'PASS:rebalance_count=%d,busy_cell=%s(%d cpus),idle_cell=%s(%d cpus)' % (
+    rebalance_count, busy_cell_id, busy_cpus, idle_cell_id, idle_cpus)
+print(msg)
+" 2>&1)
+
+    log_info "Rebalancing result: $result"
+
+    case "$result" in
+        PASS:*)
+            record_result "cpu_rebalancing_demand" "PASSED"
+            return 0
+            ;;
+        FAIL:*)
+            local reason="${result#FAIL:}"
+            log_error "Rebalancing test failed: $reason"
+            record_result "cpu_rebalancing_demand" "FAILED"
+            return 1
+            ;;
+        NO_DATA)
+            log_error "Rebalancing test: no monitor data captured"
+            record_result "cpu_rebalancing_demand" "FAILED"
+            return 1
+            ;;
+        *)
+            log_error "Rebalancing test: unexpected result: $result"
+            record_result "cpu_rebalancing_demand" "FAILED"
+            return 1
+            ;;
+    esac
+}
+
 # Run dynamic tests
 run_dynamic_tests() {
     log_info ""
@@ -766,6 +982,7 @@ main() {
     echo "Test dynamic: $TEST_DYNAMIC"
     echo "Test borrowing: $TEST_BORROWING"
     echo "Test enqueue borrowing: $TEST_ENQUEUE_BORROWING"
+    echo "Test rebalancing: $TEST_REBALANCING"
     echo "Test all: $TEST_ALL"
     echo ""
 
@@ -778,12 +995,14 @@ main() {
     local run_dynamic=0
     local run_borrowing=0
     local run_enqueue_borrowing=0
+    local run_rebalancing=0
 
     if [[ $TEST_ALL -eq 1 ]]; then
         run_basic=1
         run_dynamic=1
         run_borrowing=1
         run_enqueue_borrowing=1
+        run_rebalancing=1
     elif [[ $TEST_DYNAMIC -eq 1 ]]; then
         run_basic=0
         run_dynamic=1
@@ -793,6 +1012,9 @@ main() {
     elif [[ $TEST_ENQUEUE_BORROWING -eq 1 ]]; then
         run_basic=0
         run_enqueue_borrowing=1
+    elif [[ $TEST_REBALANCING -eq 1 ]]; then
+        run_basic=0
+        run_rebalancing=1
     fi
 
     # Run basic isolation test
@@ -813,6 +1035,11 @@ main() {
     # Run enqueue borrowing test (cpu stressor → enqueue path)
     if [[ $run_enqueue_borrowing -eq 1 ]]; then
         test_borrowing cpu enqueue_borrowing
+    fi
+
+    # Run rebalancing test
+    if [[ $run_rebalancing -eq 1 ]]; then
+        test_cpu_rebalancing_demand
     fi
 
     # Print summary and exit
