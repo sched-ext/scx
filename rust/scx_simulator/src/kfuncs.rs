@@ -27,7 +27,7 @@ use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
 use crate::trace::Trace;
-use crate::types::{CpuId, DsqId, Pid, TimeNs};
+use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
 /// Which scheduler callback is currently executing.
 ///
@@ -52,7 +52,7 @@ pub struct PendingDispatch {
     pub pid: Pid,
     pub dsq_id: DsqId,
     pub enq_flags: u64,
-    pub vtime: Option<u64>,
+    pub vtime: Option<Vtime>,
 }
 
 /// The subset of simulator state that kfuncs need access to.
@@ -304,7 +304,7 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
             pid,
             dsq_id: DsqId(dsq_id),
             enq_flags,
-            vtime: Some(vtime),
+            vtime: Some(Vtime(vtime)),
         });
     })
 }

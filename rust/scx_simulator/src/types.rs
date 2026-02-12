@@ -1,9 +1,9 @@
 //! Newtype wrappers and type aliases for domain concepts.
 //!
-//! Newtypes for identifiers (DSQ IDs, PIDs, CPU IDs) prevent silent type
-//! confusion. Type aliases for quantities (timestamps, vtimes, weights)
-//! provide self-documenting code without the boilerplate of implementing
-//! arithmetic traits.
+//! Newtypes for identifiers (DSQ IDs, PIDs, CPU IDs) and virtual time
+//! prevent silent type confusion. Type aliases for plain quantities
+//! (timestamps, weights) provide self-documenting code without the
+//! boilerplate of implementing arithmetic traits.
 
 /// Dispatch queue identifier. Wraps u64 with kernel bit-flag conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -41,7 +41,8 @@ impl DsqId {
 pub type TimeNs = u64;
 
 /// Virtual time for fair scheduling (opaque u64, not nanoseconds).
-pub type Vtime = u64;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Vtime(pub u64);
 
 /// Scheduler weight (higher = more CPU share).
 pub type Weight = u32;
