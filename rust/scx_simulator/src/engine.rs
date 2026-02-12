@@ -10,7 +10,7 @@ use tracing::{debug, info};
 
 use crate::cpu::SimCpu;
 use crate::dsq::DsqManager;
-use crate::ffi::Scheduler;
+use crate::ffi::{self, Scheduler};
 use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::scenario::Scenario;
@@ -74,10 +74,15 @@ impl<S: Scheduler> Simulator<S> {
         // Build tasks
         let mut tasks: HashMap<Pid, SimTask> = HashMap::new();
         let mut task_raw_to_pid: HashMap<usize, Pid> = HashMap::new();
+        let mut task_pid_to_raw: HashMap<Pid, usize> = HashMap::new();
 
         for def in &scenario.tasks {
             let task = SimTask::new(def, nr_cpus);
-            task_raw_to_pid.insert(task.raw() as usize, task.pid);
+            let raw_addr = task.raw() as usize;
+            task_raw_to_pid.insert(raw_addr, task.pid);
+            task_pid_to_raw.insert(task.pid, raw_addr);
+            // Set up cpus_ptr so the task is allowed on all CPUs
+            unsafe { ffi::sim_task_setup_cpus_ptr(task.raw()) };
             tasks.insert(task.pid, task);
         }
 
@@ -89,6 +94,7 @@ impl<S: Scheduler> Simulator<S> {
             trace: Trace::new(),
             clock: 0,
             task_raw_to_pid,
+            task_pid_to_raw,
             prng_state: 0xDEAD_BEEF, // deterministic seed
             ops_context: OpsContext::None,
             pending_dispatch: None,
@@ -100,6 +106,16 @@ impl<S: Scheduler> Simulator<S> {
             let rc = self.scheduler.init();
             kfuncs::exit_sim();
             assert!(rc == 0, "scheduler init failed with rc={rc}");
+        }
+
+        // Call init_task for each task (after scheduler init)
+        unsafe {
+            kfuncs::enter_sim(&mut state);
+            for task in tasks.values() {
+                let rc = self.scheduler.init_task(task.raw());
+                assert!(rc == 0, "init_task failed for pid={} rc={rc}", task.pid.0);
+            }
+            kfuncs::exit_sim();
         }
 
         // Build event queue
@@ -196,9 +212,17 @@ impl<S: Scheduler> Simulator<S> {
             .trace
             .record(state.clock, CpuId(0), TraceKind::TaskWoke { pid });
 
-        // Call select_cpu
+        // Call runnable callback
         let prev_cpu = task.prev_cpu;
         let raw = task.raw();
+        unsafe {
+            kfuncs::enter_sim(state);
+            state.current_cpu = prev_cpu;
+            self.scheduler.runnable(raw, SCX_ENQ_WAKEUP);
+            kfuncs::exit_sim();
+        }
+
+        // Call select_cpu
 
         unsafe {
             kfuncs::enter_sim(state);

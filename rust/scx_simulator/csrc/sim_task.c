@@ -15,6 +15,7 @@
 extern void *calloc(unsigned long nmemb, unsigned long size);
 extern void free(void *ptr);
 extern void *memcpy(void *dst, const void *src, unsigned long n);
+extern void *memset(void *s, int c, unsigned long n);
 
 /* Provide the LINUX_KERNEL_VERSION symbol that common.bpf.h declares as extern */
 int LINUX_KERNEL_VERSION = 0;
@@ -109,4 +110,23 @@ u32 sim_task_get_scx_weight(struct task_struct *p)
 void sim_task_set_scx_weight(struct task_struct *p, u32 weight)
 {
 	p->scx.weight = weight;
+}
+
+/* cpus_ptr and scx.flags */
+void sim_task_setup_cpus_ptr(struct task_struct *p)
+{
+	/* Point cpus_ptr at the embedded cpus_mask and fill with all-1s
+	 * so the task is allowed to run on every CPU. */
+	memset(&p->cpus_mask, 0xFF, sizeof(p->cpus_mask));
+	p->cpus_ptr = &p->cpus_mask;
+}
+
+u32 sim_task_get_scx_flags(struct task_struct *p)
+{
+	return p->scx.flags;
+}
+
+void sim_task_set_scx_flags(struct task_struct *p, u32 flags)
+{
+	p->scx.flags = flags;
 }

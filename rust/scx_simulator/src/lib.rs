@@ -42,7 +42,7 @@ pub mod types;
 
 // Re-export the main public types for convenience.
 pub use engine::Simulator;
-pub use ffi::{Scheduler, ScxSimple};
+pub use ffi::{Scheduler, ScxSimple, ScxTickless};
 pub use fmt::{FmtN, FmtTs};
 pub use kfuncs::sim_clock;
 pub use scenario::Scenario;

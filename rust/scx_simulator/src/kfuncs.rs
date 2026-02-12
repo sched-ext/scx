@@ -64,6 +64,8 @@ pub struct SimulatorState {
     pub clock: TimeNs,
     /// Maps raw task_struct pointers to PIDs for reverse lookup.
     pub task_raw_to_pid: HashMap<usize, Pid>,
+    /// Maps PIDs to raw task_struct pointers (reverse of task_raw_to_pid).
+    pub task_pid_to_raw: HashMap<Pid, usize>,
     /// Deterministic PRNG state (xorshift32).
     pub prng_state: u32,
     /// Which ops callback we are currently inside.
@@ -355,6 +357,13 @@ pub extern "C" fn bpf_get_smp_processor_id() -> u32 {
     with_sim(|sim| sim.current_cpu.0)
 }
 
+/// Alias for sim_wrapper.h macro override (avoids conflict with the
+/// static function pointer in bpf_helper_defs.h).
+#[no_mangle]
+pub extern "C" fn sim_bpf_get_smp_processor_id() -> u32 {
+    with_sim(|sim| sim.current_cpu.0)
+}
+
 /// Deterministic PRNG replacement for bpf_get_prandom_u32.
 #[no_mangle]
 pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {
@@ -419,4 +428,47 @@ pub extern "C" fn bpf_task_release(_p: *mut c_void) {}
 #[no_mangle]
 pub extern "C" fn bpf_task_from_pid(_pid: i32) -> *mut c_void {
     ptr::null_mut()
+}
+
+/// Get the current task's task_struct pointer (for the CPU we're running on).
+///
+/// Used by tickless in `is_wake_sync()` to check the waker's flags.
+#[no_mangle]
+pub extern "C" fn bpf_get_current_task_btf() -> *mut c_void {
+    with_sim(|sim| {
+        let cpu = sim.current_cpu;
+        if let Some(pid) = sim.cpus[cpu.0 as usize].current_task {
+            if let Some(&raw) = sim.task_pid_to_raw.get(&pid) {
+                return raw as *mut c_void;
+            }
+        }
+        ptr::null_mut()
+    })
+}
+
+/// Alias for sim_wrapper.h macro override (avoids conflict with the
+/// static function pointer in bpf_helper_defs.h).
+#[no_mangle]
+pub extern "C" fn sim_bpf_get_current_task_btf() -> *mut c_void {
+    bpf_get_current_task_btf()
+}
+
+/// Get the task running on a given CPU.
+///
+/// Needed as a linkable symbol for compat paths, even though
+/// `__COMPAT_scx_bpf_cpu_curr` is overridden to a macro returning NULL.
+#[no_mangle]
+pub extern "C" fn scx_bpf_cpu_curr(cpu: i32) -> *mut c_void {
+    with_sim(|sim| {
+        let idx = cpu as usize;
+        if idx >= sim.cpus.len() {
+            return ptr::null_mut();
+        }
+        if let Some(pid) = sim.cpus[idx].current_task {
+            if let Some(&raw) = sim.task_pid_to_raw.get(&pid) {
+                return raw as *mut c_void;
+            }
+        }
+        ptr::null_mut()
+    })
 }
