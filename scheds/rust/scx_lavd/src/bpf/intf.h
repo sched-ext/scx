@@ -49,13 +49,13 @@ enum {
  */
 struct sys_stat {
 	u64	last_update_clk;
-	u64	avg_util;	/* average of the CPU utilization */
-	u64	avg_sc_util;	/* average of the scaled CPU utilization,
+	u64	avg_util_wall;	/* average of the CPU utilization (based on wall clock time) */
+	u64	avg_util_invr;	/* average of the scaled CPU utilization,
 				   which is capacity and frequency invariant */
 
-	u64	avg_svc_time;	/* average service time per task */
+	u64	avg_svc_time_wwgt; /* average service time per task (weighted wall clock time) */
 	u64	nr_queued_task;
-	u64	slice;		/* base time slice */
+	u64	slice_wall;	/* base time slice (wall clock time) */
 
 	u32	avg_lat_cri;	/* average latency criticality (LC) */
 	u32	max_lat_cri;	/* maximum latency criticality (LC) */
@@ -92,25 +92,25 @@ struct task_ctx_x {
 	u32	suggested_cpu_id;	/* suggested CPU ID at ops.enqueue() and ops.select_cpu() */
 	pid_t	waker_pid;		/* last waker's PID */
 	char	waker_comm[TASK_COMM_LEN + 1]; /* last waker's comm */
-	u64	slice;		/* base time slice */
+	u64	slice_wall;		/* base time slice (wall clock time) */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u16	static_prio;	/* nice priority */
-	u64	rerunnable_interval;	/* rerunnable interval in ns: [last quiescent, last runnable] */
-	u64	resched_interval;	/* reschedule interval in ns: [last running, this running] */
+	u64	rerunnable_interval_wall;/* rerunnable interval in ns: [last quiescent, last runnable] */
+	u64	resched_interval_wall;	/* reschedule interval in ns: [last running, this running] */
 	u64	run_freq;		/* scheduling frequency in a second */
-	u64	avg_runtime;		/* average runtime per schedule */
+	u64	avg_runtime_wall;	/* average runtime per schedule (wall clock time) */
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u32	perf_cri;		/* performance criticality of a task */
 	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	cpuperf_cur;	/* CPU's current performance target */
-	u64	cpu_util;	/* cpu utilization in [0..100] */
-	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
+	u64	cpu_util_wall;	/* cpu utilization in [0..100] */
+	u64	cpu_util_invr;	/* scaled cpu utilization in [0..100] */
 	u32	nr_active;	/* number of active cores */
 	u64	dsq_id;		/* CPU's associated DSQ */
 	u64	dsq_consume_lat; /* DSQ's consume latency */
-	u64	last_slice_used;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
+	u64	last_slice_used_wall;	/* time(ns) used in last scheduled interval: [last running, last stopping] */
 };
 
 

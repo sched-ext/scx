@@ -126,8 +126,8 @@ static u64 calc_wake_factor(task_ctx *taskc)
 
 static inline u64 calc_reverse_runtime_factor(task_ctx *taskc)
 {
-	if (LAVD_LC_RUNTIME_MAX > taskc->avg_runtime) {
-		u64 delta = LAVD_LC_RUNTIME_MAX - taskc->avg_runtime;
+	if (LAVD_LC_RUNTIME_MAX > taskc->avg_runtime_wall) {
+		u64 delta = LAVD_LC_RUNTIME_MAX - taskc->avg_runtime_wall;
 		return delta / LAVD_SLICE_MIN_NS_DFL;
 	}
 	return 1;
@@ -135,7 +135,7 @@ static inline u64 calc_reverse_runtime_factor(task_ctx *taskc)
 
 static u64 calc_sum_runtime_factor(struct task_struct *p, task_ctx *taskc)
 {
-	u64 runtime = max(taskc->avg_runtime, taskc->acc_runtime);
+	u64 runtime = max(taskc->avg_runtime_wall, taskc->acc_runtime_wall);
 	u64 sum = max(taskc->run_freq, 1) * max(runtime, 1);
 	return (sum >> LAVD_SHIFT) * p->scx.weight;
 }
@@ -238,7 +238,7 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 	 * into [-lag_max, +lag_max] and set the LAVD_FLAG_IS_GREEDY flag
 	 * for preemption decision.
 	 */
-	lag = sys_stat.avg_svc_time - taskc->svc_time;
+	lag = sys_stat.avg_svc_time_wwgt - taskc->svc_time_wwgt;
 	lag_max = scale_by_task_weight_inverse(p, LAVD_TASK_LAG_MAX);
 	if (lag >= 0) {
 		reset_task_flag(taskc, LAVD_FLAG_IS_GREEDY);
@@ -248,7 +248,7 @@ static u64 calc_greedy_penalty(struct task_struct *p, task_ctx *taskc)
 		 * boost of long-sleepers.
 		 */
 		if (lag > lag_max) {
-			taskc->svc_time = sys_stat.avg_svc_time - lag_max;
+			taskc->svc_time_wwgt = sys_stat.avg_svc_time_wwgt - lag_max;
 			lag = lag_max;
 		}
 	} else {
@@ -276,12 +276,12 @@ static u64 calc_adjusted_runtime(task_ctx *taskc)
 	u64 runtime;
 
 	/*
-	 * Prefer a short-running (avg_runtime) and recently woken-up
+	 * Prefer a short-running (avg_runtime_wall) and recently woken-up
 	 * (acc_runtime) task. To avoid the starvation of CPU-bound tasks,
 	 * which rarely sleep, limit the impact of acc_runtime.
 	 */
 	runtime = LAVD_ACC_RUNTIME_MAX +
-		  min(taskc->acc_runtime, LAVD_ACC_RUNTIME_MAX);
+		  min(taskc->acc_runtime_wall, LAVD_ACC_RUNTIME_MAX);
 
 	return runtime;
 }
