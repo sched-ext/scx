@@ -293,6 +293,10 @@ static struct replenish_stat cbw_replenish_stat;
 	bpf_printk("[%s:%d] ERROR: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
 
+#define cbw_warn(fmt, ...) do { 						\
+	bpf_printk("[%s:%d] WARNING: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
+} while(0)
+
 #define cbw_info(fmt, ...) do { 						\
 	bpf_printk("[%s:%d] INFO: " fmt, __func__, __LINE__, ##__VA_ARGS__);	\
 } while(0)
@@ -324,6 +328,14 @@ static struct replenish_stat cbw_replenish_stat;
 } while (0);
 
 #define dbg_llcx(llcx, str, ...) do {						\
+	cbw_dbg(str "cgid%llu -- llcx:budget_remaining: %lld -- "		\
+		"llcx:runtime_total: %lld",					\
+		##__VA_ARGS__,							\
+		llcx->id,							\
+		llcx->budget_remaining, llcx->runtime_total);			\
+} while (0);
+
+#define info_llcx(llcx, str, ...) do {						\
 	cbw_dbg(str "cgid%llu -- llcx:budget_remaining: %lld -- "		\
 		"llcx:runtime_total: %lld",					\
 		##__VA_ARGS__,							\
@@ -1266,7 +1278,15 @@ int cbw_cgroup_bw_throttled(struct cgroup *cgrp __arg_trusted, int llc_id)
 	 */
 	llcx = cbw_get_llc_ctx(cgrp, llc_id);
 	if (!llcx) {
-		cbw_err("Failed to lookup an LLC ctx: [%llu/%d]",
+		/*
+		 * This can happen when a new cgroup is created and a task of
+		 * the cgroup is enqueued *before* the cgroup initialization
+		 * is finished in scx. This can happen, for example, when
+		 * opening a new terminal session, etc. In this case, let the
+		 * task proceed instead of waiting for cgroup initialization
+		 * to finish.
+		 */
+		cbw_dbg("Failed to lookup an LLC ctx: [%llu/%d]",
 			cgroup_get_id(cgrp), llc_id);
 		return -ESRCH;
 	}
@@ -1777,7 +1797,13 @@ int replenish_timerfn(void *map, int *key, struct bpf_timer *timer)
 
 		cur_cgrp = bpf_cgroup_from_id(ids[0]);
 		if (!cur_cgrp) {
-			cbw_err("Failed to fetch a cgroup pointer: cgid%llu", ids[0]);
+			/*
+			 * This can happen when a new cgroup is destroyed
+			 * during the replenishment process. This can happen
+			 * when closing a new terminal session, etc. So we can
+			 * safely ignore the lookup failure.
+			 */
+			cbw_dbg("Failed to fetch a cgroup pointer: cgid%llu", ids[0]);
 			continue;
 		}
 
@@ -1920,13 +1946,19 @@ int cbw_reenqueue_cgroup(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx,
 		idx = (nuance + i) % TOPO_NR(LLC);
 		llcx = cbw_get_llc_ctx_with_id(cgrp_id, idx);
 		if (!llcx) {
-			cbw_err("Failed to lookup an LLC context");
+			cbw_err("Failed to lookup an LLC context: cgid%llu", cgrp_id);
 			continue;
 		}
 
-		/* Update cgx->is_throttled before draining BTQ. */
-		if (cbw_cgroup_bw_throttled(cgrp, idx) == -EAGAIN)
-			continue;
+		/*
+		 * Update cgx->is_throttled before draining BTQ.
+		 * When the cgroup is already throttled, bail out early.
+		 */
+		if (cbw_cgroup_bw_throttled(cgrp, idx) == -EAGAIN) {
+			cbw_dbg("Give up on re-enqueueing tasks since cgroup "
+				"is already throttled: cgid%llu", cgrp_id);
+			break;
+		}
 
 		nr_enq += cbw_drain_btq_until_throttled(cgx, llcx);
 		if (nr_enq >= CBW_REENQ_MAX_BATCH)
