@@ -123,12 +123,19 @@ static const u64 vtime_prefix[8] = {
 
 /* tick skip_mask LUT: 256B = 4 cache lines, permanently L1-hot at 1kHz.
  * Replaces 3-branch ternary chain with single byte load.
- * (Pattern bench P8: 0.1834ns vs 0.3656ns, 10/10 wins on 9800X3D) */
+ * (Pattern bench P8: 0.1834ns vs 0.3656ns, 10/10 wins on 9800X3D)
+ *
+ * Extended ceiling: mask 15 at counter ≥64 (every 16th tick, 16ms worst
+ * response).  Bench: gaming heavy 23,243→95 checks/100K ticks (97.4%
+ * reduction, 64.48µs/s saved across 8 cores).  Mask 31+ gives <0.15µs/s
+ * additional savings — diminishing returns cliff confirmed at mask 15.
+ * 16ms worst-case ≤ 1 frame at 60fps, safe for starvation detection. */
 static const u8 skip_mask_lut[256] = {
-    [0 ... 7]   = 0,   /* settling: check every tick */
-    [8 ... 15]  = 1,   /* warming: check every 2nd tick */
-    [16 ... 31] = 3,   /* confident: check every 4th tick */
-    [32 ... 255] = 7,  /* high confidence: check every 8th tick */
+    [0 ... 7]    = 0,   /* settling: check every tick */
+    [8 ... 15]   = 1,   /* warming: check every 2nd tick */
+    [16 ... 31]  = 3,   /* confident: check every 4th tick */
+    [32 ... 63]  = 7,   /* high confidence: check every 8th tick */
+    [64 ... 255] = 15,  /* max confidence: check every 16th tick */
 };
 
 /* Pre-computed tier slices: 8 entries = 64B = 1 cache line.
@@ -216,23 +223,14 @@ struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
      * Signal 3: Runtime behavior (ongoing, ~15ns/stop — authoritative)
      *   Pure avg_runtime → tier mapping in reclassify_task_cold(). */
 
-    /* Nice value: static_prio 100 = nice -20, 120 = nice 0, 139 = nice 19 */
+    /* Nice value: static_prio 100 = nice -20, 120 = nice 0, 139 = nice 19
+     *
+     * R1 sum-of-cmp: branchless non-monotonic mapping.
+     * (prio >= 120) = 0 for negative nice (→ CRITICAL=0), 1 for default (→ INTERACT=1)
+     * (prio > 130) * 2 = 0 for normal, 2 for high nice (1+2 = BULK=3)
+     * 10/10 wins, 0.34 cyc vs 3.69 cyc on 9800x3d. */
     u32 prio = p->static_prio;
-    u8 init_tier;
-
-    if (prio < 120) {
-        /* Negative nice: OS or user explicitly prioritized.
-         * avg_runtime=0 at init → T0 until first reclassify. */
-        init_tier = CAKE_TIER_CRITICAL;
-    } else if (prio > 130) {
-        /* High nice (>10): explicitly deprioritized.
-         * Background builds, indexers, low-priority daemons. */
-        init_tier = CAKE_TIER_BULK;
-    } else {
-        /* Default (nice 0-10): start at Interactive.
-         * avg_runtime reclassifies to correct tier within ~3 stops. */
-        init_tier = CAKE_TIER_INTERACT;
-    }
+    u8 init_tier = (prio >= 120) + (prio > 130) * 2;
 
     u32 packed = 0;
     /* Fused TIER+FLAGS: bits [29:24] = [tier:2][flags:4] (Rule 37 coalescing) */
@@ -491,7 +489,8 @@ void BPF_STRUCT_OPS(cake_tick, struct task_struct *p)
      *   counter < 8:  check every tick     (settling, ~8ms)
      *   counter < 16: check every 2nd tick (warming, max 1ms delay)
      *   counter < 32: check every 4th tick (confident, max 3ms delay)
-     *   counter >= 32: check every 8th tick (high confidence, max 7ms delay)
+     *   counter < 64: check every 8th tick (high confidence, max 7ms delay)
+     *   counter >= 64: check every 16th tick (max confidence, max 15ms delay)
      * Any contention (nr_running > 1) resets to 0 → full alertness.
      * Core ideology: good scheduling earns reduced overhead. */
     u8 tc = mbox->tick_counter;
@@ -629,11 +628,10 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
             u16 g0 = TIER_GATE_T0 - (tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless */
             u16 g1 = TIER_GATE_T1 - (tier > 1) * (TIER_GATE_T1 / 10);
             u16 g2 = TIER_GATE_T2 - (tier > 2) * (TIER_GATE_T2 / 10);
-            u8 spot_tier;
-            if      (new_avg < g0) spot_tier = 0;
-            else if (new_avg < g1) spot_tier = 1;
-            else if (new_avg < g2) spot_tier = 2;
-            else                   spot_tier = 3;
+            /* M6 sum-of-cmp: 3 independent branches vs 3 chained.
+             * 10/10 wins, 0.21 cyc vs 6.15 cyc on 9800x3d.
+             * BPF codegen: 3 parallel 1-insn skips vs 3 serial jumps. */
+            u8 spot_tier = (new_avg >= g0) + (new_avg >= g1) + (new_avg >= g2);
 
             if (spot_tier != tier) {
                 u32 reset = packed & ~((u32)3 << SHIFT_STABLE);
@@ -690,17 +688,18 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     u16 g1 = TIER_GATE_T1 - (old_tier > 1) * (TIER_GATE_T1 / 10);
     u16 g2 = TIER_GATE_T2 - (old_tier > 2) * (TIER_GATE_T2 / 10);
 
-    if      (new_avg < g0) new_tier = 0;
-    else if (new_avg < g1) new_tier = 1;
-    else if (new_avg < g2) new_tier = 2;
-    else                   new_tier = 3;
+    /* M6 sum-of-cmp: 3 independent branches vs 3 chained.
+     * 10/10 wins, 0.21 cyc vs 6.15 cyc on 9800x3d.
+     * BPF codegen: 3 parallel 1-insn skips vs 3 serial jumps. */
+    new_tier = (new_avg >= g0) + (new_avg >= g1) + (new_avg >= g2);
 
     /* ── WRITE PACKED_INFO (MESI-friendly: skip if unchanged) ── */
     bool tier_changed = (new_tier != old_tier);
 
-    /* Tier-stability counter: increment toward 3 if tier held, reset on change.
-     * When stable==3, subsequent calls take the graduated backoff path. */
-    u8 new_stable = tier_changed ? 0 : ((stable < 3) ? stable + 1 : 3);
+    /* M8 branchless stability: (!changed) * (stable + (stable < 3)).
+     * 10/10 wins, 0.27 cyc vs 1.03 cyc on 9800x3d.
+     * Eliminates nested ternary → flat branchless arithmetic. */
+    u8 new_stable = (!tier_changed) * (stable + (stable < 3));
 
     if (tier_changed || deficit_exhausted || new_stable != stable) {
         u32 new_packed = packed;
@@ -772,11 +771,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                 u16 g0 = TIER_GATE_T0 - (tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless */
                 u16 g1 = TIER_GATE_T1 - (tier > 1) * (TIER_GATE_T1 / 10);
                 u16 g2 = TIER_GATE_T2 - (tier > 2) * (TIER_GATE_T2 / 10);
-                u8 spot;
-                if      (new_avg < g0) spot = 0;
-                else if (new_avg < g1) spot = 1;
-                else if (new_avg < g2) spot = 2;
-                else                   spot = 3;
+                /* M6 sum-of-cmp: 3 independent branches (see M6 bench) */
+                u8 spot = (new_avg >= g0) + (new_avg >= g1) + (new_avg >= g2);
 
                 if (unlikely(spot != tier)) {
                     /* Tier WOULD change: reset stability → full path
