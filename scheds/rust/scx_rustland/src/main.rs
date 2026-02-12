@@ -424,6 +424,7 @@ fn main() -> Result<()> {
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        info!("{:} scheduler starts running.", SCHEDULER_NAME);
         if !sched.run()?.should_restart() {
             break;
         }
