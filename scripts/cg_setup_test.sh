@@ -123,7 +123,6 @@ mkdir -p /sys/fs/cgroup/test06_l1/l2-a
 mkdir -p /sys/fs/cgroup/test06_l1/l2-a/l3-x
 mkdir -p /sys/fs/cgroup/test06_l1/l2-a/l3-y
 mkdir -p /sys/fs/cgroup/test06_l1/l2-b
-
 echo "+cpu" > /sys/fs/cgroup/test06_l1/cgroup.subtree_control
 echo "+cpu" > /sys/fs/cgroup/test06_l1/l2-a/cgroup.subtree_control
 echo "+cpu" > /sys/fs/cgroup/test06_l1/l2-a/l3-x/cgroup.subtree_control
@@ -155,8 +154,7 @@ mkdir -p /sys/fs/cgroup/test07_l1
 mkdir -p /sys/fs/cgroup/test07_l1/l2-a
 mkdir -p /sys/fs/cgroup/test07_l1/l2-a/l3-a
 mkdir -p /sys/fs/cgroup/test07_l1/l2-a/l3-a/l4-a
-mkdir -p /sys/fs/cgroup/test07_l1/l#	- 8 vs. 8: 70-150% not 200%
-2-a/l3-a/l4-a/l5-a
+mkdir -p /sys/fs/cgroup/test07_l1/l2-a/l3-a/l4-a/l5-a
 mkdir -p /sys/fs/cgroup/test07_l1/l2-a/l3-a/l4-a/l5-a/l6-a
 mkdir -p /sys/fs/cgroup/test07_l1/l2-a/l3-a/l4-a/l5-a/l6-a/l7-a
 mkdir -p /sys/fs/cgroup/test07_l1/l2-a/l3-a/l4-a/l5-a/l6-a/l7-a/l8-a
@@ -317,3 +315,30 @@ echo "400000 100000" > /sys/fs/cgroup/test15_l1/l2-b/cpu.max
 # Test 15-01: running on two cgroups
 # echo $$ > /sys/fs/cgroup/test15_l1/l2-a/cgroup.procs
 # echo $$ > /sys/fs/cgroup/test15_l1/l2-b/cgroup.procs
+
+# ==========================================================
+# Config 16: two-level, unlimited, 1 CPU : 4 CPUs
+mkdir -p /sys/fs/cgroup/test16_l1
+mkdir -p /sys/fs/cgroup/test16_l1/l2-a
+mkdir -p /sys/fs/cgroup/test16_l1/l2-b
+
+echo "+cpu" > /sys/fs/cgroup/test16_l1/cgroup.subtree_control
+echo "+cpu" > /sys/fs/cgroup/test16_l1/l2-a/cgroup.subtree_control
+echo "+cpu" > /sys/fs/cgroup/test16_l1/l2-b/cgroup.subtree_control
+
+echo "max 100000" > /sys/fs/cgroup/test16_l1/cpu.max
+echo "100000 100000" > /sys/fs/cgroup/test16_l1/l2-a/cpu.max
+echo "400000 100000" > /sys/fs/cgroup/test16_l1/l2-b/cpu.max
+
+# -------------
+# Test 16-01: running on one cgroups
+# echo $$ > /sys/fs/cgroup/test16_l1/l2-a/cgroup.procs
+
+# -------------
+# Test 16-02: running on another cgroups
+# echo $$ > /sys/fs/cgroup/test16_l1/l2-b/cgroup.procs
+
+# -------------
+# Test 16-03: running on two cgroups
+# echo $$ > /sys/fs/cgroup/test16_l1/l2-a/cgroup.procs
+# echo $$ > /sys/fs/cgroup/test16_l1/l2-b/cgroup.procs
