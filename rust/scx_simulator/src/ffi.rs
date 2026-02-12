@@ -26,6 +26,10 @@ extern "C" {
     pub fn sim_task_set_slice(p: *mut c_void, slice: u64);
     pub fn sim_task_get_scx_weight(p: *mut c_void) -> u32;
     pub fn sim_task_set_scx_weight(p: *mut c_void, weight: u32);
+
+    pub fn sim_task_setup_cpus_ptr(p: *mut c_void);
+    pub fn sim_task_get_scx_flags(p: *mut c_void) -> u32;
+    pub fn sim_task_set_scx_flags(p: *mut c_void, flags: u32);
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +85,13 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code. `p` must be a valid task_struct pointer.
     unsafe fn runnable(&self, _p: *mut c_void, _enq_flags: u64) {}
+
+    /// Initialize a task (ops.init_task). Called once per task at creation.
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer.
+    unsafe fn init_task(&self, _p: *mut c_void) -> i32 {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,5 +138,109 @@ impl Scheduler for ScxSimple {
 
     unsafe fn enable(&self, p: *mut c_void) {
         simple_enable(p)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// scx_tickless scheduler FFI
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    fn tickless_init() -> i32;
+    fn tickless_select_cpu(p: *mut c_void, prev_cpu: i32, wake_flags: u64) -> i32;
+    fn tickless_enqueue(p: *mut c_void, enq_flags: u64);
+    fn tickless_dispatch(cpu: i32, prev: *mut c_void);
+    fn tickless_running(p: *mut c_void);
+    fn tickless_stopping(p: *mut c_void, runnable: bool);
+    fn tickless_enable(p: *mut c_void);
+    fn tickless_runnable(p: *mut c_void, enq_flags: u64);
+    fn tickless_init_task(p: *mut c_void, args: *mut c_void) -> i32;
+
+    // Tickless global variables
+    static mut nr_cpu_ids: u32;
+    static mut smt_enabled: bool;
+    static mut slice_ns: u64;
+    static mut tick_freq: u64;
+    static mut preferred_cpus: [u64; 1024];
+
+    // Primary CPU setup (takes struct cpu_arg *)
+    fn enable_primary_cpu(input: *mut c_void) -> i32;
+
+    // Map registration
+    fn tickless_register_maps();
+}
+
+/// Matches the C `struct cpu_arg` from tickless intf.h.
+#[repr(C)]
+struct CpuArg {
+    cpu_id: i32,
+}
+
+/// The scx_tickless scheduler compiled as userspace C.
+pub struct ScxTickless;
+
+impl ScxTickless {
+    /// Set up tickless global state (nr_cpu_ids, slice, preferred_cpus)
+    /// and enable CPU 0 as the primary scheduling CPU.
+    ///
+    /// # Safety
+    /// Must be called before `init()` and before any scheduler ops.
+    pub unsafe fn setup(&self, num_cpus: u32) {
+        nr_cpu_ids = num_cpus;
+        smt_enabled = false;
+        // 20ms default slice
+        slice_ns = 20_000_000;
+        // Use simulated time, set tick_freq to avoid CONFIG_HZ dependency
+        tick_freq = 250;
+
+        // Set preferred CPU ordering (identity mapping)
+        for i in 0..num_cpus.min(1024) {
+            preferred_cpus[i as usize] = i as u64;
+        }
+
+        // Register BPF maps with test infrastructure
+        tickless_register_maps();
+
+        // Enable CPU 0 as primary
+        let mut arg = CpuArg { cpu_id: 0 };
+        enable_primary_cpu(&mut arg as *mut CpuArg as *mut c_void);
+    }
+}
+
+impl Scheduler for ScxTickless {
+    unsafe fn init(&self) -> i32 {
+        tickless_init()
+    }
+
+    unsafe fn select_cpu(&self, p: *mut c_void, prev_cpu: i32, wake_flags: u64) -> i32 {
+        tickless_select_cpu(p, prev_cpu, wake_flags)
+    }
+
+    unsafe fn enqueue(&self, p: *mut c_void, enq_flags: u64) {
+        tickless_enqueue(p, enq_flags)
+    }
+
+    unsafe fn dispatch(&self, cpu: i32, prev: *mut c_void) {
+        tickless_dispatch(cpu, prev)
+    }
+
+    unsafe fn running(&self, p: *mut c_void) {
+        tickless_running(p)
+    }
+
+    unsafe fn stopping(&self, p: *mut c_void, runnable: bool) {
+        tickless_stopping(p, runnable)
+    }
+
+    unsafe fn enable(&self, p: *mut c_void) {
+        tickless_enable(p)
+    }
+
+    unsafe fn runnable(&self, p: *mut c_void, enq_flags: u64) {
+        tickless_runnable(p, enq_flags)
+    }
+
+    unsafe fn init_task(&self, p: *mut c_void) -> i32 {
+        tickless_init_task(p, std::ptr::null_mut())
     }
 }

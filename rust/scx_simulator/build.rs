@@ -18,6 +18,8 @@ fn main() {
         root_dir.join("scheds/include/bpf-compat"),
         // Scheduler C source (for #include "scx_simple.bpf.c")
         root_dir.join("scheds/c"),
+        // Tickless BPF source (for #include "intf.h" and "main.bpf.c")
+        root_dir.join("scheds/rust/scx_tickless/src/bpf"),
         // libbpf headers
         env::var("DEP_BPF_INCLUDE")
             .expect("libbpf-sys include must be available")
@@ -64,8 +66,32 @@ fn main() {
         .flag("-Wno-unknown-attributes")
         .compile("scx_simple");
 
+    // Build the BPF stub implementations (cpumask, timer, kptr)
+    cc::Build::new()
+        .compiler(&compiler)
+        .file(manifest_dir.join("csrc/sim_bpf_stubs.c"))
+        .define("SCX_BPF_UNITTEST", None)
+        .includes(&include_paths)
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unknown-attributes")
+        .compile("sim_bpf_stubs");
+
+    // Build the scx_tickless scheduler as userspace C
+    // -Dconst= strips const qualifier so BPF "const volatile" globals
+    // (patched by loader in real BPF) are placed in writable memory.
+    cc::Build::new()
+        .compiler(&compiler)
+        .file(manifest_dir.join("csrc/tickless_wrapper.c"))
+        .define("SCX_BPF_UNITTEST", None)
+        .define("const", "")
+        .includes(&include_paths)
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unknown-attributes")
+        .compile("scx_tickless");
+
     // Rebuild triggers
     println!("cargo:rerun-if-changed=csrc/");
     println!("cargo:rerun-if-changed=../../lib/scxtest/");
     println!("cargo:rerun-if-changed=../../scheds/c/scx_simple.bpf.c");
+    println!("cargo:rerun-if-changed=../../scheds/rust/scx_tickless/src/bpf/");
 }

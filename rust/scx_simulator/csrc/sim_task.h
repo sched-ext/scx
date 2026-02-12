@@ -33,3 +33,8 @@ unsigned long long sim_task_get_slice(struct task_struct *p);
 void sim_task_set_slice(struct task_struct *p, unsigned long long slice);
 unsigned int sim_task_get_scx_weight(struct task_struct *p);
 void sim_task_set_scx_weight(struct task_struct *p, unsigned int weight);
+
+/* cpus_ptr and scx.flags accessors */
+void sim_task_setup_cpus_ptr(struct task_struct *p);
+unsigned int sim_task_get_scx_flags(struct task_struct *p);
+void sim_task_set_scx_flags(struct task_struct *p, unsigned int flags);
