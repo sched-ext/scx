@@ -621,7 +621,8 @@ void cbw_update_budget_tx(struct scx_cgroup_ctx *subroot_cgx,
 	s64 base;
 
 	base = (subroot_cgx == cgx) ? subroot_cgx->nquota_ub :
-				      subroot_cgx->budget_p2c;
+		min(subroot_cgx->budget_p2c, cgx->nquota_ub);
+
 	if (base != CBW_RUNTUME_INF) {
 		nr_branch_cgs = ((subroot_cgx == cgx) ? cgx->nr_taskable_descendents : 0) +
 				(cgx->has_llcx ? 1 : 0);
