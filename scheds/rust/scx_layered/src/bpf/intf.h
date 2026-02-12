@@ -245,7 +245,6 @@ struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_llcs;
 	u32			nr_cpus;
-	u64			llc_mask;
 };
 
 enum layer_match_kind {
