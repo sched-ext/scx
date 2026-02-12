@@ -3595,9 +3595,6 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		}
 
 		bpf_for(j, 0, nr_llcs) {
-			if (!(layer->llc_mask & (1 << j)))
-				continue;
-
 			dsq_id = layer_dsq_id(layer->id, j);
 			scx_bpf_dump("LAYER[%d](%s)-DSQ[%llx] nr_cpus=%u nr_queued=%d %+lldms\n",
 				     i, layer->name, dsq_id, layer->nr_cpus,

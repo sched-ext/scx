@@ -362,8 +362,6 @@ struct layer {
 	u64			nr_tasks;
 
 	u64			cpus_seq;
-	u64			node_mask;
-	u64			llc_mask;
 	bool			check_no_idle;
 	u32			perf;
 	u64			refresh_cpus;

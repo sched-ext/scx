@@ -64,7 +64,6 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
-use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::TopologyArgs;
@@ -832,22 +831,6 @@ fn copy_into_cstr(dst: &mut [i8], src: &str) {
     let cstr = CString::new(src).unwrap();
     let bytes = unsafe { std::mem::transmute::<&[u8], &[i8]>(cstr.as_bytes_with_nul()) };
     dst[0..bytes.len()].copy_from_slice(bytes);
-}
-
-fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
-    let mut mask = 0;
-    for node in nodes {
-        mask |= 1 << node;
-    }
-    mask
-}
-
-fn llcmask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
-    let mut mask = 0;
-    for (_, cache) in llcs {
-        mask |= 1 << cache.id;
-    }
-    mask
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
@@ -1917,7 +1900,6 @@ impl<'a> Scheduler<'a> {
                     skip_remote_node,
                     prev_over_idle_core,
                     growth_algo,
-                    nodes,
                     slice_us,
                     fifo,
                     weight,
@@ -1962,13 +1944,6 @@ impl<'a> Scheduler<'a> {
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
-                layer.node_mask = nodemask_from_nodes(nodes) as u64;
-                for (topo_node_id, topo_node) in &topo.nodes {
-                    if !nodes.is_empty() && !nodes.contains(topo_node_id) {
-                        continue;
-                    }
-                    layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
-                }
 
                 let task_place = |place: u32| crate::types::layer_task_place(place);
                 layer.task_place = match placement {
