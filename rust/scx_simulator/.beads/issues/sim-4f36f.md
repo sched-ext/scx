@@ -1,12 +1,13 @@
 ---
 title: Simulate performance counters (PMU events)
-status: open
+status: closed
 priority: 2
 issue_type: feature
 depends_on:
   sim-ea456: related
 created_at: 2026-02-13T13:04:24.436408933+00:00
-updated_at: 2026-02-13T13:07:58.514943617+00:00
+updated_at: 2026-02-13T14:20:06.762533789+00:00
+closed_at: 2026-02-13T14:20:06.762533719+00:00
 ---
 
 # Description

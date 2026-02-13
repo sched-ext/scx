@@ -44,15 +44,61 @@
  * Forward-declared here; defined after the scheduler source since
  * struct cpu_ctx is defined there.
  */
+#define MAX_SIM_CPUS 128
 static struct cpu_ctx *cosmos_lookup_percpu_elem(int cpu);
 #undef bpf_map_lookup_percpu_elem
 #define bpf_map_lookup_percpu_elem(map, key, cpu) cosmos_lookup_percpu_elem(cpu)
 
 /*
- * Perf disabled — stub out bpf_perf_event_read_value.
+ * Simulated perf counters.
+ *
+ * Use scx_bpf_now() as a monotonic counter. start_counters() records
+ * the baseline at task start; stop_counters() reads the current value
+ * at task stop. Delta = task runtime in nanoseconds.
+ *
+ * Tasks with runtime > perf_threshold are classified as "event heavy"
+ * and routed to the least-busy-event CPU.
  */
+extern u64 scx_bpf_now(void);
+
+static long sim_perf_event_read(void *map, u32 key,
+				struct bpf_perf_event_value *val, u32 size)
+{
+	(void)map; (void)key; (void)size;
+	val->counter = scx_bpf_now();
+	val->enabled = 1;
+	val->running = 1;
+	return 0;
+}
 #undef bpf_perf_event_read_value
-#define bpf_perf_event_read_value(...) ((long)0)
+#define bpf_perf_event_read_value(map, key, val, size) \
+	sim_perf_event_read(map, key, val, size)
+
+/*
+ * Per-CPU start_readings storage.
+ *
+ * The BPF start_readings map is PERCPU_ARRAY — each CPU needs its own
+ * baseline. Override bpf_map_lookup_elem to route start_readings lookups
+ * to this array; all other maps fall through to scx_test_map_lookup_elem.
+ *
+ * start_readings_map_ptr is set in cosmos_register_maps() after
+ * main.bpf.c is included (where start_readings is defined).
+ */
+static struct bpf_perf_event_value start_readings_percpu[MAX_SIM_CPUS];
+static void *start_readings_map_ptr;
+
+static void *cosmos_map_lookup(void *map, const void *key)
+{
+	if (map == start_readings_map_ptr && start_readings_map_ptr != NULL) {
+		int cpu = bpf_get_smp_processor_id();
+		if (cpu >= 0 && cpu < MAX_SIM_CPUS)
+			return &start_readings_percpu[cpu];
+		return NULL;
+	}
+	return scx_test_map_lookup_elem(map, key);
+}
+#undef bpf_map_lookup_elem
+#define bpf_map_lookup_elem(map, key) cosmos_map_lookup((void *)(map), key)
 
 /*
  * Include COSMOS interface header, then the scheduler source.
@@ -70,7 +116,6 @@ static struct cpu_ctx *cosmos_lookup_percpu_elem(int cpu);
  * Static per-CPU context array, defined after the scheduler source
  * so that struct cpu_ctx is available.
  */
-#define MAX_SIM_CPUS 128
 static struct cpu_ctx percpu_ctx[MAX_SIM_CPUS];
 
 static struct cpu_ctx *cosmos_lookup_percpu_elem(int cpu)
@@ -99,6 +144,8 @@ void cosmos_register_maps(void)
 
 	INIT_SCX_TEST_MAP(&cpu_node_test_map, cpu_node_map);
 	scx_test_map_register(&cpu_node_test_map, &cpu_node_map);
+
+	start_readings_map_ptr = (void *)&start_readings;
 }
 
 /*
@@ -119,7 +166,7 @@ void cosmos_setup(unsigned int num_cpus)
 	numa_enabled = false;
 	nr_node_ids = 1;
 	mm_affinity = false;
-	perf_enabled = false;
+	perf_enabled = true;
 	deferred_wakeups = false;
 	slice_ns = 20000000;   /* 20ms */
 	slice_lag = 20000000;  /* 20ms */
