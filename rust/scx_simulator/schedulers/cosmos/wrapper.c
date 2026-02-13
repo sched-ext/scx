@@ -116,7 +116,7 @@ void cosmos_setup(unsigned int num_cpus)
 	deferred_wakeups = false;
 	slice_ns = 20000000;   /* 20ms */
 	slice_lag = 20000000;  /* 20ms */
-	busy_threshold = 0;   /* always deadline mode */
+	busy_threshold = 1;   /* system "not busy" → flat idle scan path */
 
 	cosmos_register_maps();
 	enable_primary_cpu(&arg);
