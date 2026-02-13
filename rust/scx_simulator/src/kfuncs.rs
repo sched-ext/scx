@@ -16,7 +16,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
 
@@ -27,7 +27,7 @@ use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
 use crate::trace::{Trace, TraceKind};
-use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
+use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
 /// Which scheduler callback is currently executing.
 ///
@@ -89,7 +89,7 @@ pub struct SimulatorState {
     pub dsq_iter: Option<DsqIterState>,
     /// CPUs kicked via `scx_bpf_kick_cpu` during a callback.
     /// The engine processes these after the callback returns.
-    pub kicked_cpus: HashSet<CpuId>,
+    pub kicked_cpus: HashMap<CpuId, KickFlags>,
     /// Per-task last CPU (set when a task starts running).
     /// Used by `scx_bpf_task_cpu` to return the correct value.
     pub task_last_cpu: HashMap<Pid, CpuId>,
@@ -815,16 +815,20 @@ pub extern "C" fn bpf_task_from_pid(pid: i32) -> *mut c_void {
 
 /// Kick a CPU (send scheduling IPI).
 ///
-/// Records the CPU in the kicked set. The engine processes kicked CPUs
-/// after the current scheduler callback returns, triggering dispatch
-/// on those CPUs.
+/// Records the CPU and flags in the kicked map. The engine processes kicked
+/// CPUs after the current scheduler callback returns, triggering dispatch
+/// on those CPUs. Flags are OR'd so multiple kicks accumulate.
 #[no_mangle]
-pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, _flags: u64) {
+pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, flags: u64) {
     with_sim(|sim| {
         let cpu_id = CpuId(cpu as u32);
         if (cpu_id.0 as usize) < sim.cpus.len() {
-            sim.kicked_cpus.insert(cpu_id);
-            debug!(cpu, "kick_cpu");
+            let new_flags = KickFlags::from_raw(flags);
+            sim.kicked_cpus
+                .entry(cpu_id)
+                .and_modify(|existing| existing.insert(new_flags))
+                .or_insert(new_flags);
+            debug!(cpu, flags, "kick_cpu");
 
             let current = sim.current_cpu;
             let local_t = sim.cpus[current.0 as usize].local_clock;
@@ -974,7 +978,7 @@ mod tests {
     use crate::cpu::SimCpu;
     use crate::dsq::DsqManager;
     use crate::trace::Trace;
-    use crate::types::{CpuId, DsqId, Pid};
+    use crate::types::{CpuId, DsqId, KickFlags, Pid};
     use crate::SIM_LOCK;
 
     /// Create a minimal SimulatorState for unit testing.
@@ -992,7 +996,7 @@ mod tests {
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
-            kicked_cpus: HashSet::new(),
+            kicked_cpus: HashMap::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
             waker_task_raw: None,
@@ -1424,13 +1428,17 @@ mod tests {
 
         unsafe { enter_sim(&mut state) };
         scx_bpf_kick_cpu(1, 0);
-        scx_bpf_kick_cpu(3, 0);
-        scx_bpf_kick_cpu(1, 0); // duplicate, set semantics
+        scx_bpf_kick_cpu(3, 2); // SCX_KICK_PREEMPT
+        scx_bpf_kick_cpu(1, 2); // OR flags: 0 | 2 = PREEMPT
         exit_sim();
 
         assert_eq!(state.kicked_cpus.len(), 2);
-        assert!(state.kicked_cpus.contains(&CpuId(1)));
-        assert!(state.kicked_cpus.contains(&CpuId(3)));
+        assert!(state.kicked_cpus.contains_key(&CpuId(1)));
+        assert!(state.kicked_cpus.contains_key(&CpuId(3)));
+        // CPU 1 was kicked with 0 then 2, should have PREEMPT
+        assert!(state.kicked_cpus[&CpuId(1)].contains(KickFlags::PREEMPT));
+        // CPU 3 was kicked with PREEMPT
+        assert!(state.kicked_cpus[&CpuId(3)].contains(KickFlags::PREEMPT));
     }
 
     #[test]

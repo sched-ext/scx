@@ -71,6 +71,8 @@ pub enum TraceKind {
     DsqMoveToLocal { dsq_id: DsqId, success: bool },
     /// scx_bpf_kick_cpu: send scheduling IPI to a CPU.
     KickCpu { target_cpu: CpuId },
+    /// A periodic scheduler tick fired on this CPU.
+    Tick { pid: Pid },
 }
 
 /// A complete simulation trace, containing all events in chronological order.
@@ -162,6 +164,14 @@ impl Trace {
             .count()
     }
 
+    /// Count the number of tick events on a CPU.
+    pub fn tick_count(&self, cpu: CpuId) -> usize {
+        self.events
+            .iter()
+            .filter(|e| e.cpu == cpu && matches!(e.kind, TraceKind::Tick { .. }))
+            .count()
+    }
+
     /// Pretty-print the trace for debugging.
     pub fn dump(&self) {
         for event in &self.events {
@@ -218,6 +228,7 @@ impl Trace {
                 TraceKind::KickCpu { target_cpu } => {
                     format!("KICK     cpu={}", target_cpu.0)
                 }
+                TraceKind::Tick { pid } => format!("TICK     pid={}", pid.0),
             };
             eprintln!(
                 "[{}] cpu={:<3} {}",

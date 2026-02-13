@@ -52,6 +52,28 @@ impl DsqId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MmId(pub u32);
 
+/// Bitflags for `scx_bpf_kick_cpu` matching kernel `scx_kick_flags`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KickFlags(u64);
+
+impl KickFlags {
+    pub const NONE: KickFlags = KickFlags(0);
+    pub const IDLE: KickFlags = KickFlags(1);
+    pub const PREEMPT: KickFlags = KickFlags(2);
+
+    pub fn from_raw(raw: u64) -> Self {
+        KickFlags(raw)
+    }
+
+    pub fn contains(self, other: KickFlags) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn insert(&mut self, other: KickFlags) {
+        self.0 |= other.0;
+    }
+}
+
 /// Simulated time in nanoseconds.
 pub type TimeNs = u64;
 

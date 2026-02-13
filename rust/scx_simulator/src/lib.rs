@@ -50,7 +50,7 @@ pub use rtapp::load_rtapp;
 pub use scenario::Scenario;
 pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
-pub use types::{CpuId, DsqId, MmId, Pid, TimeNs, Vtime};
+pub use types::{CpuId, DsqId, KickFlags, MmId, Pid, TimeNs, Vtime};
 
 use std::sync::Mutex;
 

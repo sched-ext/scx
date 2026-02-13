@@ -4,7 +4,7 @@
 //! clock, CPU/task state, and drives the scheduler through its ops callbacks.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::ffi::c_void;
 
 use tracing::{debug, info};
@@ -17,7 +17,7 @@ use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::scenario::Scenario;
 use crate::task::{Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
-use crate::types::{CpuId, Pid, TimeNs};
+use crate::types::{CpuId, KickFlags, Pid, TimeNs};
 
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
@@ -155,7 +155,7 @@ impl<S: Scheduler> Simulator<S> {
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
-            kicked_cpus: HashSet::new(),
+            kicked_cpus: HashMap::new(),
             task_last_cpu: HashMap::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
@@ -305,16 +305,15 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process CPUs kicked by the timer callback
-        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
-        for kicked_cpu in kicked {
-            self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
-        }
+        self.process_kicked_cpus(None, state, tasks, events, seq);
     }
 
     /// Handle a periodic scheduler tick on a CPU.
     ///
     /// Calls `ops.tick(p)` where `p` is the currently running task.
-    /// If a task is still running after the tick, schedules the next tick.
+    /// Detects self-preemption via two patterns:
+    /// 1. Scheduler called `scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT)` on self
+    /// 2. Scheduler zeroed `p->scx.slice` (slice changed to 0 during tick)
     fn handle_tick(
         &self,
         cpu: CpuId,
@@ -333,6 +332,16 @@ impl<S: Scheduler> Simulator<S> {
             None => return,
         };
 
+        // Record tick in trace
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::Tick { pid },
+        );
+
+        // Save pre-tick slice to detect if scheduler zeroed it
+        let pre_tick_slice = unsafe { ffi::sim_task_get_slice(raw) };
+
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
@@ -341,16 +350,25 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
-        // Process CPUs kicked by the tick callback
-        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
-        for kicked_cpu in kicked {
-            if kicked_cpu != cpu {
-                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
-            }
-        }
+        // Check for self-preemption
+        let self_kick_preempt = state
+            .kicked_cpus
+            .get(&cpu)
+            .is_some_and(|flags| flags.contains(KickFlags::PREEMPT));
+        let post_tick_slice = unsafe { ffi::sim_task_get_slice(raw) };
+        let slice_zeroed = pre_tick_slice > 0 && post_tick_slice == 0;
+        let should_preempt = self_kick_preempt || slice_zeroed;
 
-        // Schedule next tick if task is still running
-        if state.cpus[cpu.0 as usize].current_task.is_some() {
+        // Remove self from kicked set before processing others
+        state.kicked_cpus.remove(&cpu);
+
+        // Process other kicked CPUs
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+
+        if should_preempt && state.cpus[cpu.0 as usize].current_task.is_some() {
+            self.preempt_current(cpu, state, tasks, events, seq);
+        } else if state.cpus[cpu.0 as usize].current_task.is_some() {
+            // Schedule next tick if task is still running
             let next_tick = state.cpus[cpu.0 as usize].local_clock + TICK_INTERVAL_NS;
             events.push(Reverse(Event {
                 time_ns: next_tick,
@@ -545,6 +563,8 @@ impl<S: Scheduler> Simulator<S> {
 
         state.cpus[cpu.0 as usize].current_task = None;
         state.cpus[cpu.0 as usize].prev_task = Some(pid);
+        state.cpus[cpu.0 as usize].task_started_at = None;
+        state.cpus[cpu.0 as usize].task_original_slice = None;
 
         // Set slice to 0: the full slice was consumed (used by stopping() for vtime)
         unsafe { crate::ffi::sim_task_set_slice(raw, 0) };
@@ -580,11 +600,7 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
-        // Must drain before try_dispatch_and_run, which clears kicked_cpus.
-        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
-        for kicked_cpu in kicked {
-            self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
-        }
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
 
         // Dispatch next task on this CPU
         self.try_dispatch_and_run(cpu, state, tasks, events, seq);
@@ -625,6 +641,8 @@ impl<S: Scheduler> Simulator<S> {
 
         state.cpus[cpu.0 as usize].current_task = None;
         state.cpus[cpu.0 as usize].prev_task = Some(pid);
+        state.cpus[cpu.0 as usize].task_started_at = None;
+        state.cpus[cpu.0 as usize].task_original_slice = None;
 
         // Set slice to reflect consumed time (used by stopping() for vtime)
         let remaining_slice = original_slice.saturating_sub(time_consumed);
@@ -804,11 +822,7 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
-        // Must drain before try_dispatch_and_run, which clears kicked_cpus.
-        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
-        for kicked_cpu in kicked {
-            self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
-        }
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
 
         // Dispatch next task on this CPU
         self.try_dispatch_and_run(cpu, state, tasks, events, seq);
@@ -863,12 +877,7 @@ impl<S: Scheduler> Simulator<S> {
             // Process CPUs kicked during dispatch().
             // The scheduler may have dispatched tasks to other CPUs'
             // local DSQs via scx_bpf_dsq_move(SCX_DSQ_LOCAL_ON | cpu).
-            let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
-            for kicked_cpu in kicked {
-                if kicked_cpu != cpu {
-                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
-                }
-            }
+            self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
         }
 
         // Try to pull a task from the local DSQ
@@ -890,6 +899,123 @@ impl<S: Scheduler> Simulator<S> {
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
             info!(cpu = cpu.0, "IDLE");
         }
+    }
+
+    /// Process CPUs kicked via `scx_bpf_kick_cpu` during a callback.
+    ///
+    /// Drains the kicked_cpus map and handles each entry based on its flags:
+    /// - `PREEMPT` + task running → `preempt_current(cpu)`
+    /// - `IDLE` → only dispatch if CPU is idle
+    /// - Plain kick → `try_dispatch_and_run(cpu)`
+    ///
+    /// `exclude_cpu` is skipped (caller handles it separately, e.g. tick's own CPU).
+    fn process_kicked_cpus(
+        &self,
+        exclude_cpu: Option<CpuId>,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut BinaryHeap<Reverse<Event>>,
+        seq: &mut u64,
+    ) {
+        let kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
+        for (kicked_cpu, flags) in kicked {
+            if Some(kicked_cpu) == exclude_cpu {
+                continue;
+            }
+            if flags.contains(KickFlags::PREEMPT)
+                && state.cpus[kicked_cpu.0 as usize].current_task.is_some()
+            {
+                self.preempt_current(kicked_cpu, state, tasks, events, seq);
+            } else if flags.contains(KickFlags::IDLE) {
+                if state.cpus[kicked_cpu.0 as usize].current_task.is_none() {
+                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+                }
+            } else {
+                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+            }
+        }
+    }
+
+    /// Preempt the currently running task on `cpu` mid-slice.
+    ///
+    /// Computes how much of the slice was consumed, deducts it from
+    /// `run_remaining_ns`, calls `stopping()` + `enqueue()`, then
+    /// dispatches the next task via `try_dispatch_and_run()`.
+    fn preempt_current(
+        &self,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut BinaryHeap<Reverse<Event>>,
+        seq: &mut u64,
+    ) {
+        let pid = match state.cpus[cpu.0 as usize].current_task {
+            Some(pid) => pid,
+            None => return,
+        };
+
+        let task = match tasks.get_mut(&pid) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let local_clock = state.cpus[cpu.0 as usize].local_clock;
+        let started_at = state.cpus[cpu.0 as usize]
+            .task_started_at
+            .unwrap_or(local_clock);
+        let original_slice = state.cpus[cpu.0 as usize].task_original_slice.unwrap_or(0);
+        let consumed = local_clock.saturating_sub(started_at);
+
+        task.run_remaining_ns = task.run_remaining_ns.saturating_sub(consumed);
+
+        state
+            .trace
+            .record(local_clock, cpu, TraceKind::TaskPreempted { pid });
+
+        let task_name = task.name.as_str();
+        info!(
+            cpu = cpu.0,
+            task = task_name,
+            pid = pid.0,
+            ran_ns = %FmtN(consumed),
+            "PREEMPTED (tick)"
+        );
+
+        let raw = task.raw();
+        task.state = TaskState::Runnable;
+
+        state.cpus[cpu.0 as usize].current_task = None;
+        state.cpus[cpu.0 as usize].prev_task = Some(pid);
+        state.cpus[cpu.0 as usize].task_started_at = None;
+        state.cpus[cpu.0 as usize].task_original_slice = None;
+
+        // Set remaining slice on raw task (used by stopping() for vtime accounting)
+        let remaining_slice = original_slice.saturating_sub(consumed);
+        unsafe { crate::ffi::sim_task_set_slice(raw, remaining_slice) };
+
+        unsafe {
+            kfuncs::enter_sim(state);
+            state.current_cpu = cpu;
+            debug!(
+                pid = pid.0,
+                cpu = cpu.0,
+                runnable = true,
+                "stopping (tick preempt)"
+            );
+            self.scheduler.stopping(raw, true);
+            state.ops_context = OpsContext::Enqueue;
+            debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
+            self.scheduler.enqueue(raw, 0);
+            state.ops_context = OpsContext::None;
+            state.resolve_pending_dispatch(cpu);
+            kfuncs::exit_sim();
+        }
+
+        // Process any CPUs kicked during stopping/enqueue
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+
+        // Dispatch next task on this CPU (will also schedule a new tick)
+        self.try_dispatch_and_run(cpu, state, tasks, events, seq);
     }
 
     /// Start running a task on a CPU.
@@ -964,6 +1090,10 @@ impl<S: Scheduler> Simulator<S> {
         let task = tasks.get(&pid).unwrap();
         let slice = task.get_slice();
         let remaining = task.run_remaining_ns;
+
+        // Track when task started for mid-slice preemption accounting
+        state.cpus[cpu.0 as usize].task_started_at = Some(local_t);
+        state.cpus[cpu.0 as usize].task_original_slice = Some(slice);
 
         info!(
             cpu = cpu.0,

@@ -27,6 +27,12 @@ pub struct SimCpu {
     /// CPU performance level set by `scx_bpf_cpuperf_set`.
     /// Range: `[0, SCX_CPUPERF_ONE]` where `SCX_CPUPERF_ONE = 1024`.
     pub perf_lvl: u32,
+    /// Timestamp when the current task started running on this CPU.
+    /// Used by `preempt_current()` to compute how much of the slice was consumed.
+    pub task_started_at: Option<TimeNs>,
+    /// The slice value when the current task started running.
+    /// Used by `preempt_current()` to set the remaining slice on the raw task.
+    pub task_original_slice: Option<TimeNs>,
 }
 
 impl SimCpu {
@@ -39,6 +45,8 @@ impl SimCpu {
             local_clock: 0,
             siblings: Vec::new(),
             perf_lvl: 0,
+            task_started_at: None,
+            task_original_slice: None,
         }
     }
 
