@@ -84,6 +84,7 @@ use log::warn;
 use sscanf::sscanf;
 use std::cmp::min;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -360,6 +361,130 @@ impl Topology {
             }
         }
         sibling_cpu
+    }
+
+    /// Count how many physical cores have at least one CPU set in the cpumask.
+    pub fn cpumask_nr_cores(&self, cpumask: &Cpumask) -> usize {
+        let mut count = 0;
+        for core in self.all_cores.values() {
+            if core.cpus.keys().any(|&cpu_id| cpumask.test_cpu(cpu_id)) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Format a cpumask as a topology-aware visual grid.
+    ///
+    /// Each physical core is represented by a single character:
+    /// - `░` = no CPUs set
+    /// - `▀` = first HT only (top half)
+    /// - `▄` = second HT only (bottom half)
+    /// - `█` = both HTs (or all HTs for >2-way SMT)
+    ///
+    /// Cores are packed together within an LLC (no space), LLCs are
+    /// space-separated, and groups of 4 LLCs are `|`-separated.
+    /// One line per NUMA node.
+    pub fn format_cpumask_grid<W: Write>(
+        &self,
+        w: &mut W,
+        cpumask: &Cpumask,
+        indent: &str,
+        max_width: usize,
+    ) -> Result<()> {
+        for node in self.nodes.values() {
+            // Build the core characters for each LLC in this node
+            let mut llc_segments: Vec<(usize, String)> = Vec::new();
+
+            for llc in node.llcs.values() {
+                let mut seg = String::new();
+                for core in llc.cores.values() {
+                    let nr_cpus = core.cpus.len();
+                    let cpu_ids: Vec<usize> = core.cpus.keys().copied().collect();
+                    let nr_set: usize = cpu_ids.iter().filter(|&&c| cpumask.test_cpu(c)).count();
+
+                    let ch = if nr_cpus == 1 {
+                        if nr_set > 0 {
+                            '█'
+                        } else {
+                            '░'
+                        }
+                    } else if nr_cpus == 2 {
+                        let first_set = cpumask.test_cpu(cpu_ids[0]);
+                        let second_set = cpumask.test_cpu(cpu_ids[1]);
+                        match (first_set, second_set) {
+                            (false, false) => '░',
+                            (true, false) => '▀',
+                            (false, true) => '▄',
+                            (true, true) => '█',
+                        }
+                    } else {
+                        // >2 HTs (e.g. 4-way SMT)
+                        if nr_set == 0 {
+                            '░'
+                        } else if nr_set == nr_cpus {
+                            '█'
+                        } else {
+                            '▄'
+                        }
+                    };
+                    seg.push(ch);
+                }
+                llc_segments.push((llc.id, seg));
+            }
+
+            if llc_segments.is_empty() {
+                continue;
+            }
+
+            // Build prefix: "N{id} L{first_llc}: "
+            let first_llc_id = llc_segments[0].0;
+            let prefix = format!("{}N{} L{:02}: ", indent, node.id, first_llc_id);
+            let prefix_width = prefix.chars().count();
+            let cont_indent = format!("{}{}", indent, " ".repeat(prefix_width - indent.chars().count()));
+
+            // Group LLC segments into chunks of 4, space-separated within
+            // a group, ` | ` between groups.
+            let groups: Vec<String> = llc_segments
+                .iter()
+                .map(|(_, s)| s.as_str())
+                .collect::<Vec<&str>>()
+                .chunks(4)
+                .map(|chunk| chunk.join(" "))
+                .collect();
+
+            // Build lines, wrapping at group boundaries if needed
+            let mut line = prefix.clone();
+            let mut first_group = true;
+
+            for group in &groups {
+                let group_display_width = group.chars().count();
+                let separator = if first_group { "" } else { " | " };
+                let sep_width = separator.chars().count();
+                let current_line_width = line.chars().count();
+
+                if !first_group && current_line_width + sep_width + group_display_width > max_width {
+                    // Wrap to next line
+                    writeln!(w, "{}", line)?;
+                    line = format!("{}{}", cont_indent, group);
+                } else {
+                    line = format!("{}{}{}", line, separator, group);
+                }
+                first_group = false;
+            }
+            writeln!(w, "{}", line)?;
+        }
+        Ok(())
+    }
+
+    /// Format a cpumask header line with cpu count, core count, and range.
+    pub fn format_cpumask_header(&self, cpumask: &Cpumask, min_cpus: u32, max_cpus: u32) -> String {
+        let nr_cpus = cpumask.weight();
+        let nr_cores = self.cpumask_nr_cores(cpumask);
+        format!(
+            "cpus={:3}({:3}c) [{:3},{:3}]",
+            nr_cpus, nr_cores, min_cpus, max_cpus
+        )
     }
 }
 
@@ -993,4 +1118,304 @@ fn create_numa_nodes(
         nodes.insert(node.id, node);
     }
     Ok(nodes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitvec::prelude::*;
+
+    // Per-struct helpers that centralize "don't care" fields. When a field is
+    // added to any topology struct, only the corresponding helper needs updating.
+
+    fn test_cpu(id: usize, core_id: usize, llc_id: usize, node_id: usize) -> Cpu {
+        Cpu {
+            id,
+            core_id,
+            llc_id,
+            node_id,
+            min_freq: 0,
+            max_freq: 0,
+            base_freq: 0,
+            cpu_capacity: 1024,
+            smt_level: 0, // filled by instantiate()
+            pm_qos_resume_latency_us: 0,
+            trans_lat_ns: 0,
+            l2_id: 0,
+            l3_id: llc_id,
+            cache_size: 0,
+            core_type: CoreType::Big { turbo: false },
+            package_id: node_id,
+            cluster_id: 0,
+        }
+    }
+
+    fn test_core(
+        id: usize,
+        cpus: BTreeMap<usize, Arc<Cpu>>,
+        llc_id: usize,
+        node_id: usize,
+        total_cpus: usize,
+    ) -> Core {
+        let mut span = bitvec![u64, Lsb0; 0; total_cpus];
+        for &cpu_id in cpus.keys() {
+            span.set(cpu_id, true);
+        }
+        Core {
+            id,
+            kernel_id: id,
+            cluster_id: 0,
+            cpus,
+            span: Cpumask::from_vec(span.into_vec()),
+            core_type: CoreType::Big { turbo: false },
+            llc_id,
+            node_id,
+        }
+    }
+
+    fn test_llc(
+        id: usize,
+        cores: BTreeMap<usize, Arc<Core>>,
+        node_id: usize,
+        total_cpus: usize,
+    ) -> Llc {
+        let mut span = bitvec![u64, Lsb0; 0; total_cpus];
+        for core in cores.values() {
+            for &cpu_id in core.cpus.keys() {
+                span.set(cpu_id, true);
+            }
+        }
+        Llc {
+            id,
+            kernel_id: id,
+            cores,
+            span: Cpumask::from_vec(span.into_vec()),
+            node_id,
+            all_cpus: BTreeMap::new(), // filled by instantiate()
+        }
+    }
+
+    fn test_node(
+        id: usize,
+        llcs: BTreeMap<usize, Arc<Llc>>,
+        nr_nodes: usize,
+        total_cpus: usize,
+    ) -> Node {
+        let mut span = bitvec![u64, Lsb0; 0; total_cpus];
+        for llc in llcs.values() {
+            for core in llc.cores.values() {
+                for &cpu_id in core.cpus.keys() {
+                    span.set(cpu_id, true);
+                }
+            }
+        }
+        Node {
+            id,
+            distance: vec![10; nr_nodes],
+            llcs,
+            span: Cpumask::from_vec(span.into_vec()),
+            all_cores: BTreeMap::new(), // filled by instantiate()
+            all_cpus: BTreeMap::new(),  // filled by instantiate()
+            #[cfg(feature = "gpu-topology")]
+            gpus: BTreeMap::new(),
+        }
+    }
+
+    fn make_test_topo(
+        nr_nodes: usize,
+        llcs_per_node: usize,
+        cores_per_llc: usize,
+        hts_per_core: usize,
+    ) -> (Topology, usize) {
+        let total_cpus = nr_nodes * llcs_per_node * cores_per_llc * hts_per_core;
+        let mut cpu_id = 0usize;
+        let mut core_id = 0usize;
+        let mut llc_id = 0usize;
+        let mut nodes = BTreeMap::new();
+
+        for node_idx in 0..nr_nodes {
+            let mut llcs = BTreeMap::new();
+            for _ in 0..llcs_per_node {
+                let mut cores = BTreeMap::new();
+                for _ in 0..cores_per_llc {
+                    let mut cpus = BTreeMap::new();
+                    for _ in 0..hts_per_core {
+                        cpus.insert(
+                            cpu_id,
+                            Arc::new(test_cpu(cpu_id, core_id, llc_id, node_idx)),
+                        );
+                        cpu_id += 1;
+                    }
+                    cores.insert(
+                        core_id,
+                        Arc::new(test_core(core_id, cpus, llc_id, node_idx, total_cpus)),
+                    );
+                    core_id += 1;
+                }
+                llcs.insert(
+                    llc_id,
+                    Arc::new(test_llc(llc_id, cores, node_idx, total_cpus)),
+                );
+                llc_id += 1;
+            }
+            nodes.insert(node_idx, test_node(node_idx, llcs, nr_nodes, total_cpus));
+        }
+
+        let span = {
+            let mut mask = bitvec![u64, Lsb0; 0; total_cpus];
+            for i in 0..total_cpus {
+                mask.set(i, true);
+            }
+            Cpumask::from_vec(mask.into_vec())
+        };
+
+        (Topology::instantiate(span, nodes).unwrap(), total_cpus)
+    }
+
+    /// Create a Cpumask from a list of set CPU IDs.
+    fn mask_from_bits(total: usize, bits: &[usize]) -> Cpumask {
+        let mut bv = bitvec![u64, Lsb0; 0; total];
+        for &b in bits {
+            bv.set(b, true);
+        }
+        Cpumask::from_vec(bv.into_vec())
+    }
+
+    fn grid_output(topo: &Topology, cpumask: &Cpumask) -> String {
+        let mut buf = Vec::new();
+        topo.format_cpumask_grid(&mut buf, cpumask, "    ", 80)
+            .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_grid_2node_2llc_3core_2ht() {
+        // 2 nodes, 2 LLCs/node, 3 cores/LLC, 2 HTs/core = 24 CPUs
+        let (topo, total) = make_test_topo(2, 2, 3, 2);
+        assert_eq!(total, 24);
+
+        // Set some specific CPUs:
+        // Node0 LLC0: core0(cpu0,1) core1(cpu2,3) core2(cpu4,5)
+        // Node0 LLC1: core3(cpu6,7) core4(cpu8,9) core5(cpu10,11)
+        // Node1 LLC2: core6(cpu12,13) core7(cpu14,15) core8(cpu16,17)
+        // Node1 LLC3: core9(cpu18,19) core10(cpu20,21) core11(cpu22,23)
+        //
+        // Set: cpu1(core0 2nd HT), cpu2+3(core1 both), cpu12(core6 1st HT)
+        let cpumask = mask_from_bits(total, &[1, 2, 3, 12]);
+
+        let output = grid_output(&topo, &cpumask);
+        // Node0: LLC0=[▄ █ ░] LLC1=[░ ░ ░]
+        // Node1: LLC2=[▀ ░ ░] LLC3=[░ ░ ░]
+        assert!(output.contains("N0 L00:"));
+        assert!(output.contains("N1 L02:"));
+        assert!(output.contains("▄█░"));
+        assert!(output.contains("▀░░"));
+
+        // Core count: cores 0,1,6 have at least one CPU set = 3
+        assert_eq!(topo.cpumask_nr_cores(&cpumask), 3);
+    }
+
+    #[test]
+    fn test_grid_empty_cpumask() {
+        let (topo, total) = make_test_topo(1, 2, 3, 2);
+        let cpumask = mask_from_bits(total, &[]);
+        let output = grid_output(&topo, &cpumask);
+        // All chars should be ░
+        assert!(!output.contains('█'));
+        assert!(!output.contains('▀'));
+        assert!(!output.contains('▄'));
+        assert!(output.contains('░'));
+        assert_eq!(topo.cpumask_nr_cores(&cpumask), 0);
+    }
+
+    #[test]
+    fn test_grid_full_cpumask() {
+        let (topo, total) = make_test_topo(1, 2, 3, 2);
+        let cpumask = mask_from_bits(total, &(0..total).collect::<Vec<_>>());
+        let output = grid_output(&topo, &cpumask);
+        // All chars should be █
+        assert!(!output.contains('░'));
+        assert!(!output.contains('▀'));
+        assert!(!output.contains('▄'));
+        assert!(output.contains('█'));
+        assert_eq!(topo.cpumask_nr_cores(&cpumask), 6);
+    }
+
+    #[test]
+    fn test_grid_mixed_ht() {
+        // 1 node, 1 LLC, 4 cores, 2 HTs = 8 CPUs
+        let (topo, total) = make_test_topo(1, 1, 4, 2);
+        // core0: cpu0,1  core1: cpu2,3  core2: cpu4,5  core3: cpu6,7
+        // Set: cpu0 only (▀), cpu3 only (▄), cpu4+5 (█), none on core3 (░)
+        let cpumask = mask_from_bits(total, &[0, 3, 4, 5]);
+        let output = grid_output(&topo, &cpumask);
+        assert!(output.contains('▀'));
+        assert!(output.contains('▄'));
+        assert!(output.contains('█'));
+        assert!(output.contains('░'));
+    }
+
+    #[test]
+    fn test_grid_single_node() {
+        let (topo, total) = make_test_topo(1, 1, 2, 2);
+        let cpumask = mask_from_bits(total, &[0, 1]);
+        let output = grid_output(&topo, &cpumask);
+        assert!(output.contains("N0 L00:"));
+        assert!(!output.contains("N1"));
+    }
+
+    #[test]
+    fn test_grid_overflow_wrap() {
+        // 1 node, 12 LLCs, 4 cores each, 2 HTs = many characters
+        // 12 LLCs grouped by 4 = 3 groups per line, should wrap
+        let (topo, total) = make_test_topo(1, 12, 4, 2);
+        let cpumask = mask_from_bits(total, &[0]);
+        let mut buf = Vec::new();
+        topo.format_cpumask_grid(&mut buf, &cpumask, "    ", 60)
+            .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // Should have multiple lines for node 0 due to wrapping
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(
+            lines.len() > 1,
+            "Expected wrapping with narrow width, got {} lines",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn test_grid_smt_off() {
+        // 1 node, 1 LLC, 4 cores, 1 HT = no SMT
+        let (topo, total) = make_test_topo(1, 1, 4, 1);
+        // core0: cpu0, core1: cpu1, core2: cpu2, core3: cpu3
+        let cpumask = mask_from_bits(total, &[0, 2]);
+        let output = grid_output(&topo, &cpumask);
+        // Only █ and ░ should appear
+        assert!(output.contains('█'));
+        assert!(output.contains('░'));
+        assert!(!output.contains('▀'));
+        assert!(!output.contains('▄'));
+    }
+
+    #[test]
+    fn test_grid_4way_smt() {
+        // 1 node, 1 LLC, 2 cores, 4 HTs = 8 CPUs
+        let (topo, total) = make_test_topo(1, 1, 2, 4);
+        // core0: cpu0-3, core1: cpu4-7
+        // Set all of core0 → █, set 2 of core1 → ▄ (partial)
+        let cpumask = mask_from_bits(total, &[0, 1, 2, 3, 4, 5]);
+        let output = grid_output(&topo, &cpumask);
+        assert!(output.contains('█')); // core0: all 4 set
+        assert!(output.contains('▄')); // core1: partial (2 of 4)
+    }
+
+    #[test]
+    fn test_cpumask_header() {
+        let (topo, total) = make_test_topo(1, 1, 4, 2);
+        // 4 cores, 8 CPUs. Set cpu0,1,2 (2 cores touched)
+        let cpumask = mask_from_bits(total, &[0, 1, 2]);
+        let header = topo.format_cpumask_header(&cpumask, 5, 10);
+        assert!(header.contains("cpus=  3(  2c)"));
+        assert!(header.contains("[  5, 10]"));
+    }
 }
