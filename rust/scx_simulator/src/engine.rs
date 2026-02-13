@@ -645,7 +645,7 @@ impl<S: Scheduler> Simulator<S> {
                     );
 
                     // Schedule wake event
-                    let wake_time = local_t + sleep_ns;
+                    let wake_time = local_t.saturating_add(sleep_ns);
                     if wake_time <= duration_ns {
                         events.push(Reverse(Event {
                             time_ns: wake_time,

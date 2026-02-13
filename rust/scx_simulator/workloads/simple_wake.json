@@ -1,0 +1,25 @@
+{
+    "global": {
+        "duration": 1,
+        "default_policy": "SCHED_OTHER",
+        "calibration": "CPU0"
+    },
+    "tasks": {
+        "producer": {
+            "priority": -5,
+            "loop": -1,
+            "cpus": [0, 1],
+            "run0": 5000,
+            "resume": "consumer",
+            "run1": 5000,
+            "sleep": 10000
+        },
+        "consumer": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1],
+            "suspend": "consumer",
+            "run": 10000
+        }
+    }
+}

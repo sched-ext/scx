@@ -1,0 +1,239 @@
+#!/usr/bin/env bpftrace
+/*
+ * trace_scx_ops.bt - Trace sched_ext ops callbacks and kfunc calls
+ *
+ * Two layers of tracing:
+ *   1. sched_class kprobes  - bracket when ops callbacks execute
+ *   2. scx_bpf_* kfunc fexit - what the BPF scheduler does inside
+ *
+ * Design notes:
+ *   - fentry on sched_ext_ops__* stubs does NOT fire when a BPF scheduler
+ *     is loaded (trampolines bypass them).
+ *   - sched_class functions are LTO-mangled on this kernel, so we use kprobe
+ *     (no BTF/fentry). Struct dereferences in kprobe entries cause BPF
+ *     complexity failures when combined with many probes, so entries use
+ *     builtins only. PIDs come from kfuncs and kretprobes instead.
+ *
+ * Usage:
+ *   # Default: trace CPUs 0-3
+ *   sudo bpftrace scripts/trace_scx_ops.bt > /tmp/scx_trace.log 2>&1
+ *
+ *   # Custom CPU range: trace CPUs 0-7
+ *   sudo bpftrace -DMAX_CPU=8 scripts/trace_scx_ops.bt > /tmp/scx_trace.log 2>&1
+ *
+ *   # All CPUs (noisy!):
+ *   sudo bpftrace -DMAX_CPU=1024 scripts/trace_scx_ops.bt > /tmp/scx_trace.log 2>&1
+ *
+ * Output format:
+ *   TIMESTAMP_NS cpu=N >> EVENT [key=value...]    (sched_class entry)
+ *   TIMESTAMP_NS cpu=N << EVENT [ret=N]           (sched_class return)
+ *   TIMESTAMP_NS cpu=N .. EVENT key=value...      (kfunc call + return)
+ *
+ * Mapping from sched_class -> ops callbacks:
+ *   select_task_rq  -> ops.select_cpu(p, prev_cpu, wake_flags)
+ *   enqueue_task    -> ops.runnable(p) then ops.enqueue(p, flags)
+ *   dequeue_task    -> ops.quiescent(p) or ops.dequeue(p)
+ *   balance         -> ops.dispatch(cpu, prev)
+ *   set_next_task   -> ops.running(p)
+ *   put_prev_task   -> ops.stopping(p, runnable)
+ *   task_tick       -> ops.tick(p)
+ *   pick_task       -> picks from local DSQ
+ */
+
+#ifndef MAX_CPU
+#define MAX_CPU 4
+#endif
+
+BEGIN {
+    printf("Tracing sched_ext ops + kfuncs on CPUs 0-%d. Ctrl-C to stop.\n\n",
+        MAX_CPU - 1);
+}
+
+/* ================================================================
+ * SCHED_CLASS ENTRY POINTS (kprobe + kretprobe)
+ *
+ * No struct dereference in entry probes to avoid BPF complexity limits.
+ * PIDs come from kfuncs and kretprobes instead.
+ *
+ * Arg layout reference:
+ *   select_task_rq(p, prev_cpu, wake_flags) -> selected_cpu
+ *   enqueue_task(rq, p, flags)
+ *   dequeue_task(rq, p, flags)
+ *   set_next_task(rq, p, first)
+ *   put_prev_task(rq, p)
+ *   balance(rq, prev, rf)
+ *   task_tick(rq, curr, queued)
+ *   pick_task(rq) -> task*
+ * ================================================================ */
+
+/* select_task_rq: called to pick a CPU for a waking task */
+kprobe:select_task_rq_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> select_task_rq\n", nsecs, cpu);
+}
+kretprobe:select_task_rq_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << select_task_rq ret=%d\n", nsecs, cpu, retval);
+}
+
+/* enqueue_task: calls ops.runnable then ops.enqueue */
+kprobe:enqueue_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> enqueue_task\n", nsecs, cpu);
+}
+kretprobe:enqueue_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << enqueue_task\n", nsecs, cpu);
+}
+
+/* dequeue_task: calls ops.quiescent or ops.dequeue */
+kprobe:dequeue_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> dequeue_task\n", nsecs, cpu);
+}
+kretprobe:dequeue_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << dequeue_task\n", nsecs, cpu);
+}
+
+/* balance: calls ops.dispatch to fill local DSQ */
+kprobe:balance_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> balance\n", nsecs, cpu);
+}
+kretprobe:balance_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << balance ret=%d\n", nsecs, cpu, retval);
+}
+
+/* set_next_task: calls ops.running - task starts executing */
+kprobe:set_next_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> set_next_task\n", nsecs, cpu);
+}
+kretprobe:set_next_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << set_next_task\n", nsecs, cpu);
+}
+
+/* put_prev_task: calls ops.stopping - task stops executing */
+kprobe:put_prev_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> put_prev_task\n", nsecs, cpu);
+}
+kretprobe:put_prev_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << put_prev_task\n", nsecs, cpu);
+}
+
+/* task_tick: calls ops.tick - periodic scheduler tick */
+kprobe:task_tick_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> task_tick\n", nsecs, cpu);
+}
+kretprobe:task_tick_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << task_tick\n", nsecs, cpu);
+}
+
+/* pick_task: picks next task from local DSQ */
+kprobe:pick_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d >> pick_task\n", nsecs, cpu);
+}
+kretprobe:pick_task_scx.llvm.6564666893982343222
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d << pick_task ret=0x%lx\n", nsecs, cpu, retval);
+}
+
+/* ================================================================
+ * KFUNC CALLS (fexit - captures args + return values via BTF)
+ * ================================================================ */
+
+fexit:scx_bpf_select_cpu_dfl
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. select_cpu_dfl pid=%d prev_cpu=%d ret=%d\n",
+        nsecs, cpu, args.p->pid, args.prev_cpu, retval);
+}
+
+fexit:scx_bpf_dsq_insert
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. dsq_insert pid=%d dsq=%llu slice=%llu enq_flags=%llu\n",
+        nsecs, cpu, args.p->pid, args.dsq_id, args.slice, args.enq_flags);
+}
+
+fexit:scx_bpf_dsq_insert_vtime
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. dsq_insert_vtime pid=%d dsq=%llu slice=%llu vtime=%llu enq_flags=%llu\n",
+        nsecs, cpu, args.p->pid, args.dsq_id, args.slice, args.vtime, args.enq_flags);
+}
+
+fexit:scx_bpf_pick_idle_cpu
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. pick_idle_cpu flags=%llu ret=%d\n",
+        nsecs, cpu, args.flags, retval);
+}
+
+fexit:scx_bpf_pick_any_cpu
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. pick_any_cpu flags=%llu ret=%d\n",
+        nsecs, cpu, args.flags, retval);
+}
+
+fexit:scx_bpf_kick_cpu
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. kick_cpu target=%d flags=%llu\n",
+        nsecs, cpu, args.cpu, args.flags);
+}
+
+fexit:scx_bpf_task_cpu
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. task_cpu pid=%d ret=%d\n",
+        nsecs, cpu, args.p->pid, retval);
+}
+
+fexit:scx_bpf_dsq_move_to_local
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. dsq_move_to_local dsq=%llu ret=%d\n",
+        nsecs, cpu, args.dsq_id, retval);
+}
+
+fexit:scx_bpf_create_dsq
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. create_dsq dsq=%llu node=%d ret=%d\n",
+        nsecs, cpu, args.dsq_id, args.node, retval);
+}
+
+fexit:scx_bpf_dsq_nr_queued
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. dsq_nr_queued dsq=%llu ret=%d\n",
+        nsecs, cpu, args.dsq_id, retval);
+}
+
+fexit:scx_bpf_task_cgroup
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. task_cgroup pid=%d\n",
+        nsecs, cpu, args.p->pid);
+}
+
+fexit:scx_bpf_task_running
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. task_running pid=%d ret=%d\n",
+        nsecs, cpu, args.p->pid, retval);
+}
+
+fexit:scx_bpf_reenqueue_local
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. reenqueue_local ret=%u\n",
+        nsecs, cpu, retval);
+}
+
+fexit:scx_bpf_consume
+/ cpu < MAX_CPU / {
+    printf("%llu cpu=%d .. consume dsq=%llu ret=%d\n",
+        nsecs, cpu, args.dsq_id, retval);
+}
+
+END {
+    printf("\nDone. Captured ops + kfunc trace.\n");
+}
