@@ -73,7 +73,7 @@ impl FmtTs {
 }
 
 /// Format a u64 with underscore grouping (groups of 3 from the right).
-fn fmt_grouped(v: u64) -> String {
+pub(crate) fn fmt_grouped(v: u64) -> String {
     let digits = v.to_string();
     let len = digits.len();
     if len <= 3 {

@@ -443,7 +443,7 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
-        debug!(pid = pid.0, dsq_id, slice = %FmtN(slice), vtime, "kfunc dsq_insert_vtime");
+        debug!(pid = pid.0, dsq_id, slice = %FmtN(slice), vtime = %Vtime(vtime), "kfunc dsq_insert_vtime");
 
         sim.pending_dispatch = Some(PendingDispatch {
             pid,
