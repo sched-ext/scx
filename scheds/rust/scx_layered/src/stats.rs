@@ -360,17 +360,14 @@ impl LayerStats {
         &self,
         w: &mut W,
         name: &str,
-        header_width: usize,
         topo: Option<&Topology>,
         max_width: usize,
         no_llc: bool,
     ) -> Result<()> {
-        let indent = "    ";
-
-        // Line 1: layer summary (uses header_width for alignment)
+        // Line 1: layer summary
         writeln!(
             w,
-            "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
+            "\n\u{25B6} {} \u{2500} util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
             name,
             self.util,
             fmt_pct(self.util_open_frac),
@@ -378,13 +375,12 @@ impl LayerStats {
             fmt_pct(self.util_protected_frac),
             fmt_pct(self.util_protected_preempt_frac),
             self.tasks,
-            width = header_width,
         )?;
 
         // sched: scheduling event flow
         writeln!(
             w,
-            "{indent}{:<7} tot={} dd_sel/enq={}/{} dsq/10s={}/{} wake/exp/re={}/{}/{}",
+            "  {:<7} tot={} dd_sel/enq={}/{} dsq/10s={}/{} wake/exp/re={}/{}/{}",
             "sched",
             fmt_num(self.total),
             fmt_pct(self.sel_local),
@@ -399,7 +395,7 @@ impl LayerStats {
         // exec: execution behavior (merged keep/yield + slice/min_exec)
         writeln!(
             w,
-            "{indent}{:<7} keep/max/busy={}/{}/{} yield/ign={}/{} slc={} min_ex={}/{}",
+            "  {:<7} keep/max/busy={}/{}/{} yield/ign={}/{} slc={} min_ex={}/{}",
             "exec",
             fmt_pct(self.keep),
             fmt_pct(self.keep_fail_max_exec),
@@ -414,7 +410,7 @@ impl LayerStats {
         // mig: CPU placement and movement
         writeln!(
             w,
-            "{indent}{:<7} mig={} xnuma={} xllc/skip={}/{} open_idle={} affn_viol={}",
+            "  {:<7} mig={} xnuma={} xllc/skip={}/{} open_idle={} affn_viol={}",
             "mig",
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
@@ -427,7 +423,7 @@ impl LayerStats {
         // preempt: preemption
         writeln!(
             w,
-            "{indent}{:<7} preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
+            "  {:<7} preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
             "preempt",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
@@ -439,7 +435,7 @@ impl LayerStats {
         // xlayer: cross-layer and LLC dispatch
         writeln!(
             w,
-            "{indent}{:<7} wake/re={}/{} llc_drain/try={}/{} skip_rnode={}",
+            "  {:<7} wake/re={}/{} llc_drain/try={}/{} skip_rnode={}",
             "xlayer",
             fmt_pct(self.xlayer_wake),
             fmt_pct(self.xlayer_rewake),
@@ -453,14 +449,14 @@ impl LayerStats {
 
         if let Some(topo) = topo {
             let header = topo.format_cpumask_header(&cpumask, self.min_nr_cpus, self.max_nr_cpus);
-            writeln!(w, "{indent}{}", header)?;
+            writeln!(w, "  {}", header)?;
             if cpumask.weight() > 0 {
-                topo.format_cpumask_grid(w, &cpumask, indent, max_width)?;
+                topo.format_cpumask_grid(w, &cpumask, "  ", max_width)?;
             }
         } else {
             writeln!(
                 w,
-                "{indent}cpus={:3} [{:3},{:3}] {}",
+                "  cpus={:3} [{:3},{:3}] {}",
                 self.cur_nr_cpus, self.min_nr_cpus, self.max_nr_cpus, &cpumask,
             )?;
         }
@@ -469,7 +465,7 @@ impl LayerStats {
         if self.is_excl != 0 {
             writeln!(
                 w,
-                "{indent}excl_coll={} excl_preempt={}",
+                "  excl_coll={} excl_preempt={}",
                 fmt_pct(self.excl_collision),
                 fmt_pct(self.excl_preempt),
             )?;
@@ -498,6 +494,7 @@ impl LayerStats {
                 .collect();
 
             if !active_llcs.is_empty() {
+                let indent = "  ";
                 writeln!(w, "{indent}LLC sched%/lat_ms")?;
                 // Cell format: [XX]99.9/99.9 = 13 chars, + 1 space separator = 14
                 let cell_width = 14;
@@ -708,21 +705,13 @@ impl SysStats {
     ) -> Result<()> {
         self.format(w)?;
 
-        let header_width = self
-            .layers
-            .keys()
-            .map(|name| name.len())
-            .max()
-            .unwrap_or(0)
-            .max(4);
-
         let mut idx_to_name: Vec<(usize, &String)> =
             self.layers.iter().map(|(k, v)| (v.index, k)).collect();
 
         idx_to_name.sort();
 
         for (_idx, name) in &idx_to_name {
-            self.layers[*name].format(w, name, header_width, topo, max_width, no_llc)?;
+            self.layers[*name].format(w, name, topo, max_width, no_llc)?;
         }
 
         Ok(())
@@ -799,7 +788,9 @@ pub fn monitor(
         || shutdown.load(Ordering::Relaxed),
         |sst| {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
-            println!("###### {} ######", dt.to_rfc2822());
+            let header = format!("\u{2501}\u{2501} {} ", dt.to_rfc2822());
+            let pad = max_width.saturating_sub(header.chars().count());
+            println!("{}{}", header, "\u{2501}".repeat(pad));
             sst.format_all(&mut std::io::stdout(), topo.as_ref(), max_width, no_llc)
         },
     )
