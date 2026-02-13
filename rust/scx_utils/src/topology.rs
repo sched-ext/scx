@@ -382,9 +382,9 @@ impl Topology {
     /// - `▄` = second HT only (bottom half)
     /// - `█` = both HTs (or all HTs for >2-way SMT)
     ///
-    /// Cores are packed together within an LLC (no space), LLCs are
-    /// space-separated, and groups of 4 LLCs are `|`-separated.
-    /// One line per NUMA node.
+    /// Cores within an LLC are split into evenly-sized groups of at
+    /// most 8 with spaces. LLCs are separated by `|`. Wrapping
+    /// happens at LLC boundaries. One line per NUMA node (may wrap).
     pub fn format_cpumask_grid<W: Write>(
         &self,
         w: &mut W,
@@ -393,12 +393,25 @@ impl Topology {
         max_width: usize,
     ) -> Result<()> {
         for node in self.nodes.values() {
-            // Build the core characters for each LLC in this node
+            // Build the core characters for each LLC in this node.
+            // Within each LLC, cores are grouped by 4 with spaces.
             let mut llc_segments: Vec<(usize, String)> = Vec::new();
 
             for llc in node.llcs.values() {
                 let mut seg = String::new();
-                for core in llc.cores.values() {
+                let nr_cores = llc.cores.len();
+                let nr_groups = (nr_cores + 7) / 8;
+                let base = nr_cores / nr_groups;
+                let rem = nr_cores % nr_groups;
+                // First `rem` groups get base+1, rest get base
+                let mut next_break = if rem > 0 { base + 1 } else { base };
+                let mut group_idx = 0;
+                for (i, core) in llc.cores.values().enumerate() {
+                    if i > 0 && i == next_break {
+                        seg.push(' ');
+                        group_idx += 1;
+                        next_break += if group_idx < rem { base + 1 } else { base };
+                    }
                     let nr_cpus = core.cpus.len();
                     let cpu_ids: Vec<usize> = core.cpus.keys().copied().collect();
                     let nr_set: usize = cpu_ids.iter().filter(|&&c| cpumask.test_cpu(c)).count();
@@ -441,36 +454,26 @@ impl Topology {
             let first_llc_id = llc_segments[0].0;
             let prefix = format!("{}N{} L{:02}: ", indent, node.id, first_llc_id);
             let prefix_width = prefix.chars().count();
-            let cont_indent = format!("{}{}", indent, " ".repeat(prefix_width - indent.chars().count()));
+            let cont_indent =
+                format!("{}{}", indent, " ".repeat(prefix_width - indent.chars().count()));
 
-            // Group LLC segments into chunks of 4, space-separated within
-            // a group, ` | ` between groups.
-            let groups: Vec<String> = llc_segments
-                .iter()
-                .map(|(_, s)| s.as_str())
-                .collect::<Vec<&str>>()
-                .chunks(4)
-                .map(|chunk| chunk.join(" "))
-                .collect();
-
-            // Build lines, wrapping at group boundaries if needed
+            // Join LLCs with "|", wrapping at LLC boundaries
             let mut line = prefix.clone();
-            let mut first_group = true;
+            let mut first_llc = true;
 
-            for group in &groups {
-                let group_display_width = group.chars().count();
-                let separator = if first_group { "" } else { " | " };
+            for (_, seg) in &llc_segments {
+                let seg_width = seg.chars().count();
+                let separator = if first_llc { "" } else { "|" };
                 let sep_width = separator.chars().count();
                 let current_line_width = line.chars().count();
 
-                if !first_group && current_line_width + sep_width + group_display_width > max_width {
-                    // Wrap to next line
+                if !first_llc && current_line_width + sep_width + seg_width > max_width {
                     writeln!(w, "{}", line)?;
-                    line = format!("{}{}", cont_indent, group);
+                    line = format!("{}{}", cont_indent, seg);
                 } else {
-                    line = format!("{}{}{}", line, separator, group);
+                    line = format!("{}{}{}", line, separator, seg);
                 }
-                first_group = false;
+                first_llc = false;
             }
             writeln!(w, "{}", line)?;
         }
@@ -1308,8 +1311,10 @@ mod tests {
         // Node1: LLC2=[▀ ░ ░] LLC3=[░ ░ ░]
         assert!(output.contains("N0 L00:"));
         assert!(output.contains("N1 L02:"));
-        assert!(output.contains("▄█░"));
-        assert!(output.contains("▀░░"));
+        // LLC0=▄█░, LLC1=░░░ separated by |
+        assert!(output.contains("▄█░|░░░"));
+        // LLC2=▀░░, LLC3=░░░ separated by |
+        assert!(output.contains("▀░░|░░░"));
 
         // Core count: cores 0,1,6 have at least one CPU set = 3
         assert_eq!(topo.cpumask_nr_cores(&cpumask), 3);
@@ -1418,4 +1423,5 @@ mod tests {
         assert!(header.contains("cpus=  3(  2c)"));
         assert!(header.contains("[  5, 10]"));
     }
+
 }

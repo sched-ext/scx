@@ -439,7 +439,7 @@ impl LayerStats {
             )?;
             let indent = format!("  {:<width$}  ", "", width = header_width);
             if cpumask.weight() > 0 {
-                topo.format_cpumask_grid(w, &cpumask, &indent, 100)?;
+                topo.format_cpumask_grid(w, &cpumask, &indent, usize::MAX)?;
             }
         } else {
             writeln!(
