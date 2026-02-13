@@ -1,6 +1,7 @@
 //! FFI declarations for scheduler ops and task_struct accessors.
 
 use std::ffi::c_void;
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // task_struct accessors (implemented in csrc/sim_task.c)
@@ -127,6 +128,44 @@ struct SchedOps {
     init_task: Option<InitTaskFn>,
 }
 
+/// Metadata about a discovered scheduler .so file.
+pub struct SchedulerInfo {
+    /// Scheduler name derived from the filename (e.g., "simple").
+    pub name: String,
+    /// Full path to the .so file.
+    pub path: std::path::PathBuf,
+}
+
+/// Scan a directory for `libscx_*.so` files and return metadata for each.
+///
+/// Does NOT load the .so files — just discovers them. Loading happens
+/// on demand via `DynamicScheduler::load`.
+pub fn discover_schedulers(dir: &Path) -> Vec<SchedulerInfo> {
+    let mut schedulers = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return schedulers,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if let Some(sched_name) = name
+            .strip_prefix("libscx_")
+            .and_then(|s| s.strip_suffix(".so"))
+        {
+            schedulers.push(SchedulerInfo {
+                name: sched_name.to_owned(),
+                path,
+            });
+        }
+    }
+    schedulers.sort_by(|a, b| a.name.cmp(&b.name));
+    schedulers
+}
+
 /// A scheduler loaded dynamically from a `.so` shared library.
 ///
 /// Each instance owns a `libloading::Library` handle. When the
@@ -139,46 +178,53 @@ pub struct DynamicScheduler {
 }
 
 impl DynamicScheduler {
-    /// Load the scx_simple scheduler.
-    pub fn simple() -> Self {
-        let path = env!("LIB_SCX_SIMPLE_SO");
-        // SAFETY: The .so is built by our build.rs from known-safe C source.
+    /// Load a scheduler from a `.so` file.
+    ///
+    /// - `path`: path to the `.so` file
+    /// - `prefix`: symbol prefix (e.g., "simple" or "tickless")
+    /// - `nr_cpus`: passed to `{prefix}_setup()` if the symbol exists
+    ///
+    /// Mandatory ops (`init`, `select_cpu`, etc.) panic if missing.
+    /// Optional ops (`runnable`, `init_task`) become `None` if missing.
+    pub fn load(path: &str, prefix: &str, nr_cpus: u32) -> Self {
+        // SAFETY: The .so is built by our build system from known-safe C source.
         // We use RTLD_NOW for eager binding and the default RTLD_LOCAL for
         // symbol isolation.
         let lib = unsafe { libloading::Library::new(path) }
             .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
 
-        let ops = unsafe { Self::load_ops(&lib, "simple", false) };
+        // Probe for {prefix}_setup — call it if present
+        unsafe {
+            let setup_sym = format!("{prefix}_setup");
+            if let Ok(sym) = lib.get::<SetupFn>(setup_sym.as_bytes()) {
+                let setup_fn: SetupFn = *sym;
+                setup_fn(nr_cpus);
+            }
+        }
+
+        let ops = unsafe { Self::load_ops(&lib, prefix) };
         Self { _lib: lib, ops }
     }
 
+    /// Load the scx_simple scheduler.
+    pub fn simple() -> Self {
+        let dir = env!("SCHEDULER_SO_DIR");
+        Self::load(&format!("{dir}/libscx_simple.so"), "simple", 1)
+    }
+
     /// Load the scx_tickless scheduler, configured for `nr_cpus` CPUs.
-    ///
-    /// Calls the C-side `tickless_setup()` to initialize globals, register
-    /// maps, and enable CPU 0 before returning.
     pub fn tickless(nr_cpus: u32) -> Self {
-        let path = env!("LIB_SCX_TICKLESS_SO");
-        let lib = unsafe { libloading::Library::new(path) }
-            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
-
-        // Call tickless_setup() to initialize globals before any ops
-        unsafe {
-            let setup: libloading::Symbol<SetupFn> = lib
-                .get(b"tickless_setup")
-                .expect("tickless_setup not found in .so");
-            let setup_fn: SetupFn = *setup;
-            setup_fn(nr_cpus);
-        }
-
-        let ops = unsafe { Self::load_ops(&lib, "tickless", true) };
-        Self { _lib: lib, ops }
+        let dir = env!("SCHEDULER_SO_DIR");
+        Self::load(&format!("{dir}/libscx_tickless.so"), "tickless", nr_cpus)
     }
 
     /// Look up scheduler ops function pointers from the loaded library.
     ///
+    /// Mandatory symbols panic if missing. Optional symbols become `None`.
+    ///
     /// # Safety
     /// The library must contain the expected symbols with correct signatures.
-    unsafe fn load_ops(lib: &libloading::Library, prefix: &str, has_extras: bool) -> SchedOps {
+    unsafe fn load_ops(lib: &libloading::Library, prefix: &str) -> SchedOps {
         macro_rules! get {
             ($name:expr) => {{
                 let sym_name = format!("{}_{}", prefix, $name);
@@ -190,7 +236,16 @@ impl DynamicScheduler {
             }};
         }
 
-        let ops = SchedOps {
+        macro_rules! try_get {
+            ($name:expr) => {{
+                let sym_name = format!("{}_{}", prefix, $name);
+                lib.get::<*const ()>(sym_name.as_bytes())
+                    .ok()
+                    .map(|sym| *sym)
+            }};
+        }
+
+        SchedOps {
             init: std::mem::transmute::<*const (), InitFn>(get!("init")),
             select_cpu: std::mem::transmute::<*const (), SelectCpuFn>(get!("select_cpu")),
             enqueue: std::mem::transmute::<*const (), EnqueueFn>(get!("enqueue")),
@@ -198,19 +253,11 @@ impl DynamicScheduler {
             running: std::mem::transmute::<*const (), RunningFn>(get!("running")),
             stopping: std::mem::transmute::<*const (), StoppingFn>(get!("stopping")),
             enable: std::mem::transmute::<*const (), EnableFn>(get!("enable")),
-            runnable: if has_extras {
-                Some(std::mem::transmute::<*const (), RunnableFn>(get!("runnable")))
-            } else {
-                None
-            },
-            init_task: if has_extras {
-                Some(std::mem::transmute::<*const (), InitTaskFn>(get!("init_task")))
-            } else {
-                None
-            },
-        };
-
-        ops
+            runnable: try_get!("runnable")
+                .map(|p| std::mem::transmute::<*const (), RunnableFn>(p)),
+            init_task: try_get!("init_task")
+                .map(|p| std::mem::transmute::<*const (), InitTaskFn>(p)),
+        }
     }
 }
 
