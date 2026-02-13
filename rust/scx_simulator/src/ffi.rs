@@ -34,6 +34,8 @@ extern "C" {
 
     // Idle cpumask management (implemented in scx_test_cpumask.c)
     pub fn scx_test_set_idle_cpumask(cpu: i32);
+    pub fn scx_test_set_idle_smtmask(cpu: i32);
+    pub fn scx_test_clear_idle_smtmask(cpu: i32);
     pub fn scx_bpf_test_and_clear_cpu_idle(cpu: i32) -> bool;
 
     // Exit info for the exit callback (implemented in sim_task.c)
@@ -138,7 +140,7 @@ struct SchedOps {
     dispatch: DispatchFn,
     running: RunningFn,
     stopping: StoppingFn,
-    enable: EnableFn,
+    enable: Option<EnableFn>,
     runnable: Option<RunnableFn>,
     init_task: Option<InitTaskFn>,
     cpu_release: Option<CpuReleaseFn>,
@@ -241,6 +243,16 @@ impl DynamicScheduler {
         Self::load(&format!("{dir}/libscx_cosmos.so"), "cosmos", nr_cpus)
     }
 
+    /// Load the scx_mitosis scheduler, configured for `nr_cpus` CPUs.
+    ///
+    /// Mitosis is a dynamic affinity scheduler that assigns cgroups to
+    /// cells with discrete CPU sets. In the simulator, all tasks belong
+    /// to the root cgroup (cell 0).
+    pub fn mitosis(nr_cpus: u32) -> Self {
+        let dir = env!("SCHEDULER_SO_DIR");
+        Self::load(&format!("{dir}/libscx_mitosis.so"), "mitosis", nr_cpus)
+    }
+
     /// Look up scheduler ops function pointers from the loaded library.
     ///
     /// Mandatory symbols panic if missing. Optional symbols become `None`.
@@ -275,7 +287,8 @@ impl DynamicScheduler {
             dispatch: std::mem::transmute::<*const (), DispatchFn>(get!("dispatch")),
             running: std::mem::transmute::<*const (), RunningFn>(get!("running")),
             stopping: std::mem::transmute::<*const (), StoppingFn>(get!("stopping")),
-            enable: std::mem::transmute::<*const (), EnableFn>(get!("enable")),
+            enable: try_get!("enable")
+                .map(|p| std::mem::transmute::<*const (), EnableFn>(p)),
             runnable: try_get!("runnable")
                 .map(|p| std::mem::transmute::<*const (), RunnableFn>(p)),
             init_task: try_get!("init_task")
@@ -314,7 +327,9 @@ impl Scheduler for DynamicScheduler {
     }
 
     unsafe fn enable(&self, p: *mut c_void) {
-        (self.ops.enable)(p)
+        if let Some(f) = self.ops.enable {
+            f(p);
+        }
     }
 
     unsafe fn runnable(&self, p: *mut c_void, enq_flags: u64) {

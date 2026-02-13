@@ -52,6 +52,11 @@ void scx_test_set_idle_smtmask(int cpu)
 	cpumask_set_cpu(cpu, &idle_smtmask);
 }
 
+void scx_test_clear_idle_smtmask(int cpu)
+{
+	cpumask_clear_cpu(cpu, &idle_smtmask);
+}
+
 void scx_test_set_idle_cpumask(int cpu)
 {
 	cpumask_set_cpu(cpu, &idle_cpumask);
