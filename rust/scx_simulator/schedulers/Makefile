@@ -49,6 +49,7 @@ INCLUDES := -I$(SIMULATOR_DIR)/csrc \
 # Shared source files compiled into every .so
 SHARED_SRCS := $(SIMULATOR_DIR)/csrc/sim_bpf_stubs.c \
                $(SIMULATOR_DIR)/csrc/sim_sdt_stubs.c \
+               $(SIMULATOR_DIR)/csrc/sim_sigfpe.c \
                $(ROOT_DIR)/lib/scxtest/overrides.c
 
 # --- Per-scheduler config ---
@@ -102,6 +103,15 @@ $(BUILD_DIR)/$(1)_sim_sdt_stubs.o: $(SIMULATOR_DIR)/csrc/sim_sdt_stubs.c | $(BUI
 		-c -o $$@ $$<
 endef
 
+# Per-scheduler sim_sigfpe.c -> <name>_sim_sigfpe.o
+# NOTE: compiled WITHOUT $(INCLUDES) to avoid vmlinux.h / signal.h conflicts
+define SIGFPE_RULE
+$(BUILD_DIR)/$(1)_sim_sigfpe.o: $(SIMULATOR_DIR)/csrc/sim_sigfpe.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) \
+		-MMD -MF $(BUILD_DIR)/$(1)_sim_sigfpe.d \
+		-c -o $$@ $$<
+endef
+
 # Per-scheduler overrides.c -> <name>_overrides.o
 define OVERRIDES_RULE
 $(BUILD_DIR)/$(1)_overrides.o: $(ROOT_DIR)/lib/scxtest/overrides.c | $(BUILD_DIR)
@@ -112,7 +122,7 @@ endef
 
 # Link .o files into .so
 define SO_RULE
-$(BUILD_DIR)/libscx_$(1).so: $(BUILD_DIR)/$(1)_wrapper.o $(BUILD_DIR)/$(1)_sim_bpf_stubs.o $(BUILD_DIR)/$(1)_sim_sdt_stubs.o $(BUILD_DIR)/$(1)_overrides.o
+$(BUILD_DIR)/libscx_$(1).so: $(BUILD_DIR)/$(1)_wrapper.o $(BUILD_DIR)/$(1)_sim_bpf_stubs.o $(BUILD_DIR)/$(1)_sim_sdt_stubs.o $(BUILD_DIR)/$(1)_sim_sigfpe.o $(BUILD_DIR)/$(1)_overrides.o
 	$(CC) -shared -o $$@ $$^
 endef
 
@@ -120,6 +130,7 @@ endef
 $(foreach s,$(SCHEDS),$(eval $(call WRAPPER_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call STUBS_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call SDT_STUBS_RULE,$(s))))
+$(foreach s,$(SCHEDS),$(eval $(call SIGFPE_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call OVERRIDES_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call SO_RULE,$(s))))
 
