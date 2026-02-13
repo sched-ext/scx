@@ -206,8 +206,8 @@ impl Profile {
 /// 4-TIER SYSTEM (classified by avg_runtime):
 ///   T0 Critical  (<100µs): IRQ, input, audio, network
 ///   T1 Interact  (<2ms):   compositor, physics, AI
-///   T2 Frame     (<20ms):  game render, encoding (incl. CPU-bound 30fps)
-///   T3 Bulk      (≥20ms):  compilation, background
+///   T2 Frame     (<8ms):   game render, encoding
+///   T3 Bulk      (≥8ms):   compilation, background
 ///
 /// EXAMPLES:
 ///   scx_cake                          # Run with gaming profile (default)
