@@ -1,10 +1,11 @@
 ---
 title: Simulate SMT topology
-status: in_progress
+status: closed
 priority: 1
 issue_type: feature
 created_at: 2026-02-13T13:04:19.322443033+00:00
-updated_at: 2026-02-13T13:19:57.569358066+00:00
+updated_at: 2026-02-13T13:30:36.834033944+00:00
+closed_at: 2026-02-13T13:30:36.834033834+00:00
 ---
 
 # Description

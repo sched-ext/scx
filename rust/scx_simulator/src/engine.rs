@@ -374,6 +374,13 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
+        // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
+        // Must drain before try_dispatch_and_run, which clears kicked_cpus.
+        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
+        for kicked_cpu in kicked {
+            self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+        }
+
         // Dispatch next task on this CPU
         self.try_dispatch_and_run(cpu, state, tasks, events, seq);
     }
@@ -567,6 +574,13 @@ impl<S: Scheduler> Simulator<S> {
                     );
                 }
             }
+        }
+
+        // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
+        // Must drain before try_dispatch_and_run, which clears kicked_cpus.
+        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
+        for kicked_cpu in kicked {
+            self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
         }
 
         // Dispatch next task on this CPU
