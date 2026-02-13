@@ -89,12 +89,14 @@ fn calc_frac(a: f64, b: f64) -> f64 {
 }
 
 fn fmt_pct(v: f64) -> String {
-    if v >= 99.995 {
-        format!("{:5.1}", v)
+    if v >= 99.95 {
+        format!("{:4.0}", v)
+    } else if v >= 10.0 {
+        format!("{:4.1}", v)
     } else if v > 0.0 && v < 0.01 {
-        format!("{:5.2}", 0.01)
+        format!("{:4.2}", 0.01)
     } else {
-        format!("{:5.2}", v)
+        format!("{:4.2}", v)
     }
 }
 
@@ -497,8 +499,8 @@ impl LayerStats {
 
             if !active_llcs.is_empty() {
                 writeln!(w, "{indent}LLC sched%/lat_ms")?;
-                // Cell format: [XX]999.9/99.9 = 14 chars, + 1 space separator = 15
-                let cell_width = 15;
+                // Cell format: [XX]99.9/99.9 = 13 chars, + 1 space separator = 14
+                let cell_width = 14;
                 let usable = if max_width > indent.len() {
                     max_width - indent.len()
                 } else {
@@ -515,7 +517,7 @@ impl LayerStats {
                     } else {
                         write!(w, " ")?;
                     }
-                    write!(w, "[{:02}]{:5.1}/{:4.1}", llc_id, frac, lat * 1_000.0)?;
+                    write!(w, "[{:02}]{}/{:4.1}", llc_id, fmt_pct(frac), lat * 1_000.0)?;
                 }
                 writeln!(w)?;
             }
