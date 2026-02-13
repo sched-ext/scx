@@ -25,7 +25,7 @@
 //!     .duration_ms(100)
 //!     .build();
 //!
-//! let trace = Simulator::new(ScxSimple).run(scenario);
+//! let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
 //! trace.dump();
 //! ```
 
@@ -42,7 +42,7 @@ pub mod types;
 
 // Re-export the main public types for convenience.
 pub use engine::Simulator;
-pub use ffi::{Scheduler, ScxSimple, ScxTickless};
+pub use ffi::{DynamicScheduler, Scheduler};
 pub use fmt::{FmtN, FmtTs};
 pub use kfuncs::sim_clock;
 pub use scenario::Scenario;

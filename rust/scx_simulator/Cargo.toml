@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 libbpf-sys = "=1.6.1"
+libloading = "0.8"
 tracing = "0.1"
 
 [dev-dependencies]
