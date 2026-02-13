@@ -430,13 +430,7 @@ impl LayerStats {
 
         if let Some(topo) = topo {
             let header = topo.format_cpumask_header(&cpumask, self.min_nr_cpus, self.max_nr_cpus);
-            writeln!(
-                w,
-                "  {:<width$}  {}",
-                "",
-                header,
-                width = header_width,
-            )?;
+            writeln!(w, "  {:<width$}  {}", "", header, width = header_width,)?;
             let indent = format!("  {:<width$}  ", "", width = header_width);
             if cpumask.weight() > 0 {
                 topo.format_cpumask_grid(w, &cpumask, &indent, usize::MAX)?;

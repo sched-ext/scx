@@ -454,8 +454,11 @@ impl Topology {
             let first_llc_id = llc_segments[0].0;
             let prefix = format!("{}N{} L{:02}: ", indent, node.id, first_llc_id);
             let prefix_width = prefix.chars().count();
-            let cont_indent =
-                format!("{}{}", indent, " ".repeat(prefix_width - indent.chars().count()));
+            let cont_indent = format!(
+                "{}{}",
+                indent,
+                " ".repeat(prefix_width - indent.chars().count())
+            );
 
             // Join LLCs with "|", wrapping at LLC boundaries
             let mut line = prefix.clone();
@@ -1423,5 +1426,4 @@ mod tests {
         assert!(header.contains("cpus=  3(  2c)"));
         assert!(header.contains("[  5, 10]"));
     }
-
 }
