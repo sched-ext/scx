@@ -5,4 +5,4 @@
 # When true, issues are named like: prefix-a1b2c3 (based on content hash)
 # When false, issues are named like: prefix-1, prefix-2, ... (sequential)
 # Default: false
-mb-hash-ids: false
+mb-hash-ids: true

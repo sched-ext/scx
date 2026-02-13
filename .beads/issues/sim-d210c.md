@@ -4,10 +4,10 @@ status: open
 priority: 1
 issue_type: feature
 depends_on:
-  sim-2: blocks
-  sim-1: parent-child
+  sim-6ba30: parent-child
+  sim-91615: blocks
 created_at: 2026-02-13T17:58:58.198196661+00:00
-updated_at: 2026-02-13T17:59:49.967888172+00:00
+updated_at: 2026-02-13T18:10:24.901709387+00:00
 ---
 
 # Description
