@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -18,8 +18,6 @@ fn main() {
         root_dir.join("scheds/vmlinux"),
         root_dir.join("scheds/vmlinux/arch/x86"),
         root_dir.join("scheds/include/bpf-compat"),
-        // Tickless BPF source (for #include "intf.h" and "main.bpf.c")
-        root_dir.join("scheds/rust/scx_tickless/src/bpf"),
         // libbpf headers
         env::var("DEP_BPF_INCLUDE")
             .expect("libbpf-sys include must be available")
@@ -63,52 +61,25 @@ fn main() {
         .compile("sim_task");
 
     // ---------------------------------------------------------------
-    // Shared libraries (.so) for schedulers
+    // Shared libraries (.so) for schedulers — built via Makefile
     // ---------------------------------------------------------------
 
-    let include_flags: Vec<String> = include_paths
-        .iter()
-        .map(|p| format!("-I{}", p.display()))
-        .collect();
+    let scheduler_dir = out_dir.join("schedulers");
+    let bpf_include = env::var("DEP_BPF_INCLUDE")
+        .expect("libbpf-sys include must be available");
 
-    // Common C flags for compiling .o files for .so
-    let common_cflags: &[&str] = &[
-        "-c",
-        "-fPIC",
-        "-DSCX_BPF_UNITTEST",
-        "-Wno-unused-parameter",
-        "-Wno-unknown-attributes",
-    ];
+    let status = Command::new("make")
+        .arg("-C")
+        .arg(manifest_dir.join("schedulers"))
+        .arg(format!("BUILD_DIR={}", scheduler_dir.display()))
+        .arg(format!("SIMULATOR_DIR={}", manifest_dir.display()))
+        .arg(format!("ROOT_DIR={}", root_dir.display()))
+        .arg(format!("BPF_INCLUDE={bpf_include}"))
+        .arg(format!("CC={compiler}"))
+        .status()
+        .expect("failed to run make");
 
-    // Build libscx_simple.so
-    let simple_so = build_scheduler_so(
-        &compiler,
-        &out_dir,
-        "libscx_simple.so",
-        &[
-            manifest_dir.join("csrc/simple_wrapper.c"),
-            manifest_dir.join("csrc/sim_bpf_stubs.c"),
-            root_dir.join("lib/scxtest/overrides.c"),
-        ],
-        common_cflags,
-        &include_flags,
-        &[], // no extra defines
-    );
-
-    // Build libscx_tickless.so
-    let tickless_so = build_scheduler_so(
-        &compiler,
-        &out_dir,
-        "libscx_tickless.so",
-        &[
-            manifest_dir.join("csrc/tickless_wrapper.c"),
-            manifest_dir.join("csrc/sim_bpf_stubs.c"),
-            root_dir.join("lib/scxtest/overrides.c"),
-        ],
-        common_cflags,
-        &include_flags,
-        &["-Dconst="], // strip const for BPF "const volatile" globals
-    );
+    assert!(status.success(), "scheduler Makefile failed: exit {status}");
 
     // ---------------------------------------------------------------
     // Linker flags for the main binary
@@ -122,82 +93,15 @@ fn main() {
     // the bpf_map_lookup_elem macro.
     println!("cargo:rustc-link-arg=-Wl,--undefined=scx_test_map_lookup_elem");
 
-    // Expose .so paths to Rust code via env vars
+    // Expose scheduler .so directory to Rust code
     println!(
-        "cargo:rustc-env=LIB_SCX_SIMPLE_SO={}",
-        simple_so.display()
-    );
-    println!(
-        "cargo:rustc-env=LIB_SCX_TICKLESS_SO={}",
-        tickless_so.display()
+        "cargo:rustc-env=SCHEDULER_SO_DIR={}",
+        scheduler_dir.display()
     );
 
     // Rebuild triggers
+    println!("cargo:rerun-if-changed=schedulers/");
     println!("cargo:rerun-if-changed=csrc/");
     println!("cargo:rerun-if-changed=../../lib/scxtest/");
     println!("cargo:rerun-if-changed=../../scheds/rust/scx_tickless/src/bpf/");
-}
-
-/// Compile a set of C source files into a shared library (.so).
-///
-/// Each source file is compiled to a .o with -fPIC, then all .o files
-/// are linked into a single .so with -shared.
-fn build_scheduler_so(
-    compiler: &str,
-    out_dir: &Path,
-    so_name: &str,
-    sources: &[PathBuf],
-    common_cflags: &[&str],
-    include_flags: &[String],
-    extra_defines: &[&str],
-) -> PathBuf {
-    let mut objects = Vec::new();
-
-    for src in sources {
-        let stem = src.file_stem().unwrap().to_str().unwrap();
-        // Use so_name prefix to avoid collisions between simple and tickless
-        // builds of the same source file (e.g. sim_bpf_stubs.c)
-        let so_stem = so_name.trim_start_matches("lib").trim_end_matches(".so");
-        let obj = out_dir.join(format!("{so_stem}_{stem}.o"));
-
-        let mut cmd = Command::new(compiler);
-        cmd.args(common_cflags);
-        for flag in include_flags {
-            cmd.arg(flag);
-        }
-        for def in extra_defines {
-            cmd.arg(def);
-        }
-        cmd.arg("-o").arg(&obj).arg(src);
-
-        let status = cmd
-            .status()
-            .unwrap_or_else(|e| panic!("failed to run {compiler}: {e}"));
-        assert!(
-            status.success(),
-            "failed to compile {}: exit {}",
-            src.display(),
-            status
-        );
-
-        objects.push(obj);
-    }
-
-    // Link all .o files into a .so
-    let so_path = out_dir.join(so_name);
-    let mut cmd = Command::new(compiler);
-    cmd.arg("-shared").arg("-o").arg(&so_path);
-    for obj in &objects {
-        cmd.arg(obj);
-    }
-
-    let status = cmd
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run linker: {e}"));
-    assert!(
-        status.success(),
-        "failed to link {so_name}: exit {status}"
-    );
-
-    so_path
 }
