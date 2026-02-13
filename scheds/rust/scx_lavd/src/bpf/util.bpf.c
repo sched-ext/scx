@@ -229,7 +229,14 @@ bool have_scheduled(task_ctx __arg_arena *taskc)
 __hidden
 bool can_boost_slice(void)
 {
-	return sys_stat.nr_queued_task <= sys_stat.nr_active;
+	/*
+	 * When CPU utilization is too high (>= 95%), do not boost the
+	 * time slice. Checking the number of queued tasks alone is not
+	 * sufficient, especially when many tasks are slice-boosted and
+	 * unlikely relinquish CPUs soon.
+	 */
+	return (sys_stat.avg_util_wall <= LAVD_SLICE_BOOST_UTIL_WALL) &&
+	       (sys_stat.nr_queued_task <= sys_stat.nr_active);
 }
 
 __hidden
