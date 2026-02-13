@@ -13,7 +13,6 @@ selftest
 selftest_noasan
 CLAUDE.md
 **/.claude
-**/.beads
 **/*.ll
 **/*.s
 **/*.tmp
