@@ -62,6 +62,35 @@ impl Dsq {
     pub fn is_empty(&self) -> bool {
         self.vtime_entries.is_empty() && self.fifo_entries.is_empty()
     }
+
+    /// Return all PIDs in priority order (vtime first, then FIFO) without consuming.
+    pub fn ordered_pids(&self) -> Vec<Pid> {
+        let mut pids = Vec::with_capacity(self.len());
+        for &pid in self.vtime_entries.values() {
+            pids.push(pid);
+        }
+        for &pid in &self.fifo_entries {
+            pids.push(pid);
+        }
+        pids
+    }
+
+    /// Remove a specific PID from the queue. Returns true if found.
+    pub fn remove_pid(&mut self, pid: Pid) -> bool {
+        if let Some(key) = self
+            .vtime_entries
+            .iter()
+            .find_map(|(k, &v)| if v == pid { Some(*k) } else { None })
+        {
+            self.vtime_entries.remove(&key);
+            return true;
+        }
+        if let Some(pos) = self.fifo_entries.iter().position(|&p| p == pid) {
+            self.fifo_entries.remove(pos);
+            return true;
+        }
+        false
+    }
 }
 
 impl Default for Dsq {
@@ -122,6 +151,20 @@ impl DsqManager {
     /// Get the number of queued tasks in a DSQ.
     pub fn nr_queued(&self, dsq_id: DsqId) -> usize {
         self.dsqs.get(&dsq_id).map_or(0, |dsq| dsq.len())
+    }
+
+    /// Get ordered PIDs in a DSQ without consuming.
+    pub fn ordered_pids(&self, dsq_id: DsqId) -> Vec<Pid> {
+        self.dsqs
+            .get(&dsq_id)
+            .map_or_else(Vec::new, |dsq| dsq.ordered_pids())
+    }
+
+    /// Remove a specific PID from a DSQ. Returns true if found.
+    pub fn remove_pid(&mut self, dsq_id: DsqId, pid: Pid) -> bool {
+        self.dsqs
+            .get_mut(&dsq_id)
+            .map_or(false, |dsq| dsq.remove_pid(pid))
     }
 }
 

@@ -135,23 +135,40 @@
 /*
  * BPF iterator overrides.
  *
- * bpf_for_each(scx_dsq, ...) iterates tasks in a DSQ — not yet supported
- * in the simulator. The loop body compiles but never executes.
+ * bpf_for_each(scx_dsq, p, dsq_id, flags) iterates tasks in a DSQ via
+ * kfuncs that snapshot the DSQ and yield task_struct pointers.
  *
  * bpf_for(i, start, end) is a bounded loop helper — maps to a plain for loop.
  */
+extern struct task_struct *sim_dsq_iter_begin(u64 dsq_id, u64 flags);
+extern struct task_struct *sim_dsq_iter_next(void);
+
 #undef bpf_for_each
-#define bpf_for_each(type, cur, args...) while (0)
+#define bpf_for_each(type, cur, args...) \
+    _bpf_for_each_##type(cur, args)
+
+#define _bpf_for_each_scx_dsq(cur, dsq_id, flags) \
+    for (cur = sim_dsq_iter_begin(dsq_id, flags); \
+         cur != NULL; \
+         cur = sim_dsq_iter_next())
+
+/* BPF_FOR_EACH_ITER is referenced in __COMPAT_scx_bpf_dsq_move calls
+ * inside for_each loop bodies. Our dsq_move override ignores it. */
+#ifndef BPF_FOR_EACH_ITER
+#define BPF_FOR_EACH_ITER NULL
+#endif
 
 #undef bpf_for
 #define bpf_for(i, start, end) for ((i) = (start); (i) < (end); (i)++)
 
 /*
- * Compat macro overrides for functions that depend on dead-code-eliminated
- * iterator paths (bpf_for_each body is unreachable with the above stub).
+ * Compat macro overrides — route to simulator kfuncs.
  */
+extern bool sim_scx_bpf_dsq_move(struct task_struct *p, u64 dsq_id, u64 enq_flags);
+
 #undef __COMPAT_scx_bpf_dsq_move
-#define __COMPAT_scx_bpf_dsq_move(it, p, dsq_id, enq_flags) false
+#define __COMPAT_scx_bpf_dsq_move(it, p, dsq_id, enq_flags) \
+    sim_scx_bpf_dsq_move(p, dsq_id, enq_flags)
 
 #undef __COMPAT_scx_bpf_cpu_curr
 #define __COMPAT_scx_bpf_cpu_curr(cpu) ((struct task_struct *)NULL)

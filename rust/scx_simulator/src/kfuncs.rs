@@ -16,7 +16,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::ptr;
 
@@ -55,6 +55,18 @@ pub struct PendingDispatch {
     pub vtime: Option<Vtime>,
 }
 
+/// Active DSQ iterator state for `bpf_for_each(scx_dsq, ...)`.
+///
+/// Holds a snapshot of the DSQ contents at iteration start, plus the
+/// current cursor position. This lets C loop code iterate a Rust-owned
+/// DSQ via `sim_dsq_iter_begin` / `sim_dsq_iter_next` kfuncs.
+#[derive(Debug)]
+pub struct DsqIterState {
+    pub dsq_id: DsqId,
+    pub pids: Vec<Pid>,
+    pub pos: usize,
+}
+
 /// The subset of simulator state that kfuncs need access to.
 pub struct SimulatorState {
     pub cpus: Vec<SimCpu>,
@@ -73,6 +85,11 @@ pub struct SimulatorState {
     /// Deferred dispatch recorded during `select_cpu` or `enqueue`.
     /// The engine resolves `SCX_DSQ_LOCAL` and executes after the callback.
     pub pending_dispatch: Option<PendingDispatch>,
+    /// Active DSQ iterator for `bpf_for_each(scx_dsq, ...)`.
+    pub dsq_iter: Option<DsqIterState>,
+    /// CPUs kicked via `scx_bpf_kick_cpu` during a callback.
+    /// The engine processes these after the callback returns.
+    pub kicked_cpus: HashSet<CpuId>,
 }
 
 impl SimulatorState {
@@ -335,13 +352,6 @@ pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
     })
 }
 
-/// Kick a CPU (send scheduling IPI). In the simulator, this is mostly a no-op
-/// for now. The simulation engine handles idle CPU dispatch separately.
-#[no_mangle]
-pub extern "C" fn scx_bpf_kick_cpu(_cpu: i32, _flags: u64) {
-    // Phase 2: generate dispatch events for kicked CPUs
-}
-
 /// Get the current simulated time (per-CPU local clock).
 #[no_mangle]
 pub extern "C" fn scx_bpf_now() -> u64 {
@@ -425,11 +435,6 @@ pub extern "C" fn bpf_rcu_read_unlock() {}
 #[no_mangle]
 pub extern "C" fn bpf_task_release(_p: *mut c_void) {}
 
-#[no_mangle]
-pub extern "C" fn bpf_task_from_pid(_pid: i32) -> *mut c_void {
-    ptr::null_mut()
-}
-
 /// Get the current task's task_struct pointer (for the CPU we're running on).
 ///
 /// Used by tickless in `is_wake_sync()` to check the waker's flags.
@@ -470,5 +475,159 @@ pub extern "C" fn scx_bpf_cpu_curr(cpu: i32) -> *mut c_void {
             }
         }
         ptr::null_mut()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// DSQ iterator kfuncs for bpf_for_each(scx_dsq, ...)
+// ---------------------------------------------------------------------------
+
+/// Begin iterating a DSQ. Returns the first task_struct* or NULL.
+///
+/// Called by the `bpf_for_each(scx_dsq, p, dsq_id, flags)` macro override.
+/// Snapshots the DSQ contents in priority order and stores the iterator
+/// state in SimulatorState.
+#[no_mangle]
+pub extern "C" fn sim_dsq_iter_begin(dsq_id: u64, _flags: u64) -> *mut c_void {
+    with_sim(|sim| {
+        let pids = sim.dsqs.ordered_pids(DsqId(dsq_id));
+        debug!(dsq_id, count = pids.len(), "dsq_iter_begin");
+
+        if pids.is_empty() {
+            sim.dsq_iter = None;
+            return ptr::null_mut();
+        }
+
+        let first_pid = pids[0];
+        sim.dsq_iter = Some(DsqIterState {
+            dsq_id: DsqId(dsq_id),
+            pids,
+            pos: 0,
+        });
+
+        sim.task_pid_to_raw
+            .get(&first_pid)
+            .map_or(ptr::null_mut(), |&raw| raw as *mut c_void)
+    })
+}
+
+/// Advance the DSQ iterator. Returns the next task_struct* or NULL.
+#[no_mangle]
+pub extern "C" fn sim_dsq_iter_next() -> *mut c_void {
+    with_sim(|sim| {
+        let iter = match sim.dsq_iter.as_mut() {
+            Some(it) => it,
+            None => return ptr::null_mut(),
+        };
+
+        iter.pos += 1;
+
+        // Skip PIDs that were removed from the DSQ (by dsq_move)
+        while iter.pos < iter.pids.len() {
+            let pid = iter.pids[iter.pos];
+            // Check if this PID is still in the DSQ
+            if sim.dsqs.ordered_pids(iter.dsq_id).contains(&pid) {
+                return sim
+                    .task_pid_to_raw
+                    .get(&pid)
+                    .map_or(ptr::null_mut(), |&raw| raw as *mut c_void);
+            }
+            iter.pos += 1;
+        }
+
+        sim.dsq_iter = None;
+        ptr::null_mut()
+    })
+}
+
+/// Move a task from the currently-iterated DSQ to a destination DSQ.
+///
+/// Called by `__COMPAT_scx_bpf_dsq_move` macro override. The source DSQ
+/// is determined from the active DSQ iterator state.
+#[no_mangle]
+pub extern "C" fn sim_scx_bpf_dsq_move(
+    p: *mut c_void,
+    dst_dsq_id: u64,
+    _enq_flags: u64,
+) -> bool {
+    with_sim(|sim| {
+        let pid = sim.task_pid_from_raw(p);
+        let src_dsq_id = match &sim.dsq_iter {
+            Some(iter) => iter.dsq_id,
+            None => {
+                debug!(pid = pid.0, "dsq_move: no active iterator");
+                return false;
+            }
+        };
+
+        // Remove from source DSQ
+        if !sim.dsqs.remove_pid(src_dsq_id, pid) {
+            debug!(
+                pid = pid.0,
+                src = src_dsq_id.0,
+                "dsq_move: pid not in source DSQ"
+            );
+            return false;
+        }
+
+        let dst = DsqId(dst_dsq_id);
+        if dst.is_local() {
+            let cpu_idx = sim.current_cpu.0 as usize;
+            sim.cpus[cpu_idx].local_dsq.push_back(pid);
+            debug!(
+                pid = pid.0,
+                cpu = sim.current_cpu.0,
+                "dsq_move → LOCAL"
+            );
+        } else if dst.is_local_on() {
+            let cpu = dst.local_on_cpu();
+            if (cpu.0 as usize) < sim.cpus.len() {
+                sim.cpus[cpu.0 as usize].local_dsq.push_back(pid);
+            }
+            debug!(pid = pid.0, cpu = cpu.0, "dsq_move → LOCAL_ON");
+        } else {
+            // Move to another named DSQ (FIFO)
+            sim.dsqs.insert_fifo(dst, pid);
+            debug!(pid = pid.0, dst = dst.0, "dsq_move → DSQ");
+        }
+
+        true
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Updated bpf_task_from_pid — return real task_struct*
+// ---------------------------------------------------------------------------
+
+/// Look up a task by PID and return its task_struct pointer.
+///
+/// In BPF this is a verifier workaround; in the simulator we use it
+/// to get the raw pointer from our PID→pointer map.
+#[no_mangle]
+pub extern "C" fn bpf_task_from_pid(pid: i32) -> *mut c_void {
+    with_sim(|sim| {
+        sim.task_pid_to_raw
+            .get(&Pid(pid))
+            .map_or(ptr::null_mut(), |&raw| raw as *mut c_void)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// scx_bpf_kick_cpu — record kicked CPUs for the engine
+// ---------------------------------------------------------------------------
+
+/// Kick a CPU (send scheduling IPI).
+///
+/// Records the CPU in the kicked set. The engine processes kicked CPUs
+/// after the current scheduler callback returns, triggering dispatch
+/// on those CPUs.
+#[no_mangle]
+pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, _flags: u64) {
+    with_sim(|sim| {
+        let cpu_id = CpuId(cpu as u32);
+        if (cpu_id.0 as usize) < sim.cpus.len() {
+            sim.kicked_cpus.insert(cpu_id);
+            debug!(cpu, "kick_cpu");
+        }
     })
 }
