@@ -642,21 +642,79 @@ pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, _flags: u64) {
     })
 }
 
-/// Return the number of possible CPUs.
-///
-/// Used by COSMOS in `cosmos_init` to set `nr_cpu_ids`.
+// ---------------------------------------------------------------------------
+// Dump kfuncs — no-op stubs for scheduler debug output
+// ---------------------------------------------------------------------------
+
+/// Dump debug text. No-op in the simulator (debug output is not modeled).
 #[no_mangle]
-pub extern "C" fn scx_bpf_nr_cpu_ids() -> u32 {
-    with_sim(|sim| {
-        let n = sim.cpus.len() as u32;
-        debug!(n, "kfunc nr_cpu_ids");
-        n
-    })
+pub extern "C" fn scx_bpf_dump_bstr(_fmt: *const i8, _data: *const u64, _data_sz: u32) {}
+
+// ---------------------------------------------------------------------------
+// Cgroup kfuncs — stub implementations
+// ---------------------------------------------------------------------------
+
+/// Get a task's cgroup. Returns NULL in the simulator (cgroups not yet modeled).
+#[no_mangle]
+pub extern "C" fn scx_bpf_task_cgroup(_p: *mut c_void, _subsys_id: i32) -> *mut c_void {
+    ptr::null_mut()
+}
+
+/// Look up a cgroup by ID. Returns NULL (cgroups not yet modeled).
+#[no_mangle]
+pub extern "C" fn bpf_cgroup_from_id(_id: u64) -> *mut c_void {
+    ptr::null_mut()
+}
+
+/// Get ancestor cgroup at a given level. Returns NULL (cgroups not yet modeled).
+#[no_mangle]
+pub extern "C" fn bpf_cgroup_ancestor(_cgrp: *mut c_void, _level: i32) -> *mut c_void {
+    ptr::null_mut()
+}
+
+/// Acquire a reference on a cgroup. No-op in the simulator.
+#[no_mangle]
+pub extern "C" fn bpf_cgroup_acquire(_cgrp: *mut c_void) -> *mut c_void {
+    _cgrp
+}
+
+/// Release a cgroup reference. No-op in the simulator.
+#[no_mangle]
+pub extern "C" fn bpf_cgroup_release(_cgrp: *mut c_void) {}
+
+/// Get per-cgroup BPF local storage. Returns NULL (not yet modeled).
+#[no_mangle]
+pub extern "C" fn bpf_cgrp_storage_get(
+    _map: *mut c_void,
+    _cgrp: *mut c_void,
+    _value: *mut c_void,
+    _flags: u64,
+) -> *mut c_void {
+    ptr::null_mut()
+}
+
+/// Get per-task BPF local storage. Returns NULL (not yet modeled).
+#[no_mangle]
+pub extern "C" fn bpf_task_storage_get(
+    _map: *mut c_void,
+    _task: *mut c_void,
+    _value: *mut c_void,
+    _flags: u64,
+) -> *mut c_void {
+    ptr::null_mut()
+}
+
+/// Look up per-CPU array element. Returns NULL (not yet modeled).
+#[no_mangle]
+pub extern "C" fn bpf_map_lookup_percpu_elem(
+    _map: *mut c_void,
+    _key: *const c_void,
+    _cpu: u32,
+) -> *mut c_void {
+    ptr::null_mut()
 }
 
 /// Check if a task is currently running on any CPU.
-///
-/// Used by COSMOS in `cosmos_enqueue` to decide whether to kick a CPU.
 #[no_mangle]
 pub extern "C" fn scx_bpf_task_running(p: *const c_void) -> bool {
     with_sim(|sim| {
@@ -667,6 +725,680 @@ pub extern "C" fn scx_bpf_task_running(p: *const c_void) -> bool {
     })
 }
 
+/// Return the number of possible CPUs.
+#[no_mangle]
+pub extern "C" fn scx_bpf_nr_cpu_ids() -> u32 {
+    with_sim(|sim| {
+        let n = sim.cpus.len() as u32;
+        debug!(n, "kfunc nr_cpu_ids");
+        n
+    })
+}
+
 /// Set CPU performance level. No-op in simulator (cpufreq disabled).
 #[no_mangle]
 pub extern "C" fn scx_bpf_cpuperf_set(_cpu: i32, _perf: u32) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpu::SimCpu;
+    use crate::dsq::DsqManager;
+    use crate::trace::Trace;
+    use crate::types::{CpuId, DsqId, Pid};
+    use crate::SIM_LOCK;
+
+    /// Create a minimal SimulatorState for unit testing.
+    fn test_state(nr_cpus: u32) -> SimulatorState {
+        SimulatorState {
+            cpus: (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect(),
+            dsqs: DsqManager::new(),
+            current_cpu: CpuId(0),
+            trace: Trace::new(),
+            clock: 0,
+            task_raw_to_pid: HashMap::new(),
+            task_pid_to_raw: HashMap::new(),
+            prng_state: 0xDEAD_BEEF,
+            ops_context: OpsContext::None,
+            pending_dispatch: None,
+            dsq_iter: None,
+            kicked_cpus: HashSet::new(),
+        }
+    }
+
+    /// Allocate a C task_struct and register it in the state's pointer maps.
+    ///
+    /// Returns the raw pointer. Caller must call `ffi::sim_task_free` when done.
+    fn register_task(state: &mut SimulatorState, pid: Pid) -> *mut c_void {
+        let raw = unsafe { ffi::sim_task_alloc() };
+        assert!(!raw.is_null());
+        unsafe { ffi::sim_task_set_pid(raw, pid.0) };
+        state.task_raw_to_pid.insert(raw as usize, pid);
+        state.task_pid_to_raw.insert(pid, raw as usize);
+        raw
+    }
+
+    /// Free a previously registered task.
+    fn free_task(state: &mut SimulatorState, pid: Pid) {
+        if let Some(raw) = state.task_pid_to_raw.remove(&pid) {
+            state.task_raw_to_pid.remove(&raw);
+            unsafe { ffi::sim_task_free(raw as *mut c_void) };
+        }
+    }
+
+    /// Run a closure with SimulatorState installed in the thread-local.
+    #[allow(dead_code)]
+    fn with_state<F, R>(state: &mut SimulatorState, f: F) -> R
+    where
+        F: FnOnce(&mut SimulatorState) -> R,
+    {
+        unsafe { enter_sim(state) };
+        let result = f(state);
+        exit_sim();
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // DSQ creation and querying
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_dsq() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+
+        unsafe { enter_sim(&mut state) };
+        assert_eq!(scx_bpf_create_dsq(42, -1), 0);
+        // Creating the same DSQ again should fail
+        assert_eq!(scx_bpf_create_dsq(42, -1), -1);
+        exit_sim();
+
+        assert_eq!(state.dsqs.nr_queued(DsqId(42)), 0);
+    }
+
+    #[test]
+    fn test_dsq_nr_queued_empty() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(100));
+
+        unsafe { enter_sim(&mut state) };
+        assert_eq!(scx_bpf_dsq_nr_queued(100), 0);
+        exit_sim();
+    }
+
+    #[test]
+    fn test_dsq_nr_queued_with_tasks() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(100));
+        state.dsqs.insert_fifo(DsqId(100), Pid(1));
+        state.dsqs.insert_fifo(DsqId(100), Pid(2));
+
+        unsafe { enter_sim(&mut state) };
+        assert_eq!(scx_bpf_dsq_nr_queued(100), 2);
+        exit_sim();
+    }
+
+    // -----------------------------------------------------------------------
+    // DSQ insert (deferred dispatch)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dsq_insert_deferred() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        let p = register_task(&mut state, Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        scx_bpf_dsq_insert(p, DsqId::GLOBAL.0, 5_000_000, 0);
+        exit_sim();
+
+        // Insert is deferred, not immediate
+        assert!(state.pending_dispatch.is_some());
+        let pd = state.pending_dispatch.as_ref().unwrap();
+        assert_eq!(pd.pid, Pid(1));
+        assert_eq!(pd.dsq_id, DsqId::GLOBAL);
+        assert!(pd.vtime.is_none());
+        // DSQ should still be empty until resolved
+        assert_eq!(state.dsqs.nr_queued(DsqId::GLOBAL), 0);
+
+        free_task(&mut state, Pid(1));
+    }
+
+    #[test]
+    fn test_dsq_insert_vtime_deferred() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(50));
+        let p = register_task(&mut state, Pid(3));
+
+        unsafe { enter_sim(&mut state) };
+        scx_bpf_dsq_insert_vtime(p, 50, 5_000_000, 1000, 0);
+        exit_sim();
+
+        let pd = state.pending_dispatch.as_ref().unwrap();
+        assert_eq!(pd.pid, Pid(3));
+        assert_eq!(pd.dsq_id, DsqId(50));
+        assert_eq!(pd.vtime, Some(Vtime(1000)));
+
+        free_task(&mut state, Pid(3));
+    }
+
+    #[test]
+    fn test_resolve_pending_dispatch_global() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        let p = register_task(&mut state, Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        scx_bpf_dsq_insert(p, DsqId::GLOBAL.0, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(0));
+        // Global DSQ dispatch returns None (not a local dispatch)
+        assert!(result.is_none());
+        assert_eq!(state.dsqs.nr_queued(DsqId::GLOBAL), 1);
+
+        free_task(&mut state, Pid(1));
+    }
+
+    #[test]
+    fn test_resolve_pending_dispatch_local() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        let p = register_task(&mut state, Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        scx_bpf_dsq_insert(p, DsqId::LOCAL.0, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(1));
+        // Local dispatch resolves to the specified CPU
+        assert_eq!(result, Some(CpuId(1)));
+        assert_eq!(state.cpus[1].local_dsq.len(), 1);
+        assert_eq!(state.cpus[1].local_dsq[0], Pid(1));
+
+        free_task(&mut state, Pid(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // DSQ move_to_local
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dsq_move_to_local() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        state.dsqs.create(DsqId(77));
+        state.dsqs.insert_fifo(DsqId(77), Pid(10));
+        state.dsqs.insert_fifo(DsqId(77), Pid(11));
+        state.current_cpu = CpuId(1);
+
+        unsafe { enter_sim(&mut state) };
+        let moved = scx_bpf_dsq_move_to_local(77);
+        exit_sim();
+
+        assert!(moved);
+        assert_eq!(state.cpus[1].local_dsq.len(), 1);
+        assert_eq!(state.cpus[1].local_dsq[0], Pid(10));
+        assert_eq!(state.dsqs.nr_queued(DsqId(77)), 1);
+    }
+
+    #[test]
+    fn test_dsq_move_to_local_empty() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(77));
+
+        unsafe { enter_sim(&mut state) };
+        let moved = scx_bpf_dsq_move_to_local(77);
+        exit_sim();
+
+        assert!(!moved);
+        assert!(state.cpus[0].local_dsq.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CPU selection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_select_cpu_dfl_prefers_prev_if_idle() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(4);
+        // All CPUs idle, prev_cpu=2 should be returned
+        let p = register_task(&mut state, Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        let mut is_idle = false;
+        let cpu = scx_bpf_select_cpu_dfl(p, 2, 0, &mut is_idle);
+        exit_sim();
+
+        assert_eq!(cpu, 2);
+        assert!(is_idle);
+
+        free_task(&mut state, Pid(1));
+    }
+
+    #[test]
+    fn test_select_cpu_dfl_finds_other_idle() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(3);
+        // Make prev_cpu busy, leave others idle
+        state.cpus[1].current_task = Some(Pid(99));
+        let p = register_task(&mut state, Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        let mut is_idle = false;
+        let cpu = scx_bpf_select_cpu_dfl(p, 1, 0, &mut is_idle);
+        exit_sim();
+
+        assert!(is_idle);
+        assert_ne!(cpu, 1); // Should pick a different idle CPU
+
+        free_task(&mut state, Pid(1));
+    }
+
+    #[test]
+    fn test_select_cpu_dfl_no_idle() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        // All CPUs busy
+        state.cpus[0].current_task = Some(Pid(10));
+        state.cpus[1].current_task = Some(Pid(11));
+        let p = register_task(&mut state, Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        let mut is_idle = false;
+        let cpu = scx_bpf_select_cpu_dfl(p, 0, 0, &mut is_idle);
+        exit_sim();
+
+        assert!(!is_idle);
+        assert_eq!(cpu, 0); // Falls back to prev_cpu
+
+        free_task(&mut state, Pid(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Clock and timing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_scx_bpf_now() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        state.current_cpu = CpuId(1);
+        state.cpus[1].local_clock = 42_000_000;
+
+        unsafe { enter_sim(&mut state) };
+        let now = scx_bpf_now();
+        exit_sim();
+
+        assert_eq!(now, 42_000_000);
+    }
+
+    #[test]
+    fn test_bpf_ktime_get_ns() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.cpus[0].local_clock = 99_000;
+
+        unsafe { enter_sim(&mut state) };
+        let t = bpf_ktime_get_ns();
+        exit_sim();
+
+        assert_eq!(t, 99_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // CPU ID helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_smp_processor_id() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(4);
+        state.current_cpu = CpuId(3);
+
+        unsafe { enter_sim(&mut state) };
+        assert_eq!(bpf_get_smp_processor_id(), 3);
+        assert_eq!(sim_bpf_get_smp_processor_id(), 3);
+        exit_sim();
+    }
+
+    #[test]
+    fn test_nr_cpu_ids() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(8);
+
+        unsafe { enter_sim(&mut state) };
+        assert_eq!(scx_bpf_nr_cpu_ids(), 8);
+        exit_sim();
+    }
+
+    // -----------------------------------------------------------------------
+    // PRNG
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_prng_deterministic() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.prng_state = 12345;
+
+        unsafe { enter_sim(&mut state) };
+        let a = sim_bpf_get_prandom_u32();
+        let b = sim_bpf_get_prandom_u32();
+        exit_sim();
+
+        // Replay with same seed
+        state.prng_state = 12345;
+        unsafe { enter_sim(&mut state) };
+        let a2 = sim_bpf_get_prandom_u32();
+        let b2 = sim_bpf_get_prandom_u32();
+        exit_sim();
+
+        assert_eq!(a, a2);
+        assert_eq!(b, b2);
+        assert_ne!(a, b); // Successive values should differ
+    }
+
+    // -----------------------------------------------------------------------
+    // Task lookup
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bpf_task_from_pid() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        let raw = register_task(&mut state, Pid(42));
+
+        unsafe { enter_sim(&mut state) };
+        let found = bpf_task_from_pid(42);
+        let not_found = bpf_task_from_pid(999);
+        exit_sim();
+
+        assert_eq!(found, raw);
+        assert!(not_found.is_null());
+
+        free_task(&mut state, Pid(42));
+    }
+
+    #[test]
+    fn test_get_current_task_btf() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        let raw = register_task(&mut state, Pid(7));
+        state.cpus[0].current_task = Some(Pid(7));
+        state.current_cpu = CpuId(0);
+
+        unsafe { enter_sim(&mut state) };
+        let current = bpf_get_current_task_btf();
+        exit_sim();
+
+        assert_eq!(current, raw);
+
+        free_task(&mut state, Pid(7));
+    }
+
+    #[test]
+    fn test_get_current_task_btf_idle() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        // No task running on CPU 0
+
+        unsafe { enter_sim(&mut state) };
+        let current = bpf_get_current_task_btf();
+        exit_sim();
+
+        assert!(current.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // scx_bpf_cpu_curr
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cpu_curr() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        let raw = register_task(&mut state, Pid(5));
+        state.cpus[1].current_task = Some(Pid(5));
+
+        unsafe { enter_sim(&mut state) };
+        let p = scx_bpf_cpu_curr(1);
+        let idle = scx_bpf_cpu_curr(0);
+        let oob = scx_bpf_cpu_curr(99);
+        exit_sim();
+
+        assert_eq!(p, raw);
+        assert!(idle.is_null());
+        assert!(oob.is_null());
+
+        free_task(&mut state, Pid(5));
+    }
+
+    // -----------------------------------------------------------------------
+    // Kick CPU
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kick_cpu() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(4);
+
+        unsafe { enter_sim(&mut state) };
+        scx_bpf_kick_cpu(1, 0);
+        scx_bpf_kick_cpu(3, 0);
+        scx_bpf_kick_cpu(1, 0); // duplicate, set semantics
+        exit_sim();
+
+        assert_eq!(state.kicked_cpus.len(), 2);
+        assert!(state.kicked_cpus.contains(&CpuId(1)));
+        assert!(state.kicked_cpus.contains(&CpuId(3)));
+    }
+
+    #[test]
+    fn test_kick_cpu_out_of_range() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+
+        unsafe { enter_sim(&mut state) };
+        scx_bpf_kick_cpu(99, 0);
+        exit_sim();
+
+        assert!(state.kicked_cpus.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // DSQ iterator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dsq_iter_empty() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(200));
+
+        unsafe { enter_sim(&mut state) };
+        let first = sim_dsq_iter_begin(200, 0);
+        exit_sim();
+
+        assert!(first.is_null());
+        assert!(state.dsq_iter.is_none());
+    }
+
+    #[test]
+    fn test_dsq_iter_traversal() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(200));
+        state.dsqs.insert_fifo(DsqId(200), Pid(1));
+        state.dsqs.insert_fifo(DsqId(200), Pid(2));
+        state.dsqs.insert_fifo(DsqId(200), Pid(3));
+
+        let raw1 = register_task(&mut state, Pid(1));
+        let raw2 = register_task(&mut state, Pid(2));
+        let raw3 = register_task(&mut state, Pid(3));
+
+        unsafe { enter_sim(&mut state) };
+
+        let p1 = sim_dsq_iter_begin(200, 0);
+        assert_eq!(p1, raw1);
+
+        let p2 = sim_dsq_iter_next();
+        assert_eq!(p2, raw2);
+
+        let p3 = sim_dsq_iter_next();
+        assert_eq!(p3, raw3);
+
+        let end = sim_dsq_iter_next();
+        assert!(end.is_null());
+
+        exit_sim();
+
+        free_task(&mut state, Pid(1));
+        free_task(&mut state, Pid(2));
+        free_task(&mut state, Pid(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // DSQ move during iteration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dsq_move() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        state.dsqs.create(DsqId(300));
+        state.dsqs.create(DsqId(301));
+        state.dsqs.insert_fifo(DsqId(300), Pid(1));
+        state.dsqs.insert_fifo(DsqId(300), Pid(2));
+
+        let raw1 = register_task(&mut state, Pid(1));
+        let _raw2 = register_task(&mut state, Pid(2));
+
+        unsafe { enter_sim(&mut state) };
+
+        // Start iterating DSQ 300
+        let p = sim_dsq_iter_begin(300, 0);
+        assert_eq!(p, raw1);
+
+        // Move pid 1 from DSQ 300 to DSQ 301
+        let moved = sim_scx_bpf_dsq_move(raw1, 301, 0);
+        assert!(moved);
+
+        exit_sim();
+
+        assert_eq!(state.dsqs.nr_queued(DsqId(300)), 1); // pid 2 remains
+        assert_eq!(state.dsqs.nr_queued(DsqId(301)), 1); // pid 1 moved here
+
+        free_task(&mut state, Pid(1));
+        free_task(&mut state, Pid(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // scx_bpf_task_running
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_task_running() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        let raw_running = register_task(&mut state, Pid(1));
+        let raw_idle = register_task(&mut state, Pid(2));
+        state.cpus[0].current_task = Some(Pid(1));
+
+        unsafe { enter_sim(&mut state) };
+        assert!(scx_bpf_task_running(raw_running));
+        assert!(!scx_bpf_task_running(raw_idle));
+        exit_sim();
+
+        free_task(&mut state, Pid(1));
+        free_task(&mut state, Pid(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // Advance CPU clock
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_advance_cpu_clock() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        state.clock = 100_000;
+        state.cpus[0].local_clock = 50_000;
+        state.cpus[1].local_clock = 200_000;
+
+        state.advance_cpu_clock(CpuId(0));
+        state.advance_cpu_clock(CpuId(1));
+
+        // CPU 0 should advance to event clock (100k > 50k)
+        assert_eq!(state.cpus[0].local_clock, 100_000);
+        // CPU 1 stays at its higher local clock (200k > 100k)
+        assert_eq!(state.cpus[1].local_clock, 200_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // RCU / ref-counting stubs (just verify they don't panic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rcu_stubs_no_panic() {
+        bpf_rcu_read_lock();
+        bpf_rcu_read_unlock();
+    }
+
+    #[test]
+    fn test_task_release_no_panic() {
+        bpf_task_release(ptr::null_mut());
+    }
+
+    #[test]
+    fn test_put_cpumask_no_panic() {
+        scx_bpf_put_cpumask(ptr::null());
+        scx_bpf_put_idle_cpumask(ptr::null());
+    }
+
+    // -----------------------------------------------------------------------
+    // Cgroup stubs return NULL
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cgroup_stubs_return_null() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+
+        unsafe { enter_sim(&mut state) };
+
+        assert!(scx_bpf_task_cgroup(ptr::null_mut(), 0).is_null());
+        assert!(bpf_cgroup_from_id(123).is_null());
+        assert!(bpf_cgroup_ancestor(ptr::null_mut(), 0).is_null());
+        assert!(bpf_cgrp_storage_get(
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0
+        )
+        .is_null());
+        assert!(bpf_task_storage_get(
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0
+        )
+        .is_null());
+        assert!(bpf_map_lookup_percpu_elem(ptr::null_mut(), ptr::null(), 0).is_null());
+
+        exit_sim();
+    }
+
+    #[test]
+    fn test_cgroup_acquire_release_passthrough() {
+        let sentinel = 0x1234usize as *mut c_void;
+        let acquired = bpf_cgroup_acquire(sentinel);
+        assert_eq!(acquired, sentinel);
+        bpf_cgroup_release(sentinel); // should not panic
+    }
+}
