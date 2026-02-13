@@ -5,6 +5,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+echo "=== Running cargo fmt --check ==="
+cargo fmt -p scx_simulator -- --check
+
+echo ""
 echo "=== Running cargo clippy ==="
 cargo clippy -p scx_simulator -- -D warnings
 

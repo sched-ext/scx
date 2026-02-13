@@ -28,6 +28,19 @@ jobs:
       - name: Clippy
         run: nix run ./.nix#ci -- clippy
 
+  simulator:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Validate scx_simulator
+        run: nix develop ./.nix -c bash rust/scx_simulator/validate.sh
+
   build-and-test:
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     needs: build-kernels
@@ -58,6 +71,7 @@ jobs:
       lint,
       build-and-test,
       integration-test,
+      simulator,
     ]
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64", "metal:nixos" ]') || 'ubuntu-latest' }}
     if: always()
