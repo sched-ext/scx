@@ -30,6 +30,24 @@ pub fn nice_to_weight(nice: i8) -> u32 {
     SCHED_PRIO_TO_WEIGHT[(nice + 20) as usize]
 }
 
+/// Cgroup weight constants from include/linux/cgroup.h.
+const CGROUP_WEIGHT_MIN: u32 = 1;
+const CGROUP_WEIGHT_DFL: u32 = 100;
+const CGROUP_WEIGHT_MAX: u32 = 10000;
+
+/// Convert a raw kernel scheduler weight to cgroup-weight space [1..10000].
+///
+/// Mirrors the kernel's `sched_weight_to_cgroup()` from kernel/sched/sched.h:
+///   clamp(weight * CGROUP_WEIGHT_DFL / 1024, 1, 10000)
+///
+/// The kernel stores this converted value in `p->scx.weight`, not the raw
+/// sched_prio_to_weight value. BPF schedulers (e.g. scx_simple's stopping
+/// callback) assume cgroup-weight space when they divide by `p->scx.weight`.
+pub fn sched_weight_to_cgroup(weight: u32) -> u32 {
+    let cg = ((weight as u64 * CGROUP_WEIGHT_DFL as u64) + 512) / 1024;
+    (cg as u32).clamp(CGROUP_WEIGHT_MIN, CGROUP_WEIGHT_MAX)
+}
+
 /// The state a simulated task can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -101,12 +119,13 @@ impl SimTask {
         let raw = unsafe { ffi::sim_task_alloc() };
         assert!(!raw.is_null(), "sim_task_alloc returned null");
 
-        let weight = nice_to_weight(def.nice);
+        let scx_weight = sched_weight_to_cgroup(nice_to_weight(def.nice));
 
         unsafe {
             ffi::sim_task_set_pid(raw, def.pid.0);
-            ffi::sim_task_set_weight(raw, weight);
-            ffi::sim_task_set_scx_weight(raw, weight);
+            // The kernel stores cgroup-weight-space [1..10000] in p->scx.weight,
+            // not the raw sched_prio_to_weight value.
+            ffi::sim_task_set_weight(raw, scx_weight);
             // Default: task can run on all CPUs
             ffi::sim_task_set_nr_cpus_allowed(raw, nr_cpus as i32);
             // static_prio = nice + 120

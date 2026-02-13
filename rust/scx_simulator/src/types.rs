@@ -32,6 +32,12 @@ impl DsqId {
         self.0 & Self::LOCAL_ON_MASK == Self::LOCAL_ON_MASK
     }
 
+    /// Whether this is a built-in DSQ (LOCAL, GLOBAL, or LOCAL_ON).
+    /// The kernel rejects vtime ordering for built-in DSQs.
+    pub fn is_builtin(self) -> bool {
+        self.0 & Self::FLAG_BUILTIN != 0
+    }
+
     pub fn local_on_cpu(self) -> CpuId {
         CpuId((self.0 & Self::LOCAL_CPU_MASK) as u32)
     }
@@ -41,6 +47,24 @@ impl DsqId {
 pub type TimeNs = u64;
 
 /// Virtual time for fair scheduling (opaque u64, not nanoseconds).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// Ordering uses wrapping comparison (like the kernel's `time_before64`),
+/// so `Vtime(u64::MAX)` compares as less than `Vtime(0)` when they are
+/// within half the u64 range of each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Vtime(pub u64);
+
+impl PartialOrd for Vtime {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Vtime {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Matches kernel time_before64: (s64)(a - b) < 0 means a < b.
+        // Wrapping subtraction cast to i64 handles overflow correctly.
+        (self.0.wrapping_sub(other.0) as i64).cmp(&0)
+    }
+}
 

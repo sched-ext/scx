@@ -306,6 +306,10 @@ pub extern "C" fn scx_bpf_dsq_insert(p: *mut c_void, dsq_id: u64, slice: u64, en
 /// Insert a task into a DSQ with vtime ordering.
 ///
 /// Deferred like `scx_bpf_dsq_insert` — see its doc comment.
+///
+/// # Panics
+/// Panics if `dsq_id` is a built-in DSQ (LOCAL, GLOBAL), matching the
+/// kernel's `dispatch_enqueue` which calls `scx_error()` for this case.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_insert_vtime(
     p: *mut c_void,
@@ -314,6 +318,12 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
     vtime: u64,
     enq_flags: u64,
 ) {
+    let dsq = DsqId(dsq_id);
+    assert!(
+        !dsq.is_builtin(),
+        "cannot use vtime ordering for built-in DSQ {:#x}",
+        dsq_id
+    );
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };

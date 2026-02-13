@@ -46,7 +46,7 @@ pub use ffi::{Scheduler, ScxSimple, ScxTickless};
 pub use fmt::{FmtN, FmtTs};
 pub use kfuncs::sim_clock;
 pub use scenario::Scenario;
-pub use task::{Phase, TaskBehavior, TaskDef, nice_to_weight};
+pub use task::{Phase, TaskBehavior, TaskDef, nice_to_weight, sched_weight_to_cgroup};
 pub use trace::{Trace, TraceEvent, TraceKind};
 pub use types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
