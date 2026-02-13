@@ -637,6 +637,10 @@ struct Opts {
     #[clap(long)]
     monitor: Option<f64>,
 
+    /// Column limit for stats monitor output.
+    #[clap(long, default_value = "95")]
+    stats_columns: usize,
+
     /// Run with example layer specifications (useful for e.g. CI pipelines)
     #[clap(long)]
     run_example: bool,
@@ -4334,8 +4338,13 @@ fn main(opts: Opts) -> Result<()> {
 
     if let Some(intv) = opts.monitor.or(opts.stats) {
         let shutdown_copy = shutdown.clone();
+        let stats_columns = opts.stats_columns;
         let jh = std::thread::spawn(move || {
-            match stats::monitor(Duration::from_secs_f64(intv), shutdown_copy) {
+            match stats::monitor(
+                Duration::from_secs_f64(intv),
+                shutdown_copy,
+                stats_columns,
+            ) {
                 Ok(_) => {
                     debug!("stats monitor thread finished successfully")
                 }

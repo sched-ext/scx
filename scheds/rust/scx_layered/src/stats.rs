@@ -338,6 +338,7 @@ impl LayerStats {
         name: &str,
         header_width: usize,
         topo: Option<&Topology>,
+        max_width: usize,
     ) -> Result<()> {
         writeln!(
             w,
@@ -433,7 +434,7 @@ impl LayerStats {
             writeln!(w, "  {:<width$}  {}", "", header, width = header_width,)?;
             let indent = format!("  {:<width$}  ", "", width = header_width);
             if cpumask.weight() > 0 {
-                topo.format_cpumask_grid(w, &cpumask, &indent, usize::MAX)?;
+                topo.format_cpumask_grid(w, &cpumask, &indent, max_width)?;
             }
         } else {
             writeln!(
@@ -666,7 +667,12 @@ impl SysStats {
         Ok(())
     }
 
-    pub fn format_all<W: Write>(&self, w: &mut W, topo: Option<&Topology>) -> Result<()> {
+    pub fn format_all<W: Write>(
+        &self,
+        w: &mut W,
+        topo: Option<&Topology>,
+        max_width: usize,
+    ) -> Result<()> {
         self.format(w)?;
 
         let header_width = self
@@ -683,7 +689,7 @@ impl SysStats {
         idx_to_name.sort();
 
         for (_idx, name) in &idx_to_name {
-            self.layers[*name].format(w, name, header_width, topo)?;
+            self.layers[*name].format(w, name, header_width, topo, max_width)?;
         }
 
         Ok(())
@@ -747,7 +753,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         )
 }
 
-pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>, max_width: usize) -> Result<()> {
     let topo = Topology::new().ok();
     scx_utils::monitor_stats::<SysStats>(
         &[],
@@ -756,7 +762,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         |sst| {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
             println!("###### {} ######", dt.to_rfc2822());
-            sst.format_all(&mut std::io::stdout(), topo.as_ref())
+            sst.format_all(&mut std::io::stdout(), topo.as_ref(), max_width)
         },
     )
 }
