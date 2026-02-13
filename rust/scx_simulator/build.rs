@@ -60,6 +60,19 @@ fn main() {
         .flag("-Wno-unknown-attributes")
         .compile("sim_task");
 
+    // Build the SDT / arena per-task storage stubs.
+    // Provides strong definitions of scx_task_alloc/data/free that override
+    // the __weak stubs in overrides.c. Linked into the main binary for unit
+    // tests and exported via -rdynamic for .so schedulers.
+    cc::Build::new()
+        .compiler(&compiler)
+        .file(manifest_dir.join("csrc/sim_sdt_stubs.c"))
+        .define("SCX_BPF_UNITTEST", None)
+        .includes(&include_paths)
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unknown-attributes")
+        .compile("sim_sdt_stubs");
+
     // ---------------------------------------------------------------
     // Shared libraries (.so) for schedulers — built via Makefile
     // ---------------------------------------------------------------

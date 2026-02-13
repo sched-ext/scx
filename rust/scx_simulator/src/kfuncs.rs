@@ -1568,4 +1568,87 @@ mod tests {
         assert_eq!(acquired, sentinel);
         bpf_cgroup_release(sentinel); // should not panic
     }
+
+    // -----------------------------------------------------------------------
+    // SDT / arena per-task storage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sdt_task_alloc_data_free() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        let p = register_task(&mut state, Pid(100));
+
+        // Initialize the allocator with 256 bytes per task
+        let ret = unsafe { ffi::scx_task_init(256) };
+        assert_eq!(ret, 0);
+
+        // Allocate per-task data
+        let data = unsafe { ffi::scx_task_alloc(p) };
+        assert!(!data.is_null(), "scx_task_alloc must return non-null");
+
+        // Retrieve the same data
+        let data2 = unsafe { ffi::scx_task_data(p) };
+        assert_eq!(data, data2, "scx_task_data must return same pointer");
+
+        // Write to the allocated memory to verify it's valid
+        unsafe { *(data as *mut u64) = 0xDEADBEEF };
+        let read_back = unsafe { *(data2 as *mut u64) };
+        assert_eq!(read_back, 0xDEADBEEF);
+
+        // Free the data
+        unsafe { ffi::scx_task_free(p) };
+
+        // After free, data should be gone
+        let data3 = unsafe { ffi::scx_task_data(p) };
+        assert!(data3.is_null(), "scx_task_data must return null after free");
+
+        free_task(&mut state, Pid(100));
+    }
+
+    #[test]
+    fn test_sdt_task_multiple_tasks() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(2);
+        let p1 = register_task(&mut state, Pid(10));
+        let p2 = register_task(&mut state, Pid(20));
+
+        let ret = unsafe { ffi::scx_task_init(64) };
+        assert_eq!(ret, 0);
+
+        let d1 = unsafe { ffi::scx_task_alloc(p1) };
+        let d2 = unsafe { ffi::scx_task_alloc(p2) };
+        assert!(!d1.is_null());
+        assert!(!d2.is_null());
+        assert_ne!(d1, d2, "different tasks must get different allocations");
+
+        // Each task retrieves its own data
+        assert_eq!(unsafe { ffi::scx_task_data(p1) }, d1);
+        assert_eq!(unsafe { ffi::scx_task_data(p2) }, d2);
+
+        // Free one, other remains
+        unsafe { ffi::scx_task_free(p1) };
+        assert!(unsafe { ffi::scx_task_data(p1) }.is_null());
+        assert_eq!(unsafe { ffi::scx_task_data(p2) }, d2);
+
+        unsafe { ffi::scx_task_free(p2) };
+        free_task(&mut state, Pid(10));
+        free_task(&mut state, Pid(20));
+    }
+
+    #[test]
+    fn test_sdt_task_data_null_before_alloc() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(1);
+        let p = register_task(&mut state, Pid(50));
+
+        let ret = unsafe { ffi::scx_task_init(32) };
+        assert_eq!(ret, 0);
+
+        // Before alloc, data should be null
+        let data = unsafe { ffi::scx_task_data(p) };
+        assert!(data.is_null(), "scx_task_data before alloc must be null");
+
+        free_task(&mut state, Pid(50));
+    }
 }

@@ -1,0 +1,15 @@
+---
+title: scx_bpf_get_online_cpumask
+status: open
+priority: 0
+issue_type: feature
+depends_on:
+  sim-1: parent-child
+  sim-2: blocks
+created_at: 2026-02-13T17:58:44.055644769+00:00
+updated_at: 2026-02-13T17:59:49.963623757+00:00
+---
+
+# Description
+
+Return cpumask with bits 0..nr_cpus-1 set. Called 4 times by LAVD (main.bpf.c:1839,1874; idle.bpf.c:136; power.bpf.c:788). Not implemented anywhere currently.

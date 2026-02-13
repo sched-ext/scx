@@ -46,6 +46,12 @@ extern "C" {
 
     // Exit info for the exit callback (implemented in sim_task.c)
     pub fn sim_get_exit_info() -> *mut c_void;
+
+    // SDT / arena per-task storage (implemented in sim_sdt_stubs.c)
+    pub fn scx_task_init(data_size: u64) -> i32;
+    pub fn scx_task_alloc(p: *mut c_void) -> *mut c_void;
+    pub fn scx_task_data(p: *mut c_void) -> *mut c_void;
+    pub fn scx_task_free(p: *mut c_void);
 }
 
 // ---------------------------------------------------------------------------

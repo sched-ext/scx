@@ -1,0 +1,14 @@
+---
+title: Missing cpumask functions
+status: open
+priority: 1
+issue_type: feature
+depends_on:
+  sim-1: parent-child
+created_at: 2026-02-13T17:58:44.060961527+00:00
+updated_at: 2026-02-13T17:59:37.198897436+00:00
+---
+
+# Description
+
+Add three missing cpumask functions to sim_bpf_stubs.c: bpf_cpumask_intersects (6 calls), bpf_cpumask_test_and_set_cpu (3 calls), bpf_cpumask_any_and_distribute (2 calls — intersection variant).
