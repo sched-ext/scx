@@ -103,6 +103,55 @@ fn test_rtapp_single_runner() {
     );
 }
 
+/// Parse two_runners.json and simulate: two tasks with run+sleep cycles and
+/// different priorities, using only the fully-supported rt-app feature subset.
+#[test]
+fn test_rtapp_two_runners() {
+    let _lock = common::setup_test();
+    let json = include_str!("../workloads/two_runners.json");
+    let scenario = load_rtapp(json, 2).unwrap();
+
+    assert_eq!(scenario.nr_cpus, 2);
+    assert_eq!(scenario.duration_ns, 1_000_000_000);
+    assert_eq!(scenario.tasks.len(), 2);
+
+    // heavy: nice=-5, run 10ms / sleep 10ms (50% duty, 20ms cycle → ~50 cycles/s)
+    let heavy = &scenario.tasks[0];
+    assert_eq!(heavy.name, "heavy");
+    assert_eq!(heavy.nice, -5);
+    assert!(heavy.behavior.repeat);
+    assert_eq!(heavy.behavior.phases.len(), 2);
+    assert!(matches!(heavy.behavior.phases[0], Phase::Run(10_000_000)));
+    assert!(matches!(heavy.behavior.phases[1], Phase::Sleep(10_000_000)));
+
+    // light: nice=0, run 5ms / sleep 15ms (25% duty, 20ms cycle → ~50 cycles/s)
+    let light = &scenario.tasks[1];
+    assert_eq!(light.name, "light");
+    assert_eq!(light.nice, 0);
+    assert!(light.behavior.repeat);
+    assert_eq!(light.behavior.phases.len(), 2);
+    assert!(matches!(light.behavior.phases[0], Phase::Run(5_000_000)));
+    assert!(matches!(light.behavior.phases[1], Phase::Sleep(15_000_000)));
+
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
+    trace.dump();
+
+    let heavy_rt = trace.total_runtime(Pid(1));
+    let light_rt = trace.total_runtime(Pid(2));
+    eprintln!("heavy(nice=-5) runtime: {heavy_rt}ns, light(nice=0) runtime: {light_rt}ns");
+
+    // heavy: 50 cycles × 10ms = ~500ms expected
+    assert!(
+        heavy_rt > 400_000_000,
+        "expected heavy >400ms runtime, got {heavy_rt}ns"
+    );
+    // light: 50 cycles × 5ms = ~250ms expected
+    assert!(
+        light_rt > 200_000_000,
+        "expected light >200ms runtime, got {light_rt}ns"
+    );
+}
+
 /// Test that rt-app workloads with nice priorities produce weighted-fair results.
 #[test]
 fn test_rtapp_weighted_tasks() {

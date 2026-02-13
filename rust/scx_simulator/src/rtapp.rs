@@ -307,6 +307,7 @@ fn parse_task(
                 repeat,
             },
             start_time_ns: 0,
+            mm_id: None,
         });
     }
 
@@ -410,6 +411,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
 
     Ok(Scenario {
         nr_cpus,
+        smt_threads_per_core: 1,
         tasks: all_tasks,
         duration_ns,
     })
