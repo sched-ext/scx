@@ -15,12 +15,19 @@
 SIMULATOR_DIR ?= ..
 ROOT_DIR      ?= $(SIMULATOR_DIR)/../..
 BUILD_DIR     ?= build
-CC            ?= clang
+
+# CC defaults to 'cc' (gcc) in Make, but this code requires clang.
+# Override the default unless the user explicitly set CC.
+ifeq ($(origin CC),default)
+CC := clang
+endif
 
 # BPF_INCLUDE must point to the libbpf header directory.
 # When invoked from build.rs, this is set to DEP_BPF_INCLUDE.
-# For standalone use, try pkg-config.
-BPF_INCLUDE   ?= $(shell pkg-config --variable=includedir libbpf 2>/dev/null)
+# For standalone use: try pkg-config, then fall back to Cargo build cache.
+BPF_INCLUDE   ?= $(or \
+    $(shell pkg-config --cflags-only-I libbpf 2>/dev/null | sed 's/^-I//'),\
+    $(firstword $(wildcard $(ROOT_DIR)/target/debug/build/libbpf-sys-*/out/include)))
 
 # --- Auto-discover schedulers ---
 SCHEDS := $(patsubst %/wrapper.c,%,$(wildcard */wrapper.c))
@@ -37,7 +44,7 @@ INCLUDES := -I$(SIMULATOR_DIR)/csrc \
             -I$(ROOT_DIR)/scheds/vmlinux \
             -I$(ROOT_DIR)/scheds/vmlinux/arch/x86 \
             -I$(ROOT_DIR)/scheds/include/bpf-compat \
-            -I$(BPF_INCLUDE)
+            $(if $(BPF_INCLUDE),-I$(BPF_INCLUDE))
 
 # Shared source files compiled into every .so
 SHARED_SRCS := $(SIMULATOR_DIR)/csrc/sim_bpf_stubs.c \
@@ -51,8 +58,13 @@ $(foreach s,$(SCHEDS),$(eval -include $(s)/config.mk))
 
 .PHONY: all clean $(SCHEDS)
 
+ifeq ($(BPF_INCLUDE),)
+all $(SO_TARGETS):
+	$(error BPF_INCLUDE is empty — install libbpf-devel or run 'cargo build' first to populate target/debug/build/libbpf-sys-*/out/include)
+else
 all: $(SO_TARGETS)
 	@echo "Built $(words $(SO_TARGETS)) scheduler(s): $(SCHEDS)"
+endif
 
 # Individual scheduler targets (e.g., make simple)
 $(foreach s,$(SCHEDS),$(eval $(s): $(BUILD_DIR)/libscx_$(s).so))
