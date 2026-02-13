@@ -1,10 +1,11 @@
 ---
 title: Simulate deferred wakeups (BPF timers)
-status: open
+status: closed
 priority: 2
 issue_type: feature
 created_at: 2026-02-13T13:04:26.558951749+00:00
-updated_at: 2026-02-13T13:07:58.515164619+00:00
+updated_at: 2026-02-13T14:30:10.388504150+00:00
+closed_at: 2026-02-13T14:30:10.388504070+00:00
 ---
 
 # Description

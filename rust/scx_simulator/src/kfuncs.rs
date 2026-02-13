@@ -97,6 +97,8 @@ pub struct SimulatorState {
     /// The engine drains the local DSQ and re-enqueues tasks after the
     /// callback returns.
     pub reenqueue_local_requested: bool,
+    /// Pending BPF timer: fire at this time (set by `sim_timer_start`).
+    pub pending_timer_ns: Option<TimeNs>,
 }
 
 impl SimulatorState {
@@ -459,7 +461,23 @@ pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
     with_sim(|sim| {
-        let n = sim.dsqs.nr_queued(DsqId(dsq_id)) as i32;
+        let dsq = DsqId(dsq_id);
+        if dsq.is_local() {
+            let cpu = sim.current_cpu.0 as usize;
+            let n = sim.cpus[cpu].local_dsq.len() as i32;
+            debug!(dsq_id, cpu, n, "kfunc dsq_nr_queued LOCAL");
+            return n;
+        }
+        if dsq.is_local_on() {
+            let cpu = dsq.local_on_cpu();
+            if (cpu.0 as usize) < sim.cpus.len() {
+                let n = sim.cpus[cpu.0 as usize].local_dsq.len() as i32;
+                debug!(dsq_id, cpu = cpu.0, n, "kfunc dsq_nr_queued LOCAL_ON");
+                return n;
+            }
+            return 0;
+        }
+        let n = sim.dsqs.nr_queued(dsq) as i32;
         debug!(dsq_id, n, "kfunc dsq_nr_queued");
         n
     })
@@ -869,6 +887,19 @@ pub extern "C" fn scx_bpf_cpuperf_set(cpu: i32, perf: u32) {
     });
 }
 
+/// Schedule a BPF timer to fire after `nsecs` nanoseconds.
+///
+/// Called from C scheduler code when `bpf_timer_start(timer, nsecs, flags)`
+/// is invoked. The engine drains `pending_timer_ns` after each callback
+/// and inserts a `TimerFired` event into the event queue.
+#[no_mangle]
+pub extern "C" fn sim_timer_start(nsecs: u64) {
+    with_sim(|sim| {
+        sim.pending_timer_ns = Some(sim.clock + nsecs);
+        debug!(nsecs, fire_at = sim.clock + nsecs, "timer_start");
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +926,7 @@ mod tests {
             dsq_iter: None,
             kicked_cpus: HashSet::new(),
             reenqueue_local_requested: false,
+            pending_timer_ns: None,
         }
     }
 
