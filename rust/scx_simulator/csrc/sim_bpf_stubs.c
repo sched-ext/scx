@@ -149,6 +149,41 @@ u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask)
 	return NR_CPUS;
 }
 
+u32 bpf_cpumask_any_and_distribute(const struct cpumask *src1,
+				   const struct cpumask *src2)
+{
+	unsigned int i;
+	for (i = 0; i < NR_CPUS; i++) {
+		unsigned long bit = 1UL << (i % BITS_PER_LONG);
+		unsigned long word = i / BITS_PER_LONG;
+		if ((src1->bits[word] & bit) && (src2->bits[word] & bit))
+			return i;
+	}
+	return NR_CPUS;
+}
+
+bool bpf_cpumask_intersects(const struct cpumask *src1,
+			    const struct cpumask *src2)
+{
+	unsigned int i;
+	for (i = 0; i < 128; i++) {
+		if (src1->bits[i] & src2->bits[i])
+			return true;
+	}
+	return false;
+}
+
+bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask)
+{
+	bool was_set;
+	if (cpu >= NR_CPUS)
+		return false;
+	was_set = !!(cpumask->bits[cpu / BITS_PER_LONG] &
+		     (1UL << (cpu % BITS_PER_LONG)));
+	cpumask->bits[cpu / BITS_PER_LONG] |= (1UL << (cpu % BITS_PER_LONG));
+	return was_set;
+}
+
 /* --- kptr exchange --- */
 
 void *bpf_kptr_xchg_impl(void **kptr, void *new_val)
