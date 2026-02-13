@@ -38,6 +38,7 @@ extern "C" {
     pub fn scx_test_set_idle_smtmask(cpu: i32);
     pub fn scx_test_clear_idle_smtmask(cpu: i32);
     pub fn scx_bpf_test_and_clear_cpu_idle(cpu: i32) -> bool;
+    pub fn bpf_cpumask_test_cpu(cpu: u32, cpumask: *const c_void) -> bool;
 
     // Exit info for the exit callback (implemented in sim_task.c)
     pub fn sim_get_exit_info() -> *mut c_void;
