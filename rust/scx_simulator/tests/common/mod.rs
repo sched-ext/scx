@@ -419,5 +419,129 @@ macro_rules! scheduler_tests {
                 "expected ~33ms runtime, got {runtime}ns"
             );
         }
+
+        /// Trace ops events: verify that the fine-grained kernel-level trace
+        /// events (PutPrevTask, PickTask, SetNextTask, Balance, DsqInsert, etc.)
+        /// are emitted consistently alongside the high-level events.
+        #[test]
+        fn test_trace_ops_events() {
+            let _lock = common::setup_test();
+            let sched_factory = $make_sched;
+            let scenario = Scenario::builder()
+                .cpus(2)
+                .task(TaskDef {
+                    name: "t1".into(),
+                    pid: Pid(1),
+                    nice: 0,
+                    behavior: TaskBehavior {
+                        phases: vec![
+                            Phase::Run(5_000_000),
+                            Phase::Sleep(5_000_000),
+                        ],
+                        repeat: true,
+                    },
+                    start_time_ns: 0,
+                    mm_id: None,
+                })
+                .task(TaskDef {
+                    name: "t2".into(),
+                    pid: Pid(2),
+                    nice: 0,
+                    behavior: TaskBehavior {
+                        phases: vec![Phase::Run(20_000_000)],
+                        repeat: true,
+                    },
+                    start_time_ns: 0,
+                    mm_id: None,
+                })
+                .duration_ms(100)
+                .build();
+
+            let trace = Simulator::new(sched_factory(2)).run(scenario);
+            trace.dump();
+
+            let events = trace.events();
+
+            // Every TaskScheduled must be preceded by PickTask and SetNextTask
+            // for the same pid (within the last few events on the same CPU).
+            for (i, e) in events.iter().enumerate() {
+                if let TraceKind::TaskScheduled { pid } = &e.kind {
+                    // Search backwards for SetNextTask and PickTask
+                    let mut found_set_next = false;
+                    let mut found_pick = false;
+                    for j in (0..i).rev() {
+                        match &events[j].kind {
+                            TraceKind::SetNextTask { pid: p } if *p == *pid => {
+                                found_set_next = true;
+                            }
+                            TraceKind::PickTask { pid: p } if *p == *pid => {
+                                found_pick = true;
+                                break; // PickTask comes before SetNextTask
+                            }
+                            // Stop searching if we hit another high-level event
+                            TraceKind::TaskScheduled { .. }
+                            | TraceKind::TaskPreempted { .. }
+                            | TraceKind::TaskSlept { .. }
+                            | TraceKind::TaskCompleted { .. }
+                            | TraceKind::CpuIdle => break,
+                            _ => {}
+                        }
+                    }
+                    assert!(
+                        found_set_next,
+                        "TaskScheduled(pid={}) at index {i} not preceded by SetNextTask",
+                        pid.0
+                    );
+                    assert!(
+                        found_pick,
+                        "TaskScheduled(pid={}) at index {i} not preceded by PickTask",
+                        pid.0
+                    );
+                }
+            }
+
+            // Every TaskPreempted must be accompanied by PutPrevTask
+            for (i, e) in events.iter().enumerate() {
+                if let TraceKind::TaskPreempted { pid } = &e.kind {
+                    // PutPrevTask should come shortly after TaskPreempted
+                    let found = events[i..].iter().take(5).any(|ev| {
+                        matches!(
+                            &ev.kind,
+                            TraceKind::PutPrevTask { pid: p, .. } if *p == *pid
+                        )
+                    });
+                    assert!(
+                        found,
+                        "TaskPreempted(pid={}) at index {i} not accompanied by PutPrevTask",
+                        pid.0
+                    );
+                }
+            }
+
+            // At least one Balance event must exist
+            let balance_count = events
+                .iter()
+                .filter(|e| matches!(e.kind, TraceKind::Balance { .. }))
+                .count();
+            assert!(
+                balance_count > 0,
+                "expected at least one Balance event"
+            );
+
+            // DsqInsert or DsqInsertVtime events must appear
+            let dsq_insert_count = events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        TraceKind::DsqInsert { .. } | TraceKind::DsqInsertVtime { .. }
+                    )
+                })
+                .count();
+            assert!(
+                dsq_insert_count > 0,
+                "expected at least one DsqInsert or DsqInsertVtime event"
+            );
+        }
     };
 }

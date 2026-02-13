@@ -34,8 +34,14 @@ fn test_rtapp_parse_simple_wake() {
     assert_eq!(consumer.nice, 0);
     assert!(consumer.behavior.repeat);
     assert_eq!(consumer.behavior.phases.len(), 2);
-    assert!(matches!(consumer.behavior.phases[0], Phase::Sleep(u64::MAX)));
-    assert!(matches!(consumer.behavior.phases[1], Phase::Run(10_000_000)));
+    assert!(matches!(
+        consumer.behavior.phases[0],
+        Phase::Sleep(u64::MAX)
+    ));
+    assert!(matches!(
+        consumer.behavior.phases[1],
+        Phase::Run(10_000_000)
+    ));
 }
 
 /// Parse simple_wake.json, run it through scx_simple, and verify both tasks run.

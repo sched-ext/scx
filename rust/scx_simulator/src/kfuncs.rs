@@ -26,7 +26,7 @@ use crate::cpu::SimCpu;
 use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
-use crate::trace::Trace;
+use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
 /// Which scheduler callback is currently executing.
@@ -416,6 +416,18 @@ pub extern "C" fn scx_bpf_dsq_insert(p: *mut c_void, dsq_id: u64, slice: u64, en
             enq_flags,
             vtime: None,
         });
+
+        let cpu = sim.current_cpu;
+        let local_t = sim.cpus[cpu.0 as usize].local_clock;
+        sim.trace.record(
+            local_t,
+            cpu,
+            TraceKind::DsqInsert {
+                pid,
+                dsq_id: DsqId(dsq_id),
+                slice,
+            },
+        );
     })
 }
 
@@ -451,6 +463,19 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
             enq_flags,
             vtime: Some(Vtime(vtime)),
         });
+
+        let cpu = sim.current_cpu;
+        let local_t = sim.cpus[cpu.0 as usize].local_clock;
+        sim.trace.record(
+            local_t,
+            cpu,
+            TraceKind::DsqInsertVtime {
+                pid,
+                dsq_id: DsqId(dsq_id),
+                slice,
+                vtime: Vtime(vtime),
+            },
+        );
     })
 }
 
@@ -464,6 +489,17 @@ pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
         let cpu = unsafe { &mut *cpus_ptr.add(cpu_idx) };
         let result = sim.dsqs.move_to_local(DsqId(dsq_id), cpu);
         debug!(dsq_id, result, "kfunc dsq_move_to_local");
+
+        let local_t = sim.cpus[cpu_idx].local_clock;
+        sim.trace.record(
+            local_t,
+            sim.current_cpu,
+            TraceKind::DsqMoveToLocal {
+                dsq_id: DsqId(dsq_id),
+                success: result,
+            },
+        );
+
         result
     })
 }
@@ -789,6 +825,11 @@ pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, _flags: u64) {
         if (cpu_id.0 as usize) < sim.cpus.len() {
             sim.kicked_cpus.insert(cpu_id);
             debug!(cpu, "kick_cpu");
+
+            let current = sim.current_cpu;
+            let local_t = sim.cpus[current.0 as usize].local_clock;
+            sim.trace
+                .record(local_t, current, TraceKind::KickCpu { target_cpu: cpu_id });
         }
     })
 }

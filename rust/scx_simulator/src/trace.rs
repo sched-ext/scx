@@ -4,7 +4,7 @@
 //! is recorded as a `TraceEvent` with a simulated timestamp and CPU ID.
 
 use crate::fmt::FmtTs;
-use crate::types::{CpuId, Pid, TimeNs};
+use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
 /// A single trace event produced by the simulator.
 #[derive(Debug, Clone)]
@@ -34,6 +34,43 @@ pub enum TraceKind {
     TaskCompleted { pid: Pid },
     /// The CPU became idle (no tasks to run).
     CpuIdle,
+
+    // ----- Ops-level events (kernel context-switch path) -----
+    /// A task was stopped on this CPU (put_prev_task → stopping()).
+    PutPrevTask { pid: Pid, still_runnable: bool },
+    /// A CPU was selected for a waking task (select_task_rq → select_cpu()).
+    SelectTaskRq {
+        pid: Pid,
+        prev_cpu: CpuId,
+        selected_cpu: CpuId,
+    },
+    /// A task was enqueued into the scheduler (enqueue_task → enqueue()).
+    EnqueueTask { pid: Pid, enq_flags: u64 },
+    /// The scheduler's dispatch() callback was invoked to fill the local DSQ.
+    Balance { prev_pid: Option<Pid> },
+    /// A task was popped from the local DSQ (pick_task).
+    PickTask { pid: Pid },
+    /// A task was handed to the CPU to run (set_next_task → running()).
+    SetNextTask { pid: Pid },
+
+    // ----- Kfunc-level events (BPF helper calls) -----
+    /// scx_bpf_dsq_insert: FIFO insert into a DSQ.
+    DsqInsert {
+        pid: Pid,
+        dsq_id: DsqId,
+        slice: TimeNs,
+    },
+    /// scx_bpf_dsq_insert_vtime: vtime-ordered insert into a DSQ.
+    DsqInsertVtime {
+        pid: Pid,
+        dsq_id: DsqId,
+        slice: TimeNs,
+        vtime: Vtime,
+    },
+    /// scx_bpf_dsq_move_to_local: move head of DSQ to the current CPU's local DSQ.
+    DsqMoveToLocal { dsq_id: DsqId, success: bool },
+    /// scx_bpf_kick_cpu: send scheduling IPI to a CPU.
+    KickCpu { target_cpu: CpuId },
 }
 
 /// A complete simulation trace, containing all events in chronological order.
@@ -102,6 +139,29 @@ impl Trace {
             .count()
     }
 
+    /// Count the number of `Balance` events on a CPU.
+    pub fn balance_count(&self, cpu: CpuId) -> usize {
+        self.events
+            .iter()
+            .filter(|e| e.cpu == cpu && matches!(e.kind, TraceKind::Balance { .. }))
+            .count()
+    }
+
+    /// Count the number of `DsqInsert` or `DsqInsertVtime` events for a task.
+    pub fn dsq_insert_count(&self, pid: Pid) -> usize {
+        self.events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    TraceKind::DsqInsert { pid: p, .. }
+                    | TraceKind::DsqInsertVtime { pid: p, .. }
+                    if p == pid
+                )
+            })
+            .count()
+    }
+
     /// Pretty-print the trace for debugging.
     pub fn dump(&self) {
         for event in &self.events {
@@ -113,6 +173,51 @@ impl Trace {
                 TraceKind::TaskWoke { pid } => format!("WAKE     pid={}", pid.0),
                 TraceKind::TaskCompleted { pid } => format!("COMPLETE pid={}", pid.0),
                 TraceKind::CpuIdle => "IDLE".to_string(),
+                TraceKind::PutPrevTask {
+                    pid,
+                    still_runnable,
+                } => {
+                    format!("PUT_PREV pid={} runnable={}", pid.0, still_runnable)
+                }
+                TraceKind::SelectTaskRq {
+                    pid,
+                    prev_cpu,
+                    selected_cpu,
+                } => {
+                    format!(
+                        "SELECT_CPU pid={} prev={} sel={}",
+                        pid.0, prev_cpu.0, selected_cpu.0
+                    )
+                }
+                TraceKind::EnqueueTask { pid, enq_flags } => {
+                    format!("ENQUEUE  pid={} flags={:#x}", pid.0, enq_flags)
+                }
+                TraceKind::Balance { prev_pid } => {
+                    let p = prev_pid.map_or(-1, |p| p.0);
+                    format!("BALANCE  prev_pid={}", p)
+                }
+                TraceKind::PickTask { pid } => format!("PICK     pid={}", pid.0),
+                TraceKind::SetNextTask { pid } => format!("SET_NEXT pid={}", pid.0),
+                TraceKind::DsqInsert { pid, dsq_id, slice } => {
+                    format!("DSQ_INS  pid={} dsq={:#x} slice={}", pid.0, dsq_id.0, slice)
+                }
+                TraceKind::DsqInsertVtime {
+                    pid,
+                    dsq_id,
+                    slice,
+                    vtime,
+                } => {
+                    format!(
+                        "DSQ_INS_V pid={} dsq={:#x} slice={} vtime={}",
+                        pid.0, dsq_id.0, slice, vtime.0
+                    )
+                }
+                TraceKind::DsqMoveToLocal { dsq_id, success } => {
+                    format!("DSQ_MOVE dsq={:#x} ok={}", dsq_id.0, success)
+                }
+                TraceKind::KickCpu { target_cpu } => {
+                    format!("KICK     cpu={}", target_cpu.0)
+                }
             };
             eprintln!(
                 "[{}] cpu={:<3} {}",
