@@ -79,3 +79,15 @@ void *bpf_kptr_xchg_impl(void **kptr, void *new_val)
 	*kptr = new_val;
 	return old;
 }
+
+/* --- cpumask query --- */
+
+bool bpf_cpumask_empty(const struct cpumask *cpumask)
+{
+	unsigned int i;
+	for (i = 0; i < (sizeof(cpumask->bits) / sizeof(cpumask->bits[0])); i++) {
+		if (cpumask->bits[i])
+			return false;
+	}
+	return true;
+}

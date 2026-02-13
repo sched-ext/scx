@@ -52,6 +52,9 @@ SHARED_SRCS := $(SIMULATOR_DIR)/csrc/sim_bpf_stubs.c \
 
 # --- Per-scheduler config ---
 # Each scheduler can define EXTRA_CFLAGS_<name> and EXTRA_INCLUDES_<name>
+# Set default goal BEFORE including config files, so rules in config.mk
+# don't accidentally become the default target.
+.DEFAULT_GOAL := all
 $(foreach s,$(SCHEDS),$(eval -include $(s)/config.mk))
 
 # --- Build rules ---

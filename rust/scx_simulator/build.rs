@@ -104,4 +104,5 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/");
     println!("cargo:rerun-if-changed=../../lib/scxtest/");
     println!("cargo:rerun-if-changed=../../scheds/rust/scx_tickless/src/bpf/");
+    println!("cargo:rerun-if-changed=../../scheds/rust/scx_cosmos/src/bpf/");
 }

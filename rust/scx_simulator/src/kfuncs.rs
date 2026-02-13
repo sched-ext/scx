@@ -641,3 +641,32 @@ pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, _flags: u64) {
         }
     })
 }
+
+/// Return the number of possible CPUs.
+///
+/// Used by COSMOS in `cosmos_init` to set `nr_cpu_ids`.
+#[no_mangle]
+pub extern "C" fn scx_bpf_nr_cpu_ids() -> u32 {
+    with_sim(|sim| {
+        let n = sim.cpus.len() as u32;
+        debug!(n, "kfunc nr_cpu_ids");
+        n
+    })
+}
+
+/// Check if a task is currently running on any CPU.
+///
+/// Used by COSMOS in `cosmos_enqueue` to decide whether to kick a CPU.
+#[no_mangle]
+pub extern "C" fn scx_bpf_task_running(p: *const c_void) -> bool {
+    with_sim(|sim| {
+        let pid = sim.task_pid_from_raw(p as *mut c_void);
+        let running = sim.cpus.iter().any(|cpu| cpu.current_task == Some(pid));
+        debug!(pid = pid.0, running, "kfunc task_running");
+        running
+    })
+}
+
+/// Set CPU performance level. No-op in simulator (cpufreq disabled).
+#[no_mangle]
+pub extern "C" fn scx_bpf_cpuperf_set(_cpu: i32, _perf: u32) {}
