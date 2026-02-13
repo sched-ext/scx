@@ -5,6 +5,8 @@
 //! (timestamps) provide self-documenting code without the boilerplate
 //! of implementing arithmetic traits.
 
+use std::fmt;
+
 /// Dispatch queue identifier. Wraps u64 with kernel bit-flag conventions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DsqId(pub u64);
@@ -72,5 +74,11 @@ impl Ord for Vtime {
         // Matches kernel time_before64: (s64)(a - b) < 0 means a < b.
         // Wrapping subtraction cast to i64 handles overflow correctly.
         (self.0.wrapping_sub(other.0) as i64).cmp(&0)
+    }
+}
+
+impl fmt::Display for Vtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&crate::fmt::fmt_grouped(self.0))
     }
 }
