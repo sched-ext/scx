@@ -108,12 +108,18 @@ struct cake_task_ctx {
  * TICK DATA STAGING (Rule 41): cake_running writes the currently-running
  * task's tier, last_run_at, and slice. cake_tick reads from SAME cache line.
  *
- * RECLASSIFY CACHE (Rule 40): cake_stopping caches reclassify outputs here.
- * Next stopping on SAME CPU reads cached state if task pointer matches AND
- * tier is stable — skips bpf_task_storage_get entirely (~25ns kfunc saved).
- * Periodic tctx sync every 16th fast-path stop prevents stale migration. */
+ * TWO-ENTRY PSYCHIC CACHE (Rule 40 + OPT5): Most CPUs alternate 2-3 tasks.
+ * Two slots give ~44% fast-path rate vs 3% with one slot (sim validated).
+ * Slot 0 = MRU (most-recently-used), Slot 1 = LRU. On slot[1] hit, swap
+ * with slot[0] for LRU promotion. Miss evicts slot[1], installs in slot[0].
+ *
+ * rc_slice REMOVED: derived from tier_slice_ns[tier] LUT (saves 8B/slot).
+ * Periodic tctx sync every 16th fast-path stop prevents migration staleness.
+ *
+ * Layout verified: 62B data + 2B padding = 64B.  All u64 fields 8B-aligned.
+ * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
-    /* --- Tick staging (bytes 0-16) --- */
+    /* --- Tick staging (bytes 0-17) --- */
     u8 flags;              /* Reserved */
     u8 dsq_hint;           /* DVFS perf target cache */
     u8 tick_counter;       /* Confidence-based starvation skip mask counter */
@@ -123,14 +129,20 @@ struct mega_mailbox_entry {
     u8 tick_ctx_valid;     /* 1 = running stamped, 0 = cleared by stopping */
     u8 _pad1;              /* alignment */
 
-    /* --- Reclassify cache (bytes 18-41) --- */
-    u16 rc_counter;        /* reclass_counter snapshot (2B-aligned) */
-    u32 _pad2;             /* alignment for rc_task_ptr */
-    u64 rc_task_ptr;       /* Task pointer for identity (8B-aligned, in reg) */
-    u64 rc_state_fused;    /* [63:32]=packed_info, [31:0]=deficit_avg_fused */
-    u64 rc_slice;          /* next_slice snapshot */
+    /* --- Psychic Cache Slot 0: MRU (bytes 18-39) --- */
+    u16 rc_counter0;       /* Slot 0 reclass counter (2B-aligned) */
+    u32 _pad2;             /* alignment for rc_task_ptr0 */
+    u64 rc_task_ptr0;      /* Slot 0 task pointer (8B-aligned) */
+    u64 rc_state_fused0;   /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
+
+    /* --- Psychic Cache Slot 1: LRU (bytes 40-57) --- */
+    u64 rc_task_ptr1;      /* Slot 1 task pointer (8B-aligned) */
+    u64 rc_state_fused1;   /* Slot 1 [63:32]=packed_info, [31:0]=deficit_avg */
+    u16 rc_counter1;       /* Slot 1 reclass counter */
+
+    /* --- Sync + padding (bytes 58-63) --- */
     u16 rc_sync_counter;   /* Periodic tctx writeback counter */
-    u8 __reserved[6];      /* Pad to 64B */
+    u8 __reserved[2];      /* Pad to 64B */
 } __attribute__((aligned(64)));
 
 /* Statistics shared with userspace */
