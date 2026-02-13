@@ -414,7 +414,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
     register struct task_struct *p_reg asm("r6") = p;
-    u32 task_flags = p_reg->flags;
 
     /* KFUNC TUNNELING: Reuse LLC ID + timestamp cached by select_cpu in scratch.
      * Eliminates 2 kfunc trampolines (~40-60ns) — select_cpu always runs on
@@ -430,7 +429,11 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
     u64 staged = p_reg->scx.dsq_vtime;
 
     if (unlikely(!(staged & (1ULL << 63)))) {
-        /* No staged context: first dispatch or kthread without alloc */
+        /* No staged context: first dispatch or kthread without alloc.
+         * task_flags read deferred here — only needed on this cold path.
+         * Avoids stealing a callee-saved register from the hot path,
+         * eliminating spill of p across bpf_get_smp_processor_id. */
+        u32 task_flags = p_reg->flags;
         u8 fallback_tier = (task_flags & PF_KTHREAD) ?
             CAKE_TIER_CRITICAL : CAKE_TIER_FRAME;
         u64 vtime = ((u64)fallback_tier << 56) | (now_cached & 0x00FFFFFFFFFFFFFFULL);
@@ -635,21 +638,29 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
+
+    /* ── PHASE 1: READ all inputs (2 cache lines: kfunc + p->scx) ── */
     u32 now = (u32)scx_bpf_now();
-    u8 tier;
-
-    mbox->tick_last_run_at = now;
-
     u64 v = p->scx.dsq_vtime;
+    u64 slice = p->scx.slice;
+
+    /* ── PHASE 2: COMPUTE (registers only, zero memory) ── */
+    u8 tier;
+    u64 final_slice;
     if (unlikely(!v)) {
-        /* First-ever dispatch — defaults until reclassify builds history */
         tier = CAKE_TIER_FRAME;
-        mbox->tick_slice = quantum_ns;
+        final_slice = quantum_ns;
     } else {
-        /* Tier at bits [57:56] in both staging and vtime-encoding formats */
         tier = (v >> 56) & 3;
-        mbox->tick_slice = p->scx.slice ?: quantum_ns;
+        final_slice = slice ?: quantum_ns;
     }
+
+    /* ── PHASE 3: WRITE all outputs (single cache line burst) ──
+     * All 4 writes hit the same mbox cache line (already in Modified state
+     * from prior tick_ctx_valid=0). Batching avoids interleaving reads from
+     * p->scx between writes, preventing store buffer stalls. */
+    mbox->tick_last_run_at = now;
+    mbox->tick_slice = final_slice;
     mbox->tick_tier = tier;
     mbox->tick_ctx_valid = 1;
 }
