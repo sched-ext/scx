@@ -48,7 +48,7 @@ pub use kfuncs::sim_clock;
 pub use scenario::Scenario;
 pub use task::{Phase, TaskBehavior, TaskDef, nice_to_weight, sched_weight_to_cgroup};
 pub use trace::{Trace, TraceEvent, TraceKind};
-pub use types::{CpuId, DsqId, Pid, TimeNs, Vtime};
+pub use types::{CpuId, DsqId, MmId, Pid, TimeNs, Vtime};
 
 use std::sync::Mutex;
 

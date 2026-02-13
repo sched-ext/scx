@@ -243,7 +243,7 @@ void cosmos_setup(unsigned int num_cpus)
 	cpufreq_enabled = true;
 	numa_enabled = false;
 	nr_node_ids = 1;
-	mm_affinity = false;
+	mm_affinity = true;
 	perf_enabled = true;
 	deferred_wakeups = true;
 	slice_ns = 20000000;   /* 20ms */

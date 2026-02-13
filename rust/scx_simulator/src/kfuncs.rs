@@ -99,6 +99,18 @@ pub struct SimulatorState {
     pub reenqueue_local_requested: bool,
     /// Pending BPF timer: fire at this time (set by `sim_timer_start`).
     pub pending_timer_ns: Option<TimeNs>,
+    /// Raw pointer to the waker task during a wake-induced `select_cpu` call.
+    ///
+    /// In the kernel, `select_cpu` runs in the waker's context, so
+    /// `bpf_get_current_task_btf()` returns the waker's task_struct.
+    /// The engine sets this when processing a `Phase::Wake`-induced event.
+    pub waker_task_raw: Option<usize>,
+    /// Raw pointer to a synthetic idle task_struct (PF_IDLE, mm=NULL).
+    ///
+    /// In the real kernel, `bpf_get_current_task_btf()` never returns NULL —
+    /// the idle task is always running when no real task is. The engine
+    /// allocates this once at startup so kfuncs can return it as a fallback.
+    pub idle_task_raw: *mut c_void,
 }
 
 impl SimulatorState {
@@ -589,17 +601,27 @@ pub extern "C" fn bpf_task_release(_p: *mut c_void) {}
 
 /// Get the current task's task_struct pointer (for the CPU we're running on).
 ///
-/// Used by tickless in `is_wake_sync()` to check the waker's flags.
+/// During a wake path with a known waker (Phase::Wake), returns the waker's
+/// task_struct so that `is_wake_affine()` can compare address spaces.
+/// Otherwise returns the task running on `current_cpu`, or a synthetic idle
+/// task if no task is running (matching kernel behavior where the idle task
+/// is always "current" on idle CPUs).
 #[no_mangle]
 pub extern "C" fn bpf_get_current_task_btf() -> *mut c_void {
     with_sim(|sim| {
+        // Waker override: during select_cpu for a waker-induced wake,
+        // return the waker's task_struct (kernel semantics).
+        if let Some(raw) = sim.waker_task_raw {
+            return raw as *mut c_void;
+        }
         let cpu = sim.current_cpu;
         if let Some(pid) = sim.cpus[cpu.0 as usize].current_task {
             if let Some(&raw) = sim.task_pid_to_raw.get(&pid) {
                 return raw as *mut c_void;
             }
         }
-        ptr::null_mut()
+        // Idle task fallback — never return NULL (kernel never does).
+        sim.idle_task_raw
     })
 }
 
@@ -927,6 +949,8 @@ mod tests {
             kicked_cpus: HashSet::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
+            waker_task_raw: None,
+            idle_task_raw: ptr::null_mut(),
         }
     }
 

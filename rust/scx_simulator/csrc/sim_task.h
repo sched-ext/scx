@@ -42,3 +42,7 @@ void sim_task_set_scx_flags(struct task_struct *p, unsigned int flags);
 /* Root cgroup for simulator cgroup modeling.
  * Returns a pointer to the global root cgroup (struct cgroup *). */
 void *sim_get_root_cgroup(void);
+
+/* Address space (mm_struct pointer) */
+void sim_task_set_mm(struct task_struct *p, void *mm);
+void *sim_task_get_mm(struct task_struct *p);

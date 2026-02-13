@@ -27,6 +27,7 @@ fn test_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .task(TaskDef {
             name: "light".into(),
@@ -37,6 +38,7 @@ fn test_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .duration_ms(200)
         .build();

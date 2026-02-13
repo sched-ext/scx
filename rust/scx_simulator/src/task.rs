@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 
 use crate::ffi;
-use crate::types::{CpuId, Pid, TimeNs, Vtime};
+use crate::types::{CpuId, MmId, Pid, TimeNs, Vtime};
 
 /// Kernel sched_prio_to_weight table from kernel/sched/core.c.
 /// Maps nice levels -20..19 (indices 0..39) to scheduler weights.
@@ -88,6 +88,9 @@ pub struct TaskDef {
     pub behavior: TaskBehavior,
     /// When the task first becomes runnable (simulated ns).
     pub start_time_ns: TimeNs,
+    /// Address-space group. Tasks with the same `MmId` share an address
+    /// space (like threads) and are eligible for wake-affine scheduling.
+    pub mm_id: Option<MmId>,
 }
 
 /// A simulated task at runtime.
