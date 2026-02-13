@@ -355,12 +355,22 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         u8 tier = (staged >> 56) & 3;
         u64 tmask = tier_snapshot[tier].mask;
 
+        /* Hoist affinity check: most gaming tasks have full cpumask.
+         * nr_cpus_allowed == nr_cpus → skip per-candidate kfunc (~5ns each).
+         * Only Wine/Proton restricted tasks need the bitmap test. */
+        bool restricted = (p->nr_cpus_allowed != nr_cpus);
+
         u32 scan;
         for (scan = 0; tmask && scan < nr_cpus; scan++) {
             s32 candidate = __builtin_ctzll(tmask);
             tmask &= tmask - 1;  /* clear lowest set bit */
             if ((u32)candidate >= CAKE_MAX_CPUS)
                 break;
+            /* Affinity gate: skip CPUs not in task's cpumask.
+             * Full-affinity fast path: comparison is RODATA-const,
+             * JIT folds to single register compare → zero kfunc cost. */
+            if (restricted && !bpf_cpumask_test_cpu(candidate, p->cpus_ptr))
+                continue;
             if (scx_bpf_test_and_clear_cpu_idle(candidate)) {
                 u64 slice = p->scx.slice ?: quantum_ns;
                 scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | candidate, slice, wake_flags);
