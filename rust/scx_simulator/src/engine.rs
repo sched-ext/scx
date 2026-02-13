@@ -17,7 +17,7 @@ use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::scenario::Scenario;
 use crate::task::{Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
-use crate::types::{CpuId, KickFlags, Pid, TimeNs};
+use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
 
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
@@ -899,6 +899,27 @@ impl<S: Scheduler> Simulator<S> {
             // The scheduler may have dispatched tasks to other CPUs'
             // local DSQs via scx_bpf_dsq_move(SCX_DSQ_LOCAL_ON | cpu).
             self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+        }
+
+        // Kernel fallback: if local DSQ is still empty after dispatch(),
+        // automatically consume from the global DSQ (SCX_DSQ_GLOBAL).
+        // This matches pick_next_task_scx() which tries the global DSQ
+        // before going idle.
+        if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
+            let cpu_idx = cpu.0 as usize;
+            let cpus_ptr = state.cpus.as_mut_ptr();
+            let sim_cpu = unsafe { &mut *cpus_ptr.add(cpu_idx) };
+            let consumed = state.dsqs.move_to_local(DsqId::GLOBAL, sim_cpu);
+            if consumed {
+                state.trace.record(
+                    state.cpus[cpu_idx].local_clock,
+                    cpu,
+                    TraceKind::DsqMoveToLocal {
+                        dsq_id: DsqId::GLOBAL,
+                        success: true,
+                    },
+                );
+            }
         }
 
         // Try to pull a task from the local DSQ
