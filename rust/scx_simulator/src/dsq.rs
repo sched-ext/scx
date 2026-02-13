@@ -120,10 +120,10 @@ impl Dsq {
     pub fn remove_pid(&mut self, pid: Pid) -> bool {
         let found = match self.mode {
             DsqMode::Priq => {
-                if let Some(key) = self
-                    .vtime_entries
-                    .iter()
-                    .find_map(|(k, &v)| if v == pid { Some(*k) } else { None })
+                if let Some(key) =
+                    self.vtime_entries
+                        .iter()
+                        .find_map(|(k, &v)| if v == pid { Some(*k) } else { None })
                 {
                     self.vtime_entries.remove(&key);
                     true

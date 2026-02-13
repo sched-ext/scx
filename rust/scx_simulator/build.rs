@@ -65,8 +65,7 @@ fn main() {
     // ---------------------------------------------------------------
 
     let scheduler_dir = out_dir.join("schedulers");
-    let bpf_include = env::var("DEP_BPF_INCLUDE")
-        .expect("libbpf-sys include must be available");
+    let bpf_include = env::var("DEP_BPF_INCLUDE").expect("libbpf-sys include must be available");
 
     let status = Command::new("make")
         .arg("-C")

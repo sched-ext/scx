@@ -74,4 +74,3 @@ impl Ord for Vtime {
         (self.0.wrapping_sub(other.0) as i64).cmp(&0)
     }
 }
-
