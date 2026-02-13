@@ -35,6 +35,9 @@ extern "C" {
     // Idle cpumask management (implemented in scx_test_cpumask.c)
     pub fn scx_test_set_idle_cpumask(cpu: i32);
     pub fn scx_bpf_test_and_clear_cpu_idle(cpu: i32) -> bool;
+
+    // Exit info for the exit callback (implemented in sim_task.c)
+    pub fn sim_get_exit_info() -> *mut c_void;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +105,11 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code.
     unsafe fn cpu_release(&self, _cpu: i32, _args: *mut c_void) {}
+
+    /// Scheduler is being unloaded (ops.exit). Called once during shutdown.
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn exit(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +127,7 @@ type EnableFn = unsafe extern "C" fn(*mut c_void);
 type RunnableFn = unsafe extern "C" fn(*mut c_void, u64);
 type InitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type CpuReleaseFn = unsafe extern "C" fn(i32, *mut c_void);
+type ExitFn = unsafe extern "C" fn(*mut c_void);
 type SetupFn = unsafe extern "C" fn(u32);
 
 /// Resolved function pointers for a scheduler's ops.
@@ -133,6 +142,7 @@ struct SchedOps {
     runnable: Option<RunnableFn>,
     init_task: Option<InitTaskFn>,
     cpu_release: Option<CpuReleaseFn>,
+    exit: Option<ExitFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -272,6 +282,8 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), InitTaskFn>(p)),
             cpu_release: try_get!("cpu_release")
                 .map(|p| std::mem::transmute::<*const (), CpuReleaseFn>(p)),
+            exit: try_get!("exit")
+                .map(|p| std::mem::transmute::<*const (), ExitFn>(p)),
         }
     }
 }
@@ -322,6 +334,12 @@ impl Scheduler for DynamicScheduler {
     unsafe fn cpu_release(&self, cpu: i32, args: *mut c_void) {
         if let Some(f) = self.ops.cpu_release {
             f(cpu, args);
+        }
+    }
+
+    unsafe fn exit(&self) {
+        if let Some(f) = self.ops.exit {
+            f(sim_get_exit_info());
         }
     }
 }

@@ -1,10 +1,11 @@
 ---
 title: Add exit callback to Scheduler trait and engine
-status: open
+status: closed
 priority: 3
 issue_type: feature
 created_at: 2026-02-13T13:04:17.951027614+00:00
-updated_at: 2026-02-13T13:07:58.514085560+00:00
+updated_at: 2026-02-13T13:19:35.222932285+00:00
+closed_at: 2026-02-13T13:19:35.222932225+00:00
 ---
 
 # Description

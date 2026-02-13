@@ -130,3 +130,11 @@ void sim_task_set_scx_flags(struct task_struct *p, u32 flags)
 {
 	p->scx.flags = flags;
 }
+
+/* Dummy exit_info for the exit callback */
+static struct scx_exit_info sim_exit_info;
+
+struct scx_exit_info *sim_get_exit_info(void)
+{
+	return &sim_exit_info;
+}
