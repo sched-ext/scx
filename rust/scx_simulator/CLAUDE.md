@@ -48,6 +48,11 @@ If you validate some changes with a new manual or temporary test, that test shou
 
 NEVER add binary files or large serialized artifacts to version control without explicit permission. Always carefully review what you are adding with `git add`, and update `.gitignore` as needed.
 
+Amending commits
+----------------------------------------
+
+It is fine to amend the most recent commit (git commit --amend) as long as it has NOT been pushed to the remote yet. If the commit has already been pushed, create a new commit instead.
+
 Branches and pushing
 ----------------------------------------
 
