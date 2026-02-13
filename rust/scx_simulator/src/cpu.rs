@@ -11,6 +11,9 @@ pub struct SimCpu {
     pub id: CpuId,
     /// PID of the currently running task, or None if idle.
     pub current_task: Option<Pid>,
+    /// PID of the previously running task (for dispatch `prev` argument).
+    /// Set when a task stops running; cleared when a new task starts.
+    pub prev_task: Option<Pid>,
     /// The CPU's local dispatch queue (FIFO).
     pub local_dsq: VecDeque<Pid>,
     /// Per-CPU logical clock (nanoseconds).
@@ -26,6 +29,7 @@ impl SimCpu {
         SimCpu {
             id,
             current_task: None,
+            prev_task: None,
             local_dsq: VecDeque::new(),
             local_clock: 0,
         }

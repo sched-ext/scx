@@ -1,10 +1,11 @@
 ---
 title: Add cpu_release callback to Scheduler trait and engine
-status: open
+status: closed
 priority: 1
 issue_type: feature
 created_at: 2026-02-13T13:04:16.215801529+00:00
-updated_at: 2026-02-13T13:07:58.513850707+00:00
+updated_at: 2026-02-13T13:15:57.844094707+00:00
+closed_at: 2026-02-13T13:15:57.844094657+00:00
 ---
 
 # Description

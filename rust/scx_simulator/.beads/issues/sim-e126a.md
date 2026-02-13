@@ -1,10 +1,11 @@
 ---
 title: Fix scx_bpf_task_cpu semantic inaccuracy
-status: open
+status: closed
 priority: 1
 issue_type: bug
 created_at: 2026-02-13T13:04:34.709807773+00:00
-updated_at: 2026-02-13T13:07:58.516116957+00:00
+updated_at: 2026-02-13T13:15:57.838035537+00:00
+closed_at: 2026-02-13T13:15:57.838035467+00:00
 ---
 
 # Description
