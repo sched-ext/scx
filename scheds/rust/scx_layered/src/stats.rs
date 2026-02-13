@@ -100,11 +100,23 @@ fn fmt_pct(v: f64) -> String {
 
 fn fmt_duration_ms(ms: f64) -> String {
     if ms >= 60_000.0 {
-        format!("{:.1}min", ms / 60_000.0)
+        let min = ms / 60_000.0;
+        if min >= 100.0 {
+            format!("{:.0}min", min)
+        } else {
+            format!("{:.1}min", min)
+        }
     } else if ms >= 1_000.0 {
-        format!("{:.1}s", ms / 1_000.0)
+        let s = ms / 1_000.0;
+        if s >= 100.0 {
+            format!("{:.0}s", s)
+        } else {
+            format!("{:.1}s", s)
+        }
+    } else if ms >= 10.0 {
+        format!("{:.0}ms", ms)
     } else {
-        format!("{:.2}ms", ms)
+        format!("{:.1}ms", ms)
     }
 }
 
@@ -370,7 +382,7 @@ impl LayerStats {
         // sched: scheduling event flow
         writeln!(
             w,
-            "{indent}{:<7} tot={:>7} dd_sel/enq={}/{} dsq/10s={}/{} wake/exp/re={}/{}/{}",
+            "{indent}{:<7} tot={} dd_sel/enq={}/{} dsq/10s={}/{} wake/exp/re={}/{}/{}",
             "sched",
             fmt_num(self.total),
             fmt_pct(self.sel_local),
@@ -385,14 +397,14 @@ impl LayerStats {
         // exec: execution behavior (merged keep/yield + slice/min_exec)
         writeln!(
             w,
-            "{indent}{:<7} keep/max/busy={}/{}/{} yield/ign={}/{} slice={}ms min_exec={}/{}",
+            "{indent}{:<7} keep/max/busy={}/{}/{} yield/ign={}/{} slc={} min_ex={}/{}",
             "exec",
             fmt_pct(self.keep),
             fmt_pct(self.keep_fail_max_exec),
             fmt_pct(self.keep_fail_busy),
             fmt_pct(self.yielded),
             fmt_num(self.yield_ignore),
-            self.slice_us as f64 / 1000.0,
+            fmt_duration_ms(self.slice_us as f64 / 1000.0),
             fmt_pct(self.min_exec),
             fmt_duration_ms(self.min_exec_us as f64 / 1000.0),
         )?;
@@ -653,7 +665,7 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms sys_util_ewma={:5.1}",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fb_cpu/util={:3}/{:4.1} proc={}ms sys_util_10s={:5.1}",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
