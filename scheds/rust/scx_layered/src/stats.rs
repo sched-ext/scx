@@ -17,6 +17,7 @@ use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
+use scx_utils::Topology;
 use serde::Deserialize;
 use serde::Serialize;
 use tracing::warn;
@@ -331,7 +332,13 @@ impl LayerStats {
         }
     }
 
-    pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
+    pub fn format<W: Write>(
+        &self,
+        w: &mut W,
+        name: &str,
+        header_width: usize,
+        topo: Option<&Topology>,
+    ) -> Result<()> {
         writeln!(
             w,
             "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
@@ -421,16 +428,25 @@ impl LayerStats {
 
         let cpumask = Cpumask::from_vec(self.cpus.clone());
 
-        writeln!(
-            w,
-            "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
-            "",
-            self.cur_nr_cpus,
-            self.min_nr_cpus,
-            self.max_nr_cpus,
-            &cpumask,
-            width = header_width
-        )?;
+        if let Some(topo) = topo {
+            let header = topo.format_cpumask_header(&cpumask, self.min_nr_cpus, self.max_nr_cpus);
+            writeln!(w, "  {:<width$}  {}", "", header, width = header_width,)?;
+            let indent = format!("  {:<width$}  ", "", width = header_width);
+            if cpumask.weight() > 0 {
+                topo.format_cpumask_grid(w, &cpumask, &indent, usize::MAX)?;
+            }
+        } else {
+            writeln!(
+                w,
+                "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
+                "",
+                self.cur_nr_cpus,
+                self.min_nr_cpus,
+                self.max_nr_cpus,
+                &cpumask,
+                width = header_width
+            )?;
+        }
 
         write!(
             w,
@@ -650,7 +666,7 @@ impl SysStats {
         Ok(())
     }
 
-    pub fn format_all<W: Write>(&self, w: &mut W) -> Result<()> {
+    pub fn format_all<W: Write>(&self, w: &mut W, topo: Option<&Topology>) -> Result<()> {
         self.format(w)?;
 
         let header_width = self
@@ -667,7 +683,7 @@ impl SysStats {
         idx_to_name.sort();
 
         for (_idx, name) in &idx_to_name {
-            self.layers[*name].format(w, name, header_width)?;
+            self.layers[*name].format(w, name, header_width, topo)?;
         }
 
         Ok(())
@@ -732,6 +748,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    let topo = Topology::new().ok();
     scx_utils::monitor_stats::<SysStats>(
         &[],
         intv,
@@ -739,7 +756,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         |sst| {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
             println!("###### {} ######", dt.to_rfc2822());
-            sst.format_all(&mut std::io::stdout())
+            sst.format_all(&mut std::io::stdout(), topo.as_ref())
         },
     )
 }
