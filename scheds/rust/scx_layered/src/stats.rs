@@ -98,6 +98,16 @@ fn fmt_pct(v: f64) -> String {
     }
 }
 
+fn fmt_duration_ms(ms: f64) -> String {
+    if ms >= 60_000.0 {
+        format!("{:.1}min", ms / 60_000.0)
+    } else if ms >= 1_000.0 {
+        format!("{:.1}s", ms / 1_000.0)
+    } else {
+        format!("{:.2}ms", ms)
+    }
+}
+
 fn fmt_num(v: u64) -> String {
     if v > 1_000_000 {
         format!("{:5.1}m", v as f64 / 1_000_000.0)
@@ -339,7 +349,11 @@ impl LayerStats {
         header_width: usize,
         topo: Option<&Topology>,
         max_width: usize,
+        no_llc: bool,
     ) -> Result<()> {
+        let indent = "    ";
+
+        // Line 1: layer summary (uses header_width for alignment)
         writeln!(
             w,
             "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
@@ -353,134 +367,97 @@ impl LayerStats {
             width = header_width,
         )?;
 
+        // sched: scheduling event flow
         writeln!(
             w,
-            "  {:<width$}  tot={:7} local_sel/enq={}/{} enq_dsq={} wake/exp/reenq={}/{}/{} dsq_ewma={}",
-            "",
-            self.total,
+            "{indent}{:<7} tot={:>7} dd_sel/enq={}/{} dsq/10s={}/{} wake/exp/re={}/{}/{}",
+            "sched",
+            fmt_num(self.total),
             fmt_pct(self.sel_local),
             fmt_pct(self.enq_local),
             fmt_pct(self.enq_dsq),
+            fmt_pct(self.dsq_insert_ewma),
             fmt_pct(self.enq_wakeup),
             fmt_pct(self.enq_expire),
             fmt_pct(self.enq_reenq),
-            fmt_pct(self.dsq_insert_ewma),
-            width = header_width,
         )?;
 
+        // exec: execution behavior (merged keep/yield + slice/min_exec)
         writeln!(
             w,
-            "  {:<width$}  keep/max/busy={}/{}/{} yield/ign={}/{}",
-            "",
+            "{indent}{:<7} keep/max/busy={}/{}/{} yield/ign={}/{} slice={}ms min_exec={}/{}",
+            "exec",
             fmt_pct(self.keep),
             fmt_pct(self.keep_fail_max_exec),
             fmt_pct(self.keep_fail_busy),
             fmt_pct(self.yielded),
             fmt_num(self.yield_ignore),
-            width = header_width,
+            self.slice_us as f64 / 1000.0,
+            fmt_pct(self.min_exec),
+            fmt_duration_ms(self.min_exec_us as f64 / 1000.0),
         )?;
 
+        // mig: CPU placement and movement
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip={}/{} affn_viol={}",
-            "",
-            fmt_pct(self.open_idle),
+            "{indent}{:<7} mig={} xnuma={} xllc/skip={}/{} open_idle={} affn_viol={}",
+            "mig",
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
             fmt_pct(self.xllc_migration_skip),
+            fmt_pct(self.open_idle),
             fmt_pct(self.affn_viol),
-            width = header_width,
         )?;
 
+        // preempt: preemption
         writeln!(
             w,
-            "  {:<width$}  preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
-            "",
+            "{indent}{:<7} preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
+            "preempt",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
             fmt_pct(self.preempt_xllc),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
-            width = header_width,
         )?;
 
+        // xlayer: cross-layer and LLC dispatch
         writeln!(
             w,
-            "  {:<width$}  xlayer_wake/re={}/{} llc_drain/try={}/{} skip_rnode={}",
-            "",
+            "{indent}{:<7} wake/re={}/{} llc_drain/try={}/{} skip_rnode={}",
+            "xlayer",
             fmt_pct(self.xlayer_wake),
             fmt_pct(self.xlayer_rewake),
             fmt_pct(self.llc_drain),
             fmt_pct(self.llc_drain_try),
             fmt_pct(self.skip_remote_node),
-            width = header_width,
         )?;
 
-        writeln!(
-            w,
-            "  {:<width$}  slice={}ms min_exec={}/{:7.2}ms",
-            "",
-            self.slice_us as f64 / 1000.0,
-            fmt_pct(self.min_exec),
-            self.min_exec_us as f64 / 1000.0,
-            width = header_width
-        )?;
-
+        // cpumask
         let cpumask = Cpumask::from_vec(self.cpus.clone());
 
         if let Some(topo) = topo {
             let header = topo.format_cpumask_header(&cpumask, self.min_nr_cpus, self.max_nr_cpus);
-            writeln!(w, "  {:<width$}  {}", "", header, width = header_width,)?;
-            let indent = format!("  {:<width$}  ", "", width = header_width);
+            writeln!(w, "{indent}{}", header)?;
             if cpumask.weight() > 0 {
-                topo.format_cpumask_grid(w, &cpumask, &indent, max_width)?;
+                topo.format_cpumask_grid(w, &cpumask, indent, max_width)?;
             }
         } else {
             writeln!(
                 w,
-                "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
-                "",
-                self.cur_nr_cpus,
-                self.min_nr_cpus,
-                self.max_nr_cpus,
-                &cpumask,
-                width = header_width
+                "{indent}cpus={:3} [{:3},{:3}] {}",
+                self.cur_nr_cpus, self.min_nr_cpus, self.max_nr_cpus, &cpumask,
             )?;
         }
 
-        write!(
-            w,
-            "  {:<width$}  [LLC] nr_cpus: sched% lat_ms",
-            "",
-            width = header_width
-        )?;
-
-        for (i, (&frac, &lat)) in self.llc_fracs.iter().zip(self.llc_lats.iter()).enumerate() {
-            if (i % 4) == 0 {
-                writeln!(w, "")?;
-                write!(w, "  {:<width$}  [{:03}]", "", i, width = header_width)?;
-            } else {
-                write!(w, " |")?;
-            }
-            write!(
-                w,
-                " {:2}:{}%{:7.2}",
-                self.nr_llc_cpus[i],
-                fmt_pct(frac),
-                lat * 1_000.0
-            )?;
-        }
-        writeln!(w, "")?;
-
+        // excl stats
         if self.is_excl != 0 {
             writeln!(
                 w,
-                "  {:<width$}  excl_coll={} excl_preempt={}",
-                "",
+                "{indent}excl_coll={} excl_preempt={}",
                 fmt_pct(self.excl_collision),
                 fmt_pct(self.excl_preempt),
-                width = header_width,
             )?;
         } else if self.excl_collision != 0.0 || self.excl_preempt != 0.0 {
             warn!(
@@ -489,6 +466,47 @@ impl LayerStats {
                 fmt_pct(self.excl_collision),
                 fmt_pct(self.excl_preempt),
             );
+        }
+
+        // LLC stats (compact grid, skip inactive)
+        if !no_llc {
+            // Collect active LLCs (nr_cpus > 0 or frac > 0)
+            let active_llcs: Vec<(usize, f64, f64)> = self
+                .llc_fracs
+                .iter()
+                .zip(self.llc_lats.iter())
+                .enumerate()
+                .filter(|(i, (&frac, _))| {
+                    let nr_cpus = self.nr_llc_cpus.get(*i).copied().unwrap_or(0);
+                    nr_cpus > 0 || frac > 0.0
+                })
+                .map(|(i, (&frac, &lat))| (i, frac, lat))
+                .collect();
+
+            if !active_llcs.is_empty() {
+                writeln!(w, "{indent}LLC sched%/lat_ms")?;
+                // Cell format: [XX]999.9/99.9 = 14 chars, + 1 space separator = 15
+                let cell_width = 15;
+                let usable = if max_width > indent.len() {
+                    max_width - indent.len()
+                } else {
+                    60
+                };
+                let cells_per_row = (usable / cell_width).max(1);
+
+                for (col, &(llc_id, frac, lat)) in active_llcs.iter().enumerate() {
+                    if col % cells_per_row == 0 {
+                        if col > 0 {
+                            writeln!(w)?;
+                        }
+                        write!(w, "{indent}")?;
+                    } else {
+                        write!(w, " ")?;
+                    }
+                    write!(w, "[{:02}]{:5.1}/{:4.1}", llc_id, frac, lat * 1_000.0)?;
+                }
+                writeln!(w)?;
+            }
         }
 
         Ok(())
@@ -672,6 +690,7 @@ impl SysStats {
         w: &mut W,
         topo: Option<&Topology>,
         max_width: usize,
+        no_llc: bool,
     ) -> Result<()> {
         self.format(w)?;
 
@@ -689,7 +708,7 @@ impl SysStats {
         idx_to_name.sort();
 
         for (_idx, name) in &idx_to_name {
-            self.layers[*name].format(w, name, header_width, topo, max_width)?;
+            self.layers[*name].format(w, name, header_width, topo, max_width, no_llc)?;
         }
 
         Ok(())
@@ -753,7 +772,12 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         )
 }
 
-pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>, max_width: usize) -> Result<()> {
+pub fn monitor(
+    intv: Duration,
+    shutdown: Arc<AtomicBool>,
+    max_width: usize,
+    no_llc: bool,
+) -> Result<()> {
     let topo = Topology::new().ok();
     scx_utils::monitor_stats::<SysStats>(
         &[],
@@ -762,7 +786,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>, max_width: usize) -> R
         |sst| {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
             println!("###### {} ######", dt.to_rfc2822());
-            sst.format_all(&mut std::io::stdout(), topo.as_ref(), max_width)
+            sst.format_all(&mut std::io::stdout(), topo.as_ref(), max_width, no_llc)
         },
     )
 }
