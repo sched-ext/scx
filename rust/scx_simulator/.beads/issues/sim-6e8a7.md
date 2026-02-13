@@ -1,12 +1,13 @@
 ---
 title: Implement scx_bpf_select_cpu_and kfunc
-status: open
+status: closed
 priority: 2
 issue_type: feature
 depends_on:
   sim-5a20c: blocks
 created_at: 2026-02-13T13:04:33.380874766+00:00
-updated_at: 2026-02-13T13:07:58.515894183+00:00
+updated_at: 2026-02-13T13:48:08.750415259+00:00
+closed_at: 2026-02-13T13:48:08.750415179+00:00
 ---
 
 # Description

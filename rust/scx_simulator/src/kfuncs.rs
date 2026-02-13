@@ -323,6 +323,68 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
     })
 }
 
+/// Extended CPU selection with cpumask constraint and SCX_PICK_IDLE_CORE.
+///
+/// Returns an idle CPU (>= 0) matching both the task's cpus_ptr and
+/// `cpus_allowed`, or negative on failure.
+#[no_mangle]
+pub extern "C" fn scx_bpf_select_cpu_and(
+    _p: *mut c_void,
+    prev_cpu: i32,
+    _wake_flags: u64,
+    cpus_allowed: *const c_void,
+    flags: u64,
+) -> i32 {
+    const SCX_PICK_IDLE_CORE: u64 = 1;
+
+    with_sim(|sim| {
+        let nr_cpus = sim.cpus.len();
+        let prev = CpuId(prev_cpu as u32);
+        let want_idle_core = flags & SCX_PICK_IDLE_CORE != 0;
+
+        let in_mask = |cpu: u32| -> bool {
+            cpus_allowed.is_null()
+                || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_allowed) }
+        };
+
+        let has_idle_core = |cpu: CpuId| -> bool {
+            let siblings = &sim.cpus[cpu.0 as usize].siblings;
+            if siblings.is_empty() {
+                return true; // no SMT — single-thread core
+            }
+            siblings.iter().all(|&sib| sim.cpu_is_idle(sib))
+        };
+
+        // Prefer prev_cpu if it meets all constraints
+        if (prev.0 as usize) < nr_cpus
+            && sim.cpu_is_idle(prev)
+            && in_mask(prev.0)
+            && (!want_idle_core || has_idle_core(prev))
+        {
+            debug!(prev_cpu, cpu = prev_cpu, "kfunc select_cpu_and (prev idle)");
+            return prev_cpu;
+        }
+
+        // Scan for any idle CPU matching constraints
+        for i in 0..nr_cpus {
+            let cpu = CpuId(i as u32);
+            if cpu == prev {
+                continue;
+            }
+            if sim.cpu_is_idle(cpu)
+                && in_mask(i as u32)
+                && (!want_idle_core || has_idle_core(cpu))
+            {
+                debug!(prev_cpu, cpu = i, "kfunc select_cpu_and (found idle)");
+                return i as i32;
+            }
+        }
+
+        debug!(prev_cpu, "kfunc select_cpu_and (no idle)");
+        -1 // EBUSY
+    })
+}
+
 /// Insert a task into a DSQ (FIFO ordering).
 ///
 /// Like the kernel, this records intent but does NOT insert immediately.

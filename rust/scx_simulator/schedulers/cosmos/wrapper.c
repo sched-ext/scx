@@ -18,11 +18,11 @@
  */
 
 /*
- * Force scx_bpf_select_cpu_dfl fallback — avoids needing
- * scx_bpf_select_cpu_and which isn't implemented in the simulator.
+ * Enable scx_bpf_select_cpu_and — implemented in the simulator.
+ * With flat_idle_scan=false, COSMOS will use this instead of flat scan.
  */
 #undef bpf_ksym_exists
-#define bpf_ksym_exists(sym) (0)
+#define bpf_ksym_exists(sym) (1)
 
 /*
  * The simulator always calls select_cpu before enqueue, so the
@@ -106,7 +106,7 @@ void cosmos_setup(unsigned int num_cpus)
 	smt_enabled = true;
 	avoid_smt = true;
 	primary_all = true;
-	flat_idle_scan = true;
+	flat_idle_scan = false;
 	preferred_idle_scan = false;
 	cpufreq_enabled = false;
 	numa_enabled = false;
