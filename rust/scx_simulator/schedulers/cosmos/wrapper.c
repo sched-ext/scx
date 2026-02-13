@@ -103,10 +103,10 @@ void cosmos_setup(unsigned int num_cpus)
 {
 	struct cpu_arg arg = { .cpu_id = 0 };
 
-	smt_enabled = false;
-	avoid_smt = false;
+	smt_enabled = true;
+	avoid_smt = true;
 	primary_all = true;
-	flat_idle_scan = false;
+	flat_idle_scan = true;
 	preferred_idle_scan = false;
 	cpufreq_enabled = false;
 	numa_enabled = false;

@@ -22,6 +22,8 @@ pub struct SimCpu {
     /// equals the event queue time. When overhead is modeled, local clocks
     /// diverge across CPUs.
     pub local_clock: TimeNs,
+    /// SMT sibling CPUs (including self). Empty if SMT is not configured.
+    pub siblings: Vec<CpuId>,
 }
 
 impl SimCpu {
@@ -32,6 +34,7 @@ impl SimCpu {
             prev_task: None,
             local_dsq: VecDeque::new(),
             local_clock: 0,
+            siblings: Vec::new(),
         }
     }
 

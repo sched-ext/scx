@@ -113,6 +113,40 @@ impl SimulatorState {
             .map(|c| c.id)
     }
 
+    /// Update the idle SMT mask when a CPU transitions busy→idle.
+    ///
+    /// If all SMT siblings of `cpu` are idle, sets all of them in the
+    /// idle SMT mask (the core is fully idle). Called by the engine when
+    /// a CPU becomes idle.
+    pub fn update_smt_mask_idle(&self, cpu: CpuId) {
+        let siblings = &self.cpus[cpu.0 as usize].siblings;
+        if siblings.is_empty() {
+            return;
+        }
+        // Check if all siblings (including self) are idle
+        let all_idle = siblings.iter().all(|&sib| self.cpus[sib.0 as usize].is_idle());
+        if all_idle {
+            for &sib in siblings {
+                unsafe { crate::ffi::scx_test_set_idle_smtmask(sib.0 as i32) };
+            }
+        }
+    }
+
+    /// Update the idle SMT mask when a CPU transitions idle→busy.
+    ///
+    /// Clears all SMT siblings from the idle SMT mask (the core is no
+    /// longer fully idle). Called by the engine when a task starts
+    /// running on a CPU.
+    pub fn update_smt_mask_busy(&self, cpu: CpuId) {
+        let siblings = &self.cpus[cpu.0 as usize].siblings;
+        if siblings.is_empty() {
+            return;
+        }
+        for &sib in siblings {
+            unsafe { crate::ffi::scx_test_clear_idle_smtmask(sib.0 as i32) };
+        }
+    }
+
     pub fn task_pid_from_raw(&self, p: *mut c_void) -> Pid {
         *self
             .task_raw_to_pid
@@ -786,12 +820,12 @@ mod tests {
             clock: 0,
             task_raw_to_pid: HashMap::new(),
             task_pid_to_raw: HashMap::new(),
+            task_last_cpu: HashMap::new(),
             prng_state: 0xDEAD_BEEF,
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
             kicked_cpus: HashSet::new(),
-            task_last_cpu: HashMap::new(),
             reenqueue_local_requested: false,
         }
     }

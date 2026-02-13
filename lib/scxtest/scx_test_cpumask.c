@@ -62,6 +62,11 @@ void scx_test_set_idle_cpumask(int cpu)
 	cpumask_set_cpu(cpu, &idle_cpumask);
 }
 
+void scx_test_clear_idle_cpumask(int cpu)
+{
+	cpumask_clear_cpu(cpu, &idle_cpumask);
+}
+
 void scx_test_cpumask_set(int cpu, struct cpumask *cpumask)
 {
 	cpumask_set_cpu(cpu, cpumask);
