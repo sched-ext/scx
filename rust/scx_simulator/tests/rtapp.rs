@@ -81,6 +81,28 @@ fn test_rtapp_simulate_simple_wake() {
         consumer_rt > 0,
         "expected consumer to have nonzero runtime, got {consumer_rt}ns"
     );
+
+    // With repeat=true over 1 second:
+    // producer: run 5ms, wake, run 5ms, sleep 10ms = 20ms cycle → ~50 cycles
+    // consumer: suspend, run 10ms = woken ~50 times
+    // Producer should run many cycles, not just one.
+    let producer_schedules = trace.schedule_count(producer_pid);
+    assert!(
+        producer_schedules > 5,
+        "expected producer to be scheduled many times, got {producer_schedules} \
+         (Phase::Wake repeat bug?)"
+    );
+
+    // Producer runtime: ~50 cycles × 10ms = ~500ms
+    assert!(
+        producer_rt > 200_000_000,
+        "expected producer >200ms runtime over 1s, got {producer_rt}ns"
+    );
+    // Consumer runtime: ~50 cycles × 10ms = ~500ms
+    assert!(
+        consumer_rt > 200_000_000,
+        "expected consumer >200ms runtime over 1s, got {consumer_rt}ns"
+    );
 }
 
 /// Inline JSON with a single CPU-bound looping task — basic sanity check.

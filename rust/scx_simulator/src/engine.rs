@@ -769,13 +769,8 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 Some(Phase::Wake(target_pid)) => {
                     let local_t = state.cpus[cpu.0 as usize].local_clock;
-                    let task = tasks.get_mut(&pid).unwrap();
-                    task.state = TaskState::Sleeping;
-                    state
-                        .trace
-                        .record(local_t, cpu, TraceKind::TaskSlept { pid });
 
-                    // Immediately wake the target (with waker context)
+                    // Queue the wake for the target task (with waker context)
                     events.push(Reverse(Event {
                         time_ns: local_t,
                         seq: *seq,
@@ -786,48 +781,104 @@ impl<S: Scheduler> Simulator<S> {
                     }));
                     *seq += 1;
 
-                    // And schedule our own re-wake after the Wake phase
-                    // by advancing to the next phase
+                    // Phase::Wake is instantaneous — advance to the next phase
+                    // and handle it inline. The waker does NOT sleep during a wake.
                     let task = tasks.get_mut(&pid).unwrap();
-                    if task.advance_phase() {
-                        match task.current_phase() {
-                            Some(Phase::Sleep(ns)) => {
-                                let ns = *ns;
-                                task.state = TaskState::Sleeping;
-                                let wake_time = local_t + ns;
-                                if wake_time <= duration_ns {
+                    if !task.advance_phase() {
+                        task.state = TaskState::Exited;
+                        state
+                            .trace
+                            .record(local_t, cpu, TraceKind::TaskCompleted { pid });
+                    } else {
+                        // Process chained Wake phases (e.g. wake A, wake B, run)
+                        loop {
+                            match task.current_phase() {
+                                Some(Phase::Wake(next_target)) => {
+                                    let next_target = *next_target;
                                     events.push(Reverse(Event {
-                                        time_ns: wake_time,
+                                        time_ns: local_t,
                                         seq: *seq,
-                                        kind: EventKind::TaskWake { pid, waker: None },
+                                        kind: EventKind::TaskWake {
+                                            pid: next_target,
+                                            waker: Some(WakerInfo { pid, cpu }),
+                                        },
                                     }));
                                     *seq += 1;
+                                    if !task.advance_phase() {
+                                        task.state = TaskState::Exited;
+                                        state.trace.record(
+                                            local_t,
+                                            cpu,
+                                            TraceKind::TaskCompleted { pid },
+                                        );
+                                        break;
+                                    }
+                                }
+                                Some(Phase::Run(_)) => {
+                                    // Still runnable — re-enqueue (same as yield)
+                                    task.state = TaskState::Runnable;
+                                    let raw = task.raw();
+                                    unsafe {
+                                        kfuncs::enter_sim(state);
+                                        state.ops_context = OpsContext::Enqueue;
+                                        state.current_cpu = cpu;
+                                        self.scheduler.enqueue(raw, 0);
+                                        state.ops_context = OpsContext::None;
+                                        state.resolve_pending_dispatch(cpu);
+                                        kfuncs::exit_sim();
+                                    }
+                                    state.trace.record(
+                                        state.cpus[cpu.0 as usize].local_clock,
+                                        cpu,
+                                        TraceKind::EnqueueTask { pid, enq_flags: 0 },
+                                    );
+                                    state.trace.record(
+                                        state.cpus[cpu.0 as usize].local_clock,
+                                        cpu,
+                                        TraceKind::TaskYielded { pid },
+                                    );
+                                    info!(
+                                        cpu = cpu.0,
+                                        task = task.name.as_str(),
+                                        pid = pid.0,
+                                        "YIELDED (after wake)"
+                                    );
+                                    break;
+                                }
+                                Some(Phase::Sleep(ns)) => {
+                                    let ns = *ns;
+                                    task.state = TaskState::Sleeping;
+                                    state
+                                        .trace
+                                        .record(local_t, cpu, TraceKind::TaskSlept { pid });
+                                    info!(
+                                        cpu = cpu.0,
+                                        task = task.name.as_str(),
+                                        pid = pid.0,
+                                        "SLEEPING (after wake)"
+                                    );
+                                    let wake_time = local_t.saturating_add(ns);
+                                    if wake_time <= duration_ns {
+                                        events.push(Reverse(Event {
+                                            time_ns: wake_time,
+                                            seq: *seq,
+                                            kind: EventKind::TaskWake { pid, waker: None },
+                                        }));
+                                        *seq += 1;
+                                    }
+                                    break;
+                                }
+                                None => {
+                                    task.state = TaskState::Exited;
+                                    state.trace.record(
+                                        local_t,
+                                        cpu,
+                                        TraceKind::TaskCompleted { pid },
+                                    );
+                                    break;
                                 }
                             }
-                            Some(Phase::Run(_)) => {
-                                task.state = TaskState::Runnable;
-                                events.push(Reverse(Event {
-                                    time_ns: local_t,
-                                    seq: *seq,
-                                    kind: EventKind::TaskWake { pid, waker: None },
-                                }));
-                                *seq += 1;
-                            }
-                            Some(Phase::Wake(_)) => {
-                                // Chain of wakes - schedule immediate re-processing
-                                events.push(Reverse(Event {
-                                    time_ns: local_t,
-                                    seq: *seq,
-                                    kind: EventKind::TaskWake { pid, waker: None },
-                                }));
-                                *seq += 1;
-                            }
-                            None => {
-                                task.state = TaskState::Exited;
-                            }
                         }
-                    } else {
-                        task.state = TaskState::Exited;
                     }
                 }
                 None => {
