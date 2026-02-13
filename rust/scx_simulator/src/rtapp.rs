@@ -73,7 +73,7 @@ fn strip_comments(input: &str) -> String {
         if c == '/' {
             if chars.peek() == Some(&'*') {
                 chars.next(); // consume '*'
-                // Skip until '*/'
+                              // Skip until '*/'
                 loop {
                     match chars.next() {
                         Some('*') if chars.peek() == Some(&'/') => {
@@ -155,18 +155,14 @@ fn parse_events(
                 let usec = value
                     .as_u64()
                     .or_else(|| value.as_i64().map(|v| v as u64))
-                    .ok_or_else(|| {
-                        RtAppError::InvalidValue(format!("{key}: expected integer"))
-                    })?;
+                    .ok_or_else(|| RtAppError::InvalidValue(format!("{key}: expected integer")))?;
                 phases.push(Phase::Run(usec * 1_000)); // usec → ns
             }
             "sleep" => {
                 let usec = value
                     .as_u64()
                     .or_else(|| value.as_i64().map(|v| v as u64))
-                    .ok_or_else(|| {
-                        RtAppError::InvalidValue(format!("{key}: expected integer"))
-                    })?;
+                    .ok_or_else(|| RtAppError::InvalidValue(format!("{key}: expected integer")))?;
                 phases.push(Phase::Sleep(usec * 1_000));
             }
             "timer" => {
@@ -185,16 +181,20 @@ fn parse_events(
                 phases.push(Phase::Sleep(u64::MAX));
             }
             "resume" => {
-                let target_name = value.as_str().ok_or_else(|| {
-                    RtAppError::InvalidValue(format!("{key}: expected string"))
-                })?;
-                let target_pid = name_to_pid.get(target_name).ok_or_else(|| {
-                    RtAppError::UnresolvedResume(target_name.to_string())
-                })?;
+                let target_name = value
+                    .as_str()
+                    .ok_or_else(|| RtAppError::InvalidValue(format!("{key}: expected string")))?;
+                let target_pid = name_to_pid
+                    .get(target_name)
+                    .ok_or_else(|| RtAppError::UnresolvedResume(target_name.to_string()))?;
                 phases.push(Phase::Wake(*target_pid));
             }
             unsupported => {
-                warn!(event = unsupported, key = key.as_str(), "skipping unsupported rt-app event");
+                warn!(
+                    event = unsupported,
+                    key = key.as_str(),
+                    "skipping unsupported rt-app event"
+                );
             }
         }
     }
@@ -211,10 +211,7 @@ fn parse_task(
     pid_start: &mut i32,
     name_to_pid: &HashMap<String, Pid>,
 ) -> Result<Vec<TaskDef>, RtAppError> {
-    let instance_count = obj
-        .get("instance")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1) as u32;
+    let instance_count = obj.get("instance").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
     let nice = obj
         .get("priority")
@@ -222,17 +219,20 @@ fn parse_task(
         .unwrap_or(0)
         .clamp(-20, 19) as i8;
 
-    let loop_count = obj
-        .get("loop")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(-1);
+    let loop_count = obj.get("loop").and_then(|v| v.as_i64()).unwrap_or(-1);
 
     // Warn about unsupported fields
     if obj.contains_key("cpus") {
-        warn!(task = name, "ignoring 'cpus' affinity (not modeled in simulator)");
+        warn!(
+            task = name,
+            "ignoring 'cpus' affinity (not modeled in simulator)"
+        );
     }
     if obj.contains_key("taskgroup") {
-        warn!(task = name, "ignoring 'taskgroup' (not modeled in simulator)");
+        warn!(
+            task = name,
+            "ignoring 'taskgroup' (not modeled in simulator)"
+        );
     }
 
     // Parse phases
@@ -248,10 +248,7 @@ fn parse_task(
                 .as_object()
                 .ok_or_else(|| RtAppError::InvalidValue("phase: expected object".into()))?;
 
-            let phase_loop = phase_obj
-                .get("loop")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1);
+            let phase_loop = phase_obj.get("loop").and_then(|v| v.as_i64()).unwrap_or(1);
 
             let events = parse_events(phase_obj, name_to_pid)?;
 
@@ -395,9 +392,9 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
     let mut all_tasks: Vec<TaskDef> = Vec::new();
     let mut pid_counter: i32 = 1;
     for (task_name, task_val) in tasks_obj.iter() {
-        let task_obj = task_val
-            .as_object()
-            .ok_or_else(|| RtAppError::InvalidValue(format!("task {task_name}: expected object")))?;
+        let task_obj = task_val.as_object().ok_or_else(|| {
+            RtAppError::InvalidValue(format!("task {task_name}: expected object"))
+        })?;
 
         let defs = parse_task(task_name, task_obj, &mut pid_counter, &name_to_pid)?;
         all_tasks.extend(defs);
@@ -496,7 +493,10 @@ mod tests {
         let producer = &scenario.tasks[0];
         assert_eq!(producer.name, "producer");
         assert_eq!(producer.behavior.phases.len(), 3);
-        assert!(matches!(producer.behavior.phases[0], Phase::Run(10_000_000)));
+        assert!(matches!(
+            producer.behavior.phases[0],
+            Phase::Run(10_000_000)
+        ));
         assert!(matches!(producer.behavior.phases[1], Phase::Wake(Pid(2)))); // consumer pid
         assert!(matches!(
             producer.behavior.phases[2],
@@ -506,7 +506,10 @@ mod tests {
         let consumer = &scenario.tasks[1];
         assert_eq!(consumer.name, "consumer");
         assert_eq!(consumer.behavior.phases.len(), 2);
-        assert!(matches!(consumer.behavior.phases[0], Phase::Sleep(u64::MAX))); // suspend
+        assert!(matches!(
+            consumer.behavior.phases[0],
+            Phase::Sleep(u64::MAX)
+        )); // suspend
         assert!(matches!(consumer.behavior.phases[1], Phase::Run(5_000_000)));
     }
 

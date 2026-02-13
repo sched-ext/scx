@@ -258,13 +258,7 @@ impl<S: Scheduler> Simulator<S> {
                     self.handle_timer_fired(&mut state, &mut tasks, &mut events, &mut seq);
                 }
                 EventKind::Tick { cpu } => {
-                    self.handle_tick(
-                        cpu,
-                        &mut state,
-                        &mut tasks,
-                        &mut events,
-                        &mut seq,
-                    );
+                    self.handle_tick(cpu, &mut state, &mut tasks, &mut events, &mut seq);
                 }
             }
         }
@@ -454,6 +448,16 @@ impl<S: Scheduler> Simulator<S> {
             let direct_dispatched = state.resolve_pending_dispatch(selected_cpu);
             kfuncs::exit_sim();
 
+            state.trace.record(
+                state.clock,
+                CpuId(0),
+                TraceKind::SelectTaskRq {
+                    pid,
+                    prev_cpu,
+                    selected_cpu,
+                },
+            );
+
             let task = tasks.get_mut(&pid).unwrap();
             task.prev_cpu = selected_cpu;
 
@@ -472,6 +476,15 @@ impl<S: Scheduler> Simulator<S> {
                 // (SCX_DSQ_LOCAL resolves to the task's assigned CPU)
                 state.resolve_pending_dispatch(selected_cpu);
                 kfuncs::exit_sim();
+
+                state.trace.record(
+                    state.clock,
+                    selected_cpu,
+                    TraceKind::EnqueueTask {
+                        pid,
+                        enq_flags: SCX_ENQ_WAKEUP,
+                    },
+                );
 
                 // Try to dispatch on idle CPUs
                 let idle_cpus: Vec<CpuId> = state
@@ -541,13 +554,29 @@ impl<S: Scheduler> Simulator<S> {
             state.current_cpu = cpu;
             debug!(pid = pid.0, cpu = cpu.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
-                                                // Re-enqueue the preempted task
+
+            state.trace.record(
+                state.cpus[cpu.0 as usize].local_clock,
+                cpu,
+                TraceKind::PutPrevTask {
+                    pid,
+                    still_runnable: true,
+                },
+            );
+
+            // Re-enqueue the preempted task
             state.ops_context = OpsContext::Enqueue;
             debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
             state.ops_context = OpsContext::None;
             state.resolve_pending_dispatch(cpu);
             kfuncs::exit_sim();
+
+            state.trace.record(
+                state.cpus[cpu.0 as usize].local_clock,
+                cpu,
+                TraceKind::EnqueueTask { pid, enq_flags: 0 },
+            );
         }
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
@@ -612,6 +641,15 @@ impl<S: Scheduler> Simulator<S> {
             }
             kfuncs::exit_sim();
         }
+
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::PutPrevTask {
+                pid,
+                still_runnable,
+            },
+        );
 
         if !has_next {
             // Task has completed all phases
@@ -683,6 +721,12 @@ impl<S: Scheduler> Simulator<S> {
                         state.resolve_pending_dispatch(cpu);
                         kfuncs::exit_sim();
                     }
+
+                    state.trace.record(
+                        state.cpus[cpu.0 as usize].local_clock,
+                        cpu,
+                        TraceKind::EnqueueTask { pid, enq_flags: 0 },
+                    );
                 }
                 Some(Phase::Wake(target_pid)) => {
                     let local_t = state.cpus[cpu.0 as usize].local_clock;
@@ -790,8 +834,8 @@ impl<S: Scheduler> Simulator<S> {
         // Check if local DSQ has tasks
         if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
             // Look up the previously-running task's raw pointer for dispatch
-            let prev_raw = state.cpus[cpu.0 as usize]
-                .prev_task
+            let prev_pid = state.cpus[cpu.0 as usize].prev_task;
+            let prev_raw = prev_pid
                 .and_then(|pid| state.task_pid_to_raw.get(&pid).copied())
                 .map_or(std::ptr::null_mut(), |raw| raw as *mut c_void);
 
@@ -810,6 +854,12 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::exit_sim();
             }
 
+            state.trace.record(
+                state.cpus[cpu.0 as usize].local_clock,
+                cpu,
+                TraceKind::Balance { prev_pid },
+            );
+
             // Process CPUs kicked during dispatch().
             // The scheduler may have dispatched tasks to other CPUs'
             // local DSQs via scx_bpf_dsq_move(SCX_DSQ_LOCAL_ON | cpu).
@@ -823,6 +873,11 @@ impl<S: Scheduler> Simulator<S> {
 
         // Try to pull a task from the local DSQ
         if let Some(pid) = state.cpus[cpu.0 as usize].local_dsq.pop_front() {
+            state.trace.record(
+                state.cpus[cpu.0 as usize].local_clock,
+                cpu,
+                TraceKind::PickTask { pid },
+            );
             self.start_running(cpu, pid, state, tasks, events, seq);
         } else {
             // CPU is idle — update the C idle cpumask so
@@ -891,6 +946,12 @@ impl<S: Scheduler> Simulator<S> {
             self.scheduler.running(raw);
             kfuncs::exit_sim();
         }
+
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::SetNextTask { pid },
+        );
 
         let local_t = state.cpus[cpu.0 as usize].local_clock;
         kfuncs::set_sim_clock(local_t);
