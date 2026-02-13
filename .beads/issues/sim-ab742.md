@@ -1,13 +1,14 @@
 ---
 title: scx_bpf_cpuperf_cur implementation
-status: open
+status: closed
 priority: 1
 issue_type: feature
 depends_on:
-  sim-91615: blocks
   sim-6ba30: parent-child
+  sim-91615: blocks
 created_at: 2026-02-13T17:58:58.204670830+00:00
-updated_at: 2026-02-13T18:10:24.902467096+00:00
+updated_at: 2026-02-13T21:04:03.861431849+00:00
+closed_at: 2026-02-13T21:04:03.861431760+00:00
 ---
 
 # Description
