@@ -57,3 +57,14 @@ Branches and pushing
 ----------------------------------------
 
 The `main` branch is protected. Never push directly to main. Only push to feature branches after validation. Don't force push unless you're asked to or ask permission.
+
+Issue Tracking
+========================================
+
+We use minibeads (`mb`) for local issue tracking. Run `mb quickstart` to learn
+the commands. Use `mb ready` to find the next issue to work on, and update issue
+status as you work (`mb update sim-N --status in_progress`, `mb close sim-N`).
+
+File issues for bugs, TODOs, and feature work rather than leaving stale TODO
+comments in code. Reference issue IDs (e.g. sim-1) in commit messages when
+closing issues.
