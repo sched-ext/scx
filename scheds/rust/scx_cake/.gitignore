@@ -1,0 +1,8 @@
+.agent/
+docs/
+
+# Benchmark binaries
+bench/
+
+# MangoHud performance logs
+mangohud/
