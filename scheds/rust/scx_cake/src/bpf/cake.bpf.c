@@ -156,6 +156,22 @@ static const u16 tier_recheck_mask[] = {
     15, 15, 15, 15,  /* padding */
 };
 
+/* M5 hysteresis gate LUT: 4 tiers × 4 entries = 32B RODATA (1 cache line).
+ * Pre-computes tier boundaries with 10% promote-only hysteresis.
+ * Replaces 9 instructions (3 cmp + 3 imul + 3 sub) with 3 L1d loads.
+ * [4][4] layout: power-of-2 stride → single LEA for indexing.
+ * (cake_math_bench M5: 2.66 cyc vs 13.4 cyc, 80.1% faster on 9800X3D) */
+static const u16 tier_gates[4][4] = {
+    /* old_tier=0: standard gates (no hysteresis — already at lowest relevant) */
+    { TIER_GATE_T0,                    TIER_GATE_T1,                    TIER_GATE_T2,                    0 },
+    /* old_tier=1: g0 lowered 10% (harder to promote T1→T0) */
+    { TIER_GATE_T0 - TIER_GATE_T0/10, TIER_GATE_T1,                    TIER_GATE_T2,                    0 },
+    /* old_tier=2: g0,g1 lowered 10% */
+    { TIER_GATE_T0 - TIER_GATE_T0/10, TIER_GATE_T1 - TIER_GATE_T1/10, TIER_GATE_T2,                    0 },
+    /* old_tier=3: all gates lowered 10% */
+    { TIER_GATE_T0 - TIER_GATE_T0/10, TIER_GATE_T1 - TIER_GATE_T1/10, TIER_GATE_T2 - TIER_GATE_T2/10, 0 },
+};
+
 /* Vtime table removed - FIFO DSQs don't use dsq_vtime, saved 160B + 30 cycles */
 
 /* Per-task context map */
@@ -310,10 +326,15 @@ s32 dispatch_sync_cold(struct task_struct *p, u64 wake_flags)
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
-    /* SYNC FAST PATH: Direct dispatch to waker's CPU.
-     * Cold helper checks cpumask internally (Rule 5: zero extra hot-path
-     * instructions). Returns -1 if cpumask disallows → fall through. */
-    if (wake_flags & SCX_WAKE_SYNC) {
+    /* SYNC WAKE GATING: only lightweight tasks (T0/T1, slice ≤ 2ms) benefit
+     * from SYNC dispatch to waker's CPU (producer-consumer cache locality).
+     * Heavy tasks (T2+, slice > 2ms) have large working sets hot in prev_cpu's
+     * L1/L2 — migrating to waker's CPU causes 20-80µs cache refill penalty.
+     * Skip SYNC for these → kernel cascade tries prev_cpu first, preserving
+     * cache warmth.  For vsync games, prev_cpu is typically idle after the
+     * sleep window (6-14ms >> 2.4ms quantum), so zero DSQ wait cost.
+     * p->scx.slice is pre-staged by cake_stopping — already in register. */
+    if ((wake_flags & SCX_WAKE_SYNC) && p->scx.slice <= 2000000) {
         s32 sync_cpu = dispatch_sync_cold(p, wake_flags);
         if (sync_cpu >= 0)
             return sync_cpu;
@@ -606,8 +627,8 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
         /* Fast path: update EWMA + deficit without full tier mapping */
         u32 old_fused = tctx->deficit_avg_fused;
         u16 avg_rt = EXTRACT_AVG_RT(old_fused);
+        u16 deficit = EXTRACT_DEFICIT(old_fused);  /* M11 ILP: extract both before compute */
         u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_clamped >> 3);
-        u16 deficit = EXTRACT_DEFICIT(old_fused);
         u16 _d = deficit - rt_clamped;
         deficit = (deficit > rt_clamped) ? _d : 0;  /* P4 cmov: 0.38ns vs 0.55ns */
         u32 new_fused = PACK_DEFICIT_AVG(deficit, new_avg);
@@ -625,9 +646,8 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
              * so spot-check agrees exactly with full reclassify logic.
              * Only resets stability when a genuine tier change is imminent.
              * Zero false triggers from normal frame variance. */
-            u16 g0 = TIER_GATE_T0 - (tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless */
-            u16 g1 = TIER_GATE_T1 - (tier > 1) * (TIER_GATE_T1 / 10);
-            u16 g2 = TIER_GATE_T2 - (tier > 2) * (TIER_GATE_T2 / 10);
+            const u16 *tg = tier_gates[tier & 3];  /* M5 LUT: 2.66 vs 13.4 cyc */
+            u16 g0 = tg[0], g1 = tg[1], g2 = tg[2];
             /* M6 sum-of-cmp: 3 independent branches vs 3 chained.
              * 10/10 wins, 0.21 cyc vs 6.15 cyc on 9800x3d.
              * BPF codegen: 3 parallel 1-insn skips vs 3 serial jumps. */
@@ -645,18 +665,15 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
 
     /* ── FULL RECLASSIFICATION ── */
 
-    /* ── EWMA RUNTIME UPDATE ── */
-    /* Decay 7/8: responds in ~8 execution bouts. Smooth enough to ignore
-     * single outliers, fast enough to detect behavior changes within 50ms. */
+    /* ── EWMA + DEFICIT UPDATE (M11 ILP interleaved) ── */
+    /* Extract both fields before computing either chain → OoO executes in parallel.
+     * (cake_math_bench M11: 2.76 cyc vs 3.57 cyc, 22.6% faster on 9800X3D) */
     u32 old_fused = tctx->deficit_avg_fused;
     u16 avg_rt = EXTRACT_AVG_RT(old_fused);
-    u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_clamped >> 3);
-
-    /* ── DRR++ DEFICIT TRACKING ── */
-    /* Each execution bout consumes deficit. When deficit exhausts, clear the
-     * new-flow flag → task loses its priority bonus within the tier.
-     * Initial deficit = quantum + new_flow_bonus ≈ 10ms of credit. */
     u16 deficit = EXTRACT_DEFICIT(old_fused);
+    /* EWMA 7/8 decay: responds in ~8 bouts, ignores single outliers */
+    u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_clamped >> 3);
+    /* DRR++ deficit: each bout consumes credit, clear new-flow on exhaust */
     u16 _d2 = deficit - rt_clamped;
     deficit = (deficit > rt_clamped) ? _d2 : 0;  /* P4 cmov: 0.38ns vs 0.55ns */
 
@@ -684,17 +701,32 @@ void reclassify_task_cold(struct cake_task_ctx *tctx)
     /* Gate values with 10% hysteresis applied per-direction.
      * Promote gates (10% below): task must clearly be in the faster tier.
      * Demote gates  (10% above): task must clearly be in the slower tier. */
-    u16 g0 = TIER_GATE_T0 - (old_tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless: 0.37ns vs 0.42ns */
-    u16 g1 = TIER_GATE_T1 - (old_tier > 1) * (TIER_GATE_T1 / 10);
-    u16 g2 = TIER_GATE_T2 - (old_tier > 2) * (TIER_GATE_T2 / 10);
+    const u16 *tg = tier_gates[old_tier & 3];  /* M5 LUT: 2.66 vs 13.4 cyc */
+    u16 g0 = tg[0], g1 = tg[1], g2 = tg[2];
 
     /* M6 sum-of-cmp: 3 independent branches vs 3 chained.
      * 10/10 wins, 0.21 cyc vs 6.15 cyc on 9800x3d.
      * BPF codegen: 3 parallel 1-insn skips vs 3 serial jumps. */
     new_tier = (new_avg >= g0) + (new_avg >= g1) + (new_avg >= g2);
 
-    /* ── WRITE PACKED_INFO (MESI-friendly: skip if unchanged) ── */
+    /* ── TIER-CHANGE DAMPENING ──
+     * Suppress tier change when stability == 0 (zero prior agreement).
+     * Prevents single-sample EWMA fluctuations near gate boundaries from
+     * causing vtime priority whiplash (1<<56 jump) → scheduling feedback
+     * loop.  Confirmed fix for vsync'd games (Elden Ring bimodal 40ms/5ms
+     * frametime oscillation).
+     *
+     * Mechanism: first divergence at stable==0 keeps old tier, lets
+     * stability increment to 1.  If next cycle still computes the same
+     * new tier (stable >= 1), the change is allowed through.
+     * Cost: 1 extra reclassify cycle (~1-4ms) delay for legitimate
+     * tier transitions.  Zero cost for stable tasks.
+     *
+     * Branchless: cmov keeps old_tier when dampen==1 (Rule 16). */
     bool tier_changed = (new_tier != old_tier);
+    u8 dampen = tier_changed & (!stable);
+    new_tier = dampen ? old_tier : new_tier;  /* cmov: suppress on first divergence */
+    tier_changed = (new_tier != old_tier);     /* recompute after dampening */
 
     /* M8 branchless stability: (!changed) * (stable + (stable < 3)).
      * 10/10 wins, 0.27 cyc vs 1.03 cyc on 9800x3d.
@@ -762,15 +794,14 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
                 u32 deficit_avg = (u32)fused;
                 u16 avg_rt = EXTRACT_AVG_RT(deficit_avg);
+                u16 deficit = EXTRACT_DEFICIT(deficit_avg);  /* M11 ILP: extract both before compute */
                 u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_us >> 3);
-                u16 deficit = EXTRACT_DEFICIT(deficit_avg);
                 u16 _d3 = deficit - rt_us;
                 deficit = (deficit > rt_us) ? _d3 : 0;  /* P4 cmov: 0.38ns vs 0.55ns */
 
                 /* SPOT-CHECK: would new EWMA change the tier? */
-                u16 g0 = TIER_GATE_T0 - (tier > 0) * (TIER_GATE_T0 / 10);  /* P6 branchless */
-                u16 g1 = TIER_GATE_T1 - (tier > 1) * (TIER_GATE_T1 / 10);
-                u16 g2 = TIER_GATE_T2 - (tier > 2) * (TIER_GATE_T2 / 10);
+                const u16 *tg = tier_gates[tier & 3];  /* M5 LUT: 2.66 vs 13.4 cyc */
+                u16 g0 = tg[0], g1 = tg[1], g2 = tg[2];
                 /* M6 sum-of-cmp: 3 independent branches (see M6 bench) */
                 u8 spot = (new_avg >= g0) + (new_avg >= g1) + (new_avg >= g2);
 
