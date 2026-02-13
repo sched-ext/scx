@@ -68,17 +68,27 @@ impl<S: Scheduler> Simulator<S> {
     /// Run a scenario and return the trace.
     pub fn run(&self, scenario: Scenario) -> Trace {
         let nr_cpus = scenario.nr_cpus;
+        let smt = scenario.smt_threads_per_core;
 
-        // Build CPUs
-        let cpus: Vec<SimCpu> = (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect();
+        // Build CPUs with SMT sibling groups
+        let mut cpus: Vec<SimCpu> = (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect();
+        if smt > 1 {
+            for core_base in (0..nr_cpus).step_by(smt as usize) {
+                let siblings: Vec<CpuId> =
+                    (core_base..core_base + smt).map(CpuId).collect();
+                for &sib in &siblings {
+                    cpus[sib.0 as usize].siblings = siblings.clone();
+                }
+            }
+        }
 
-        // Initialize all CPUs as idle in the C cpumask.
-        // Without SMT modeling, the SMT mask mirrors the idle cpumask.
+        // Initialize all CPUs as idle in the C cpumasks
         for i in 0..nr_cpus {
             unsafe {
                 ffi::scx_test_set_idle_cpumask(i as i32);
+                // All CPUs idle => all cores fully idle
                 ffi::scx_test_set_idle_smtmask(i as i32);
-            }
+            };
         }
 
         // Build tasks
@@ -619,12 +629,10 @@ impl<S: Scheduler> Simulator<S> {
             self.start_running(cpu, pid, state, tasks, events, seq);
         } else {
             // CPU is idle — update the C idle cpumask so
-            // scx_bpf_test_and_clear_cpu_idle works correctly.
-            // Without SMT, the SMT mask mirrors the idle cpumask.
-            unsafe {
-                ffi::scx_test_set_idle_cpumask(cpu.0 as i32);
-                ffi::scx_test_set_idle_smtmask(cpu.0 as i32);
-            }
+            // scx_bpf_test_and_clear_cpu_idle works correctly
+            unsafe { ffi::scx_test_set_idle_cpumask(cpu.0 as i32) };
+            // Check if all siblings are idle too (full-idle core)
+            state.update_smt_mask_idle(cpu);
             let local_t = state.cpus[cpu.0 as usize].local_clock;
             kfuncs::set_sim_clock(local_t);
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
@@ -659,12 +667,10 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].prev_task = None;
         state.task_last_cpu.insert(pid, cpu);
         // Clear idle bit in the C cpumask (in case scheduler didn't call
-        // scx_bpf_test_and_clear_cpu_idle for this CPU).
-        // Without SMT, also clear the SMT mask.
-        unsafe {
-            ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32);
-            ffi::scx_test_clear_idle_smtmask(cpu.0 as i32);
-        }
+        // scx_bpf_test_and_clear_cpu_idle for this CPU)
+        unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };
+        // CPU is now busy — core is no longer fully idle
+        state.update_smt_mask_busy(cpu);
 
         let raw = task.raw();
 

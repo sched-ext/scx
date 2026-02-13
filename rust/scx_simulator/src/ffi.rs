@@ -34,6 +34,7 @@ extern "C" {
 
     // Idle cpumask management (implemented in scx_test_cpumask.c)
     pub fn scx_test_set_idle_cpumask(cpu: i32);
+    pub fn scx_test_clear_idle_cpumask(cpu: i32);
     pub fn scx_test_set_idle_smtmask(cpu: i32);
     pub fn scx_test_clear_idle_smtmask(cpu: i32);
     pub fn scx_bpf_test_and_clear_cpu_idle(cpu: i32) -> bool;

@@ -7,6 +7,10 @@ use crate::types::{Pid, TimeNs};
 #[derive(Debug, Clone)]
 pub struct Scenario {
     pub nr_cpus: u32,
+    /// SMT threads per physical core (1 = no SMT, 2 = hyperthreading).
+    /// CPUs are grouped sequentially: with 4 CPUs and smt=2, CPUs 0,1
+    /// share core 0 and CPUs 2,3 share core 1.
+    pub smt_threads_per_core: u32,
     pub tasks: Vec<TaskDef>,
     pub duration_ns: TimeNs,
 }
@@ -14,6 +18,7 @@ pub struct Scenario {
 /// Builder for constructing scenarios.
 pub struct ScenarioBuilder {
     nr_cpus: u32,
+    smt_threads_per_core: u32,
     tasks: Vec<TaskDef>,
     duration_ns: TimeNs,
     next_pid: Pid,
@@ -23,6 +28,7 @@ impl Scenario {
     pub fn builder() -> ScenarioBuilder {
         ScenarioBuilder {
             nr_cpus: 1,
+            smt_threads_per_core: 1,
             tasks: Vec::new(),
             duration_ns: 100_000_000, // 100ms default
             next_pid: Pid(1),
@@ -34,6 +40,14 @@ impl ScenarioBuilder {
     /// Set the number of simulated CPUs.
     pub fn cpus(mut self, n: u32) -> Self {
         self.nr_cpus = n;
+        self
+    }
+
+    /// Set SMT threads per core (default 1 = no SMT).
+    ///
+    /// `nr_cpus` must be divisible by this value.
+    pub fn smt(mut self, threads_per_core: u32) -> Self {
+        self.smt_threads_per_core = threads_per_core;
         self
     }
 
@@ -76,8 +90,19 @@ impl ScenarioBuilder {
             "scenario must have at least one task"
         );
         assert!(self.nr_cpus > 0, "scenario must have at least one CPU");
+        assert!(
+            self.smt_threads_per_core > 0,
+            "smt_threads_per_core must be at least 1"
+        );
+        assert!(
+            self.nr_cpus.is_multiple_of(self.smt_threads_per_core),
+            "nr_cpus ({}) must be divisible by smt_threads_per_core ({})",
+            self.nr_cpus,
+            self.smt_threads_per_core
+        );
         Scenario {
             nr_cpus: self.nr_cpus,
+            smt_threads_per_core: self.smt_threads_per_core,
             tasks: self.tasks,
             duration_ns: self.duration_ns,
         }
