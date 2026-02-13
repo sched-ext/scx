@@ -45,10 +45,26 @@ impl PartialOrd for Event {
     }
 }
 
+/// Context about the task that triggered a wakeup.
+///
+/// In the kernel, `select_cpu` runs in the waker's context: both
+/// `bpf_get_current_task_btf()` and `bpf_get_smp_processor_id()` return
+/// the waker's state. The engine uses this to set up the same context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WakerInfo {
+    pid: Pid,
+    cpu: CpuId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EventKind {
     /// A task becomes runnable (wakes up).
-    TaskWake { pid: Pid },
+    /// `waker` identifies the task that triggered the wake (if any),
+    /// enabling wake-affine scheduling (e.g., COSMOS mm_affinity).
+    TaskWake {
+        pid: Pid,
+        waker: Option<WakerInfo>,
+    },
     /// A task's time slice expires on the given CPU.
     SliceExpired { cpu: CpuId },
     /// A task finishes its current Run phase on the given CPU.
@@ -98,6 +114,15 @@ impl<S: Scheduler> Simulator<S> {
         let mut task_raw_to_pid: HashMap<usize, Pid> = HashMap::new();
         let mut task_pid_to_raw: HashMap<Pid, usize> = HashMap::new();
 
+        // Allocate a synthetic idle task for bpf_get_current_task_btf() fallback.
+        // In the kernel, there's always a task running (idle task on idle CPUs).
+        // PF_IDLE = 0x2, mm = NULL (calloc-zeroed).
+        let idle_task_raw = unsafe {
+            let p = ffi::sim_task_alloc();
+            ffi::sim_task_set_flags(p, 0x2); // PF_IDLE
+            p
+        };
+
         for def in &scenario.tasks {
             let task = SimTask::new(def, nr_cpus);
             let raw_addr = task.raw() as usize;
@@ -105,6 +130,13 @@ impl<S: Scheduler> Simulator<S> {
             task_pid_to_raw.insert(task.pid, raw_addr);
             // Set up cpus_ptr so the task is allowed on all CPUs
             unsafe { ffi::sim_task_setup_cpus_ptr(task.raw()) };
+            // Set mm pointer for address-space grouping (wake-affine scheduling)
+            if let Some(mm_id) = def.mm_id {
+                // Synthetic non-NULL pointer: never dereferenced, only compared.
+                // Each unique MmId maps to a distinct non-NULL value.
+                let mm_ptr = ((mm_id.0 as usize) + 1) * 0x1000;
+                unsafe { ffi::sim_task_set_mm(task.raw(), mm_ptr as *mut c_void) };
+            }
             tasks.insert(task.pid, task);
         }
 
@@ -125,6 +157,8 @@ impl<S: Scheduler> Simulator<S> {
             task_last_cpu: HashMap::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
+            waker_task_raw: None,
+            idle_task_raw,
         };
 
         // Initialize scheduler
@@ -164,7 +198,7 @@ impl<S: Scheduler> Simulator<S> {
             events.push(Reverse(Event {
                 time_ns: def.start_time_ns,
                 seq,
-                kind: EventKind::TaskWake { pid: def.pid },
+                kind: EventKind::TaskWake { pid: def.pid, waker: None },
             }));
             seq += 1;
         }
@@ -190,8 +224,8 @@ impl<S: Scheduler> Simulator<S> {
             }
 
             match event.kind {
-                EventKind::TaskWake { pid } => {
-                    self.handle_task_wake(pid, &mut state, &mut tasks, &mut events, &mut seq);
+                EventKind::TaskWake { pid, waker } => {
+                    self.handle_task_wake(pid, waker, &mut state, &mut tasks, &mut events, &mut seq);
                 }
                 EventKind::SliceExpired { cpu } => {
                     self.handle_slice_expired(cpu, &mut state, &mut tasks, &mut events, &mut seq);
@@ -223,6 +257,9 @@ impl<S: Scheduler> Simulator<S> {
             self.scheduler.exit();
             kfuncs::exit_sim();
         }
+
+        // Free the synthetic idle task
+        unsafe { ffi::sim_task_free(idle_task_raw) };
 
         state.trace
     }
@@ -263,9 +300,14 @@ impl<S: Scheduler> Simulator<S> {
     }
 
     /// Handle a task waking up.
+    ///
+    /// If `waker` is provided (from a `Phase::Wake`), the waker's context is
+    /// set so that `bpf_get_current_task_btf()` and `bpf_get_smp_processor_id()`
+    /// return the waker's state during `select_cpu` (kernel semantics).
     fn handle_task_wake(
         &self,
         pid: Pid,
+        waker: Option<WakerInfo>,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
@@ -299,12 +341,20 @@ impl<S: Scheduler> Simulator<S> {
             .trace
             .record(state.clock, CpuId(0), TraceKind::TaskWoke { pid });
 
+        // Set waker context: in the kernel, runnable/select_cpu/enqueue all
+        // run in the waker's context, so bpf_get_current_task_btf() and
+        // bpf_get_smp_processor_id() return the waker's state.
+        let waker_raw = waker.as_ref().and_then(|w| {
+            state.task_pid_to_raw.get(&w.pid).copied()
+        });
+
         // Call runnable callback
         let prev_cpu = task.prev_cpu;
         let raw = task.raw();
         unsafe {
             kfuncs::enter_sim(state);
-            state.current_cpu = prev_cpu;
+            state.waker_task_raw = waker_raw;
+            state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
             self.scheduler.runnable(raw, SCX_ENQ_WAKEUP);
             kfuncs::exit_sim();
         }
@@ -315,13 +365,15 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.pending_dispatch = None;
             state.ops_context = OpsContext::SelectCpu;
-            state.current_cpu = prev_cpu;
+            state.waker_task_raw = waker_raw;
+            state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
 
             let selected_cpu_raw =
                 self.scheduler
                     .select_cpu(raw, prev_cpu.0 as i32, SCX_ENQ_WAKEUP);
             let selected_cpu = CpuId(selected_cpu_raw as u32);
             state.ops_context = OpsContext::None;
+            state.waker_task_raw = None;
             debug!(
                 pid = pid.0,
                 prev_cpu = prev_cpu.0,
@@ -526,7 +578,7 @@ impl<S: Scheduler> Simulator<S> {
                         events.push(Reverse(Event {
                             time_ns: wake_time,
                             seq: *seq,
-                            kind: EventKind::TaskWake { pid },
+                            kind: EventKind::TaskWake { pid, waker: None },
                         }));
                         *seq += 1;
                     }
@@ -568,11 +620,14 @@ impl<S: Scheduler> Simulator<S> {
                         .trace
                         .record(local_t, cpu, TraceKind::TaskSlept { pid });
 
-                    // Immediately wake the target
+                    // Immediately wake the target (with waker context)
                     events.push(Reverse(Event {
                         time_ns: local_t,
                         seq: *seq,
-                        kind: EventKind::TaskWake { pid: target_pid },
+                        kind: EventKind::TaskWake {
+                            pid: target_pid,
+                            waker: Some(WakerInfo { pid, cpu }),
+                        },
                     }));
                     *seq += 1;
 
@@ -589,7 +644,7 @@ impl<S: Scheduler> Simulator<S> {
                                     events.push(Reverse(Event {
                                         time_ns: wake_time,
                                         seq: *seq,
-                                        kind: EventKind::TaskWake { pid },
+                                        kind: EventKind::TaskWake { pid, waker: None },
                                     }));
                                     *seq += 1;
                                 }
@@ -599,7 +654,7 @@ impl<S: Scheduler> Simulator<S> {
                                 events.push(Reverse(Event {
                                     time_ns: local_t,
                                     seq: *seq,
-                                    kind: EventKind::TaskWake { pid },
+                                    kind: EventKind::TaskWake { pid, waker: None },
                                 }));
                                 *seq += 1;
                             }
@@ -608,7 +663,7 @@ impl<S: Scheduler> Simulator<S> {
                                 events.push(Reverse(Event {
                                     time_ns: local_t,
                                     seq: *seq,
-                                    kind: EventKind::TaskWake { pid },
+                                    kind: EventKind::TaskWake { pid, waker: None },
                                 }));
                                 *seq += 1;
                             }
@@ -828,7 +883,7 @@ impl<S: Scheduler> Simulator<S> {
                     events.push(Reverse(Event {
                         time_ns: state.clock,
                         seq: *seq,
-                        kind: EventKind::TaskWake { pid: target },
+                        kind: EventKind::TaskWake { pid: target, waker: None },
                     }));
                     *seq += 1;
                     if !task.advance_phase() {

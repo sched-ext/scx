@@ -1,7 +1,7 @@
 //! Scenario definition and builder API.
 
 use crate::task::{TaskBehavior, TaskDef};
-use crate::types::{Pid, TimeNs};
+use crate::types::{MmId, Pid, TimeNs};
 
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
@@ -67,6 +67,31 @@ impl ScenarioBuilder {
             nice,
             behavior,
             start_time_ns: 0,
+            mm_id: None,
+        });
+        self
+    }
+
+    /// Convenience: add a task with auto-assigned PID and a shared address space.
+    ///
+    /// Tasks with the same `MmId` are treated as threads sharing an address
+    /// space, enabling wake-affine scheduling in COSMOS.
+    pub fn add_task_with_mm(
+        mut self,
+        name: &str,
+        nice: i8,
+        behavior: TaskBehavior,
+        mm_id: MmId,
+    ) -> Self {
+        let pid = self.next_pid;
+        self.next_pid = Pid(pid.0 + 1);
+        self.tasks.push(TaskDef {
+            name: name.to_string(),
+            pid,
+            nice,
+            behavior,
+            start_time_ns: 0,
+            mm_id: Some(mm_id),
         });
         self
     }

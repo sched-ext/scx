@@ -1,10 +1,11 @@
 ---
 title: Simulate address-space affinity (mm_affinity)
-status: open
+status: closed
 priority: 3
 issue_type: feature
 created_at: 2026-02-13T13:04:28.379110510+00:00
-updated_at: 2026-02-13T13:07:58.515386692+00:00
+updated_at: 2026-02-13T14:49:15.112778650+00:00
+closed_at: 2026-02-13T14:49:15.112778580+00:00
 ---
 
 # Description

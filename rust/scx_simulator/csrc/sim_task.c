@@ -174,6 +174,17 @@ void sim_task_set_scx_flags(struct task_struct *p, u32 flags)
 	p->scx.flags = flags;
 }
 
+/* Address space (mm_struct pointer) */
+void sim_task_set_mm(struct task_struct *p, void *mm)
+{
+	p->mm = (struct mm_struct *)mm;
+}
+
+void *sim_task_get_mm(struct task_struct *p)
+{
+	return (void *)p->mm;
+}
+
 /* Dummy exit_info for the exit callback */
 static struct scx_exit_info sim_exit_info;
 

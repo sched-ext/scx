@@ -147,6 +147,7 @@ macro_rules! scheduler_tests {
                         repeat: false,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -182,6 +183,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -192,6 +194,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -223,6 +226,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -233,6 +237,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -275,6 +280,7 @@ macro_rules! scheduler_tests {
                             repeat: true,
                         },
                         start_time_ns: 0,
+                        mm_id: None,
                     })
                     .task(TaskDef {
                         name: "t2".into(),
@@ -285,6 +291,7 @@ macro_rules! scheduler_tests {
                             repeat: true,
                         },
                         start_time_ns: 0,
+                        mm_id: None,
                     })
                     .duration_ms(50)
                     .build()
@@ -339,6 +346,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -349,6 +357,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .duration_ms(200)
                 .build();
@@ -390,6 +399,7 @@ macro_rules! scheduler_tests {
                         repeat: true,
                     },
                     start_time_ns: 0,
+                    mm_id: None,
                 })
                 .duration_ms(100)
                 .build();

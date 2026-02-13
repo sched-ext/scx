@@ -43,6 +43,13 @@ impl DsqId {
     }
 }
 
+/// Address-space (mm_struct) group identifier.
+///
+/// Tasks with the same `MmId` share an address space (threads in the same
+/// process). Used by COSMOS's `is_wake_affine()` to co-locate related tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MmId(pub u32);
+
 /// Simulated time in nanoseconds.
 pub type TimeNs = u64;
 

@@ -25,6 +25,7 @@ fn test_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .task(TaskDef {
             name: "light".into(),
@@ -35,6 +36,7 @@ fn test_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .duration_ms(200)
         .build();
@@ -70,6 +72,7 @@ fn test_three_way_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .task(TaskDef {
             name: "n2".into(),
@@ -80,6 +83,7 @@ fn test_three_way_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .task(TaskDef {
             name: "n0".into(),
@@ -90,6 +94,7 @@ fn test_three_way_weighted_fairness() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .duration_ms(600) // longer to allow convergence
         .build();
@@ -131,6 +136,7 @@ fn test_slice_preemption() {
                 repeat: false,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .duration_ms(200)
         .build();
@@ -169,6 +175,7 @@ fn test_preemption_interleaving() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -179,6 +186,7 @@ fn test_preemption_interleaving() {
                 repeat: true,
             },
             start_time_ns: 0,
+            mm_id: None,
         })
         .duration_ms(100)
         .build();
