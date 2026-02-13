@@ -134,8 +134,8 @@ struct mega_mailbox_entry {
     u8 _pad1;              /* alignment */
 
     /* --- Psychic Cache Slot 0: MRU (bytes 18-39) --- */
+    u16 _pad2;             /* alignment: keeps rc_counter0 at 4B-aligned offset 20 */
     u32 rc_counter0;       /* Slot 0 reclass counter (widened: u16→u32, no wrap) */
-    u16 _pad2;             /* alignment for rc_task_ptr0 (shrunk from u32) */
     u64 rc_task_ptr0;      /* Slot 0 task pointer (8B-aligned) */
     u64 rc_state_fused0;   /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
 
