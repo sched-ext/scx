@@ -18,6 +18,23 @@
 #include <scx/common.bpf.h>
 
 /*
+ * CO-RE helper overrides for userspace compilation.
+ *
+ * bpf_core_read.h (included transitively via common.bpf.h) defines these
+ * using __builtin_preserve_access_index / CO-RE builtins. In the simulator
+ * we need plain userspace implementations. We #undef after include to
+ * avoid redefinition warnings.
+ */
+#undef bpf_core_read
+#define bpf_core_read(dst, sz, src) __builtin_memcpy(dst, src, sz)
+#undef bpf_core_cast
+#define bpf_core_cast(ptr, type) ((type *)(ptr))
+#undef bpf_core_type_matches
+#define bpf_core_type_matches(type) 1
+#undef bpf_core_type_size
+#define bpf_core_type_size(type) sizeof(type)
+
+/*
  * Undo BPF CO-RE enum variable macros from enums.autogen.bpf.h.
  *
  * In BPF programs, these constants are resolved at load time via CO-RE
@@ -151,6 +168,15 @@ extern struct task_struct *sim_dsq_iter_next(void);
     for (cur = sim_dsq_iter_begin(dsq_id, flags); \
          cur != NULL; \
          cur = sim_dsq_iter_next())
+
+/*
+ * CSS (cgroup_subsys_state) iterator — stub.
+ *
+ * bpf_for_each(css, cur, root, flags) iterates cgroup children.
+ * Until cgroups are fully modeled, this iterates nothing.
+ */
+#define _bpf_for_each_css(cur, root, flags) \
+    for (cur = NULL; cur != NULL; )
 
 /* BPF_FOR_EACH_ITER is referenced in __COMPAT_scx_bpf_dsq_move calls
  * inside for_each loop bodies. Our dsq_move override ignores it. */

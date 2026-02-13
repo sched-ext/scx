@@ -36,8 +36,6 @@
 /* Stub out __arena for unittest environment */
 #define __arena
 
-
-
 /* Function declarations for BPF functions overridden in overrides.c */
 struct task_struct;
 void *scx_task_data(struct task_struct *p);

@@ -56,9 +56,87 @@ void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask)
 		cpumask->bits[cpu / BITS_PER_LONG] |= (1UL << (cpu % BITS_PER_LONG));
 }
 
+void bpf_cpumask_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask)
+{
+	if (cpu < NR_CPUS)
+		cpumask->bits[cpu / BITS_PER_LONG] &= ~(1UL << (cpu % BITS_PER_LONG));
+}
+
 void bpf_cpumask_clear(struct bpf_cpumask *cpumask)
 {
 	memset(cpumask, 0, sizeof(struct bpf_cpumask));
+}
+
+void bpf_cpumask_setall(struct bpf_cpumask *cpumask)
+{
+	memset(cpumask, 0xff, sizeof(struct bpf_cpumask));
+}
+
+bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask)
+{
+	if (cpu >= NR_CPUS)
+		return false;
+	return !!(cpumask->bits[cpu / BITS_PER_LONG] & (1UL << (cpu % BITS_PER_LONG)));
+}
+
+bool bpf_cpumask_empty(const struct cpumask *cpumask)
+{
+	unsigned int i;
+	for (i = 0; i < 128; i++) {
+		if (cpumask->bits[i])
+			return false;
+	}
+	return true;
+}
+
+u32 bpf_cpumask_weight(const struct cpumask *cpumask)
+{
+	u32 count = 0;
+	unsigned int i;
+	for (i = 0; i < 128; i++) {
+		unsigned long v = cpumask->bits[i];
+		while (v) {
+			count += v & 1;
+			v >>= 1;
+		}
+	}
+	return count;
+}
+
+bool bpf_cpumask_and(struct bpf_cpumask *dst, const struct cpumask *src1,
+		     const struct cpumask *src2)
+{
+	bool result = false;
+	unsigned int i;
+	for (i = 0; i < 128; i++) {
+		dst->bits[i] = src1->bits[i] & src2->bits[i];
+		if (dst->bits[i])
+			result = true;
+	}
+	return result;
+}
+
+void bpf_cpumask_or(struct bpf_cpumask *dst, const struct cpumask *src1,
+		    const struct cpumask *src2)
+{
+	unsigned int i;
+	for (i = 0; i < 128; i++)
+		dst->bits[i] = src1->bits[i] | src2->bits[i];
+}
+
+void bpf_cpumask_copy(struct bpf_cpumask *dst, const struct cpumask *src)
+{
+	__builtin_memcpy(dst, src, sizeof(struct cpumask));
+}
+
+bool bpf_cpumask_subset(const struct cpumask *src1, const struct cpumask *src2)
+{
+	unsigned int i;
+	for (i = 0; i < 128; i++) {
+		if (src1->bits[i] & ~src2->bits[i])
+			return false;
+	}
+	return true;
 }
 
 u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask)
@@ -80,14 +158,4 @@ void *bpf_kptr_xchg_impl(void **kptr, void *new_val)
 	return old;
 }
 
-/* --- cpumask query --- */
 
-bool bpf_cpumask_empty(const struct cpumask *cpumask)
-{
-	unsigned int i;
-	for (i = 0; i < (sizeof(cpumask->bits) / sizeof(cpumask->bits[0])); i++) {
-		if (cpumask->bits[i])
-			return false;
-	}
-	return true;
-}
