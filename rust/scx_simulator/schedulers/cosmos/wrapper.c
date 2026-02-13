@@ -115,7 +115,7 @@ void cosmos_setup(unsigned int num_cpus)
 	primary_all = true;
 	flat_idle_scan = false;
 	preferred_idle_scan = false;
-	cpufreq_enabled = false;
+	cpufreq_enabled = true;
 	numa_enabled = false;
 	nr_node_ids = 1;
 	mm_affinity = false;

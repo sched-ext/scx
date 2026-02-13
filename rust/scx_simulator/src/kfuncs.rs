@@ -859,9 +859,15 @@ pub extern "C" fn scx_bpf_nr_cpu_ids() -> u32 {
     })
 }
 
-/// Set CPU performance level. No-op in simulator (cpufreq disabled).
+/// Set CPU performance level. Stores in SimCpu for observability.
 #[no_mangle]
-pub extern "C" fn scx_bpf_cpuperf_set(_cpu: i32, _perf: u32) {}
+pub extern "C" fn scx_bpf_cpuperf_set(cpu: i32, perf: u32) {
+    with_sim(|sim| {
+        if let Some(c) = sim.cpus.get_mut(cpu as usize) {
+            c.perf_lvl = perf;
+        }
+    });
+}
 
 #[cfg(test)]
 mod tests {
