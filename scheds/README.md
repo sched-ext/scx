@@ -25,14 +25,15 @@ of schedulers:
 # Note on C schedulers
 
 This directory previously also held C schedulers for illustration purposes. These
-schedulers are now found only in the Linux kernel repository in tools/sched\_ext.
+schedulers are now found only in the Linux kernel repository in
+[`tools/sched_ext`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/sched_ext).
 Each C scheduler's purpose was to demonstrate a single technique for development,
 often BPF-related. The C schedulers were kept synced between upstream and this
 repository.
 
 As the ecosystem has matured these schedulers have been superseded by those in the
-rust/ directory, many of which are production-ready. These schedulers better represent
-modern sched\_ext codebases and are a more appropriate starting oint for newcomers. The
-build system and surrouding crates ecosystem is also geared towards Rust schedulers.
+`rust/` directory, many of which are production-ready. These schedulers better represent
+modern `sched_ext` codebases and are a more appropriate starting point for newcomers.
+The build system and surrouding crates ecosystem is also geared towards Rust schedulers.
 As a result, the C schedulers are no longer mirrored here and are only available
 from the kernel source.
