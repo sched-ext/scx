@@ -73,14 +73,20 @@
 
 
 
-/* rq access — scx_bpf_cpu_rq() is universally available (~10-15ns).
+/* ═══════════════════════════════════════════════════════════════════════════
+ * RQ ACCESS: Prefer scx_bpf_locked_rq() over deprecated scx_bpf_cpu_rq().
  *
- * scx_bpf_rq_locked() would be ~3-5ns faster (skips RCU + bounds check) but
- * common.bpf.h declares it as strong __ksym — libbpf fails to load if the
- * kernel doesn't export it. A __weak redeclaration CANNOT override the strong
- * one already seen from common.bpf.h. Until the scx team makes it __weak or
- * all kernels export it, we use cpu_rq. */
+ * scx_bpf_locked_rq(): ~3-5ns (no RCU, no bounds check, rq lock held)
+ * scx_bpf_cpu_rq():    ~10-15ns (RCU + bounds check, deprecated)
+ *
+ * cake_tick holds the local rq lock, so locked_rq is both faster and correct.
+ * Declared __weak: if kernel doesn't export it, falls back to cpu_rq.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+extern struct rq *scx_bpf_locked_rq(void) __weak __ksym;
+
 static __always_inline struct rq *cake_get_rq(s32 cpu) {
+    if (scx_bpf_locked_rq)
+        return scx_bpf_locked_rq();
     return scx_bpf_cpu_rq(cpu);
 }
 
