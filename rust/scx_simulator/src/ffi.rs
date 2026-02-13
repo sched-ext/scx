@@ -218,6 +218,15 @@ impl DynamicScheduler {
         Self::load(&format!("{dir}/libscx_tickless.so"), "tickless", nr_cpus)
     }
 
+    /// Load the scx_cosmos scheduler, configured for `nr_cpus` CPUs.
+    // TODO: COSMOS defines cosmos_cpu_release(cpu, args) which calls
+    // scx_bpf_reenqueue_local(). This op is not yet in the Scheduler trait.
+    // Add cpu_release support to SchedOps, Scheduler trait, and the engine.
+    pub fn cosmos(nr_cpus: u32) -> Self {
+        let dir = env!("SCHEDULER_SO_DIR");
+        Self::load(&format!("{dir}/libscx_cosmos.so"), "cosmos", nr_cpus)
+    }
+
     /// Look up scheduler ops function pointers from the loaded library.
     ///
     /// Mandatory symbols panic if missing. Optional symbols become `None`.

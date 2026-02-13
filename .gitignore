@@ -16,3 +16,4 @@ CLAUDE.md
 **/*.ll
 **/*.s
 **/*.tmp
+rust/scx_simulator/schedulers/cosmos/cosmos_main_patched.c
