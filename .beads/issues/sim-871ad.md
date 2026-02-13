@@ -4,17 +4,17 @@ status: open
 priority: 1
 issue_type: task
 depends_on:
-  sim-16: blocks
-  sim-15: blocks
-  sim-1: parent-child
-  sim-4: blocks
-  sim-8: blocks
-  sim-6: blocks
-  sim-14: blocks
-  sim-7: blocks
-  sim-5: blocks
+  sim-e7a38: blocks
+  sim-908a7: blocks
+  sim-8e425: blocks
+  sim-1b36e: blocks
+  sim-38516: blocks
+  sim-6ba30: parent-child
+  sim-cd172: blocks
+  sim-3a1c7: blocks
+  sim-1216f: blocks
 created_at: 2026-02-13T17:59:26.872035392+00:00
-updated_at: 2026-02-13T18:00:01.197013939+00:00
+updated_at: 2026-02-13T18:10:24.903949466+00:00
 ---
 
 # Description
