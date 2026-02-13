@@ -65,6 +65,7 @@ struct task_struct *sim_task_alloc(void)
 	if (p) {
 		sim_init_root_cgroup();
 		p->cgroups = &sim_root_css_set;
+		p->real_parent = p; /* self-referencing; simulates init as parent */
 	}
 	return p;
 }
@@ -191,4 +192,15 @@ static struct scx_exit_info sim_exit_info;
 struct scx_exit_info *sim_get_exit_info(void)
 {
 	return &sim_exit_info;
+}
+
+/* Init task args for the init_task callback */
+static struct scx_init_task_args sim_init_task_args;
+
+struct scx_init_task_args *sim_get_init_task_args(void)
+{
+	sim_init_root_cgroup();
+	sim_init_task_args.fork = false;
+	sim_init_task_args.cgroup = &sim_root_cgroup;
+	return &sim_init_task_args;
 }

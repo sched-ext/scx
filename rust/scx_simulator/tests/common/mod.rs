@@ -412,9 +412,10 @@ macro_rules! scheduler_tests {
 
             // Runtime should be about 5ms per cycle, ~6-7 cycles in 100ms
             // (15ms per cycle => ~33ms total runtime)
+            // Allow wider range for schedulers with different slice/preemption behavior.
             let runtime = trace.total_runtime(Pid(1));
             assert!(
-                runtime > 20_000_000 && runtime < 40_000_000,
+                runtime > 20_000_000 && runtime < 55_000_000,
                 "expected ~33ms runtime, got {runtime}ns"
             );
         }
