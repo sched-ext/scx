@@ -23,7 +23,7 @@ fn test_single_task_single_cpu() {
         .duration_ms(100)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
     trace.dump();
 
     // Task should have been scheduled at least once
@@ -75,7 +75,7 @@ fn test_multiple_tasks_single_cpu() {
         .duration_ms(100)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
     trace.dump();
 
     // Both tasks should have been scheduled
@@ -124,7 +124,7 @@ fn test_multiple_cpus() {
         .duration_ms(100)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
 
     // Both tasks should get runtime
     assert!(trace.total_runtime(Pid(1)) > 0);
@@ -178,8 +178,8 @@ fn test_determinism() {
             .build()
     };
 
-    let trace1 = Simulator::new(ScxSimple).run(make_scenario());
-    let trace2 = Simulator::new(ScxSimple).run(make_scenario());
+    let trace1 = Simulator::new(DynamicScheduler::simple()).run(make_scenario());
+    let trace2 = Simulator::new(DynamicScheduler::simple()).run(make_scenario());
 
     assert_eq!(
         trace1.events().len(),

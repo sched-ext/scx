@@ -24,7 +24,7 @@ fn test_sleep_wake_cycle() {
         .duration_ms(100)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
     trace.dump();
 
     // Should have been scheduled multiple times
@@ -61,7 +61,7 @@ fn test_slice_preemption() {
         .duration_ms(200)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
     trace.dump();
 
     // With a single task, it should be rescheduled after each slice expiry
@@ -109,7 +109,7 @@ fn test_preemption_interleaving() {
         .duration_ms(100)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
 
     // Both tasks should be scheduled multiple times (interleaving)
     let count1 = trace.schedule_count(Pid(1));

@@ -31,7 +31,7 @@ fn test_equal_weight_fairness() {
         .duration_ms(200)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
     trace.dump();
 
     let rt1 = trace.total_runtime(Pid(1));
@@ -80,7 +80,7 @@ fn test_weighted_fairness() {
         .duration_ms(200)
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
     trace.dump();
 
     let rt1 = trace.total_runtime(Pid(1)); // nice -3 (weight 1991)
@@ -135,7 +135,7 @@ fn test_three_way_weighted_fairness() {
         .duration_ms(600) // longer to allow convergence
         .build();
 
-    let trace = Simulator::new(ScxSimple).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
 
     let rt1 = trace.total_runtime(Pid(1)); // nice 5 (lightest)
     let rt2 = trace.total_runtime(Pid(2)); // nice 2

@@ -99,152 +99,161 @@ pub trait Scheduler {
 }
 
 // ---------------------------------------------------------------------------
-// scx_simple scheduler FFI
+// DynamicScheduler — loads scheduler .so via libloading
 // ---------------------------------------------------------------------------
 
-extern "C" {
-    fn simple_init() -> i32;
-    fn simple_select_cpu(p: *mut c_void, prev_cpu: i32, wake_flags: u64) -> i32;
-    fn simple_enqueue(p: *mut c_void, enq_flags: u64);
-    fn simple_dispatch(cpu: i32, prev: *mut c_void);
-    fn simple_running(p: *mut c_void);
-    fn simple_stopping(p: *mut c_void, runnable: bool);
-    fn simple_enable(p: *mut c_void);
+/// Function pointer types for scheduler ops.
+type InitFn = unsafe extern "C" fn() -> i32;
+type SelectCpuFn = unsafe extern "C" fn(*mut c_void, i32, u64) -> i32;
+type EnqueueFn = unsafe extern "C" fn(*mut c_void, u64);
+type DispatchFn = unsafe extern "C" fn(i32, *mut c_void);
+type RunningFn = unsafe extern "C" fn(*mut c_void);
+type StoppingFn = unsafe extern "C" fn(*mut c_void, bool);
+type EnableFn = unsafe extern "C" fn(*mut c_void);
+type RunnableFn = unsafe extern "C" fn(*mut c_void, u64);
+type InitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+type SetupFn = unsafe extern "C" fn(u32);
+
+/// Resolved function pointers for a scheduler's ops.
+struct SchedOps {
+    init: InitFn,
+    select_cpu: SelectCpuFn,
+    enqueue: EnqueueFn,
+    dispatch: DispatchFn,
+    running: RunningFn,
+    stopping: StoppingFn,
+    enable: EnableFn,
+    runnable: Option<RunnableFn>,
+    init_task: Option<InitTaskFn>,
 }
 
-/// The scx_simple scheduler compiled as userspace C.
-pub struct ScxSimple;
-
-impl Scheduler for ScxSimple {
-    unsafe fn init(&self) -> i32 {
-        simple_init()
-    }
-
-    unsafe fn select_cpu(&self, p: *mut c_void, prev_cpu: i32, wake_flags: u64) -> i32 {
-        simple_select_cpu(p, prev_cpu, wake_flags)
-    }
-
-    unsafe fn enqueue(&self, p: *mut c_void, enq_flags: u64) {
-        simple_enqueue(p, enq_flags)
-    }
-
-    unsafe fn dispatch(&self, cpu: i32, prev: *mut c_void) {
-        simple_dispatch(cpu, prev)
-    }
-
-    unsafe fn running(&self, p: *mut c_void) {
-        simple_running(p)
-    }
-
-    unsafe fn stopping(&self, p: *mut c_void, runnable: bool) {
-        simple_stopping(p, runnable)
-    }
-
-    unsafe fn enable(&self, p: *mut c_void) {
-        simple_enable(p)
-    }
+/// A scheduler loaded dynamically from a `.so` shared library.
+///
+/// Each instance owns a `libloading::Library` handle. When the
+/// `DynamicScheduler` is dropped, the library is unloaded via `dlclose`,
+/// resetting all global state in the scheduler C code.
+pub struct DynamicScheduler {
+    /// Keep the library alive so function pointers remain valid.
+    _lib: libloading::Library,
+    ops: SchedOps,
 }
 
-// ---------------------------------------------------------------------------
-// scx_tickless scheduler FFI
-// ---------------------------------------------------------------------------
+impl DynamicScheduler {
+    /// Load the scx_simple scheduler.
+    pub fn simple() -> Self {
+        let path = env!("LIB_SCX_SIMPLE_SO");
+        // SAFETY: The .so is built by our build.rs from known-safe C source.
+        // We use RTLD_NOW for eager binding and the default RTLD_LOCAL for
+        // symbol isolation.
+        let lib = unsafe { libloading::Library::new(path) }
+            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
 
-extern "C" {
-    fn tickless_init() -> i32;
-    fn tickless_select_cpu(p: *mut c_void, prev_cpu: i32, wake_flags: u64) -> i32;
-    fn tickless_enqueue(p: *mut c_void, enq_flags: u64);
-    fn tickless_dispatch(cpu: i32, prev: *mut c_void);
-    fn tickless_running(p: *mut c_void);
-    fn tickless_stopping(p: *mut c_void, runnable: bool);
-    fn tickless_enable(p: *mut c_void);
-    fn tickless_runnable(p: *mut c_void, enq_flags: u64);
-    fn tickless_init_task(p: *mut c_void, args: *mut c_void) -> i32;
+        let ops = unsafe { Self::load_ops(&lib, "simple", false) };
+        Self { _lib: lib, ops }
+    }
 
-    // Tickless global variables
-    static mut nr_cpu_ids: u32;
-    static mut smt_enabled: bool;
-    static mut slice_ns: u64;
-    static mut tick_freq: u64;
-    static mut preferred_cpus: [u64; 1024];
-
-    // Primary CPU setup (takes struct cpu_arg *)
-    fn enable_primary_cpu(input: *mut c_void) -> i32;
-
-    // Map registration
-    fn tickless_register_maps();
-}
-
-/// Matches the C `struct cpu_arg` from tickless intf.h.
-#[repr(C)]
-struct CpuArg {
-    cpu_id: i32,
-}
-
-/// The scx_tickless scheduler compiled as userspace C.
-pub struct ScxTickless;
-
-impl ScxTickless {
-    /// Set up tickless global state (nr_cpu_ids, slice, preferred_cpus)
-    /// and enable CPU 0 as the primary scheduling CPU.
+    /// Load the scx_tickless scheduler, configured for `nr_cpus` CPUs.
     ///
-    /// # Safety
-    /// Must be called before `init()` and before any scheduler ops.
-    pub unsafe fn setup(&self, num_cpus: u32) {
-        nr_cpu_ids = num_cpus;
-        smt_enabled = false;
-        // 20ms default slice
-        slice_ns = 20_000_000;
-        // Use simulated time, set tick_freq to avoid CONFIG_HZ dependency
-        tick_freq = 250;
+    /// Calls the C-side `tickless_setup()` to initialize globals, register
+    /// maps, and enable CPU 0 before returning.
+    pub fn tickless(nr_cpus: u32) -> Self {
+        let path = env!("LIB_SCX_TICKLESS_SO");
+        let lib = unsafe { libloading::Library::new(path) }
+            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
 
-        // Set preferred CPU ordering (identity mapping)
-        for i in 0..num_cpus.min(1024) {
-            preferred_cpus[i as usize] = i as u64;
+        // Call tickless_setup() to initialize globals before any ops
+        unsafe {
+            let setup: libloading::Symbol<SetupFn> = lib
+                .get(b"tickless_setup")
+                .expect("tickless_setup not found in .so");
+            let setup_fn: SetupFn = *setup;
+            setup_fn(nr_cpus);
         }
 
-        // Register BPF maps with test infrastructure
-        tickless_register_maps();
+        let ops = unsafe { Self::load_ops(&lib, "tickless", true) };
+        Self { _lib: lib, ops }
+    }
 
-        // Enable CPU 0 as primary
-        let mut arg = CpuArg { cpu_id: 0 };
-        enable_primary_cpu(&mut arg as *mut CpuArg as *mut c_void);
+    /// Look up scheduler ops function pointers from the loaded library.
+    ///
+    /// # Safety
+    /// The library must contain the expected symbols with correct signatures.
+    unsafe fn load_ops(lib: &libloading::Library, prefix: &str, has_extras: bool) -> SchedOps {
+        macro_rules! get {
+            ($name:expr) => {{
+                let sym_name = format!("{}_{}", prefix, $name);
+                let sym: libloading::Symbol<*const ()> = lib
+                    .get(sym_name.as_bytes())
+                    .unwrap_or_else(|e| panic!("{sym_name} not found: {e}"));
+                // Copy the raw pointer out — it's valid as long as _lib lives.
+                *sym
+            }};
+        }
+
+        let ops = SchedOps {
+            init: std::mem::transmute(get!("init")),
+            select_cpu: std::mem::transmute(get!("select_cpu")),
+            enqueue: std::mem::transmute(get!("enqueue")),
+            dispatch: std::mem::transmute(get!("dispatch")),
+            running: std::mem::transmute(get!("running")),
+            stopping: std::mem::transmute(get!("stopping")),
+            enable: std::mem::transmute(get!("enable")),
+            runnable: if has_extras {
+                Some(std::mem::transmute(get!("runnable")))
+            } else {
+                None
+            },
+            init_task: if has_extras {
+                Some(std::mem::transmute(get!("init_task")))
+            } else {
+                None
+            },
+        };
+
+        ops
     }
 }
 
-impl Scheduler for ScxTickless {
+impl Scheduler for DynamicScheduler {
     unsafe fn init(&self) -> i32 {
-        tickless_init()
+        (self.ops.init)()
     }
 
     unsafe fn select_cpu(&self, p: *mut c_void, prev_cpu: i32, wake_flags: u64) -> i32 {
-        tickless_select_cpu(p, prev_cpu, wake_flags)
+        (self.ops.select_cpu)(p, prev_cpu, wake_flags)
     }
 
     unsafe fn enqueue(&self, p: *mut c_void, enq_flags: u64) {
-        tickless_enqueue(p, enq_flags)
+        (self.ops.enqueue)(p, enq_flags)
     }
 
     unsafe fn dispatch(&self, cpu: i32, prev: *mut c_void) {
-        tickless_dispatch(cpu, prev)
+        (self.ops.dispatch)(cpu, prev)
     }
 
     unsafe fn running(&self, p: *mut c_void) {
-        tickless_running(p)
+        (self.ops.running)(p)
     }
 
     unsafe fn stopping(&self, p: *mut c_void, runnable: bool) {
-        tickless_stopping(p, runnable)
+        (self.ops.stopping)(p, runnable)
     }
 
     unsafe fn enable(&self, p: *mut c_void) {
-        tickless_enable(p)
+        (self.ops.enable)(p)
     }
 
     unsafe fn runnable(&self, p: *mut c_void, enq_flags: u64) {
-        tickless_runnable(p, enq_flags)
+        if let Some(f) = self.ops.runnable {
+            f(p, enq_flags);
+        }
     }
 
     unsafe fn init_task(&self, p: *mut c_void) -> i32 {
-        tickless_init_task(p, std::ptr::null_mut())
+        if let Some(f) = self.ops.init_task {
+            f(p, std::ptr::null_mut())
+        } else {
+            0
+        }
     }
 }

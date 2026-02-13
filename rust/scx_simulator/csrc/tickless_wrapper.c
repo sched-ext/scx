@@ -36,3 +36,25 @@ void tickless_register_maps(void)
 	INIT_SCX_TEST_MAP(&cpu_ctx_map, cpu_ctx_stor);
 	scx_test_map_register(&cpu_ctx_map, &cpu_ctx_stor);
 }
+
+/*
+ * Combined setup function called from Rust before tickless_init().
+ * Sets global variables, registers maps, and enables CPU 0.
+ * struct cpu_arg is defined in intf.h (included above).
+ */
+void tickless_setup(unsigned int num_cpus)
+{
+	unsigned int i;
+	struct cpu_arg arg = { .cpu_id = 0 };
+
+	nr_cpu_ids = num_cpus;
+	smt_enabled = false;
+	slice_ns = 20000000;  /* 20ms default slice */
+	tick_freq = 250;
+
+	for (i = 0; i < num_cpus && i < 1024; i++)
+		preferred_cpus[i] = i;
+
+	tickless_register_maps();
+	enable_primary_cpu(&arg);
+}
