@@ -1,14 +1,27 @@
 //! Dispatch queue (DSQ) simulation.
 //!
 //! Provides both FIFO and vtime-ordered dispatch queues that mirror
-//! the kernel's DSQ semantics.
+//! the kernel's DSQ semantics. Like the kernel, a DSQ must be used
+//! exclusively as either FIFO or vtime-ordered — mixing is an error.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::cpu::SimCpu;
 use crate::types::{DsqId, Pid, Vtime};
 
-/// A single dispatch queue, supporting both FIFO and vtime ordering.
+/// The ordering mode of a DSQ. The kernel enforces that a DSQ is either
+/// purely FIFO or purely PRIQ (vtime-ordered); mixing triggers scx_error().
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DsqMode {
+    /// No tasks have been inserted yet — mode is undetermined.
+    Empty,
+    /// Tasks are ordered FIFO (inserted via scx_bpf_dsq_insert).
+    Fifo,
+    /// Tasks are ordered by vtime (inserted via scx_bpf_dsq_insert_vtime).
+    Priq,
+}
+
+/// A single dispatch queue, supporting either FIFO or vtime ordering.
 #[derive(Debug)]
 pub struct Dsq {
     /// Vtime-ordered entries: (vtime, insertion_order) -> pid.
@@ -18,6 +31,8 @@ pub struct Dsq {
     fifo_entries: VecDeque<Pid>,
     /// Monotonic counter for insertion ordering.
     insertion_counter: u64,
+    /// Current mode — enforced to prevent mixing FIFO and vtime tasks.
+    mode: DsqMode,
 }
 
 impl Dsq {
@@ -26,31 +41,59 @@ impl Dsq {
             vtime_entries: BTreeMap::new(),
             fifo_entries: VecDeque::new(),
             insertion_counter: 0,
+            mode: DsqMode::Empty,
         }
     }
 
     /// Insert a task in FIFO order.
+    ///
+    /// # Panics
+    /// Panics if the DSQ already contains vtime-ordered tasks (mixing is
+    /// not allowed, matching the kernel's `dispatch_enqueue` check).
     pub fn insert_fifo(&mut self, pid: Pid) {
+        assert!(
+            self.mode != DsqMode::Priq,
+            "cannot insert FIFO task into a vtime-ordered DSQ"
+        );
+        self.mode = DsqMode::Fifo;
         self.fifo_entries.push_back(pid);
     }
 
     /// Insert a task ordered by vtime.
+    ///
+    /// # Panics
+    /// Panics if the DSQ already contains FIFO tasks (mixing is not
+    /// allowed, matching the kernel's `dispatch_enqueue` check).
     pub fn insert_vtime(&mut self, pid: Pid, vtime: Vtime) {
+        assert!(
+            self.mode != DsqMode::Fifo,
+            "cannot insert vtime task into a FIFO DSQ"
+        );
+        self.mode = DsqMode::Priq;
         let order = self.insertion_counter;
         self.insertion_counter += 1;
         self.vtime_entries.insert((vtime, order), pid);
     }
 
-    /// Pop the highest-priority task (lowest vtime, or FIFO head).
-    /// Vtime entries take priority over FIFO entries.
+    /// Pop the highest-priority task.
+    ///
+    /// For PRIQ DSQs, returns the lowest-vtime task.
+    /// For FIFO DSQs, returns the head of the queue.
+    /// Resets mode to Empty when the last task is removed.
     pub fn pop(&mut self) -> Option<Pid> {
-        // Try vtime entries first
-        if let Some((&key, &pid)) = self.vtime_entries.iter().next() {
-            self.vtime_entries.remove(&key);
-            return Some(pid);
+        let result = match self.mode {
+            DsqMode::Priq => {
+                let (&key, &pid) = self.vtime_entries.iter().next()?;
+                self.vtime_entries.remove(&key);
+                Some(pid)
+            }
+            DsqMode::Fifo => self.fifo_entries.pop_front(),
+            DsqMode::Empty => None,
+        };
+        if self.is_empty() {
+            self.mode = DsqMode::Empty;
         }
-        // Fall back to FIFO
-        self.fifo_entries.pop_front()
+        result
     }
 
     /// Number of queued tasks.
@@ -63,33 +106,45 @@ impl Dsq {
         self.vtime_entries.is_empty() && self.fifo_entries.is_empty()
     }
 
-    /// Return all PIDs in priority order (vtime first, then FIFO) without consuming.
+    /// Return all PIDs in priority order without consuming.
     pub fn ordered_pids(&self) -> Vec<Pid> {
-        let mut pids = Vec::with_capacity(self.len());
-        for &pid in self.vtime_entries.values() {
-            pids.push(pid);
+        match self.mode {
+            DsqMode::Priq => self.vtime_entries.values().copied().collect(),
+            DsqMode::Fifo => self.fifo_entries.iter().copied().collect(),
+            DsqMode::Empty => Vec::new(),
         }
-        for &pid in &self.fifo_entries {
-            pids.push(pid);
-        }
-        pids
     }
 
     /// Remove a specific PID from the queue. Returns true if found.
+    /// Resets mode to Empty when the last task is removed.
     pub fn remove_pid(&mut self, pid: Pid) -> bool {
-        if let Some(key) = self
-            .vtime_entries
-            .iter()
-            .find_map(|(k, &v)| if v == pid { Some(*k) } else { None })
-        {
-            self.vtime_entries.remove(&key);
-            return true;
+        let found = match self.mode {
+            DsqMode::Priq => {
+                if let Some(key) = self
+                    .vtime_entries
+                    .iter()
+                    .find_map(|(k, &v)| if v == pid { Some(*k) } else { None })
+                {
+                    self.vtime_entries.remove(&key);
+                    true
+                } else {
+                    false
+                }
+            }
+            DsqMode::Fifo => {
+                if let Some(pos) = self.fifo_entries.iter().position(|&p| p == pid) {
+                    self.fifo_entries.remove(pos);
+                    true
+                } else {
+                    false
+                }
+            }
+            DsqMode::Empty => false,
+        };
+        if found && self.is_empty() {
+            self.mode = DsqMode::Empty;
         }
-        if let Some(pos) = self.fifo_entries.iter().position(|&p| p == pid) {
-            self.fifo_entries.remove(pos);
-            return true;
-        }
-        false
+        found
     }
 }
 
