@@ -50,3 +50,35 @@ fn test_smt_topology() {
         "task 1 didn't get fair share"
     );
 }
+
+/// NUMA topology: 4 CPUs across 2 NUMA nodes.
+/// With NUMA enabled, each node has its own shared DSQ.
+/// Tasks on different nodes should still get fair runtime.
+#[test]
+fn test_numa_topology() {
+    let _lock = common::setup_test();
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .add_task("node0_task", 0, TaskBehavior {
+            phases: vec![Phase::Run(50_000_000)],
+            repeat: true,
+        })
+        .add_task("node1_task", 0, TaskBehavior {
+            phases: vec![Phase::Run(50_000_000)],
+            repeat: true,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(DynamicScheduler::cosmos_with_numa(4, 2)).run(scenario);
+
+    assert!(trace.total_runtime(Pid(1)) > 0, "task 1 got no runtime");
+    assert!(trace.total_runtime(Pid(2)) > 0, "task 2 got no runtime");
+
+    // Both tasks should get significant runtime
+    let total = trace.total_runtime(Pid(1)) + trace.total_runtime(Pid(2));
+    assert!(
+        trace.total_runtime(Pid(1)) >= total / 4,
+        "task 1 didn't get fair share"
+    );
+}

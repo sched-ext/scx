@@ -255,6 +255,30 @@ impl DynamicScheduler {
         Self::load(&format!("{dir}/libscx_mitosis.so"), "mitosis", nr_cpus)
     }
 
+    /// Load the scx_cosmos scheduler with NUMA topology.
+    ///
+    /// CPUs are grouped sequentially into `nr_nodes` NUMA nodes.
+    /// `nr_cpus` must be divisible by `nr_nodes`.
+    pub fn cosmos_with_numa(nr_cpus: u32, nr_nodes: u32) -> Self {
+        assert!(nr_nodes > 0);
+        assert!(nr_cpus >= nr_nodes);
+        assert!(
+            nr_cpus.is_multiple_of(nr_nodes),
+            "nr_cpus ({nr_cpus}) must be divisible by nr_nodes ({nr_nodes})"
+        );
+        let sched = Self::cosmos(nr_cpus);
+        // Call cosmos_configure_numa in the loaded .so
+        type ConfigureNumaFn = unsafe extern "C" fn(u32, u32);
+        unsafe {
+            let sym: libloading::Symbol<ConfigureNumaFn> = sched
+                ._lib
+                .get(b"cosmos_configure_numa")
+                .expect("cosmos_configure_numa not found");
+            (sym)(nr_cpus, nr_nodes);
+        }
+        sched
+    }
+
     /// Look up scheduler ops function pointers from the loaded library.
     ///
     /// Mandatory symbols panic if missing. Optional symbols become `None`.

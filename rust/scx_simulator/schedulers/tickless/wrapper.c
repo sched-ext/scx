@@ -30,6 +30,8 @@ static struct scx_test_map cpu_ctx_map;
 
 void tickless_register_maps(void)
 {
+	scx_test_map_clear_all();
+
 	INIT_SCX_TEST_MAP_FROM_TASK_STORAGE(&task_ctx_map, task_ctx_stor);
 	scx_test_map_register(&task_ctx_map, &task_ctx_stor);
 
