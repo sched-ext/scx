@@ -83,15 +83,22 @@ static struct cpu_ctx *cosmos_lookup_percpu_elem(int cpu)
 /*
  * Register the COSMOS BPF maps with the test map infrastructure.
  *
- * Only task_ctx_stor (TASK_STORAGE) needs registration.
- * cpu_ctx_stor (PERCPU_ARRAY) is handled by the static array above.
+ * Both task_ctx_stor (TASK_STORAGE) and cpu_node_map (HASH) are
+ * registered here; cpu_ctx_stor (PERCPU_ARRAY) is handled by the
+ * static array above.
  */
 static struct scx_test_map task_ctx_map;
+static struct scx_test_map cpu_node_test_map;
 
 void cosmos_register_maps(void)
 {
+	scx_test_map_clear_all();
+
 	INIT_SCX_TEST_MAP_FROM_TASK_STORAGE(&task_ctx_map, task_ctx_stor);
 	scx_test_map_register(&task_ctx_map, &task_ctx_stor);
+
+	INIT_SCX_TEST_MAP(&cpu_node_test_map, cpu_node_map);
+	scx_test_map_register(&cpu_node_test_map, &cpu_node_map);
 }
 
 /*
@@ -120,4 +127,29 @@ void cosmos_setup(unsigned int num_cpus)
 
 	cosmos_register_maps();
 	enable_primary_cpu(&arg);
+}
+
+/*
+ * Configure NUMA topology after setup.
+ * Populates cpu_node_map with sequential grouping:
+ * CPUs [0, cpus_per_node) → node 0, etc.
+ * Enables NUMA-aware scheduling in COSMOS.
+ */
+void cosmos_configure_numa(unsigned int num_cpus, unsigned int nr_nodes)
+{
+	unsigned int cpus_per_node, cpu, node;
+
+	if (nr_nodes <= 1)
+		return;  /* leave numa_enabled=false */
+
+	cpus_per_node = num_cpus / nr_nodes;
+	for (cpu = 0; cpu < num_cpus; cpu++) {
+		node = cpu / cpus_per_node;
+		if (node >= nr_nodes)
+			node = nr_nodes - 1;
+		bpf_map_update_elem(&cpu_node_map, &cpu, &node, 0);
+	}
+
+	numa_enabled = true;
+	nr_node_ids = nr_nodes;
 }

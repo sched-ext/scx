@@ -1,13 +1,17 @@
 #pragma once
 
 struct scx_test_map {
-	void **keys;
-	void **values;
+	void *keys;
+	void *values;
 	unsigned int max_entries;
 	unsigned int key_size;
 	unsigned int value_size;
 	int nr;
 };
+
+/* Byte-level element accessors — stride by key_size / value_size. */
+#define SCX_MAP_KEY(map, i)   ((void *)((char *)(map)->keys + (size_t)(i) * (map)->key_size))
+#define SCX_MAP_VALUE(map, i) ((void *)((char *)(map)->values + (size_t)(i) * (map)->value_size))
 
 struct scx_percpu_test_map {
 	struct scx_test_map *per_cpu_maps;
@@ -15,6 +19,7 @@ struct scx_percpu_test_map {
 };
 
 void scx_test_map_register(struct scx_test_map *map, void *map_ptr);
+void scx_test_map_clear_all(void);
 void *scx_test_map_lookup_elem(void *map, const void *key);
 void *scx_test_map_lookup_percpu_elem(void *map, const void *key, int cpu);
 int scx_test_map_update_elem(void *map, const void *key, const void *value,
