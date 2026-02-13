@@ -1,0 +1,21 @@
+{
+    "global": {
+        "duration": 1,
+        "default_policy": "SCHED_OTHER",
+        "calibration": "CPU0"
+    },
+    "tasks": {
+        "heavy": {
+            "priority": -5,
+            "loop": -1,
+            "run": 10000,
+            "sleep": 10000
+        },
+        "light": {
+            "priority": 0,
+            "loop": -1,
+            "run": 5000,
+            "sleep": 15000
+        }
+    }
+}
