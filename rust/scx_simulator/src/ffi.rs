@@ -30,6 +30,10 @@ extern "C" {
     pub fn sim_task_setup_cpus_ptr(p: *mut c_void);
     pub fn sim_task_get_scx_flags(p: *mut c_void) -> u32;
     pub fn sim_task_set_scx_flags(p: *mut c_void, flags: u32);
+
+    // Idle cpumask management (implemented in scx_test_cpumask.c)
+    pub fn scx_test_set_idle_cpumask(cpu: i32);
+    pub fn scx_bpf_test_and_clear_cpu_idle(cpu: i32) -> bool;
 }
 
 // ---------------------------------------------------------------------------

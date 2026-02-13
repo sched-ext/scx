@@ -4,7 +4,7 @@
 //! clock, CPU/task state, and drives the scheduler through its ops callbacks.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use tracing::{debug, info};
 
@@ -71,6 +71,11 @@ impl<S: Scheduler> Simulator<S> {
         // Build CPUs
         let cpus: Vec<SimCpu> = (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect();
 
+        // Initialize all CPUs as idle in the C cpumask
+        for i in 0..nr_cpus {
+            unsafe { ffi::scx_test_set_idle_cpumask(i as i32) };
+        }
+
         // Build tasks
         let mut tasks: HashMap<Pid, SimTask> = HashMap::new();
         let mut task_raw_to_pid: HashMap<usize, Pid> = HashMap::new();
@@ -98,6 +103,8 @@ impl<S: Scheduler> Simulator<S> {
             prng_state: 0xDEAD_BEEF, // deterministic seed
             ops_context: OpsContext::None,
             pending_dispatch: None,
+            dsq_iter: None,
+            kicked_cpus: HashSet::new(),
         };
 
         // Initialize scheduler
@@ -564,6 +571,7 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::enter_sim(state);
                 state.ops_context = OpsContext::Dispatch;
                 state.current_cpu = cpu;
+                state.kicked_cpus.clear();
                 debug!(cpu = cpu.0, "dispatch");
                 self.scheduler.dispatch(cpu.0 as i32, std::ptr::null_mut());
                 state.ops_context = OpsContext::None;
@@ -572,13 +580,25 @@ impl<S: Scheduler> Simulator<S> {
                 state.resolve_pending_dispatch(cpu);
                 kfuncs::exit_sim();
             }
+
+            // Process CPUs kicked during dispatch().
+            // The scheduler may have dispatched tasks to other CPUs'
+            // local DSQs via scx_bpf_dsq_move(SCX_DSQ_LOCAL_ON | cpu).
+            let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
+            for kicked_cpu in kicked {
+                if kicked_cpu != cpu {
+                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+                }
+            }
         }
 
         // Try to pull a task from the local DSQ
         if let Some(pid) = state.cpus[cpu.0 as usize].local_dsq.pop_front() {
             self.start_running(cpu, pid, state, tasks, events, seq);
         } else {
-            // CPU is idle
+            // CPU is idle — update the C idle cpumask so
+            // scx_bpf_test_and_clear_cpu_idle works correctly
+            unsafe { ffi::scx_test_set_idle_cpumask(cpu.0 as i32) };
             let local_t = state.cpus[cpu.0 as usize].local_clock;
             kfuncs::set_sim_clock(local_t);
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
@@ -610,6 +630,9 @@ impl<S: Scheduler> Simulator<S> {
         task.state = TaskState::Running { cpu };
         task.prev_cpu = cpu;
         state.cpus[cpu.0 as usize].current_task = Some(pid);
+        // Clear idle bit in the C cpumask (in case scheduler didn't call
+        // scx_bpf_test_and_clear_cpu_idle for this CPU)
+        unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };
 
         let raw = task.raw();
 
