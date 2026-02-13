@@ -1,0 +1,15 @@
+---
+title: Per-CPU map emulation for LAVD
+status: open
+priority: 0
+issue_type: feature
+depends_on:
+  sim-1: parent-child
+  sim-2: blocks
+created_at: 2026-02-13T17:58:29.540304990+00:00
+updated_at: 2026-02-13T17:59:49.962156189+00:00
+---
+
+# Description
+
+LAVD's cpu_ctx_stor is BPF_MAP_TYPE_PERCPU_ARRAY. get_cpu_ctx() calls bpf_map_lookup_elem and must return per-CPU cpu_ctx struct. get_cpu_ctx_id(cpu) calls bpf_map_lookup_percpu_elem to get another CPU's context. Need to allocate nr_cpus copies of cpu_ctx. The existing scxtest map infrastructure handles regular arrays but not per-CPU arrays.
