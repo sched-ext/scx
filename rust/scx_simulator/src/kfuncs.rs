@@ -791,6 +791,8 @@ mod tests {
             pending_dispatch: None,
             dsq_iter: None,
             kicked_cpus: HashSet::new(),
+            task_last_cpu: HashMap::new(),
+            reenqueue_local_requested: false,
         }
     }
 

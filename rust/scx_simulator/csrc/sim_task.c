@@ -20,9 +20,52 @@ extern void *memset(void *s, int c, unsigned long n);
 /* Provide the LINUX_KERNEL_VERSION symbol that common.bpf.h declares as extern */
 int LINUX_KERNEL_VERSION = 0;
 
+/*
+ * Global root cgroup structures for simulator cgroup modeling.
+ *
+ * Every task starts with cgroups pointing to this default css_set,
+ * which in turn points at a root cgroup.  Schedulers that use cgroups
+ * (e.g., mitosis) access p->cgroups->dfl_cgrp->kn->id and expect
+ * consistent pointers.
+ */
+static struct kernfs_node sim_root_kn;
+static struct cgroup sim_root_cgroup;
+static struct css_set sim_root_css_set;
+static int sim_root_cgroup_initialized;
+
+static void sim_init_root_cgroup(void)
+{
+	if (sim_root_cgroup_initialized)
+		return;
+
+	memset(&sim_root_kn, 0, sizeof(sim_root_kn));
+	sim_root_kn.id = 1; /* matches default root_cgid */
+
+	memset(&sim_root_cgroup, 0, sizeof(sim_root_cgroup));
+	sim_root_cgroup.kn = &sim_root_kn;
+	sim_root_cgroup.self.cgroup = &sim_root_cgroup;
+	sim_root_cgroup.level = 0;
+	/* subsys[] is zeroed (no cpuset), percpu_count_ptr is 0 (not dying) */
+
+	memset(&sim_root_css_set, 0, sizeof(sim_root_css_set));
+	sim_root_css_set.dfl_cgrp = &sim_root_cgroup;
+
+	sim_root_cgroup_initialized = 1;
+}
+
+void *sim_get_root_cgroup(void)
+{
+	sim_init_root_cgroup();
+	return &sim_root_cgroup;
+}
+
 struct task_struct *sim_task_alloc(void)
 {
 	struct task_struct *p = calloc(1, sizeof(struct task_struct));
+	if (p) {
+		sim_init_root_cgroup();
+		p->cgroups = &sim_root_css_set;
+	}
 	return p;
 }
 

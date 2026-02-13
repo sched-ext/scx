@@ -26,7 +26,7 @@
  * avoid redefinition warnings.
  */
 #undef bpf_core_read
-#define bpf_core_read(dst, sz, src) __builtin_memcpy(dst, src, sz)
+#define bpf_core_read(dst, sz, src) (__builtin_memcpy(dst, src, sz), (int)0)
 #undef bpf_core_cast
 #define bpf_core_cast(ptr, type) ((type *)(ptr))
 #undef bpf_core_type_matches
@@ -245,4 +245,15 @@ extern unsigned int sim_bpf_get_smp_processor_id(void);
 extern struct task_struct *sim_bpf_get_current_task_btf(void);
 #undef bpf_get_current_task_btf
 #define bpf_get_current_task_btf() sim_bpf_get_current_task_btf()
+
+/*
+ * BPF_PROG override for tracepoint/fentry programs.
+ *
+ * BPF_PROG from bpf_tracing.h uses ___bpf_ctx_cast and
+ * __builtin_preserve_access_index (Clang-only builtins). For userspace
+ * compilation with GCC, produce a plain weak function instead. This
+ * does NOT affect BPF_STRUCT_OPS which is separately overridden above.
+ */
+#undef BPF_PROG
+#define BPF_PROG(name, args...) __attribute__((weak)) name(args)
 

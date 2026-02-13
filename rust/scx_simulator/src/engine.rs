@@ -72,9 +72,13 @@ impl<S: Scheduler> Simulator<S> {
         // Build CPUs
         let cpus: Vec<SimCpu> = (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect();
 
-        // Initialize all CPUs as idle in the C cpumask
+        // Initialize all CPUs as idle in the C cpumask.
+        // Without SMT modeling, the SMT mask mirrors the idle cpumask.
         for i in 0..nr_cpus {
-            unsafe { ffi::scx_test_set_idle_cpumask(i as i32) };
+            unsafe {
+                ffi::scx_test_set_idle_cpumask(i as i32);
+                ffi::scx_test_set_idle_smtmask(i as i32);
+            }
         }
 
         // Build tasks
@@ -615,8 +619,12 @@ impl<S: Scheduler> Simulator<S> {
             self.start_running(cpu, pid, state, tasks, events, seq);
         } else {
             // CPU is idle — update the C idle cpumask so
-            // scx_bpf_test_and_clear_cpu_idle works correctly
-            unsafe { ffi::scx_test_set_idle_cpumask(cpu.0 as i32) };
+            // scx_bpf_test_and_clear_cpu_idle works correctly.
+            // Without SMT, the SMT mask mirrors the idle cpumask.
+            unsafe {
+                ffi::scx_test_set_idle_cpumask(cpu.0 as i32);
+                ffi::scx_test_set_idle_smtmask(cpu.0 as i32);
+            }
             let local_t = state.cpus[cpu.0 as usize].local_clock;
             kfuncs::set_sim_clock(local_t);
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
@@ -651,8 +659,12 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].prev_task = None;
         state.task_last_cpu.insert(pid, cpu);
         // Clear idle bit in the C cpumask (in case scheduler didn't call
-        // scx_bpf_test_and_clear_cpu_idle for this CPU)
-        unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };
+        // scx_bpf_test_and_clear_cpu_idle for this CPU).
+        // Without SMT, also clear the SMT mask.
+        unsafe {
+            ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32);
+            ffi::scx_test_clear_idle_smtmask(cpu.0 as i32);
+        }
 
         let raw = task.raw();
 
