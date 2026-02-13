@@ -90,6 +90,13 @@ pub struct SimulatorState {
     /// CPUs kicked via `scx_bpf_kick_cpu` during a callback.
     /// The engine processes these after the callback returns.
     pub kicked_cpus: HashSet<CpuId>,
+    /// Per-task last CPU (set when a task starts running).
+    /// Used by `scx_bpf_task_cpu` to return the correct value.
+    pub task_last_cpu: HashMap<Pid, CpuId>,
+    /// Flag set by `scx_bpf_reenqueue_local` during `cpu_release`.
+    /// The engine drains the local DSQ and re-enqueues tasks after the
+    /// callback returns.
+    pub reenqueue_local_requested: bool,
 }
 
 impl SimulatorState {
@@ -391,9 +398,21 @@ pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {
 }
 
 /// Get the CPU a task is assigned to.
+///
+/// Returns the CPU the task was last scheduled on, matching the kernel's
+/// `task_cpu(p)` semantics. Falls back to CPU 0 for tasks that haven't
+/// run yet.
 #[no_mangle]
-pub extern "C" fn scx_bpf_task_cpu(_p: *const c_void) -> i32 {
-    with_sim(|sim| sim.current_cpu.0 as i32)
+pub extern "C" fn scx_bpf_task_cpu(p: *const c_void) -> i32 {
+    with_sim(|sim| {
+        let pid = sim.task_pid_from_raw(p as *mut c_void);
+        let cpu = sim
+            .task_last_cpu
+            .get(&pid)
+            .copied()
+            .unwrap_or(CpuId(0));
+        cpu.0 as i32
+    })
 }
 
 /// Report a scheduler error. In the simulator, we panic.
@@ -408,10 +427,19 @@ pub extern "C" fn scx_bpf_error_bstr(fmt: *const i8, _data: *const u64, _data_sz
     eprintln!("scx_bpf_error: {msg}");
 }
 
-/// Reenqueue all tasks from the local DSQ. No-op for now.
+/// Request re-enqueue of all tasks on the current CPU's local DSQ.
+///
+/// Called by `cpu_release` handlers (e.g. COSMOS). Sets a flag that
+/// the engine checks after the callback returns. The engine then
+/// drains the local DSQ and calls `enqueue(p, SCX_ENQ_REENQ)` for
+/// each task.
 #[no_mangle]
 pub extern "C" fn scx_bpf_reenqueue_local() -> u32 {
-    0
+    with_sim(|sim| {
+        debug!(cpu = sim.current_cpu.0, "kfunc reenqueue_local");
+        sim.reenqueue_local_requested = true;
+        0
+    })
 }
 
 /// No-op stubs for cpumask ref counting in simulator.

@@ -5,6 +5,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::ffi::c_void;
 
 use tracing::{debug, info};
 
@@ -105,6 +106,8 @@ impl<S: Scheduler> Simulator<S> {
             pending_dispatch: None,
             dsq_iter: None,
             kicked_cpus: HashSet::new(),
+            task_last_cpu: HashMap::new(),
+            reenqueue_local_requested: false,
         };
 
         // Initialize scheduler
@@ -331,6 +334,7 @@ impl<S: Scheduler> Simulator<S> {
         task.state = TaskState::Runnable;
 
         state.cpus[cpu.0 as usize].current_task = None;
+        state.cpus[cpu.0 as usize].prev_task = Some(pid);
 
         // Set slice to 0: the full slice was consumed (used by stopping() for vtime)
         unsafe { crate::ffi::sim_task_set_slice(raw, 0) };
@@ -387,6 +391,7 @@ impl<S: Scheduler> Simulator<S> {
         let still_runnable = has_next && matches!(next_phase, Some(Phase::Run(_)));
 
         state.cpus[cpu.0 as usize].current_task = None;
+        state.cpus[cpu.0 as usize].prev_task = Some(pid);
 
         // Set slice to reflect consumed time (used by stopping() for vtime)
         let remaining_slice = original_slice.saturating_sub(time_consumed);
@@ -566,6 +571,12 @@ impl<S: Scheduler> Simulator<S> {
 
         // Check if local DSQ has tasks
         if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
+            // Look up the previously-running task's raw pointer for dispatch
+            let prev_raw = state.cpus[cpu.0 as usize]
+                .prev_task
+                .and_then(|pid| state.task_pid_to_raw.get(&pid).copied())
+                .map_or(std::ptr::null_mut(), |raw| raw as *mut c_void);
+
             // Call scheduler dispatch to try to fill the local DSQ
             unsafe {
                 kfuncs::enter_sim(state);
@@ -573,7 +584,7 @@ impl<S: Scheduler> Simulator<S> {
                 state.current_cpu = cpu;
                 state.kicked_cpus.clear();
                 debug!(cpu = cpu.0, "dispatch");
-                self.scheduler.dispatch(cpu.0 as i32, std::ptr::null_mut());
+                self.scheduler.dispatch(cpu.0 as i32, prev_raw);
                 state.ops_context = OpsContext::None;
                 // Flush any deferred dispatch from dispatch() callback
                 // (SCX_DSQ_LOCAL resolves to the dispatching CPU)
@@ -630,6 +641,8 @@ impl<S: Scheduler> Simulator<S> {
         task.state = TaskState::Running { cpu };
         task.prev_cpu = cpu;
         state.cpus[cpu.0 as usize].current_task = Some(pid);
+        state.cpus[cpu.0 as usize].prev_task = None;
+        state.task_last_cpu.insert(pid, cpu);
         // Clear idle bit in the C cpumask (in case scheduler didn't call
         // scx_bpf_test_and_clear_cpu_idle for this CPU)
         unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };

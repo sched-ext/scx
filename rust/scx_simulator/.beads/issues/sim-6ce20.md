@@ -1,12 +1,13 @@
 ---
 title: Pass prev task to dispatch callback
-status: open
+status: closed
 priority: 2
 issue_type: bug
 depends_on:
   sim-5a20c: related
 created_at: 2026-02-13T13:04:36.633452243+00:00
-updated_at: 2026-02-13T13:07:58.516338800+00:00
+updated_at: 2026-02-13T13:15:57.840914346+00:00
+closed_at: 2026-02-13T13:15:57.840914306+00:00
 ---
 
 # Description

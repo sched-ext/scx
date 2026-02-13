@@ -97,6 +97,11 @@ pub trait Scheduler {
     unsafe fn init_task(&self, _p: *mut c_void) -> i32 {
         0
     }
+
+    /// A CPU was released by a higher scheduling class (ops.cpu_release).
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn cpu_release(&self, _cpu: i32, _args: *mut c_void) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +118,7 @@ type StoppingFn = unsafe extern "C" fn(*mut c_void, bool);
 type EnableFn = unsafe extern "C" fn(*mut c_void);
 type RunnableFn = unsafe extern "C" fn(*mut c_void, u64);
 type InitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+type CpuReleaseFn = unsafe extern "C" fn(i32, *mut c_void);
 type SetupFn = unsafe extern "C" fn(u32);
 
 /// Resolved function pointers for a scheduler's ops.
@@ -126,6 +132,7 @@ struct SchedOps {
     enable: EnableFn,
     runnable: Option<RunnableFn>,
     init_task: Option<InitTaskFn>,
+    cpu_release: Option<CpuReleaseFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -219,9 +226,6 @@ impl DynamicScheduler {
     }
 
     /// Load the scx_cosmos scheduler, configured for `nr_cpus` CPUs.
-    // TODO: COSMOS defines cosmos_cpu_release(cpu, args) which calls
-    // scx_bpf_reenqueue_local(). This op is not yet in the Scheduler trait.
-    // Add cpu_release support to SchedOps, Scheduler trait, and the engine.
     pub fn cosmos(nr_cpus: u32) -> Self {
         let dir = env!("SCHEDULER_SO_DIR");
         Self::load(&format!("{dir}/libscx_cosmos.so"), "cosmos", nr_cpus)
@@ -266,6 +270,8 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), RunnableFn>(p)),
             init_task: try_get!("init_task")
                 .map(|p| std::mem::transmute::<*const (), InitTaskFn>(p)),
+            cpu_release: try_get!("cpu_release")
+                .map(|p| std::mem::transmute::<*const (), CpuReleaseFn>(p)),
         }
     }
 }
@@ -310,6 +316,12 @@ impl Scheduler for DynamicScheduler {
             f(p, std::ptr::null_mut())
         } else {
             0
+        }
+    }
+
+    unsafe fn cpu_release(&self, cpu: i32, args: *mut c_void) {
+        if let Some(f) = self.ops.cpu_release {
+            f(cpu, args);
         }
     }
 }
