@@ -122,3 +122,35 @@ s32 scx_bpf_pick_idle_cpu(const struct cpumask *cpus_allowed, u64 flags __attrib
 	}
 	return -1;
 }
+
+s32 scx_bpf_pick_any_cpu_node(const struct cpumask *cpus_allowed,
+			      int node __attribute__((unused)),
+			      u64 flags __attribute__((unused)))
+{
+	for (int i = 0; i < NR_CPUS; i++) {
+		if (cpumask_test_cpu(i, cpus_allowed))
+			return i;
+	}
+	return -1;
+}
+
+s32 scx_bpf_pick_any_cpu(const struct cpumask *cpus_allowed,
+			 u64 flags __attribute__((unused)))
+{
+	return scx_bpf_pick_any_cpu_node(cpus_allowed, 0, flags);
+}
+
+const struct cpumask *scx_bpf_get_online_cpumask(void)
+{
+	return &all_cpus;
+}
+
+const struct cpumask *scx_bpf_get_possible_cpumask(void)
+{
+	return &all_cpus;
+}
+
+const struct cpumask *scx_bpf_get_idle_cpumask_node(int node __attribute__((unused)))
+{
+	return &idle_cpumask;
+}

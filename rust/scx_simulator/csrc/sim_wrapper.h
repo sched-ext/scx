@@ -145,6 +145,15 @@
 #define bpf_probe_read_kernel_str(dst, sz, src) ((void)(dst), (void)(sz), (void)(src), (long)0)
 #endif
 
+/*
+ * bpf_probe_read_kernel -- reads kernel memory. In the simulator, the
+ * "kernel" pointer is just a regular userspace pointer, so memcpy is safe.
+ * Returns -EFAULT (> 0 test fails) if src is NULL to match BPF semantics.
+ */
+#undef bpf_probe_read_kernel
+#define bpf_probe_read_kernel(dst, sz, src) \
+	((src) ? (__builtin_memcpy((dst), (src), (sz)), (long)0) : (long)(-14))
+
 /* __kconfig variables don't exist in userspace */
 #undef __kconfig
 #define __kconfig

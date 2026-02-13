@@ -177,6 +177,28 @@ static struct task_struct *lavd_cpu_curr(int cpu)
 extern void sim_install_sigfpe_handler(void);
 
 /*
+ * Per-task arena storage initialization (sim_sdt_stubs.c).
+ * Must be called before any scx_task_alloc() calls.
+ */
+extern int scx_task_init(u64 data_size);
+
+/*
+ * Kernel symbols that LAVD references but are not available in userspace.
+ *
+ * nr_cpu_ids: kernel global variable for number of possible CPUs.
+ * Declared as "const extern volatile u32" in lavd.bpf.h; with -Dconst=
+ * it becomes "extern volatile u32" (just a declaration). We provide the
+ * definition here and lavd_setup() sets the value.
+ *
+ * cpufreq_cpu_data / hw_pressure: __ksym kernel symbols referenced in
+ * power.bpf.c but guarded by bpf_ksym_exists() which returns 0.
+ * Provide zero-initialized definitions to satisfy the linker.
+ */
+volatile u32 nr_cpu_ids;
+struct cpufreq_policy *cpufreq_cpu_data;
+unsigned long hw_pressure;
+
+/*
  * =================================================================
  * Include LAVD source files
  * =================================================================
@@ -198,6 +220,29 @@ extern void sim_install_sigfpe_handler(void);
 #include "sdt_task_defs.h"
 
 #include "intf.h"
+
+/*
+ * Pre-include bpf_experimental.h to trigger its include guard, then
+ * override can_loop and __cond_break which it defines using BPF-only
+ * inline asm (.byte 0xe5 / may_goto). bpf_arena_common.bpf.h already
+ * defines these correctly for SCX_BPF_UNITTEST but bpf_experimental.h
+ * unconditionally redefines them.
+ *
+ * Also override the IRQ/NMI context checks (get_preempt_count,
+ * bpf_in_hardirq, bpf_in_nmi, bpf_in_serving_softirq) which access
+ * per-CPU kernel variables via bpf_this_cpu_ptr/bpf_core_field_exists.
+ * The simulator never runs in interrupt context.
+ */
+#include <bpf_experimental.h>
+#undef can_loop
+#define can_loop true
+#undef __cond_break
+#define __cond_break(expr) expr
+#define get_preempt_count() (0)
+#define bpf_in_hardirq() (0)
+#define bpf_in_nmi() (0)
+#define bpf_in_serving_softirq() (0)
+#define bpf_in_interrupt() (0)
 
 #include "util.bpf.c"
 #include "power.bpf.c"
@@ -382,6 +427,9 @@ void lavd_setup(unsigned int num_cpus)
 
 	/* Install SIGFPE handler for BPF div-by-zero semantics */
 	sim_install_sigfpe_handler();
+
+	/* Initialize per-task arena storage for task_ctx */
+	scx_task_init(sizeof(struct task_ctx));
 
 	/* Register maps */
 	lavd_register_maps();

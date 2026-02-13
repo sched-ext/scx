@@ -22,6 +22,9 @@ use crate::types::{CpuId, Pid, TimeNs};
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
 
+/// Tick interval in nanoseconds (4ms, matching HZ=250).
+const TICK_INTERVAL_NS: TimeNs = 4_000_000;
+
 /// A simulation event, ordered by timestamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Event {
@@ -68,6 +71,8 @@ enum EventKind {
     TaskPhaseComplete { cpu: CpuId },
     /// A BPF timer fires (e.g., deferred wakeup timer).
     TimerFired,
+    /// Periodic scheduler tick on a CPU.
+    Tick { cpu: CpuId },
 }
 
 /// The main simulator.
@@ -99,6 +104,7 @@ impl<S: Scheduler> Simulator<S> {
         // Initialize all CPUs as idle in the C cpumasks
         for i in 0..nr_cpus {
             unsafe {
+                ffi::scx_test_set_all_cpumask(i as i32);
                 ffi::scx_test_set_idle_cpumask(i as i32);
                 // All CPUs idle => all cores fully idle
                 ffi::scx_test_set_idle_smtmask(i as i32);
@@ -212,7 +218,9 @@ impl<S: Scheduler> Simulator<S> {
 
             // Advance per-CPU clock for CPU-specific events
             match &event.kind {
-                EventKind::SliceExpired { cpu } | EventKind::TaskPhaseComplete { cpu } => {
+                EventKind::SliceExpired { cpu }
+                | EventKind::TaskPhaseComplete { cpu }
+                | EventKind::Tick { cpu } => {
                     state.advance_cpu_clock(*cpu);
                     kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock);
                 }
@@ -248,6 +256,15 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 EventKind::TimerFired => {
                     self.handle_timer_fired(&mut state, &mut tasks, &mut events, &mut seq);
+                }
+                EventKind::Tick { cpu } => {
+                    self.handle_tick(
+                        cpu,
+                        &mut state,
+                        &mut tasks,
+                        &mut events,
+                        &mut seq,
+                    );
                 }
             }
         }
@@ -297,6 +314,56 @@ impl<S: Scheduler> Simulator<S> {
         let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
         for kicked_cpu in kicked {
             self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+        }
+    }
+
+    /// Handle a periodic scheduler tick on a CPU.
+    ///
+    /// Calls `ops.tick(p)` where `p` is the currently running task.
+    /// If a task is still running after the tick, schedules the next tick.
+    fn handle_tick(
+        &self,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut BinaryHeap<Reverse<Event>>,
+        seq: &mut u64,
+    ) {
+        let pid = match state.cpus[cpu.0 as usize].current_task {
+            Some(pid) => pid,
+            None => return, // No task running — stale tick event
+        };
+
+        let raw = match tasks.get(&pid) {
+            Some(task) => task.raw(),
+            None => return,
+        };
+
+        unsafe {
+            kfuncs::enter_sim(state);
+            state.current_cpu = cpu;
+            debug!(pid = pid.0, cpu = cpu.0, "tick");
+            self.scheduler.tick(raw);
+            kfuncs::exit_sim();
+        }
+
+        // Process CPUs kicked by the tick callback
+        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
+        for kicked_cpu in kicked {
+            if kicked_cpu != cpu {
+                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+            }
+        }
+
+        // Schedule next tick if task is still running
+        if state.cpus[cpu.0 as usize].current_task.is_some() {
+            let next_tick = state.cpus[cpu.0 as usize].local_clock + TICK_INTERVAL_NS;
+            events.push(Reverse(Event {
+                time_ns: next_tick,
+                seq: *seq,
+                kind: EventKind::Tick { cpu },
+            }));
+            *seq += 1;
         }
     }
 
@@ -539,6 +606,10 @@ impl<S: Scheduler> Simulator<S> {
             state.current_cpu = cpu;
             debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
+            if !still_runnable {
+                debug!(pid = pid.0, cpu = cpu.0, "quiescent");
+                self.scheduler.quiescent(raw, 0);
+            }
             kfuncs::exit_sim();
         }
 
@@ -866,6 +937,15 @@ impl<S: Scheduler> Simulator<S> {
             }));
             *seq += 1;
         }
+
+        // Schedule first tick for this CPU
+        let first_tick = local_t + TICK_INTERVAL_NS;
+        events.push(Reverse(Event {
+            time_ns: first_tick,
+            seq: *seq,
+            kind: EventKind::Tick { cpu },
+        }));
+        *seq += 1;
     }
 
     /// Advance a task past any Wake phases to the next Run or Sleep phase.

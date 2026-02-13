@@ -36,7 +36,8 @@ extern "C" {
     pub fn sim_task_set_mm(p: *mut c_void, mm: *mut c_void);
     pub fn sim_task_get_mm(p: *mut c_void) -> *mut c_void;
 
-    // Idle cpumask management (implemented in scx_test_cpumask.c)
+    // Cpumask management (implemented in scx_test_cpumask.c)
+    pub fn scx_test_set_all_cpumask(cpu: i32);
     pub fn scx_test_set_idle_cpumask(cpu: i32);
     pub fn scx_test_clear_idle_cpumask(cpu: i32);
     pub fn scx_test_set_idle_smtmask(cpu: i32);
@@ -46,6 +47,9 @@ extern "C" {
 
     // Exit info for the exit callback (implemented in sim_task.c)
     pub fn sim_get_exit_info() -> *mut c_void;
+
+    // Init task args for the init_task callback (implemented in sim_task.c)
+    pub fn sim_get_init_task_args() -> *mut c_void;
 
     // SDT / arena per-task storage (implemented in sim_sdt_stubs.c)
     pub fn scx_task_init(data_size: u64) -> i32;
@@ -129,6 +133,12 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code.
     unsafe fn fire_timer(&self) {}
+
+    /// Periodic tick on the current CPU (ops.tick). Optional.
+    /// `p` is the currently running task.
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer.
+    unsafe fn tick(&self, _p: *mut c_void) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +159,8 @@ type CpuReleaseFn = unsafe extern "C" fn(i32, *mut c_void);
 type ExitFn = unsafe extern "C" fn(*mut c_void);
 type SetupFn = unsafe extern "C" fn(u32);
 type FireTimerFn = unsafe extern "C" fn();
+type QuiescentFn = unsafe extern "C" fn(*mut c_void, u64);
+type TickFn = unsafe extern "C" fn(*mut c_void);
 
 /// Resolved function pointers for a scheduler's ops.
 struct SchedOps {
@@ -164,6 +176,8 @@ struct SchedOps {
     cpu_release: Option<CpuReleaseFn>,
     exit: Option<ExitFn>,
     fire_timer: Option<FireTimerFn>,
+    quiescent: Option<QuiescentFn>,
+    tick: Option<TickFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -272,6 +286,17 @@ impl DynamicScheduler {
         Self::load(&format!("{dir}/libscx_mitosis.so"), "mitosis", nr_cpus)
     }
 
+    /// Load the scx_lavd scheduler, configured for `nr_cpus` CPUs.
+    ///
+    /// LAVD (Latency-criticality Aware Virtual Deadline) is a production
+    /// scheduler that combines virtual deadline ordering with latency
+    /// criticality tracking. In the simulator, complex features like
+    /// cgroup bandwidth, autopilot, and core compaction are disabled.
+    pub fn lavd(nr_cpus: u32) -> Self {
+        let dir = env!("SCHEDULER_SO_DIR");
+        Self::load(&format!("{dir}/libscx_lavd.so"), "lavd", nr_cpus)
+    }
+
     /// Load the scx_cosmos scheduler with NUMA topology.
     ///
     /// CPUs are grouped sequentially into `nr_nodes` NUMA nodes.
@@ -339,6 +364,9 @@ impl DynamicScheduler {
             exit: try_get!("exit").map(|p| std::mem::transmute::<*const (), ExitFn>(p)),
             fire_timer: try_get!("fire_timer")
                 .map(|p| std::mem::transmute::<*const (), FireTimerFn>(p)),
+            quiescent: try_get!("quiescent")
+                .map(|p| std::mem::transmute::<*const (), QuiescentFn>(p)),
+            tick: try_get!("tick").map(|p| std::mem::transmute::<*const (), TickFn>(p)),
         }
     }
 }
@@ -382,7 +410,7 @@ impl Scheduler for DynamicScheduler {
 
     unsafe fn init_task(&self, p: *mut c_void) -> i32 {
         if let Some(f) = self.ops.init_task {
-            f(p, std::ptr::null_mut())
+            f(p, sim_get_init_task_args())
         } else {
             0
         }
@@ -403,6 +431,18 @@ impl Scheduler for DynamicScheduler {
     unsafe fn fire_timer(&self) {
         if let Some(f) = self.ops.fire_timer {
             f();
+        }
+    }
+
+    unsafe fn quiescent(&self, p: *mut c_void, deq_flags: u64) {
+        if let Some(f) = self.ops.quiescent {
+            f(p, deq_flags);
+        }
+    }
+
+    unsafe fn tick(&self, p: *mut c_void) {
+        if let Some(f) = self.ops.tick {
+            f(p);
         }
     }
 }

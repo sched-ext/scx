@@ -896,6 +896,24 @@ pub extern "C" fn scx_bpf_cpuperf_set(cpu: i32, perf: u32) {
     });
 }
 
+/// Get current CPU performance level. Returns the level set by cpuperf_set,
+/// or SCX_CPUPERF_ONE (1024) if never set.
+#[no_mangle]
+pub extern "C" fn scx_bpf_cpuperf_cur(cpu: i32) -> u32 {
+    with_sim(|sim| {
+        sim.cpus
+            .get(cpu as usize)
+            .map_or(0, |c| if c.perf_lvl > 0 { c.perf_lvl } else { 1024 })
+    })
+}
+
+/// Get CPU performance capacity. Returns SCX_CPUPERF_ONE (1024) for all
+/// CPUs in the simulator (all CPUs have equal max capacity).
+#[no_mangle]
+pub extern "C" fn scx_bpf_cpuperf_cap(_cpu: i32) -> u32 {
+    1024
+}
+
 /// Schedule a BPF timer to fire after `nsecs` nanoseconds.
 ///
 /// Called from C scheduler code when `bpf_timer_start(timer, nsecs, flags)`
