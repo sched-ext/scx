@@ -93,8 +93,8 @@ struct cake_task_ctx {
 /* Pure avg_runtime tier gates (µs) */
 #define TIER_GATE_T0   100   /* < 100µs  → T0 Critical: IRQ, input, audio */
 #define TIER_GATE_T1   2000  /* < 2000µs → T1 Interact: compositor, physics */
-#define TIER_GATE_T2   20000 /* < 20000µs → T2 Frame:    game render (incl. CPU-bound 30fps) */
-                              /* ≥ 20000µs → T3 Bulk:     compilation, bg */
+#define TIER_GATE_T2   8000  /* < 8000µs → T2 Frame:    game render, encode */
+                              /* ≥ 8000µs → T3 Bulk:     compilation, bg */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: Per-CPU state (64 bytes = single cache line)
