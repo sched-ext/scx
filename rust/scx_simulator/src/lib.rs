@@ -42,11 +42,11 @@ pub mod types;
 
 // Re-export the main public types for convenience.
 pub use engine::Simulator;
-pub use ffi::{DynamicScheduler, Scheduler, SchedulerInfo, discover_schedulers};
+pub use ffi::{discover_schedulers, DynamicScheduler, Scheduler, SchedulerInfo};
 pub use fmt::{FmtN, FmtTs};
 pub use kfuncs::sim_clock;
 pub use scenario::Scenario;
-pub use task::{Phase, TaskBehavior, TaskDef, nice_to_weight, sched_weight_to_cgroup};
+pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
 pub use types::{CpuId, DsqId, MmId, Pid, TimeNs, Vtime};
 

@@ -324,16 +324,13 @@ impl DynamicScheduler {
             dispatch: std::mem::transmute::<*const (), DispatchFn>(get!("dispatch")),
             running: std::mem::transmute::<*const (), RunningFn>(get!("running")),
             stopping: std::mem::transmute::<*const (), StoppingFn>(get!("stopping")),
-            enable: try_get!("enable")
-                .map(|p| std::mem::transmute::<*const (), EnableFn>(p)),
-            runnable: try_get!("runnable")
-                .map(|p| std::mem::transmute::<*const (), RunnableFn>(p)),
+            enable: try_get!("enable").map(|p| std::mem::transmute::<*const (), EnableFn>(p)),
+            runnable: try_get!("runnable").map(|p| std::mem::transmute::<*const (), RunnableFn>(p)),
             init_task: try_get!("init_task")
                 .map(|p| std::mem::transmute::<*const (), InitTaskFn>(p)),
             cpu_release: try_get!("cpu_release")
                 .map(|p| std::mem::transmute::<*const (), CpuReleaseFn>(p)),
-            exit: try_get!("exit")
-                .map(|p| std::mem::transmute::<*const (), ExitFn>(p)),
+            exit: try_get!("exit").map(|p| std::mem::transmute::<*const (), ExitFn>(p)),
             fire_timer: try_get!("fire_timer")
                 .map(|p| std::mem::transmute::<*const (), FireTimerFn>(p)),
         }

@@ -61,10 +61,7 @@ enum EventKind {
     /// A task becomes runnable (wakes up).
     /// `waker` identifies the task that triggered the wake (if any),
     /// enabling wake-affine scheduling (e.g., COSMOS mm_affinity).
-    TaskWake {
-        pid: Pid,
-        waker: Option<WakerInfo>,
-    },
+    TaskWake { pid: Pid, waker: Option<WakerInfo> },
     /// A task's time slice expires on the given CPU.
     SliceExpired { cpu: CpuId },
     /// A task finishes its current Run phase on the given CPU.
@@ -92,8 +89,7 @@ impl<S: Scheduler> Simulator<S> {
         let mut cpus: Vec<SimCpu> = (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect();
         if smt > 1 {
             for core_base in (0..nr_cpus).step_by(smt as usize) {
-                let siblings: Vec<CpuId> =
-                    (core_base..core_base + smt).map(CpuId).collect();
+                let siblings: Vec<CpuId> = (core_base..core_base + smt).map(CpuId).collect();
                 for &sib in &siblings {
                     cpus[sib.0 as usize].siblings = siblings.clone();
                 }
@@ -198,7 +194,10 @@ impl<S: Scheduler> Simulator<S> {
             events.push(Reverse(Event {
                 time_ns: def.start_time_ns,
                 seq,
-                kind: EventKind::TaskWake { pid: def.pid, waker: None },
+                kind: EventKind::TaskWake {
+                    pid: def.pid,
+                    waker: None,
+                },
             }));
             seq += 1;
         }
@@ -225,7 +224,14 @@ impl<S: Scheduler> Simulator<S> {
 
             match event.kind {
                 EventKind::TaskWake { pid, waker } => {
-                    self.handle_task_wake(pid, waker, &mut state, &mut tasks, &mut events, &mut seq);
+                    self.handle_task_wake(
+                        pid,
+                        waker,
+                        &mut state,
+                        &mut tasks,
+                        &mut events,
+                        &mut seq,
+                    );
                 }
                 EventKind::SliceExpired { cpu } => {
                     self.handle_slice_expired(cpu, &mut state, &mut tasks, &mut events, &mut seq);
@@ -241,12 +247,7 @@ impl<S: Scheduler> Simulator<S> {
                     );
                 }
                 EventKind::TimerFired => {
-                    self.handle_timer_fired(
-                        &mut state,
-                        &mut tasks,
-                        &mut events,
-                        &mut seq,
-                    );
+                    self.handle_timer_fired(&mut state, &mut tasks, &mut events, &mut seq);
                 }
             }
         }
@@ -344,9 +345,9 @@ impl<S: Scheduler> Simulator<S> {
         // Set waker context: in the kernel, runnable/select_cpu/enqueue all
         // run in the waker's context, so bpf_get_current_task_btf() and
         // bpf_get_smp_processor_id() return the waker's state.
-        let waker_raw = waker.as_ref().and_then(|w| {
-            state.task_pid_to_raw.get(&w.pid).copied()
-        });
+        let waker_raw = waker
+            .as_ref()
+            .and_then(|w| state.task_pid_to_raw.get(&w.pid).copied());
 
         // Call runnable callback
         let prev_cpu = task.prev_cpu;
@@ -883,7 +884,10 @@ impl<S: Scheduler> Simulator<S> {
                     events.push(Reverse(Event {
                         time_ns: state.clock,
                         seq: *seq,
-                        kind: EventKind::TaskWake { pid: target, waker: None },
+                        kind: EventKind::TaskWake {
+                            pid: target,
+                            waker: None,
+                        },
                     }));
                     *seq += 1;
                     if !task.advance_phase() {

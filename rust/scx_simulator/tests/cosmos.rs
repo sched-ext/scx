@@ -93,14 +93,8 @@ fn test_mm_affinity() {
 
     let trace = Simulator::new(DynamicScheduler::cosmos(2)).run(scenario);
 
-    assert!(
-        trace.total_runtime(Pid(1)) > 0,
-        "waker got no runtime"
-    );
-    assert!(
-        trace.total_runtime(Pid(2)) > 0,
-        "wakee got no runtime"
-    );
+    assert!(trace.total_runtime(Pid(1)) > 0, "waker got no runtime");
+    assert!(trace.total_runtime(Pid(2)) > 0, "wakee got no runtime");
 
     // Both tasks should be scheduled multiple times (wake/sleep cycling)
     assert!(
@@ -122,14 +116,22 @@ fn test_numa_topology() {
     let _lock = common::setup_test();
     let scenario = Scenario::builder()
         .cpus(4)
-        .add_task("node0_task", 0, TaskBehavior {
-            phases: vec![Phase::Run(50_000_000)],
-            repeat: true,
-        })
-        .add_task("node1_task", 0, TaskBehavior {
-            phases: vec![Phase::Run(50_000_000)],
-            repeat: true,
-        })
+        .add_task(
+            "node0_task",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(50_000_000)],
+                repeat: true,
+            },
+        )
+        .add_task(
+            "node1_task",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(50_000_000)],
+                repeat: true,
+            },
+        )
         .duration_ms(200)
         .build();
 

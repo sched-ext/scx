@@ -138,7 +138,9 @@ impl SimulatorState {
             return;
         }
         // Check if all siblings (including self) are idle
-        let all_idle = siblings.iter().all(|&sib| self.cpus[sib.0 as usize].is_idle());
+        let all_idle = siblings
+            .iter()
+            .all(|&sib| self.cpus[sib.0 as usize].is_idle());
         if all_idle {
             for &sib in siblings {
                 unsafe { crate::ffi::scx_test_set_idle_smtmask(sib.0 as i32) };
@@ -357,8 +359,7 @@ pub extern "C" fn scx_bpf_select_cpu_and(
         let want_idle_core = flags & SCX_PICK_IDLE_CORE != 0;
 
         let in_mask = |cpu: u32| -> bool {
-            cpus_allowed.is_null()
-                || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_allowed) }
+            cpus_allowed.is_null() || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_allowed) }
         };
 
         let has_idle_core = |cpu: CpuId| -> bool {
@@ -385,9 +386,7 @@ pub extern "C" fn scx_bpf_select_cpu_and(
             if cpu == prev {
                 continue;
             }
-            if sim.cpu_is_idle(cpu)
-                && in_mask(i as u32)
-                && (!want_idle_core || has_idle_core(cpu))
+            if sim.cpu_is_idle(cpu) && in_mask(i as u32) && (!want_idle_core || has_idle_core(cpu))
             {
                 debug!(prev_cpu, cpu = i, "kfunc select_cpu_and (found idle)");
                 return i as i32;
@@ -532,11 +531,7 @@ pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {
 pub extern "C" fn scx_bpf_task_cpu(p: *const c_void) -> i32 {
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p as *mut c_void);
-        let cpu = sim
-            .task_last_cpu
-            .get(&pid)
-            .copied()
-            .unwrap_or(CpuId(0));
+        let cpu = sim.task_last_cpu.get(&pid).copied().unwrap_or(CpuId(0));
         cpu.0 as i32
     })
 }
@@ -719,11 +714,7 @@ pub extern "C" fn sim_dsq_iter_next() -> *mut c_void {
 /// Called by `__COMPAT_scx_bpf_dsq_move` macro override. The source DSQ
 /// is determined from the active DSQ iterator state.
 #[no_mangle]
-pub extern "C" fn sim_scx_bpf_dsq_move(
-    p: *mut c_void,
-    dst_dsq_id: u64,
-    _enq_flags: u64,
-) -> bool {
+pub extern "C" fn sim_scx_bpf_dsq_move(p: *mut c_void, dst_dsq_id: u64, _enq_flags: u64) -> bool {
     with_sim(|sim| {
         let pid = sim.task_pid_from_raw(p);
         let src_dsq_id = match &sim.dsq_iter {
@@ -748,11 +739,7 @@ pub extern "C" fn sim_scx_bpf_dsq_move(
         if dst.is_local() {
             let cpu_idx = sim.current_cpu.0 as usize;
             sim.cpus[cpu_idx].local_dsq.push_back(pid);
-            debug!(
-                pid = pid.0,
-                cpu = sim.current_cpu.0,
-                "dsq_move → LOCAL"
-            );
+            debug!(pid = pid.0, cpu = sim.current_cpu.0, "dsq_move → LOCAL");
         } else if dst.is_local_on() {
             let cpu = dst.local_on_cpu();
             if (cpu.0 as usize) < sim.cpus.len() {
@@ -1563,20 +1550,12 @@ mod tests {
         assert!(scx_bpf_task_cgroup(ptr::null_mut(), 0).is_null());
         assert!(bpf_cgroup_from_id(123).is_null());
         assert!(bpf_cgroup_ancestor(ptr::null_mut(), 0).is_null());
-        assert!(bpf_cgrp_storage_get(
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0
-        )
-        .is_null());
-        assert!(bpf_task_storage_get(
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            0
-        )
-        .is_null());
+        assert!(
+            bpf_cgrp_storage_get(ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), 0).is_null()
+        );
+        assert!(
+            bpf_task_storage_get(ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), 0).is_null()
+        );
         assert!(bpf_map_lookup_percpu_elem(ptr::null_mut(), ptr::null(), 0).is_null());
 
         exit_sim();
