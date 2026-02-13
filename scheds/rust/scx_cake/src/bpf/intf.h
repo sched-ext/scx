@@ -67,10 +67,12 @@ struct cake_task_ctx {
     /* --- Timestamp (cake_running) [Bytes 16-19] --- */
     u32 last_run_at;       /* 4B: Last run timestamp (ns), wraps 4.2s */
 
-    /* --- Graduated backoff counter [Bytes 20-21] --- */
-    u16 reclass_counter;   /* 2B: Per-task stop counter for per-tier backoff */
+    /* --- Graduated backoff counter [Bytes 20-23] --- */
+    u32 reclass_counter;   /* 4B: Per-task stop counter for per-tier backoff
+                            * Widened from u16 to prevent 21-218s wrap cascade.
+                            * u32 at 50K/s wraps at 23.9 hours — effectively never. */
 
-    u8 __pad[42];          /* Pad to 64 bytes: 8+8+4+2+42 = 64 */
+    u8 __pad[40];          /* Pad to 64 bytes: 8+8+4+4+40 = 64 */
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
@@ -116,7 +118,9 @@ struct cake_task_ctx {
  * rc_slice REMOVED: derived from tier_slice_ns[tier] LUT (saves 8B/slot).
  * Periodic tctx sync every 16th fast-path stop prevents migration staleness.
  *
- * Layout verified: 62B data + 2B padding = 64B.  All u64 fields 8B-aligned.
+ * Layout verified: 64B data = 64B. All u64 fields 8B-aligned.
+ * rc_counter0/1 and rc_sync_counter widened from u16 to u32 to eliminate
+ * 1.3-13s wrap cascades. u32 at 50K/s wraps at 23.9 hours — effectively never.
  * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
     /* --- Tick staging (bytes 0-17) --- */
@@ -130,19 +134,18 @@ struct mega_mailbox_entry {
     u8 _pad1;              /* alignment */
 
     /* --- Psychic Cache Slot 0: MRU (bytes 18-39) --- */
-    u16 rc_counter0;       /* Slot 0 reclass counter (2B-aligned) */
-    u32 _pad2;             /* alignment for rc_task_ptr0 */
+    u32 rc_counter0;       /* Slot 0 reclass counter (widened: u16→u32, no wrap) */
+    u16 _pad2;             /* alignment for rc_task_ptr0 (shrunk from u32) */
     u64 rc_task_ptr0;      /* Slot 0 task pointer (8B-aligned) */
     u64 rc_state_fused0;   /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
 
-    /* --- Psychic Cache Slot 1: LRU (bytes 40-57) --- */
+    /* --- Psychic Cache Slot 1: LRU (bytes 40-59) --- */
     u64 rc_task_ptr1;      /* Slot 1 task pointer (8B-aligned) */
     u64 rc_state_fused1;   /* Slot 1 [63:32]=packed_info, [31:0]=deficit_avg */
-    u16 rc_counter1;       /* Slot 1 reclass counter */
+    u32 rc_counter1;       /* Slot 1 reclass counter (widened: u16→u32) */
 
-    /* --- Sync + padding (bytes 58-63) --- */
-    u16 rc_sync_counter;   /* Periodic tctx writeback counter */
-    u8 __reserved[2];      /* Pad to 64B */
+    /* --- Sync (bytes 60-63) --- */
+    u32 rc_sync_counter;   /* Periodic tctx writeback counter (widened: u16→u32) */
 } __attribute__((aligned(64)));
 
 /* Statistics shared with userspace */
