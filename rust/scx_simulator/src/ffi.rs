@@ -114,6 +114,11 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code.
     unsafe fn exit(&self) {}
+
+    /// Fire a pending BPF timer callback. Optional.
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn fire_timer(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +138,7 @@ type InitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type CpuReleaseFn = unsafe extern "C" fn(i32, *mut c_void);
 type ExitFn = unsafe extern "C" fn(*mut c_void);
 type SetupFn = unsafe extern "C" fn(u32);
+type FireTimerFn = unsafe extern "C" fn();
 
 /// Resolved function pointers for a scheduler's ops.
 struct SchedOps {
@@ -147,6 +153,7 @@ struct SchedOps {
     init_task: Option<InitTaskFn>,
     cpu_release: Option<CpuReleaseFn>,
     exit: Option<ExitFn>,
+    fire_timer: Option<FireTimerFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -323,6 +330,8 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), CpuReleaseFn>(p)),
             exit: try_get!("exit")
                 .map(|p| std::mem::transmute::<*const (), ExitFn>(p)),
+            fire_timer: try_get!("fire_timer")
+                .map(|p| std::mem::transmute::<*const (), FireTimerFn>(p)),
         }
     }
 }
@@ -381,6 +390,12 @@ impl Scheduler for DynamicScheduler {
     unsafe fn exit(&self) {
         if let Some(f) = self.ops.exit {
             f(sim_get_exit_info());
+        }
+    }
+
+    unsafe fn fire_timer(&self) {
+        if let Some(f) = self.ops.fire_timer {
+            f();
         }
     }
 }

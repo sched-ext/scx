@@ -40,6 +40,36 @@
 #define is_migration_disabled(p) ((void)(p), false)
 
 /*
+ * Override __COMPAT_scx_bpf_cpu_curr to return actual running tasks.
+ *
+ * The default sim_wrapper.h override returns NULL, which makes
+ * is_cpu_idle() always return false (with scx_bpf_error).
+ * We need proper idle detection for deferred wakeups and PMU routing.
+ *
+ * For idle CPUs (scx_bpf_cpu_curr returns NULL), we return a synthetic
+ * idle task with PF_IDLE set so is_cpu_idle() returns true.
+ */
+extern struct task_struct *scx_bpf_cpu_curr(int cpu);
+static struct task_struct sim_idle_task;
+static bool sim_idle_task_init;
+
+static struct task_struct *cosmos_cpu_curr(int cpu)
+{
+	struct task_struct *p = scx_bpf_cpu_curr(cpu);
+	if (p)
+		return p;
+	/* Return synthetic idle task for idle CPUs */
+	if (!sim_idle_task_init) {
+		__builtin_memset(&sim_idle_task, 0, sizeof(sim_idle_task));
+		sim_idle_task.flags = PF_IDLE;
+		sim_idle_task_init = true;
+	}
+	return &sim_idle_task;
+}
+#undef __COMPAT_scx_bpf_cpu_curr
+#define __COMPAT_scx_bpf_cpu_curr(cpu) cosmos_cpu_curr(cpu)
+
+/*
  * Route bpf_map_lookup_percpu_elem to a static cpu_ctx array.
  * Forward-declared here; defined after the scheduler source since
  * struct cpu_ctx is defined there.
@@ -75,6 +105,29 @@ static long sim_perf_event_read(void *map, u32 key,
 	sim_perf_event_read(map, key, val, size)
 
 /*
+ * BPF timer overrides for deferred wakeups.
+ *
+ * bpf_timer_set_callback stores the callback pointer.
+ * bpf_timer_start calls sim_timer_start() (Rust kfunc) to schedule
+ * a TimerFired event in the simulator's event queue.
+ * cosmos_fire_timer() invokes the stored callback from the engine.
+ */
+static int (*cosmos_timer_cb)(void *, int *, struct bpf_timer *);
+static struct bpf_timer *cosmos_timer_ptr;
+static void *cosmos_timer_map;
+
+extern void sim_timer_start(unsigned long long nsecs);
+
+#undef bpf_timer_set_callback
+#define bpf_timer_set_callback(timer, cb) \
+	(cosmos_timer_cb = (typeof(cosmos_timer_cb))(cb), \
+	 cosmos_timer_ptr = (struct bpf_timer *)(timer), 0)
+
+#undef bpf_timer_start
+#define bpf_timer_start(timer, nsecs, flags) \
+	(sim_timer_start(nsecs), 0)
+
+/*
  * Per-CPU start_readings storage.
  *
  * The BPF start_readings map is PERCPU_ARRAY — each CPU needs its own
@@ -86,6 +139,16 @@ static long sim_perf_event_read(void *map, u32 key,
  */
 static struct bpf_perf_event_value start_readings_percpu[MAX_SIM_CPUS];
 static void *start_readings_map_ptr;
+static void *wakeup_timer_map_ptr;
+
+/*
+ * Static wakeup_timer backing storage.
+ * The struct bpf_timer inside is opaque to us — we just need to provide
+ * memory for bpf_map_lookup_elem to return. The bpf_timer fields aren't
+ * accessed; our macros intercept bpf_timer_init/set_callback/start.
+ * Size is generous to accommodate any struct wakeup_timer layout.
+ */
+static char sim_wakeup_timer_buf[256];
 
 static void *cosmos_map_lookup(void *map, const void *key)
 {
@@ -95,6 +158,8 @@ static void *cosmos_map_lookup(void *map, const void *key)
 			return &start_readings_percpu[cpu];
 		return NULL;
 	}
+	if (map == wakeup_timer_map_ptr && wakeup_timer_map_ptr != NULL)
+		return sim_wakeup_timer_buf;
 	return scx_test_map_lookup_elem(map, key);
 }
 #undef bpf_map_lookup_elem
@@ -146,6 +211,19 @@ void cosmos_register_maps(void)
 	scx_test_map_register(&cpu_node_test_map, &cpu_node_map);
 
 	start_readings_map_ptr = (void *)&start_readings;
+	wakeup_timer_map_ptr = (void *)&wakeup_timer;
+	cosmos_timer_map = (void *)&wakeup_timer;
+}
+
+/*
+ * Fire the stored BPF timer callback.
+ * Called from the Rust engine when a TimerFired event is processed.
+ */
+void cosmos_fire_timer(void)
+{
+	int key = 0;
+	if (cosmos_timer_cb && cosmos_timer_ptr)
+		cosmos_timer_cb(cosmos_timer_map, &key, cosmos_timer_ptr);
 }
 
 /*
@@ -167,7 +245,7 @@ void cosmos_setup(unsigned int num_cpus)
 	nr_node_ids = 1;
 	mm_affinity = false;
 	perf_enabled = true;
-	deferred_wakeups = false;
+	deferred_wakeups = true;
 	slice_ns = 20000000;   /* 20ms */
 	slice_lag = 20000000;  /* 20ms */
 	busy_threshold = 1;   /* system "not busy" → flat idle scan path */

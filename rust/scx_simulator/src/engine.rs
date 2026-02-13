@@ -53,6 +53,8 @@ enum EventKind {
     SliceExpired { cpu: CpuId },
     /// A task finishes its current Run phase on the given CPU.
     TaskPhaseComplete { cpu: CpuId },
+    /// A BPF timer fires (e.g., deferred wakeup timer).
+    TimerFired,
 }
 
 /// The main simulator.
@@ -122,6 +124,7 @@ impl<S: Scheduler> Simulator<S> {
             kicked_cpus: HashSet::new(),
             task_last_cpu: HashMap::new(),
             reenqueue_local_requested: false,
+            pending_timer_ns: None,
         };
 
         // Initialize scheduler
@@ -145,6 +148,16 @@ impl<S: Scheduler> Simulator<S> {
         // Build event queue
         let mut events: BinaryHeap<Reverse<Event>> = BinaryHeap::new();
         let mut seq: u64 = 0;
+
+        // Drain any pending timer from scheduler init (e.g., deferred wakeup timer)
+        if let Some(fire_at) = state.pending_timer_ns.take() {
+            events.push(Reverse(Event {
+                time_ns: fire_at,
+                seq,
+                kind: EventKind::TimerFired,
+            }));
+            seq += 1;
+        }
 
         // Schedule initial TaskWake events for all tasks
         for def in &scenario.tasks {
@@ -170,7 +183,7 @@ impl<S: Scheduler> Simulator<S> {
                     state.advance_cpu_clock(*cpu);
                     kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock);
                 }
-                EventKind::TaskWake { .. } => {
+                EventKind::TaskWake { .. } | EventKind::TimerFired => {
                     // No specific CPU yet; use event queue time for tracing
                     kfuncs::set_sim_clock(state.clock);
                 }
@@ -193,6 +206,14 @@ impl<S: Scheduler> Simulator<S> {
                         scenario.duration_ns,
                     );
                 }
+                EventKind::TimerFired => {
+                    self.handle_timer_fired(
+                        &mut state,
+                        &mut tasks,
+                        &mut events,
+                        &mut seq,
+                    );
+                }
             }
         }
 
@@ -204,6 +225,41 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         state.trace
+    }
+
+    /// Handle a BPF timer firing.
+    ///
+    /// Calls the scheduler's `fire_timer()` callback, which invokes the
+    /// stored BPF timer callback (e.g., `wakeup_timerfn` in COSMOS).
+    /// The callback may kick CPUs and re-arm the timer via `bpf_timer_start`.
+    fn handle_timer_fired(
+        &self,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut BinaryHeap<Reverse<Event>>,
+        seq: &mut u64,
+    ) {
+        unsafe {
+            kfuncs::enter_sim(state);
+            self.scheduler.fire_timer();
+            kfuncs::exit_sim();
+        }
+
+        // Drain re-armed timer
+        if let Some(fire_at) = state.pending_timer_ns.take() {
+            events.push(Reverse(Event {
+                time_ns: fire_at,
+                seq: *seq,
+                kind: EventKind::TimerFired,
+            }));
+            *seq += 1;
+        }
+
+        // Process CPUs kicked by the timer callback
+        let kicked: Vec<CpuId> = state.kicked_cpus.drain().collect();
+        for kicked_cpu in kicked {
+            self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+        }
     }
 
     /// Handle a task waking up.
