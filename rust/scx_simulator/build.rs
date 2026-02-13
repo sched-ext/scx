@@ -16,8 +16,6 @@ fn main() {
         root_dir.join("scheds/vmlinux"),
         root_dir.join("scheds/vmlinux/arch/x86"),
         root_dir.join("scheds/include/bpf-compat"),
-        // Scheduler C source (for #include "scx_simple.bpf.c")
-        root_dir.join("scheds/c"),
         // Tickless BPF source (for #include "intf.h" and "main.bpf.c")
         root_dir.join("scheds/rust/scx_tickless/src/bpf"),
         // libbpf headers
@@ -92,6 +90,5 @@ fn main() {
     // Rebuild triggers
     println!("cargo:rerun-if-changed=csrc/");
     println!("cargo:rerun-if-changed=../../lib/scxtest/");
-    println!("cargo:rerun-if-changed=../../scheds/c/scx_simple.bpf.c");
     println!("cargo:rerun-if-changed=../../scheds/rust/scx_tickless/src/bpf/");
 }
