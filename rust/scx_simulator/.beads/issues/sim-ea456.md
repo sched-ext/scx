@@ -1,10 +1,11 @@
 ---
 title: Simulate cpufreq / performance scaling
-status: open
+status: closed
 priority: 2
 issue_type: feature
 created_at: 2026-02-13T13:04:22.695345080+00:00
-updated_at: 2026-02-13T13:07:58.514732120+00:00
+updated_at: 2026-02-13T14:10:32.574993639+00:00
+closed_at: 2026-02-13T14:10:32.574993569+00:00
 ---
 
 # Description

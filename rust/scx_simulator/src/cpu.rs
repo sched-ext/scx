@@ -24,6 +24,9 @@ pub struct SimCpu {
     pub local_clock: TimeNs,
     /// SMT sibling CPUs (including self). Empty if SMT is not configured.
     pub siblings: Vec<CpuId>,
+    /// CPU performance level set by `scx_bpf_cpuperf_set`.
+    /// Range: `[0, SCX_CPUPERF_ONE]` where `SCX_CPUPERF_ONE = 1024`.
+    pub perf_lvl: u32,
 }
 
 impl SimCpu {
@@ -35,6 +38,7 @@ impl SimCpu {
             local_dsq: VecDeque::new(),
             local_clock: 0,
             siblings: Vec::new(),
+            perf_lvl: 0,
         }
     }
 
