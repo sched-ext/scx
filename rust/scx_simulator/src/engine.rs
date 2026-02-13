@@ -182,6 +182,13 @@ impl<S: Scheduler> Simulator<S> {
             }
         }
 
+        // Call scheduler exit
+        unsafe {
+            kfuncs::enter_sim(&mut state);
+            self.scheduler.exit();
+            kfuncs::exit_sim();
+        }
+
         state.trace
     }
 
