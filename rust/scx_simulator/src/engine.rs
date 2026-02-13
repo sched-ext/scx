@@ -433,10 +433,6 @@ impl<S: Scheduler> Simulator<S> {
             return;
         }
 
-        state
-            .trace
-            .record(state.clock, CpuId(0), TraceKind::TaskWoke { pid });
-
         // Set waker context: in the kernel, runnable/select_cpu/enqueue all
         // run in the waker's context, so bpf_get_current_task_btf() and
         // bpf_get_smp_processor_id() return the waker's state.
@@ -444,8 +440,15 @@ impl<S: Scheduler> Simulator<S> {
             .as_ref()
             .and_then(|w| state.task_pid_to_raw.get(&w.pid).copied());
 
-        // Call runnable callback
+        // CPU where the wakeup originates (waker's CPU or prev_cpu as fallback)
         let prev_cpu = task.prev_cpu;
+        let wake_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
+
+        state
+            .trace
+            .record(state.clock, wake_cpu, TraceKind::TaskWoke { pid });
+
+        // Call runnable callback
         let raw = task.raw();
         unsafe {
             kfuncs::enter_sim(state);
@@ -484,7 +487,7 @@ impl<S: Scheduler> Simulator<S> {
 
             state.trace.record(
                 state.clock,
-                CpuId(0),
+                wake_cpu,
                 TraceKind::SelectTaskRq {
                     pid,
                     prev_cpu,
@@ -558,12 +561,6 @@ impl<S: Scheduler> Simulator<S> {
         let slice = task.get_slice();
         task.run_remaining_ns = task.run_remaining_ns.saturating_sub(slice);
 
-        state.trace.record(
-            state.cpus[cpu.0 as usize].local_clock,
-            cpu,
-            TraceKind::TaskPreempted { pid },
-        );
-
         let task_name = task.name.as_str();
         info!(
             cpu = cpu.0,
@@ -614,6 +611,13 @@ impl<S: Scheduler> Simulator<S> {
                 TraceKind::EnqueueTask { pid, enq_flags: 0 },
             );
         }
+
+        // High-level event: task is now fully off-CPU and re-enqueued
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::TaskPreempted { pid },
+        );
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
         self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
@@ -732,19 +736,7 @@ impl<S: Scheduler> Simulator<S> {
                     let task = tasks.get_mut(&pid).unwrap();
                     task.state = TaskState::Runnable;
 
-                    state.trace.record(
-                        state.cpus[cpu.0 as usize].local_clock,
-                        cpu,
-                        TraceKind::TaskYielded { pid },
-                    );
-                    info!(
-                        cpu = cpu.0,
-                        task = task.name.as_str(),
-                        pid = pid.0,
-                        "YIELDED"
-                    );
-
-                    // Re-enqueue
+                    // Re-enqueue (part of put_prev_task for runnable tasks)
                     let raw = task.raw();
                     unsafe {
                         kfuncs::enter_sim(state);
@@ -760,6 +752,19 @@ impl<S: Scheduler> Simulator<S> {
                         state.cpus[cpu.0 as usize].local_clock,
                         cpu,
                         TraceKind::EnqueueTask { pid, enq_flags: 0 },
+                    );
+
+                    // High-level event: task is now fully off-CPU and re-enqueued
+                    state.trace.record(
+                        state.cpus[cpu.0 as usize].local_clock,
+                        cpu,
+                        TraceKind::TaskYielded { pid },
+                    );
+                    info!(
+                        cpu = cpu.0,
+                        task = task.name.as_str(),
+                        pid = pid.0,
+                        "YIELDED"
                     );
                 }
                 Some(Phase::Wake(target_pid)) => {

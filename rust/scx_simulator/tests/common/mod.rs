@@ -500,11 +500,11 @@ macro_rules! scheduler_tests {
                 }
             }
 
-            // Every TaskPreempted must be accompanied by PutPrevTask
+            // Every TaskPreempted must be preceded by PutPrevTask
+            // (kernel: put_prev_task runs before the task is considered off-CPU)
             for (i, e) in events.iter().enumerate() {
                 if let TraceKind::TaskPreempted { pid } = &e.kind {
-                    // PutPrevTask should come shortly after TaskPreempted
-                    let found = events[i..].iter().take(5).any(|ev| {
+                    let found = events[..i].iter().rev().take(10).any(|ev| {
                         matches!(
                             &ev.kind,
                             TraceKind::PutPrevTask { pid: p, .. } if *p == *pid
@@ -512,7 +512,7 @@ macro_rules! scheduler_tests {
                     });
                     assert!(
                         found,
-                        "TaskPreempted(pid={}) at index {i} not accompanied by PutPrevTask",
+                        "TaskPreempted(pid={}) at index {i} not preceded by PutPrevTask",
                         pid.0
                     );
                 }
