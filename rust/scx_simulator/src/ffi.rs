@@ -191,20 +191,20 @@ impl DynamicScheduler {
         }
 
         let ops = SchedOps {
-            init: std::mem::transmute(get!("init")),
-            select_cpu: std::mem::transmute(get!("select_cpu")),
-            enqueue: std::mem::transmute(get!("enqueue")),
-            dispatch: std::mem::transmute(get!("dispatch")),
-            running: std::mem::transmute(get!("running")),
-            stopping: std::mem::transmute(get!("stopping")),
-            enable: std::mem::transmute(get!("enable")),
+            init: std::mem::transmute::<*const (), InitFn>(get!("init")),
+            select_cpu: std::mem::transmute::<*const (), SelectCpuFn>(get!("select_cpu")),
+            enqueue: std::mem::transmute::<*const (), EnqueueFn>(get!("enqueue")),
+            dispatch: std::mem::transmute::<*const (), DispatchFn>(get!("dispatch")),
+            running: std::mem::transmute::<*const (), RunningFn>(get!("running")),
+            stopping: std::mem::transmute::<*const (), StoppingFn>(get!("stopping")),
+            enable: std::mem::transmute::<*const (), EnableFn>(get!("enable")),
             runnable: if has_extras {
-                Some(std::mem::transmute(get!("runnable")))
+                Some(std::mem::transmute::<*const (), RunnableFn>(get!("runnable")))
             } else {
                 None
             },
             init_task: if has_extras {
-                Some(std::mem::transmute(get!("init_task")))
+                Some(std::mem::transmute::<*const (), InitTaskFn>(get!("init_task")))
             } else {
                 None
             },

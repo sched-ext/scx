@@ -219,7 +219,7 @@ impl DsqManager {
     pub fn remove_pid(&mut self, dsq_id: DsqId, pid: Pid) -> bool {
         self.dsqs
             .get_mut(&dsq_id)
-            .map_or(false, |dsq| dsq.remove_pid(pid))
+            .is_some_and(|dsq| dsq.remove_pid(pid))
     }
 }
 
