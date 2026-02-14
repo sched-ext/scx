@@ -87,6 +87,9 @@ pub struct TaskDef {
     /// Address-space group. Tasks with the same `MmId` share an address
     /// space (like threads) and are eligible for wake-affine scheduling.
     pub mm_id: Option<MmId>,
+    /// CPU affinity mask. `None` means all CPUs are allowed.
+    /// When `Some(cpus)`, the task may only run on the listed CPUs.
+    pub allowed_cpus: Option<Vec<CpuId>>,
 }
 
 /// A simulated task at runtime.

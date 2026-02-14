@@ -36,6 +36,9 @@ void sim_task_set_scx_weight(struct task_struct *p, unsigned int weight);
 
 /* cpus_ptr and scx.flags accessors */
 void sim_task_setup_cpus_ptr(struct task_struct *p);
+void sim_task_clear_cpumask(struct task_struct *p);
+void sim_task_set_cpumask_cpu(struct task_struct *p, int cpu);
+void *sim_task_get_cpus_ptr(struct task_struct *p);
 unsigned int sim_task_get_scx_flags(struct task_struct *p);
 void sim_task_set_scx_flags(struct task_struct *p, unsigned int flags);
 

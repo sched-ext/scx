@@ -302,17 +302,26 @@ pub extern "C" fn scx_bpf_create_dsq(dsq_id: u64, _node: i32) -> i32 {
 }
 
 /// Default CPU selection: find an idle CPU, preferring prev_cpu.
+///
+/// Respects the task's cpumask (`p->cpus_ptr`): only CPUs allowed by the
+/// task's affinity mask are considered, matching the kernel's
+/// `scx_select_cpu_dfl` behavior.
 #[no_mangle]
 pub extern "C" fn scx_bpf_select_cpu_dfl(
-    _p: *mut c_void,
+    p: *mut c_void,
     prev_cpu: i32,
     _wake_flags: u64,
     is_idle: *mut bool,
 ) -> i32 {
     with_sim(|sim| {
+        let cpus_ptr = unsafe { ffi::sim_task_get_cpus_ptr(p) };
+        let allowed = |cpu: u32| -> bool {
+            cpus_ptr.is_null() || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_ptr) }
+        };
+
         let prev = CpuId(prev_cpu as u32);
-        // Prefer prev_cpu if it's idle
-        if (prev.0 as usize) < sim.cpus.len() && sim.cpu_is_idle(prev) {
+        // Prefer prev_cpu if it's idle and allowed
+        if (prev.0 as usize) < sim.cpus.len() && sim.cpu_is_idle(prev) && allowed(prev.0) {
             unsafe { *is_idle = true };
             debug!(
                 prev_cpu,
@@ -322,20 +331,38 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
             );
             return prev_cpu;
         }
-        // Find any idle CPU
-        if let Some(cpu) = sim.find_any_idle_cpu() {
+        // Find any idle CPU that is allowed
+        if let Some(cpu) = sim
+            .cpus
+            .iter()
+            .find(|c| c.is_idle() && c.local_dsq.is_empty() && allowed(c.id.0))
+        {
+            let cpu_id = cpu.id;
             unsafe { *is_idle = true };
-            debug!(prev_cpu, cpu = cpu.0, idle = true, "kfunc select_cpu_dfl");
-            return cpu.0 as i32;
+            debug!(
+                prev_cpu,
+                cpu = cpu_id.0,
+                idle = true,
+                "kfunc select_cpu_dfl"
+            );
+            return cpu_id.0 as i32;
         }
         unsafe { *is_idle = false };
+        // Fall back to prev_cpu if allowed, otherwise first allowed CPU
+        let fallback = if allowed(prev.0) {
+            prev_cpu
+        } else {
+            (0..sim.cpus.len() as u32)
+                .find(|&c| allowed(c))
+                .map_or(prev_cpu, |c| c as i32)
+        };
         debug!(
             prev_cpu,
-            cpu = prev_cpu,
+            cpu = fallback,
             idle = false,
             "kfunc select_cpu_dfl"
         );
-        prev_cpu
+        fallback
     })
 }
 
@@ -345,7 +372,7 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
 /// `cpus_allowed`, or negative on failure.
 #[no_mangle]
 pub extern "C" fn scx_bpf_select_cpu_and(
-    _p: *mut c_void,
+    p: *mut c_void,
     prev_cpu: i32,
     _wake_flags: u64,
     cpus_allowed: *const c_void,
@@ -357,9 +384,13 @@ pub extern "C" fn scx_bpf_select_cpu_and(
         let nr_cpus = sim.cpus.len();
         let prev = CpuId(prev_cpu as u32);
         let want_idle_core = flags & SCX_PICK_IDLE_CORE != 0;
+        let cpus_ptr = unsafe { ffi::sim_task_get_cpus_ptr(p) };
 
         let in_mask = |cpu: u32| -> bool {
-            cpus_allowed.is_null() || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_allowed) }
+            let task_ok = cpus_ptr.is_null() || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_ptr) };
+            let caller_ok =
+                cpus_allowed.is_null() || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_allowed) };
+            task_ok && caller_ok
         };
 
         let has_idle_core = |cpu: CpuId| -> bool {

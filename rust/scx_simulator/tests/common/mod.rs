@@ -148,6 +148,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -184,6 +185,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -195,6 +197,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -227,6 +230,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -238,6 +242,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -281,6 +286,7 @@ macro_rules! scheduler_tests {
                         },
                         start_time_ns: 0,
                         mm_id: None,
+                    allowed_cpus: None,
                     })
                     .task(TaskDef {
                         name: "t2".into(),
@@ -292,6 +298,7 @@ macro_rules! scheduler_tests {
                         },
                         start_time_ns: 0,
                         mm_id: None,
+                    allowed_cpus: None,
                     })
                     .duration_ms(50)
                     .build()
@@ -347,6 +354,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -358,6 +366,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .duration_ms(200)
                 .build();
@@ -400,6 +409,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -442,6 +452,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -453,6 +464,7 @@ macro_rules! scheduler_tests {
                     },
                     start_time_ns: 0,
                     mm_id: None,
+                    allowed_cpus: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -542,6 +554,70 @@ macro_rules! scheduler_tests {
                 dsq_insert_count > 0,
                 "expected at least one DsqInsert or DsqInsertVtime event"
             );
+        }
+
+        /// CPU affinity: a task pinned to CPU 0 on a 4-CPU system must only
+        /// be scheduled on CPU 0.
+        #[test]
+        fn test_cpu_affinity() {
+            let _lock = common::setup_test();
+            let sched_factory = $make_sched;
+            let scenario = Scenario::builder()
+                .cpus(4)
+                .task(TaskDef {
+                    name: "pinned".into(),
+                    pid: Pid(1),
+                    nice: 0,
+                    behavior: TaskBehavior {
+                        phases: vec![
+                            Phase::Run(5_000_000),
+                            Phase::Sleep(5_000_000),
+                        ],
+                        repeat: true,
+                    },
+                    start_time_ns: 0,
+                    mm_id: None,
+                    allowed_cpus: Some(vec![CpuId(0)]),
+                })
+                // Add an unpinned task to occupy other CPUs
+                .task(TaskDef {
+                    name: "free".into(),
+                    pid: Pid(2),
+                    nice: 0,
+                    behavior: TaskBehavior {
+                        phases: vec![Phase::Run(20_000_000)],
+                        repeat: true,
+                    },
+                    start_time_ns: 0,
+                    mm_id: None,
+                    allowed_cpus: None,
+                })
+                .duration_ms(100)
+                .build();
+
+            let trace = Simulator::new(sched_factory(4)).run(scenario);
+            trace.dump();
+
+            // Pinned task must have been scheduled
+            let pinned_schedules = trace.schedule_count(Pid(1));
+            assert!(
+                pinned_schedules > 0,
+                "pinned task was never scheduled"
+            );
+
+            // Every TaskScheduled event for the pinned task must be on CPU 0
+            for event in trace.events() {
+                if let TraceKind::TaskScheduled { pid } = &event.kind {
+                    if *pid == Pid(1) {
+                        assert_eq!(
+                            event.cpu,
+                            CpuId(0),
+                            "pinned task scheduled on {:?} instead of CPU 0",
+                            event.cpu
+                        );
+                    }
+                }
+            }
         }
     };
 }

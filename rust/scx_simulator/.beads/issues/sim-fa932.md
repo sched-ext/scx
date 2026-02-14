@@ -1,12 +1,13 @@
 ---
 title: Simulator trace lacks balance/dispatch granularity for real-trace comparison
-status: open
+status: closed
 priority: 3
 issue_type: task
 labels:
-  - realism
+- realism
 created_at: 2026-02-13T21:26:38.505453075+00:00
-updated_at: 2026-02-13T21:26:38.505453075+00:00
+updated_at: 2026-02-13T23:33:41.764477928+00:00
+closed_at: 2026-02-13T23:33:41.764477788+00:00
 ---
 
 # Description

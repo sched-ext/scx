@@ -29,6 +29,9 @@ extern "C" {
     pub fn sim_task_set_scx_weight(p: *mut c_void, weight: u32);
 
     pub fn sim_task_setup_cpus_ptr(p: *mut c_void);
+    pub fn sim_task_clear_cpumask(p: *mut c_void);
+    pub fn sim_task_set_cpumask_cpu(p: *mut c_void, cpu: i32);
+    pub fn sim_task_get_cpus_ptr(p: *mut c_void) -> *const c_void;
     pub fn sim_task_get_scx_flags(p: *mut c_void) -> u32;
     pub fn sim_task_set_scx_flags(p: *mut c_void, flags: u32);
 
