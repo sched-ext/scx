@@ -68,6 +68,7 @@ impl ScenarioBuilder {
             behavior,
             start_time_ns: 0,
             mm_id: None,
+            allowed_cpus: None,
         });
         self
     }
@@ -92,6 +93,7 @@ impl ScenarioBuilder {
             behavior,
             start_time_ns: 0,
             mm_id: Some(mm_id),
+            allowed_cpus: None,
         });
         self
     }

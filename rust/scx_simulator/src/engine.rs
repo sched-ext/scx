@@ -130,8 +130,17 @@ impl<S: Scheduler> Simulator<S> {
             let raw_addr = task.raw() as usize;
             task_raw_to_pid.insert(raw_addr, task.pid);
             task_pid_to_raw.insert(task.pid, raw_addr);
-            // Set up cpus_ptr so the task is allowed on all CPUs
-            unsafe { ffi::sim_task_setup_cpus_ptr(task.raw()) };
+            // Set up cpus_ptr — restricted to allowed_cpus if specified
+            unsafe {
+                ffi::sim_task_setup_cpus_ptr(task.raw());
+                if let Some(ref cpus) = def.allowed_cpus {
+                    ffi::sim_task_clear_cpumask(task.raw());
+                    for cpu in cpus {
+                        ffi::sim_task_set_cpumask_cpu(task.raw(), cpu.0 as i32);
+                    }
+                    ffi::sim_task_set_nr_cpus_allowed(task.raw(), cpus.len() as i32);
+                }
+            }
             // Set mm pointer for address-space grouping (wake-affine scheduling)
             if let Some(mm_id) = def.mm_id {
                 // Synthetic non-NULL pointer: never dereferenced, only compared.

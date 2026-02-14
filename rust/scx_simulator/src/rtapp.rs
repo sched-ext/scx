@@ -14,6 +14,7 @@
 //! - `loop` — repetition control
 //! - `phases` — multi-phase task definitions
 //! - `instance` — multiple task instances
+//! - `cpus` — CPU affinity mask (parsed into `TaskDef::allowed_cpus`)
 //! - `global.duration` — scenario duration
 //!
 //! # Limitations
@@ -22,7 +23,7 @@
 //!   with rt-app's `workgen` script or use suffixed keys (`"run0"`, `"run1"`).
 //! - Unsupported events (`lock`, `unlock`, `wait`, `signal`, `broad`, `sync`,
 //!   `mem`, `iorun`, `yield`, `barrier`, `fork`) are skipped with a warning.
-//! - CPU affinity (`cpus`) and cgroup (`taskgroup`) are not modeled.
+//! - Cgroup (`taskgroup`) is not modeled.
 
 use std::collections::HashMap;
 
@@ -31,7 +32,7 @@ use tracing::warn;
 
 use crate::scenario::Scenario;
 use crate::task::{Phase, TaskBehavior, TaskDef};
-use crate::types::Pid;
+use crate::types::{CpuId, Pid};
 
 /// Errors from parsing rt-app JSON.
 #[derive(Debug)]
@@ -202,6 +203,70 @@ fn parse_events(
     Ok(phases)
 }
 
+/// Parse an rt-app CPU affinity string into a list of CPU IDs.
+///
+/// rt-app supports several formats:
+/// - Single CPU: `"0"` or `0`
+/// - Comma-separated: `"0,2,4"`
+/// - Range: `"0-3"` (expands to 0,1,2,3)
+/// - Mixed: `"0,2-4,6"` (expands to 0,2,3,4,6)
+/// - JSON array: `[0, 1, 2]`
+fn parse_cpus(value: &Value) -> Result<Option<Vec<CpuId>>, RtAppError> {
+    match value {
+        Value::String(s) => {
+            let mut cpus = Vec::new();
+            for part in s.split(',') {
+                let part = part.trim();
+                if let Some((start, end)) = part.split_once('-') {
+                    let start: u32 = start.trim().parse().map_err(|_| {
+                        RtAppError::InvalidValue(format!("cpus: invalid range start {start:?}"))
+                    })?;
+                    let end: u32 = end.trim().parse().map_err(|_| {
+                        RtAppError::InvalidValue(format!("cpus: invalid range end {end:?}"))
+                    })?;
+                    for cpu in start..=end {
+                        cpus.push(CpuId(cpu));
+                    }
+                } else {
+                    let cpu: u32 = part.parse().map_err(|_| {
+                        RtAppError::InvalidValue(format!("cpus: invalid cpu {part:?}"))
+                    })?;
+                    cpus.push(CpuId(cpu));
+                }
+            }
+            if cpus.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(cpus))
+            }
+        }
+        Value::Number(n) => {
+            let cpu = n.as_u64().ok_or_else(|| {
+                RtAppError::InvalidValue(format!("cpus: expected unsigned integer, got {n}"))
+            })? as u32;
+            Ok(Some(vec![CpuId(cpu)]))
+        }
+        Value::Array(arr) => {
+            let mut cpus = Vec::new();
+            for v in arr {
+                let cpu = v.as_u64().ok_or_else(|| {
+                    RtAppError::InvalidValue(format!("cpus: array element not an integer: {v}"))
+                })? as u32;
+                cpus.push(CpuId(cpu));
+            }
+            if cpus.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(cpus))
+            }
+        }
+        _ => {
+            warn!("cpus: unexpected type, ignoring");
+            Ok(None)
+        }
+    }
+}
+
 /// Parse a single rt-app task object into one or more `TaskDef`s.
 ///
 /// Multiple `TaskDef`s are produced when `instance > 1`.
@@ -221,13 +286,13 @@ fn parse_task(
 
     let loop_count = obj.get("loop").and_then(|v| v.as_i64()).unwrap_or(-1);
 
-    // Warn about unsupported fields
-    if obj.contains_key("cpus") {
-        warn!(
-            task = name,
-            "ignoring 'cpus' affinity (not modeled in simulator)"
-        );
-    }
+    // Parse CPU affinity
+    let allowed_cpus = if let Some(cpus_val) = obj.get("cpus") {
+        parse_cpus(cpus_val)?
+    } else {
+        None
+    };
+
     if obj.contains_key("taskgroup") {
         warn!(
             task = name,
@@ -305,6 +370,7 @@ fn parse_task(
             },
             start_time_ns: 0,
             mm_id: None,
+            allowed_cpus: allowed_cpus.clone(),
         });
     }
 
@@ -595,5 +661,68 @@ mod tests {
         assert!(matches!(task.behavior.phases[0], Phase::Run(2_000_000)));
         // timer period 16667 usec = 16667000 ns
         assert!(matches!(task.behavior.phases[1], Phase::Sleep(16_667_000)));
+    }
+
+    #[test]
+    fn test_parse_cpus_string_single() {
+        let v = serde_json::json!("0");
+        let cpus = parse_cpus(&v).unwrap();
+        assert_eq!(cpus, Some(vec![CpuId(0)]));
+    }
+
+    #[test]
+    fn test_parse_cpus_string_list() {
+        let v = serde_json::json!("0,2,4");
+        let cpus = parse_cpus(&v).unwrap();
+        assert_eq!(cpus, Some(vec![CpuId(0), CpuId(2), CpuId(4)]));
+    }
+
+    #[test]
+    fn test_parse_cpus_string_range() {
+        let v = serde_json::json!("1-3");
+        let cpus = parse_cpus(&v).unwrap();
+        assert_eq!(cpus, Some(vec![CpuId(1), CpuId(2), CpuId(3)]));
+    }
+
+    #[test]
+    fn test_parse_cpus_string_mixed() {
+        let v = serde_json::json!("0,2-4,6");
+        let cpus = parse_cpus(&v).unwrap();
+        assert_eq!(
+            cpus,
+            Some(vec![CpuId(0), CpuId(2), CpuId(3), CpuId(4), CpuId(6)])
+        );
+    }
+
+    #[test]
+    fn test_parse_cpus_number() {
+        let v = serde_json::json!(3);
+        let cpus = parse_cpus(&v).unwrap();
+        assert_eq!(cpus, Some(vec![CpuId(3)]));
+    }
+
+    #[test]
+    fn test_parse_cpus_array() {
+        let v = serde_json::json!([0, 1, 3]);
+        let cpus = parse_cpus(&v).unwrap();
+        assert_eq!(cpus, Some(vec![CpuId(0), CpuId(1), CpuId(3)]));
+    }
+
+    #[test]
+    fn test_parse_cpus_in_workload() {
+        let json = r#"{
+            "global": { "duration": 1 },
+            "tasks": {
+                "pinned": {
+                    "loop": -1,
+                    "cpus": "0,1",
+                    "run": 5000
+                }
+            }
+        }"#;
+
+        let scenario = load_rtapp(json, 4).unwrap();
+        let task = &scenario.tasks[0];
+        assert_eq!(task.allowed_cpus, Some(vec![CpuId(0), CpuId(1)]));
     }
 }

@@ -165,6 +165,27 @@ void sim_task_setup_cpus_ptr(struct task_struct *p)
 	p->cpus_ptr = &p->cpus_mask;
 }
 
+void sim_task_clear_cpumask(struct task_struct *p)
+{
+	memset(&p->cpus_mask, 0, sizeof(p->cpus_mask));
+	p->cpus_ptr = &p->cpus_mask;
+}
+
+void sim_task_set_cpumask_cpu(struct task_struct *p, int cpu)
+{
+	/* Set one bit in cpus_mask. cpumask uses unsigned long array,
+	 * with BITS_PER_LONG bits per element. */
+	unsigned long *bits = (unsigned long *)&p->cpus_mask;
+	int word = cpu / (sizeof(unsigned long) * 8);
+	int bit = cpu % (sizeof(unsigned long) * 8);
+	bits[word] |= (1UL << bit);
+}
+
+void *sim_task_get_cpus_ptr(struct task_struct *p)
+{
+	return (void *)p->cpus_ptr;
+}
+
 u32 sim_task_get_scx_flags(struct task_struct *p)
 {
 	return p->scx.flags;
