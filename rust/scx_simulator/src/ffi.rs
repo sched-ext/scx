@@ -105,6 +105,12 @@ pub trait Scheduler {
     /// Calls into C code. `p` must be a valid task_struct pointer.
     unsafe fn enable(&self, p: *mut c_void);
 
+    /// A task was dequeued (ops.dequeue). Optional.
+    /// Called when a task leaves the runnable state.
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer.
+    unsafe fn dequeue(&self, _p: *mut c_void, _deq_flags: u64) {}
+
     /// A task went to sleep (ops.quiescent). Optional.
     /// # Safety
     /// Calls into C code. `p` must be a valid task_struct pointer.
@@ -163,6 +169,7 @@ type ExitFn = unsafe extern "C" fn(*mut c_void);
 type SetupFn = unsafe extern "C" fn(u32);
 type FireTimerFn = unsafe extern "C" fn();
 type QuiescentFn = unsafe extern "C" fn(*mut c_void, u64);
+type DequeueFn = unsafe extern "C" fn(*mut c_void, u64);
 type TickFn = unsafe extern "C" fn(*mut c_void);
 
 /// Resolved function pointers for a scheduler's ops.
@@ -180,6 +187,7 @@ struct SchedOps {
     exit: Option<ExitFn>,
     fire_timer: Option<FireTimerFn>,
     quiescent: Option<QuiescentFn>,
+    dequeue: Option<DequeueFn>,
     tick: Option<TickFn>,
 }
 
@@ -369,6 +377,7 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), FireTimerFn>(p)),
             quiescent: try_get!("quiescent")
                 .map(|p| std::mem::transmute::<*const (), QuiescentFn>(p)),
+            dequeue: try_get!("dequeue").map(|p| std::mem::transmute::<*const (), DequeueFn>(p)),
             tick: try_get!("tick").map(|p| std::mem::transmute::<*const (), TickFn>(p)),
         }
     }
@@ -434,6 +443,12 @@ impl Scheduler for DynamicScheduler {
     unsafe fn fire_timer(&self) {
         if let Some(f) = self.ops.fire_timer {
             f();
+        }
+    }
+
+    unsafe fn dequeue(&self, p: *mut c_void, deq_flags: u64) {
+        if let Some(f) = self.ops.dequeue {
+            f(p, deq_flags);
         }
     }
 
