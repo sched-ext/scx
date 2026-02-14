@@ -27,6 +27,7 @@ use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
 use crate::scenario::{NoiseConfig, OverheadConfig};
+use crate::task::OpsTaskState;
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
@@ -94,6 +95,10 @@ pub struct SimulatorState {
     /// Per-task last CPU (set when a task starts running).
     /// Used by `scx_bpf_task_cpu` to return the correct value.
     pub task_last_cpu: HashMap<Pid, CpuId>,
+    /// Per-task SCX ops_state (mirrors kernel's `SCX_OPSS_*`).
+    /// Tracks whether the task is `Queued` (in the BPF scheduler) or `None`
+    /// (dispatched / not queued). Used to gate `ops.dequeue()`.
+    pub task_ops_state: HashMap<Pid, OpsTaskState>,
     /// Flag set by `scx_bpf_reenqueue_local` during `cpu_release`.
     /// The engine drains the local DSQ and re-enqueues tasks after the
     /// callback returns.
@@ -281,6 +286,9 @@ impl SimulatorState {
     /// should try to run on that CPU), or None.
     pub fn resolve_pending_dispatch(&mut self, local_cpu: CpuId) -> Option<CpuId> {
         let pd = self.pending_dispatch.take()?;
+
+        // Task has been dispatched — no longer in BPF scheduler's queue.
+        self.task_ops_state.insert(pd.pid, OpsTaskState::None);
 
         let dsq = pd.dsq_id;
         if dsq.is_local() {
@@ -1104,6 +1112,7 @@ mod tests {
             task_raw_to_pid: HashMap::new(),
             task_pid_to_raw: HashMap::new(),
             task_last_cpu: HashMap::new(),
+            task_ops_state: HashMap::new(),
             prng_state: 0xDEAD_BEEF,
             ops_context: OpsContext::None,
             pending_dispatch: None,
