@@ -43,7 +43,6 @@ const volatile u64	     slice_ns;
 const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
 const volatile bool	     exiting_task_workaround_enabled = true;
-const volatile bool	     split_vtime_updates	     = false;
 const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
 
@@ -1278,7 +1277,6 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
 	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
-	struct cell	*cell;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1287,17 +1285,6 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (enable_llc_awareness && enable_work_stealing) {
 		if (maybe_retag_stolen_task(p, tctx, cctx) < 0)
 			return;
-	}
-
-	/*
-	 * Legacy approach: Update vtime_now before task runs.
-	 * Only used when split vtime updates is enabled.
-	 */
-	if (split_vtime_updates) {
-		if (!(cell = lookup_cell(cctx->cell)))
-			return;
-
-		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
 	}
 
 	tctx->started_running_at = scx_bpf_now();
@@ -1333,13 +1320,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
-	/*
-	 * Default approach: Update cell and cpu dsq vtime after updating task's vtime
-	 * to keep them in sync and prevent "vtime too far ahead" errors.
-	 */
-	if (!split_vtime_updates) {
-		advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
-	}
+	/* Advance cell and cpu dsq vtime to keep in sync with task vtime. */
+	advance_dsq_vtimes(cell, cctx, tctx, p->scx.dsq_vtime);
 
 	if (cidx != 0 || tctx->all_cell_cpus_allowed) {
 		u64 *cell_cycles = MEMBER_VPTR(cctx->cell_cycles, [cidx]);
