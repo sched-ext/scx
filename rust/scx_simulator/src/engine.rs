@@ -22,6 +22,9 @@ use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
 
+/// SCX dequeue flags: task is going to sleep.
+const SCX_DEQ_SLEEP: u64 = 1;
+
 /// Tick interval in nanoseconds (4ms, matching HZ=250).
 const TICK_INTERVAL_NS: TimeNs = 4_000_000;
 
@@ -714,8 +717,10 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
             if !still_runnable {
+                debug!(pid = pid.0, cpu = cpu.0, "dequeue");
+                self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
                 debug!(pid = pid.0, cpu = cpu.0, "quiescent");
-                self.scheduler.quiescent(raw, 0);
+                self.scheduler.quiescent(raw, SCX_DEQ_SLEEP);
             }
             kfuncs::exit_sim();
         }
