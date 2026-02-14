@@ -43,8 +43,6 @@ pub struct SimCpu {
     /// The slice value when the current task started running.
     /// Used by `preempt_current()` to set the remaining slice on the raw task.
     pub task_original_slice: Option<TimeNs>,
-    /// How the previous task stopped running, used for context switch overhead.
-    pub last_stop_reason: Option<LastStopReason>,
 }
 
 impl SimCpu {
@@ -59,7 +57,6 @@ impl SimCpu {
             perf_lvl: 0,
             task_started_at: None,
             task_original_slice: None,
-            last_stop_reason: None,
         }
     }
 

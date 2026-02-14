@@ -592,7 +592,10 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].prev_task = Some(pid);
         state.cpus[cpu.0 as usize].task_started_at = None;
         state.cpus[cpu.0 as usize].task_original_slice = None;
-        state.cpus[cpu.0 as usize].last_stop_reason = Some(LastStopReason::Involuntary);
+
+        // Apply CSW overhead directly to local_clock (see #NOTE TIMING_MODEL)
+        let overhead = state.csw_overhead(LastStopReason::Involuntary);
+        state.cpus[cpu.0 as usize].local_clock += overhead;
 
         // Set slice to 0: the full slice was consumed (used by stopping() for vtime)
         unsafe { crate::ffi::sim_task_set_slice(raw, 0) };
@@ -681,7 +684,10 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].prev_task = Some(pid);
         state.cpus[cpu.0 as usize].task_started_at = None;
         state.cpus[cpu.0 as usize].task_original_slice = None;
-        state.cpus[cpu.0 as usize].last_stop_reason = Some(stop_reason);
+
+        // Apply CSW overhead directly to local_clock (see #NOTE TIMING_MODEL)
+        let overhead = state.csw_overhead(stop_reason);
+        state.cpus[cpu.0 as usize].local_clock += overhead;
 
         // Set slice to reflect consumed time (used by stopping() for vtime)
         let remaining_slice = original_slice.saturating_sub(time_consumed);
@@ -937,19 +943,6 @@ impl<S: Scheduler> Simulator<S> {
         // Advance this CPU's clock to at least the event queue time
         state.advance_cpu_clock(cpu);
 
-        // Apply context switch overhead if a task just stopped on this CPU.
-        //
-        // TODO: Move this to the stop sites (handle_slice_expired,
-        // preempt_current, handle_task_phase_complete) where the overhead
-        // should be applied directly to local_clock at the point it occurs.
-        // Applying lazily here at dispatch time is wrong: it charges
-        // overhead after idle gaps where no task-to-task switch happened.
-        // See #NOTE TIMING_MODEL on advance_cpu_clock in kfuncs.rs.
-        if let Some(reason) = state.cpus[cpu.0 as usize].last_stop_reason.take() {
-            let overhead = state.csw_overhead(reason);
-            state.cpus[cpu.0 as usize].local_clock += overhead;
-        }
-
         // Check if local DSQ has tasks
         if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
             // Look up the previously-running task's raw pointer for dispatch
@@ -1114,7 +1107,10 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].prev_task = Some(pid);
         state.cpus[cpu.0 as usize].task_started_at = None;
         state.cpus[cpu.0 as usize].task_original_slice = None;
-        state.cpus[cpu.0 as usize].last_stop_reason = Some(LastStopReason::Involuntary);
+
+        // Apply CSW overhead directly to local_clock (see #NOTE TIMING_MODEL)
+        let overhead = state.csw_overhead(LastStopReason::Involuntary);
+        state.cpus[cpu.0 as usize].local_clock += overhead;
 
         // Set remaining slice on raw task (used by stopping() for vtime accounting)
         let remaining_slice = original_slice.saturating_sub(consumed);
