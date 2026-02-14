@@ -89,12 +89,36 @@ fn calc_frac(a: f64, b: f64) -> f64 {
 }
 
 fn fmt_pct(v: f64) -> String {
-    if v >= 99.995 {
-        format!("{:5.1}", v)
+    if v >= 99.95 {
+        format!("{:4.0}", v)
+    } else if v >= 10.0 {
+        format!("{:4.1}", v)
     } else if v > 0.0 && v < 0.01 {
-        format!("{:5.2}", 0.01)
+        format!("{:4.2}", 0.01)
     } else {
-        format!("{:5.2}", v)
+        format!("{:4.2}", v)
+    }
+}
+
+fn fmt_duration_ms(ms: f64) -> String {
+    if ms >= 60_000.0 {
+        let min = ms / 60_000.0;
+        if min >= 100.0 {
+            format!("{:.0}min", min)
+        } else {
+            format!("{:.1}min", min)
+        }
+    } else if ms >= 1_000.0 {
+        let s = ms / 1_000.0;
+        if s >= 100.0 {
+            format!("{:.0}s", s)
+        } else {
+            format!("{:.1}s", s)
+        }
+    } else if ms >= 10.0 {
+        format!("{:.0}ms", ms)
+    } else {
+        format!("{:.1}ms", ms)
     }
 }
 
@@ -336,12 +360,14 @@ impl LayerStats {
         &self,
         w: &mut W,
         name: &str,
-        header_width: usize,
         topo: Option<&Topology>,
+        max_width: usize,
+        no_llc: bool,
     ) -> Result<()> {
+        // Line 1: layer summary
         writeln!(
             w,
-            "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
+            "\n\u{25B6} {} \u{2500} util/open/frac={:6.1}/{}/{:7.1} prot/prot_preempt={}/{} tasks={:6}",
             name,
             self.util,
             fmt_pct(self.util_open_frac),
@@ -349,137 +375,99 @@ impl LayerStats {
             fmt_pct(self.util_protected_frac),
             fmt_pct(self.util_protected_preempt_frac),
             self.tasks,
-            width = header_width,
         )?;
 
+        // sched: scheduling event flow
         writeln!(
             w,
-            "  {:<width$}  tot={:7} local_sel/enq={}/{} enq_dsq={} wake/exp/reenq={}/{}/{} dsq_ewma={}",
-            "",
-            self.total,
+            "  {:<7} tot={} dd_sel/enq={}/{} dsq/10s={}/{} wake/exp/re={}/{}/{}",
+            "sched",
+            fmt_num(self.total),
             fmt_pct(self.sel_local),
             fmt_pct(self.enq_local),
             fmt_pct(self.enq_dsq),
+            fmt_pct(self.dsq_insert_ewma),
             fmt_pct(self.enq_wakeup),
             fmt_pct(self.enq_expire),
             fmt_pct(self.enq_reenq),
-            fmt_pct(self.dsq_insert_ewma),
-            width = header_width,
         )?;
 
+        // exec: execution behavior (merged keep/yield + slice/min_exec)
         writeln!(
             w,
-            "  {:<width$}  keep/max/busy={}/{}/{} yield/ign={}/{}",
-            "",
+            "  {:<7} keep/max/busy={}/{}/{} yield/ign={}/{} slc={} min_ex={}/{}",
+            "exec",
             fmt_pct(self.keep),
             fmt_pct(self.keep_fail_max_exec),
             fmt_pct(self.keep_fail_busy),
             fmt_pct(self.yielded),
             fmt_num(self.yield_ignore),
-            width = header_width,
+            fmt_duration_ms(self.slice_us as f64 / 1000.0),
+            fmt_pct(self.min_exec),
+            fmt_duration_ms(self.min_exec_us as f64 / 1000.0),
         )?;
 
+        // mig: CPU placement and movement
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip={}/{} affn_viol={}",
-            "",
-            fmt_pct(self.open_idle),
+            "  {:<7} mig={} xnuma={} xllc/skip={}/{} open_idle={} affn_viol={}",
+            "mig",
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
             fmt_pct(self.xllc_migration_skip),
+            fmt_pct(self.open_idle),
             fmt_pct(self.affn_viol),
-            width = header_width,
         )?;
 
+        // preempt: preemption
         writeln!(
             w,
-            "  {:<width$}  preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
-            "",
+            "  {:<7} preempt/first/xllc/idle/fail={}/{}/{}/{}/{}",
+            "preempt",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
             fmt_pct(self.preempt_xllc),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
-            width = header_width,
         )?;
 
+        // xlayer: cross-layer and LLC dispatch
         writeln!(
             w,
-            "  {:<width$}  xlayer_wake/re={}/{} llc_drain/try={}/{} skip_rnode={}",
-            "",
+            "  {:<7} wake/re={}/{} llc_drain/try={}/{} skip_rnode={}",
+            "xlayer",
             fmt_pct(self.xlayer_wake),
             fmt_pct(self.xlayer_rewake),
             fmt_pct(self.llc_drain),
             fmt_pct(self.llc_drain_try),
             fmt_pct(self.skip_remote_node),
-            width = header_width,
         )?;
 
-        writeln!(
-            w,
-            "  {:<width$}  slice={}ms min_exec={}/{:7.2}ms",
-            "",
-            self.slice_us as f64 / 1000.0,
-            fmt_pct(self.min_exec),
-            self.min_exec_us as f64 / 1000.0,
-            width = header_width
-        )?;
-
+        // cpumask
         let cpumask = Cpumask::from_vec(self.cpus.clone());
 
         if let Some(topo) = topo {
             let header = topo.format_cpumask_header(&cpumask, self.min_nr_cpus, self.max_nr_cpus);
-            writeln!(w, "  {:<width$}  {}", "", header, width = header_width,)?;
-            let indent = format!("  {:<width$}  ", "", width = header_width);
+            writeln!(w, "  {}", header)?;
             if cpumask.weight() > 0 {
-                topo.format_cpumask_grid(w, &cpumask, &indent, usize::MAX)?;
+                topo.format_cpumask_grid(w, &cpumask, "  ", max_width)?;
             }
         } else {
             writeln!(
                 w,
-                "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
-                "",
-                self.cur_nr_cpus,
-                self.min_nr_cpus,
-                self.max_nr_cpus,
-                &cpumask,
-                width = header_width
+                "  cpus={:3} [{:3},{:3}] {}",
+                self.cur_nr_cpus, self.min_nr_cpus, self.max_nr_cpus, &cpumask,
             )?;
         }
 
-        write!(
-            w,
-            "  {:<width$}  [LLC] nr_cpus: sched% lat_ms",
-            "",
-            width = header_width
-        )?;
-
-        for (i, (&frac, &lat)) in self.llc_fracs.iter().zip(self.llc_lats.iter()).enumerate() {
-            if (i % 4) == 0 {
-                writeln!(w, "")?;
-                write!(w, "  {:<width$}  [{:03}]", "", i, width = header_width)?;
-            } else {
-                write!(w, " |")?;
-            }
-            write!(
-                w,
-                " {:2}:{}%{:7.2}",
-                self.nr_llc_cpus[i],
-                fmt_pct(frac),
-                lat * 1_000.0
-            )?;
-        }
-        writeln!(w, "")?;
-
+        // excl stats
         if self.is_excl != 0 {
             writeln!(
                 w,
-                "  {:<width$}  excl_coll={} excl_preempt={}",
-                "",
+                "  excl_coll={} excl_preempt={}",
                 fmt_pct(self.excl_collision),
                 fmt_pct(self.excl_preempt),
-                width = header_width,
             )?;
         } else if self.excl_collision != 0.0 || self.excl_preempt != 0.0 {
             warn!(
@@ -488,6 +476,48 @@ impl LayerStats {
                 fmt_pct(self.excl_collision),
                 fmt_pct(self.excl_preempt),
             );
+        }
+
+        // LLC stats (compact grid, skip inactive)
+        if !no_llc {
+            // Collect active LLCs (nr_cpus > 0 or frac > 0)
+            let active_llcs: Vec<(usize, f64, f64)> = self
+                .llc_fracs
+                .iter()
+                .zip(self.llc_lats.iter())
+                .enumerate()
+                .filter(|(i, (&frac, _))| {
+                    let nr_cpus = self.nr_llc_cpus.get(*i).copied().unwrap_or(0);
+                    nr_cpus > 0 || frac > 0.0
+                })
+                .map(|(i, (&frac, &lat))| (i, frac, lat))
+                .collect();
+
+            if !active_llcs.is_empty() {
+                let indent = "  ";
+                writeln!(w, "{indent}LLC sched%/lat_ms")?;
+                // Cell format: [XX]99.9/99.9 = 13 chars, + 1 space separator = 14
+                let cell_width = 14;
+                let usable = if max_width > indent.len() {
+                    max_width - indent.len()
+                } else {
+                    60
+                };
+                let cells_per_row = (usable / cell_width).max(1);
+
+                for (col, &(llc_id, frac, lat)) in active_llcs.iter().enumerate() {
+                    if col % cells_per_row == 0 {
+                        if col > 0 {
+                            writeln!(w)?;
+                        }
+                        write!(w, "{indent}")?;
+                    } else {
+                        write!(w, " ")?;
+                    }
+                    write!(w, "[{:02}]{}/{:4.1}", llc_id, fmt_pct(frac), lat * 1_000.0)?;
+                }
+                writeln!(w)?;
+            }
         }
 
         Ok(())
@@ -634,7 +664,7 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms sys_util_ewma={:5.1}",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fb_cpu/util={:3}/{:4.1} proc={}ms sys_util_10s={:5.1}",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
@@ -666,16 +696,14 @@ impl SysStats {
         Ok(())
     }
 
-    pub fn format_all<W: Write>(&self, w: &mut W, topo: Option<&Topology>) -> Result<()> {
+    pub fn format_all<W: Write>(
+        &self,
+        w: &mut W,
+        topo: Option<&Topology>,
+        max_width: usize,
+        no_llc: bool,
+    ) -> Result<()> {
         self.format(w)?;
-
-        let header_width = self
-            .layers
-            .keys()
-            .map(|name| name.len())
-            .max()
-            .unwrap_or(0)
-            .max(4);
 
         let mut idx_to_name: Vec<(usize, &String)> =
             self.layers.iter().map(|(k, v)| (v.index, k)).collect();
@@ -683,7 +711,7 @@ impl SysStats {
         idx_to_name.sort();
 
         for (_idx, name) in &idx_to_name {
-            self.layers[*name].format(w, name, header_width, topo)?;
+            self.layers[*name].format(w, name, topo, max_width, no_llc)?;
         }
 
         Ok(())
@@ -747,7 +775,12 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         )
 }
 
-pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn monitor(
+    intv: Duration,
+    shutdown: Arc<AtomicBool>,
+    max_width: usize,
+    no_llc: bool,
+) -> Result<()> {
     let topo = Topology::new().ok();
     scx_utils::monitor_stats::<SysStats>(
         &[],
@@ -755,8 +788,10 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         || shutdown.load(Ordering::Relaxed),
         |sst| {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
-            println!("###### {} ######", dt.to_rfc2822());
-            sst.format_all(&mut std::io::stdout(), topo.as_ref())
+            let header = format!("\u{2501}\u{2501} {} ", dt.to_rfc2822());
+            let pad = max_width.saturating_sub(header.chars().count());
+            println!("{}{}", header, "\u{2501}".repeat(pad));
+            sst.format_all(&mut std::io::stdout(), topo.as_ref(), max_width, no_llc)
         },
     )
 }
