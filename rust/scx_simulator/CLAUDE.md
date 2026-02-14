@@ -80,3 +80,33 @@ Common tools already available:
 - **rt-app**: `~/bin/rt-app` (built from `~/playground/rt-app`)
 - **bpftrace**: system-installed
 - **mb** (minibeads): local issue tracker
+
+Every TODO in source code MUST reference an issue: `TODO(sim-XXXXX)`. Do not
+leave TODOs without a tracking issue — file one first, then add the TODO.
+
+Kernel Fidelity
+========================================
+
+The simulator models a SUBSET of kernel behavior. That is acceptable — we cannot
+simulate everything. What is NOT acceptable is admitting behaviors that are not
+realizable by the kernel. Every callback invocation, flag value, and ordering
+must correspond to a real kernel code path. If the kernel would not make a
+particular call in a given situation, neither should the simulator.
+
+Be extremely cautious with shortcuts that deviate from kernel semantics.
+Hard-coding unconditional calls (e.g. always calling ops.dequeue regardless of
+task state) is dangerous because it introduces behaviors no kernel execution
+would produce. Schedulers may rely on the invariant that certain callbacks only
+fire in specific states.
+
+When a shortcut is unavoidable (e.g. because we haven't yet modeled the
+requisite state), mark it with `DANGER TODO(<issue>)` in the code. The `DANGER`
+prefix makes these easy to grep for and signals that the code is known to
+deviate from kernel semantics. The `<issue>` is a minibeads issue ID (e.g.
+`sim-1ae1a`) that describes the proper fix. Example:
+
+```rust
+// DANGER TODO(sim-1ae1a): unconditional dequeue is not kernel-accurate.
+// The kernel only calls ops.dequeue when the task is in SCX_OPSS_QUEUED
+// state. We need to model ops_state.
+```
