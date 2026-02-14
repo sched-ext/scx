@@ -208,6 +208,18 @@ impl<S: Scheduler> Simulator<S> {
             seq += 1;
         }
 
+        // Seed per-CPU tick streams. Each CPU gets a single perpetual tick
+        // chain: tick fires → handle_tick → schedule next tick. This matches
+        // the kernel's periodic timer interrupt (HZ=250 → 4ms).
+        for cpu_id in 0..nr_cpus {
+            events.push(Reverse(Event {
+                time_ns: TICK_INTERVAL_NS,
+                seq,
+                kind: EventKind::Tick { cpu: CpuId(cpu_id) },
+            }));
+            seq += 1;
+        }
+
         // Main event loop
         while let Some(Reverse(event)) = events.pop() {
             if event.time_ns > scenario.duration_ns {
@@ -310,8 +322,12 @@ impl<S: Scheduler> Simulator<S> {
 
     /// Handle a periodic scheduler tick on a CPU.
     ///
-    /// Calls `ops.tick(p)` where `p` is the currently running task.
-    /// Detects self-preemption via two patterns:
+    /// Ticks are per-CPU periodic timer interrupts, independent of which task
+    /// is running. Each tick unconditionally schedules the next tick at
+    /// `now + TICK_INTERVAL_NS`, maintaining a single perpetual chain per CPU.
+    ///
+    /// If a task is running, calls `ops.tick(p)` and detects self-preemption
+    /// via two patterns:
     /// 1. Scheduler called `scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT)` on self
     /// 2. Scheduler zeroed `p->scx.slice` (slice changed to 0 during tick)
     fn handle_tick(
@@ -322,9 +338,18 @@ impl<S: Scheduler> Simulator<S> {
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
     ) {
+        // Always schedule the next tick — ticks are unconditional per-CPU timers
+        let next_tick = state.cpus[cpu.0 as usize].local_clock + TICK_INTERVAL_NS;
+        events.push(Reverse(Event {
+            time_ns: next_tick,
+            seq: *seq,
+            kind: EventKind::Tick { cpu },
+        }));
+        *seq += 1;
+
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
-            None => return, // No task running — stale tick event
+            None => return, // No task running — nothing to tick
         };
 
         let raw = match tasks.get(&pid) {
@@ -367,15 +392,6 @@ impl<S: Scheduler> Simulator<S> {
 
         if should_preempt && state.cpus[cpu.0 as usize].current_task.is_some() {
             self.preempt_current(cpu, state, tasks, events, seq);
-        } else if state.cpus[cpu.0 as usize].current_task.is_some() {
-            // Schedule next tick if task is still running
-            let next_tick = state.cpus[cpu.0 as usize].local_clock + TICK_INTERVAL_NS;
-            events.push(Reverse(Event {
-                time_ns: next_tick,
-                seq: *seq,
-                kind: EventKind::Tick { cpu },
-            }));
-            *seq += 1;
         }
     }
 
@@ -1128,15 +1144,6 @@ impl<S: Scheduler> Simulator<S> {
             }));
             *seq += 1;
         }
-
-        // Schedule first tick for this CPU
-        let first_tick = local_t + TICK_INTERVAL_NS;
-        events.push(Reverse(Event {
-            time_ns: first_tick,
-            seq: *seq,
-            kind: EventKind::Tick { cpu },
-        }));
-        *seq += 1;
     }
 
     /// Advance a task past any Wake phases to the next Run or Sleep phase.
