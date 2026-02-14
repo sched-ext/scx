@@ -68,3 +68,15 @@ status as you work (`mb update sim-N --status in_progress`, `mb close sim-N`).
 File issues for bugs, TODOs, and feature work rather than leaving stale TODO
 comments in code. Reference issue IDs (e.g. sim-1) in commit messages when
 closing issues.
+
+Dependencies and Missing Software
+========================================
+
+Never work around a missing dependency with a compromised fallback. If software
+is needed, install it — build from source, use the package manager, or ask the
+user for help. The `~/bin/` directory is on `$PATH` for locally-built tools.
+Common tools already available:
+
+- **rt-app**: `~/bin/rt-app` (built from `~/playground/rt-app`)
+- **bpftrace**: system-installed
+- **mb** (minibeads): local issue tracker

@@ -104,12 +104,10 @@ fn classify_event(key: &str) -> Option<&'static str> {
         "runtime", "run", "sleep", "timer", "suspend", "resume", "lock", "unlock", "wait",
         "signal", "broad", "sync", "mem", "iorun", "yield", "barrier", "fork",
     ];
-    for prefix in EVENT_PREFIXES {
-        if key.len() >= prefix.len() && &key[..prefix.len()] == *prefix {
-            return Some(prefix);
-        }
-    }
-    None
+    EVENT_PREFIXES
+        .iter()
+        .find(|&&prefix| key.len() >= prefix.len() && &key[..prefix.len()] == prefix)
+        .copied()
 }
 
 /// Non-event keys that are valid at phase/task level.

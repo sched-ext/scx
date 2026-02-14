@@ -463,6 +463,7 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.waker_task_raw = waker_raw;
             state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
+            debug!(pid = pid.0, "runnable");
             self.scheduler.runnable(raw, SCX_ENQ_WAKEUP);
             kfuncs::exit_sim();
         }
@@ -509,6 +510,7 @@ impl<S: Scheduler> Simulator<S> {
 
             if let Some(dd_cpu) = direct_dispatched {
                 // Task was directly dispatched — skip enqueue (kernel semantics)
+                debug!(pid = pid.0, cpu = dd_cpu.0, "direct dispatch");
                 self.try_dispatch_and_run(dd_cpu, state, tasks, events, seq);
             } else {
                 // Task was not directly dispatched; call enqueue
@@ -751,6 +753,7 @@ impl<S: Scheduler> Simulator<S> {
                         kfuncs::enter_sim(state);
                         state.ops_context = OpsContext::Enqueue;
                         state.current_cpu = cpu;
+                        debug!(pid = pid.0, "enqueue (yield re-enqueue)");
                         self.scheduler.enqueue(raw, 0);
                         state.ops_context = OpsContext::None;
                         state.resolve_pending_dispatch(cpu);

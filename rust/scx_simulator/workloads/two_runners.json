@@ -2,7 +2,7 @@
     "global": {
         "duration": 1,
         "default_policy": "SCHED_OTHER",
-        "calibration": "CPU0"
+        "calibration": 19
     },
     "tasks": {
         "heavy": {
