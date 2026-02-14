@@ -29,7 +29,6 @@ enum cake_tier {
     CAKE_TIER_INTERACT  = 1,  /* <2ms:    compositor, physics, AI */
     CAKE_TIER_FRAME     = 2,  /* <8ms:    game render, encoding */
     CAKE_TIER_BULK      = 3,  /* ≥8ms:    compilation, background */
-    CAKE_TIER_IDLE      = 255,
     CAKE_TIER_MAX       = 4,
 };
 
@@ -44,11 +43,10 @@ enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
 };
 
-/* Per-task flow state - 64B aligned, first 16B coalesced for cake_stopping writes */
+/* Per-task flow state - 64B aligned, first 8B coalesced for cake_stopping writes */
 struct cake_task_ctx {
-    /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
-    u64 next_slice;        /* 8B: Pre-computed slice (ns) */
-
+    /* --- Hot Write Group (cake_stopping) [Bytes 0-7] ---
+     * Union: deficit_avg_fused (4B) + packed_info (4B) = 8B */
     /* STATE FUSION: Union allows atomic u64 access to both state fields */
     union {
         struct {
@@ -61,18 +59,17 @@ struct cake_task_ctx {
             };
             u32 packed_info;               /* 4B: Bitfield */
         };
-        u64 state_fused_u64;               /* 8B: Direct burst commit */
     };
 
-    /* --- Timestamp (cake_running) [Bytes 16-19] --- */
+    /* --- Timestamp (cake_running) [Bytes 8-11] --- */
     u32 last_run_at;       /* 4B: Last run timestamp (ns), wraps 4.2s */
 
-    /* --- Graduated backoff counter [Bytes 20-23] --- */
+    /* --- Graduated backoff counter [Bytes 12-15] --- */
     u32 reclass_counter;   /* 4B: Per-task stop counter for per-tier backoff
                             * Widened from u16 to prevent 21-218s wrap cascade.
                             * u32 at 50K/s wraps at 23.9 hours — effectively never. */
 
-    u8 __pad[40];          /* Pad to 64 bytes: 8+8+4+4+40 = 64 */
+    u8 __pad[48];          /* Pad to 64 bytes: 8+4+4+48 = 64 */
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
@@ -91,12 +88,6 @@ struct cake_task_ctx {
 #define EXTRACT_DEFICIT(fused)  ((u16)((fused) & 0xFFFF))
 #define EXTRACT_AVG_RT(fused)   ((u16)((fused) >> 16))
 #define PACK_DEFICIT_AVG(deficit, avg)  (((u32)(deficit) & 0xFFFF) | ((u32)(avg) << 16))
-
-/* Pure avg_runtime tier gates (µs) */
-#define TIER_GATE_T0   100   /* < 100µs  → T0 Critical: IRQ, input, audio */
-#define TIER_GATE_T1   2000  /* < 2000µs → T1 Interact: compositor, physics */
-#define TIER_GATE_T2   8000  /* < 8000µs → T2 Frame:    game render, encode */
-                              /* ≥ 8000µs → T3 Bulk:     compilation, bg */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: Per-CPU state (64 bytes = single cache line)
@@ -124,7 +115,7 @@ struct cake_task_ctx {
  * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
     /* --- Tick staging (bytes 0-17) --- */
-    u8 flags;              /* Reserved */
+    u8 _reserved0;         /* Reserved byte (offset 0, never accessed) */
     u8 dsq_hint;           /* DVFS perf target cache */
     u8 tick_counter;       /* Confidence-based starvation skip mask counter */
     u8 tick_tier;          /* Tier of currently-running task (set by running) */
@@ -157,12 +148,11 @@ struct cake_stats {
     u64 _pad[22];                  /* Pad to 256 bytes: (2+4+4+22)*8 = 256 */
 } __attribute__((aligned(64)));
 
-/* Topology flags - enables zero-cost specialization (false = code path eliminated by verifier) */
 
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS         (2 * 1000 * 1000)   /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS  (8 * 1000 * 1000)   /* 8ms */
-#define CAKE_DEFAULT_STARVATION_NS      (100 * 1000 * 1000) /* 100ms */
+
 
 /* Default tier arrays (Gaming profile) — 4 tiers */
 
@@ -200,13 +190,7 @@ typedef u64 fused_config_t;
 #define CFG_MASK_BUDGET       0xFFFFULL
 #define CFG_MASK_STARVATION   0xFFFFFULL
 
-/* Extraction Macros (BPF Side) */
-/* Multiplier: bits 0-11. AND only. */
-#define UNPACK_MULTIPLIER(cfg)    ((cfg) & CFG_MASK_MULTIPLIER)
-/* Quantum: bits 12-27. SHR; AND; SHL. */
-#define UNPACK_QUANTUM_NS(cfg)    ((((cfg) >> CFG_SHIFT_QUANTUM) & CFG_MASK_QUANTUM) << 10)
-/* Budget: bits 28-43. SHR; AND; SHL. */
-#define UNPACK_BUDGET_NS(cfg)     ((((cfg) >> CFG_SHIFT_BUDGET) & CFG_MASK_BUDGET) << 10)
+/* Extraction Macro (BPF Side) — only STARVATION used in hot path */
 /* Starvation: bits 44-63. SHR; SHL. (Mask redundant) */
 #define UNPACK_STARVATION_NS(cfg) (((cfg) >> CFG_SHIFT_STARVATION) << 10)
 

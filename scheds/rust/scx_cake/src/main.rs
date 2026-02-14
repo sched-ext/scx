@@ -375,6 +375,7 @@ impl<'a> Scheduler<'a> {
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
             rodata.nr_cpus = topo.nr_cpus.min(64) as u32; // Rule 39: bounds kick scan loop
+            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(64) as u32; // V3: PHYS_FIRST scan mask
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }

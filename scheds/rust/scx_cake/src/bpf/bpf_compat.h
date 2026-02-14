@@ -9,8 +9,6 @@
     /* MODERN PATH: Formal Atomics (Max Performance) */
     #define cake_relaxed_load_u32(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
     #define cake_relaxed_store_u32(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
-    #define cake_relaxed_load_u64(ptr)      __atomic_load_n(ptr, __ATOMIC_RELAXED)
-    #define cake_relaxed_store_u64(ptr, v)  __atomic_store_n(ptr, v, __ATOMIC_RELAXED)
 
 #else
 
@@ -34,44 +32,7 @@
         );
     }
 
-    static __always_inline u64 cake_relaxed_load_u64(const volatile u64 *ptr) {
-        u64 val;
-        asm volatile(
-            "%0 = *(u64 *)(%1 + 0)"
-            : "=r"(val)
-            : "r"(ptr), "m"(*ptr)
-        );
-        return val;
-    }
-
-    static __always_inline void cake_relaxed_store_u64(volatile u64 *ptr, u64 val) {
-        asm volatile(
-            "*(u64 *)(%1 + 0) = %2"
-            : "=m"(*ptr)
-            : "r"(ptr), "r"(val)
-        );
-    }
-
 #endif
-
-/* Bitfield extraction: shift + mask (2 cycles) — BMI2 BEXTR unavailable in BPF ISA */
-#define EXTRACT_BITS_U32(val, start, len) \
-    (((u32)(val) >> (start)) & ((1U << (len)) - 1))
-#define EXTRACT_BITS_U64(val, start, len) \
-    (((u64)(val) >> (start)) & ((1ULL << (len)) - 1))
-
-
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * PREFETCH: Materialize address early to encourage prefetch-like behavior
- * - Forces compiler to compute the address, enabling earlier load scheduling
- * - No "memory" clobber: avoids acting as a compiler barrier that would
- *   flush store buffers and inhibit register caching / ILP / MLP
- * ═══════════════════════════════════════════════════════════════════════════ */
-#define CAKE_PREFETCH(addr) \
-    asm volatile("" : : "r"(addr))
-
-
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * RQ ACCESS: Prefer scx_bpf_locked_rq() over deprecated scx_bpf_cpu_rq().
