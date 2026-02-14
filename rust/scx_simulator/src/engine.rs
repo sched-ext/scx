@@ -717,6 +717,10 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
             if !still_runnable {
+                // DANGER TODO(sim-1ae1a): unconditional dequeue is not
+                // kernel-accurate. The kernel only calls ops.dequeue when
+                // the task is in SCX_OPSS_QUEUED state; a running task has
+                // already left that state. We need to model ops_state.
                 debug!(pid = pid.0, cpu = cpu.0, "dequeue");
                 self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
                 debug!(pid = pid.0, cpu = cpu.0, "quiescent");
