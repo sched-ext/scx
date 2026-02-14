@@ -12,7 +12,7 @@ pub use bpf_intf::*;
 
 mod stats;
 use std::collections::HashSet;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_ulong};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::mem::MaybeUninit;
@@ -468,12 +468,13 @@ impl<'a> Scheduler<'a> {
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
 
         // Generate the list of available CPUs sorted by capacity in descending order.
+        let mut cpus: Vec<_> = topo.all_cpus.values().collect();
+        cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
+        for (i, cpu) in cpus.iter().enumerate() {
+            rodata.cpu_capacity[cpu.id] = cpu.cpu_capacity as c_ulong;
+            rodata.preferred_cpus[i] = cpu.id as u64;
+        }
         if opts.preferred_idle_scan {
-            let mut cpus: Vec<_> = topo.all_cpus.values().collect();
-            cpus.sort_by_key(|cpu| std::cmp::Reverse(cpu.cpu_capacity));
-            for (i, cpu) in cpus.iter().enumerate() {
-                rodata.preferred_cpus[i] = cpu.id as u64;
-            }
             info!(
                 "Preferred CPUs: {:?}",
                 &rodata.preferred_cpus[0..cpus.len()]
@@ -560,6 +561,11 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        // Initialize SMT domains.
+        if smt_enabled {
+            Self::init_smt_domains(&mut skel, &topo)?;
+        }
+
         // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, cosmos_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -589,6 +595,44 @@ impl<'a> Scheduler<'a> {
         let out = prog.test_run(input).unwrap();
         if out.return_value != 0 {
             return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn enable_sibling_cpu(
+        skel: &mut BpfSkel<'_>,
+        cpu: usize,
+        sibling_cpu: usize,
+    ) -> Result<(), u32> {
+        let prog = &mut skel.progs.enable_sibling_cpu;
+        let mut args = domain_arg {
+            cpu_id: cpu as c_int,
+            sibling_cpu_id: sibling_cpu as c_int,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+        if out.return_value != 0 {
+            return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        let smt_siblings = topo.sibling_cpus();
+
+        info!("SMT sibling CPUs: {:?}", smt_siblings);
+        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
+            Self::enable_sibling_cpu(skel, cpu, *sibling_cpu as usize).unwrap();
         }
 
         Ok(())
