@@ -1,5 +1,7 @@
 //! Scenario definition and builder API.
 
+use tracing::warn;
+
 use crate::task::{TaskBehavior, TaskDef};
 use crate::types::{MmId, Pid, TimeNs};
 
@@ -111,6 +113,50 @@ impl OverheadConfig {
     }
 }
 
+/// Default PRNG seed used when `SCX_SIM_SEED` is not set.
+const DEFAULT_SEED: u32 = 42;
+
+/// Resolve the PRNG seed from the `SCX_SIM_SEED` environment variable.
+///
+/// - Unset or empty: returns `DEFAULT_SEED` (42).
+/// - `"entropy"` (case-insensitive): seeds from OS randomness and logs the
+///   chosen value so the run can be reproduced later.
+/// - Any decimal integer: parsed as a `u32` seed.
+pub fn seed_from_env() -> u32 {
+    match std::env::var("SCX_SIM_SEED").ok().as_deref() {
+        None | Some("") => DEFAULT_SEED,
+        Some(s) if s.eq_ignore_ascii_case("entropy") => {
+            // Use OS randomness: read 4 bytes from /dev/urandom.
+            let seed = {
+                use std::io::Read;
+                let mut buf = [0u8; 4];
+                std::fs::File::open("/dev/urandom")
+                    .and_then(|mut f| f.read_exact(&mut buf).map(|_| u32::from_le_bytes(buf)))
+                    .unwrap_or_else(|_| {
+                        // Fallback: use process ID + rough timestamp.
+                        let pid = std::process::id();
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u32)
+                            .unwrap_or(0);
+                        pid ^ ts
+                    })
+            };
+            // Avoid seed 0 which is a fixed point for xorshift.
+            let seed = if seed == 0 { 1 } else { seed };
+            warn!(
+                seed,
+                "SCX_SIM_SEED=entropy: seeding PRNG with OS randomness \
+                 (set SCX_SIM_SEED={seed} to reproduce this run)"
+            );
+            seed
+        }
+        Some(s) => s.parse::<u32>().unwrap_or_else(|_| {
+            panic!("SCX_SIM_SEED={s:?}: expected a u32 integer or \"entropy\"");
+        }),
+    }
+}
+
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
@@ -123,6 +169,8 @@ pub struct Scenario {
     pub duration_ns: TimeNs,
     pub noise: NoiseConfig,
     pub overhead: OverheadConfig,
+    /// PRNG seed for deterministic simulation. Default: 42.
+    pub seed: u32,
 }
 
 /// Builder for constructing scenarios.
@@ -134,6 +182,7 @@ pub struct ScenarioBuilder {
     next_pid: Pid,
     noise: NoiseConfig,
     overhead: OverheadConfig,
+    seed: u32,
 }
 
 impl Scenario {
@@ -146,6 +195,7 @@ impl Scenario {
             next_pid: Pid(1),
             noise: NoiseConfig::from_env(),
             overhead: OverheadConfig::from_env(),
+            seed: seed_from_env(),
         }
     }
 }
@@ -256,6 +306,12 @@ impl ScenarioBuilder {
         self.noise(false).overhead(false)
     }
 
+    /// Set the PRNG seed for deterministic simulation.
+    pub fn seed(mut self, seed: u32) -> Self {
+        self.seed = seed;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -280,6 +336,7 @@ impl ScenarioBuilder {
             duration_ns: self.duration_ns,
             noise: self.noise,
             overhead: self.overhead,
+            seed: self.seed,
         }
     }
 }
