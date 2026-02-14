@@ -1,13 +1,14 @@
 ---
 title: ops.dequeue support
-status: open
+status: closed
 priority: 1
 issue_type: feature
 depends_on:
   sim-6ba30: parent-child
   sim-91615: blocks
 created_at: 2026-02-13T17:58:58.198196661+00:00
-updated_at: 2026-02-13T18:10:24.901709387+00:00
+updated_at: 2026-02-14T05:16:36.038215575+00:00
+closed_at: 2026-02-14T05:16:36.038215455+00:00
 ---
 
 # Description
