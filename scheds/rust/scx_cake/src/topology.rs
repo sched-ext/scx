@@ -14,6 +14,8 @@ pub const MAX_LLCS: usize = 8;
 pub struct TopologyInfo {
     /// Number of online CPUs
     pub nr_cpus: usize,
+    /// Number of physical cores (for PHYS_FIRST scan)
+    pub nr_phys_cpus: usize,
 
     /// True if system has multiple L3 cache domains (CCDs)
     pub has_dual_ccd: bool,
@@ -71,6 +73,7 @@ pub fn detect() -> Result<TopologyInfo> {
 
     let mut info = TopologyInfo {
         nr_cpus,
+        nr_phys_cpus: topo.all_cores.len(),
         has_dual_ccd: nr_llcs > 1,
         has_hybrid_cores: false, // Will detect below
         smt_enabled: topo.smt_enabled,
@@ -187,6 +190,7 @@ pub fn detect() -> Result<TopologyInfo> {
     // Log detected topology (debug level - use RUST_LOG=debug to see)
     log::debug!("Topology detected:");
     log::debug!("  CPUs:          {}", info.nr_cpus);
+    log::debug!("  Phys cores:    {}", info.nr_phys_cpus);
     log::debug!("  SMT Enabled:   {}", info.smt_enabled);
     log::debug!("  Dual CCD:      {}", info.has_dual_ccd);
     if info.has_dual_ccd {
