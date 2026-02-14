@@ -34,6 +34,9 @@ pub enum TraceKind {
     TaskCompleted { pid: Pid },
     /// The CPU became idle (no tasks to run).
     CpuIdle,
+    /// Simulation ended while this task was still running on a CPU.
+    /// Emitted for each CPU with a current task when the event loop exits.
+    SimulationEnd { pid: Pid },
 
     // ----- Ops-level events (kernel context-switch path) -----
     /// A task was stopped on this CPU (put_prev_task → stopping()).
@@ -98,7 +101,10 @@ impl Trace {
     /// Calculate the total runtime (nanoseconds) for a given task PID.
     ///
     /// This sums up the intervals between `TaskScheduled` and the next
-    /// `TaskPreempted`/`TaskSlept`/`TaskCompleted` for that PID.
+    /// `TaskPreempted`/`TaskSlept`/`TaskCompleted` for that PID. Open
+    /// intervals (task still running at simulation end) are not counted;
+    /// use longer durations or shorter phases to ensure tasks complete
+    /// at least one cycle.
     pub fn total_runtime(&self, pid: Pid) -> TimeNs {
         let mut total: TimeNs = 0;
         let mut running_since: Option<TimeNs> = None;
@@ -183,6 +189,7 @@ impl Trace {
                 TraceKind::TaskWoke { pid } => format!("WAKE     pid={}", pid.0),
                 TraceKind::TaskCompleted { pid } => format!("COMPLETE pid={}", pid.0),
                 TraceKind::CpuIdle => "IDLE".to_string(),
+                TraceKind::SimulationEnd { pid } => format!("SIM_END  pid={}", pid.0),
                 TraceKind::PutPrevTask {
                     pid,
                     still_runnable,

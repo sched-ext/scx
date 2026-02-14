@@ -138,7 +138,7 @@ macro_rules! scheduler_tests {
             let sched_factory = $make_sched;
             let scenario = Scenario::builder()
                 .cpus(1)
-                .exact_timing()
+                .instant_timing()
                 .task(TaskDef {
                     name: "worker".into(),
                     pid: Pid(1),
@@ -176,7 +176,6 @@ macro_rules! scheduler_tests {
             let sched_factory = $make_sched;
             let scenario = Scenario::builder()
                 .cpus(1)
-                .exact_timing()
                 .task(TaskDef {
                     name: "t1".into(),
                     pid: Pid(1),
@@ -222,7 +221,6 @@ macro_rules! scheduler_tests {
             let sched_factory = $make_sched;
             let scenario = Scenario::builder()
                 .cpus(4)
-                .exact_timing()
                 .task(TaskDef {
                     name: "t1".into(),
                     pid: Pid(1),
@@ -279,7 +277,6 @@ macro_rules! scheduler_tests {
             let make_scenario = || {
                 Scenario::builder()
                     .cpus(2)
-                    .exact_timing()
                     .task(TaskDef {
                         name: "t1".into(),
                         pid: Pid(1),
@@ -348,7 +345,6 @@ macro_rules! scheduler_tests {
             let sched_factory = $make_sched;
             let scenario = Scenario::builder()
                 .cpus(1)
-                .exact_timing()
                 .task(TaskDef {
                     name: "t1".into(),
                     pid: Pid(1),
@@ -373,7 +369,7 @@ macro_rules! scheduler_tests {
                     mm_id: None,
                     allowed_cpus: None,
                 })
-                .duration_ms(200)
+                .duration_ms(500)
                 .build();
 
             let trace = Simulator::new(sched_factory(1)).run(scenario);
@@ -401,7 +397,6 @@ macro_rules! scheduler_tests {
             let sched_factory = $make_sched;
             let scenario = Scenario::builder()
                 .cpus(1)
-                .exact_timing()
                 .task(TaskDef {
                     name: "sleeper".into(),
                     pid: Pid(1),
@@ -445,7 +440,6 @@ macro_rules! scheduler_tests {
             let sched_factory = $make_sched;
             let scenario = Scenario::builder()
                 .cpus(2)
-                .exact_timing()
                 .task(TaskDef {
                     name: "t1".into(),
                     pid: Pid(1),

@@ -29,6 +29,28 @@ impl Default for NoiseConfig {
     }
 }
 
+impl NoiseConfig {
+    /// Create a NoiseConfig with defaults influenced by environment variables.
+    ///
+    /// Precedence: `SCX_SIM_NOISE` > `SCX_SIM_INSTANT_TIMING` > hardcoded default.
+    ///
+    /// - `SCX_SIM_NOISE=0` disables noise; `SCX_SIM_NOISE=1` enables it.
+    /// - `SCX_SIM_INSTANT_TIMING=1` disables noise (lower priority).
+    /// - If neither is set, defaults to enabled.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if std::env::var("SCX_SIM_INSTANT_TIMING").ok().as_deref() == Some("1") {
+            config.enabled = false;
+        }
+        match std::env::var("SCX_SIM_NOISE").ok().as_deref() {
+            Some("0") => config.enabled = false,
+            Some("1") => config.enabled = true,
+            _ => {}
+        }
+        config
+    }
+}
+
 /// Configuration for context switch overhead.
 ///
 /// Models real CPU time consumed during task transitions. A voluntary yield
@@ -67,6 +89,28 @@ impl Default for OverheadConfig {
     }
 }
 
+impl OverheadConfig {
+    /// Create an OverheadConfig with defaults influenced by environment variables.
+    ///
+    /// Precedence: `SCX_SIM_OVERHEAD` > `SCX_SIM_INSTANT_TIMING` > hardcoded default.
+    ///
+    /// - `SCX_SIM_OVERHEAD=0` disables overhead; `SCX_SIM_OVERHEAD=1` enables it.
+    /// - `SCX_SIM_INSTANT_TIMING=1` disables overhead (lower priority).
+    /// - If neither is set, defaults to enabled.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if std::env::var("SCX_SIM_INSTANT_TIMING").ok().as_deref() == Some("1") {
+            config.enabled = false;
+        }
+        match std::env::var("SCX_SIM_OVERHEAD").ok().as_deref() {
+            Some("0") => config.enabled = false,
+            Some("1") => config.enabled = true,
+            _ => {}
+        }
+        config
+    }
+}
+
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
@@ -100,8 +144,8 @@ impl Scenario {
             tasks: Vec::new(),
             duration_ns: 100_000_000, // 100ms default
             next_pid: Pid(1),
-            noise: NoiseConfig::default(),
-            overhead: OverheadConfig::default(),
+            noise: NoiseConfig::from_env(),
+            overhead: OverheadConfig::from_env(),
         }
     }
 }
@@ -204,10 +248,11 @@ impl ScenarioBuilder {
         self
     }
 
-    /// Disable all noise and overhead for exact deterministic timing.
+    /// Disable all noise and overhead for instant timing.
     ///
-    /// Shorthand for `.noise(false).overhead(false)`.
-    pub fn exact_timing(self) -> Self {
+    /// Context switches and tick interrupts happen instantaneously with zero
+    /// cost. Shorthand for `.noise(false).overhead(false)`.
+    pub fn instant_timing(self) -> Self {
         self.noise(false).overhead(false)
     }
 
