@@ -475,8 +475,8 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         smt_threads_per_core: 1,
         tasks: all_tasks,
         duration_ns,
-        noise: NoiseConfig::default(),
-        overhead: OverheadConfig::default(),
+        noise: NoiseConfig::from_env(),
+        overhead: OverheadConfig::from_env(),
     })
 }
 

@@ -286,6 +286,20 @@ impl<S: Scheduler> Simulator<S> {
             }
         }
 
+        // Flush running tasks: emit SimulationEnd for any task still on-CPU
+        // so that total_runtime() can close its open interval. We use
+        // duration_ns as the end time because the simulation conceptually
+        // ends at the configured boundary regardless of per-CPU clock drift.
+        for cpu_idx in 0..state.cpus.len() {
+            if let Some(pid) = state.cpus[cpu_idx].current_task {
+                state.trace.record(
+                    scenario.duration_ns,
+                    CpuId(cpu_idx as u32),
+                    TraceKind::SimulationEnd { pid },
+                );
+            }
+        }
+
         // Call scheduler exit
         unsafe {
             kfuncs::enter_sim(&mut state);

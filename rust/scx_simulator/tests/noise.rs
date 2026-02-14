@@ -2,13 +2,13 @@ use scx_simulator::*;
 
 mod common;
 
-/// Noise disabled: exact timing preserved.
+/// Noise disabled: instant timing preserved.
 #[test]
-fn test_noise_disabled_exact_timing() {
+fn test_noise_disabled_instant_timing() {
     let _lock = common::setup_test();
     let scenario = Scenario::builder()
         .cpus(1)
-        .exact_timing()
+        .instant_timing()
         .task(TaskDef {
             name: "worker".into(),
             pid: Pid(1),
@@ -134,7 +134,7 @@ fn test_csw_overhead_consumed() {
     // Run with exact timing — get baseline runtime
     let scenario_exact = Scenario::builder()
         .cpus(1)
-        .exact_timing()
+        .instant_timing()
         .task(make_tasks()[0].clone())
         .task(make_tasks()[1].clone())
         .duration_ms(100)

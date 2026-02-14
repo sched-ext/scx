@@ -132,7 +132,7 @@ fn test_slice_preemption() {
     let _lock = common::setup_test();
     let scenario = Scenario::builder()
         .cpus(1)
-        .exact_timing()
+        .instant_timing()
         .task(TaskDef {
             name: "long_runner".into(),
             pid: Pid(1),
