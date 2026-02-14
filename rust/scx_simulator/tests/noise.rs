@@ -19,6 +19,7 @@ fn test_noise_disabled_exact_timing() {
             },
             start_time_ns: 0,
             mm_id: None,
+            allowed_cpus: None,
         })
         .duration_ms(100)
         .build();
@@ -48,6 +49,7 @@ fn test_tick_jitter_varies_intervals() {
             },
             start_time_ns: 0,
             mm_id: None,
+            allowed_cpus: None,
         })
         .duration_ms(50)
         .build();
@@ -111,6 +113,7 @@ fn test_csw_overhead_consumed() {
                 },
                 start_time_ns: 0,
                 mm_id: None,
+                allowed_cpus: None,
             },
             TaskDef {
                 name: "t2".into(),
@@ -122,6 +125,7 @@ fn test_csw_overhead_consumed() {
                 },
                 start_time_ns: 0,
                 mm_id: None,
+                allowed_cpus: None,
             },
         ]
     };
@@ -184,6 +188,7 @@ fn test_noise_determinism() {
                 },
                 start_time_ns: 0,
                 mm_id: None,
+                allowed_cpus: None,
             })
             .task(TaskDef {
                 name: "t2".into(),
@@ -195,6 +200,7 @@ fn test_noise_determinism() {
                 },
                 start_time_ns: 0,
                 mm_id: None,
+                allowed_cpus: None,
             })
             .duration_ms(50)
             .build()
