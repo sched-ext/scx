@@ -123,7 +123,7 @@ endef
 # Link .o files into .so
 define SO_RULE
 $(BUILD_DIR)/libscx_$(1).so: $(BUILD_DIR)/$(1)_wrapper.o $(BUILD_DIR)/$(1)_sim_bpf_stubs.o $(BUILD_DIR)/$(1)_sim_sdt_stubs.o $(BUILD_DIR)/$(1)_sim_sigfpe.o $(BUILD_DIR)/$(1)_overrides.o
-	$(CC) -shared -o $$@ $$^
+	$(CC) -shared -nostdlib -o $$@ $$^
 endef
 
 # Instantiate rules for each scheduler
