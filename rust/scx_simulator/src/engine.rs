@@ -163,7 +163,7 @@ impl<S: Scheduler> Simulator<S> {
             clock: 0,
             task_raw_to_pid,
             task_pid_to_raw,
-            prng_state: 0xDEAD_BEEF, // deterministic seed
+            prng_state: scenario.seed,
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
