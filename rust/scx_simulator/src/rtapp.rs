@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 use tracing::warn;
 
-use crate::scenario::Scenario;
+use crate::scenario::{NoiseConfig, Scenario};
 use crate::task::{Phase, TaskBehavior, TaskDef};
 use crate::types::{CpuId, Pid};
 
@@ -475,6 +475,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         smt_threads_per_core: 1,
         tasks: all_tasks,
         duration_ns,
+        noise: NoiseConfig::default(),
     })
 }
 

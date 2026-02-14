@@ -22,10 +22,11 @@ use std::ptr;
 
 use tracing::debug;
 
-use crate::cpu::SimCpu;
+use crate::cpu::{LastStopReason, SimCpu};
 use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
+use crate::scenario::NoiseConfig;
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
@@ -111,6 +112,8 @@ pub struct SimulatorState {
     /// the idle task is always running when no real task is. The engine
     /// allocates this once at startup so kfuncs can return it as a fallback.
     pub idle_task_raw: *mut c_void,
+    /// Timing noise configuration (tick jitter + context switch overhead).
+    pub noise: NoiseConfig,
 }
 
 impl SimulatorState {
@@ -182,12 +185,75 @@ impl SimulatorState {
 
     /// Advance a CPU's local clock to at least the event queue time.
     ///
-    /// Uses Lamport-style max: `local_clock = max(local_clock, clock)`.
-    /// When there's no scheduler overhead, this keeps local clocks in sync
-    /// with the event queue. With overhead, local clocks advance further.
+    /// # NOTE TIMING_MODEL
+    ///
+    /// This simulator is **not** cycle-accurate. Real CPU cores share a
+    /// clock and run in lockstep, but our discrete-event loop jumps between
+    /// unrelated concurrent events. Each CPU maintains a `local_clock` that
+    /// tracks how far that CPU has progressed in simulated time.
+    ///
+    /// The essential correctness invariant: it is safe for CPU A's local
+    /// clock to run ahead of CPU B's, **as long as the interval does not
+    /// involve interaction between A and B**. When an event does require
+    /// cross-CPU coordination (wake, kick, etc.), the event queue timestamp
+    /// establishes a lower bound, and this function synchronizes:
+    ///
+    /// ```text
+    /// local_clock = max(local_clock, event_queue_time)
+    /// ```
+    ///
+    /// - If `local_clock > event_queue_time`: the CPU was busy and has
+    ///   already advanced past the event. The local clock is preserved.
+    ///   This is the common case for back-to-back task execution.
+    ///
+    /// - If `local_clock < event_queue_time`: the CPU was idle or behind.
+    ///   We pull its clock forward to the event time. Any per-CPU overhead
+    ///   (e.g. context switch cost) that was applied to `local_clock`
+    ///   before the idle period is correctly absorbed — it represents real
+    ///   time consumed on that CPU, which elapsed during the idle gap.
+    ///
+    /// Corollary: per-CPU timing adjustments (CSW overhead, tick jitter)
+    /// should be applied directly to `local_clock` at the point they
+    /// occur. They affect only subsequent events on that CPU and cannot
+    /// influence other CPUs' clocks.
     pub fn advance_cpu_clock(&mut self, cpu: CpuId) {
         let idx = cpu.0 as usize;
         self.cpus[idx].local_clock = self.cpus[idx].local_clock.max(self.clock);
+    }
+
+    /// Sample approximately-normal noise using Irwin-Hall (sum of 4 uniforms).
+    /// Returns a value centered around 0 with the given stddev.
+    pub fn sample_normal_ns(&mut self, stddev: TimeNs) -> i64 {
+        if stddev == 0 {
+            return 0;
+        }
+        // Sum of 4 uniform [0,1000) values → mean=2000, σ ≈ 577 (in milli-units)
+        let sum: u64 = (0..4).map(|_| (self.next_prng() as u64) % 1000).sum();
+        let centered = sum as i64 - 2000;
+        // Scale: centered/577 * stddev
+        (centered * stddev as i64) / 577
+    }
+
+    /// Compute tick jitter (added to next tick interval).
+    pub fn tick_jitter(&mut self) -> i64 {
+        if !self.noise.enabled {
+            return 0;
+        }
+        self.sample_normal_ns(self.noise.tick_jitter_stddev_ns)
+    }
+
+    /// Compute context switch overhead for the given stop reason.
+    pub fn csw_overhead(&mut self, reason: LastStopReason) -> TimeNs {
+        if !self.noise.enabled {
+            return 0;
+        }
+        let base = match reason {
+            LastStopReason::Voluntary => self.noise.voluntary_csw_overhead_ns,
+            LastStopReason::Involuntary => self.noise.involuntary_csw_overhead_ns,
+        };
+        let jitter = self.sample_normal_ns(self.noise.csw_jitter_stddev_ns);
+        // Clamp to [0, 2*base] to avoid negative overhead
+        (base as i64 + jitter).clamp(0, 2 * base as i64) as TimeNs
     }
 
     /// Execute a pending deferred dispatch, resolving `SCX_DSQ_LOCAL` to
@@ -1008,6 +1074,7 @@ mod tests {
     use super::*;
     use crate::cpu::SimCpu;
     use crate::dsq::DsqManager;
+    use crate::scenario::NoiseConfig;
     use crate::trace::Trace;
     use crate::types::{CpuId, DsqId, KickFlags, Pid};
     use crate::SIM_LOCK;
@@ -1032,6 +1099,10 @@ mod tests {
             pending_timer_ns: None,
             waker_task_raw: None,
             idle_task_raw: ptr::null_mut(),
+            noise: NoiseConfig {
+                enabled: false,
+                ..Default::default()
+            },
         }
     }
 
