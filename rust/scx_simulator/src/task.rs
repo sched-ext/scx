@@ -44,6 +44,25 @@ pub fn sched_weight_to_cgroup(weight: u32) -> u32 {
     (cg as u32).clamp(CGROUP_WEIGHT_MIN, CGROUP_WEIGHT_MAX)
 }
 
+/// Per-task SCX ops_state, modeling the kernel's `SCX_OPSS_*` state machine.
+///
+/// In the kernel, `ops.dequeue()` is only called when a task is in
+/// `SCX_OPSS_QUEUED` — i.e., it was handed to the BPF scheduler via
+/// `enqueue()` but has not yet been dispatched to a DSQ. Once dispatched
+/// (or picked to run), the task transitions to `NONE` and `dequeue()` is
+/// no longer valid.
+///
+/// We only need two states: the kernel's `DISPATCHING` is transient and
+/// resolved immediately by `resolve_pending_dispatch()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpsTaskState {
+    /// Task is not queued in the BPF scheduler (default / after dispatch).
+    #[default]
+    None,
+    /// Task has been enqueued to the BPF scheduler but not yet dispatched.
+    Queued,
+}
+
 /// The state a simulated task can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {

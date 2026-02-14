@@ -1,6 +1,6 @@
 ---
 title: Model SCX_OPSS ops_state to gate ops.dequeue calls
-status: open
+status: closed
 priority: 2
 issue_type: feature
 labels:
@@ -8,7 +8,8 @@ labels:
 depends_on:
   sim-6ba30: parent-child
 created_at: 2026-02-14T10:12:28.591999570+00:00
-updated_at: 2026-02-14T10:12:28.591999570+00:00
+updated_at: 2026-02-14T10:32:56.183777207+00:00
+closed_at: 2026-02-14T10:32:56.183777057+00:00
 ---
 
 # Description

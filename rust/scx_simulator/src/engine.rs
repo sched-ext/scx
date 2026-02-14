@@ -15,7 +15,7 @@ use crate::ffi::{self, Scheduler};
 use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::scenario::Scenario;
-use crate::task::{Phase, SimTask, TaskState};
+use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
 
@@ -169,6 +169,7 @@ impl<S: Scheduler> Simulator<S> {
             dsq_iter: None,
             kicked_cpus: HashMap::new(),
             task_last_cpu: HashMap::new(),
+            task_ops_state: HashMap::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
             waker_task_raw: None,
@@ -490,6 +491,9 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Call select_cpu
+        // Set ops_state to Queued before select_cpu — kernel sets QUEUED in
+        // do_enqueue_task before either select_cpu or enqueue.
+        state.task_ops_state.insert(pid, OpsTaskState::Queued);
 
         unsafe {
             kfuncs::enter_sim(state);
@@ -635,6 +639,7 @@ impl<S: Scheduler> Simulator<S> {
 
             // Re-enqueue the preempted task
             state.ops_context = OpsContext::Enqueue;
+            state.task_ops_state.insert(pid, OpsTaskState::Queued);
             debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
             state.ops_context = OpsContext::None;
@@ -717,12 +722,12 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
             if !still_runnable {
-                // DANGER TODO(sim-1ae1a): unconditional dequeue is not
-                // kernel-accurate. The kernel only calls ops.dequeue when
-                // the task is in SCX_OPSS_QUEUED state; a running task has
-                // already left that state. We need to model ops_state.
-                debug!(pid = pid.0, cpu = cpu.0, "dequeue");
-                self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
+                let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
+                if ops_state == OpsTaskState::Queued {
+                    debug!(pid = pid.0, cpu = cpu.0, "dequeue");
+                    self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
+                    state.task_ops_state.insert(pid, OpsTaskState::None);
+                }
                 debug!(pid = pid.0, cpu = cpu.0, "quiescent");
                 self.scheduler.quiescent(raw, SCX_DEQ_SLEEP);
             }
@@ -792,6 +797,7 @@ impl<S: Scheduler> Simulator<S> {
                         state.ops_context = OpsContext::Enqueue;
                         state.current_cpu = cpu;
                         debug!(pid = pid.0, "enqueue (yield re-enqueue)");
+                        state.task_ops_state.insert(pid, OpsTaskState::Queued);
                         self.scheduler.enqueue(raw, 0);
                         state.ops_context = OpsContext::None;
                         state.resolve_pending_dispatch(cpu);
@@ -872,6 +878,7 @@ impl<S: Scheduler> Simulator<S> {
                                         kfuncs::enter_sim(state);
                                         state.ops_context = OpsContext::Enqueue;
                                         state.current_cpu = cpu;
+                                        state.task_ops_state.insert(pid, OpsTaskState::Queued);
                                         self.scheduler.enqueue(raw, 0);
                                         state.ops_context = OpsContext::None;
                                         state.resolve_pending_dispatch(cpu);
@@ -1151,6 +1158,7 @@ impl<S: Scheduler> Simulator<S> {
             );
             self.scheduler.stopping(raw, true);
             state.ops_context = OpsContext::Enqueue;
+            state.task_ops_state.insert(pid, OpsTaskState::Queued);
             debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
             self.scheduler.enqueue(raw, 0);
             state.ops_context = OpsContext::None;
