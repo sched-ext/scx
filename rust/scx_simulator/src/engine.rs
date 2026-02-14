@@ -171,6 +171,7 @@ impl<S: Scheduler> Simulator<S> {
             waker_task_raw: None,
             idle_task_raw,
             noise: scenario.noise.clone(),
+            overhead: scenario.overhead.clone(),
         };
 
         // Initialize scheduler

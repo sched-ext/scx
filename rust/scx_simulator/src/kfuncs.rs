@@ -26,7 +26,7 @@ use crate::cpu::{LastStopReason, SimCpu};
 use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
-use crate::scenario::NoiseConfig;
+use crate::scenario::{NoiseConfig, OverheadConfig};
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
@@ -112,8 +112,10 @@ pub struct SimulatorState {
     /// the idle task is always running when no real task is. The engine
     /// allocates this once at startup so kfuncs can return it as a fallback.
     pub idle_task_raw: *mut c_void,
-    /// Timing noise configuration (tick jitter + context switch overhead).
+    /// Timing noise configuration (tick jitter).
     pub noise: NoiseConfig,
+    /// Context switch overhead configuration.
+    pub overhead: OverheadConfig,
 }
 
 impl SimulatorState {
@@ -236,7 +238,7 @@ impl SimulatorState {
 
     /// Compute tick jitter (added to next tick interval).
     pub fn tick_jitter(&mut self) -> i64 {
-        if !self.noise.enabled {
+        if !self.noise.enabled || !self.noise.tick_jitter {
             return 0;
         }
         self.sample_normal_ns(self.noise.tick_jitter_stddev_ns)
@@ -244,14 +246,26 @@ impl SimulatorState {
 
     /// Compute context switch overhead for the given stop reason.
     pub fn csw_overhead(&mut self, reason: LastStopReason) -> TimeNs {
-        if !self.noise.enabled {
+        if !self.overhead.enabled {
             return 0;
         }
-        let base = match reason {
-            LastStopReason::Voluntary => self.noise.voluntary_csw_overhead_ns,
-            LastStopReason::Involuntary => self.noise.involuntary_csw_overhead_ns,
+        let (enabled, base) = match reason {
+            LastStopReason::Voluntary => {
+                (self.overhead.voluntary_csw, self.overhead.voluntary_csw_ns)
+            }
+            LastStopReason::Involuntary => (
+                self.overhead.involuntary_csw,
+                self.overhead.involuntary_csw_ns,
+            ),
         };
-        let jitter = self.sample_normal_ns(self.noise.csw_jitter_stddev_ns);
+        if !enabled {
+            return 0;
+        }
+        let jitter = if self.overhead.csw_jitter {
+            self.sample_normal_ns(self.overhead.csw_jitter_stddev_ns)
+        } else {
+            0
+        };
         // Clamp to [0, 2*base] to avoid negative overhead
         (base as i64 + jitter).clamp(0, 2 * base as i64) as TimeNs
     }
@@ -1074,7 +1088,7 @@ mod tests {
     use super::*;
     use crate::cpu::SimCpu;
     use crate::dsq::DsqManager;
-    use crate::scenario::NoiseConfig;
+    use crate::scenario::{NoiseConfig, OverheadConfig};
     use crate::trace::Trace;
     use crate::types::{CpuId, DsqId, KickFlags, Pid};
     use crate::SIM_LOCK;
@@ -1100,6 +1114,10 @@ mod tests {
             waker_task_raw: None,
             idle_task_raw: ptr::null_mut(),
             noise: NoiseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            overhead: OverheadConfig {
                 enabled: false,
                 ..Default::default()
             },

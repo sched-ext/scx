@@ -8,7 +8,7 @@ fn test_noise_disabled_exact_timing() {
     let _lock = common::setup_test();
     let scenario = Scenario::builder()
         .cpus(1)
-        .noise(false)
+        .exact_timing()
         .task(TaskDef {
             name: "worker".into(),
             pid: Pid(1),
@@ -39,6 +39,7 @@ fn test_tick_jitter_varies_intervals() {
     let scenario = Scenario::builder()
         .cpus(1)
         .noise(true)
+        .overhead(false)
         .task(TaskDef {
             name: "runner".into(),
             pid: Pid(1),
@@ -130,10 +131,10 @@ fn test_csw_overhead_consumed() {
         ]
     };
 
-    // Run with noise off — get exact runtime
+    // Run with exact timing — get baseline runtime
     let scenario_exact = Scenario::builder()
         .cpus(1)
-        .noise(false)
+        .exact_timing()
         .task(make_tasks()[0].clone())
         .task(make_tasks()[1].clone())
         .duration_ms(100)
@@ -142,14 +143,17 @@ fn test_csw_overhead_consumed() {
     let trace_exact = Simulator::new(DynamicScheduler::simple()).run(scenario_exact);
     let total_exact = trace_exact.total_runtime(Pid(1)) + trace_exact.total_runtime(Pid(2));
 
-    // Run with noise on (with very large CSW overhead to make the effect visible)
-    let scenario_noisy = Scenario::builder()
+    // Run with overhead only (no tick jitter, to isolate CSW effect)
+    let scenario_overhead = Scenario::builder()
         .cpus(1)
-        .noise_config(NoiseConfig {
+        .noise(false)
+        .overhead_config(OverheadConfig {
             enabled: true,
-            tick_jitter_stddev_ns: 0,
-            voluntary_csw_overhead_ns: 500_000, // 500μs per voluntary CSW
-            involuntary_csw_overhead_ns: 500_000, // 500μs per involuntary CSW
+            voluntary_csw: true,
+            involuntary_csw: true,
+            voluntary_csw_ns: 500_000,   // 500μs per voluntary CSW
+            involuntary_csw_ns: 500_000, // 500μs per involuntary CSW
+            csw_jitter: false,
             csw_jitter_stddev_ns: 0,
         })
         .task(make_tasks()[0].clone())
@@ -157,19 +161,20 @@ fn test_csw_overhead_consumed() {
         .duration_ms(100)
         .build();
 
-    let trace_noisy = Simulator::new(DynamicScheduler::simple()).run(scenario_noisy);
-    let total_noisy = trace_noisy.total_runtime(Pid(1)) + trace_noisy.total_runtime(Pid(2));
+    let trace_overhead = Simulator::new(DynamicScheduler::simple()).run(scenario_overhead);
+    let total_overhead =
+        trace_overhead.total_runtime(Pid(1)) + trace_overhead.total_runtime(Pid(2));
 
-    eprintln!("exact total runtime: {total_exact}ns, noisy total runtime: {total_noisy}ns");
+    eprintln!("exact total runtime: {total_exact}ns, overhead total runtime: {total_overhead}ns");
 
-    // CSW overhead eats into available runtime, so total_noisy < total_exact
+    // CSW overhead eats into available runtime
     assert!(
-        total_noisy < total_exact,
-        "expected noisy runtime ({total_noisy}ns) < exact runtime ({total_exact}ns) due to CSW overhead"
+        total_overhead < total_exact,
+        "expected overhead runtime ({total_overhead}ns) < exact runtime ({total_exact}ns) due to CSW overhead"
     );
 }
 
-/// Noise is deterministic (same PRNG seed → same trace).
+/// Noise and overhead are deterministic (same PRNG seed → same trace).
 #[test]
 fn test_noise_determinism() {
     let _lock = common::setup_test();
@@ -177,7 +182,6 @@ fn test_noise_determinism() {
     let make_scenario = || {
         Scenario::builder()
             .cpus(2)
-            .noise(true)
             .task(TaskDef {
                 name: "t1".into(),
                 pid: Pid(1),
