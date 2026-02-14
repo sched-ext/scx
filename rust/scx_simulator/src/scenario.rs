@@ -3,34 +3,65 @@
 use crate::task::{TaskBehavior, TaskDef};
 use crate::types::{MmId, Pid, TimeNs};
 
-/// Configuration for simulation timing noise.
+/// Configuration for simulation timing noise (tick jitter).
 ///
-/// Models two sources of real-world timing imprecision:
-/// - **Tick jitter**: Hardware interrupt delivery latency causes 1–10μs of
-///   jitter on commodity hardware (normal distribution, σ=2μs default).
-/// - **Context switch overhead**: Voluntary yields cost ~500ns; involuntary
-///   preemptions cost ~1000ns due to cache/TLB invalidation.
+/// Models hardware interrupt delivery latency: on commodity non-RT kernels,
+/// timer interrupts show 1–10μs of jitter due to interrupt latency, cache
+/// misses, and pipeline stalls. Modeled as normally-distributed noise added
+/// to each tick interval.
 #[derive(Debug, Clone)]
 pub struct NoiseConfig {
-    /// Master switch: false disables all noise (exact deterministic timing).
+    /// Master switch: false disables all noise (exact deterministic tick timing).
     pub enabled: bool,
+    /// Enable tick jitter (normally-distributed variation in tick intervals).
+    pub tick_jitter: bool,
     /// Standard deviation for tick jitter (ns). Default: 2000 (2μs).
     pub tick_jitter_stddev_ns: TimeNs,
-    /// Time consumed by a voluntary context switch (ns). Default: 500.
-    pub voluntary_csw_overhead_ns: TimeNs,
-    /// Time consumed by an involuntary context switch (ns). Default: 1000.
-    pub involuntary_csw_overhead_ns: TimeNs,
-    /// Standard deviation for CSW overhead jitter (ns). Default: 100.
-    pub csw_jitter_stddev_ns: TimeNs,
 }
 
 impl Default for NoiseConfig {
     fn default() -> Self {
         NoiseConfig {
             enabled: true,
+            tick_jitter: true,
             tick_jitter_stddev_ns: 2_000,
-            voluntary_csw_overhead_ns: 500,
-            involuntary_csw_overhead_ns: 1_000,
+        }
+    }
+}
+
+/// Configuration for context switch overhead.
+///
+/// Models real CPU time consumed during task transitions. A voluntary yield
+/// (sleep, exit) costs ~500ns (~1000 cycles at 2GHz). An involuntary
+/// preemption costs ~1000ns due to pipeline flush, TLB shootdown, and cache
+/// cold effects. Each has optional per-switch jitter.
+#[derive(Debug, Clone)]
+pub struct OverheadConfig {
+    /// Master switch: false disables all overhead (zero-cost transitions).
+    pub enabled: bool,
+    /// Enable overhead for voluntary context switches (sleep, exit, yield).
+    pub voluntary_csw: bool,
+    /// Enable overhead for involuntary context switches (preemption).
+    pub involuntary_csw: bool,
+    /// Time consumed by a voluntary context switch (ns). Default: 500.
+    pub voluntary_csw_ns: TimeNs,
+    /// Time consumed by an involuntary context switch (ns). Default: 1000.
+    pub involuntary_csw_ns: TimeNs,
+    /// Enable per-switch jitter on CSW overhead.
+    pub csw_jitter: bool,
+    /// Standard deviation for CSW overhead jitter (ns). Default: 100.
+    pub csw_jitter_stddev_ns: TimeNs,
+}
+
+impl Default for OverheadConfig {
+    fn default() -> Self {
+        OverheadConfig {
+            enabled: true,
+            voluntary_csw: true,
+            involuntary_csw: true,
+            voluntary_csw_ns: 500,
+            involuntary_csw_ns: 1_000,
+            csw_jitter: true,
             csw_jitter_stddev_ns: 100,
         }
     }
@@ -47,6 +78,7 @@ pub struct Scenario {
     pub tasks: Vec<TaskDef>,
     pub duration_ns: TimeNs,
     pub noise: NoiseConfig,
+    pub overhead: OverheadConfig,
 }
 
 /// Builder for constructing scenarios.
@@ -57,6 +89,7 @@ pub struct ScenarioBuilder {
     duration_ns: TimeNs,
     next_pid: Pid,
     noise: NoiseConfig,
+    overhead: OverheadConfig,
 }
 
 impl Scenario {
@@ -68,6 +101,7 @@ impl Scenario {
             duration_ns: 100_000_000, // 100ms default
             next_pid: Pid(1),
             noise: NoiseConfig::default(),
+            overhead: OverheadConfig::default(),
         }
     }
 }
@@ -146,7 +180,7 @@ impl ScenarioBuilder {
         self
     }
 
-    /// Enable or disable all simulation noise.
+    /// Enable or disable all simulation noise (tick jitter).
     pub fn noise(mut self, enabled: bool) -> Self {
         self.noise.enabled = enabled;
         self
@@ -156,6 +190,25 @@ impl ScenarioBuilder {
     pub fn noise_config(mut self, config: NoiseConfig) -> Self {
         self.noise = config;
         self
+    }
+
+    /// Enable or disable all context switch overhead.
+    pub fn overhead(mut self, enabled: bool) -> Self {
+        self.overhead.enabled = enabled;
+        self
+    }
+
+    /// Set a custom overhead configuration.
+    pub fn overhead_config(mut self, config: OverheadConfig) -> Self {
+        self.overhead = config;
+        self
+    }
+
+    /// Disable all noise and overhead for exact deterministic timing.
+    ///
+    /// Shorthand for `.noise(false).overhead(false)`.
+    pub fn exact_timing(self) -> Self {
+        self.noise(false).overhead(false)
     }
 
     /// Build the scenario.
@@ -181,6 +234,7 @@ impl ScenarioBuilder {
             tasks: self.tasks,
             duration_ns: self.duration_ns,
             noise: self.noise,
+            overhead: self.overhead,
         }
     }
 }
