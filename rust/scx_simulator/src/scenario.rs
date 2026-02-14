@@ -3,6 +3,39 @@
 use crate::task::{TaskBehavior, TaskDef};
 use crate::types::{MmId, Pid, TimeNs};
 
+/// Configuration for simulation timing noise.
+///
+/// Models two sources of real-world timing imprecision:
+/// - **Tick jitter**: Hardware interrupt delivery latency causes 1–10μs of
+///   jitter on commodity hardware (normal distribution, σ=2μs default).
+/// - **Context switch overhead**: Voluntary yields cost ~500ns; involuntary
+///   preemptions cost ~1000ns due to cache/TLB invalidation.
+#[derive(Debug, Clone)]
+pub struct NoiseConfig {
+    /// Master switch: false disables all noise (exact deterministic timing).
+    pub enabled: bool,
+    /// Standard deviation for tick jitter (ns). Default: 2000 (2μs).
+    pub tick_jitter_stddev_ns: TimeNs,
+    /// Time consumed by a voluntary context switch (ns). Default: 500.
+    pub voluntary_csw_overhead_ns: TimeNs,
+    /// Time consumed by an involuntary context switch (ns). Default: 1000.
+    pub involuntary_csw_overhead_ns: TimeNs,
+    /// Standard deviation for CSW overhead jitter (ns). Default: 100.
+    pub csw_jitter_stddev_ns: TimeNs,
+}
+
+impl Default for NoiseConfig {
+    fn default() -> Self {
+        NoiseConfig {
+            enabled: true,
+            tick_jitter_stddev_ns: 2_000,
+            voluntary_csw_overhead_ns: 500,
+            involuntary_csw_overhead_ns: 1_000,
+            csw_jitter_stddev_ns: 100,
+        }
+    }
+}
+
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
@@ -13,6 +46,7 @@ pub struct Scenario {
     pub smt_threads_per_core: u32,
     pub tasks: Vec<TaskDef>,
     pub duration_ns: TimeNs,
+    pub noise: NoiseConfig,
 }
 
 /// Builder for constructing scenarios.
@@ -22,6 +56,7 @@ pub struct ScenarioBuilder {
     tasks: Vec<TaskDef>,
     duration_ns: TimeNs,
     next_pid: Pid,
+    noise: NoiseConfig,
 }
 
 impl Scenario {
@@ -32,6 +67,7 @@ impl Scenario {
             tasks: Vec::new(),
             duration_ns: 100_000_000, // 100ms default
             next_pid: Pid(1),
+            noise: NoiseConfig::default(),
         }
     }
 }
@@ -110,6 +146,18 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Enable or disable all simulation noise.
+    pub fn noise(mut self, enabled: bool) -> Self {
+        self.noise.enabled = enabled;
+        self
+    }
+
+    /// Set a custom noise configuration.
+    pub fn noise_config(mut self, config: NoiseConfig) -> Self {
+        self.noise = config;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -132,6 +180,7 @@ impl ScenarioBuilder {
             smt_threads_per_core: self.smt_threads_per_core,
             tasks: self.tasks,
             duration_ns: self.duration_ns,
+            noise: self.noise,
         }
     }
 }
