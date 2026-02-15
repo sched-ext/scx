@@ -1,4 +1,4 @@
-#!/bin/bash
+ls /sys/kernel/debug/tracing/events/sched/ 2>/dev/null | head -20#!/bin/bash
 
 set +x
 

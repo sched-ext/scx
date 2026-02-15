@@ -115,7 +115,7 @@ struct cake_task_ctx {
  * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
     /* --- Tick staging (bytes 0-17) --- */
-    u8 _reserved0;         /* Reserved byte (offset 0, never accessed) */
+    u8 wakeup_same_cpu;    /* J1 V2: consecutive same-CPU wakeup counter (0-255) */
     u8 dsq_hint;           /* DVFS perf target cache */
     u8 tick_counter;       /* Confidence-based starvation skip mask counter */
     u8 tick_tier;          /* Tier of currently-running task (set by running) */
