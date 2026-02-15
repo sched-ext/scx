@@ -114,6 +114,8 @@ struct cake_task_ctx {
  * 1.3-13s wrap cascades. u32 at 50K/s wraps at 23.9 hours — effectively never.
  * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
+    /* ═══ CACHE LINE 0 (bytes 0-63): tick staging + slots 0-1 (HOT) ═══ */
+
     /* --- Tick staging (bytes 0-17) --- */
     u8 wakeup_same_cpu;    /* J1 V2: consecutive same-CPU wakeup counter (0-255) */
     u8 dsq_hint;           /* DVFS perf target cache */
@@ -122,7 +124,7 @@ struct mega_mailbox_entry {
     u32 tick_last_run_at;  /* Timestamp when task started (set by running) */
     u64 tick_slice;        /* Slice of currently-running task (set by running) */
     u8 tick_ctx_valid;     /* 1 = running stamped, 0 = cleared by stopping */
-    u8 _pad1;              /* alignment */
+    u8 s1_hot_flag;        /* C2: deferred promotion — 1 = first s1 hit seen, promote on 2nd */
 
     /* --- Psychic Cache Slot 0: MRU (bytes 18-39) --- */
     u16 _pad2;             /* alignment: keeps rc_counter0 at 4B-aligned offset 20 */
@@ -130,14 +132,30 @@ struct mega_mailbox_entry {
     u64 rc_task_ptr0;      /* Slot 0 task pointer (8B-aligned) */
     u64 rc_state_fused0;   /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
 
-    /* --- Psychic Cache Slot 1: LRU (bytes 40-59) --- */
+    /* --- Psychic Cache Slot 1 (bytes 40-59) --- */
     u64 rc_task_ptr1;      /* Slot 1 task pointer (8B-aligned) */
     u64 rc_state_fused1;   /* Slot 1 [63:32]=packed_info, [31:0]=deficit_avg */
     u32 rc_counter1;       /* Slot 1 reclass counter (widened: u16→u32) */
 
     /* --- Sync (bytes 60-63) --- */
     u32 rc_sync_counter;   /* Periodic tctx writeback counter (widened: u16→u32) */
-} __attribute__((aligned(64)));
+
+    /* ═══ CACHE LINE 1 (bytes 64-127): slot 2 + padding (WARM) ═══
+     * Only accessed on s0+s1 miss (~4.6% in Arc Raiders).
+     * ALP prefetches this line for free on Zen 5 (128B pair).
+     * Captures 3rd-most-frequent task per CPU, reducing miss rate
+     * from 22% (2-slot) to 4.6% (3-slot). Sim-validated. */
+
+    /* --- Psychic Cache Slot 2: LRU (bytes 64-83) --- */
+    u64 rc_task_ptr2;      /* Slot 2 task pointer (8B-aligned) */
+    u64 rc_state_fused2;   /* Slot 2 [63:32]=packed_info, [31:0]=deficit_avg */
+    u32 rc_counter2;       /* Slot 2 reclass counter */
+
+    /* --- Reserved (bytes 84-127): 44 bytes for future use --- */
+    u32 _reserved[11];
+} __attribute__((aligned(128)));
+_Static_assert(sizeof(struct mega_mailbox_entry) == 128,
+    "mega_mailbox_entry must be exactly 128 bytes (2 cache lines — R2 3-slot)");
 
 /* Statistics shared with userspace */
 struct cake_stats {
