@@ -102,7 +102,6 @@ are provided for select distros.
 scx
 |-- scheds               : Sched_ext scheduler implementations
 |   |-- include          : Shared BPF and user C include files including vmlinux.h
-|   |-- c                : Example schedulers - userspace code written C
 |   \-- rust             : Example schedulers - userspace code written Rust
 \-- rust                 : Rust support code
     \-- scx_utils        : Common utility library for Rust schedulers
@@ -112,7 +111,6 @@ scx
 
 This repository provides two build systems:
 
-- **C schedulers**: Use `make`
 - **Rust schedulers**: Use `cargo`
 
 **Dependencies:**
@@ -139,14 +137,6 @@ You can append its contents to your kernel `.config` file to enable the necessar
 
 ### Building and Installing
 
-#### C Schedulers
-
-```shell
-$ cd $SCX
-$ make all                          # Build all C schedulers
-$ make install INSTALL_DIR=~/bin    # Install to custom directory
-```
-
 #### Rust Schedulers
 
 ```shell
@@ -165,12 +155,11 @@ See: [CARGO BUILD](CARGO_BUILD.md)
 
 ### Binary Locations
 
-- **C schedulers**: `build/scheds/c/scx_simple`
 - **Rust schedulers**: `target/release/scx_rusty`
 
 ### Environment Variables
 
-Both `make` and `cargo` support these environment variables for BPF compilation:
+`cargo` support these environment variables for BPF compilation:
 
 - `BPF_CLANG`: The clang command to use. (Default: `clang`)
 - `BPF_CFLAGS`: Override all compiler flags for BPF compilation
@@ -178,22 +167,11 @@ Both `make` and `cargo` support these environment variables for BPF compilation:
 - `BPF_EXTRA_CFLAGS_PRE_INCL`: Extra flags before include paths
 - `BPF_EXTRA_CFLAGS_POST_INCL`: Extra flags after include paths
 
-C schedulers only:
-
-- `BPFTOOL`: The bpftool command to use. (Default: `bpftool`)
-- `CC`: The C compiler to use. (Default: `cc`)
-
 **Examples:**
 
 ```shell
-# Use specific clang version for C schedulers
-$ BPF_CLANG=clang-17 make all
-
 # Use specific clang version for Rust schedulers
 $ BPF_CLANG=clang-17 cargo build --release
-
-# Use clang for C compilation and system bpftool
-$ CC=clang BPFTOOL=/usr/bin/bpftool make all
 ```
 
 ## Checking scx_stats
