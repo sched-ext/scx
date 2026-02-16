@@ -7,6 +7,7 @@ mod topology;
 mod tui;
 
 use core::sync::atomic::Ordering;
+use std::io::IsTerminal;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -401,9 +402,16 @@ impl<'a> Scheduler<'a> {
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
-        self.show_startup_splash()?;
+        // Detect headless: skip TUI/splash when no TTY (CI VMs, piped output)
+        let is_tty = std::io::stdout().is_terminal();
 
-        if self.args.verbose {
+        if is_tty {
+            self.show_startup_splash()?;
+        } else {
+            info!("No terminal detected — running in headless mode");
+        }
+
+        if self.args.verbose && is_tty {
             // Run TUI mode
             tui::run_tui(
                 &mut self.skel,
@@ -412,6 +420,9 @@ impl<'a> Scheduler<'a> {
                 self.topology.clone(),
             )?;
         } else {
+            if self.args.verbose && !is_tty {
+                warn!("TUI disabled: no terminal detected (headless mode)");
+            }
             // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
 
             // Block SIGINT and SIGTERM from normal delivery
