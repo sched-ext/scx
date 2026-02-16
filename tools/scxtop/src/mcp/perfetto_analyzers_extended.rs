@@ -12,18 +12,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Aggregation mode for task state analysis
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregationMode {
     /// Show per-thread statistics (TID level)
+    #[default]
     PerThread,
     /// Aggregate by process (TGID level) - combines all threads in a process
     PerProcess,
-}
-
-impl Default for AggregationMode {
-    fn default() -> Self {
-        Self::PerThread
-    }
 }
 
 /// Analyzes task state transitions and time spent in each state

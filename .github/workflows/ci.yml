@@ -1,0 +1,583 @@
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+      - ci-debug
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BPF_CLANG: clang-19
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev"
+  SCHED_EXT_KERNEL_URL: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+  SCHED_EXT_KERNEL_TAG: for-next
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=lld"
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          cache-all-crates: true
+      - run: cargo fetch --locked
+
+      - uses: actions/cache@v4
+        id: tools-cache
+        with:
+          path: .veristat-tools
+          key: veristat-tools-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: veristat-tools-${{ runner.arch }}-
+
+      - uses: ./.github/actions/install-deps-action
+
+      - name: Build tools
+        run: |
+          mkdir -p .veristat-tools/bin
+          git clone -q --depth 1 --recurse-submodules https://github.com/libbpf/veristat /tmp/veristat
+          make -s -C /tmp/veristat/src -j$(nproc)
+          cp /tmp/veristat/src/veristat .veristat-tools/bin/
+          cargo install -q --git https://github.com/likewhatevs/cargo-veristat --locked --root .veristat-tools
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  lint:
+    needs: [fetch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+      - name: Format Rust
+        run: cargo fmt --check
+      - name: Format C
+        run: |
+          find tools/scxtop scheds/rust/scx_chaos scheds/rust/scx_mitosis \
+            -name '*.c' -o -name '*.h' | xargs clang-format --dry-run -Werror
+
+  clippy-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.pkgs.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - id: pkgs
+        run: |
+          echo "packages=$(cargo metadata --format-version 1 | \
+            jq -c '[.packages[] | select(.metadata.scx.ci.use_clippy == true) | .name]')" >> "$GITHUB_OUTPUT"
+
+  clippy:
+    needs: [fetch, clippy-matrix]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.clippy-matrix.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - uses: ./.github/actions/install-deps-action
+      - name: 'Clippy: ${{ matrix.package }}'
+        run: cargo clippy -q --no-deps --locked -p "${{ matrix.package }}" -- -Dwarnings
+
+  kernel:
+    strategy:
+      matrix:
+        kernel:
+          - name: scx__sched_ext__for-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+            tag: for-next
+          - name: scx__bpf__bpf-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
+            tag: master
+          - name: scx__stable__linux-rolling-stable
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-rolling-stable
+          - name: scx__stable__6_13
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.13.y
+          - name: scx__stable__6_16
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.16.y
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Cache kernel: ${{ matrix.kernel.name }} (${{ runner.arch }})'
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v17
+          packages: ${{ env.SCX_PACKAGES }}
+          verbose: false
+          run: echo ok
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  build:
+    needs: [fetch]
+    if: github.event_name == 'merge_group'
+    runs-on: ${{ (github.repository_owner == 'likewhatevs' || github.repository_owner == 'sched-ext') && fromJSON('[ "self-hosted", "Linux", "X64", "large" ]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - uses: ./.github/actions/install-deps-action
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check
+        run: cargo check -q --profile ci --locked
+
+      - name: Check vmlinux sync
+        run: |
+          tmpdir=$(mktemp -d)
+          tar -xf rust/scx_utils/vmlinux.tar.zst -C "$tmpdir"
+          diff --no-dereference -qr scheds/vmlinux/ "$tmpdir/vmlinux/"
+
+      - name: Unit tests
+        run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
+
+  arena-selftests:
+    needs: [kernel, fetch]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - run: echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
+      - name: Install build dependencies
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 90
+          max_attempts: 3
+          command: |
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends -qq ${{ env.SCX_PACKAGES }}
+      - name: Build arena selftests
+        run: cargo build -q --profile ci -p scx_arena_selftests --locked
+
+      - name: Arena selftests
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: scx__sched_ext__for-next__${{ runner.arch }}
+          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
+          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: false
+          run: target/ci/scx_arena_selftests
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  test:
+    needs: [kernel, fetch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        scheduler: [beerland, bpfland, chaos, cosmos, flash, lavd, layered, p2dq, rlfifo, rustland, rusty, tickless]
+        include:
+          - scheduler: chaos
+            flags: --random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000
+          - scheduler: lavd
+            flags: --log-level info
+          - scheduler: layered
+            flags: --log-level info --stats 15 --run-example
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - run: echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
+      - uses: actions/cache/restore@v4
+        with:
+          path: .veristat-tools
+          key: veristat-tools-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: veristat-tools-${{ runner.arch }}-
+          fail-on-cache-miss: true
+      - run: echo "$GITHUB_WORKSPACE/.veristat-tools/bin" >> $GITHUB_PATH
+      - name: Install build dependencies
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 90
+          max_attempts: 3
+          command: |
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends -qq ${{ env.SCX_PACKAGES }}
+      - name: 'Build: scx_${{ matrix.scheduler }}'
+        run: cargo build -q --profile ci --locked -p scx_${{ matrix.scheduler }}
+
+      - name: 'Test: ${{ matrix.scheduler }} (${{ runner.arch }})'
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: scx__sched_ext__for-next__${{ runner.arch }}
+          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
+          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: false
+          run: |
+            stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
+              --affinity 1 --affinity-delay 1 --affinity-pin &
+            timeout --foreground --preserve-status 45 \
+              target/ci/scx_${{ matrix.scheduler }} ${{ matrix.flags || '-v' }}
+
+      - name: 'Verify: ${{ matrix.scheduler }} (${{ runner.arch }})'
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: scx__sched_ext__for-next__${{ runner.arch }}
+          kernel-url: ${{ env.SCHED_EXT_KERNEL_URL }}
+          kernel-tag: ${{ env.SCHED_EXT_KERNEL_TAG }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: false
+          run: cargo veristat --profile ci --stderr-gfm scx_${{ matrix.scheduler }} 2>>"$GITHUB_STEP_SUMMARY"
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  veristat:
+    needs: [kernel, fetch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        scheduler: [cosmos, lavd, layered, mitosis]
+        kernel:
+          - name: scx__sched_ext__for-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git
+            tag: for-next
+          - name: scx__bpf__bpf-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
+            tag: master
+          - name: scx__stable__linux-rolling-stable
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-rolling-stable
+          - name: scx__stable__6_13
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.13.y
+          - name: scx__stable__6_16
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.16.y
+        exclude:
+          # layered_init and layered_runnable hit 1M insn limit on 6.13 verifier
+          - scheduler: layered
+            kernel:
+              name: scx__stable__6_13
+          # lavd hits verifier issues on 6.13
+          - scheduler: lavd
+            kernel:
+              name: scx__stable__6_13
+          # lavd_cgroup_set_bandwidth not present in 6.16 kernel
+          - scheduler: lavd
+            kernel:
+              name: scx__stable__6_16
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - run: echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
+      - uses: actions/cache/restore@v4
+        with:
+          path: .veristat-tools
+          key: veristat-tools-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: veristat-tools-${{ runner.arch }}-
+          fail-on-cache-miss: true
+      - run: echo "$GITHUB_WORKSPACE/.veristat-tools/bin" >> $GITHUB_PATH
+      - name: Install build dependencies
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 90
+          max_attempts: 3
+          command: |
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends -qq ${{ env.SCX_PACKAGES }}
+      - name: 'Build: scx_${{ matrix.scheduler }}'
+        run: cargo build -q --profile ci --locked -p scx_${{ matrix.scheduler }}
+
+      - name: 'Verify: ${{ matrix.scheduler }} (${{ matrix.kernel.name }})'
+        uses: likewhatevs/vng-action@v0.3.0
+        with:
+          name: ${{ matrix.kernel.name }}__${{ runner.arch }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v17
+          network: user
+          verbose: false
+          run: cargo veristat --profile ci --stderr-gfm-erronly scx_${{ matrix.scheduler }} 2>>"$GITHUB_STEP_SUMMARY"
+      - name: Fix permissions for cache
+        if: always()
+        run: sudo chown -R $(id -u):$(id -g) ~
+
+  benchmark-matrix:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      has_schedulers: ${{ steps.detect.outputs.has_schedulers }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect changed schedulers
+        id: detect
+        run: |
+          bench_set="cake cosmos lavd layered mitosis p2dq"
+          base="${{ github.event.pull_request.base.sha }}"
+          detected=$(git diff --name-only "$base" HEAD | { grep -oP 'scheds/rust/scx_\K[^/]+' || true; } | sort -u)
+          filtered=""
+          for s in $detected; do
+            for b in $bench_set; do
+              if [ "$s" = "$b" ]; then
+                if [ -n "$filtered" ]; then
+                  filtered="$filtered,\"$s\""
+                else
+                  filtered="\"$s\""
+                fi
+              fi
+            done
+          done
+          if [ -z "$filtered" ]; then
+            echo "No benchmarkable schedulers changed"
+            echo 'matrix={"scheduler":[]}' >> "$GITHUB_OUTPUT"
+            echo "has_schedulers=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"scheduler\":[$filtered]}" >> "$GITHUB_OUTPUT"
+            echo "has_schedulers=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  benchmark:
+    needs: [fetch, benchmark-matrix]
+    if: needs.benchmark-matrix.outputs.has_schedulers == 'true'
+    runs-on: ${{ (github.repository_owner == 'likewhatevs' || github.repository_owner == 'sched-ext') && fromJSON('[ "self-hosted", "Linux", "X64", "large" ]') || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.benchmark-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-${{ runner.arch }}
+          cache-targets: false
+          save-if: false
+      - uses: ./.github/actions/install-deps-action
+
+      - name: Build scheduler (HEAD)
+        run: cargo build -q --release --locked -p scx_${{ matrix.scheduler }}
+
+      - name: 'Benchmark HEAD: ${{ matrix.scheduler }}'
+        run: |
+          chmod +x .github/scripts/bench-harness.sh
+          .github/scripts/bench-harness.sh \
+            target/release/scx_${{ matrix.scheduler }} \
+            PR \
+            "${{ github.event.pull_request.head.sha }}"
+
+      - name: Compute merge base
+        id: merge-base
+        run: echo "sha=$(git merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout base and rebuild
+        run: |
+          git checkout ${{ steps.merge-base.outputs.sha }}
+          cargo clean
+          cargo build -q --release --locked -p scx_${{ matrix.scheduler }}
+
+      - name: 'Benchmark BASE: ${{ matrix.scheduler }}'
+        run: |
+          .github/scripts/bench-harness.sh \
+            target/release/scx_${{ matrix.scheduler }} \
+            BASE \
+            "${{ steps.merge-base.outputs.sha }}"
+
+  claude-review:
+    if: "!cancelled() && github.event_name == 'pull_request'"
+    needs: [lint, clippy, build, arena-selftests, test, veristat, benchmark]
+    runs-on: ${{ (github.repository_owner == 'likewhatevs' || github.repository_owner == 'sched-ext') && fromJSON('[ "self-hosted", "Linux", "X64", "large" ]') || 'ubuntu-24.04' }}
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_MODEL: ${{ secrets.AWS_INFERENCE_PROFILE }}
+          ANTHROPIC_SMALL_FAST_MODEL: ${{ secrets.AWS_INFERENCE_PROFILE }}
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_bedrock: "true"
+          prompt: |
+            Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            CI run: ${{ github.run_id }}
+
+            ## 0. Setup
+
+            Read ~/.claude/CLAUDE.md for environment details, tool locations, and review
+            methodology. Load the review guides it references before proceeding.
+
+            ## 1. Prior Context
+
+            Read prior PR comments via `gh pr view` and
+            `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`.
+            Do not repeat feedback already given and acknowledged.
+
+            ## 2. Code Review
+
+            Read the full PR diff. For every changed function or code path:
+            - Use semcode to read the kernel-side implementation of any sched_ext APIs touched
+            - Analyze correctness, safety, and performance implications
+            - Cross-reference with the review methodology guides
+
+            Use `mcp__github_inline_comment__create_inline_comment` for specific code issues.
+
+            ## 3. CI Results
+
+            Use `mcp__github_ci__get_ci_status` and `mcp__github_ci__download_job_log` to
+            check CI results for run ${{ github.run_id }}. Report failing jobs with root cause.
+
+            ## 4. Benchmark Analysis
+
+            If benchmark jobs ran, download their logs and extract the structured result
+            blocks (delimited by `===BENCH_RESULT_START===` / `===BENCH_RESULT_END===`).
+            Each block contains scheduler metrics (`---RSCHED_START---`) and benchmark
+            tool output (`---BENCH_OUTPUT_START---`), labeled `PR` or `BASE`.
+
+            Compare PR vs BASE for each scheduler:
+            - Correlate benchmark deltas with the actual code changes in the diff
+            - Use the performance analysis approach from CLAUDE.md
+            - Present a summary table of meaningful deltas
+
+            ## 5. Summary
+
+            Post a single PR comment via `gh pr comment` with:
+            - Code review findings (inline comments for specifics, summary for themes)
+            - CI status
+            - Benchmark comparison table (if benchmarks ran)
+            - Overall assessment: correctness, performance, and merge safety
+
+            Use emojis where appropriate for readability (section headers, status
+            indicators, benchmark deltas, severity markers, etc.).
+
+          claude_args: |
+            --mcp-config '{"mcpServers":{"semcode":{"command":"semcode-mcp","args":["--database","/opt/linux/.semcode.db","--git-repo","/opt/linux"]}}}'
+            --allowedTools "Read,Glob,Grep,Bash,WebFetch,WebSearch,mcp__github_inline_comment__create_inline_comment,mcp__github_ci__get_ci_status,mcp__github_ci__get_workflow_run_details,mcp__github_ci__download_job_log,mcp__semcode__find_function,mcp__semcode__find_type,mcp__semcode__find_callers,mcp__semcode__find_calls,mcp__semcode__find_callchain,mcp__semcode__diff_functions,mcp__semcode__grep_functions,mcp__semcode__vgrep_functions,mcp__semcode__find_commit,mcp__semcode__vcommit_similar_commits,mcp__semcode__lore_search,mcp__semcode__dig,mcp__semcode__vlore_similar_emails"
+            --max-turns 250
+
+  required-checks:
+    needs: [lint, clippy, build, arena-selftests, test, veristat]
+    runs-on: ubuntu-latest
+    if: always()
+    env:
+      NEEDS_CONTEXT: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "$NEEDS_CONTEXT" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'
+
+  pages:
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      # prevent cache permission errors
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/install-deps-action
+      - name: Build Book and Linux Docs
+        run: |
+          rustup install nightly
+          rustup component add rustfmt --toolchain nightly
+          RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items
+          sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
+          cargo install htmlq
+          git clone --single-branch -b "$SCHED_EXT_KERNEL_TAG" --depth 1 "$SCHED_EXT_KERNEL_URL" linux
+          cd linux
+          make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=scheduler htmldocs
+          make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=bpf htmldocs
+          cd ..
+          cp -a linux/Documentation/output/scheduler target/doc/
+          cp -a linux/Documentation/output/bpf target/doc/
+          sed -i 's%<li><a href="server/index.html">server</a></li>%<li><a href="server/index.html">server</a></li><li><a href="scheduler/sched-ext.html">Kernel Sched Ext Docs</a></li><li><a href="bpf/helpers.html">Kernel Bpf Helpers Docs</a></li>%' target/doc/index.html
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+        with:
+          enablement: true
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'target/doc'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

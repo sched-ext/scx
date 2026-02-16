@@ -1,0 +1,69 @@
+[
+  {
+    "name": "latency",
+    "comment": "Wakeup-latency-sensitive workloads (schbench)",
+    "matches": [
+      [{"CommPrefix": "schbench"}],
+      [{"PcommPrefix": "schbench"}]
+    ],
+    "kind": {
+      "Open": {
+        "preempt": true,
+        "prev_over_idle_core": true,
+        "min_exec_us": 100,
+        "slice_us": 5000,
+        "weight": 200,
+        "growth_algo": "Sticky"
+      }
+    }
+  },
+  {
+    "name": "compute",
+    "comment": "CPU-intensive throughput workloads (sysbench, stress-ng)",
+    "matches": [
+      [{"CommPrefix": "sysbench"}],
+      [{"PcommPrefix": "sysbench"}],
+      [{"CommPrefix": "stress-ng"}],
+      [{"PcommPrefix": "stress-ng"}]
+    ],
+    "kind": {
+      "Confined": {
+        "util_range": [0.7, 0.9],
+        "cpus_range_frac": [0.3, 0.9],
+        "min_exec_us": 500,
+        "slice_us": 20000,
+        "xllc_mig_min_us": 500.0,
+        "growth_algo": "Topo"
+      }
+    }
+  },
+  {
+    "name": "sync",
+    "comment": "Synchronization-intensive workloads (perf bench epoll/futex)",
+    "matches": [
+      [{"CommPrefix": "perf"}],
+      [{"PcommPrefix": "perf"}]
+    ],
+    "kind": {
+      "Grouped": {
+        "util_range": [0.5, 0.7],
+        "cpus_range_frac": [0.2, 0.8],
+        "min_exec_us": 200,
+        "slice_us": 10000,
+        "skip_remote_node": true,
+        "xllc_mig_min_us": 200.0,
+        "growth_algo": "Linear"
+      }
+    }
+  },
+  {
+    "name": "rest",
+    "comment": "Catch-all for system services, shell, etc.",
+    "matches": [[]],
+    "kind": {
+      "Grouped": {
+        "util_range": [0.5, 0.6]
+      }
+    }
+  }
+]

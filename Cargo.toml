@@ -48,3 +48,10 @@ inherits = "release"
 lto = false
 codegen-units = 32
 panic = "abort"
+
+[profile.ci]
+inherits = "dev"
+debug = 0
+incremental = false
+strip = true
+lto = false

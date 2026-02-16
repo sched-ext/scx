@@ -1200,8 +1200,8 @@ impl McpTools {
             Some(t) => return Err(anyhow!("Unknown stat_type: {}", t)),
         };
 
-        let help_text = if stat_type.is_some() {
-            format!("Statistics resources for {}:\n\n", stat_type.unwrap())
+        let help_text = if let Some(t) = stat_type {
+            format!("Statistics resources for {}:\n\n", t)
         } else {
             "Available statistics resources:\n\n".to_string()
         };
