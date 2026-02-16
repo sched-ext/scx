@@ -2059,6 +2059,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	return 0;
 }
 
+void BPF_STRUCT_OPS(mitosis_enable, struct task_struct *p)
+{
+	scx_bpf_task_cpu(p);
+}
+
 void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
@@ -2078,6 +2083,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .cgroup_move		= (void *)mitosis_cgroup_move,
 	       .dump 			= (void *)mitosis_dump,
 	       .dump_task		= (void *)mitosis_dump_task,
+	       .enable			= (void *)mitosis_enable,
 	       .init			= (void *)mitosis_init,
 	       .exit			= (void *)mitosis_exit,
 	       .name			= "mitosis");
