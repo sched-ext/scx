@@ -253,6 +253,14 @@ struct Opts {
     #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
     mm_affinity: bool,
 
+    /// Rotation: minimum time (ms) on one tier before we consider moving the task to the other tier.
+    ///
+    /// When > 0, enables tier rotation: track runtime on fast vs slow tiers and prefer placing
+    /// tasks on the tier where they have run less. Only effective with --preferred-idle-scan or
+    /// --flat-idle-scan. Requires topology with both Big and Little cores. 0 = disabled.
+    #[clap(long, default_value = "0")]
+    rotation_interval_ms: u64,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -454,6 +462,37 @@ impl<'a> Scheduler<'a> {
         rodata.no_wake_sync = opts.no_wake_sync;
         rodata.avoid_smt = opts.avoid_smt;
         rodata.mm_affinity = opts.mm_affinity;
+
+        // Tier rotation: when rotation_interval_ms > 0, enable if topology has Big and Little cores.
+        let (capacity_thresh, rotation_interval_ns) = if opts.rotation_interval_ms > 0 {
+            let big_caps: Vec<_> = topo
+                .all_cpus
+                .values()
+                .filter(|c| matches!(c.core_type, CoreType::Big { .. }))
+                .map(|c| c.cpu_capacity)
+                .collect();
+            let has_little = topo
+                .all_cpus
+                .values()
+                .any(|c| matches!(c.core_type, CoreType::Little));
+            if !big_caps.is_empty() && has_little {
+                let thresh = *big_caps.iter().min().unwrap();
+                info!(
+                    "Tier rotation enabled (interval {} ms), capacity_thresh={}",
+                    opts.rotation_interval_ms, thresh
+                );
+                (thresh as c_ulong, opts.rotation_interval_ms * 1_000_000) // ms -> ns
+            } else {
+                if !has_little {
+                    warn!("Rotation interval set but no Little cores in topology; disabling tier rotation");
+                }
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        };
+        rodata.capacity_thresh = capacity_thresh;
+        rodata.rotation_interval_ns = rotation_interval_ns;
 
         // Enable perf event scheduling settings.
         if opts.perf_config > 0 {

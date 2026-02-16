@@ -128,6 +128,18 @@ const volatile bool perf_sticky;
 const volatile bool no_wake_sync;
 
 /*
+ * Capacity threshold: CPU with capacity >= capacity_thresh is "fast", else
+ * "slow". Set from userspace from topology (e.g., min Big core capacity).
+ */
+const volatile u64 capacity_thresh;
+
+/*
+ * Minimum time (ns) a task runs on the same CPU before we force a rotation
+ * in dispatch. 0 = disabled.
+ */
+const volatile u64 rotation_interval_ns;
+
+/*
  * Default time slice.
  */
 const volatile u64 slice_ns = 10000ULL;
@@ -186,6 +198,29 @@ struct task_ctx {
 	 */
 	u64 perf_events;
 	u64 perf_delta_t;
+
+	/*
+	 * Tier rotation: cumulative runtime on fast and slow cores.
+	 */
+	u64 runtime_fast_ns;
+	u64 runtime_slow_ns;
+
+	/*
+	 * Tier rotation: track time on current tier for time-based
+	 * rotation:
+	 * - last_tier: 0 = slow, 1 = fast, -1 = unknown
+	 * - same_tier_since_ns = when we started running on this tier
+	 */
+	s32 last_tier;
+	u64 same_tier_since_ns;
+
+	/*
+	 * Tier rotation: when we last applied a rotation.
+	 *
+	 * Used to throttle rotations to at most once per
+	 * rotation_interval_ns.
+	 */
+	u64 last_rotation_at;
 };
 
 struct {
@@ -570,39 +605,78 @@ static inline bool is_cpu_faster(s32 this_cpu, s32 that_cpu)
  * Try to pick the best idle CPU based on the @preferred_cpus ranking.
  * Return a full-idle SMT core if @do_idle_smt is true, or any idle CPU if
  * @do_idle_smt is false.
+ *
+ * When rotation is enabled, only after rotation_interval_ns has passed
+ * since last_rotation_at do we try the tier where the task has run less
+ * first, then any tier; otherwise we try any tier.
+ *
+ * When rotation is enabled, once rotation_interval_ns has elapsed, first
+ * try the tier where the task has run less, then fall back to any tier.
  */
 static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_prev_allowed,
 				  const struct cpumask *primary, const struct cpumask *smt)
 {
+	struct task_ctx *tctx;
 	static u32 last_cpu;
+	s32 tier_prefer = -1;
 	u64 max_cpus = MIN(nr_cpu_ids, MAX_CPUS);
-	int i, start;
+	u64 now;
+	int i, start, pass;
+	bool cpu_ok;
 
-	if (is_prev_allowed &&
-	    (!primary || bpf_cpumask_test_cpu(prev_cpu, primary)) &&
-	    (!smt || bpf_cpumask_test_cpu(prev_cpu, smt)) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
 		return prev_cpu;
 
-	start = last_cpu;
-	bpf_for(i, 0, max_cpus) {
-		/*
-		 * If @preferred_idle_scan is true, always scan the CPUs in
-		 * the preferred order, otherwise rotate the CPUs to
-		 * distribute the load more evenly.
-		 */
-		s32 cpu = preferred_idle_scan ?
-				preferred_cpus[i] : (start + i) % max_cpus;
+	if (rotation_interval_ns && capacity_thresh) {
+		now = scx_bpf_now();
+		tier_prefer = tctx->runtime_fast_ns < tctx->runtime_slow_ns ? 1 : 0;
+		if (rotation_interval_ns > 0 &&
+		    now - tctx->last_rotation_at < rotation_interval_ns)
+			tier_prefer = -1;
+	}
 
-		if ((cpu == prev_cpu) || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			continue;
+	for (pass = 0; pass < 2; pass++) {
+		if (pass == 1) {
+			if (tier_prefer < 0)
+				break;
+			tier_prefer = -1;
+		}
 
-		if ((!primary || bpf_cpumask_test_cpu(cpu, primary)) &&
-		    (!smt || bpf_cpumask_test_cpu(cpu, smt)) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			if (!preferred_idle_scan)
-				last_cpu = cpu + 1;
-			return cpu;
+		if (is_prev_allowed && prev_cpu >= 0 && prev_cpu < MAX_CPUS &&
+		    (!primary || bpf_cpumask_test_cpu(prev_cpu, primary)) &&
+		    (!smt || bpf_cpumask_test_cpu(prev_cpu, smt))) {
+			if ((tier_prefer < 0 ||
+			    (cpu_capacity[prev_cpu] >= capacity_thresh) == (tier_prefer == 1)) &&
+			    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				return prev_cpu;
+		}
+
+		start = last_cpu;
+		bpf_for(i, 0, max_cpus) {
+			/*
+			 * If @preferred_idle_scan is true, always scan the
+			 * CPUs in the preferred order, otherwise rotate
+			 * the CPUs to distribute the load more evenly.
+			 */
+			s32 cpu = preferred_idle_scan ?
+					preferred_cpus[i] : (start + i) % max_cpus;
+
+			if ((cpu == prev_cpu) || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+				continue;
+
+			if (tier_prefer >= 0 && cpu >= 0 && cpu < MAX_CPUS &&
+			    (cpu_capacity[cpu] >= capacity_thresh) != (tier_prefer == 1))
+				continue;
+
+			cpu_ok = (!primary || bpf_cpumask_test_cpu(cpu, primary)) &&
+				 (!smt || bpf_cpumask_test_cpu(cpu, smt)) &&
+				 scx_bpf_test_and_clear_cpu_idle(cpu);
+			if (cpu_ok) {
+				if (!preferred_idle_scan)
+					last_cpu = cpu + 1;
+				return cpu;
+			}
 		}
 	}
 
@@ -611,7 +685,8 @@ static s32 pick_idle_cpu_pref_smt(struct task_struct *p, s32 prev_cpu, bool is_p
 
 /*
  * Return the optimal idle CPU for task @p or -EBUSY if no idle CPU is
- * found.
+ * found. When rotation is enabled, pick_idle_cpu_pref_smt prefers the
+ * tier where the task has run less, then falls back to any tier.
  */
 static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 {
@@ -635,42 +710,30 @@ static s32 pick_idle_cpu_flat(struct task_struct *p, s32 prev_cpu)
 
 	if (!primary_all) {
 		if (smt_enabled) {
-			/*
-			 * Try to pick a full-idle core in the primary
-			 * domain.
-			 */
-			cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, smt);
+			cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed,
+						     primary, smt);
 			if (cpu >= 0)
 				goto out;
 		}
-
-		/*
-		 * Try to pick any idle CPU in the primary domain.
-		 */
-		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, primary, NULL);
+		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed,
+					     primary, NULL);
 		if (cpu >= 0)
 			goto out;
 	}
 
 	if (smt_enabled) {
-		/*
-		 * Try to pick any full-idle core in the system.
-		 */
 		cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, smt);
 		if (cpu >= 0)
 			goto out;
 	}
 
-	/*
-	 * Try to pick any idle CPU in the system.
-	 */
 	cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed, NULL, NULL);
 
 out:
 	if (smt)
 		scx_bpf_put_cpumask(smt);
 
-	return cpu;
+	return cpu >= 0 ? cpu : -EBUSY;
 }
 
 /*
@@ -712,9 +775,10 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, s32 this_cpu,
 	 * to move the wakee closer to the waker.
 	 *
 	 * In presence of hybrid cores this helps to naturally migrate
-	 * tasks over to the faster cores.
+	 * tasks over to the faster cores. Skip when tier rotation is enabled
+	 * so placement is driven by runtime balance instead.
 	 */
-	if (primary_all && is_wakeup(wake_flags) && this_cpu >= 0 &&
+	if (!rotation_interval_ns && primary_all && is_wakeup(wake_flags) && this_cpu >= 0 &&
 	    is_cpu_faster(this_cpu, prev_cpu)) {
 		/*
 		 * If both the waker's CPU and the wakee's CPU are in the
@@ -1048,6 +1112,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
 	struct task_ctx *tctx;
+	u64 now;
 	int new_cpu;
 
 	/*
@@ -1057,6 +1122,29 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	/*
+	 * Tier rotation: when the interval has passed, force the task through
+	 * the migration path (pick_idle_cpu) so it can be placed on the other
+	 * tier. Same behavior as task_should_migrate() but triggered by
+	 * rotation timing.
+	 */
+	if (rotation_interval_ns && (preferred_idle_scan || flat_idle_scan) &&
+	    capacity_thresh && !is_migration_disabled(p) &&
+	    p->nr_cpus_allowed > 1) {
+		now = scx_bpf_now();
+		if (now - tctx->last_rotation_at >= rotation_interval_ns) {
+			cpu = pick_idle_cpu(p, prev_cpu, -1, 0, true);
+			if (cpu >= 0) {
+				/* last_rotation_at updated in cosmos_running when task actually runs */
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+						  task_slice(p), enq_flags);
+				if (cpu != prev_cpu || !scx_bpf_task_running(p))
+					wakeup_cpu(cpu);
+				return;
+			}
+		}
+	}
 
 	/*
 	 * Immediately dispatch perf event-heavy tasks to a new CPU.
@@ -1113,6 +1201,9 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct task_ctx *tctx;
+	u64 now;
+
 	/*
 	 * Check if the there's any task waiting in the shared DSQ and
 	 * dispatch.
@@ -1123,10 +1214,25 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * If the previous task expired its time slice, but no other task
 	 * wants to run on this SMT core, allow the previous task to run
-	 * for another time slot.
+	 * for another time slot. When tier rotation is enabled, force a
+	 * migration to the other tier after the task has stayed in the same
+	 * tier for rotation_interval_ns.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		if (rotation_interval_ns && (preferred_idle_scan || flat_idle_scan) &&
+		    capacity_thresh && is_cpu_valid(cpu) &&
+		    !is_migration_disabled(prev) && prev->nr_cpus_allowed > 1) {
+			tctx = try_lookup_task_ctx(prev);
+			if (!tctx)
+				return;
+
+			now = scx_bpf_now();
+			if (now - tctx->same_tier_since_ns >= rotation_interval_ns &&
+			    tctx->last_tier >= 0)
+				return;
+		}
 		prev->scx.slice = task_slice(prev);
+	}
 }
 
 void BPF_STRUCT_OPS(cosmos_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
@@ -1169,16 +1275,32 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
+	u64 now = scx_bpf_now();
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 
 	/*
+	 * Tier rotation: track when we started on this tier for time-based
+	 * rotation in dispatch. Update last_rotation_at here (not in select_cpu
+	 * or enqueue) so we use the CPU where the task actually runs; the core
+	 * may bounce the task after select_cpu.
+	 */
+	if (rotation_interval_ns && capacity_thresh && is_cpu_valid(cpu)) {
+		s32 tier = cpu_capacity[cpu] >= capacity_thresh ? 1 : 0;
+		if (tctx->last_tier != tier) {
+			tctx->last_tier = tier;
+			tctx->same_tier_since_ns = now;
+			tctx->last_rotation_at = now;
+		}
+	}
+
+	/*
 	 * Save a timestamp when the task begins to run (used to evaluate
 	 * the used time slice).
 	 */
-	tctx->last_run_at = scx_bpf_now();
+	tctx->last_run_at = now;
 
 	/*
 	 * Update current system's vruntime.
@@ -1189,7 +1311,7 @@ void BPF_STRUCT_OPS(cosmos_running, struct task_struct *p)
 	/*
 	 * Refresh cpufreq performance level.
 	 */
-	update_cpufreq(scx_bpf_task_cpu(p));
+	update_cpufreq(cpu);
 
 	/*
 	 * Capture performance counter baseline when task starts running.
@@ -1231,6 +1353,16 @@ void BPF_STRUCT_OPS(cosmos_stopping, struct task_struct *p, bool runnable)
 	 * Update per-CPU statistics.
 	 */
 	update_cpu_load(p, slice);
+
+	/*
+	 * Tier rotation: account runtime on fast vs slow tier.
+	 */
+	if (rotation_interval_ns && capacity_thresh && is_cpu_valid(cpu)) {
+		if (cpu_capacity[cpu] >= capacity_thresh)
+			tctx->runtime_fast_ns += slice;
+		else
+			tctx->runtime_slow_ns += slice;
+	}
 }
 
 void BPF_STRUCT_OPS(cosmos_enable, struct task_struct *p)
@@ -1247,6 +1379,10 @@ s32 BPF_STRUCT_OPS(cosmos_init_task, struct task_struct *p,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
+
+	/* Tier rotation: ensure first run on any tier updates same_tier_since_ns */
+	if (rotation_interval_ns)
+		tctx->last_tier = -1;
 
 	return 0;
 }
