@@ -69,7 +69,14 @@ struct cake_task_ctx {
                             * Widened from u16 to prevent 21-218s wrap cascade.
                             * u32 at 50K/s wraps at 23.9 hours — effectively never. */
 
-    u8 __pad[48];          /* Pad to 64 bytes: 8+4+4+48 = 64 */
+    /* --- LAST2 tracking (bytes 16-19) --- */
+    s32 prev_prev_cpu;     /* 4B: Second-to-last CPU this task ran on.
+                            * Used by Gate 1a (LAST2_TRACK): if prev_cpu busy,
+                            * try prev_prev_cpu before SMT sibling. Cache still
+                            * partially warm from recent run. Sim: -4.7µs jitter
+                            * for FF16 workloads. Set to -1 initially. */
+
+    u8 __pad[44];          /* Pad to 64 bytes: 8+4+4+4+44 = 64 */
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
@@ -151,8 +158,17 @@ struct mega_mailbox_entry {
     u64 rc_state_fused2;   /* Slot 2 [63:32]=packed_info, [31:0]=deficit_avg */
     u32 rc_counter2;       /* Slot 2 reclass counter */
 
-    /* --- Reserved (bytes 84-127): 44 bytes for future use --- */
-    u32 _reserved[11];
+    /* --- Migration cooldown (byte 84) --- */
+    u8 migration_cooldown; /* NEAR_PREF: wakeups remaining in cooldown period.
+                            * Set to 4 on migration, decremented on Gate 1 hit.
+                            * While > 0, Gate 1c scans same-CCD-half idle CPUs
+                            * before falling to Gate 2 (far scan).
+                            * Sim: 8.5× jitter reduction for FF16, no-op for
+                            * Arc Raiders (already high Gate 1 hit rate). */
+
+    /* --- Reserved (bytes 85-127): 43 bytes for future use --- */
+    u8 _reserved_byte[3];  /* alignment */
+    u32 _reserved[10];
 } __attribute__((aligned(128)));
 _Static_assert(sizeof(struct mega_mailbox_entry) == 128,
     "mega_mailbox_entry must be exactly 128 bytes (2 cache lines — R2 3-slot)");
