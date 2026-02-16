@@ -29,7 +29,7 @@ use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::UserExitInfo;
 use stats::Metrics;
 
-const SCHEDULER_NAME: &str = "RustLand";
+const SCHEDULER_NAME: &str = "scx_rustland";
 
 /// scx_rustland: user-space scheduler written in Rust
 ///
@@ -424,6 +424,14 @@ fn main() -> Result<()> {
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        if build_id::is_scx_running(SCHEDULER_NAME) {
+            info!("{:} starts running", SCHEDULER_NAME);
+        } else {
+            warn!(
+                "{:} initialized, but not found in /sys/kernel/sched_ext/root/ops",
+                SCHEDULER_NAME
+            );
+        }
         if !sched.run()?.should_restart() {
             break;
         }

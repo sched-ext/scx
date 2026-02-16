@@ -4,6 +4,8 @@
 // GNU General Public License version 2.
 
 use std::fmt::Write;
+use std::fs;
+use std::path::Path;
 
 lazy_static::lazy_static! {
     static ref GIT_VERSION: String = {
@@ -67,8 +69,31 @@ lazy_static::lazy_static! {
     pub static ref SCX_FULL_VERSION: String = full_version(*SCX_CARGO_VERSION);
 }
 
+fn match_name(cur_ops: &str, expected: &str) -> bool {
+    let base = expected.strip_prefix("scx_").unwrap_or(expected);
+    cur_ops.contains(base)
+}
+
+pub fn is_scx_running(expected: &str) -> bool {
+    let ops_path = "/sys/kernel/sched_ext/root/ops";
+
+    if !Path::new(ops_path).exists() {
+        return false;
+    }
+
+    match fs::read_to_string(ops_path) {
+        Ok(ret) => match_name(ret.trim(), expected),
+        Err(e) => {
+            log::debug!("Failed to read {}: {}", ops_path, e);
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_cargo_ver() {
         //assert_eq!(super::*SCX_CARGO_VERSION, 1);
@@ -79,5 +104,11 @@ mod tests {
     fn test_full_ver() {
         //assert_eq!(super::*SCX_CARGO_VERSION, 1);
         println!("{}", *super::SCX_FULL_VERSION);
+    }
+
+    #[test]
+    fn test_match_name() {
+        assert!(match_name("bpfland_version", "scx_bpfland"));
+        assert!(!match_name("other", "scx_bpfland"));
     }
 }
