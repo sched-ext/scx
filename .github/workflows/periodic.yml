@@ -1,0 +1,136 @@
+name: periodic
+
+on:
+  schedule:
+    - cron: "35 0,6,12,18 * * *"
+  workflow_dispatch:
+
+env:
+  BPF_CLANG: clang-19
+
+jobs:
+  build-kernels:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - name: scx__bpf__bpf-next
+            kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
+            kernel-tag: master
+          - name: scx__stable__6_12
+            kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            kernel-tag: linux-6.12.y
+          - name: scx__stable__linux-rolling-stable
+            kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            kernel-tag: linux-rolling-stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Kernel: ${{ matrix.name }}'
+        uses: likewhatevs/vng-action@main
+        with:
+          name: ${{ matrix.name }}
+          kernel-url: ${{ matrix.kernel-url }}
+          kernel-tag: ${{ matrix.kernel-tag }}
+          kconfig: kernel.config
+          version: v15
+          run: echo ok
+
+  integration-test:
+    needs: build-kernels
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        scheduler: [beerland, bpfland, chaos, cosmos, flash, lavd, layered, p2dq, rlfifo, rustland, rusty, tickless]
+        kernel:
+          - name: scx__bpf__bpf-next
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git
+            tag: master
+          - name: scx__stable__6_12
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-6.12.y
+          - name: scx__stable__linux-rolling-stable
+            url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            tag: linux-rolling-stable
+        include:
+          - scheduler: chaos
+            flags: --random-delay-frequency 0.5 --random-delay-min-us 1000 --random-delay-max-us 2000
+          - scheduler: lavd
+            flags: --log-level debug
+          - scheduler: layered
+            flags: --log-level debug --stats 1 --run-example
+        exclude:
+          # https://github.com/sched-ext/scx/issues/3046
+          - kernel:
+              name: scx__stable__6_12
+            scheduler: lavd
+          # https://github.com/sched-ext/scx/issues/3047
+          - kernel:
+              name: scx__stable__6_12
+            scheduler: p2dq
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/install-deps-action
+
+      - name: Install cargo veristat
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/libbpf/veristat /tmp/veristat
+          make -C /tmp/veristat/src -j$(nproc)
+          sudo install /tmp/veristat/src/veristat /usr/local/bin/
+          cargo install --git https://github.com/likewhatevs/cargo-veristat --locked
+
+      - name: Build scheduler
+        run: cargo build --profile ci -p scx_${{ matrix.scheduler }}
+
+      - name: 'Test: ${{ matrix.scheduler }} (${{ matrix.kernel.name }})'
+        uses: likewhatevs/vng-action@main
+        with:
+          name: ${{ matrix.kernel.name }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v15
+          cpus: 10
+          memory: 13G
+          run: |
+            stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
+              --affinity 1 --affinity-delay 1 --affinity-pin &
+            timeout --foreground --preserve-status 45 \
+              target/ci/scx_${{ matrix.scheduler }} ${{ matrix.flags || '-v' }}
+
+      - name: 'Verify: ${{ matrix.scheduler }} (${{ matrix.kernel.name }})'
+        uses: likewhatevs/vng-action@main
+        with:
+          name: ${{ matrix.kernel.name }}
+          kernel-url: ${{ matrix.kernel.url }}
+          kernel-tag: ${{ matrix.kernel.tag }}
+          kconfig: kernel.config
+          version: v15
+          cpus: 10
+          memory: 13G
+          network: user
+          run: |
+            export HOME=/home/runner
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cargo build --profile ci -p scx_${{ matrix.scheduler }}
+            GFM=--stderr-gfm-erronly
+            case "${{ matrix.kernel.name }}" in *stable*) GFM=--stderr-gfm ;; esac
+            cargo veristat --profile ci $GFM scx_${{ matrix.scheduler }} 2>>"$GITHUB_STEP_SUMMARY"
+
+  notify:
+    needs: integration-test
+    runs-on: ubuntu-latest
+    if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Slack Notification
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_USERNAME: ci
+          SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
+          SLACK_TITLE: Workflow failed
+          SLACK_MESSAGE: Periodic CI job failed.
+          SLACK_COLOR: failure
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}

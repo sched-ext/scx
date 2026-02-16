@@ -46,3 +46,10 @@ codegen-units = 1
 inherits = "release"
 lto = false
 incremental = true
+
+[profile.ci]
+inherits = "dev"
+debug = 0
+incremental = false
+strip = true
+lto = false
