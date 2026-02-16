@@ -29,7 +29,6 @@ enum cake_tier {
     CAKE_TIER_INTERACT  = 1,  /* <2ms:    compositor, physics, AI */
     CAKE_TIER_FRAME     = 2,  /* <8ms:    game render, encoding */
     CAKE_TIER_BULK      = 3,  /* ≥8ms:    compilation, background */
-    CAKE_TIER_IDLE      = 255,
     CAKE_TIER_MAX       = 4,
 };
 
@@ -44,11 +43,10 @@ enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
 };
 
-/* Per-task flow state - 64B aligned, first 16B coalesced for cake_stopping writes */
+/* Per-task flow state - 64B aligned, first 8B coalesced for cake_stopping writes */
 struct cake_task_ctx {
-    /* --- Hot Write Group (cake_stopping) [Bytes 0-15] --- */
-    u64 next_slice;        /* 8B: Pre-computed slice (ns) */
-
+    /* --- Hot Write Group (cake_stopping) [Bytes 0-7] ---
+     * Union: deficit_avg_fused (4B) + packed_info (4B) = 8B */
     /* STATE FUSION: Union allows atomic u64 access to both state fields */
     union {
         struct {
@@ -61,30 +59,35 @@ struct cake_task_ctx {
             };
             u32 packed_info;               /* 4B: Bitfield */
         };
-        u64 state_fused_u64;               /* 8B: Direct burst commit */
     };
 
-    /* --- Timestamp (cake_running) [Bytes 16-19] --- */
+    /* --- Timestamp (cake_running) [Bytes 8-11] --- */
     u32 last_run_at;       /* 4B: Last run timestamp (ns), wraps 4.2s */
 
-    /* --- Graduated backoff counter [Bytes 20-21] --- */
-    u16 reclass_counter;   /* 2B: Per-task stop counter for per-tier backoff */
+    /* --- Graduated backoff counter [Bytes 12-15] --- */
+    u32 reclass_counter;   /* 4B: Per-task stop counter for per-tier backoff
+                            * Widened from u16 to prevent 21-218s wrap cascade.
+                            * u32 at 50K/s wraps at 23.9 hours — effectively never. */
 
-    u8 __pad[42];          /* Pad to 64 bytes: 8+8+4+2+42 = 64 */
+    /* --- LAST2 tracking (bytes 16-19) --- */
+    s32 prev_prev_cpu;     /* 4B: Second-to-last CPU this task ran on.
+                            * Used by Gate 1a (LAST2_TRACK): if prev_cpu busy,
+                            * try prev_prev_cpu before SMT sibling. Cache still
+                            * partially warm from recent run. Sim: -4.7µs jitter
+                            * for FF16 workloads. Set to -1 initially. */
+
+    u8 __pad[44];          /* Pad to 64 bytes: 8+4+4+4+44 = 64 */
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
- * [Stable:2][Tier:2][Flags:4][Rsvd:8][Wait:8][Error:8]
- *  31-30     29-28   27-24    23-16   15-8     7-0
- * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify (2 ops vs 4) */
-#define SHIFT_KALMAN_ERROR  0
-#define SHIFT_WAIT_DATA     8
+ * [Stable:2][Tier:2][Flags:4][Rsvd:16][Rsvd:8]
+ *  31-30     29-28   27-24    23-8      7-0
+ * TIER+STABLE adjacent → fused 4-bit clear/set in reclassify (2 ops vs 4)
+ * Bits [15:0] reserved for future use (Kalman error + wait data removed). */
 #define SHIFT_FLAGS         24  /* 4 bits: flow flags */
 #define SHIFT_TIER          28  /* 2 bits: tier 0-3 (coalesced with STABLE) */
 #define SHIFT_STABLE        30  /* 2 bits: tier-stability counter (0-3) */
 
-#define MASK_KALMAN_ERROR   0xFF  /* 8 bits: 0-255 */
-#define MASK_WAIT_DATA      0xFF  /* 8 bits: violations<<4 | checks */
 #define MASK_TIER           0x03  /* 2 bits: 0-3 */
 #define MASK_FLAGS          0x0F  /* 4 bits */
 
@@ -93,40 +96,82 @@ struct cake_task_ctx {
 #define EXTRACT_AVG_RT(fused)   ((u16)((fused) >> 16))
 #define PACK_DEFICIT_AVG(deficit, avg)  (((u32)(deficit) & 0xFFFF) | ((u32)(avg) << 16))
 
-/* Pure avg_runtime tier gates (µs) */
-#define TIER_GATE_T0   100   /* < 100µs  → T0 Critical: IRQ, input, audio */
-#define TIER_GATE_T1   2000  /* < 2000µs → T1 Interact: compositor, physics */
-#define TIER_GATE_T2   8000  /* < 8000µs → T2 Frame:    game render, encode */
-                             /* ≥ 8000µs → T3 Bulk:     compilation, bg */
-
 /* ═══════════════════════════════════════════════════════════════════════════
  * MEGA-MAILBOX: Per-CPU state (64 bytes = single cache line)
  * - Zero false sharing: each CPU writes only to its own entry
  * - Prefetch-accelerated reads: one prefetch loads entire CPU state
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Mailbox flags (packed in flags byte) */
-#define MBOX_TIER_MASK    0x03  /* Bits [1:0] = tier (0-3) */
-#define MBOX_VICTIM_BIT   0x08  /* Bit  [3]   = victim (preemptible) */
-#define MBOX_IDLE_BIT     0x10  /* Bit  [4]   = idle (no task running) */
-#define MBOX_WARM_BIT     0x20  /* Bit  [5]   = cache warm (recent run) */
-
-/* Mailbox flag accessors */
-#define MBOX_GET_TIER(f)   ((f) & MBOX_TIER_MASK)
-#define MBOX_IS_VICTIM(f)  ((f) & MBOX_VICTIM_BIT)
-#define MBOX_IS_IDLE(f)    ((f) & MBOX_IDLE_BIT)
-#define MBOX_IS_WARM(f)    ((f) & MBOX_WARM_BIT)
-
 /* 64-byte mega-mailbox entry (single cache line = optimal L1 efficiency)
  * Per-CPU write isolation: each CPU writes ONLY its own entry.
- * Only flags (tier) and dsq_hint (DVFS cache) are actively used.
- * Reserved space kept at 64B for future per-CPU-write features. */
+ *
+ * TICK DATA STAGING (Rule 41): cake_running writes the currently-running
+ * task's tier, last_run_at, and slice. cake_tick reads from SAME cache line.
+ *
+ * TWO-ENTRY PSYCHIC CACHE (Rule 40 + OPT5): Most CPUs alternate 2-3 tasks.
+ * Two slots give ~44% fast-path rate vs 3% with one slot (sim validated).
+ * Slot 0 = MRU (most-recently-used), Slot 1 = LRU. On slot[1] hit, swap
+ * with slot[0] for LRU promotion. Miss evicts slot[1], installs in slot[0].
+ *
+ * rc_slice REMOVED: derived from tier_slice_ns[tier] LUT (saves 8B/slot).
+ * Periodic tctx sync every 16th fast-path stop prevents migration staleness.
+ *
+ * Layout verified: 64B data = 64B. All u64 fields 8B-aligned.
+ * rc_counter0/1 and rc_sync_counter widened from u16 to u32 to eliminate
+ * 1.3-13s wrap cascades. u32 at 50K/s wraps at 23.9 hours — effectively never.
+ * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
-    u8 flags;              /* [1:0]=tier — written by cake_tick */
-    u8 dsq_hint;           /* DVFS perf target cache — written by cake_tick */
-    u8 tick_counter;       /* 2-tick starvation gate — alternates rq lookup */
-    u8 __reserved[61];     /* Pad to 64B cache line, available for future use */
-} __attribute__((aligned(64)));
+    /* ═══ CACHE LINE 0 (bytes 0-63): tick staging + slots 0-1 (HOT) ═══ */
+
+    /* --- Tick staging (bytes 0-17) --- */
+    u8 wakeup_same_cpu;    /* J1 V2: consecutive same-CPU wakeup counter (0-255) */
+    u8 dsq_hint;           /* DVFS perf target cache */
+    u8 tick_counter;       /* Confidence-based starvation skip mask counter */
+    u8 tick_tier;          /* Tier of currently-running task (set by running) */
+    u32 tick_last_run_at;  /* Timestamp when task started (set by running) */
+    u64 tick_slice;        /* Slice of currently-running task (set by running) */
+    u8 tick_ctx_valid;     /* 1 = running stamped, 0 = cleared by stopping */
+    u8 s1_hot_flag;        /* C2: deferred promotion — 1 = first s1 hit seen, promote on 2nd */
+
+    /* --- Psychic Cache Slot 0: MRU (bytes 18-39) --- */
+    u16 _pad2;             /* alignment: keeps rc_counter0 at 4B-aligned offset 20 */
+    u32 rc_counter0;       /* Slot 0 reclass counter (widened: u16→u32, no wrap) */
+    u64 rc_task_ptr0;      /* Slot 0 task pointer (8B-aligned) */
+    u64 rc_state_fused0;   /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
+
+    /* --- Psychic Cache Slot 1 (bytes 40-59) --- */
+    u64 rc_task_ptr1;      /* Slot 1 task pointer (8B-aligned) */
+    u64 rc_state_fused1;   /* Slot 1 [63:32]=packed_info, [31:0]=deficit_avg */
+    u32 rc_counter1;       /* Slot 1 reclass counter (widened: u16→u32) */
+
+    /* --- Sync (bytes 60-63) --- */
+    u32 rc_sync_counter;   /* Periodic tctx writeback counter (widened: u16→u32) */
+
+    /* ═══ CACHE LINE 1 (bytes 64-127): slot 2 + padding (WARM) ═══
+     * Only accessed on s0+s1 miss (~4.6% in Arc Raiders).
+     * ALP prefetches this line for free on Zen 5 (128B pair).
+     * Captures 3rd-most-frequent task per CPU, reducing miss rate
+     * from 22% (2-slot) to 4.6% (3-slot). Sim-validated. */
+
+    /* --- Psychic Cache Slot 2: LRU (bytes 64-83) --- */
+    u64 rc_task_ptr2;      /* Slot 2 task pointer (8B-aligned) */
+    u64 rc_state_fused2;   /* Slot 2 [63:32]=packed_info, [31:0]=deficit_avg */
+    u32 rc_counter2;       /* Slot 2 reclass counter */
+
+    /* --- Migration cooldown (byte 84) --- */
+    u8 migration_cooldown; /* NEAR_PREF: wakeups remaining in cooldown period.
+                            * Set to 4 on migration, decremented on Gate 1 hit.
+                            * While > 0, Gate 1c scans same-CCD-half idle CPUs
+                            * before falling to Gate 2 (far scan).
+                            * Sim: 8.5× jitter reduction for FF16, no-op for
+                            * Arc Raiders (already high Gate 1 hit rate). */
+
+    /* --- Reserved (bytes 85-127): 43 bytes for future use --- */
+    u8 _reserved_byte[3];  /* alignment */
+    u32 _reserved[10];
+} __attribute__((aligned(128)));
+_Static_assert(sizeof(struct mega_mailbox_entry) == 128,
+    "mega_mailbox_entry must be exactly 128 bytes (2 cache lines — R2 3-slot)");
 
 /* Statistics shared with userspace */
 struct cake_stats {
@@ -137,12 +182,11 @@ struct cake_stats {
     u64 _pad[22];                  /* Pad to 256 bytes: (2+4+4+22)*8 = 256 */
 } __attribute__((aligned(64)));
 
-/* Topology flags - enables zero-cost specialization (false = code path eliminated by verifier) */
 
 /* Default values (Gaming profile) */
 #define CAKE_DEFAULT_QUANTUM_NS         (2 * 1000 * 1000)   /* 2ms */
 #define CAKE_DEFAULT_NEW_FLOW_BONUS_NS  (8 * 1000 * 1000)   /* 8ms */
-#define CAKE_DEFAULT_STARVATION_NS      (100 * 1000 * 1000) /* 100ms */
+
 
 /* Default tier arrays (Gaming profile) — 4 tiers */
 
@@ -180,13 +224,7 @@ typedef u64 fused_config_t;
 #define CFG_MASK_BUDGET       0xFFFFULL
 #define CFG_MASK_STARVATION   0xFFFFFULL
 
-/* Extraction Macros (BPF Side) */
-/* Multiplier: bits 0-11. AND only. */
-#define UNPACK_MULTIPLIER(cfg)    ((cfg) & CFG_MASK_MULTIPLIER)
-/* Quantum: bits 12-27. SHR; AND; SHL. */
-#define UNPACK_QUANTUM_NS(cfg)    ((((cfg) >> CFG_SHIFT_QUANTUM) & CFG_MASK_QUANTUM) << 10)
-/* Budget: bits 28-43. SHR; AND; SHL. */
-#define UNPACK_BUDGET_NS(cfg)     ((((cfg) >> CFG_SHIFT_BUDGET) & CFG_MASK_BUDGET) << 10)
+/* Extraction Macro (BPF Side) — only STARVATION used in hot path */
 /* Starvation: bits 44-63. SHR; SHL. (Mask redundant) */
 #define UNPACK_STARVATION_NS(cfg) (((cfg) >> CFG_SHIFT_STARVATION) << 10)
 

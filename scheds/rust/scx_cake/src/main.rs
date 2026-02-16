@@ -7,6 +7,7 @@ mod topology;
 mod tui;
 
 use core::sync::atomic::Ordering;
+use std::io::IsTerminal;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -40,6 +41,8 @@ pub enum Profile {
     Gaming,
     /// Balanced profile for general desktop use (same as gaming for now)
     Default,
+    /// Power-efficient profile for handhelds/laptops on battery (DVFS enabled)
+    Battery,
 }
 
 impl Profile {
@@ -54,6 +57,8 @@ impl Profile {
             Profile::Gaming => (2000, 8000, 100000),
             // Default: Same as gaming for now
             Profile::Default => (2000, 8000, 100000),
+            // Battery: 4ms quantum — fewer context switches = less power
+            Profile::Battery => (4000, 12000, 200000),
         }
     }
 
@@ -87,6 +92,16 @@ impl Profile {
                 100_000_000,
                 100_000_000, // Padding
             ],
+            Profile::Battery => [
+                6_000_000,   // T0 Critical: 6ms (100% freq, relaxed runway)
+                16_000_000,  // T1 Interactive: 16ms (87.5% freq needs more time)
+                80_000_000,  // T2 Frame: 80ms (75% freq — longer per frame)
+                200_000_000, // T3 Bulk: 200ms (50% freq — let it finish)
+                200_000_000,
+                200_000_000,
+                200_000_000,
+                200_000_000, // Padding
+            ],
         }
     }
 
@@ -99,6 +114,13 @@ impl Profile {
                 1229, // T2 Frame: 1.2x
                 1434, // T3 Bulk: 1.4x
                 1434, 1434, 1434, 1434, // Padding
+            ],
+            Profile::Battery => [
+                512,  // T0 Critical: 0.5x = 2ms (fast release at full freq)
+                1024, // T1 Interactive: 1.0x = 4ms
+                1434, // T2 Frame: 1.4x = 5.6ms (longer slice at reduced freq)
+                2048, // T3 Bulk: 2.0x = 8ms (fewer switches = less power)
+                2048, 2048, 2048, 2048, // Padding
             ],
         }
     }
@@ -127,6 +149,13 @@ impl Profile {
                 0,         // T3 Bulk: no limit
                 0, 0, 0, 0, // Padding
             ],
+            Profile::Battery => [
+                200_000,    // T0 Critical: 200µs (reduce cross-LLC migration)
+                4_000_000,  // T1 Interactive: 4ms
+                16_000_000, // T2 Frame: 16ms
+                0,          // T3 Bulk: no limit
+                0, 0, 0, 0, // Padding
+            ],
         }
     }
 
@@ -144,6 +173,26 @@ impl Profile {
                 | (((starvation[i] >> 10) & 0xFFFFF) << 44);
         }
         configs
+    }
+
+    /// DVFS enabled — only Battery profile activates frequency steering
+    fn dvfs_enabled(&self) -> bool {
+        matches!(self, Profile::Battery)
+    }
+
+    /// DVFS per-tier CPU performance targets (SCX_CPUPERF_ONE = 1024 = max)
+    /// Returns None for profiles that don't use DVFS.
+    fn dvfs_targets(&self) -> Option<[u32; 8]> {
+        match self {
+            Profile::Battery => Some([
+                1024, // T0 Critical: 100% — IRQ, input, audio (never throttle)
+                896,  // T1 Interactive: 87.5% — compositor, physics
+                768,  // T2 Frame: 75% — game render (P ∝ V²f savings)
+                512,  // T3 Bulk: 50% — background tasks at half speed
+                512, 512, 512, 512, // Padding
+            ]),
+            _ => None,
+        }
     }
 }
 
@@ -190,6 +239,10 @@ struct Args {
     ///
     /// DEFAULT: Balanced profile for general desktop use.
     ///   - Currently same as gaming; will diverge in future versions
+    ///
+    /// BATTERY: Power-efficient for handhelds/laptops on battery.
+    ///   - Quantum: 4000µs, DVFS enabled, per-tier frequency scaling
+    ///   - T0: 100%, T1: 87.5%, T2: 75%, T3: 50%
     #[arg(long, short, value_enum, default_value_t = Profile::Gaming, verbatim_doc_comment)]
     profile: Profile,
 
@@ -301,13 +354,29 @@ impl<'a> Scheduler<'a> {
             rodata.enable_stats = args.verbose;
             rodata.tier_configs = args.profile.tier_configs(quantum);
 
-            // Topology: only has_hybrid is live (DVFS scaling in cake_tick)
+            // P16: Pre-computed tier slices (single RODATA load vs multiply+shift)
+            let multipliers = args.profile.tier_multiplier();
+            let q_ns = quantum * 1000;
+            let mut slices = [0u64; 8];
+            for i in 0..8 {
+                slices[i] = (q_ns * multipliers[i] as u64) >> 10;
+            }
+            rodata.tier_slice_ns = slices;
+
+            // DVFS: Battery profile enables per-tier CPU frequency steering
+            rodata.enable_dvfs = args.profile.dvfs_enabled();
+            if let Some(targets) = args.profile.dvfs_targets() {
+                rodata.tier_perf_target = targets;
+            }
+
+            // Topology: has_hybrid enables P/E-core DVFS scaling in cake_tick
             rodata.has_hybrid = topo.has_hybrid_cores;
 
             // Per-LLC DSQ partitioning: populate CPU→LLC mapping
             let llc_count = topo.llc_cpu_mask.iter().filter(|&&m| m != 0).count() as u32;
             rodata.nr_llcs = llc_count.max(1);
             rodata.nr_cpus = topo.nr_cpus.min(64) as u32; // Rule 39: bounds kick scan loop
+            rodata.nr_phys_cpus = topo.nr_phys_cpus.min(64) as u32; // V3: PHYS_FIRST scan mask
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
@@ -333,9 +402,16 @@ impl<'a> Scheduler<'a> {
             .attach_struct_ops()
             .context("Failed to attach scheduler")?;
 
-        self.show_startup_splash()?;
+        // Detect headless: skip TUI/splash when no TTY (CI VMs, piped output)
+        let is_tty = std::io::stdout().is_terminal();
 
-        if self.args.verbose {
+        if is_tty {
+            self.show_startup_splash()?;
+        } else {
+            info!("No terminal detected — running in headless mode");
+        }
+
+        if self.args.verbose && is_tty {
             // Run TUI mode
             tui::run_tui(
                 &mut self.skel,
@@ -344,6 +420,9 @@ impl<'a> Scheduler<'a> {
                 self.topology.clone(),
             )?;
         } else {
+            if self.args.verbose && !is_tty {
+                warn!("TUI disabled: no terminal detected (headless mode)");
+            }
             // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
 
             // Block SIGINT and SIGTERM from normal delivery
