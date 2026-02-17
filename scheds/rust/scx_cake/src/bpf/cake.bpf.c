@@ -70,14 +70,13 @@ struct tier_snap {
 struct tier_snap tier_snapshot[4] SEC(".bss") __attribute__((aligned(64)));
 
 
-/* C1 INTERLEAVED: packed tier+WSC array for snapshot reader.
- * u16 per CPU: lower byte = tier, upper byte = WSC.
- * Tier written conditionally by cake_running (only on change).
- * WSC mirrored from select_cpu (dual-write with mailbox).
- * Read by CPU 0's cake_tick: 1 u16 load extracts both via shift/mask.
- * 16 CPUs × 2B = 32B = half a cache line. Bench: −38% tick latency,
- * 16.5× lower jitter vs mailbox reads (σ=85 vs σ=1189). */
-static u16 packed_tier_wsc[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(64)));
+/* packed_tiers[]/packed_wsc[] REMOVED: both were redundant copies of data
+ * already in mega_mailbox (tick_tier on CL0, wakeup_same_cpu on CL1).
+ * All entries shared 1 cache line each = false sharing between CPUs.
+ * packed_wsc was the worst: 100K+/s cross-CPU writes bouncing the line.
+ * Tick reader now reads directly from per-CPU mailbox entries.
+ * Cost: 30 extra CL reads per rebuild (~200/s) = 60µs/s.
+ * Savings: eliminates 100K+ RFOs/s = 3-7M cycles/s saved. */
 
 /* V9 FLAG-SKIP: dirty flag for tier snapshot rebuild.
  * Set by any CPU's cake_running when tier changes (~200/s in gaming).
@@ -246,6 +245,48 @@ static __always_inline u8 classify_tier_lut(u8 old_tier, u16 new_avg)
     return tier_classify_lut[old_tier & 3][bucket];
 }
 
+/* ═══ EWMA + CLASSIFICATION HELPER ═══
+ * Extracted from 3 identical copies in cake_stopping (fast-path, ramp-path,
+ * miss-path). __always_inline produces identical codegen to copy-paste
+ * but single source of truth eliminates maintenance fragility. */
+struct ewma_result {
+    u16 rt_us;
+    u16 new_avg;
+    u16 deficit;
+    u8  new_tier;
+};
+
+static __always_inline struct ewma_result
+compute_ewma_classify(u64 tick_slice, u64 remaining_slice,
+                      u16 old_avg, u16 old_deficit, u8 old_tier)
+{
+    struct ewma_result r;
+    /* OPT6: slice-delta runtime (zero kfuncs) */
+    u32 rt_raw = (u32)(tick_slice - remaining_slice);
+    u32 _max_rt = 65535U << 10;
+    rt_raw -= (rt_raw - _max_rt) & -(rt_raw > _max_rt);
+    r.rt_us = (u16)(rt_raw >> 10);
+    /* EWMA: 7/8 old + 1/8 new */
+    r.new_avg = old_avg - (old_avg >> 3) + (r.rt_us >> 3);
+    /* Deficit drain */
+    u16 _d = old_deficit - r.rt_us;
+    r.deficit = (old_deficit > r.rt_us) ? _d : 0;
+    /* Classification via hysteresis LUT */
+    r.new_tier = classify_tier_lut(old_tier, r.new_avg) & MASK_TIER;
+    return r;
+}
+
+/* C2 DUAL_PHASE: bimodal runtime detection helper.
+ * If THIS run's actual runtime > 2× EWMA average, dispatch with
+ * one-tier-higher slice to avoid preemption on long physics batches. */
+static __always_inline u8
+compute_dispatch_tier(u8 tier, u16 rt_us, u16 new_avg)
+{
+    if (rt_us > (new_avg << 1))
+        return (tier < 3) ? tier + 1 : 3;
+    return tier;
+}
+
 
 /* Per-task context map */
 struct {
@@ -385,7 +426,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         if (wsc < 255) {
             u8 new_wsc = wsc + 1;
             mega_mailbox[prev_idx].wakeup_same_cpu = new_wsc;
-            packed_tier_wsc[prev_idx] = (packed_tier_wsc[prev_idx] & 0x00FF) | ((u16)new_wsc << 8);
         }
         /* NEAR_PREF: Gate 1 hit — same CPU, cooldown decrement.
          * CL1 read: mailbox[prev_idx] already hot from WSC read above.
@@ -406,7 +446,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         u8 wsc = mega_mailbox[prev_idx].wakeup_same_cpu;
         if (wsc >= 8) {
             mega_mailbox[prev_idx].wakeup_same_cpu = 0;
-            packed_tier_wsc[prev_idx] &= 0x00FF;  /* C1: clear WSC upper byte */
             /* Use prev_cpu's LLC, not waker's — task predicted to run
              * on prev_cpu. Using waker's LLC would put it in the wrong
              * DSQ on multi-CCD systems. */
@@ -415,7 +454,6 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             return prev_cpu;
         }
         mega_mailbox[prev_idx].wakeup_same_cpu = 0;
-        packed_tier_wsc[prev_idx] &= 0x00FF;  /* C1: clear WSC upper byte */
     }
 
     /* NEAR_PREF: Gate 1 MISS — task is about to migrate.
@@ -462,7 +500,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         u8 mcd = mega_mailbox[prev_idx].migration_cooldown;
         if (mcd > 0) {
             u32 prev_phys = (u32)prev_cpu % nr_phys_cpus;
-            u32 half_base = (prev_phys / 4) * 4;  /* 0 or 4 */
+            u32 half_base = prev_phys & ~3u;  /* 0 or 4 — single AND, no division */
             /* Scan physical cores in same half */
             #pragma unroll
             for (u32 off = 0; off < 4 && off < nr_phys_cpus; off++) {
@@ -909,12 +947,12 @@ skip_increment:;
         for (c = 0; c < nr_cpus; c++) {
             if (c >= CAKE_MAX_CPUS)
                 break;
-            /* C1: single u16 load extracts both tier and WSC.
-             * 1 load + shift/mask vs 2 loads from different CLs.
-             * Bench: −38% latency, +27% throughput, 16.5× lower jitter. */
-            u16 tw = packed_tier_wsc[c];
-            u8 t = (u8)(tw & 3);         /* tier in lower byte, & 3 verifier-safe */
-            u8 wsc = (u8)(tw >> 8);      /* WSC in upper byte */
+            /* Read tier + WSC directly from per-CPU mailbox entries.
+             * No packed arrays = no false sharing between CPUs.
+             * CL0 (tick_tier): local-CPU-only writes, mostly in Shared state.
+             * CL1 (wakeup_same_cpu): cross-CPU writes, per-CPU isolated. */
+            u8 t = mega_mailbox[c].tick_tier & 3;  /* & 3 verifier-safe */
+            u8 wsc = mega_mailbox[c].wakeup_same_cpu;
             tmasks[t] |= 1ULL << c;
             if (wsc < twsc[t]) {
                 twsc[t] = wsc;
@@ -954,27 +992,26 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
         final_slice = slice ?: quantum_ns;
     }
 
+    /* ── PHASE 2b: READ old tier for dirty check (before overwrite) ──
+     * CL0 already in Modified state from prior tick_ctx_valid=0 —
+     * this read is free (same cache line, no extra memory access). */
+    u8 old_tier = mbox->tick_tier;
+
     /* ── PHASE 3: WRITE all outputs (single cache line burst) ──
      * All 4 writes hit the same mbox cache line (already in Modified state
      * from prior tick_ctx_valid=0). Batching avoids interleaving reads from
-     * p->escx between writes, preventing store buffer stalls.
+     * p->scx between writes, preventing store buffer stalls.
      * (write_coalesce_bench: narrow stores 1.21 cyc vs fused u64 3.57 cyc) */
     mbox->tick_last_run_at = now;
     mbox->tick_slice = final_slice;
     mbox->tick_tier = tier;
     mbox->tick_ctx_valid = 1;
 
-    /* V2 COND_WRITE: update packed array only on tier change.
-     * Read-only check keeps line MESI Shared (~95% of the time).
-     * Write triggers RFO only on actual tier change (~5%).
-     * Bench: 20× fewer RFOs, zero instruction cost regression. */
-    if ((packed_tier_wsc[cpu] & 0xFF) != tier) {
-        /* C1: write tier to lower byte, preserve WSC in upper byte */
-        packed_tier_wsc[cpu] = (packed_tier_wsc[cpu] & 0xFF00) | (tier & 0xFF);
-        /* V9 FLAG-SKIP: signal CPU 0 tick to rebuild snapshot.
-         * Read-before-write: skip store when already dirty (~80% of writes
-         * under load), avoids redundant RFO cache-line invalidation.
-         * Same RFO as packed_tiers write (both on same code path). */
+    /* V9 FLAG-SKIP: signal CPU 0 tick to rebuild snapshot.
+     * old_tier captured above before Phase 3 overwrites tick_tier.
+     * Replaces packed_tiers[] conditional write (eliminated: false sharing).
+     * snapshot_dirty is on its own 64B cache line — idempotent store. */
+    if (old_tier != tier) {
         if (!snapshot_dirty)
             snapshot_dirty = 1;
     }
@@ -1107,28 +1144,16 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                     return;  /* ULTRA-FAST: zero kfunc, zero EWMA ✅ */
                 }
 
-                /* ── INLINE EWMA+DEFICIT UPDATE ──
-                 * OPT6: slice-delta runtime. Kernel decrements p->scx.slice
-                 * via update_curr_scx() before stopping() fires.
-                 * runtime = original_slice - remaining. Zero kfuncs. */
-                u32 rt_raw = (u32)(mbox->tick_slice - p->scx.slice);
-                /* Branchless delta clamp */
-                u32 _max_rt = 65535U << 10;
-                rt_raw -= (rt_raw - _max_rt) & -(rt_raw > _max_rt);
-                u16 rt_us = (u16)(rt_raw >> 10);
-
+                /* ── INLINE EWMA+DEFICIT UPDATE via helper ──
+                 * OPT6: slice-delta runtime + EWMA + deficit + classify.
+                 * Single source of truth (was copy-pasted 3×). */
                 u32 deficit_avg = (u32)fused;
-                u16 avg_rt = EXTRACT_AVG_RT(deficit_avg);
-                u16 deficit = EXTRACT_DEFICIT(deficit_avg);
-                u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_us >> 3);
-                u16 _d3 = deficit - rt_us;
-                deficit = (deficit > rt_us) ? _d3 : 0;
+                struct ewma_result er = compute_ewma_classify(
+                    mbox->tick_slice, p->scx.slice,
+                    EXTRACT_AVG_RT(deficit_avg),
+                    EXTRACT_DEFICIT(deficit_avg), tier);
 
-                /* SPOT-CHECK: would new EWMA change the tier?
-                 * LUT: 1 shift + 1 load, ZERO branches */
-                u8 spot = classify_tier_lut(tier, new_avg) & MASK_TIER;
-
-                if (unlikely(spot != tier)) {
+                if (unlikely(er.new_tier != tier)) {
                     /* ── DAMPENED TIER CHANGE ──
                      * DON'T change tier in-place. Reset stability to 0.
                      * Keeps old tier — forces 3 confirming stops through
@@ -1137,33 +1162,22 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                     packed &= ~((u32)3 << SHIFT_STABLE);  /* stable = 0 */
                 } else {
                     /* DRR++ deficit exhaustion */
-                    if (deficit == 0 &&
+                    if (er.deficit == 0 &&
                         (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)))
                         packed &= ~((u32)CAKE_FLOW_NEW << SHIFT_FLAGS);
                 }
 
-                /* ── C2 DUAL_PHASE: bimodal runtime detection ──
-                 * If THIS run's actual runtime > 2× EWMA average, dispatch
-                 * with one-tier-higher slice to avoid preemption on long
-                 * physics batches. Threshold is relative to task's own
-                 * behavior — adapts to any CPU speed (Rule 54).
-                 * Only affects THIS dispatch's slice, not stored tier.
-                 * Sweep: 2× through 50× all produce 0 false positives,
-                 * 2× gives widest safe margin.
-                 * Bench: 100% throughput (vs 99.2% baseline), 0 regression. */
-                u8 dispatch_tier = tier;
-                if (rt_us > (new_avg << 1))
-                    dispatch_tier = (tier < 3) ? tier + 1 : 3;
+                u8 dispatch_tier = compute_dispatch_tier(tier, er.rt_us, er.new_avg);
 
                 /* ── WRITE BURST: pre-compute all values in registers,
                  * then group all stores at exit. Bench: +3-5% over
                  * scattered writes, fixes p99 spike at 32c (141→94). ── */
                 u64 new_fused = ((u64)packed << 32) |
-                    PACK_DEFICIT_AVG(deficit, new_avg);
+                    PACK_DEFICIT_AVG(er.deficit, er.new_avg);
                 u8 nf = (packed >> SHIFT_FLAGS) & 1;
                 u64 new_slice = tier_slice_ns[dispatch_tier & 7];
                 u64 new_vtime = vtime_prefix[(tier << 1) | nf] |
-                    ((u64)new_avg << 32);
+                    ((u64)er.new_avg << 32);
                 u32 sync = mbox->rc_sync_counter + 1;  /* u32: no wrap */
 
                 /* All stores grouped — same-line writes coalesce in
@@ -1201,23 +1215,16 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
          * disagreement. Requires 3 consecutive confirming stops to
          * reach stable=3. Prevents tier oscillation (Rule 45). */
         if (stable < 3) {
-            /* OPT6: slice-delta runtime (zero kfuncs) */
-            u32 rt_raw = (u32)(mbox->tick_slice - p->scx.slice);
-            u32 _max_rt_r = 65535U << 10;
-            rt_raw -= (rt_raw - _max_rt_r) & -(rt_raw > _max_rt_r);
-            u16 rt_us = (u16)(rt_raw >> 10);
+            /* EWMA + classify via helper */
+            u32 deficit_avg_r = (u32)fused;
+            struct ewma_result er_r = compute_ewma_classify(
+                mbox->tick_slice, p->scx.slice,
+                EXTRACT_AVG_RT(deficit_avg_r),
+                EXTRACT_DEFICIT(deficit_avg_r), tier);
 
-            u32 deficit_avg = (u32)fused;
-            u16 avg_rt = EXTRACT_AVG_RT(deficit_avg);
-            u16 deficit = EXTRACT_DEFICIT(deficit_avg);
-            u16 new_avg = avg_rt - (avg_rt >> 3) + (rt_us >> 3);
-            u16 _d_r = deficit - rt_us;
-            deficit = (deficit > rt_us) ? _d_r : 0;
-
-            u8 spot = classify_tier_lut(tier, new_avg) & MASK_TIER;
             u8 new_stable;
 
-            if (spot == tier) {
+            if (er_r.new_tier == tier) {
                 /* Tier confirms — increment stability */
                 new_stable = stable + 1;
             } else {
@@ -1226,7 +1233,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
             }
 
             /* DRR++ deficit exhaustion */
-            if (deficit == 0 &&
+            if (er_r.deficit == 0 &&
                 (packed & ((u32)CAKE_FLOW_NEW << SHIFT_FLAGS)))
                 packed &= ~((u32)CAKE_FLOW_NEW << SHIFT_FLAGS);
 
@@ -1234,19 +1241,17 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                      (((u32)new_stable << 2) | (u32)tier) << 28;
 
             u64 new_fused = ((u64)packed << 32) |
-                PACK_DEFICIT_AVG(deficit, new_avg);
+                PACK_DEFICIT_AVG(er_r.deficit, er_r.new_avg);
             u8 nf = (packed >> SHIFT_FLAGS) & 1;
 
             /* C2 DUAL_PHASE: bimodal slice boost (same as fast path) */
-            u8 dispatch_tier_r = tier;
-            if (rt_us > (new_avg << 1))
-                dispatch_tier_r = (tier < 3) ? tier + 1 : 3;
+            u8 dispatch_tier_r = compute_dispatch_tier(tier, er_r.rt_us, er_r.new_avg);
 
             *counter_ptr = *counter_ptr + 1;
             *fused_ptr = new_fused;
             p->scx.slice = tier_slice_ns[dispatch_tier_r & 7];
             p->scx.dsq_vtime = vtime_prefix[(tier << 1) | nf] |
-                ((u64)new_avg << 32);
+                ((u64)er_r.new_avg << 32);
             mbox->tick_ctx_valid = 0;
             return;  /* RAMP PATH: 1 kfunc, building confidence ✅ */
         }
@@ -1266,27 +1271,20 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
         u16 init_avg = has_carried ? (u16)((staged >> 32) & 0xFFFF) : 0;
         u8 init_tier = has_carried ? (u8)((staged >> 56) & 3) : CAKE_TIER_FRAME;
 
-        /* OPT6: slice-delta runtime (zero kfuncs) */
-        u32 rt_raw = (u32)(mbox->tick_slice - p->scx.slice);
-        u32 _max_rt_u = 65535U << 10;
-        rt_raw -= (rt_raw - _max_rt_u) & -(rt_raw > _max_rt_u);
-        u16 rt_us = (u16)(rt_raw >> 10);
-
-        /* EWMA: self-seed uses carried avg, cold uses 0 */
-        u16 new_avg = init_avg - (init_avg >> 3) + (rt_us >> 3);
-        u8 new_tier = classify_tier_lut(init_tier, new_avg) & MASK_TIER;
+        /* EWMA + classify via helper */
+        struct ewma_result er_m = compute_ewma_classify(
+            mbox->tick_slice, p->scx.slice,
+            init_avg, 0, init_tier);
 
         /* C2 DUAL_PHASE: bimodal slice boost for miss/seed path */
-        u8 dispatch_tier_m = new_tier;
-        if (rt_us > (new_avg << 1))
-            dispatch_tier_m = (new_tier < 3) ? new_tier + 1 : 3;
+        u8 dispatch_tier_m = compute_dispatch_tier(er_m.new_tier, er_m.rt_us, er_m.new_avg);
 
         /* DAMPENED SEED: stable=2 if tier confirms (self-seed only),
          * stable=0 for cold start or tier change.
          * Requires 1-3 confirming stops via ramp before stable=3. */
-        u8 seed_stable = (has_carried && new_tier == init_tier) ? 2 : 0;
+        u8 seed_stable = (has_carried && er_m.new_tier == init_tier) ? 2 : 0;
         u32 new_packed = ((u32)seed_stable << SHIFT_STABLE) |
-                         ((u32)new_tier << SHIFT_TIER);
+                         ((u32)er_m.new_tier << SHIFT_TIER);
         u16 new_deficit = (u16)((tier_slice_ns[dispatch_tier_m & 7] >> 10) & 0xFFFF);
 
         /* Install in cache: cascade evict s1→s2, s0→s1, new→s0 (R2 3-slot) */
@@ -1298,13 +1296,13 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
         mbox->rc_counter1 = mbox->rc_counter0;
         mbox->rc_task_ptr0 = tp;
         mbox->rc_state_fused0 = ((u64)new_packed << 32) |
-            PACK_DEFICIT_AVG(new_deficit, new_avg);
+            PACK_DEFICIT_AVG(new_deficit, er_m.new_avg);
         mbox->rc_counter0 = has_carried ? 1 : 0;  /* Pre-warm on self-seed */
         mbox->rc_sync_counter = 0;
 
         p->scx.slice = tier_slice_ns[dispatch_tier_m & 7];
-        p->scx.dsq_vtime = vtime_prefix[new_tier << 1] |
-            ((u64)new_avg << 32);
+        p->scx.dsq_vtime = vtime_prefix[er_m.new_tier << 1] |
+            ((u64)er_m.new_avg << 32);
     }
 
     mbox->tick_ctx_valid = 0;
