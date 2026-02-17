@@ -121,10 +121,12 @@ struct cake_task_ctx {
  * 1.3-13s wrap cascades. u32 at 50K/s wraps at 23.9 hours — effectively never.
  * (mailbox_cacheline_bench: 64B beats 128B by 1.1% on MONSTER sim, lower jitter) */
 struct mega_mailbox_entry {
-    /* ═══ CACHE LINE 0 (bytes 0-63): tick staging + slots 0-1 (HOT) ═══ */
+    /* ═══ CACHE LINE 0 (bytes 0-63): LOCAL-CPU ONLY (HOT) ═══
+     * All fields written exclusively by the CPU that owns this mailbox entry.
+     * Zero cross-CPU writes → zero RFO bounces from waker CPUs. */
 
     /* --- Tick staging (bytes 0-17) --- */
-    u8 wakeup_same_cpu;    /* J1 V2: consecutive same-CPU wakeup counter (0-255) */
+    u8 _pad_cl0;           /* Was wakeup_same_cpu — moved to CL1 to eliminate false sharing */
     u8 dsq_hint;           /* DVFS perf target cache */
     u8 tick_counter;       /* Confidence-based starvation skip mask counter */
     u8 tick_tier;          /* Tier of currently-running task (set by running) */
@@ -147,27 +149,31 @@ struct mega_mailbox_entry {
     /* --- Sync (bytes 60-63) --- */
     u32 rc_sync_counter;   /* Periodic tctx writeback counter (widened: u16→u32) */
 
-    /* ═══ CACHE LINE 1 (bytes 64-127): slot 2 + padding (WARM) ═══
-     * Only accessed on s0+s1 miss (~4.6% in Arc Raiders).
+    /* ═══ CACHE LINE 1 (bytes 64-127): slot 2 + CROSS-CPU fields (WARM) ═══
+     * Slot 2 accessed on s0+s1 miss (~4.6% in Arc Raiders).
      * ALP prefetches this line for free on Zen 5 (128B pair).
-     * Captures 3rd-most-frequent task per CPU, reducing miss rate
-     * from 22% (2-slot) to 4.6% (3-slot). Sim-validated. */
+     * Cross-CPU fields (wakeup_same_cpu, migration_cooldown) colocated here
+     * to isolate waker RFOs from CL0's local-only tick/running/stopping. */
 
     /* --- Psychic Cache Slot 2: LRU (bytes 64-83) --- */
     u64 rc_task_ptr2;      /* Slot 2 task pointer (8B-aligned) */
     u64 rc_state_fused2;   /* Slot 2 [63:32]=packed_info, [31:0]=deficit_avg */
     u32 rc_counter2;       /* Slot 2 reclass counter */
 
-    /* --- Migration cooldown (byte 84) --- */
+    /* --- Cross-CPU fields (bytes 84-85): written by waker in select_cpu --- */
     u8 migration_cooldown; /* NEAR_PREF: wakeups remaining in cooldown period.
                             * Set to 4 on migration, decremented on Gate 1 hit.
                             * While > 0, Gate 1c scans same-CCD-half idle CPUs
                             * before falling to Gate 2 (far scan).
                             * Sim: 8.5× jitter reduction for FF16, no-op for
                             * Arc Raiders (already high Gate 1 hit rate). */
+    u8 wakeup_same_cpu;    /* J1 V2: consecutive same-CPU wakeup counter (0-255).
+                            * Written cross-CPU by waker in cake_select_cpu.
+                            * Relocated from CL0→CL1 to eliminate false sharing
+                            * with tick/running/stopping (all local-CPU-only). */
 
-    /* --- Reserved (bytes 85-127): 43 bytes for future use --- */
-    u8 _reserved_byte[3];  /* alignment */
+    /* --- Reserved (bytes 86-127): 42 bytes for future use --- */
+    u8 _reserved_byte[2];  /* alignment */
     u32 _reserved[10];
 } __attribute__((aligned(128)));
 _Static_assert(sizeof(struct mega_mailbox_entry) == 128,
