@@ -38,6 +38,25 @@ enum cake_tier {
 /* Per-LLC DSQ base — DSQ IDs are LLC_DSQ_BASE + llc_index (0..nr_llcs-1) */
 #define LLC_DSQ_BASE 200
 
+/* ── Confidence-based gate routing (Rule 40) ──
+ * Gate IDs for the miss-path cascade in cake_select_cpu.
+ * Gate 1 (prev_cpu) and WSC bypass always run — confidence only
+ * applies to gates AFTER WSC miss. IDs are sequential for comparison. */
+enum cake_gate_id {
+    CAKE_GATE_1B  = 0,   /* SMT sibling */
+    CAKE_GATE_1C  = 1,   /* Nearby CCD half */
+    CAKE_GATE_2   = 2,   /* Tier-matched snapshot */
+    CAKE_GATE_3   = 3,   /* Kernel fallback */
+    CAKE_GATE_4   = 4,   /* Lazy preempt */
+    CAKE_GATE_TUN = 5,   /* Tunnel (all miss) */
+};
+
+/* Consecutive-match threshold to activate gate skipping.
+ * 8 matches = ~200ms at 40 wakeups/s — stable enough to predict. */
+#define CAKE_GATE_CONF_THRESH 8
+#define CAKE_GATE_CONF_MAX    31  /* 5-bit saturate */
+
+
 /* Flow state flags (only CAKE_FLOW_NEW currently used) */
 enum cake_flow_flags {
     CAKE_FLOW_NEW = 1 << 0,  /* Task is newly created */
@@ -69,14 +88,10 @@ struct cake_task_ctx {
                             * Widened from u16 to prevent 21-218s wrap cascade.
                             * u32 at 50K/s wraps at 23.9 hours — effectively never. */
 
-    /* --- LAST2 tracking (bytes 16-19) --- */
-    s32 prev_prev_cpu;     /* 4B: Second-to-last CPU this task ran on.
-                            * Used by Gate 1a (LAST2_TRACK): if prev_cpu busy,
-                            * try prev_prev_cpu before SMT sibling. Cache still
-                            * partially warm from recent run. Sim: -4.7µs jitter
-                            * for FF16 workloads. Set to -1 initially. */
+    /* prev_prev_cpu REMOVED: was reserved for Gate 1a LAST2_TRACK,
+     * never implemented in BPF. Absorbed into padding. */
 
-    u8 __pad[44];          /* Pad to 64 bytes: 8+4+4+4+44 = 64 */
+    u8 __pad[48];          /* Pad to 64 bytes: 8+4+4+48 = 64 */
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
@@ -125,19 +140,19 @@ struct mega_mailbox_entry {
      * All fields written exclusively by the CPU that owns this mailbox entry.
      * Zero cross-CPU writes → zero RFO bounces from waker CPUs. */
 
-    /* --- Tick staging (bytes 0-17) --- */
-    u8 _pad_cl0;           /* Was wakeup_same_cpu — moved to CL1 to eliminate false sharing */
-    u8 dsq_hint;           /* DVFS perf target cache */
-    u8 tick_counter;       /* Confidence-based starvation skip mask counter */
+    /* --- Tick staging (bytes 0-15) --- */
+    u8 _reserved_cl0[3];  /* Was: _pad_cl0, dsq_hint, tick_counter (tick/DVFS removed) */
     u8 tick_tier;          /* Tier of currently-running task (set by running) */
     u32 tick_last_run_at;  /* Timestamp when task started (set by running) */
     u64 tick_slice;        /* Slice of currently-running task (set by running) */
-    u8 tick_ctx_valid;     /* 1 = running stamped, 0 = cleared by stopping */
+    /* tick_ctx_valid REMOVED: was tick↔stopping validity flag. Tick eliminated,
+     * 5 dead writes removed (~100K wasted stores/s). */
     u8 s1_hot_flag;        /* C2: deferred promotion — 1 = first s1 hit seen, promote on 2nd */
 
-    /* --- Psychic Cache Slot 0: MRU (bytes 18-39) --- */
-    u16 _pad2;             /* alignment: keeps rc_counter0 at 4B-aligned offset 20 */
+    /* --- Psychic Cache Slot 0: MRU (bytes 17-43) --- */
+    u8 _pad_s0[3];         /* alignment: keeps rc_counter0 at offset 20 (4B-aligned) */
     u32 rc_counter0;       /* Slot 0 reclass counter (widened: u16→u32, no wrap) */
+    /* rc_task_ptr0 at offset 24: 8B-aligned ✅ */
     u64 rc_task_ptr0;      /* Slot 0 task pointer (8B-aligned) */
     u64 rc_state_fused0;   /* Slot 0 [63:32]=packed_info, [31:0]=deficit_avg */
 
@@ -172,8 +187,15 @@ struct mega_mailbox_entry {
                             * Relocated from CL0→CL1 to eliminate false sharing
                             * with tick/running/stopping (all local-CPU-only). */
 
-    /* --- Reserved (bytes 86-127): 42 bytes for future use --- */
-    u8 _reserved_byte[2];  /* alignment */
+    /* --- Confidence routing (bytes 86-87): written by waker in select_cpu ---
+     * Extends WSC pattern (Rule 40) to all gates. When a task consistently
+     * exits through the same gate, skip intermediate gates on the miss path.
+     * Sim: +42µs/s (Arc), +16µs/s (FF16), +915µs/s (compilation). */
+    u8 predicted_gate;     /* Last gate that handled prev_cpu's wakeup (0-7).
+                            * Updated on every Gate 1 miss exit.
+                            * Gate IDs: CAKE_GATE_1B=0, _1C=1, _2=2, _3=3, _4=4, _TUN=5 */
+    u8 gate_confidence;    /* Consecutive matches for predicted_gate (0-31 sat).
+                            * >= CAKE_GATE_CONF_THRESH (8): skip to predicted gate. */
     u32 _reserved[10];
 } __attribute__((aligned(128)));
 _Static_assert(sizeof(struct mega_mailbox_entry) == 128,

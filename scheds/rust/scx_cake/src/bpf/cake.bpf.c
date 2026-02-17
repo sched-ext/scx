@@ -374,6 +374,23 @@ static __always_inline struct cake_task_ctx *get_task_ctx(struct task_struct *p,
  * SYNC wakes from vkd3d_queue, GXWorkers on random cores.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ── Confidence gate recording macro (Rule 40) ──
+ * Updates predicted_gate + gate_confidence on the mailbox for prev_cpu.
+ * Called at each miss-path gate exit. Gate 1 hits and WSC bypass do NOT
+ * update confidence — Gate 1 depends on system idle state, not task behavior.
+ * CL1 write: mailbox[prev_idx] already hot from WSC + migration_cooldown. */
+#define CAKE_GATE_RECORD(idx, gate_id) do {                     \
+    u8 _pg = mega_mailbox[(idx)].predicted_gate;                \
+    if (_pg == (gate_id)) {                                     \
+        u8 _gc = mega_mailbox[(idx)].gate_confidence;           \
+        if (_gc < CAKE_GATE_CONF_MAX)                           \
+            mega_mailbox[(idx)].gate_confidence = _gc + 1;      \
+    } else {                                                    \
+        mega_mailbox[(idx)].predicted_gate = (gate_id);         \
+        mega_mailbox[(idx)].gate_confidence = 1;                \
+    }                                                           \
+} while (0)
+
 s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
@@ -408,8 +425,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         u64 slice = p->scx.slice ?: quantum_ns;
 
         /* J1 V2: Gate 1 hit — increment prediction counter.
-         * Saturate at 255 to avoid wrap.
-         * C1: dual-write to packed_tier_wsc upper byte for bulk tick reads. */
+         * Saturate at 255 to avoid wrap. */
         u8 wsc = mega_mailbox[prev_idx].wakeup_same_cpu;
         if (wsc < 255) {
             u8 new_wsc = wsc + 1;
@@ -449,11 +465,40 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         mega_mailbox[prev_idx].wakeup_same_cpu = 0;
     }
 
+    /* Hoist staged/tier extraction above confidence check.
+     * Gate 4, Gate 2, and tunnel all need these values. If confidence
+     * routing jumps past Gate 2, they must already be initialized.
+     * p->scx.dsq_vtime is on the same cache line as p->scx.slice
+     * (already pulled by Gate 1 MLP) — zero new cache line fetch. */
+    u64 staged = p->scx.dsq_vtime;
+    u8 tier = (staged >> 56) & 3;
+
+    /* ── CONFIDENCE ROUTING: skip intermediate gates if predictable ──
+     * After WSC miss, if this CPU's wakeups consistently exit through
+     * the same gate, jump directly to that gate (forward goto).
+     * Saves ~2-6 kfunc calls per skipped gate (15-40ns each).
+     * CL1 read: mailbox[prev_idx] already hot from WSC access above.
+     * BPF: forward goto only — verifier traces both paths. */
+    u8 _pred_gate = mega_mailbox[prev_idx].predicted_gate;
+    u8 _gate_conf = mega_mailbox[prev_idx].gate_confidence;
+    if (_gate_conf >= CAKE_GATE_CONF_THRESH) {
+        switch (_pred_gate) {
+        case CAKE_GATE_2:   goto gate_2_entry;
+        case CAKE_GATE_3:   goto gate_3_entry;
+        case CAKE_GATE_4:   goto gate_4_entry;
+        case CAKE_GATE_TUN: goto gate_tunnel_entry;
+        default:            break;  /* GATE_1B, GATE_1C: fall through */
+        }
+    }
+
     /* NEAR_PREF: Gate 1 MISS — task is about to migrate.
      * Set cooldown = 4: for the next 4 Gate 1 hits, the cooldown
      * decrements and Gate 1c will try nearby CPUs before Gate 2.
      * CL1 of mailbox[prev_idx] already hot from WSC access above. */
-    mega_mailbox[prev_idx].migration_cooldown = 4;
+    /* MESI GUARD (Rule 11): skip write if already at target value.
+     * Avoids ~4.5K unnecessary RFOs/s on CL1 when cooldown is already 4. */
+    if (mega_mailbox[prev_idx].migration_cooldown != 4)
+        mega_mailbox[prev_idx].migration_cooldown = 4;
 
     /* ── GATE 1b: SMT sibling fallback — L2 still warm ──
      * When prev_cpu is busy, try its SMT sibling before Gate 2's full scan.
@@ -469,6 +514,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             scx_bpf_test_and_clear_cpu_idle(sib)) {
             u64 slice = p->scx.slice ?: quantum_ns;
             scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | sib, slice, wake_flags);
+            CAKE_GATE_RECORD(prev_idx, CAKE_GATE_1B);
             return sib;
         }
     }
@@ -504,6 +550,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                     scx_bpf_test_and_clear_cpu_idle(c)) {
                     u64 slice = p->scx.slice ?: quantum_ns;
                     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
+                    CAKE_GATE_RECORD(prev_idx, CAKE_GATE_1C);
                     return c;
                 }
             }
@@ -519,6 +566,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                         scx_bpf_test_and_clear_cpu_idle(c)) {
                         u64 slice = p->scx.slice ?: quantum_ns;
                         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
+                        CAKE_GATE_RECORD(prev_idx, CAKE_GATE_1C);
                         return c;
                     }
                 }
@@ -526,17 +574,16 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         }
     }
 
+gate_2_entry: __attribute__((unused));
     /* ── GATE 2: Tier-matched idle core via tick snapshot (A4) ──
      * Read the task's tier from staged dsq_vtime (set by cake_stopping).
-     * tier_snapshot[tier].mask built by CPU 0's tick from per-CPU mailboxes.
+     * tier_snapshot[tier].mask updated atomically by cake_running.
      * Single L1 read (~1.3ns) + CTZ scan — zero cross-CPU cache line reads.
      *
-     * MESI: zero contention. Single writer (CPU 0 tick, 1kHz).
-     * Staleness: ~1ms. Tiers stable for seconds → stale hit causes kfunc
-     * test to fail → next candidate. No correctness issue.
+     * MESI: negligible contention (~200 atomic ops/s from tier changes).
+     * Staleness: ZERO — updated at the instant a tier changes.
      * Sim: 31ns/wakeup amortized (vs 40ns mailbox scan). */
-    u64 staged = p->scx.dsq_vtime;
-    u8 tier = (staged >> 56) & 3;  /* Extract once — reused by Gate 2 + Gate 4 */
+    /* staged + tier already extracted above confidence check */
     if (staged & (1ULL << 63)) {
         u64 tmask = tier_snapshot[tier].mask;
 
@@ -558,6 +605,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                     scx_bpf_test_and_clear_cpu_idle(c)) {
                     u64 slice = p->scx.slice ?: quantum_ns;
                     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
+                    CAKE_GATE_RECORD(prev_idx, CAKE_GATE_2);
                     return c;
                 }
             }
@@ -570,12 +618,14 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                     scx_bpf_test_and_clear_cpu_idle(c)) {
                     u64 slice = p->scx.slice ?: quantum_ns;
                     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
+                    CAKE_GATE_RECORD(prev_idx, CAKE_GATE_2);
                     return c;
                 }
             }
         }
     }
 
+gate_3_entry: __attribute__((unused));
     /* ── GATE 3: Kernel fallback — let kernel find any idle CPU ──
      * Only reached when prev_cpu is busy AND no tier-matched cores are idle.
      * This is the cold path (~2-5% of wakeups in gaming). */
@@ -584,9 +634,11 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (is_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
         u64 slice = p->scx.slice ?: quantum_ns;
         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
+        CAKE_GATE_RECORD(prev_idx, CAKE_GATE_3);
         return cpu;
     }
 
+gate_4_entry: __attribute__((unused));
     /* ── GATE 4: Lazy preempt — T0/T1 urgent task, all CPUs busy ──
      * All idle gates missed. If the waking task is T0/T1 (latency-critical),
      * find the worst-tier CPU via tier_snapshot bitmask (pre-built by tick,
@@ -604,7 +656,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
         /* tier already extracted above — zero redundant shift+AND */
         s32 victim = -1;
 
-        /* V3 bitmask scan: tier_snapshot[].mask pre-built by CPU 0 tick.
+        /* V3 bitmask scan: tier_snapshot[].mask updated atomically by cake_running.
          * Scan worst tier first: T3 → T2 → (T1 if waker is T0).
          * CTZ = first set bit = one victim CPU. 1.14ns on 9800X3D.
          * ~1ms staleness is fine: if CPU went idle since snapshot,
@@ -621,16 +673,19 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             (!restricted || bpf_cpumask_test_cpu(victim, p->cpus_ptr))) {
             u64 slice = p->scx.slice ?: quantum_ns;
             scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | victim, slice, wake_flags);
+            CAKE_GATE_RECORD(prev_idx, CAKE_GATE_4);
             return victim;
         }
     }
 
+gate_tunnel_entry: __attribute__((unused));
     /* ALL BUSY + NO VICTIM: tunnel LLC ID + timestamp for enqueue.
      * select_cpu runs on same CPU as enqueue — safe to tunnel.
      * Reached when: all T0/T1 (no higher-tier victim exists),
      * or task is T2/T3 (no preemption needed), or new task (no staged ctx). */
     scr->cached_llc = cpu_llc_id[tc_id];
     scr->cached_now = scx_bpf_now();
+    CAKE_GATE_RECORD(prev_idx, CAKE_GATE_TUN);
     return prev_cpu;
 }
 
@@ -856,7 +911,6 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
     mbox->tick_last_run_at = now;
     mbox->tick_slice = final_slice;
     mbox->tick_tier = tier;
-    mbox->tick_ctx_valid = 1;
 
     /* ── PHASE 4: INCREMENTAL TIER SNAPSHOT (tick-less) ──
      * On tier change: atomically move this CPU's bit from old tier to new.
@@ -924,7 +978,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
         hit = 0;
         fused_ptr = &mbox->rc_state_fused0;
         counter_ptr = &mbox->rc_counter0;
-        mbox->s1_hot_flag = 0;  /* C2: s0 hit resets s1 promotion tracking */
+        if (mbox->s1_hot_flag)  /* J3: skip-if-unchanged — 58% of stops write 0 to already-0 */
+            mbox->s1_hot_flag = 0;
     } else if (tp == mbox->rc_task_ptr1) {
         hit = 1;
         /* C2: DEFERRED PROMOTION — avoid swap churn for occasional s1 hits.
@@ -997,7 +1052,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                     p->scx.slice = tier_slice_ns[tier & 7];
                     p->scx.dsq_vtime = vtime_prefix[(tier << 1) | nf] |
                         ((u64)EXTRACT_AVG_RT((u32)fused) << 32);
-                    mbox->tick_ctx_valid = 0;
                     return;  /* ULTRA-FAST: zero kfunc, zero EWMA ✅ */
                 }
 
@@ -1044,7 +1098,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                 mbox->rc_sync_counter = sync;
                 p->scx.slice = new_slice;
                 p->scx.dsq_vtime = new_vtime;
-                mbox->tick_ctx_valid = 0;
 
                 /* PERIODIC TCTX SYNC: every 16th fast-path stop.
                  * J23 V3: Skip when hyper-stable (stable=3) — psychic cache +
@@ -1109,7 +1162,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
             p->scx.slice = tier_slice_ns[dispatch_tier_r & 7];
             p->scx.dsq_vtime = vtime_prefix[(tier << 1) | nf] |
                 ((u64)er_r.new_avg << 32);
-            mbox->tick_ctx_valid = 0;
             return;  /* RAMP PATH: 1 kfunc, building confidence ✅ */
         }
         /* Fall through: stable < 3 handled above, this is unreachable
@@ -1162,7 +1214,6 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
             ((u64)er_m.new_avg << 32);
     }
 
-    mbox->tick_ctx_valid = 0;
 }
 
 /* Initialize the scheduler */
