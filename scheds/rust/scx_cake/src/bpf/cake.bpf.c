@@ -820,20 +820,19 @@ const u32 tier_perf_target[8] = {
  * On tier change: clear old bit, set new bit (2 atomics, ~200/s total). */
 void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
 {
-    /* ── PRE-LOAD: task fields before kfunc trampolines ──
-     * p->scx.dsq_vtime and p->scx.slice don't depend on any kfunc result.
-     * Loading them first lets the CPU execute these loads in parallel with
-     * the ~30ns of kfunc trampoline overhead (get_smp_processor_id + now).
-     * Saves ~3-6ns of dependent load latency vs loading after kfuncs.
-     * Both values land in callee-saved registers (r7, r8) across kfuncs. */
+    /* PRE-LOAD: dsq_vtime before kfunc trampoline.
+     * Doesn't depend on any kfunc result. Lands in r8 callee-saved
+     * (confirmed by codegen audit — zero spill). Saves ~3ns.
+     * NOTE: p->scx.slice NOT pre-loaded — codegen audit showed it
+     * spills to stack (4ns) > gain (3ns). Loaded after kfuncs instead. */
     u64 v = p->scx.dsq_vtime;
-    u64 slice = p->scx.slice;
 
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
 
-    /* ── PHASE 1: READ timestamp (kfunc — task fields already in registers) ── */
+    /* ── PHASE 1: READ timestamp + slice (kfunc + task field) ── */
     u32 now = (u32)scx_bpf_now();
+    u64 slice = p->scx.slice;
 
     /* ── PHASE 2: COMPUTE (registers only, zero memory) ── */
     u8 tier;
@@ -903,11 +902,10 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
  * Periodic tctx sync every 16th fast-path stop prevents migration staleness. */
 void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 {
-    /* PRE-LOAD: p->scx.slice before kfunc — doesn't depend on cpu.
-     * The 71% OPT3 ultra-fast path reads this via compute_ewma_classify.
-     * Pre-loading lets the load execute during the ~15ns kfunc trampoline.
-     * Callee-saved register survives across bpf_get_smp_processor_id. */
-    u64 pre_slice = p->scx.slice;
+    /* NOTE: p->scx.slice NOT pre-loaded here — codegen audit showed it
+     * spills to stack (4ns cost) since all callee-saved registers are
+     * occupied. Only 29% of paths use it (compute_ewma_classify calls).
+     * Net: 4ns spill > 0.87ns weighted gain. Read inline instead. */
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
     u64 tp = (u64)p;
@@ -1008,7 +1006,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                  * Single source of truth (was copy-pasted 3×). */
                 u32 deficit_avg = (u32)fused;
                 struct ewma_result er = compute_ewma_classify(
-                    mbox->tick_slice, pre_slice,
+                    mbox->tick_slice, p->scx.slice,
                     EXTRACT_AVG_RT(deficit_avg),
                     EXTRACT_DEFICIT(deficit_avg), tier);
 
@@ -1077,7 +1075,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
             /* EWMA + classify via helper */
             u32 deficit_avg_r = (u32)fused;
             struct ewma_result er_r = compute_ewma_classify(
-                mbox->tick_slice, pre_slice,
+                mbox->tick_slice, p->scx.slice,
                 EXTRACT_AVG_RT(deficit_avg_r),
                 EXTRACT_DEFICIT(deficit_avg_r), tier);
 
@@ -1132,7 +1130,7 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
         /* EWMA + classify via helper */
         struct ewma_result er_m = compute_ewma_classify(
-            mbox->tick_slice, pre_slice,
+            mbox->tick_slice, p->scx.slice,
             init_avg, 0, init_tier);
 
         /* C2 DUAL_PHASE: bimodal slice boost for miss/seed path */
