@@ -739,7 +739,7 @@ int save_gpu_tgid_pid(void) {
 	if (!enable_gpu_support)
 		return 0;
 	struct task_struct *p = NULL;
-	struct task_ctx *taskc, *parent;
+	struct task_ctx *taskc, *leader;
 	u64 pid_tgid;
 	u32 pid, tid;
 	u64 timestamp = MEMBER_INVALID;
@@ -767,15 +767,24 @@ int save_gpu_tgid_pid(void) {
 			timestamp = taskc->running_at;
 		}
 
-		/* Same logic for the parent. */
-		if ((parent = lookup_task_ctx_may_fail(p->parent))) {
+		/*
+		 * Refresh the group leader so UsedGpuPid + IsGroupLeader
+		 * rules work. Note: this relies on p->group_leader, which
+		 * is the main thread of the thread group (same tgid). If
+		 * the GPU-accessing process was created via fork() rather
+		 * than clone(CLONE_THREAD)/pthread_create(), it will be
+		 * its own group leader and the parent process will not be
+		 * refreshed — so IsGroupLeader matching on the parent
+		 * will not work in that case.
+		 */
+		if ((leader = lookup_task_ctx_may_fail(p->group_leader))) {
 			if(!bpf_map_lookup_elem(&gpu_tgid, &pid)) {
 				trace("New GPU pid: %d, force to refresh layer", pid);
-				parent->refresh_layer = true;
+				leader->refresh_layer = true;
 			}
 
-			if (parent->recheck_layer_membership == MEMBER_EXPIRED)
-				parent->refresh_layer = true;
+			if (leader->recheck_layer_membership == MEMBER_EXPIRED)
+				leader->refresh_layer = true;
 		}
 	}
 	bpf_map_update_elem(&gpu_tid, &tid, &timestamp, BPF_ANY);
