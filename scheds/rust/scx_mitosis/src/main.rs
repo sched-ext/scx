@@ -108,12 +108,6 @@ struct Opts {
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     exiting_task_workaround: bool,
 
-    /// Split vtime updates between running() and stopping() instead of unifying them in stopping().
-    /// Enabling this flag restores the legacy behavior of vtime updates, which we've observed to
-    /// cause "vtime too far ahead" errors.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    split_vtime_updates: bool,
-
     /// Disable SCX cgroup callbacks (for when CPU cgroup controller is disabled).
     /// Uses tracepoints and cgroup iteration instead.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -243,7 +237,6 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.debug_events_enabled = opts.debug_events;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
-        rodata.split_vtime_updates = opts.split_vtime_updates;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
