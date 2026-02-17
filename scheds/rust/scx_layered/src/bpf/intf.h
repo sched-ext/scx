@@ -369,6 +369,7 @@ struct layer {
 
 	u32			nr_cpus;
 	u32			nr_llc_cpus[MAX_LLCS];
+	u32			nr_node_cpus[MAX_NUMA_NODES];
 
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;
