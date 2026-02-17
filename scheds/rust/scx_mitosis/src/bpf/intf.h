@@ -105,7 +105,7 @@ _Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
 #if !defined(__BINDGEN_RUNNING__)
 #define CELL_LOCK_T struct bpf_spin_lock
 #else
-// When userspaces acceses a cell, this pad is zero.
+// When userspaces accesses a cell, this pad is zero.
 #define CELL_LOCK_T        \
 	struct {           \
 		u32 __pad; \

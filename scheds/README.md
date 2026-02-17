@@ -34,6 +34,6 @@ repository.
 As the ecosystem has matured these schedulers have been superseded by those in the
 `rust/` directory, many of which are production-ready. These schedulers better represent
 modern `sched_ext` codebases and are a more appropriate starting point for newcomers.
-The build system and surrouding crates ecosystem is also geared towards Rust schedulers.
+The build system and surrounding crates ecosystem is also geared towards Rust schedulers.
 As a result, the C schedulers are no longer mirrored here and are only available
 from the kernel source.
