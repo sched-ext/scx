@@ -3413,9 +3413,13 @@ impl<'a> Scheduler<'a> {
                 let nr_available_cpus = available_cpus.weight();
 
                 // Open layers need the intersection of allowed cpus and
-                // available cpus.
+                // available cpus. Recompute per-LLC counts since open
+                // layers bypass alloc/free.
                 layer.cpus = available_cpus;
                 layer.nr_cpus = nr_available_cpus;
+                for llc in self.cpu_pool.topo.all_llcs.values() {
+                    layer.nr_llc_cpus[llc.id] = layer.cpus.and(&llc.span).weight();
+                }
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
 
