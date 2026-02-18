@@ -1919,6 +1919,9 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
 	}
 
+	if (taskc->pinned_node < MAX_NUMA_NODES)
+		cpuc->node_pinned_usage[task_lid] += used;
+
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
 		gstat_add(GSTAT_HI_FB_USAGE, cpuc, used);
 	else if (taskc->dsq_id & LO_FB_DSQ_BASE)

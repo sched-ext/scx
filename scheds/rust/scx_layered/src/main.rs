@@ -963,13 +963,15 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 struct Stats {
     at: Instant,
     elapsed: Duration,
+    topo: Arc<Topology>,
     nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
-    nr_nodes: usize,
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<Vec<f64>>,
     prev_layer_usages: Vec<Vec<u64>>,
+    layer_node_pinned_utils: Vec<Vec<f64>>,
+    prev_layer_node_pinned_usages: Vec<Vec<u64>>,
 
     layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
@@ -1023,6 +1025,24 @@ impl Stats {
         layer_membw_agg
     }
 
+    fn read_layer_node_pinned_usages(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+        nr_nodes: usize,
+    ) -> Vec<Vec<u64>> {
+        let mut usages = vec![vec![0u64; nr_nodes]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
+            for layer in 0..nr_layers {
+                usages[layer][node] += cpu_ctxs[cpu].node_pinned_usage[layer];
+            }
+        }
+
+        usages
+    }
+
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
@@ -1053,25 +1073,32 @@ impl Stats {
     fn new(
         skel: &mut BpfSkel,
         proc_reader: &fb_procfs::ProcReader,
+        topo: Arc<Topology>,
         gpu_task_affinitizer: &GpuTaskAffinitizer,
     ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
+        let nr_nodes = topo.nodes.len();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
-        let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
         let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
             elapsed: Default::default(),
+
+            topo: topo.clone(),
             nr_layers,
             nr_layer_tasks: vec![0; nr_layers],
-            nr_nodes,
 
             total_util: 0.0,
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
-            layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
+            layer_node_pinned_utils: vec![vec![0.0; nr_nodes]; nr_layers],
+            prev_layer_node_pinned_usages: Self::read_layer_node_pinned_usages(
+                &cpu_ctxs, &topo, nr_layers, nr_nodes,
+            ),
+
+            layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             // This is not normalized because we don't have enough history to do so.
             // It should not matter too much, since the value is dropped on the first
             // iteration.
@@ -1129,6 +1156,12 @@ impl Stats {
             .collect();
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
+        let cur_layer_node_pinned_usages = Self::read_layer_node_pinned_usages(
+            &cpu_ctxs,
+            &self.topo,
+            self.nr_layers,
+            self.topo.nodes.len(),
+        );
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
 
         // Memory BW normalization. It requires finding the delta according to perf, the delta
@@ -1206,6 +1239,16 @@ impl Stats {
 
         let layer_utils: Vec<Vec<f64>> =
             metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
+        let cur_node_pinned_utils: Vec<Vec<f64>> = compute_diff(
+            &cur_layer_node_pinned_usages,
+            &self.prev_layer_node_pinned_usages,
+        );
+        let layer_node_pinned_utils: Vec<Vec<f64>> = metric_decay(
+            cur_node_pinned_utils,
+            &self.layer_node_pinned_utils,
+            *USAGE_DECAY,
+        );
+
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
@@ -1253,17 +1296,20 @@ impl Stats {
         *self = Self {
             at: now,
             elapsed,
+            topo: self.topo.clone(),
             nr_layers: self.nr_layers,
             nr_layer_tasks,
-            nr_nodes: self.nr_nodes,
 
             total_util: layer_utils
                 .iter()
                 .map(|x| x.iter().take(LAYER_USAGE_SUM_UPTO + 1).sum::<f64>())
                 .sum(),
             layer_utils,
-            layer_membws,
             prev_layer_usages: cur_layer_usages,
+            layer_node_pinned_utils,
+            prev_layer_node_pinned_usages: cur_layer_node_pinned_usages,
+
+            layer_membws,
             prev_layer_membw_agg: cur_layer_membw_agg,
             // Was updated during normalization.
             prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
@@ -2709,7 +2755,7 @@ impl<'a> Scheduler<'a> {
             layers,
             idle_qos_enabled,
 
-            sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
+            sched_stats: Stats::new(&mut skel, &proc_reader, topo.clone(), &gpu_task_handler)?,
 
             cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
@@ -3823,7 +3869,7 @@ impl<'a> Scheduler<'a> {
                             self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
                         );
                         let stats =
-                            Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
+                            Stats::new(&mut self.skel, &self.proc_reader, self.topo.clone(), &self.gpu_task_handler)?;
                         res_ch.send(StatsRes::Hello(stats))?;
                     }
                     Ok(StatsReq::Refresh(tid, mut stats)) => {
