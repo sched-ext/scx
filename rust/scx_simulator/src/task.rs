@@ -87,11 +87,22 @@ pub enum Phase {
     Wake(Pid),
 }
 
-/// The scripted behavior for a task: a sequence of phases, optionally repeating.
+/// How a task's phase sequence repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatMode {
+    /// Run the phase sequence exactly once and exit.
+    Once,
+    /// Repeat the phase sequence a fixed number of times, then exit.
+    Count(u32),
+    /// Repeat the phase sequence indefinitely (until simulation ends).
+    Forever,
+}
+
+/// The scripted behavior for a task: a sequence of phases with a repeat mode.
 #[derive(Debug, Clone)]
 pub struct TaskBehavior {
     pub phases: Vec<Phase>,
-    pub repeat: bool,
+    pub repeat: RepeatMode,
 }
 
 /// Definition of a task for scenario creation.
@@ -123,6 +134,9 @@ pub struct SimTask {
     pub behavior: TaskBehavior,
     /// Current phase index.
     pub phase_idx: usize,
+    /// Current repeat iteration (0-based). Incremented each time the phase
+    /// sequence wraps back to the beginning.
+    pub repeat_iteration: u32,
     /// Remaining nanoseconds in the current Run phase (only meaningful
     /// when the current phase is `Phase::Run`).
     pub run_remaining_ns: TimeNs,
@@ -165,6 +179,7 @@ impl SimTask {
             name: def.name.clone(),
             behavior: def.behavior.clone(),
             phase_idx: 0,
+            repeat_iteration: 0,
             run_remaining_ns,
             state: TaskState::Sleeping,
             enabled: false,
@@ -186,10 +201,19 @@ impl SimTask {
     pub fn advance_phase(&mut self) -> bool {
         self.phase_idx += 1;
         if self.phase_idx >= self.behavior.phases.len() {
-            if self.behavior.repeat {
-                self.phase_idx = 0;
-            } else {
-                return false;
+            match self.behavior.repeat {
+                RepeatMode::Once => return false,
+                RepeatMode::Forever => {
+                    self.phase_idx = 0;
+                    self.repeat_iteration += 1;
+                }
+                RepeatMode::Count(n) => {
+                    self.repeat_iteration += 1;
+                    if self.repeat_iteration >= n {
+                        return false;
+                    }
+                    self.phase_idx = 0;
+                }
             }
         }
         // Reset run_remaining for the new phase

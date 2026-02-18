@@ -479,3 +479,72 @@ void lavd_setup(unsigned int num_cpus)
 				(1ULL << (cpu % 64));
 	}
 }
+
+/*
+ * =================================================================
+ * Probe functions — exported accessors for scheduler-internal state
+ * =================================================================
+ *
+ * These are called from Rust via dlsym to sample LAVD state during
+ * simulation. Each returns 0/default if the context is not available.
+ */
+
+/* Per-task probes: access task_ctx fields via get_task_ctx(). */
+
+u16 lavd_probe_lat_cri(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->lat_cri : 0;
+}
+
+u64 lavd_probe_wait_freq(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->wait_freq : 0;
+}
+
+u64 lavd_probe_wake_freq(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->wake_freq : 0;
+}
+
+u64 lavd_probe_avg_runtime(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->avg_runtime : 0;
+}
+
+u16 lavd_probe_lat_cri_waker(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->lat_cri_waker : 0;
+}
+
+u16 lavd_probe_lat_cri_wakee(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->lat_cri_wakee : 0;
+}
+
+/* System-wide probes: access global sys_stat. */
+
+u32 lavd_probe_sys_avg_lat_cri(void)
+{
+	return sys_stat.avg_lat_cri;
+}
+
+u32 lavd_probe_sys_thr_lat_cri(void)
+{
+	return sys_stat.thr_lat_cri;
+}
+
+u64 lavd_probe_sys_nr_sched(void)
+{
+	return sys_stat.nr_sched;
+}
+
+u64 lavd_probe_sys_nr_lat_cri(void)
+{
+	return sys_stat.nr_lat_cri;
+}

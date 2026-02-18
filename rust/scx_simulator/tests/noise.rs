@@ -15,7 +15,7 @@ fn test_noise_disabled_instant_timing() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(5_000_000)],
-                repeat: false,
+                repeat: RepeatMode::Once,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -46,7 +46,7 @@ fn test_tick_jitter_varies_intervals() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)], // 100ms
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -110,7 +110,7 @@ fn test_csw_overhead_consumed() {
                 nice: 0,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(1_000_000), Phase::Sleep(1_000_000)],
-                    repeat: true,
+                    repeat: RepeatMode::Forever,
                 },
                 start_time_ns: 0,
                 mm_id: None,
@@ -122,7 +122,7 @@ fn test_csw_overhead_consumed() {
                 nice: 0,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(1_000_000), Phase::Sleep(1_000_000)],
-                    repeat: true,
+                    repeat: RepeatMode::Forever,
                 },
                 start_time_ns: 0,
                 mm_id: None,
@@ -188,7 +188,7 @@ fn test_noise_determinism() {
                 nice: 0,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(10_000_000)],
-                    repeat: true,
+                    repeat: RepeatMode::Forever,
                 },
                 start_time_ns: 0,
                 mm_id: None,
@@ -200,7 +200,7 @@ fn test_noise_determinism() {
                 nice: -3,
                 behavior: TaskBehavior {
                     phases: vec![Phase::Run(10_000_000)],
-                    repeat: true,
+                    repeat: RepeatMode::Forever,
                 },
                 start_time_ns: 0,
                 mm_id: None,

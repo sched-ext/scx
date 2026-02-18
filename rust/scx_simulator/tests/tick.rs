@@ -15,7 +15,7 @@ fn test_tick_events_recorded() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)], // 100ms
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -27,7 +27,7 @@ fn test_tick_events_recorded() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)], // 100ms
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -63,7 +63,7 @@ fn test_lavd_tick_preemption() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -75,7 +75,7 @@ fn test_lavd_tick_preemption() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -87,7 +87,7 @@ fn test_lavd_tick_preemption() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -99,7 +99,7 @@ fn test_lavd_tick_preemption() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,

@@ -31,7 +31,7 @@ use serde_json::{Map, Value};
 use tracing::warn;
 
 use crate::scenario::{seed_from_env, NoiseConfig, OverheadConfig, Scenario};
-use crate::task::{Phase, TaskBehavior, TaskDef};
+use crate::task::{Phase, RepeatMode, TaskBehavior, TaskDef};
 use crate::types::{CpuId, Pid};
 
 /// Errors from parsing rt-app JSON.
@@ -334,17 +334,13 @@ fn parse_task(
         return Ok(Vec::new());
     }
 
-    // Handle loop: -1 means repeat forever, N>1 means expand
+    // Handle loop: -1 means repeat forever, N>1 uses RepeatMode::Count
     let (final_phases, repeat) = if loop_count < 0 {
-        (all_phases, true)
+        (all_phases, RepeatMode::Forever)
     } else if loop_count <= 1 {
-        (all_phases, false)
+        (all_phases, RepeatMode::Once)
     } else {
-        let mut expanded = Vec::new();
-        for _ in 0..loop_count {
-            expanded.extend(all_phases.clone());
-        }
-        (expanded, false)
+        (all_phases, RepeatMode::Count(loop_count as u32))
     };
 
     // Create task instances
@@ -530,7 +526,7 @@ mod tests {
         let task = &scenario.tasks[0];
         assert_eq!(task.name, "worker");
         assert_eq!(task.nice, 0);
-        assert!(task.behavior.repeat);
+        assert_eq!(task.behavior.repeat, RepeatMode::Forever);
         assert_eq!(task.behavior.phases.len(), 2);
         assert!(matches!(task.behavior.phases[0], Phase::Run(5_000_000)));
         assert!(matches!(task.behavior.phases[1], Phase::Sleep(5_000_000)));

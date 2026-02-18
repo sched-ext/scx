@@ -21,7 +21,7 @@ fn test_smt_topology() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -33,7 +33,7 @@ fn test_smt_topology() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -76,7 +76,7 @@ fn test_mm_affinity() {
                     Phase::Wake(Pid(2)),
                     Phase::Sleep(5_000_000),
                 ],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             MmId(1),
         )
@@ -86,7 +86,7 @@ fn test_mm_affinity() {
             TaskBehavior {
                 // Run 5ms → sleep 20ms (will be woken by waker before timer)
                 phases: vec![Phase::Run(5_000_000), Phase::Sleep(20_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             MmId(1),
         )
@@ -123,7 +123,7 @@ fn test_numa_topology() {
             0,
             TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
         )
         .add_task(
@@ -131,7 +131,7 @@ fn test_numa_topology() {
             0,
             TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
         )
         .duration_ms(200)

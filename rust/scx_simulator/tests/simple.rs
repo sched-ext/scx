@@ -22,7 +22,7 @@ fn test_weighted_fairness() {
             nice: -3,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -34,7 +34,7 @@ fn test_weighted_fairness() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -71,7 +71,7 @@ fn test_three_way_weighted_fairness() {
             nice: 5, // weight 335
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -83,7 +83,7 @@ fn test_three_way_weighted_fairness() {
             nice: 2, // weight 655
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -95,7 +95,7 @@ fn test_three_way_weighted_fairness() {
             nice: 0, // weight 1024
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -139,7 +139,7 @@ fn test_slice_preemption() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)], // 100ms
-                repeat: false,
+                repeat: RepeatMode::Once,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -179,7 +179,7 @@ fn test_preemption_interleaving() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -191,7 +191,7 @@ fn test_preemption_interleaving() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(100_000_000)],
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,

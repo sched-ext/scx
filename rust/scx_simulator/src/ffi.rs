@@ -241,6 +241,16 @@ pub struct DynamicScheduler {
 }
 
 impl DynamicScheduler {
+    /// Look up a symbol in the loaded scheduler `.so`.
+    ///
+    /// Returns `None` if the symbol is not found. The returned `Symbol`
+    /// borrows `self`, keeping the library alive.
+    ///
+    /// # Safety
+    /// The caller must ensure `T` matches the actual symbol's type.
+    pub unsafe fn get_symbol<T>(&self, name: &[u8]) -> Option<libloading::Symbol<'_, T>> {
+        self._lib.get(name).ok()
+    }
     /// Load a scheduler from a `.so` file.
     ///
     /// - `path`: path to the `.so` file

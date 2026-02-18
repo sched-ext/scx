@@ -18,7 +18,7 @@ fn test_rtapp_parse_simple_wake() {
     let producer = &scenario.tasks[0];
     assert_eq!(producer.name, "producer");
     assert_eq!(producer.nice, -5);
-    assert!(producer.behavior.repeat);
+    assert_eq!(producer.behavior.repeat, RepeatMode::Forever);
     assert_eq!(producer.behavior.phases.len(), 4);
     assert!(matches!(producer.behavior.phases[0], Phase::Run(5_000_000)));
     assert!(matches!(producer.behavior.phases[1], Phase::Wake(_))); // consumer
@@ -32,7 +32,7 @@ fn test_rtapp_parse_simple_wake() {
     let consumer = &scenario.tasks[1];
     assert_eq!(consumer.name, "consumer");
     assert_eq!(consumer.nice, 0);
-    assert!(consumer.behavior.repeat);
+    assert_eq!(consumer.behavior.repeat, RepeatMode::Forever);
     assert_eq!(consumer.behavior.phases.len(), 2);
     assert!(matches!(
         consumer.behavior.phases[0],
@@ -147,7 +147,7 @@ fn test_rtapp_two_runners() {
     let heavy = &scenario.tasks[0];
     assert_eq!(heavy.name, "heavy");
     assert_eq!(heavy.nice, -5);
-    assert!(heavy.behavior.repeat);
+    assert_eq!(heavy.behavior.repeat, RepeatMode::Forever);
     assert_eq!(heavy.behavior.phases.len(), 2);
     assert!(matches!(heavy.behavior.phases[0], Phase::Run(10_000_000)));
     assert!(matches!(heavy.behavior.phases[1], Phase::Sleep(10_000_000)));
@@ -156,7 +156,7 @@ fn test_rtapp_two_runners() {
     let light = &scenario.tasks[1];
     assert_eq!(light.name, "light");
     assert_eq!(light.nice, 0);
-    assert!(light.behavior.repeat);
+    assert_eq!(light.behavior.repeat, RepeatMode::Forever);
     assert_eq!(light.behavior.phases.len(), 2);
     assert!(matches!(light.behavior.phases[0], Phase::Run(5_000_000)));
     assert!(matches!(light.behavior.phases[1], Phase::Sleep(15_000_000)));
