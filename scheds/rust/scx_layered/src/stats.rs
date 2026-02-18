@@ -236,6 +236,10 @@ pub struct LayerStats {
     pub membw_pct: f64,
     #[stat(desc = "DSQ insertion ratio EWMA (10s window)")]
     pub dsq_insert_ewma: f64,
+    #[stat(desc = "Per-node pinned task utilization (100% = one full CPU)")]
+    pub node_pinned_utils: Vec<f64>,
+    #[stat(desc = "Per-node pinned task counts")]
+    pub node_pinned_tasks: Vec<u64>,
 }
 
 impl LayerStats {
@@ -353,6 +357,11 @@ impl LayerStats {
                 .collect(),
             membw_pct: membw_frac * 100.0,
             dsq_insert_ewma: stats.layer_dsq_insert_ewma[lidx] * 100.0,
+            node_pinned_utils: stats.layer_node_pinned_utils[lidx]
+                .iter()
+                .map(|u| u * 100.0)
+                .collect(),
+            node_pinned_tasks: stats.layer_nr_node_pinned_tasks[lidx].clone(),
         }
     }
 
@@ -443,6 +452,34 @@ impl LayerStats {
             fmt_pct(self.llc_drain_try),
             fmt_pct(self.skip_remote_node),
         )?;
+
+        // node-pinned utilization and task counts (util/tasks per node)
+        if self.node_pinned_tasks.iter().any(|t| *t > 0) {
+            let prefix = "  pinned  util/tasks ";
+            // N99=99999.9/99999 = 18 chars + 1 space = 19
+            let cell_width = 19;
+            let usable = if max_width > prefix.len() {
+                max_width - prefix.len()
+            } else {
+                60
+            };
+            let cells_per_row = (usable / cell_width).max(1);
+
+            for (col, nid) in (0..self.node_pinned_utils.len()).enumerate() {
+                let util = self.node_pinned_utils[nid];
+                let tasks = self.node_pinned_tasks.get(nid).copied().unwrap_or(0);
+                if col % cells_per_row == 0 {
+                    if col > 0 {
+                        writeln!(w)?;
+                    }
+                    write!(w, "{prefix}")?;
+                } else {
+                    write!(w, " ")?;
+                }
+                write!(w, "N{}={:7.1}/{:5}", nid, util, tasks)?;
+            }
+            writeln!(w)?;
+        }
 
         // cpumask
         let cpumask = Cpumask::from_vec(self.cpus.clone());
@@ -609,7 +646,7 @@ impl SysStats {
 
         Ok(Self {
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
-            nr_nodes: stats.nr_nodes,
+            nr_nodes: stats.topo.nodes.len(),
             total,
             local_sel: lsum_pct(LSTAT_SEL_LOCAL),
             local_enq: lsum_pct(LSTAT_ENQ_LOCAL),

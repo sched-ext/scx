@@ -192,6 +192,7 @@ struct cpu_ctx {
 	bool			is_protected;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
+	u64			node_pinned_usage[MAX_LAYERS];
 	u64			layer_membw_agg[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
@@ -360,6 +361,7 @@ struct layer {
 	int			growth_algo;
 
 	u64			nr_tasks;
+	u64			nr_node_pinned_tasks[MAX_NUMA_NODES];
 
 	u64			cpus_seq;
 	bool			check_no_idle;
@@ -369,6 +371,7 @@ struct layer {
 
 	u32			nr_cpus;
 	u32			nr_llc_cpus[MAX_LLCS];
+	u32			nr_node_cpus[MAX_NUMA_NODES];
 
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;

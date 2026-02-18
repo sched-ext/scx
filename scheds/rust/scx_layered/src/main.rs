@@ -963,13 +963,16 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 struct Stats {
     at: Instant,
     elapsed: Duration,
+    topo: Arc<Topology>,
     nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
-    nr_nodes: usize,
+    layer_nr_node_pinned_tasks: Vec<Vec<u64>>,
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<Vec<f64>>,
     prev_layer_usages: Vec<Vec<u64>>,
+    layer_node_pinned_utils: Vec<Vec<f64>>,
+    prev_layer_node_pinned_usages: Vec<Vec<u64>>,
 
     layer_membws: Vec<Vec<f64>>, // Estimated memory bandsidth consumption
     prev_layer_membw_agg: Vec<Vec<u64>>, // Estimated aggregate membw consumption
@@ -1023,6 +1026,24 @@ impl Stats {
         layer_membw_agg
     }
 
+    fn read_layer_node_pinned_usages(
+        cpu_ctxs: &[bpf_intf::cpu_ctx],
+        topo: &Topology,
+        nr_layers: usize,
+        nr_nodes: usize,
+    ) -> Vec<Vec<u64>> {
+        let mut usages = vec![vec![0u64; nr_nodes]; nr_layers];
+
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            let node = topo.all_cpus.get(&cpu).map_or(0, |c| c.node_id);
+            for layer in 0..nr_layers {
+                usages[layer][node] += cpu_ctxs[cpu].node_pinned_usage[layer];
+            }
+        }
+
+        usages
+    }
+
     /// Use the membw reported by resctrl to normalize the values reported by hw counters.
     /// We have the following problem:
     /// 1) We want per-task memory bandwidth reporting. We cannot do this with resctrl, much
@@ -1053,25 +1074,33 @@ impl Stats {
     fn new(
         skel: &mut BpfSkel,
         proc_reader: &fb_procfs::ProcReader,
+        topo: Arc<Topology>,
         gpu_task_affinitizer: &GpuTaskAffinitizer,
     ) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.as_ref().unwrap().nr_layers as usize;
+        let nr_nodes = topo.nodes.len();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
         let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
-        let nr_nodes = skel.maps.rodata_data.as_ref().unwrap().nr_nodes as usize;
         let pmu_membw = Self::read_layer_membw_agg(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
             elapsed: Default::default(),
+
+            topo: topo.clone(),
             nr_layers,
             nr_layer_tasks: vec![0; nr_layers],
-            nr_nodes,
+            layer_nr_node_pinned_tasks: vec![vec![0; nr_nodes]; nr_layers],
 
             total_util: 0.0,
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
-            layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
+            layer_node_pinned_utils: vec![vec![0.0; nr_nodes]; nr_layers],
+            prev_layer_node_pinned_usages: Self::read_layer_node_pinned_usages(
+                &cpu_ctxs, &topo, nr_layers, nr_nodes,
+            ),
+
+            layer_membws: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             // This is not normalized because we don't have enough history to do so.
             // It should not matter too much, since the value is dropped on the first
             // iteration.
@@ -1107,28 +1136,35 @@ impl Stats {
         let elapsed_f64 = elapsed.as_secs_f64();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
-        let nr_layer_tasks: Vec<usize> = skel
-            .maps
-            .bss_data
-            .as_ref()
-            .unwrap()
-            .layers
+        let layers = &skel.maps.bss_data.as_ref().unwrap().layers;
+        let nr_layer_tasks: Vec<usize> = layers
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
             .collect();
-        let layer_slice_us: Vec<u64> = skel
-            .maps
-            .bss_data
-            .as_ref()
-            .unwrap()
-            .layers
+        let layer_nr_node_pinned_tasks: Vec<Vec<u64>> = layers
+            .iter()
+            .take(self.nr_layers)
+            .map(|layer| {
+                layer.nr_node_pinned_tasks[..self.topo.nodes.len()]
+                    .iter()
+                    .map(|&v| v)
+                    .collect()
+            })
+            .collect();
+        let layer_slice_us: Vec<u64> = layers
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.slice_ns / 1000_u64)
             .collect();
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
+        let cur_layer_node_pinned_usages = Self::read_layer_node_pinned_usages(
+            &cpu_ctxs,
+            &self.topo,
+            self.nr_layers,
+            self.topo.nodes.len(),
+        );
         let cur_layer_membw_agg = Self::read_layer_membw_agg(&cpu_ctxs, self.nr_layers);
 
         // Memory BW normalization. It requires finding the delta according to perf, the delta
@@ -1206,6 +1242,16 @@ impl Stats {
 
         let layer_utils: Vec<Vec<f64>> =
             metric_decay(cur_layer_utils, &self.layer_utils, *USAGE_DECAY);
+        let cur_node_pinned_utils: Vec<Vec<f64>> = compute_diff(
+            &cur_layer_node_pinned_usages,
+            &self.prev_layer_node_pinned_usages,
+        );
+        let layer_node_pinned_utils: Vec<Vec<f64>> = metric_decay(
+            cur_node_pinned_utils,
+            &self.layer_node_pinned_utils,
+            *USAGE_DECAY,
+        );
+
         let layer_membws: Vec<Vec<f64>> = metric_decay(cur_layer_membw, &self.layer_membws, 0.0);
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
@@ -1253,17 +1299,21 @@ impl Stats {
         *self = Self {
             at: now,
             elapsed,
+            topo: self.topo.clone(),
             nr_layers: self.nr_layers,
             nr_layer_tasks,
-            nr_nodes: self.nr_nodes,
+            layer_nr_node_pinned_tasks,
 
             total_util: layer_utils
                 .iter()
                 .map(|x| x.iter().take(LAYER_USAGE_SUM_UPTO + 1).sum::<f64>())
                 .sum(),
             layer_utils,
-            layer_membws,
             prev_layer_usages: cur_layer_usages,
+            layer_node_pinned_utils,
+            prev_layer_node_pinned_usages: cur_layer_node_pinned_usages,
+
+            layer_membws,
             prev_layer_membw_agg: cur_layer_membw_agg,
             // Was updated during normalization.
             prev_pmu_resctrl_membw: (pmu_cur, resctrl_cur),
@@ -1299,6 +1349,7 @@ struct Layer {
 
     nr_cpus: usize,
     nr_llc_cpus: Vec<usize>,
+    nr_node_cpus: Vec<usize>,
     cpus: Cpumask,
     allowed_cpus: Cpumask,
 }
@@ -1438,6 +1489,7 @@ impl Layer {
 
             nr_cpus: 0,
             nr_llc_cpus: vec![0; topo.all_llcs.len()],
+            nr_node_cpus: vec![0; topo.nodes.len()],
             cpus: Cpumask::new(),
             allowed_cpus,
         })
@@ -1457,6 +1509,7 @@ impl Layer {
             self.nr_cpus -= nr_to_free;
             for cpu in cpus_to_free.iter() {
                 self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                self.nr_node_cpus[cpu_pool.topo.all_cpus[&cpu].node_id] -= 1;
             }
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
@@ -1482,6 +1535,7 @@ impl Layer {
         self.nr_cpus += nr_new_cpus;
         for cpu in new_cpus.iter() {
             self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+            self.nr_node_cpus[cpu_pool.topo.all_cpus[&cpu].node_id] += 1;
         }
         Ok(nr_new_cpus)
     }
@@ -2705,7 +2759,7 @@ impl<'a> Scheduler<'a> {
             layers,
             idle_qos_enabled,
 
-            sched_stats: Stats::new(&mut skel, &proc_reader, &gpu_task_handler)?,
+            sched_stats: Stats::new(&mut skel, &proc_reader, topo.clone(), &gpu_task_handler)?,
 
             cgroup_regexes: Some(cgroup_regexes),
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
@@ -2742,6 +2796,9 @@ impl<'a> Scheduler<'a> {
         bpf_layer.nr_cpus = layer.nr_cpus as u32;
         for (llc_id, &nr_llc_cpus) in layer.nr_llc_cpus.iter().enumerate() {
             bpf_layer.nr_llc_cpus[llc_id] = nr_llc_cpus as u32;
+        }
+        for (node_id, &nr_node_cpus) in layer.nr_node_cpus.iter().enumerate() {
+            bpf_layer.nr_node_cpus[node_id] = nr_node_cpus as u32;
         }
 
         bpf_layer.refresh_cpus = 1;
@@ -3204,6 +3261,7 @@ impl<'a> Scheduler<'a> {
                 layer.nr_cpus -= cpus_to_free.weight();
                 for cpu in cpus_to_free.iter() {
                     layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                    layer.nr_node_cpus[self.cpu_pool.topo.all_cpus[&cpu].node_id] -= 1;
                 }
                 self.cpu_pool.free(&cpus_to_free)?;
                 updated = true;
@@ -3251,6 +3309,7 @@ impl<'a> Scheduler<'a> {
                 layer.nr_cpus += cpus_to_alloc.weight();
                 for cpu in cpus_to_alloc.iter() {
                     layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+                    layer.nr_node_cpus[self.cpu_pool.topo.all_cpus[&cpu].node_id] += 1;
                 }
                 self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
                 updated = true;
@@ -3413,9 +3472,16 @@ impl<'a> Scheduler<'a> {
                 let nr_available_cpus = available_cpus.weight();
 
                 // Open layers need the intersection of allowed cpus and
-                // available cpus.
+                // available cpus. Recompute per-LLC and per-node counts
+                // since open layers bypass alloc/free.
                 layer.cpus = available_cpus;
                 layer.nr_cpus = nr_available_cpus;
+                for llc in self.cpu_pool.topo.all_llcs.values() {
+                    layer.nr_llc_cpus[llc.id] = layer.cpus.and(&llc.span).weight();
+                }
+                for node in self.cpu_pool.topo.nodes.values() {
+                    layer.nr_node_cpus[node.id] = layer.cpus.and(&node.span).weight();
+                }
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
 
@@ -3807,7 +3873,7 @@ impl<'a> Scheduler<'a> {
                             self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
                         );
                         let stats =
-                            Stats::new(&mut self.skel, &self.proc_reader, &self.gpu_task_handler)?;
+                            Stats::new(&mut self.skel, &self.proc_reader, self.topo.clone(), &self.gpu_task_handler)?;
                         res_ch.send(StatsRes::Hello(stats))?;
                     }
                     Ok(StatsReq::Refresh(tid, mut stats)) => {

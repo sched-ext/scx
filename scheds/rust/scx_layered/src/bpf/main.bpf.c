@@ -605,6 +605,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
 	bool			all_cpuset_allowed;
 	bool			cpus_node_aligned;
+	u32			pinned_node;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -1927,6 +1928,9 @@ static void account_used(struct task_struct *p, struct cpu_ctx *cpuc, struct tas
 		cpuc->layer_membw_agg[task_lid][LAYER_USAGE_OPEN] += bytes;
 	}
 
+	if (taskc->pinned_node < MAX_NUMA_NODES)
+		cpuc->node_pinned_usage[task_lid] += used;
+
 	if (taskc->dsq_id & HI_FB_DSQ_BASE)
 		gstat_add(GSTAT_HI_FB_USAGE, cpuc, used);
 	else if (taskc->dsq_id & LO_FB_DSQ_BASE)
@@ -2804,8 +2808,13 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	struct layer *layer;
 
 	/* Drop membership from older layer. */
-	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
-		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+	u32 old_lid = taskc->layer_id;
+
+	if (old_lid < nr_layers) {
+		__sync_fetch_and_add(&layers[old_lid].nr_tasks, -1);
+		if (taskc->pinned_node < MAX_NUMA_NODES)
+			__sync_fetch_and_add(&layers[old_lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+	}
 
 	if (layer_id >= nr_layers)
 		return;
@@ -2832,6 +2841,8 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
+	if (taskc->pinned_node < MAX_NUMA_NODES)
+		__sync_fetch_and_add(&layer->nr_node_pinned_tasks[taskc->pinned_node], 1);
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
@@ -3287,7 +3298,7 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
 	const struct cpumask *cpuset;
-	u32 node_id;
+	u32 node_id, nr_intersects = 0, nr_covered = 0, covered_node = MAX_NUMA_NODES;
 
 	cpuset = (const struct cpumask *)lookup_layer_cpuset(taskc->layer_id);
 	if (!cpuset) {
@@ -3296,7 +3307,13 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 	}
 
 	taskc->all_cpuset_allowed = bpf_cpumask_subset(cpuset, cpumask);
-	taskc->cpus_node_aligned = true;
+
+	/*
+	 * Help bpf_for() verification by making the following variables
+	 * imprecise. Otherwise, the iterations never converge.
+	 */
+	__sink(nr_intersects);
+	__sink(nr_covered);
 
 	bpf_for(node_id, 0, nr_nodes) {
 		struct node_ctx *nodec;
@@ -3306,13 +3323,20 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 		    !(node_cpumask = cast_mask(nodec->cpumask)))
 			return;
 
-		/* not llc aligned if partially overlaps */
-		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
-		    !bpf_cpumask_subset(node_cpumask, cpumask)) {
-			taskc->cpus_node_aligned = false;
-			break;
+		if (!bpf_cpumask_intersects(node_cpumask, cpumask))
+			continue;
+
+		nr_intersects++;
+
+		if (bpf_cpumask_subset(node_cpumask, cpumask)) {
+			nr_covered++;
+			covered_node = node_id;
 		}
 	}
+
+	taskc->cpus_node_aligned = nr_intersects == nr_covered;
+	taskc->pinned_node = (nr_nodes > 1 && nr_covered == 1 && nr_intersects == 1) ?
+		covered_node : MAX_NUMA_NODES;
 }
 
 static int init_cached_cpus(struct cached_cpus *ccpus)
@@ -3364,8 +3388,22 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	 * belongs to so that we can compute all_cpuset_allowed. Defer
 	 * the call until we match.
 	 */
-	if (taskc->layer_id != MAX_LAYERS)
+	if (taskc->layer_id != MAX_LAYERS) {
+		u32 old_pinned = taskc->pinned_node;
+
 		refresh_cpus_flags(taskc, cpumask);
+
+		if (old_pinned != taskc->pinned_node) {
+			u32 lid = taskc->layer_id;
+
+			if (lid < nr_layers) {
+				if (old_pinned < MAX_NUMA_NODES)
+					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[old_pinned], -1);
+				if (taskc->pinned_node < MAX_NUMA_NODES)
+					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], 1);
+			}
+		}
+	}
 
 	/* invalidate all cached cpumasks */
 	taskc->layered_cpus.seq = -1;
@@ -3467,6 +3505,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
+	taskc->pinned_node = MAX_NUMA_NODES;
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
@@ -3511,8 +3550,13 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (taskc->layer_id < nr_layers)
-		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+	u32 lid = taskc->layer_id;
+
+	if (lid < nr_layers) {
+		__sync_fetch_and_add(&layers[lid].nr_tasks, -1);
+		if (taskc->pinned_node < MAX_NUMA_NODES)
+			__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+	}
 
 	if (membw_event)
 		scx_pmu_task_fini(p);
