@@ -407,33 +407,15 @@ impl CellManager {
     fn create_cell_for_cgroup(&mut self, path: &Path, cgid: u64) -> Result<(u64, u32)> {
         let cell_id = self.allocate_cell_id()?;
 
-        // Try to read cpuset.cpus for this cgroup
-        let cpuset_path = path.join("cpuset.cpus");
-        let cpuset = match std::fs::read_to_string(&cpuset_path) {
-            Ok(content) => {
-                let content = content.trim();
-                if content.is_empty() {
-                    None
-                } else {
-                    let mask = Cpumask::from_cpulist(content).with_context(|| {
-                        format!(
-                            "Failed to parse cpuset '{}' from {}",
-                            content,
-                            cpuset_path.display()
-                        )
-                    })?;
-                    debug!(
-                        "Cell {} has cpuset: {} (from {})",
-                        cell_id,
-                        content,
-                        cpuset_path.display()
-                    );
-                    Some(mask)
-                }
-            }
-            // File doesn't exist - cpuset controller is not enabled for this cgroup
-            Err(_) => None,
-        };
+        let cpuset = Self::read_cpuset(path)?;
+        if let Some(ref mask) = cpuset {
+            debug!(
+                "Cell {} has cpuset: {} (from {})",
+                cell_id,
+                mask.to_cpulist(),
+                path.join("cpuset.cpus").display()
+            );
+        }
 
         self.cells.insert(
             cgid,
@@ -454,6 +436,30 @@ impl CellManager {
         );
 
         Ok((cgid, cell_id))
+    }
+
+    /// Read cpuset.cpus from a cgroup path. Returns None if empty or unavailable.
+    fn read_cpuset(cgroup_path: &Path) -> Result<Option<Cpumask>> {
+        let cpuset_path = cgroup_path.join("cpuset.cpus");
+        match std::fs::read_to_string(&cpuset_path) {
+            Ok(content) => {
+                let content = content.trim();
+                if content.is_empty() {
+                    Ok(None)
+                } else {
+                    let mask = Cpumask::from_cpulist(content).with_context(|| {
+                        format!(
+                            "Failed to parse cpuset '{}' from {}",
+                            content,
+                            cpuset_path.display()
+                        )
+                    })?;
+                    Ok(Some(mask))
+                }
+            }
+            // File doesn't exist - cpuset controller is not enabled for this cgroup
+            Err(_) => Ok(None),
+        }
     }
 
     fn allocate_cell_id(&mut self) -> Result<u32> {
@@ -767,6 +773,30 @@ impl CellManager {
             }
         }
         parts.join(" ")
+    }
+
+    /// Re-read cpuset.cpus for all cells and update stored cpusets.
+    /// Returns true if any cell's cpuset changed.
+    pub fn refresh_cpusets(&mut self) -> Result<bool> {
+        let mut changed = false;
+        for info in self.cells.values_mut() {
+            let Some(ref cgroup_path) = info.cgroup_path else {
+                continue; // cell 0 has no cgroup
+            };
+            let new_cpuset = Self::read_cpuset(cgroup_path)?;
+            if new_cpuset != info.cpuset {
+                info!(
+                    "Cell {} cpuset changed: {:?} -> {:?} ({})",
+                    info.cell_id,
+                    info.cpuset.as_ref().map(|m| m.to_cpulist()),
+                    new_cpuset.as_ref().map(|m| m.to_cpulist()),
+                    cgroup_path.display(),
+                );
+                info.cpuset = new_cpuset;
+                changed = true;
+            }
+        }
+        Ok(changed)
     }
 }
 
