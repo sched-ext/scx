@@ -29,21 +29,23 @@ const u32 nr_phys_cpus = 8;  /* Set by loader — physical core count for PHYS_F
 const u32 cpu_llc_id[CAKE_MAX_CPUS] = {};
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * MEGA-MAILBOX: 64-byte per-CPU state (single cache line = optimal L1)
- * Two-entry psychic cache: slot[0]=MRU, slot[1]=LRU. LRU promotion on hit.
- * rc_slice derived from tier_slice_ns[tier] LUT (saves 8B/slot).
- * (mailbox_cacheline_bench: 64B beats 128B by 1.1%, lower jitter @ 4.89GHz)
+ * MEGA-MAILBOX: Arena per-CPU state (Phase 2 arena migration).
+ * 128-byte per CPU: psychic cache (3-slot), tick staging, tier snapshot.
+ * Arena pointer eliminates verifier bounds checks (~12ns/cycle savings).
+ * Allocated contiguously in cake_init via bpf_arena_alloc_pages.
  * ═══════════════════════════════════════════════════════════════════════════ */
-struct mega_mailbox_entry mega_mailbox[CAKE_MAX_CPUS] SEC(".bss");
+struct mega_mailbox_entry __arena *arena_mailbox;
 
-/* Per-CPU scratch area - BSS-tunneled helper outputs, isolated to prevent MESI contention */
+/* Per-CPU scratch area — arena-backed (Phase 3).
+ * Tunnels select_cpu → enqueue outputs (LLC ID, timestamp). */
 struct cake_scratch {
     u32 cached_llc;            /* LLC ID tunneled from select_cpu → enqueue (saves 1 kfunc) */
     u64 cached_now;            /* scx_bpf_now() tunneled from select_cpu → enqueue (saves 1 kfunc) */
     u8 _pad[112]; /* Pad to 128 bytes (2 cache lines) — F4: removed dead dummy_idle field */
-} global_scratch[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(128)));
+};
 _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
+struct cake_scratch __arena *arena_scratch;
 
 /* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(256)));
@@ -77,6 +79,12 @@ struct tier_snap tier_snapshot[4] SEC(".bss") __attribute__((aligned(64)));
  * snapshot_dirty was the tick-based rebuild flag — no longer needed.
  * Tier snapshot now updated incrementally via atomics in cake_running. */
 
+/* Force BPF arena map association for struct_ops programs.
+ * BSS-stored __arena pointers generate addr_space_cast instructions, but the
+ * verifier only allows these in programs with an associated arena map.
+ * BSS loads don't create arena map relocations — only direct &arena references do.
+ * volatile prevents dead-code elimination. Cost: 2 insns (~0.4ns). */
+#define ARENA_ASSOC() do { void *volatile __p = (void *)&arena; (void)__p; } while (0)
 
 static __always_inline struct cake_stats *get_local_stats(void)
 {
@@ -315,14 +323,14 @@ static __always_inline struct cake_task_ctx __arena *get_task_ctx(struct task_st
  * update confidence — Gate 1 depends on system idle state, not task behavior.
  * CL1 write: mailbox[prev_idx] already hot from WSC + migration_cooldown. */
 #define CAKE_GATE_RECORD(idx, gate_id) do {                     \
-    u8 _pg = mega_mailbox[(idx)].predicted_gate;                \
+    u8 _pg = arena_mailbox[(idx)].predicted_gate;               \
     if (_pg == (gate_id)) {                                     \
-        u8 _gc = mega_mailbox[(idx)].gate_confidence;           \
+        u8 _gc = arena_mailbox[(idx)].gate_confidence;          \
         if (_gc < CAKE_GATE_CONF_MAX)                           \
-            mega_mailbox[(idx)].gate_confidence = _gc + 1;      \
+            arena_mailbox[(idx)].gate_confidence = _gc + 1;     \
     } else {                                                    \
-        mega_mailbox[(idx)].predicted_gate = (gate_id);         \
-        mega_mailbox[(idx)].gate_confidence = 1;                \
+        arena_mailbox[(idx)].predicted_gate = (gate_id);        \
+        arena_mailbox[(idx)].gate_confidence = 1;               \
     }                                                           \
 } while (0)
 
@@ -330,6 +338,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                    u64 wake_flags)
 {
     bool is_idle = false;
+    ARENA_ASSOC();
 
     /* ── SYNC STRIP: prevent waker-core migration ──
      * Bench: 0.20ns cost, saves 1.6-3.5µs per prevented migration.
@@ -361,17 +370,17 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
         /* J1 V2: Gate 1 hit — increment prediction counter.
          * Saturate at 255 to avoid wrap. */
-        u8 wsc = mega_mailbox[prev_idx].wakeup_same_cpu;
+        u8 wsc = arena_mailbox[prev_idx].wakeup_same_cpu;
         if (wsc < 255) {
             u8 new_wsc = wsc + 1;
-            mega_mailbox[prev_idx].wakeup_same_cpu = new_wsc;
+            arena_mailbox[prev_idx].wakeup_same_cpu = new_wsc;
         }
         /* NEAR_PREF: Gate 1 hit — same CPU, cooldown decrement.
          * CL1 read: mailbox[prev_idx] already hot from WSC read above.
          * CL1 write: conditional-only, no spurious invalidation (Rule 11). */
-        u8 mcd = mega_mailbox[prev_idx].migration_cooldown;
+        u8 mcd = arena_mailbox[prev_idx].migration_cooldown;
         if (mcd > 0)
-            mega_mailbox[prev_idx].migration_cooldown = mcd - 1;
+            arena_mailbox[prev_idx].migration_cooldown = mcd - 1;
         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice, wake_flags);
         return prev_cpu;
     }
@@ -380,16 +389,16 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * Only reached on Gate 1 miss (~9%). WSC bypass, Gate 1c, Gate 2-4,
      * and the enqueue tunnel all need tc_id/scr. */
     u32 tc_id = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    struct cake_scratch *scr = &global_scratch[tc_id];
+    struct cake_scratch __arena *scr = &arena_scratch[tc_id];
 
     /* J1 V2: Gate 1 MISS — check prediction counter.
      * If task has 8+ consecutive same-CPU wakeups, it strongly prefers
      * prev_cpu. Skip Gates 1b/2/3 — let enqueue handle placement.
      * Sim: -100% gate cascade jitter (P99-P50 → 0ns). */
     {
-        u8 wsc = mega_mailbox[prev_idx].wakeup_same_cpu;
+        u8 wsc = arena_mailbox[prev_idx].wakeup_same_cpu;
         if (wsc >= 8) {
-            mega_mailbox[prev_idx].wakeup_same_cpu = 0;
+            arena_mailbox[prev_idx].wakeup_same_cpu = 0;
             /* Use prev_cpu's LLC, not waker's — task predicted to run
              * on prev_cpu. Using waker's LLC would put it in the wrong
              * DSQ on multi-CCD systems. */
@@ -397,7 +406,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
             scr->cached_now = scx_bpf_now();
             return prev_cpu;
         }
-        mega_mailbox[prev_idx].wakeup_same_cpu = 0;
+        arena_mailbox[prev_idx].wakeup_same_cpu = 0;
     }
 
     /* Hoist staged/tier extraction above confidence check.
@@ -414,8 +423,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * Saves ~2-6 kfunc calls per skipped gate (15-40ns each).
      * CL1 read: mailbox[prev_idx] already hot from WSC access above.
      * BPF: forward goto only — verifier traces both paths. */
-    u8 _pred_gate = mega_mailbox[prev_idx].predicted_gate;
-    u8 _gate_conf = mega_mailbox[prev_idx].gate_confidence;
+    u8 _pred_gate = arena_mailbox[prev_idx].predicted_gate;
+    u8 _gate_conf = arena_mailbox[prev_idx].gate_confidence;
     if (_gate_conf >= CAKE_GATE_CONF_THRESH) {
         switch (_pred_gate) {
         case CAKE_GATE_2:   goto gate_2_entry;
@@ -432,8 +441,8 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * CL1 of mailbox[prev_idx] already hot from WSC access above. */
     /* MESI GUARD (Rule 11): skip write if already at target value.
      * Avoids ~4.5K unnecessary RFOs/s on CL1 when cooldown is already 4. */
-    if (mega_mailbox[prev_idx].migration_cooldown != 4)
-        mega_mailbox[prev_idx].migration_cooldown = 4;
+    if (arena_mailbox[prev_idx].migration_cooldown != 4)
+        arena_mailbox[prev_idx].migration_cooldown = 4;
 
     /* ── GATE 1b: SMT sibling fallback — L2 still warm ──
      * When prev_cpu is busy, try its SMT sibling before Gate 2's full scan.
@@ -471,7 +480,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * 9800X3D: all 8 cores on 1 CCD, so half = P0-P3 or P4-P7.
      * Cost: 0-4 kfuncs (avg 1-2). Only on Gate 1+1b miss + cooldown active. */
     {
-        u8 mcd = mega_mailbox[prev_idx].migration_cooldown;
+        u8 mcd = arena_mailbox[prev_idx].migration_cooldown;
         if (mcd > 0) {
             u32 prev_phys = (u32)prev_cpu % nr_phys_cpus;
             u32 half_base = prev_phys & ~3u;  /* 0 or 4 — single AND, no division */
@@ -641,6 +650,7 @@ gate_tunnel_entry: __attribute__((unused));
 void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 {
     register struct task_struct *p_reg asm("r6") = p;
+    ARENA_ASSOC();
 
     /* PRE-LOAD: staged context before kfunc trampoline.
      * p_reg->scx.dsq_vtime doesn't depend on enq_cpu — load executes
@@ -652,7 +662,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * Eliminates 2 kfunc trampolines (~40-60ns) — select_cpu always runs on
      * the same CPU immediately before enqueue, so values are fresh. */
     u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    struct cake_scratch *scr = &global_scratch[enq_cpu];
+    struct cake_scratch __arena *scr = &arena_scratch[enq_cpu];
     u64 now_cached = scr->cached_now;
     u32 enq_llc = scr->cached_llc;
 
@@ -816,9 +826,10 @@ void BPF_STRUCT_OPS(cake_running, struct task_struct *p)
      * NOTE: p->scx.slice NOT pre-loaded — codegen audit showed it
      * spills to stack (4ns) > gain (3ns). Loaded after kfuncs instead. */
     u64 v = p->scx.dsq_vtime;
+    ARENA_ASSOC();
 
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
+    struct mega_mailbox_entry __arena *mbox = &arena_mailbox[cpu];
 
     /* ── PHASE 1: READ timestamp + slice (kfunc + task field) ── */
     u32 now = (u32)scx_bpf_now();
@@ -896,7 +907,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
      * occupied. Only 29% of paths use it (compute_ewma_classify calls).
      * Net: 4ns spill > 0.87ns weighted gain. Read inline instead. */
     u32 cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
-    struct mega_mailbox_entry *mbox = &mega_mailbox[cpu];
+    ARENA_ASSOC();
+    struct mega_mailbox_entry __arena *mbox = &arena_mailbox[cpu];
     u64 tp = (u64)p;
 
     /* ═══ PSYCHIC CACHE: Check all 3 slots (R2 3-slot) ═══
@@ -906,8 +918,8 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
      * Combined: 95.4% fast-path rate (was 78% with 2-slot).
      * Slot 2 on CL1: only accessed on s0+s1 miss, ALP-prefetched. */
     int hit = -1;
-    u64 *fused_ptr;
-    u32 *counter_ptr;
+    u64 __arena *fused_ptr;
+    u32 __arena *counter_ptr;
 
     if (likely(tp == mbox->rc_task_ptr0)) {
         hit = 0;
@@ -1217,6 +1229,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
                 return ret;
         }
     }
+
+    /* Phase 2+3: Allocate arena per-CPU arrays.
+     * bpf_arena_alloc_pages returns page-aligned memory from the arena map.
+     * mega_mailbox: 128B × 64 = 8KB = 2 pages
+     * scratch: 128B × 64 = 8KB = 2 pages */
+    arena_mailbox = (struct mega_mailbox_entry __arena *)
+        bpf_arena_alloc_pages(&arena, NULL, 2, NUMA_NO_NODE, 0);
+    if (!arena_mailbox)
+        return -ENOMEM;
+
+    arena_scratch = (struct cake_scratch __arena *)
+        bpf_arena_alloc_pages(&arena, NULL, 2, NUMA_NO_NODE, 0);
+    if (!arena_scratch)
+        return -ENOMEM;
 
     return 0;
 }
