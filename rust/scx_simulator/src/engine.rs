@@ -29,11 +29,15 @@ const SCX_DEQ_SLEEP: u64 = 1;
 /// Tick interval in nanoseconds (4ms, matching HZ=250).
 const TICK_INTERVAL_NS: TimeNs = 4_000_000;
 
-/// A simulation event, ordered by timestamp.
+/// A simulation event, ordered by timestamp then tiebreaker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Event {
     time_ns: TimeNs,
     /// Tiebreaker for events at the same time (lower = higher priority).
+    /// In fixed-priority mode, this is a monotonic counter (insertion order).
+    /// In randomized mode, this combines a PRNG-derived priority with a
+    /// monotonic counter to explore different orderings while remaining
+    /// deterministic for a given seed.
     seq: u64,
     kind: EventKind,
 }
@@ -49,6 +53,76 @@ impl Ord for Event {
 impl PartialOrd for Event {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+/// Priority-queue wrapper that assigns tiebreakers to events.
+///
+/// In **fixed-priority** mode, events at the same timestamp are processed in
+/// insertion order (monotonic `seq`). In **randomized** mode, each event gets
+/// a PRNG-derived priority in the upper 32 bits of `seq` with the monotonic
+/// counter in the lower 32 bits. This explores different orderings for
+/// same-timestamp events while remaining deterministic for a given seed.
+///
+/// The event PRNG is separate from `SimulatorState::prng_state` so that
+/// adding/removing events does not perturb the scheduler's PRNG sequence.
+struct EventQueue {
+    heap: BinaryHeap<Reverse<Event>>,
+    /// Monotonic counter for unique event identity / fixed-priority ordering.
+    seq: u64,
+    /// Separate xorshift32 PRNG for randomized tiebreaking.
+    event_prng: u32,
+    /// When true, use insertion-order tiebreaking (monotonic seq).
+    fixed_priority: bool,
+}
+
+impl EventQueue {
+    fn new(seed: u32, fixed_priority: bool) -> Self {
+        // Derive event PRNG seed from scenario seed but offset it so it's
+        // independent of the main simulation PRNG.
+        let event_seed = seed.wrapping_mul(0x9e3779b9).wrapping_add(0xdeadbeef);
+        let event_seed = if event_seed == 0 { 1 } else { event_seed };
+        EventQueue {
+            heap: BinaryHeap::new(),
+            seq: 0,
+            event_prng: event_seed,
+            fixed_priority,
+        }
+    }
+
+    /// Advance the event PRNG (xorshift32) and return the next value.
+    fn next_prng(&mut self) -> u32 {
+        let mut x = self.event_prng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.event_prng = x;
+        x
+    }
+
+    /// Compute the `seq` tiebreaker for a new event.
+    fn next_seq(&mut self) -> u64 {
+        let s = self.seq;
+        self.seq += 1;
+        if self.fixed_priority {
+            s
+        } else {
+            // Upper 32 bits: random priority; lower 32 bits: monotonic
+            // counter for deterministic uniqueness.
+            let random_priority = self.next_prng() as u64;
+            (random_priority << 32) | (s & 0xFFFF_FFFF)
+        }
+    }
+
+    /// Push a new event, automatically assigning a tiebreaker.
+    fn push(&mut self, time_ns: TimeNs, kind: EventKind) {
+        let seq = self.next_seq();
+        self.heap.push(Reverse(Event { time_ns, seq, kind }));
+    }
+
+    /// Pop the next event (earliest timestamp, then lowest tiebreaker).
+    fn pop(&mut self) -> Option<Event> {
+        self.heap.pop().map(|Reverse(e)| e)
     }
 }
 
@@ -237,46 +311,33 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Build event queue
-        let mut events: BinaryHeap<Reverse<Event>> = BinaryHeap::new();
-        let mut seq: u64 = 0;
+        let mut events = EventQueue::new(scenario.seed, scenario.fixed_priority);
 
         // Drain any pending timer from scheduler init (e.g., deferred wakeup timer)
         if let Some(fire_at) = state.pending_timer_ns.take() {
-            events.push(Reverse(Event {
-                time_ns: fire_at,
-                seq,
-                kind: EventKind::TimerFired,
-            }));
-            seq += 1;
+            events.push(fire_at, EventKind::TimerFired);
         }
 
         // Schedule initial TaskWake events for all tasks
         for def in &scenario.tasks {
-            events.push(Reverse(Event {
-                time_ns: def.start_time_ns,
-                seq,
-                kind: EventKind::TaskWake {
+            events.push(
+                def.start_time_ns,
+                EventKind::TaskWake {
                     pid: def.pid,
                     waker: None,
                 },
-            }));
-            seq += 1;
+            );
         }
 
         // Seed per-CPU tick streams. Each CPU gets a single perpetual tick
         // chain: tick fires → handle_tick → schedule next tick. This matches
         // the kernel's periodic timer interrupt (HZ=250 → 4ms).
         for cpu_id in 0..nr_cpus {
-            events.push(Reverse(Event {
-                time_ns: TICK_INTERVAL_NS,
-                seq,
-                kind: EventKind::Tick { cpu: CpuId(cpu_id) },
-            }));
-            seq += 1;
+            events.push(TICK_INTERVAL_NS, EventKind::Tick { cpu: CpuId(cpu_id) });
         }
 
         // Main event loop
-        while let Some(Reverse(event)) = events.pop() {
+        while let Some(event) = events.pop() {
             if event.time_ns > scenario.duration_ns {
                 break;
             }
@@ -299,25 +360,10 @@ impl<S: Scheduler> Simulator<S> {
 
             match event.kind {
                 EventKind::TaskWake { pid, waker } => {
-                    self.handle_task_wake(
-                        pid,
-                        waker,
-                        &mut state,
-                        &mut tasks,
-                        &mut events,
-                        &mut seq,
-                        monitor,
-                    );
+                    self.handle_task_wake(pid, waker, &mut state, &mut tasks, &mut events, monitor);
                 }
                 EventKind::SliceExpired { cpu } => {
-                    self.handle_slice_expired(
-                        cpu,
-                        &mut state,
-                        &mut tasks,
-                        &mut events,
-                        &mut seq,
-                        monitor,
-                    );
+                    self.handle_slice_expired(cpu, &mut state, &mut tasks, &mut events, monitor);
                 }
                 EventKind::TaskPhaseComplete { cpu } => {
                     self.handle_task_phase_complete(
@@ -325,16 +371,15 @@ impl<S: Scheduler> Simulator<S> {
                         &mut state,
                         &mut tasks,
                         &mut events,
-                        &mut seq,
                         scenario.duration_ns,
                         monitor,
                     );
                 }
                 EventKind::TimerFired => {
-                    self.handle_timer_fired(&mut state, &mut tasks, &mut events, &mut seq, monitor);
+                    self.handle_timer_fired(&mut state, &mut tasks, &mut events, monitor);
                 }
                 EventKind::Tick { cpu } => {
-                    self.handle_tick(cpu, &mut state, &mut tasks, &mut events, &mut seq, monitor);
+                    self.handle_tick(cpu, &mut state, &mut tasks, &mut events, monitor);
                 }
             }
         }
@@ -378,8 +423,7 @@ impl<S: Scheduler> Simulator<S> {
         &self,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         unsafe {
@@ -390,16 +434,11 @@ impl<S: Scheduler> Simulator<S> {
 
         // Drain re-armed timer
         if let Some(fire_at) = state.pending_timer_ns.take() {
-            events.push(Reverse(Event {
-                time_ns: fire_at,
-                seq: *seq,
-                kind: EventKind::TimerFired,
-            }));
-            *seq += 1;
+            events.push(fire_at, EventKind::TimerFired);
         }
 
         // Process CPUs kicked by the timer callback
-        self.process_kicked_cpus(None, state, tasks, events, seq, monitor);
+        self.process_kicked_cpus(None, state, tasks, events, monitor);
     }
 
     /// Handle a periodic scheduler tick on a CPU.
@@ -417,20 +456,14 @@ impl<S: Scheduler> Simulator<S> {
         cpu: CpuId,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         // Always schedule the next tick — ticks are unconditional per-CPU timers
         let jitter = state.tick_jitter();
         let interval = (TICK_INTERVAL_NS as i64 + jitter).max(1) as TimeNs;
         let next_tick = state.cpus[cpu.0 as usize].local_clock + interval;
-        events.push(Reverse(Event {
-            time_ns: next_tick,
-            seq: *seq,
-            kind: EventKind::Tick { cpu },
-        }));
-        *seq += 1;
+        events.push(next_tick, EventKind::Tick { cpu });
 
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
@@ -473,10 +506,10 @@ impl<S: Scheduler> Simulator<S> {
         state.kicked_cpus.remove(&cpu);
 
         // Process other kicked CPUs
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, monitor);
 
         if should_preempt && state.cpus[cpu.0 as usize].current_task.is_some() {
-            self.preempt_current(cpu, state, tasks, events, seq, monitor);
+            self.preempt_current(cpu, state, tasks, events, monitor);
         }
     }
 
@@ -485,15 +518,13 @@ impl<S: Scheduler> Simulator<S> {
     /// If `waker` is provided (from a `Phase::Wake`), the waker's context is
     /// set so that `bpf_get_current_task_btf()` and `bpf_get_smp_processor_id()`
     /// return the waker's state during `select_cpu` (kernel semantics).
-    #[allow(clippy::too_many_arguments)]
     fn handle_task_wake(
         &self,
         pid: Pid,
         waker: Option<WakerInfo>,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         let task = match tasks.get_mut(&pid) {
@@ -514,7 +545,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Make sure the current phase is a Run phase
         // (skip over Wake phases, handle Sleep->Run transitions)
-        self.advance_to_run_phase(task, state, events, seq);
+        self.advance_to_run_phase(task, state, events);
 
         if matches!(task.state, TaskState::Exited | TaskState::Sleeping) {
             return;
@@ -592,7 +623,7 @@ impl<S: Scheduler> Simulator<S> {
             if let Some(dd_cpu) = direct_dispatched {
                 // Task was directly dispatched — skip enqueue (kernel semantics)
                 debug!(pid = pid.0, cpu = dd_cpu.0, "direct dispatch");
-                self.try_dispatch_and_run(dd_cpu, state, tasks, events, seq, monitor);
+                self.try_dispatch_and_run(dd_cpu, state, tasks, events, monitor);
             } else {
                 // Task was not directly dispatched; call enqueue
                 kfuncs::enter_sim(state);
@@ -624,7 +655,7 @@ impl<S: Scheduler> Simulator<S> {
                     .collect();
 
                 for cpu in idle_cpus {
-                    self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
+                    self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
                 }
             }
         }
@@ -636,8 +667,7 @@ impl<S: Scheduler> Simulator<S> {
         cpu: CpuId,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         let pid = match state.cpus[cpu.0 as usize].current_task {
@@ -734,21 +764,19 @@ impl<S: Scheduler> Simulator<S> {
         );
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, monitor);
 
         // Dispatch next task on this CPU
-        self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
+        self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
     }
 
     /// Handle a task completing its current Run phase.
-    #[allow(clippy::too_many_arguments)]
     fn handle_task_phase_complete(
         &self,
         cpu: CpuId,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         duration_ns: TimeNs,
         monitor: &mut dyn Monitor,
     ) {
@@ -878,12 +906,7 @@ impl<S: Scheduler> Simulator<S> {
                     // Schedule wake event
                     let wake_time = local_t.saturating_add(sleep_ns);
                     if wake_time <= duration_ns {
-                        events.push(Reverse(Event {
-                            time_ns: wake_time,
-                            seq: *seq,
-                            kind: EventKind::TaskWake { pid, waker: None },
-                        }));
-                        *seq += 1;
+                        events.push(wake_time, EventKind::TaskWake { pid, waker: None });
                     }
                 }
                 Some(Phase::Run(_)) => {
@@ -928,15 +951,13 @@ impl<S: Scheduler> Simulator<S> {
                     let local_t = state.cpus[cpu.0 as usize].local_clock;
 
                     // Queue the wake for the target task (with waker context)
-                    events.push(Reverse(Event {
-                        time_ns: local_t,
-                        seq: *seq,
-                        kind: EventKind::TaskWake {
+                    events.push(
+                        local_t,
+                        EventKind::TaskWake {
                             pid: target_pid,
                             waker: Some(WakerInfo { pid, cpu }),
                         },
-                    }));
-                    *seq += 1;
+                    );
 
                     // Phase::Wake is instantaneous — advance to the next phase
                     // and handle it inline. The waker does NOT sleep during a wake.
@@ -952,15 +973,13 @@ impl<S: Scheduler> Simulator<S> {
                             match task.current_phase() {
                                 Some(Phase::Wake(next_target)) => {
                                     let next_target = *next_target;
-                                    events.push(Reverse(Event {
-                                        time_ns: local_t,
-                                        seq: *seq,
-                                        kind: EventKind::TaskWake {
+                                    events.push(
+                                        local_t,
+                                        EventKind::TaskWake {
                                             pid: next_target,
                                             waker: Some(WakerInfo { pid, cpu }),
                                         },
-                                    }));
-                                    *seq += 1;
+                                    );
                                     if !task.advance_phase() {
                                         task.state = TaskState::Exited;
                                         state.trace.record(
@@ -1017,12 +1036,10 @@ impl<S: Scheduler> Simulator<S> {
                                     );
                                     let wake_time = local_t.saturating_add(ns);
                                     if wake_time <= duration_ns {
-                                        events.push(Reverse(Event {
-                                            time_ns: wake_time,
-                                            seq: *seq,
-                                            kind: EventKind::TaskWake { pid, waker: None },
-                                        }));
-                                        *seq += 1;
+                                        events.push(
+                                            wake_time,
+                                            EventKind::TaskWake { pid, waker: None },
+                                        );
                                     }
                                     break;
                                 }
@@ -1052,10 +1069,10 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, monitor);
 
         // Dispatch next task on this CPU
-        self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
+        self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
     }
 
     /// Try to dispatch and run a task on the given CPU.
@@ -1064,8 +1081,7 @@ impl<S: Scheduler> Simulator<S> {
         cpu: CpuId,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         // If CPU is already running something, nothing to do
@@ -1122,7 +1138,7 @@ impl<S: Scheduler> Simulator<S> {
             // Process CPUs kicked during dispatch().
             // The scheduler may have dispatched tasks to other CPUs'
             // local DSQs via scx_bpf_dsq_move(SCX_DSQ_LOCAL_ON | cpu).
-            self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
+            self.process_kicked_cpus(Some(cpu), state, tasks, events, monitor);
         }
 
         // Kernel fallback: if local DSQ is still empty after dispatch(),
@@ -1153,7 +1169,7 @@ impl<S: Scheduler> Simulator<S> {
                 cpu,
                 TraceKind::PickTask { pid },
             );
-            self.start_running(cpu, pid, state, tasks, events, seq, monitor);
+            self.start_running(cpu, pid, state, tasks, events, monitor);
         } else {
             // CPU is idle — update the C idle cpumask so
             // scx_bpf_test_and_clear_cpu_idle works correctly
@@ -1180,8 +1196,7 @@ impl<S: Scheduler> Simulator<S> {
         exclude_cpu: Option<CpuId>,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         let kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
@@ -1192,13 +1207,13 @@ impl<S: Scheduler> Simulator<S> {
             if flags.contains(KickFlags::PREEMPT)
                 && state.cpus[kicked_cpu.0 as usize].current_task.is_some()
             {
-                self.preempt_current(kicked_cpu, state, tasks, events, seq, monitor);
+                self.preempt_current(kicked_cpu, state, tasks, events, monitor);
             } else if flags.contains(KickFlags::IDLE) {
                 if state.cpus[kicked_cpu.0 as usize].current_task.is_none() {
-                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq, monitor);
+                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, monitor);
                 }
             } else {
-                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq, monitor);
+                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, monitor);
             }
         }
     }
@@ -1213,8 +1228,7 @@ impl<S: Scheduler> Simulator<S> {
         cpu: CpuId,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         let pid = match state.cpus[cpu.0 as usize].current_task {
@@ -1301,22 +1315,20 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process any CPUs kicked during stopping/enqueue
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, monitor);
 
         // Dispatch next task on this CPU (will also schedule a new tick)
-        self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
+        self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
     }
 
     /// Start running a task on a CPU.
-    #[allow(clippy::too_many_arguments)]
     fn start_running(
         &self,
         cpu: CpuId,
         pid: Pid,
         state: &mut SimulatorState,
         tasks: &mut HashMap<Pid, SimTask>,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
         let task = match tasks.get_mut(&pid) {
@@ -1326,7 +1338,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Skip exited tasks that are still lingering in DSQs
         if matches!(task.state, TaskState::Exited) {
-            self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
+            self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
             return;
         }
 
@@ -1406,28 +1418,13 @@ impl<S: Scheduler> Simulator<S> {
 
         if remaining == 0 {
             // Task has no remaining work -- complete immediately
-            events.push(Reverse(Event {
-                time_ns: local_t,
-                seq: *seq,
-                kind: EventKind::TaskPhaseComplete { cpu },
-            }));
-            *seq += 1;
+            events.push(local_t, EventKind::TaskPhaseComplete { cpu });
         } else if slice > 0 && slice <= remaining {
             // Slice expires before the phase completes
-            events.push(Reverse(Event {
-                time_ns: local_t + slice,
-                seq: *seq,
-                kind: EventKind::SliceExpired { cpu },
-            }));
-            *seq += 1;
+            events.push(local_t + slice, EventKind::SliceExpired { cpu });
         } else {
             // Phase completes before the slice
-            events.push(Reverse(Event {
-                time_ns: local_t + remaining,
-                seq: *seq,
-                kind: EventKind::TaskPhaseComplete { cpu },
-            }));
-            *seq += 1;
+            events.push(local_t + remaining, EventKind::TaskPhaseComplete { cpu });
         }
     }
 
@@ -1436,23 +1433,20 @@ impl<S: Scheduler> Simulator<S> {
         &self,
         task: &mut SimTask,
         state: &mut SimulatorState,
-        events: &mut BinaryHeap<Reverse<Event>>,
-        seq: &mut u64,
+        events: &mut EventQueue,
     ) {
         loop {
             match task.current_phase() {
                 Some(Phase::Run(_)) => break,
                 Some(Phase::Wake(target_pid)) => {
                     let target = *target_pid;
-                    events.push(Reverse(Event {
-                        time_ns: state.clock,
-                        seq: *seq,
-                        kind: EventKind::TaskWake {
+                    events.push(
+                        state.clock,
+                        EventKind::TaskWake {
                             pid: target,
                             waker: None,
                         },
-                    }));
-                    *seq += 1;
+                    );
                     if !task.advance_phase() {
                         task.state = TaskState::Exited;
                         return;
