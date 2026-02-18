@@ -19,7 +19,7 @@ clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"
 crossbeam = "0.8.4"
 ctrlc = { version = "3.1", features = ["termination"] }
 fb_procfs = "0.7"
-libbpf-rs = "=0.26.0"
+libbpf-rs = "=0.26.1"
 nix = { features = ["process", "time"], default-features = false, version = "0.30.1" }
 log = "0.4.17"
 ordered-float = "3.4.0"

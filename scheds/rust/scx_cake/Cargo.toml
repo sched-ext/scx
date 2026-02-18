@@ -10,7 +10,7 @@ license = "GPL-2.0-only"
 anyhow = "1.0.100"
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.4"
-libbpf-rs = "=0.26.0"
+libbpf-rs = "=0.26.1"
 libc = "0.2.180"
 log = "0.4"
 env_logger = "0.11"
