@@ -2826,8 +2826,7 @@ impl<'a> Scheduler<'a> {
                 .topo
                 .nodes
                 .values()
-                .take_while(|n| n.id == netdev.node())
-                .next()
+                .find(|n| n.id == netdev.node())
                 .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
             let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
@@ -3534,7 +3533,9 @@ impl<'a> Scheduler<'a> {
                 empty_layer_ids.len() as u32;
         }
 
-        let _ = self.update_netdev_cpumasks();
+        if let Err(e) = self.update_netdev_cpumasks() {
+            warn!("Failed to update netdev IRQ cpumasks: {:#}", e);
+        }
         Ok(())
     }
 
