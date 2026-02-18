@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::ffi::c_void;
 
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use crate::cpu::{LastStopReason, SimCpu};
 use crate::dsq::DsqManager;
@@ -15,6 +15,7 @@ use crate::ffi::{self, Scheduler};
 use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::monitor::{Monitor, ProbeContext, ProbePoint};
+use crate::perf;
 use crate::scenario::Scenario;
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
@@ -182,6 +183,34 @@ impl Monitor for NoopMonitor {
     fn sample(&mut self, _ctx: &ProbeContext) {}
 }
 
+/// Reset and enable the RBC counter before an ops call.
+fn start_rbc(state: &mut SimulatorState) {
+    if let Some(ref rbc) = state.rbc_counter {
+        state.rbc_kfunc_calls = 0;
+        let _ = rbc.reset();
+        let _ = rbc.enable();
+    }
+}
+
+/// Disable the RBC counter, read the count, and charge RBC-derived time to `cpu`.
+fn charge_sched_time(state: &mut SimulatorState, cpu: CpuId, ops: &str) {
+    if let Some(ref rbc) = state.rbc_counter {
+        let _ = rbc.disable();
+        let count = rbc.read().unwrap_or(0);
+        if let Some(ns_per_rbc) = state.sched_overhead_rbc_ns {
+            let charged_ns = count * ns_per_rbc;
+            state.cpus[cpu.0 as usize].local_clock += charged_ns;
+            trace!(
+                ops,
+                rbc = count,
+                charged_ns,
+                kfuncs = state.rbc_kfunc_calls,
+                "sched overhead"
+            );
+        }
+    }
+}
+
 impl<S: Scheduler> Simulator<S> {
     pub fn new(scheduler: S) -> Self {
         Simulator { scheduler }
@@ -269,6 +298,12 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Build simulator state (shared with kfuncs via thread-local)
+        let rbc_counter = if scenario.sched_overhead_rbc_ns.is_some() {
+            perf::try_create_rbc_counter()
+        } else {
+            None
+        };
+
         let mut state = SimulatorState {
             cpus,
             dsqs: DsqManager::new(),
@@ -290,12 +325,17 @@ impl<S: Scheduler> Simulator<S> {
             idle_task_raw,
             noise: scenario.noise.clone(),
             overhead: scenario.overhead.clone(),
+            rbc_counter,
+            sched_overhead_rbc_ns: scenario.sched_overhead_rbc_ns,
+            rbc_kfunc_calls: 0,
         };
 
         // Initialize scheduler
         unsafe {
             kfuncs::enter_sim(&mut state);
+            start_rbc(&mut state);
             let rc = self.scheduler.init();
+            charge_sched_time(&mut state, CpuId(0), "init");
             kfuncs::exit_sim();
             assert!(rc == 0, "scheduler init failed with rc={rc}");
         }
@@ -304,7 +344,9 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(&mut state);
             for task in tasks.values() {
+                start_rbc(&mut state);
                 let rc = self.scheduler.init_task(task.raw());
+                charge_sched_time(&mut state, CpuId(0), "init_task");
                 assert!(rc == 0, "init_task failed for pid={} rc={rc}", task.pid.0);
             }
             kfuncs::exit_sim();
@@ -401,7 +443,9 @@ impl<S: Scheduler> Simulator<S> {
         // Call scheduler exit
         unsafe {
             kfuncs::enter_sim(&mut state);
+            start_rbc(&mut state);
             self.scheduler.exit();
+            charge_sched_time(&mut state, CpuId(0), "exit");
             kfuncs::exit_sim();
         }
 
@@ -428,7 +472,9 @@ impl<S: Scheduler> Simulator<S> {
     ) {
         unsafe {
             kfuncs::enter_sim(state);
+            start_rbc(state);
             self.scheduler.fire_timer();
+            charge_sched_time(state, CpuId(0), "fire_timer");
             kfuncs::exit_sim();
         }
 
@@ -488,8 +534,10 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            start_rbc(state);
             debug!(pid = pid.0, cpu = cpu.0, "tick");
             self.scheduler.tick(raw);
+            charge_sched_time(state, cpu, "tick");
             kfuncs::exit_sim();
         }
 
@@ -572,8 +620,10 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.waker_task_raw = waker_raw;
             state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
+            start_rbc(state);
             debug!(pid = pid.0, "runnable");
             self.scheduler.runnable(raw, SCX_ENQ_WAKEUP);
+            charge_sched_time(state, wake_cpu, "runnable");
             kfuncs::exit_sim();
         }
 
@@ -588,11 +638,13 @@ impl<S: Scheduler> Simulator<S> {
             state.ops_context = OpsContext::SelectCpu;
             state.waker_task_raw = waker_raw;
             state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
+            start_rbc(state);
 
             let selected_cpu_raw =
                 self.scheduler
                     .select_cpu(raw, prev_cpu.0 as i32, SCX_ENQ_WAKEUP);
             let selected_cpu = CpuId(selected_cpu_raw as u32);
+            charge_sched_time(state, selected_cpu, "select_cpu");
             state.ops_context = OpsContext::None;
             state.waker_task_raw = None;
             debug!(
@@ -629,8 +681,10 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::enter_sim(state);
                 state.ops_context = OpsContext::Enqueue;
                 state.current_cpu = selected_cpu;
+                start_rbc(state);
                 debug!(pid = pid.0, enq_flags = SCX_ENQ_WAKEUP, "enqueue");
                 self.scheduler.enqueue(raw, SCX_ENQ_WAKEUP);
+                charge_sched_time(state, selected_cpu, "enqueue");
                 state.ops_context = OpsContext::None;
                 // Resolve any deferred dispatch from enqueue
                 // (SCX_DSQ_LOCAL resolves to the task's assigned CPU)
@@ -712,8 +766,10 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            start_rbc(state);
             debug!(pid = pid.0, cpu = cpu.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
+            charge_sched_time(state, cpu, "stopping");
             kfuncs::exit_sim();
         }
 
@@ -743,8 +799,10 @@ impl<S: Scheduler> Simulator<S> {
             // Re-enqueue the preempted task
             state.ops_context = OpsContext::Enqueue;
             state.task_ops_state.insert(pid, OpsTaskState::Queued);
+            start_rbc(state);
             debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
+            charge_sched_time(state, cpu, "enqueue");
             state.ops_context = OpsContext::None;
             state.resolve_pending_dispatch(cpu);
             kfuncs::exit_sim();
@@ -822,8 +880,10 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            start_rbc(state);
             debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
+            charge_sched_time(state, cpu, "stopping");
             kfuncs::exit_sim();
         }
 
@@ -843,12 +903,16 @@ impl<S: Scheduler> Simulator<S> {
                 state.current_cpu = cpu;
                 let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
                 if ops_state == OpsTaskState::Queued {
+                    start_rbc(state);
                     debug!(pid = pid.0, cpu = cpu.0, "dequeue");
                     self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
+                    charge_sched_time(state, cpu, "dequeue");
                     state.task_ops_state.insert(pid, OpsTaskState::None);
                 }
+                start_rbc(state);
                 debug!(pid = pid.0, cpu = cpu.0, "quiescent");
                 self.scheduler.quiescent(raw, SCX_DEQ_SLEEP);
+                charge_sched_time(state, cpu, "quiescent");
                 kfuncs::exit_sim();
             }
 
@@ -920,9 +984,11 @@ impl<S: Scheduler> Simulator<S> {
                         kfuncs::enter_sim(state);
                         state.ops_context = OpsContext::Enqueue;
                         state.current_cpu = cpu;
+                        start_rbc(state);
                         debug!(pid = pid.0, "enqueue (yield re-enqueue)");
                         state.task_ops_state.insert(pid, OpsTaskState::Queued);
                         self.scheduler.enqueue(raw, 0);
+                        charge_sched_time(state, cpu, "enqueue");
                         state.ops_context = OpsContext::None;
                         state.resolve_pending_dispatch(cpu);
                         kfuncs::exit_sim();
@@ -998,8 +1064,10 @@ impl<S: Scheduler> Simulator<S> {
                                         kfuncs::enter_sim(state);
                                         state.ops_context = OpsContext::Enqueue;
                                         state.current_cpu = cpu;
+                                        start_rbc(state);
                                         state.task_ops_state.insert(pid, OpsTaskState::Queued);
                                         self.scheduler.enqueue(raw, 0);
+                                        charge_sched_time(state, cpu, "enqueue");
                                         state.ops_context = OpsContext::None;
                                         state.resolve_pending_dispatch(cpu);
                                         kfuncs::exit_sim();
@@ -1106,8 +1174,10 @@ impl<S: Scheduler> Simulator<S> {
                 state.ops_context = OpsContext::Dispatch;
                 state.current_cpu = cpu;
                 state.kicked_cpus.clear();
+                start_rbc(state);
                 debug!(cpu = cpu.0, "dispatch");
                 self.scheduler.dispatch(cpu.0 as i32, prev_raw);
+                charge_sched_time(state, cpu, "dispatch");
                 state.ops_context = OpsContext::None;
                 // Flush any deferred dispatch from dispatch() callback
                 // (SCX_DSQ_LOCAL resolves to the dispatching CPU)
@@ -1282,6 +1352,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            start_rbc(state);
             debug!(
                 pid = pid.0,
                 cpu = cpu.0,
@@ -1289,6 +1360,7 @@ impl<S: Scheduler> Simulator<S> {
                 "stopping (tick preempt)"
             );
             self.scheduler.stopping(raw, true);
+            charge_sched_time(state, cpu, "stopping");
             kfuncs::exit_sim();
         }
 
@@ -1307,8 +1379,10 @@ impl<S: Scheduler> Simulator<S> {
             state.current_cpu = cpu;
             state.ops_context = OpsContext::Enqueue;
             state.task_ops_state.insert(pid, OpsTaskState::Queued);
+            start_rbc(state);
             debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
             self.scheduler.enqueue(raw, 0);
+            charge_sched_time(state, cpu, "enqueue");
             state.ops_context = OpsContext::None;
             state.resolve_pending_dispatch(cpu);
             kfuncs::exit_sim();
@@ -1361,8 +1435,10 @@ impl<S: Scheduler> Simulator<S> {
             unsafe {
                 kfuncs::enter_sim(state);
                 state.current_cpu = cpu;
+                start_rbc(state);
                 debug!(pid = pid.0, cpu = cpu.0, "enable");
                 self.scheduler.enable(raw);
+                charge_sched_time(state, cpu, "enable");
                 kfuncs::exit_sim();
             }
         }
@@ -1371,8 +1447,10 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
+            start_rbc(state);
             debug!(pid = pid.0, cpu = cpu.0, "running");
             self.scheduler.running(raw);
+            charge_sched_time(state, cpu, "running");
             kfuncs::exit_sim();
         }
 

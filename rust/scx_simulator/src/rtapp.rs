@@ -30,7 +30,9 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 use tracing::warn;
 
-use crate::scenario::{seed_from_env, NoiseConfig, OverheadConfig, Scenario};
+use crate::scenario::{
+    sched_overhead_rbc_ns_from_env, seed_from_env, NoiseConfig, OverheadConfig, Scenario,
+};
 use crate::task::{Phase, RepeatMode, TaskBehavior, TaskDef};
 use crate::types::{CpuId, Pid};
 
@@ -475,6 +477,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         overhead: OverheadConfig::from_env(),
         seed: seed_from_env(),
         fixed_priority: false,
+        sched_overhead_rbc_ns: sched_overhead_rbc_ns_from_env(),
     })
 }
 
