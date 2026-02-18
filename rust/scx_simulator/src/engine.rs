@@ -14,6 +14,7 @@ use crate::dsq::DsqManager;
 use crate::ffi::{self, Scheduler};
 use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
+use crate::monitor::{Monitor, ProbeContext, ProbePoint};
 use crate::scenario::Scenario;
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
@@ -83,6 +84,30 @@ pub struct Simulator<S: Scheduler> {
     scheduler: S,
 }
 
+/// Result of a simulation, keeping task storage alive for post-simulation
+/// probing of scheduler-internal state.
+pub struct SimulationResult {
+    /// The event trace.
+    pub trace: Trace,
+    /// Kept alive so raw task pointers remain valid until dropped.
+    tasks: HashMap<Pid, SimTask>,
+}
+
+impl SimulationResult {
+    /// Get the raw `task_struct` pointer for a task.
+    ///
+    /// Valid until this `SimulationResult` is dropped.
+    pub fn task_raw(&self, pid: Pid) -> Option<*mut c_void> {
+        self.tasks.get(&pid).map(|t| t.raw())
+    }
+}
+
+/// A no-op monitor (zero overhead when no monitor is needed).
+struct NoopMonitor;
+impl Monitor for NoopMonitor {
+    fn sample(&mut self, _ctx: &ProbeContext) {}
+}
+
 impl<S: Scheduler> Simulator<S> {
     pub fn new(scheduler: S) -> Self {
         Simulator { scheduler }
@@ -90,6 +115,21 @@ impl<S: Scheduler> Simulator<S> {
 
     /// Run a scenario and return the trace.
     pub fn run(&self, scenario: Scenario) -> Trace {
+        let result = self.run_internal(scenario, &mut NoopMonitor);
+        result.trace
+    }
+
+    /// Run a scenario with a monitor, returning the full result.
+    ///
+    /// The monitor is called at each scheduling event (Running, Stopping,
+    /// Quiescent, Dispatched) with a [`ProbeContext`] that includes the
+    /// raw task pointer for scheduler-internal inspection.
+    pub fn run_monitored(&self, scenario: Scenario, monitor: &mut dyn Monitor) -> SimulationResult {
+        self.run_internal(scenario, monitor)
+    }
+
+    /// Internal simulation loop shared by `run()` and `run_monitored()`.
+    fn run_internal(&self, scenario: Scenario, monitor: &mut dyn Monitor) -> SimulationResult {
         let nr_cpus = scenario.nr_cpus;
         let smt = scenario.smt_threads_per_core;
 
@@ -266,10 +306,18 @@ impl<S: Scheduler> Simulator<S> {
                         &mut tasks,
                         &mut events,
                         &mut seq,
+                        monitor,
                     );
                 }
                 EventKind::SliceExpired { cpu } => {
-                    self.handle_slice_expired(cpu, &mut state, &mut tasks, &mut events, &mut seq);
+                    self.handle_slice_expired(
+                        cpu,
+                        &mut state,
+                        &mut tasks,
+                        &mut events,
+                        &mut seq,
+                        monitor,
+                    );
                 }
                 EventKind::TaskPhaseComplete { cpu } => {
                     self.handle_task_phase_complete(
@@ -279,13 +327,14 @@ impl<S: Scheduler> Simulator<S> {
                         &mut events,
                         &mut seq,
                         scenario.duration_ns,
+                        monitor,
                     );
                 }
                 EventKind::TimerFired => {
-                    self.handle_timer_fired(&mut state, &mut tasks, &mut events, &mut seq);
+                    self.handle_timer_fired(&mut state, &mut tasks, &mut events, &mut seq, monitor);
                 }
                 EventKind::Tick { cpu } => {
-                    self.handle_tick(cpu, &mut state, &mut tasks, &mut events, &mut seq);
+                    self.handle_tick(cpu, &mut state, &mut tasks, &mut events, &mut seq, monitor);
                 }
             }
         }
@@ -314,7 +363,10 @@ impl<S: Scheduler> Simulator<S> {
         // Free the synthetic idle task
         unsafe { ffi::sim_task_free(idle_task_raw) };
 
-        state.trace
+        SimulationResult {
+            trace: state.trace,
+            tasks,
+        }
     }
 
     /// Handle a BPF timer firing.
@@ -328,6 +380,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         unsafe {
             kfuncs::enter_sim(state);
@@ -346,7 +399,7 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process CPUs kicked by the timer callback
-        self.process_kicked_cpus(None, state, tasks, events, seq);
+        self.process_kicked_cpus(None, state, tasks, events, seq, monitor);
     }
 
     /// Handle a periodic scheduler tick on a CPU.
@@ -366,6 +419,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         // Always schedule the next tick — ticks are unconditional per-CPU timers
         let jitter = state.tick_jitter();
@@ -419,10 +473,10 @@ impl<S: Scheduler> Simulator<S> {
         state.kicked_cpus.remove(&cpu);
 
         // Process other kicked CPUs
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
 
         if should_preempt && state.cpus[cpu.0 as usize].current_task.is_some() {
-            self.preempt_current(cpu, state, tasks, events, seq);
+            self.preempt_current(cpu, state, tasks, events, seq, monitor);
         }
     }
 
@@ -431,6 +485,7 @@ impl<S: Scheduler> Simulator<S> {
     /// If `waker` is provided (from a `Phase::Wake`), the waker's context is
     /// set so that `bpf_get_current_task_btf()` and `bpf_get_smp_processor_id()`
     /// return the waker's state during `select_cpu` (kernel semantics).
+    #[allow(clippy::too_many_arguments)]
     fn handle_task_wake(
         &self,
         pid: Pid,
@@ -439,6 +494,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         let task = match tasks.get_mut(&pid) {
             Some(t) => t,
@@ -536,7 +592,7 @@ impl<S: Scheduler> Simulator<S> {
             if let Some(dd_cpu) = direct_dispatched {
                 // Task was directly dispatched — skip enqueue (kernel semantics)
                 debug!(pid = pid.0, cpu = dd_cpu.0, "direct dispatch");
-                self.try_dispatch_and_run(dd_cpu, state, tasks, events, seq);
+                self.try_dispatch_and_run(dd_cpu, state, tasks, events, seq, monitor);
             } else {
                 // Task was not directly dispatched; call enqueue
                 kfuncs::enter_sim(state);
@@ -568,7 +624,7 @@ impl<S: Scheduler> Simulator<S> {
                     .collect();
 
                 for cpu in idle_cpus {
-                    self.try_dispatch_and_run(cpu, state, tasks, events, seq);
+                    self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
                 }
             }
         }
@@ -582,6 +638,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
@@ -627,6 +684,22 @@ impl<S: Scheduler> Simulator<S> {
             state.current_cpu = cpu;
             debug!(pid = pid.0, cpu = cpu.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
+            kfuncs::exit_sim();
+        }
+
+        // Monitor: Stopping probe
+        monitor.sample(&ProbeContext {
+            point: ProbePoint::Stopping,
+            pid,
+            cpu,
+            time_ns: state.cpus[cpu.0 as usize].local_clock,
+            task_raw: raw,
+            trace: &state.trace,
+        });
+
+        unsafe {
+            kfuncs::enter_sim(state);
+            state.current_cpu = cpu;
 
             state.trace.record(
                 state.cpus[cpu.0 as usize].local_clock,
@@ -661,13 +734,14 @@ impl<S: Scheduler> Simulator<S> {
         );
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
 
         // Dispatch next task on this CPU
-        self.try_dispatch_and_run(cpu, state, tasks, events, seq);
+        self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
     }
 
     /// Handle a task completing its current Run phase.
+    #[allow(clippy::too_many_arguments)]
     fn handle_task_phase_complete(
         &self,
         cpu: CpuId,
@@ -676,6 +750,7 @@ impl<S: Scheduler> Simulator<S> {
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
         duration_ns: TimeNs,
+        monitor: &mut dyn Monitor,
     ) {
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
@@ -721,7 +796,23 @@ impl<S: Scheduler> Simulator<S> {
             state.current_cpu = cpu;
             debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
-            if !still_runnable {
+            kfuncs::exit_sim();
+        }
+
+        // Monitor: Stopping probe
+        monitor.sample(&ProbeContext {
+            point: ProbePoint::Stopping,
+            pid,
+            cpu,
+            time_ns: state.cpus[cpu.0 as usize].local_clock,
+            task_raw: raw,
+            trace: &state.trace,
+        });
+
+        if !still_runnable {
+            unsafe {
+                kfuncs::enter_sim(state);
+                state.current_cpu = cpu;
                 let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
                 if ops_state == OpsTaskState::Queued {
                     debug!(pid = pid.0, cpu = cpu.0, "dequeue");
@@ -730,8 +821,18 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 debug!(pid = pid.0, cpu = cpu.0, "quiescent");
                 self.scheduler.quiescent(raw, SCX_DEQ_SLEEP);
+                kfuncs::exit_sim();
             }
-            kfuncs::exit_sim();
+
+            // Monitor: Quiescent probe
+            monitor.sample(&ProbeContext {
+                point: ProbePoint::Quiescent,
+                pid,
+                cpu,
+                time_ns: state.cpus[cpu.0 as usize].local_clock,
+                task_raw: raw,
+                trace: &state.trace,
+            });
         }
 
         state.trace.record(
@@ -951,10 +1052,10 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process CPUs kicked during enqueue (e.g. SCX_DSQ_LOCAL_ON | cpu)
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
 
         // Dispatch next task on this CPU
-        self.try_dispatch_and_run(cpu, state, tasks, events, seq);
+        self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
     }
 
     /// Try to dispatch and run a task on the given CPU.
@@ -965,6 +1066,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         // If CPU is already running something, nothing to do
         if state.cpus[cpu.0 as usize].current_task.is_some() {
@@ -1003,10 +1105,24 @@ impl<S: Scheduler> Simulator<S> {
                 TraceKind::Balance { prev_pid },
             );
 
+            // Monitor: Dispatched probe (after ops.dispatch() completed)
+            if let Some(ppid) = prev_pid {
+                if let Some(task) = tasks.get(&ppid) {
+                    monitor.sample(&ProbeContext {
+                        point: ProbePoint::Dispatched,
+                        pid: ppid,
+                        cpu,
+                        time_ns: state.cpus[cpu.0 as usize].local_clock,
+                        task_raw: task.raw(),
+                        trace: &state.trace,
+                    });
+                }
+            }
+
             // Process CPUs kicked during dispatch().
             // The scheduler may have dispatched tasks to other CPUs'
             // local DSQs via scx_bpf_dsq_move(SCX_DSQ_LOCAL_ON | cpu).
-            self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+            self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
         }
 
         // Kernel fallback: if local DSQ is still empty after dispatch(),
@@ -1037,7 +1153,7 @@ impl<S: Scheduler> Simulator<S> {
                 cpu,
                 TraceKind::PickTask { pid },
             );
-            self.start_running(cpu, pid, state, tasks, events, seq);
+            self.start_running(cpu, pid, state, tasks, events, seq, monitor);
         } else {
             // CPU is idle — update the C idle cpumask so
             // scx_bpf_test_and_clear_cpu_idle works correctly
@@ -1066,6 +1182,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         let kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
         for (kicked_cpu, flags) in kicked {
@@ -1075,13 +1192,13 @@ impl<S: Scheduler> Simulator<S> {
             if flags.contains(KickFlags::PREEMPT)
                 && state.cpus[kicked_cpu.0 as usize].current_task.is_some()
             {
-                self.preempt_current(kicked_cpu, state, tasks, events, seq);
+                self.preempt_current(kicked_cpu, state, tasks, events, seq, monitor);
             } else if flags.contains(KickFlags::IDLE) {
                 if state.cpus[kicked_cpu.0 as usize].current_task.is_none() {
-                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+                    self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq, monitor);
                 }
             } else {
-                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq);
+                self.try_dispatch_and_run(kicked_cpu, state, tasks, events, seq, monitor);
             }
         }
     }
@@ -1098,6 +1215,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
@@ -1157,6 +1275,22 @@ impl<S: Scheduler> Simulator<S> {
                 "stopping (tick preempt)"
             );
             self.scheduler.stopping(raw, true);
+            kfuncs::exit_sim();
+        }
+
+        // Monitor: Stopping probe
+        monitor.sample(&ProbeContext {
+            point: ProbePoint::Stopping,
+            pid,
+            cpu,
+            time_ns: state.cpus[cpu.0 as usize].local_clock,
+            task_raw: raw,
+            trace: &state.trace,
+        });
+
+        unsafe {
+            kfuncs::enter_sim(state);
+            state.current_cpu = cpu;
             state.ops_context = OpsContext::Enqueue;
             state.task_ops_state.insert(pid, OpsTaskState::Queued);
             debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
@@ -1167,13 +1301,14 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Process any CPUs kicked during stopping/enqueue
-        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq);
+        self.process_kicked_cpus(Some(cpu), state, tasks, events, seq, monitor);
 
         // Dispatch next task on this CPU (will also schedule a new tick)
-        self.try_dispatch_and_run(cpu, state, tasks, events, seq);
+        self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
     }
 
     /// Start running a task on a CPU.
+    #[allow(clippy::too_many_arguments)]
     fn start_running(
         &self,
         cpu: CpuId,
@@ -1182,6 +1317,7 @@ impl<S: Scheduler> Simulator<S> {
         tasks: &mut HashMap<Pid, SimTask>,
         events: &mut BinaryHeap<Reverse<Event>>,
         seq: &mut u64,
+        monitor: &mut dyn Monitor,
     ) {
         let task = match tasks.get_mut(&pid) {
             Some(t) => t,
@@ -1190,7 +1326,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Skip exited tasks that are still lingering in DSQs
         if matches!(task.state, TaskState::Exited) {
-            self.try_dispatch_and_run(cpu, state, tasks, events, seq);
+            self.try_dispatch_and_run(cpu, state, tasks, events, seq, monitor);
             return;
         }
 
@@ -1227,6 +1363,16 @@ impl<S: Scheduler> Simulator<S> {
             self.scheduler.running(raw);
             kfuncs::exit_sim();
         }
+
+        // Monitor: Running probe
+        monitor.sample(&ProbeContext {
+            point: ProbePoint::Running,
+            pid,
+            cpu,
+            time_ns: state.cpus[cpu.0 as usize].local_clock,
+            task_raw: raw,
+            trace: &state.trace,
+        });
 
         state.trace.record(
             state.cpus[cpu.0 as usize].local_clock,

@@ -20,7 +20,7 @@
 //!     .cpus(2)
 //!     .add_task("worker", 0, TaskBehavior {
 //!         phases: vec![Phase::Run(10_000_000)],
-//!         repeat: true,
+//!         repeat: RepeatMode::Forever,
 //!     })
 //!     .duration_ms(100)
 //!     .build();
@@ -35,20 +35,24 @@ pub mod engine;
 pub mod ffi;
 pub mod fmt;
 pub mod kfuncs;
+pub mod monitor;
+pub mod probes;
 pub mod rtapp;
 pub mod scenario;
 pub mod task;
 pub mod trace;
 pub mod types;
+pub mod workloads;
 
 // Re-export the main public types for convenience.
-pub use engine::Simulator;
+pub use engine::{SimulationResult, Simulator};
 pub use ffi::{discover_schedulers, DynamicScheduler, Scheduler, SchedulerInfo};
 pub use fmt::{FmtN, FmtTs};
 pub use kfuncs::sim_clock;
+pub use monitor::{Monitor, ProbeContext, ProbePoint};
 pub use rtapp::load_rtapp;
 pub use scenario::{NoiseConfig, OverheadConfig, Scenario};
-pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, TaskBehavior, TaskDef};
+pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, RepeatMode, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
 pub use types::{CpuId, DsqId, KickFlags, MmId, Pid, TimeNs, Vtime};
 

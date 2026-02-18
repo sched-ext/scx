@@ -145,7 +145,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(5_000_000)],
-                        repeat: false,
+                        repeat: RepeatMode::Once,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -182,7 +182,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(20_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -194,7 +194,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(20_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -227,7 +227,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(50_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -239,7 +239,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(50_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -283,7 +283,7 @@ macro_rules! scheduler_tests {
                         nice: 0,
                         behavior: TaskBehavior {
                             phases: vec![Phase::Run(10_000_000)],
-                            repeat: true,
+                            repeat: RepeatMode::Forever,
                         },
                         start_time_ns: 0,
                         mm_id: None,
@@ -295,7 +295,7 @@ macro_rules! scheduler_tests {
                         nice: -3,
                         behavior: TaskBehavior {
                             phases: vec![Phase::Run(10_000_000)],
-                            repeat: true,
+                            repeat: RepeatMode::Forever,
                         },
                         start_time_ns: 0,
                         mm_id: None,
@@ -351,7 +351,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(100_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -363,7 +363,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(100_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -406,7 +406,7 @@ macro_rules! scheduler_tests {
                             Phase::Run(5_000_000),    // run 5ms
                             Phase::Sleep(10_000_000), // sleep 10ms
                         ],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -449,7 +449,7 @@ macro_rules! scheduler_tests {
                             Phase::Run(5_000_000),
                             Phase::Sleep(5_000_000),
                         ],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -461,7 +461,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(20_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -574,7 +574,7 @@ macro_rules! scheduler_tests {
                             Phase::Run(5_000_000),
                             Phase::Sleep(5_000_000),
                         ],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,
@@ -587,7 +587,7 @@ macro_rules! scheduler_tests {
                     nice: 0,
                     behavior: TaskBehavior {
                         phases: vec![Phase::Run(20_000_000)],
-                        repeat: true,
+                        repeat: RepeatMode::Forever,
                     },
                     start_time_ns: 0,
                     mm_id: None,

@@ -24,7 +24,7 @@ fn test_weighted_fairness() {
             nice: -3,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)], // 50ms
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
@@ -36,7 +36,7 @@ fn test_weighted_fairness() {
             nice: 0,
             behavior: TaskBehavior {
                 phases: vec![Phase::Run(50_000_000)], // 50ms
-                repeat: true,
+                repeat: RepeatMode::Forever,
             },
             start_time_ns: 0,
             mm_id: None,
