@@ -263,6 +263,19 @@ sched-ext has been fully upstreamed as of 6.12.
 Want to learn how to develop a scheduler or find some useful tools for working
 with schedulers? See the developer guide for more details.
 
+## Other sched_ext Schedulers
+
+- [**PANDEMONIUM**](https://github.com/wllclngn/PANDEMONIUM) - A scheduler
+  written in Rust and C that dynamically learns task behavior. It classifies
+  tasks by wakeup frequency, context switch rate, runtime, and sleep patterns,
+  then adapts scheduling decisions in real time using a persistent process
+  database.
+
+- [**scx_horoscope**](https://github.com/zampierilucas/scx_horoscope) - An
+  astrological CPU scheduler that makes scheduling decisions based on real-time
+  planetary positions and zodiac signs. Tasks get boosted or penalized depending
+  on cosmic conditions. Built for educational and entertainment purposes.
+
 ## Getting in Touch
 
 We aim to build a friendly and approachable community around `sched_ext`. You
