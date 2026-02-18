@@ -215,16 +215,16 @@ pub fn parse_duration_ns(s: &str) -> Result<TimeNs, String> {
 
 /// Resolve `sched_overhead_rbc_ns` from the `SCX_SIM_RBC_NS` environment variable.
 ///
-/// - Unset or empty: returns `None` (disabled).
+/// - Unset or empty: returns `Some(10)` (default: 10ns per RBC).
+/// - `"0"`: returns `Some(0)` (disabled).
 /// - Any decimal integer: returns `Some(value)`.
 pub fn sched_overhead_rbc_ns_from_env() -> Option<u64> {
     match std::env::var("SCX_SIM_RBC_NS").ok().as_deref() {
-        None | Some("") => None,
+        None | Some("") => Some(10),
         Some(s) => Some(s.parse::<u64>().unwrap_or_else(|_| {
             panic!("SCX_SIM_RBC_NS={s:?}: expected a u64 integer");
         })),
     }
-}
 }
 
 /// A complete simulation scenario: CPUs, tasks, and duration.
@@ -275,7 +275,7 @@ impl Scenario {
             overhead: OverheadConfig::from_env(),
             seed: seed_from_env(),
             fixed_priority: false,
-            sched_overhead_rbc_ns: sched_overhead_rbc_ns_from_env(),
+            sched_overhead_rbc_ns: None,
         }
     }
 }

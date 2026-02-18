@@ -298,7 +298,8 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Build simulator state (shared with kfuncs via thread-local)
-        let rbc_counter = if scenario.sched_overhead_rbc_ns.is_some() {
+        let rbc_ns = scenario.sched_overhead_rbc_ns.filter(|&ns| ns > 0);
+        let rbc_counter = if rbc_ns.is_some() {
             perf::try_create_rbc_counter()
         } else {
             None
@@ -326,7 +327,7 @@ impl<S: Scheduler> Simulator<S> {
             noise: scenario.noise.clone(),
             overhead: scenario.overhead.clone(),
             rbc_counter,
-            sched_overhead_rbc_ns: scenario.sched_overhead_rbc_ns,
+            sched_overhead_rbc_ns: rbc_ns,
             rbc_kfunc_calls: 0,
         };
 
