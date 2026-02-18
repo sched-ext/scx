@@ -4044,6 +4044,7 @@ name = "scx_simulator"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "clap",
  "libbpf-sys",
  "libloading",
  "serde_json",

@@ -48,7 +48,7 @@ pub mod workloads;
 // Re-export the main public types for convenience.
 pub use engine::{SimulationResult, Simulator};
 pub use ffi::{discover_schedulers, DynamicScheduler, Scheduler, SchedulerInfo};
-pub use fmt::{FmtN, FmtTs};
+pub use fmt::{FmtN, FmtTs, SimFormat};
 pub use kfuncs::sim_clock;
 pub use monitor::{Monitor, ProbeContext, ProbePoint};
 pub use rtapp::load_rtapp;
