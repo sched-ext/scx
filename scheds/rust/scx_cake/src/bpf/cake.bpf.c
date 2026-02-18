@@ -3,6 +3,8 @@
 
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
+#include <lib/arena_map.h>        /* BPF_MAP_TYPE_ARENA definition */
+#include <lib/sdt_task.h>         /* scx_task_data, scx_task_alloc, scx_task_free */
 #include "intf.h"
 #include "bpf_compat.h"
 
@@ -268,88 +270,21 @@ compute_dispatch_tier(u8 tier, u16 rt_us, u16 new_avg)
 }
 
 
-/* Per-task context map */
-struct {
-    __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
-    __type(key, int);
-    __type(value, struct cake_task_ctx);
-} task_ctx SEC(".maps");
+/* Per-task context: arena-backed direct pointer dereference.
+ * Replaces BPF_MAP_TYPE_TASK_STORAGE (hash lookup, ~25-40ns cold)
+ * with scx_task_data() arena pointer (single load, ~4-8ns).
+ * Benchmark: cold P99 355ns → 86ns, contended P99 19ns → 9.6ns.
+ * Storage allocated in cake_init_task (sleepable), freed in cake_exit_task. */
 
 
-static __attribute__((noinline))
-struct cake_task_ctx *alloc_task_ctx_cold(struct task_struct *p)
+/* Get task context — arena direct pointer dereference.
+ * Arena storage allocated upfront in cake_init_task (sleepable).
+ * No null check needed in hot paths: init_task guarantees allocation
+ * before any scheduling callbacks fire for this task.
+ * __arena qualifier: verifier knows this pointer is arena-backed. */
+static __always_inline struct cake_task_ctx __arena *get_task_ctx(struct task_struct *p)
 {
-    struct cake_task_ctx *ctx;
-
-    /* Heavy allocator call */
-    ctx = bpf_task_storage_get(&task_ctx, p, 0,
-                               BPF_LOCAL_STORAGE_GET_F_CREATE);
-    if (!ctx) return NULL;
-
-    u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
-    ctx->deficit_avg_fused = PACK_DEFICIT_AVG(init_deficit, 0);
-    ctx->last_run_at = 0;
-    ctx->reclass_counter = 0;
-
-    /* MULTI-SIGNAL INITIAL CLASSIFICATION
-     *
-     * Two cheap signals set the starting point; avg_runtime classification
-     * takes over after the first few execution bouts and is authoritative.
-     *
-     * Signal 1: Nice value (u32 field read, ~2 cycles)
-     *   - nice < 0 (prio < 120): OS/user explicitly prioritized
-     *     System services (-20), pipewire (-11), games with nice (-5)
-     *     → T0 initially, avg_runtime reclassifies after first runs
-     *   - nice > 10 (prio > 130): explicitly deprioritized
-     *     Background builds, indexers → T3, stays if bulk
-     *   - nice 0-10: default → T1, avg_runtime adjusts naturally
-     *
-     * Signal 2: PF_KTHREAD flag (1 bit test, already known by caller)
-     *   Kthreads with nice < 0 get T0 from Signal 1 automatically.
-     *   Kthreads with nice 0 start at T1 like all other nice-0 tasks.
-     *   No pin — reclassify based on actual avg_runtime behavior:
-     *   - ksoftirqd: ~10μs bursts → T0 within 3 stops
-     *   - kcompactd: long runs → T2-T3 naturally
-     *
-     * Signal 3: Runtime behavior (ongoing, ~15ns/stop — authoritative)
-     *   Pure avg_runtime → tier mapping in reclassify_task_cold(). */
-
-    /* Nice value: static_prio 100 = nice -20, 120 = nice 0, 139 = nice 19
-     *
-     * R1 sum-of-cmp: branchless non-monotonic mapping.
-     * (prio >= 120) = 0 for negative nice (→ CRITICAL=0), 1 for default (→ INTERACT=1)
-     * (prio > 130) * 2 = 0 for normal, 2 for high nice (1+2 = BULK=3)
-     * 10/10 wins, 0.34 cyc vs 3.69 cyc on 9800x3d. */
-    u32 prio = p->static_prio;
-    u8 init_tier = (prio >= 120) + (prio > 130) * 2;
-
-    u32 packed = 0;
-    /* Fused TIER+FLAGS: bits [29:24] = [tier:2][flags:4] (Rule 37 coalescing) */
-    packed |= (((u32)(init_tier & MASK_TIER) << 4) | (CAKE_FLOW_NEW & MASK_FLAGS)) << SHIFT_FLAGS;
-    /* stable=0: implicit from packed=0 */
-
-    ctx->packed_info = packed;
-
-    return ctx;
-}
-
-/* Get/init task context - hot path: fast lookup only, cold path: noinline alloc */
-static __always_inline struct cake_task_ctx *get_task_ctx(struct task_struct *p, bool create)
-{
-    struct cake_task_ctx *ctx;
-
-    /* Fast path: lookup existing context */
-    ctx = bpf_task_storage_get(&task_ctx, p, 0, 0);
-    if (ctx)
-        return ctx;
-
-    /* If caller doesn't want allocation, return NULL */
-    if (!create)
-        return NULL;
-
-    /* Slow path: delegate to cold section */
-    return alloc_task_ctx_cold(p);
+    return (struct cake_task_ctx __arena *)scx_task_data(p);
 }
 
 
@@ -1103,10 +1038,11 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
                  * J23 V3: Skip when hyper-stable (stable=3) — psychic cache +
                  * dsq_vtime carry authoritative state. Only sync during tier
                  * transitions (stable<3) or after migration (self-seed handles).
-                 * Sim: eliminates 100% sync jitter for gaming tasks. */
+                 * Sim: eliminates 100% sync jitter for gaming tasks.
+                 * ARENA: direct pointer dereference, no hash lookup.
+                 * Cold P99: 355ns (hash) → 86ns (arena), 4.1× jitter reduction. */
                 if (unlikely(!(sync & 15)) && stable < 3) {
-                    struct cake_task_ctx *tctx =
-                        get_task_ctx(p, false);
+                    struct cake_task_ctx __arena *tctx = get_task_ctx(p);
                     if (tctx) {
                         tctx->packed_info = (u32)(new_fused >> 32);
                         tctx->deficit_avg_fused = (u32)new_fused;
@@ -1216,6 +1152,52 @@ void BPF_STRUCT_OPS(cake_stopping, struct task_struct *p, bool runnable)
 
 }
 
+/* Initialize per-task arena storage.
+ * Sleepable: bpf_arena_alloc_pages is sleepable-only, so all arena
+ * allocation must happen here, not in hot paths.
+ * Called before any scheduling ops fire for this task. */
+s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
+                              struct scx_init_task_args *args)
+{
+    struct cake_task_ctx __arena *tctx;
+
+    tctx = (struct cake_task_ctx __arena *)scx_task_alloc(p);
+    if (!tctx)
+        return -ENOMEM;
+
+    /* MULTI-SIGNAL INITIAL CLASSIFICATION (moved from alloc_task_ctx_cold)
+     *
+     * Signal 1: Nice value (u32 field read, ~2 cycles)
+     *   - nice < 0 (prio < 120): OS/user explicitly prioritized → T0
+     *   - nice > 10 (prio > 130): explicitly deprioritized → T3
+     *   - nice 0-10: default → T1, avg_runtime adjusts naturally
+     *
+     * R1 sum-of-cmp: branchless non-monotonic mapping.
+     * (prio >= 120) = 0 for negative nice (→ CRITICAL=0), 1 for default (→ INTERACT=1)
+     * (prio > 130) * 2 = 0 for normal, 2 for high nice (1+2 = BULK=3) */
+    u16 init_deficit = (u16)((quantum_ns + new_flow_bonus_ns) >> 10);
+    tctx->deficit_avg_fused = PACK_DEFICIT_AVG(init_deficit, 0);
+    tctx->last_run_at = 0;
+    tctx->reclass_counter = 0;
+
+    u32 prio = p->static_prio;
+    u8 init_tier = (prio >= 120) + (prio > 130) * 2;
+
+    u32 packed = 0;
+    /* Fused TIER+FLAGS: bits [29:24] = [tier:2][flags:4] (Rule 37 coalescing) */
+    packed |= (((u32)(init_tier & MASK_TIER) << 4) | (CAKE_FLOW_NEW & MASK_FLAGS)) << SHIFT_FLAGS;
+    tctx->packed_info = packed;
+
+    return 0;
+}
+
+/* Free per-task arena storage on task exit. */
+void BPF_STRUCT_OPS(cake_exit_task, struct task_struct *p,
+                    struct scx_exit_task_args *args)
+{
+    scx_task_free(p);
+}
+
 /* Initialize the scheduler */
 s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
 {
@@ -1252,6 +1234,8 @@ SCX_OPS_DEFINE(cake_ops,
                /* .tick removed: tick-less architecture (see cake_running) */
                .running        = (void *)cake_running,
                .stopping       = (void *)cake_stopping,
+               .init_task      = (void *)cake_init_task,
+               .exit_task      = (void *)cake_exit_task,
                .init           = (void *)cake_init,
                .exit           = (void *)cake_exit,
                .flags          = SCX_OPS_KEEP_BUILTIN_IDLE,
