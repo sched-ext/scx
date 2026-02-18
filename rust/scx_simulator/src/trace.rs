@@ -4,6 +4,7 @@
 //! is recorded as a `TraceEvent` with a simulated timestamp and CPU ID.
 
 use crate::fmt::FmtTs;
+use crate::task::TaskDef;
 use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
 /// A single trace event produced by the simulator.
@@ -82,11 +83,27 @@ pub enum TraceKind {
 #[derive(Debug, Clone)]
 pub struct Trace {
     events: Vec<TraceEvent>,
+    pub(crate) nr_cpus: u32,
+    task_names: Vec<(Pid, String)>,
 }
 
 impl Trace {
-    pub(crate) fn new() -> Self {
-        Self { events: Vec::new() }
+    pub(crate) fn new(nr_cpus: u32, tasks: &[TaskDef]) -> Self {
+        let task_names = tasks.iter().map(|t| (t.pid, t.name.clone())).collect();
+        Self {
+            events: Vec::new(),
+            nr_cpus,
+            task_names,
+        }
+    }
+
+    /// Resolve a PID to a task name, or `"???"` if unknown.
+    pub(crate) fn task_name(&self, pid: Pid) -> &str {
+        self.task_names
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, n)| n.as_str())
+            .unwrap_or("???")
     }
 
     pub(crate) fn record(&mut self, time_ns: TimeNs, cpu: CpuId, kind: TraceKind) {
@@ -176,6 +193,12 @@ impl Trace {
             .iter()
             .filter(|e| e.cpu == cpu && matches!(e.kind, TraceKind::Tick { .. }))
             .count()
+    }
+
+    /// Write the trace in Chrome Trace Event Format JSON, loadable in
+    /// [ui.perfetto.dev](https://ui.perfetto.dev).
+    pub fn write_perfetto_json(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
+        crate::perfetto::write_json(self, writer)
     }
 
     /// Pretty-print the trace for debugging.
