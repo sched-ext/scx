@@ -18,6 +18,7 @@ use std::fmt::Display;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -216,6 +217,8 @@ struct Scheduler<'a> {
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
+    /// Last observed cpuset_seq for cpuset change detection
+    last_cpuset_seq: u32,
     /// Optional cell manager for --cell-parent-cgroup mode
     cell_manager: Option<CellManager>,
     /// Whether CPU borrowing is enabled
@@ -409,6 +412,7 @@ impl<'a> Scheduler<'a> {
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
+            last_cpuset_seq: 0,
             cell_manager,
             enable_borrowing: opts.enable_borrowing,
             enable_rebalancing: opts.enable_rebalancing,
@@ -477,6 +481,7 @@ impl<'a> Scheduler<'a> {
 
             // Periodic work on every iteration
             self.refresh_bpf_cells()?;
+            self.check_cpuset_changes()?;
             self.collect_metrics()?;
 
             if self.enable_rebalancing && self.cell_manager.is_some() {
@@ -1142,6 +1147,38 @@ impl<'a> Scheduler<'a> {
         self.metrics
             .update_demand(global_util_pct, global_borrow_pct, global_lent_pct);
 
+        Ok(())
+    }
+
+    /// Check if any cell's cpuset was modified and recompute if so.
+    fn check_cpuset_changes(&mut self) -> Result<()> {
+        let Some(ref mut cm) = self.cell_manager else {
+            return Ok(());
+        };
+
+        let current_seq = unsafe {
+            let ptr = &self.skel.maps.bss_data.as_ref().unwrap().cpuset_seq as *const u32;
+            (ptr as *const AtomicU32)
+                .as_ref()
+                .unwrap()
+                .load(Ordering::Acquire)
+        };
+
+        if current_seq == self.last_cpuset_seq {
+            return Ok(());
+        }
+        self.last_cpuset_seq = current_seq;
+
+        if !cm.refresh_cpusets()? {
+            return Ok(()); // seq changed but no cpusets on our cells changed
+        }
+
+        let cpu_assignments = self.compute_and_apply_cell_config(&[])?;
+        let cell_manager = self.cell_manager.as_ref().unwrap();
+        info!(
+            "Cpuset change detected, recomputed config: {}",
+            cell_manager.format_cell_config(&cpu_assignments)
+        );
         Ok(())
     }
 
