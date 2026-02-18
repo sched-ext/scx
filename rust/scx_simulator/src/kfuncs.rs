@@ -1107,7 +1107,7 @@ mod tests {
             cpus: (0..nr_cpus).map(|i| SimCpu::new(CpuId(i))).collect(),
             dsqs: DsqManager::new(),
             current_cpu: CpuId(0),
-            trace: Trace::new(),
+            trace: Trace::new(nr_cpus, &[]),
             clock: 0,
             task_raw_to_pid: HashMap::new(),
             task_pid_to_raw: HashMap::new(),

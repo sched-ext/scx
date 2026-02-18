@@ -36,6 +36,7 @@ pub mod ffi;
 pub mod fmt;
 pub mod kfuncs;
 pub mod monitor;
+mod perfetto;
 pub mod probes;
 pub mod rtapp;
 pub mod scenario;
