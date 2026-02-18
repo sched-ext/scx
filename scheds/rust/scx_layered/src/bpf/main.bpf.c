@@ -605,6 +605,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
 	bool			all_cpuset_allowed;
 	bool			cpus_node_aligned;
+	u32			pinned_node;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -3278,7 +3279,7 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
 	const struct cpumask *cpuset;
-	u32 node_id;
+	u32 node_id, nr_intersects = 0, nr_covered = 0, covered_node = MAX_NUMA_NODES;
 
 	cpuset = (const struct cpumask *)lookup_layer_cpuset(taskc->layer_id);
 	if (!cpuset) {
@@ -3287,7 +3288,13 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 	}
 
 	taskc->all_cpuset_allowed = bpf_cpumask_subset(cpuset, cpumask);
-	taskc->cpus_node_aligned = true;
+
+	/*
+	 * Help bpf_for() verification by making the following variables
+	 * imprecise. Otherwise, the iterations never converge.
+	 */
+	__sink(nr_intersects);
+	__sink(nr_covered);
 
 	bpf_for(node_id, 0, nr_nodes) {
 		struct node_ctx *nodec;
@@ -3297,13 +3304,20 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 		    !(node_cpumask = cast_mask(nodec->cpumask)))
 			return;
 
-		/* not llc aligned if partially overlaps */
-		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
-		    !bpf_cpumask_subset(node_cpumask, cpumask)) {
-			taskc->cpus_node_aligned = false;
-			break;
+		if (!bpf_cpumask_intersects(node_cpumask, cpumask))
+			continue;
+
+		nr_intersects++;
+
+		if (bpf_cpumask_subset(node_cpumask, cpumask)) {
+			nr_covered++;
+			covered_node = node_id;
 		}
 	}
+
+	taskc->cpus_node_aligned = nr_intersects == nr_covered;
+	taskc->pinned_node = (nr_nodes > 1 && nr_covered == 1 && nr_intersects == 1) ?
+		covered_node : MAX_NUMA_NODES;
 }
 
 static int init_cached_cpus(struct cached_cpus *ccpus)
@@ -3458,6 +3472,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
+	taskc->pinned_node = MAX_NUMA_NODES;
 	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
