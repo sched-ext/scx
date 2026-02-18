@@ -10,7 +10,7 @@
 #   ./test_cell_isolation.sh [--cpuset] [--proportional] [--num-cells N] [--workers N]
 #                            [--test-dynamic] [--test-borrowing]
 #                            [--test-enqueue-borrowing]
-#                            [--test-rebalancing] [--test-all]
+#                            [--test-rebalancing] [--test-cpuset-change] [--test-all]
 #
 # Options:
 #   --cpuset        Test cpuset-based cell isolation (requires cpuset configuration)
@@ -19,7 +19,8 @@
 #   --workers N     Number of stress-ng workers per cell (default: 5)
 #   --test-dynamic  Run dynamic cell creation/destruction tests
 #   --test-rebalancing Run demand-based CPU rebalancing test
-#   --test-all      Run all tests (basic + dynamic + borrowing + rebalancing)
+#   --test-cpuset-change Run cpuset change detection test
+#   --test-all      Run all tests (basic + dynamic + borrowing + rebalancing + cpuset-change)
 #   --help          Show this help message
 #
 
@@ -40,6 +41,7 @@ TEST_DYNAMIC=0
 TEST_BORROWING=0
 TEST_ENQUEUE_BORROWING=0
 TEST_REBALANCING=0
+TEST_CPUSET_CHANGE=0
 TEST_ALL=0
 
 # Test result tracking
@@ -103,6 +105,10 @@ while [[ $# -gt 0 ]]; do
             TEST_REBALANCING=1
             shift
             ;;
+        --test-cpuset-change)
+            TEST_CPUSET_CHANGE=1
+            shift
+            ;;
         --test-all)
             TEST_ALL=1
             shift
@@ -146,7 +152,7 @@ cleanup() {
     done
 
     # Remove dynamic test cgroups
-    for cell_name in test_cell_dynamic test_cell_temp test_cell_3 test_cell_reuse_a test_cell_reuse_b test_cell_borrow_busy test_cell_borrow_idle test_cell_rebal_busy test_cell_rebal_idle; do
+    for cell_name in test_cell_dynamic test_cell_temp test_cell_3 test_cell_reuse_a test_cell_reuse_b test_cell_borrow_busy test_cell_borrow_idle test_cell_rebal_busy test_cell_rebal_idle test_cell_cpuset_a test_cell_cpuset_b; do
         cell_path="$CGROUP_BASE/$cell_name"
         if [[ -d "$cell_path" ]]; then
             for pid in $(cat "$cell_path/cgroup.procs" 2>/dev/null); do
@@ -921,6 +927,155 @@ print(msg)
     esac
 }
 
+# Test: Cpuset change detection - verify scheduler reacts to cpuset.cpus changes
+test_cpuset_change() {
+    log_info "=== Running test: Cpuset Change Detection ==="
+
+    # Kill existing scheduler if running
+    if [[ -n "$SCHED_PID" ]] && ps -p "$SCHED_PID" > /dev/null 2>&1; then
+        sudo kill "$SCHED_PID" 2>/dev/null || true
+        sleep 2
+    fi
+    sudo pkill -9 scx_mitosis 2>/dev/null || true
+    sleep 2
+
+    # Create two test cells
+    local cell_a="$CGROUP_BASE/test_cell_cpuset_a"
+    local cell_b="$CGROUP_BASE/test_cell_cpuset_b"
+
+    # Clean up ALL test cgroups (not just cpuset ones) since earlier tests
+    # may have left stale cgroups that would confuse the scheduler.
+    for cell_name in test_cell_1 test_cell_2 test_cell_3 test_cell_dynamic test_cell_temp test_cell_reuse_a test_cell_reuse_b test_cell_borrow_busy test_cell_borrow_idle test_cell_rebal_busy test_cell_rebal_idle test_cell_cpuset_a test_cell_cpuset_b; do
+        local path="$CGROUP_BASE/$cell_name"
+        if [[ -d "$path" ]]; then
+            for pid in $(cat "$path/cgroup.procs" 2>/dev/null); do
+                sudo kill -9 "$pid" 2>/dev/null || true
+            done
+            sudo rmdir "$path" 2>/dev/null || true
+        fi
+    done
+
+    sudo mkdir -p "$cell_a"
+    sudo mkdir -p "$cell_b"
+
+    # Enable cpuset controller for children of test.slice
+    if ! grep -q "cpuset" "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null; then
+        echo "+cpuset" | sudo tee "$CGROUP_BASE/cgroup.subtree_control" > /dev/null
+    fi
+
+    # Get total CPU count and split into ranges, leaving some CPUs for cell 0
+    local total_cpus=$(nproc)
+    local half=$((total_cpus / 2))
+    if [[ $total_cpus -lt 4 ]]; then
+        log_error "Not enough CPUs for cpuset change test (need at least 4)"
+        record_result "cpuset_change" "FAILED"
+        return 1
+    fi
+
+    # Leave one CPU at each boundary for cell 0 (root cell)
+    local first_half="0-$((half - 2))"
+    local second_half="${half}-$((total_cpus - 2))"
+
+    # Write initial cpusets: A gets first half, B gets second half
+    log_info "Setting initial cpusets: A=$first_half, B=$second_half"
+    echo "$first_half" | sudo tee "$cell_a/cpuset.cpus" > /dev/null
+    echo "$second_half" | sudo tee "$cell_b/cpuset.cpus" > /dev/null
+
+    # Start scheduler
+    start_scheduler
+
+    # Start workloads in both cells
+    local workers=$((half > 3 ? 3 : half))
+    sudo bash -c "echo \$\$ > $cell_a/cgroup.procs && \
+        exec stress-ng --cpu $workers --timeout 60s --quiet" &
+    sudo bash -c "echo \$\$ > $cell_b/cgroup.procs && \
+        exec stress-ng --cpu $workers --timeout 60s --quiet" &
+    sleep 3
+
+    # Sample initial CPU assignments and verify cell A uses first half
+    log_info "Verifying initial CPU assignments..."
+    local initial_ok=1
+    for pid in $(cat "$cell_a/cgroup.procs" 2>/dev/null); do
+        if [[ -d "/proc/$pid" ]]; then
+            local cpu=$(get_process_cpu "$pid")
+            if [[ -n "$cpu" ]] && [[ "$cpu" -ge "$half" ]]; then
+                log_error "Cell A PID $pid running on CPU $cpu (expected < $half)"
+                initial_ok=0
+            fi
+        fi
+    done
+
+    if [[ $initial_ok -eq 0 ]]; then
+        sudo pkill -9 stress-ng 2>/dev/null || true
+        record_result "cpuset_change" "FAILED"
+        return 1
+    fi
+    log_info "Initial CPU assignments correct"
+
+    # Now swap the cpusets: A gets second half, B gets first half
+    log_info "Swapping cpusets: A=$second_half, B=$first_half"
+    echo "$second_half" | sudo tee "$cell_a/cpuset.cpus" > /dev/null
+    echo "$first_half" | sudo tee "$cell_b/cpuset.cpus" > /dev/null
+
+    # Wait for scheduler to detect and apply the change
+    sleep 5
+
+    # Verify scheduler detected the change
+    if ! grep -q "Cpuset change detected" "$LOG_FILE"; then
+        log_error "Cpuset change not detected in scheduler logs"
+        log_info "Scheduler log tail:"
+        tail -20 "$LOG_FILE"
+        sudo pkill -9 stress-ng 2>/dev/null || true
+        record_result "cpuset_change" "FAILED"
+        return 1
+    fi
+
+    log_info "Cpuset change detected in scheduler logs"
+
+    # Verify cell A tasks now run on the new cpuset (second half).
+    # Only check actively-running worker processes (stress-ng-cpu), not the
+    # sleeping master process which may not have been rescheduled yet.
+    sleep 2
+    local swap_ok=1
+    local checked=0
+    for pid in $(cat "$cell_a/cgroup.procs" 2>/dev/null); do
+        if [[ -d "/proc/$pid" ]]; then
+            local comm
+            comm=$(cat "/proc/$pid/comm" 2>/dev/null) || continue
+            if [[ "$comm" != "stress-ng-cpu" ]]; then
+                continue
+            fi
+            local cpu=$(get_process_cpu "$pid")
+            if [[ -n "$cpu" ]]; then
+                checked=$((checked + 1))
+                if [[ "$cpu" -lt "$half" ]]; then
+                    log_warn "After swap: Cell A PID $pid running on CPU $cpu (expected >= $half)"
+                    swap_ok=0
+                fi
+            fi
+        fi
+    done
+
+    # Kill workloads
+    sudo pkill -9 stress-ng 2>/dev/null || true
+
+    if [[ $checked -eq 0 ]]; then
+        log_error "No processes found to verify after cpuset swap"
+        record_result "cpuset_change" "FAILED"
+        return 1
+    fi
+
+    if [[ $swap_ok -eq 1 ]]; then
+        log_info "After cpuset swap, cell A tasks correctly running on new CPUs"
+        record_result "cpuset_change" "PASSED"
+        return 0
+    else
+        log_error "Processes still on old CPUs after cpuset swap"
+        record_result "cpuset_change" "FAILED"
+        return 1
+    fi
+}
+
 # Run dynamic tests
 run_dynamic_tests() {
     log_info ""
@@ -983,6 +1138,7 @@ main() {
     echo "Test borrowing: $TEST_BORROWING"
     echo "Test enqueue borrowing: $TEST_ENQUEUE_BORROWING"
     echo "Test rebalancing: $TEST_REBALANCING"
+    echo "Test cpuset change: $TEST_CPUSET_CHANGE"
     echo "Test all: $TEST_ALL"
     echo ""
 
@@ -996,6 +1152,7 @@ main() {
     local run_borrowing=0
     local run_enqueue_borrowing=0
     local run_rebalancing=0
+    local run_cpuset_change=0
 
     if [[ $TEST_ALL -eq 1 ]]; then
         run_basic=1
@@ -1003,6 +1160,7 @@ main() {
         run_borrowing=1
         run_enqueue_borrowing=1
         run_rebalancing=1
+        run_cpuset_change=1
     elif [[ $TEST_DYNAMIC -eq 1 ]]; then
         run_basic=0
         run_dynamic=1
@@ -1015,6 +1173,9 @@ main() {
     elif [[ $TEST_REBALANCING -eq 1 ]]; then
         run_basic=0
         run_rebalancing=1
+    elif [[ $TEST_CPUSET_CHANGE -eq 1 ]]; then
+        run_basic=0
+        run_cpuset_change=1
     fi
 
     # Run basic isolation test
@@ -1040,6 +1201,11 @@ main() {
     # Run rebalancing test
     if [[ $run_rebalancing -eq 1 ]]; then
         test_cpu_rebalancing_demand
+    fi
+
+    # Run cpuset change test
+    if [[ $run_cpuset_change -eq 1 ]]; then
+        test_cpuset_change
     fi
 
     # Print summary and exit

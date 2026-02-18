@@ -62,6 +62,7 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
  */
 u32 configuration_seq;
 u32 applied_configuration_seq;
+u32 cpuset_seq;
 
 /*
  * Debug events circular buffer
@@ -1422,10 +1423,17 @@ int BPF_PROG(fentry_cpuset_write_resmask, struct kernfs_open_file *of,
 	     char *buf, size_t nbytes, loff_t off, ssize_t retval)
 {
 	/*
-	 * On a write to cpuset.cpus, we'll need to configure new cells, bump
-	 * configuration_seq so tick() does that.
+	 * On a write to cpuset.cpus, we'll need to reconfigure cells.
+	 *
+	 * In userspace-managed mode, bump cpuset_seq so userspace re-reads
+	 * cpusets and recomputes CPU assignments.
+	 *
+	 * In auto mode, bump configuration_seq so tick() reconfigures cells.
 	 */
-	__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
+	if (userspace_managed_cell_mode)
+		__atomic_add_fetch(&cpuset_seq, 1, __ATOMIC_RELEASE);
+	else
+		__atomic_add_fetch(&configuration_seq, 1, __ATOMIC_RELEASE);
 	return 0;
 }
 
