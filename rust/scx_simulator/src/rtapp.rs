@@ -474,6 +474,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         noise: NoiseConfig::from_env(),
         overhead: OverheadConfig::from_env(),
         seed: seed_from_env(),
+        fixed_priority: false,
     })
 }
 

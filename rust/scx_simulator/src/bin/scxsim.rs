@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
+use scx_simulator::scenario::parse_seed;
 use scx_simulator::{
     discover_schedulers, load_rtapp, DynamicScheduler, SimFormat, Simulator, SIM_LOCK,
 };
@@ -26,6 +27,22 @@ struct Cli {
     /// SMT threads per core.
     #[arg(long, default_value_t = 1)]
     smt: u32,
+
+    /// PRNG seed (u32 integer or "entropy" for OS randomness).
+    ///
+    /// Controls deterministic simulation: tick jitter, context-switch
+    /// overhead noise, and event tiebreaking all derive from this seed.
+    /// Falls back to SCX_SIM_SEED env var, then default (42).
+    #[arg(long, env = "SCX_SIM_SEED")]
+    seed: Option<String>,
+
+    /// Use insertion-order event tiebreaking instead of randomized.
+    ///
+    /// By default, events at the same timestamp are processed in a
+    /// PRNG-randomized order to detect ordering-dependent bugs.
+    /// This flag restores the deterministic insertion-order behavior.
+    #[arg(long)]
+    fixed_priority: bool,
 
     /// Write Perfetto trace JSON to file.
     #[arg(long, value_name = "PATH")]
@@ -82,6 +99,12 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
     if cli.no_overhead {
         scenario.overhead.enabled = false;
+    }
+    if let Some(ref seed_str) = cli.seed {
+        scenario.seed = parse_seed(Some(seed_str));
+    }
+    if cli.fixed_priority {
+        scenario.fixed_priority = true;
     }
 
     let sched = load_scheduler(&cli.scheduler, cli.cpus)?;

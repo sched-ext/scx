@@ -113,17 +113,14 @@ impl OverheadConfig {
     }
 }
 
-/// Default PRNG seed used when `SCX_SIM_SEED` is not set.
-const DEFAULT_SEED: u32 = 42;
+/// Default PRNG seed used when no seed is specified.
+pub const DEFAULT_SEED: u32 = 42;
 
-/// Resolve the PRNG seed from the `SCX_SIM_SEED` environment variable.
+/// Parse a seed string: a `u32` integer or `"entropy"` for OS randomness.
 ///
-/// - Unset or empty: returns `DEFAULT_SEED` (42).
-/// - `"entropy"` (case-insensitive): seeds from OS randomness and logs the
-///   chosen value so the run can be reproduced later.
-/// - Any decimal integer: parsed as a `u32` seed.
-pub fn seed_from_env() -> u32 {
-    match std::env::var("SCX_SIM_SEED").ok().as_deref() {
+/// Returns `DEFAULT_SEED` (42) for `None` or empty strings.
+pub fn parse_seed(s: Option<&str>) -> u32 {
+    match s {
         None | Some("") => DEFAULT_SEED,
         Some(s) if s.eq_ignore_ascii_case("entropy") => {
             // Use OS randomness: read 4 bytes from /dev/urandom.
@@ -146,15 +143,25 @@ pub fn seed_from_env() -> u32 {
             let seed = if seed == 0 { 1 } else { seed };
             warn!(
                 seed,
-                "SCX_SIM_SEED=entropy: seeding PRNG with OS randomness \
-                 (set SCX_SIM_SEED={seed} to reproduce this run)"
+                "seed=entropy: seeding PRNG with OS randomness \
+                 (set seed={seed} to reproduce this run)"
             );
             seed
         }
         Some(s) => s.parse::<u32>().unwrap_or_else(|_| {
-            panic!("SCX_SIM_SEED={s:?}: expected a u32 integer or \"entropy\"");
+            panic!("seed={s:?}: expected a u32 integer or \"entropy\"");
         }),
     }
+}
+
+/// Resolve the PRNG seed from the `SCX_SIM_SEED` environment variable.
+///
+/// - Unset or empty: returns `DEFAULT_SEED` (42).
+/// - `"entropy"` (case-insensitive): seeds from OS randomness and logs the
+///   chosen value so the run can be reproduced later.
+/// - Any decimal integer: parsed as a `u32` seed.
+pub fn seed_from_env() -> u32 {
+    parse_seed(std::env::var("SCX_SIM_SEED").ok().as_deref())
 }
 
 /// A complete simulation scenario: CPUs, tasks, and duration.
@@ -171,6 +178,9 @@ pub struct Scenario {
     pub overhead: OverheadConfig,
     /// PRNG seed for deterministic simulation. Default: 42.
     pub seed: u32,
+    /// Use insertion-order tiebreaking instead of PRNG-randomized tiebreaking
+    /// for events at the same timestamp. Default: false (randomized).
+    pub fixed_priority: bool,
 }
 
 /// Builder for constructing scenarios.
@@ -183,6 +193,7 @@ pub struct ScenarioBuilder {
     noise: NoiseConfig,
     overhead: OverheadConfig,
     seed: u32,
+    fixed_priority: bool,
 }
 
 impl Scenario {
@@ -196,6 +207,7 @@ impl Scenario {
             noise: NoiseConfig::from_env(),
             overhead: OverheadConfig::from_env(),
             seed: seed_from_env(),
+            fixed_priority: false,
         }
     }
 }
@@ -312,6 +324,17 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Use insertion-order tiebreaking (disable randomized event ordering).
+    ///
+    /// By default, events at the same timestamp are processed in a
+    /// PRNG-randomized order to detect ordering-dependent bugs. With
+    /// `fixed_priority(true)`, events are processed in insertion order
+    /// (lower `seq` wins), matching the pre-randomization behavior.
+    pub fn fixed_priority(mut self, fixed: bool) -> Self {
+        self.fixed_priority = fixed;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -337,6 +360,7 @@ impl ScenarioBuilder {
             noise: self.noise,
             overhead: self.overhead,
             seed: self.seed,
+            fixed_priority: self.fixed_priority,
         }
     }
 }
