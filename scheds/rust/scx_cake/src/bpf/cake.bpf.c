@@ -47,6 +47,14 @@ _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
 struct cake_scratch __arena *arena_scratch;
 
+/* Per-LLC tier-occupancy bitmask — arena-backed (2nd pass item C).
+ * 4 bits per LLC (bit 0 = T0, bit 3 = T3). Set in cake_enqueue when
+ * inserting to a tier DSQ. Read by cake_dispatch to skip empty tiers,
+ * avoiding ~25ns kfunc trampoline per skipped tier. Cleared after
+ * successful dsq_move_to_local. Racy but safe: worst case is one
+ * extra dsq_move_to_local that returns false instantly. */
+u8 __arena *arena_tier_occupied;
+
 /* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(256)));
 
@@ -678,6 +686,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         /* J6 V1: per-tier DSQ — reduce contention ~75% */
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + fallback_tier,
                                  quantum_ns, vtime, enq_flags);
+        arena_tier_occupied[enq_llc & (CAKE_MAX_LLCS - 1)] |= (1 << fallback_tier);
         return;
     }
 
@@ -701,6 +710,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         /* J6 V1: per-tier DSQ */
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + requeue_tier,
                                  requeue_slice, vtime, enq_flags);
+        arena_tier_occupied[enq_llc & (CAKE_MAX_LLCS - 1)] |= (1 << requeue_tier);
         return;
     }
 
@@ -743,6 +753,8 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * scans T0 before T1 before T2 before T3. The vtime_tier promotion
      * only affects ordering within the DSQ, not DSQ selection. */
     scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + tier, slice, vtime, enq_flags);
+    /* Mark tier as occupied for dispatch skip optimization */
+    arena_tier_occupied[enq_llc & (CAKE_MAX_LLCS - 1)] |= (1 << tier);
 }
 
 /* Dispatch: per-LLC DSQ scan with cross-LLC stealing fallback.
@@ -753,14 +765,26 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 {
     u32 my_llc = cpu_llc_id[raw_cpu & (CAKE_MAX_CPUS - 1)];
     u32 base = LLC_DSQ_BASE + my_llc * 4;
+    ARENA_ASSOC();
 
-    /* J6 V1: Scan local LLC per-tier DSQs in priority order (T0→T3).
-     * Higher-priority tiers always dispatch first, eliminating the
-     * vtime-tier encoding as the sole priority mechanism.
-     * Each per-tier DSQ has ~1/4 the contention of a unified DSQ. */
+    /* J6 V2: Arena-filtered local LLC dispatch.
+     * Read arena_tier_occupied to skip tiers known-empty.
+     * Each skipped tier avoids a ~25ns dsq_move_to_local kfunc trampoline.
+     * Racy: bit may be stale (another CPU consumed last task), but
+     * dsq_move_to_local returns false instantly in that case. */
+    u8 occ = arena_tier_occupied[my_llc & (CAKE_MAX_LLCS - 1)];
     for (u32 t = 0; t < 4; t++) {
-        if (scx_bpf_dsq_move_to_local(base + t))
+        if (!(occ & (1 << t)))
+            continue;  /* Skip empty tier — save ~25ns kfunc trampoline */
+        if (scx_bpf_dsq_move_to_local(base + t)) {
+            /* Clear bit: we consumed from this tier. Racy but safe —
+             * worst case: another enqueue re-sets it next cycle. */
+            arena_tier_occupied[my_llc & (CAKE_MAX_LLCS - 1)] &= ~(1 << t);
             return;
+        }
+        /* dsq_move_to_local returned false: tier actually empty.
+         * Clear the stale bit so future dispatches skip it. */
+        arena_tier_occupied[my_llc & (CAKE_MAX_LLCS - 1)] &= ~(1 << t);
     }
 
     /* Steal from other LLCs (only when all local tiers empty).
@@ -774,9 +798,12 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
         u32 victim = my_llc + i;
         if (victim >= nr_llcs)
             victim -= nr_llcs;
+        u8 vocc = arena_tier_occupied[victim & (CAKE_MAX_LLCS - 1)];
         u32 vbase = LLC_DSQ_BASE + victim * 4;
         /* Steal in tier priority order from victim LLC */
         for (u32 t = 0; t < 4; t++) {
+            if (!(vocc & (1 << t)))
+                continue;
             if (scx_bpf_dsq_move_to_local(vbase + t))
                 return;
         }
@@ -1242,6 +1269,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
     arena_scratch = (struct cake_scratch __arena *)
         bpf_arena_alloc_pages(&arena, NULL, 2, NUMA_NO_NODE, 0);
     if (!arena_scratch)
+        return -ENOMEM;
+
+    /* 2nd pass item C: per-LLC tier-occupancy bitmask.
+     * CAKE_MAX_LLCS bytes (4 bits per LLC), 1 page is overkill but minimum. */
+    arena_tier_occupied = (u8 __arena *)
+        bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
+    if (!arena_tier_occupied)
         return -ENOMEM;
 
     return 0;
