@@ -2407,10 +2407,21 @@ impl<'a> Scheduler<'a> {
         }
 
         let netdevs = if opts.netdev_irq_balance {
-            warn!(
-                "Experimental netdev IRQ balancing enabled. Reset IRQ masks of network devices after use!!!"
+            let devs = read_netdevs()?;
+            let total_irqs: usize = devs.values().map(|d| d.irqs.len()).sum();
+            let breakdown = devs
+                .iter()
+                .map(|(iface, d)| format!("{iface}={}", d.irqs.len()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            info!(
+                "Netdev IRQ balancing enabled: overriding {total_irqs} IRQ{} \
+                 across {} interface{} [{breakdown}]",
+                if total_irqs == 1 { "" } else { "s" },
+                devs.len(),
+                if devs.len() == 1 { "" } else { "s" },
             );
-            read_netdevs()?
+            devs
         } else {
             BTreeMap::new()
         };
@@ -2836,6 +2847,11 @@ impl<'a> Scheduler<'a> {
                 trace!("{} updating irq {} cpumask {:?}", iface, irq, irqmask);
             }
             netdev.apply_cpumasks()?;
+            debug!(
+                "{iface}: applied affinity override to {} IRQ{}",
+                netdev.irqs.len(),
+                if netdev.irqs.len() == 1 { "" } else { "s" },
+            );
         }
 
         Ok(())
@@ -3949,6 +3965,15 @@ impl<'a> Scheduler<'a> {
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {SCHEDULER_NAME} scheduler");
+
+        if !self.netdevs.is_empty() {
+            for (iface, netdev) in &self.netdevs {
+                if let Err(e) = netdev.restore_cpumasks() {
+                    warn!("Failed to restore {iface} IRQ affinity: {e}");
+                }
+            }
+            info!("Restored original netdev IRQ affinity");
+        }
 
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
