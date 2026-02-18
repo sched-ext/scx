@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use scx_simulator::scenario::parse_seed;
+use scx_simulator::scenario::{parse_duration_ns, parse_seed};
 use scx_simulator::{
     discover_schedulers, load_rtapp, DynamicScheduler, SimFormat, Simulator, SIM_LOCK,
 };
@@ -43,6 +43,13 @@ struct Cli {
     /// This flag restores the deterministic insertion-order behavior.
     #[arg(long)]
     fixed_priority: bool,
+
+    /// Simulation end time (overrides workload duration).
+    ///
+    /// Accepts durations with units: "1s", "0.5s", "500ms", "100us", "1000ns".
+    /// A bare number is interpreted as nanoseconds.
+    #[arg(long, value_name = "DURATION")]
+    end_time: Option<String>,
 
     /// Write Perfetto trace JSON to file.
     #[arg(long, value_name = "PATH")]
@@ -105,6 +112,10 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
     if cli.fixed_priority {
         scenario.fixed_priority = true;
+    }
+    if let Some(ref end_time) = cli.end_time {
+        scenario.duration_ns =
+            parse_duration_ns(end_time).map_err(|e| format!("--end-time: {e}"))?;
     }
 
     let sched = load_scheduler(&cli.scheduler, cli.cpus)?;

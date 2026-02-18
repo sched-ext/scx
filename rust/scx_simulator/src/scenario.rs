@@ -164,6 +164,55 @@ pub fn seed_from_env() -> u32 {
     parse_seed(std::env::var("SCX_SIM_SEED").ok().as_deref())
 }
 
+/// Parse a duration string with optional unit suffix into nanoseconds.
+///
+/// Supported formats:
+/// - `"1s"`, `"0.5s"` — seconds
+/// - `"500ms"` — milliseconds
+/// - `"100us"`, `"100μs"` — microseconds
+/// - `"1000ns"` — nanoseconds (explicit)
+/// - `"1000000"` — bare number, interpreted as nanoseconds
+///
+/// Returns an error string if the input cannot be parsed.
+pub fn parse_duration_ns(s: &str) -> Result<TimeNs, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty duration string".into());
+    }
+
+    // Try suffixes longest-first to avoid ambiguity (e.g. "ms" before "s").
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix("ms") {
+        (n, 1_000_000.0)
+    } else if let Some(n) = s.strip_suffix("us") {
+        (n, 1_000.0)
+    } else if let Some(n) = s.strip_suffix("μs") {
+        (n, 1_000.0)
+    } else if let Some(n) = s.strip_suffix("ns") {
+        (n, 1.0)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1_000_000_000.0)
+    } else {
+        // Bare number — nanoseconds
+        (s, 1.0)
+    };
+
+    let num: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid duration number: {num_str:?}"))?;
+
+    if num < 0.0 {
+        return Err(format!("duration must be non-negative: {s:?}"));
+    }
+
+    let ns = num * multiplier;
+    if ns > u64::MAX as f64 {
+        return Err(format!("duration overflow: {s:?}"));
+    }
+
+    Ok(ns as TimeNs)
+}
+
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
@@ -362,5 +411,57 @@ impl ScenarioBuilder {
             seed: self.seed,
             fixed_priority: self.fixed_priority,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(parse_duration_ns("1s").unwrap(), 1_000_000_000);
+        assert_eq!(parse_duration_ns("0.5s").unwrap(), 500_000_000);
+        assert_eq!(parse_duration_ns("2.5s").unwrap(), 2_500_000_000);
+    }
+
+    #[test]
+    fn test_parse_duration_milliseconds() {
+        assert_eq!(parse_duration_ns("500ms").unwrap(), 500_000_000);
+        assert_eq!(parse_duration_ns("1ms").unwrap(), 1_000_000);
+        assert_eq!(parse_duration_ns("0.5ms").unwrap(), 500_000);
+    }
+
+    #[test]
+    fn test_parse_duration_microseconds() {
+        assert_eq!(parse_duration_ns("100us").unwrap(), 100_000);
+        assert_eq!(parse_duration_ns("100μs").unwrap(), 100_000);
+        assert_eq!(parse_duration_ns("1.5us").unwrap(), 1_500);
+    }
+
+    #[test]
+    fn test_parse_duration_nanoseconds() {
+        assert_eq!(parse_duration_ns("1000ns").unwrap(), 1_000);
+        assert_eq!(parse_duration_ns("1ns").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_parse_duration_bare_number() {
+        assert_eq!(parse_duration_ns("1000000").unwrap(), 1_000_000);
+        assert_eq!(parse_duration_ns("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_duration_whitespace() {
+        assert_eq!(parse_duration_ns("  500ms  ").unwrap(), 500_000_000);
+        assert_eq!(parse_duration_ns(" 1 s").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_duration_errors() {
+        assert!(parse_duration_ns("").is_err());
+        assert!(parse_duration_ns("abc").is_err());
+        assert!(parse_duration_ns("-1s").is_err());
+        assert!(parse_duration_ns("xs").is_err());
     }
 }
