@@ -81,6 +81,8 @@ pub use cpumask::read_cpulist;
 pub use cpumask::Cpumask;
 
 mod gpu;
+#[cfg(feature = "gpu-topology")]
+pub use gpu::GpuIndex;
 
 mod infeasible;
 pub use infeasible::LoadAggregator;
