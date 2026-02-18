@@ -1299,6 +1299,7 @@ struct Layer {
 
     nr_cpus: usize,
     nr_llc_cpus: Vec<usize>,
+    nr_node_cpus: Vec<usize>,
     cpus: Cpumask,
     allowed_cpus: Cpumask,
 }
@@ -1438,6 +1439,7 @@ impl Layer {
 
             nr_cpus: 0,
             nr_llc_cpus: vec![0; topo.all_llcs.len()],
+            nr_node_cpus: vec![0; topo.nodes.len()],
             cpus: Cpumask::new(),
             allowed_cpus,
         })
@@ -1457,6 +1459,7 @@ impl Layer {
             self.nr_cpus -= nr_to_free;
             for cpu in cpus_to_free.iter() {
                 self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                self.nr_node_cpus[cpu_pool.topo.all_cpus[&cpu].node_id] -= 1;
             }
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
@@ -1482,6 +1485,7 @@ impl Layer {
         self.nr_cpus += nr_new_cpus;
         for cpu in new_cpus.iter() {
             self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+            self.nr_node_cpus[cpu_pool.topo.all_cpus[&cpu].node_id] += 1;
         }
         Ok(nr_new_cpus)
     }
@@ -2743,6 +2747,9 @@ impl<'a> Scheduler<'a> {
         for (llc_id, &nr_llc_cpus) in layer.nr_llc_cpus.iter().enumerate() {
             bpf_layer.nr_llc_cpus[llc_id] = nr_llc_cpus as u32;
         }
+        for (node_id, &nr_node_cpus) in layer.nr_node_cpus.iter().enumerate() {
+            bpf_layer.nr_node_cpus[node_id] = nr_node_cpus as u32;
+        }
 
         bpf_layer.refresh_cpus = 1;
     }
@@ -3204,6 +3211,7 @@ impl<'a> Scheduler<'a> {
                 layer.nr_cpus -= cpus_to_free.weight();
                 for cpu in cpus_to_free.iter() {
                     layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+                    layer.nr_node_cpus[self.cpu_pool.topo.all_cpus[&cpu].node_id] -= 1;
                 }
                 self.cpu_pool.free(&cpus_to_free)?;
                 updated = true;
@@ -3251,6 +3259,7 @@ impl<'a> Scheduler<'a> {
                 layer.nr_cpus += cpus_to_alloc.weight();
                 for cpu in cpus_to_alloc.iter() {
                     layer.nr_llc_cpus[self.cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+                    layer.nr_node_cpus[self.cpu_pool.topo.all_cpus[&cpu].node_id] += 1;
                 }
                 self.cpu_pool.mark_allocated(&cpus_to_alloc)?;
                 updated = true;
@@ -3413,12 +3422,15 @@ impl<'a> Scheduler<'a> {
                 let nr_available_cpus = available_cpus.weight();
 
                 // Open layers need the intersection of allowed cpus and
-                // available cpus. Recompute per-LLC counts since open
-                // layers bypass alloc/free.
+                // available cpus. Recompute per-LLC and per-node counts
+                // since open layers bypass alloc/free.
                 layer.cpus = available_cpus;
                 layer.nr_cpus = nr_available_cpus;
                 for llc in self.cpu_pool.topo.all_llcs.values() {
                     layer.nr_llc_cpus[llc.id] = layer.cpus.and(&llc.span).weight();
+                }
+                for node in self.cpu_pool.topo.nodes.values() {
+                    layer.nr_node_cpus[node.id] = layer.cpus.and(&node.span).weight();
                 }
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
