@@ -213,6 +213,20 @@ pub fn parse_duration_ns(s: &str) -> Result<TimeNs, String> {
     Ok(ns as TimeNs)
 }
 
+/// Resolve `sched_overhead_rbc_ns` from the `SCX_SIM_RBC_NS` environment variable.
+///
+/// - Unset or empty: returns `None` (disabled).
+/// - Any decimal integer: returns `Some(value)`.
+pub fn sched_overhead_rbc_ns_from_env() -> Option<u64> {
+    match std::env::var("SCX_SIM_RBC_NS").ok().as_deref() {
+        None | Some("") => None,
+        Some(s) => Some(s.parse::<u64>().unwrap_or_else(|_| {
+            panic!("SCX_SIM_RBC_NS={s:?}: expected a u64 integer");
+        })),
+    }
+}
+}
+
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
@@ -230,6 +244,9 @@ pub struct Scenario {
     /// Use insertion-order tiebreaking instead of PRNG-randomized tiebreaking
     /// for events at the same timestamp. Default: false (randomized).
     pub fixed_priority: bool,
+    /// Nanoseconds per retired conditional branch in scheduler C code.
+    /// `None` = disabled (no PMU counter). `Some(10)` = 10ns per RBC.
+    pub sched_overhead_rbc_ns: Option<u64>,
 }
 
 /// Builder for constructing scenarios.
@@ -243,6 +260,7 @@ pub struct ScenarioBuilder {
     overhead: OverheadConfig,
     seed: u32,
     fixed_priority: bool,
+    sched_overhead_rbc_ns: Option<u64>,
 }
 
 impl Scenario {
@@ -257,6 +275,7 @@ impl Scenario {
             overhead: OverheadConfig::from_env(),
             seed: seed_from_env(),
             fixed_priority: false,
+            sched_overhead_rbc_ns: sched_overhead_rbc_ns_from_env(),
         }
     }
 }
@@ -384,6 +403,13 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Set nanoseconds per retired conditional branch for PMU-based
+    /// scheduler overhead measurement. `None` disables RBC counting.
+    pub fn sched_overhead_rbc_ns(mut self, ns: Option<u64>) -> Self {
+        self.sched_overhead_rbc_ns = ns;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -410,6 +436,7 @@ impl ScenarioBuilder {
             overhead: self.overhead,
             seed: self.seed,
             fixed_priority: self.fixed_priority,
+            sched_overhead_rbc_ns: self.sched_overhead_rbc_ns,
         }
     }
 }

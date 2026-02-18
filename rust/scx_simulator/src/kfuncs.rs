@@ -26,6 +26,7 @@ use crate::cpu::{LastStopReason, SimCpu};
 use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
+use crate::perf::RbcCounter;
 use crate::scenario::{NoiseConfig, OverheadConfig};
 use crate::task::OpsTaskState;
 use crate::trace::{Trace, TraceKind};
@@ -121,6 +122,12 @@ pub struct SimulatorState {
     pub noise: NoiseConfig,
     /// Context switch overhead configuration.
     pub overhead: OverheadConfig,
+    /// RBC counter for measuring scheduler C code overhead (None = disabled).
+    pub rbc_counter: Option<RbcCounter>,
+    /// Nanoseconds per retired conditional branch (None = disabled).
+    pub sched_overhead_rbc_ns: Option<u64>,
+    /// Number of kfunc calls during the current RBC measurement window.
+    pub rbc_kfunc_calls: u32,
 }
 
 impl SimulatorState {
@@ -354,6 +361,10 @@ pub fn set_sim_clock(local: TimeNs) {
 
 /// Access the simulator state from within a kfunc.
 ///
+/// Pauses the RBC counter during kfunc execution (kfunc code is not
+/// scheduler C code and should not contribute to overhead measurement)
+/// and resumes it on return.
+///
 /// # Panics
 /// Panics if called outside of an `enter_sim`/`exit_sim` scope.
 fn with_sim<F, R>(f: F) -> R
@@ -367,7 +378,18 @@ where
         // SAFETY: We hold a valid pointer installed by enter_sim, and
         // the simulation is single-threaded.
         let sim = unsafe { &mut *ptr };
-        f(sim)
+        // Track kfunc call count for RBC accounting
+        sim.rbc_kfunc_calls += 1;
+        // Pause RBC counter — kfunc code is not scheduler code
+        if let Some(ref rbc) = sim.rbc_counter {
+            let _ = rbc.disable();
+        }
+        let result = f(sim);
+        // Resume RBC counter — returning to scheduler C code
+        if let Some(ref rbc) = sim.rbc_counter {
+            let _ = rbc.enable();
+        }
+        result
     })
 }
 
@@ -1130,6 +1152,9 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             },
+            rbc_counter: None,
+            sched_overhead_rbc_ns: None,
+            rbc_kfunc_calls: 0,
         }
     }
 
