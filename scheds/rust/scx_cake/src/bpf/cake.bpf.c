@@ -87,12 +87,11 @@ struct tier_snap tier_snapshot[4] SEC(".bss") __attribute__((aligned(64)));
  * snapshot_dirty was the tick-based rebuild flag — no longer needed.
  * Tier snapshot now updated incrementally via atomics in cake_running. */
 
-/* Force BPF arena map association for struct_ops programs.
- * BSS-stored __arena pointers generate addr_space_cast instructions, but the
- * verifier only allows these in programs with an associated arena map.
+/* ARENA_ASSOC: Force arena map association for struct_ops programs.
  * BSS loads don't create arena map relocations — only direct &arena references do.
- * volatile prevents dead-code elimination. Cost: 2 insns (~0.4ns). */
-#define ARENA_ASSOC() do { void *volatile __p = (void *)&arena; (void)__p; } while (0)
+ * Inline asm constraint forces &arena into a register (ld_imm64 relocation)
+ * without emitting a stack store. 2 insns vs 3 with volatile. */
+#define ARENA_ASSOC() asm volatile("" : : "r"(&arena))
 
 static __always_inline struct cake_stats *get_local_stats(void)
 {
