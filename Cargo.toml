@@ -48,3 +48,7 @@ inherits = "release"
 lto = false
 codegen-units = 32
 panic = "abort"
+
+[patch.crates-io]
+libbpf-cargo = { git = "https://github.com/libbpf/libbpf-rs", rev = "80d730e8c70c3615fdcc41eef457f64dc304d000" }
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs", rev = "80d730e8c70c3615fdcc41eef457f64dc304d000" }

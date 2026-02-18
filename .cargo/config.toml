@@ -1,5 +1,2 @@
 [alias]
 xtask = "run --package xtask --"
-
-[build]
-jobs = 6
