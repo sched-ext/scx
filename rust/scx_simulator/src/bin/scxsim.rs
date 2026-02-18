@@ -68,9 +68,13 @@ struct Cli {
     no_overhead: bool,
 
     /// Nanoseconds of logical time per retired conditional branch in scheduler
-    /// code. Enables PMU-based scheduler overhead measurement.
-    #[arg(long, value_name = "NS")]
+    /// code. Enables PMU-based scheduler overhead measurement. Default: 10.
+    #[arg(long, value_name = "NS", conflicts_with = "no_rbc")]
     rbc_ns: Option<u64>,
+
+    /// Disable PMU-based RBC scheduler overhead (equivalent to --rbc-ns 0).
+    #[arg(long, conflicts_with = "rbc_ns")]
+    no_rbc: bool,
 
     /// List available schedulers and exit.
     #[arg(long)]
@@ -124,6 +128,9 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
     if let Some(rbc_ns) = cli.rbc_ns {
         scenario.sched_overhead_rbc_ns = Some(rbc_ns);
+    }
+    if cli.no_rbc {
+        scenario.sched_overhead_rbc_ns = Some(0);
     }
 
     let sched = load_scheduler(&cli.scheduler, cli.cpus)?;
