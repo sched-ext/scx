@@ -2799,8 +2799,13 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	struct layer *layer;
 
 	/* Drop membership from older layer. */
-	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
-		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+	u32 old_lid = taskc->layer_id;
+
+	if (old_lid < nr_layers) {
+		__sync_fetch_and_add(&layers[old_lid].nr_tasks, -1);
+		if (taskc->pinned_node < MAX_NUMA_NODES)
+			__sync_fetch_and_add(&layers[old_lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+	}
 
 	if (layer_id >= nr_layers)
 		return;
@@ -2827,6 +2832,8 @@ static void switch_to_layer(struct task_struct *p, struct task_ctx *taskc, u64 l
 	__sync_fetch_and_add(&layer->nr_tasks, 1);
 
 	refresh_cpus_flags(taskc, p->cpus_ptr);
+	if (taskc->pinned_node < MAX_NUMA_NODES)
+		__sync_fetch_and_add(&layer->nr_node_pinned_tasks[taskc->pinned_node], 1);
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
@@ -3372,8 +3379,22 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	 * belongs to so that we can compute all_cpuset_allowed. Defer
 	 * the call until we match.
 	 */
-	if (taskc->layer_id != MAX_LAYERS)
+	if (taskc->layer_id != MAX_LAYERS) {
+		u32 old_pinned = taskc->pinned_node;
+
 		refresh_cpus_flags(taskc, cpumask);
+
+		if (old_pinned != taskc->pinned_node) {
+			u32 lid = taskc->layer_id;
+
+			if (lid < nr_layers) {
+				if (old_pinned < MAX_NUMA_NODES)
+					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[old_pinned], -1);
+				if (taskc->pinned_node < MAX_NUMA_NODES)
+					__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], 1);
+			}
+		}
+	}
 
 	/* invalidate all cached cpumasks */
 	taskc->layered_cpus.seq = -1;
@@ -3520,8 +3541,13 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (taskc->layer_id < nr_layers)
-		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+	u32 lid = taskc->layer_id;
+
+	if (lid < nr_layers) {
+		__sync_fetch_and_add(&layers[lid].nr_tasks, -1);
+		if (taskc->pinned_node < MAX_NUMA_NODES)
+			__sync_fetch_and_add(&layers[lid].nr_node_pinned_tasks[taskc->pinned_node], -1);
+	}
 
 	if (membw_event)
 		scx_pmu_task_fini(p);

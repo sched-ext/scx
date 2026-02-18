@@ -361,6 +361,7 @@ struct layer {
 	int			growth_algo;
 
 	u64			nr_tasks;
+	u64			nr_node_pinned_tasks[MAX_NUMA_NODES];
 
 	u64			cpus_seq;
 	bool			check_no_idle;

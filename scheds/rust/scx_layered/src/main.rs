@@ -966,6 +966,7 @@ struct Stats {
     topo: Arc<Topology>,
     nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
+    layer_nr_node_pinned_tasks: Vec<Vec<u64>>,
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<Vec<f64>>,
@@ -1089,6 +1090,7 @@ impl Stats {
             topo: topo.clone(),
             nr_layers,
             nr_layer_tasks: vec![0; nr_layers],
+            layer_nr_node_pinned_tasks: vec![vec![0; nr_nodes]; nr_layers],
 
             total_util: 0.0,
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
@@ -1134,22 +1136,23 @@ impl Stats {
         let elapsed_f64 = elapsed.as_secs_f64();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
-        let nr_layer_tasks: Vec<usize> = skel
-            .maps
-            .bss_data
-            .as_ref()
-            .unwrap()
-            .layers
+        let layers = &skel.maps.bss_data.as_ref().unwrap().layers;
+        let nr_layer_tasks: Vec<usize> = layers
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
             .collect();
-        let layer_slice_us: Vec<u64> = skel
-            .maps
-            .bss_data
-            .as_ref()
-            .unwrap()
-            .layers
+        let layer_nr_node_pinned_tasks: Vec<Vec<u64>> = layers
+            .iter()
+            .take(self.nr_layers)
+            .map(|layer| {
+                layer.nr_node_pinned_tasks[..self.topo.nodes.len()]
+                    .iter()
+                    .map(|&v| v)
+                    .collect()
+            })
+            .collect();
+        let layer_slice_us: Vec<u64> = layers
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.slice_ns / 1000_u64)
@@ -1299,6 +1302,7 @@ impl Stats {
             topo: self.topo.clone(),
             nr_layers: self.nr_layers,
             nr_layer_tasks,
+            layer_nr_node_pinned_tasks,
 
             total_util: layer_utils
                 .iter()

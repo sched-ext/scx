@@ -238,6 +238,8 @@ pub struct LayerStats {
     pub dsq_insert_ewma: f64,
     #[stat(desc = "Per-node pinned task utilization (100% = one full CPU)")]
     pub node_pinned_utils: Vec<f64>,
+    #[stat(desc = "Per-node pinned task counts")]
+    pub node_pinned_tasks: Vec<u64>,
 }
 
 impl LayerStats {
@@ -359,6 +361,7 @@ impl LayerStats {
                 .iter()
                 .map(|u| u * 100.0)
                 .collect(),
+            node_pinned_tasks: stats.layer_nr_node_pinned_tasks[lidx].clone(),
         }
     }
 
@@ -450,11 +453,11 @@ impl LayerStats {
             fmt_pct(self.skip_remote_node),
         )?;
 
-        // node-pinned utilization (only if any node has pinned tasks)
-        if self.node_pinned_utils.iter().any(|u| *u > 0.0) {
-            let prefix = "  pinned  util ";
-            // N99=99999.9 = 12 chars + 1 space = 13
-            let cell_width = 13;
+        // node-pinned utilization and task counts (util/tasks per node)
+        if self.node_pinned_tasks.iter().any(|t| *t > 0) {
+            let prefix = "  pinned  util/tasks ";
+            // N99=99999.9/99999 = 18 chars + 1 space = 19
+            let cell_width = 19;
             let usable = if max_width > prefix.len() {
                 max_width - prefix.len()
             } else {
@@ -462,7 +465,9 @@ impl LayerStats {
             };
             let cells_per_row = (usable / cell_width).max(1);
 
-            for (col, (nid, util)) in self.node_pinned_utils.iter().enumerate().enumerate() {
+            for (col, nid) in (0..self.node_pinned_utils.len()).enumerate() {
+                let util = self.node_pinned_utils[nid];
+                let tasks = self.node_pinned_tasks.get(nid).copied().unwrap_or(0);
                 if col % cells_per_row == 0 {
                     if col > 0 {
                         writeln!(w)?;
@@ -471,7 +476,7 @@ impl LayerStats {
                 } else {
                     write!(w, " ")?;
                 }
-                write!(w, "N{}={:7.1}", nid, util)?;
+                write!(w, "N{}={:7.1}/{:5}", nid, util, tasks)?;
             }
             writeln!(w)?;
         }
