@@ -198,13 +198,16 @@ fn charge_sched_time(state: &mut SimulatorState, cpu: CpuId, ops: &str) {
         let _ = rbc.disable();
         let count = rbc.read().unwrap_or(0);
         if let Some(ns_per_rbc) = state.sched_overhead_rbc_ns {
-            let charged_ns = count * ns_per_rbc;
-            state.cpus[cpu.0 as usize].local_clock += charged_ns;
+            let rbc_ns = count * ns_per_rbc;
+            // total_ns = RBC overhead + kfunc cost (currently zero; will
+            // grow when a kfunc cost table is added)
+            let total_ns = rbc_ns;
+            state.cpus[cpu.0 as usize].local_clock += total_ns;
             trace!(
                 ops,
                 rbc = count,
-                charged_ns,
                 kfuncs = state.rbc_kfunc_calls,
+                total_ns,
                 "sched overhead"
             );
         }
