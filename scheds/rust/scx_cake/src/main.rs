@@ -17,6 +17,8 @@ use clap::{Parser, ValueEnum};
 use log::{info, warn};
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
+use scx_arena::ArenaLib;
+use scx_utils::NR_CPU_IDS;
 // Include the generated interface bindings
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 mod bpf_intf {
@@ -318,7 +320,7 @@ impl<'a> Scheduler<'a> {
         args: Args,
         open_object: &'a mut std::mem::MaybeUninit<libbpf_rs::OpenObject>,
     ) -> Result<Self> {
-        use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+        use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 
         // Open and load the BPF skeleton
         let skel_builder = BpfSkelBuilder::default();
@@ -380,10 +382,28 @@ impl<'a> Scheduler<'a> {
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
+            // Arena library: nr_cpu_ids must be set before load() — arena_init
+            // checks this and returns -ENODEV (errno 19) if uninitialized.
+            rodata.nr_cpu_ids = *NR_CPU_IDS as u32;
         }
 
         // Load the BPF program
-        let skel = open_skel.load().context("Failed to load BPF program")?;
+        let mut skel = open_skel.load().context("Failed to load BPF program")?;
+
+        // Initialize the BPF arena library.
+        // Must happen after load() (BPF maps are now live) but before attach_struct_ops()
+        // (scheduler not yet running, so init_task hasn't fired yet).
+        // ArenaLib::setup() runs SEC("syscall") probes:
+        //   1. arena_init: allocates static pages, inits task stack allocator
+        //   2. arena_topology_node_init: registers topology nodes for arena traversal
+        let task_ctx_size = std::mem::size_of::<bpf_intf::cake_task_ctx>();
+        let arena = ArenaLib::init(skel.object_mut(), task_ctx_size, topo.nr_cpus)
+            .context("Failed to create ArenaLib")?;
+        arena.setup().context("Failed to initialize BPF arena")?;
+        info!(
+            "BPF arena initialized (task_ctx_size={}B, nr_cpus={})",
+            task_ctx_size, topo.nr_cpus
+        );
 
         Ok(Self {
             skel,

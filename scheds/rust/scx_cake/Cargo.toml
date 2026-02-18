@@ -19,6 +19,7 @@ crossterm = "0.29"
 arboard = "3.6"
 
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
+scx_arena = { path = "../../../rust/scx_arena/scx_arena", version = "0.1" }
 core_affinity = "0.8"
 quanta = "0.12"
 crossbeam-utils = "0.8"

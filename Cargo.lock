@@ -3746,6 +3746,7 @@ dependencies = [
  "nix 0.29.0",
  "quanta",
  "ratatui 0.30.0",
+ "scx_arena",
  "scx_cargo",
  "scx_utils",
  "tachyonfx",
