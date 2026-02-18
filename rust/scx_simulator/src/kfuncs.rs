@@ -32,6 +32,22 @@ use crate::task::OpsTaskState;
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
+/// Nanosecond cost for each simulated kernel function.
+///
+/// Each kfunc call during a scheduler ops invocation contributes its tier
+/// cost to the CPU's `local_clock` via `rbc_kfunc_ns`, complementing the
+/// RBC counter (which measures scheduler C code).
+pub mod kfunc_cost {
+    /// Field read/write: `scx_bpf_now`, `bpf_ktime_get_ns`, etc.
+    pub const TRIVIAL: u64 = 10;
+    /// Lookup/insert: `scx_bpf_create_dsq`, `bpf_task_from_pid`, etc.
+    pub const SIMPLE: u64 = 50;
+    /// PID lookup + trace: `scx_bpf_dsq_insert`, `scx_bpf_task_running`, etc.
+    pub const MODERATE: u64 = 100;
+    /// CPU scan, DSQ ops: `scx_bpf_select_cpu_dfl`, DSQ iterators, etc.
+    pub const COMPLEX: u64 = 200;
+}
+
 /// Which scheduler callback is currently executing.
 ///
 /// The kernel defers `scx_bpf_dsq_insert` — it never inserts immediately.
@@ -128,6 +144,8 @@ pub struct SimulatorState {
     pub sched_overhead_rbc_ns: Option<u64>,
     /// Number of kfunc calls during the current RBC measurement window.
     pub rbc_kfunc_calls: u32,
+    /// Accumulated kfunc nanosecond cost during the current RBC measurement window.
+    pub rbc_kfunc_ns: u64,
 }
 
 impl SimulatorState {
@@ -363,11 +381,12 @@ pub fn set_sim_clock(local: TimeNs) {
 ///
 /// Pauses the RBC counter during kfunc execution (kfunc code is not
 /// scheduler C code and should not contribute to overhead measurement)
-/// and resumes it on return.
+/// and resumes it on return. Adds `cost_ns` to the accumulated kfunc
+/// cost for the current measurement window.
 ///
 /// # Panics
 /// Panics if called outside of an `enter_sim`/`exit_sim` scope.
-fn with_sim<F, R>(f: F) -> R
+fn with_sim<F, R>(cost_ns: u64, f: F) -> R
 where
     F: FnOnce(&mut SimulatorState) -> R,
 {
@@ -378,8 +397,9 @@ where
         // SAFETY: We hold a valid pointer installed by enter_sim, and
         // the simulation is single-threaded.
         let sim = unsafe { &mut *ptr };
-        // Track kfunc call count for RBC accounting
+        // Track kfunc call count and cost for RBC accounting
         sim.rbc_kfunc_calls += 1;
+        sim.rbc_kfunc_ns += cost_ns;
         // Pause RBC counter — kfunc code is not scheduler code
         if let Some(ref rbc) = sim.rbc_counter {
             let _ = rbc.disable();
@@ -400,7 +420,7 @@ where
 /// Create a dispatch queue.
 #[no_mangle]
 pub extern "C" fn scx_bpf_create_dsq(dsq_id: u64, _node: i32) -> i32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         let result = if sim.dsqs.create(DsqId(dsq_id)) {
             0
         } else {
@@ -423,7 +443,7 @@ pub extern "C" fn scx_bpf_select_cpu_dfl(
     _wake_flags: u64,
     is_idle: *mut bool,
 ) -> i32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::COMPLEX, |sim| {
         let cpus_ptr = unsafe { ffi::sim_task_get_cpus_ptr(p) };
         let allowed = |cpu: u32| -> bool {
             cpus_ptr.is_null() || unsafe { ffi::bpf_cpumask_test_cpu(cpu, cpus_ptr) }
@@ -490,7 +510,7 @@ pub extern "C" fn scx_bpf_select_cpu_and(
 ) -> i32 {
     const SCX_PICK_IDLE_CORE: u64 = 1;
 
-    with_sim(|sim| {
+    with_sim(kfunc_cost::COMPLEX, |sim| {
         let nr_cpus = sim.cpus.len();
         let prev = CpuId(prev_cpu as u32);
         let want_idle_core = flags & SCX_PICK_IDLE_CORE != 0;
@@ -546,7 +566,7 @@ pub extern "C" fn scx_bpf_select_cpu_and(
 /// at which point `SCX_DSQ_LOCAL` is mapped to the correct CPU.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_insert(p: *mut c_void, dsq_id: u64, slice: u64, enq_flags: u64) {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::MODERATE, |sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
         debug!(pid = pid.0, dsq_id, slice = %FmtN(slice), "kfunc dsq_insert");
@@ -593,7 +613,7 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
         "cannot use vtime ordering for built-in DSQ {:#x}",
         dsq_id
     );
-    with_sim(|sim| {
+    with_sim(kfunc_cost::MODERATE, |sim| {
         let pid = sim.task_pid_from_raw(p);
         unsafe { ffi::sim_task_set_slice(p, slice) };
         debug!(pid = pid.0, dsq_id, slice = %FmtN(slice), vtime = %Vtime(vtime), "kfunc dsq_insert_vtime");
@@ -623,7 +643,7 @@ pub extern "C" fn scx_bpf_dsq_insert_vtime(
 /// Move the head of a DSQ to the current CPU's local DSQ.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::COMPLEX, |sim| {
         let cpu_idx = sim.current_cpu.0 as usize;
         // Need to split borrow: extract cpu mutably, pass dsqs mutably
         let cpus_ptr = sim.cpus.as_mut_ptr();
@@ -648,7 +668,7 @@ pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
 /// Query the number of tasks queued in a DSQ.
 #[no_mangle]
 pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         let dsq = DsqId(dsq_id);
         if dsq.is_local() {
             let cpu = sim.current_cpu.0 as usize;
@@ -674,7 +694,7 @@ pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
 /// Get the current simulated time (per-CPU local clock).
 #[no_mangle]
 pub extern "C" fn scx_bpf_now() -> u64 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         let cpu = sim.current_cpu.0 as usize;
         sim.cpus[cpu].local_clock
     })
@@ -683,20 +703,20 @@ pub extern "C" fn scx_bpf_now() -> u64 {
 /// Get the current CPU ID.
 #[no_mangle]
 pub extern "C" fn bpf_get_smp_processor_id() -> u32 {
-    with_sim(|sim| sim.current_cpu.0)
+    with_sim(kfunc_cost::TRIVIAL, |sim| sim.current_cpu.0)
 }
 
 /// Alias for sim_wrapper.h macro override (avoids conflict with the
 /// static function pointer in bpf_helper_defs.h).
 #[no_mangle]
 pub extern "C" fn sim_bpf_get_smp_processor_id() -> u32 {
-    with_sim(|sim| sim.current_cpu.0)
+    with_sim(kfunc_cost::TRIVIAL, |sim| sim.current_cpu.0)
 }
 
 /// Deterministic PRNG replacement for bpf_get_prandom_u32.
 #[no_mangle]
 pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {
-    with_sim(|sim| sim.next_prng())
+    with_sim(kfunc_cost::TRIVIAL, |sim| sim.next_prng())
 }
 
 /// Get the CPU a task is assigned to.
@@ -706,7 +726,7 @@ pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {
 /// run yet.
 #[no_mangle]
 pub extern "C" fn scx_bpf_task_cpu(p: *const c_void) -> i32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         let pid = sim.task_pid_from_raw(p as *mut c_void);
         let cpu = sim.task_last_cpu.get(&pid).copied().unwrap_or(CpuId(0));
         cpu.0 as i32
@@ -733,7 +753,7 @@ pub extern "C" fn scx_bpf_error_bstr(fmt: *const i8, _data: *const u64, _data_sz
 /// each task.
 #[no_mangle]
 pub extern "C" fn scx_bpf_reenqueue_local() -> u32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         debug!(cpu = sim.current_cpu.0, "kfunc reenqueue_local");
         sim.reenqueue_local_requested = true;
         0
@@ -754,7 +774,7 @@ pub extern "C" fn scx_bpf_destroy_dsq(_dsq_id: u64) {}
 /// No-op for bpf_ktime_get_ns -- use per-CPU local clock.
 #[no_mangle]
 pub extern "C" fn bpf_ktime_get_ns() -> u64 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         let cpu = sim.current_cpu.0 as usize;
         sim.cpus[cpu].local_clock
     })
@@ -780,7 +800,7 @@ pub extern "C" fn bpf_task_release(_p: *mut c_void) {}
 /// is always "current" on idle CPUs).
 #[no_mangle]
 pub extern "C" fn bpf_get_current_task_btf() -> *mut c_void {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         // Waker override: during select_cpu for a waker-induced wake,
         // return the waker's task_struct (kernel semantics).
         if let Some(raw) = sim.waker_task_raw {
@@ -810,7 +830,7 @@ pub extern "C" fn sim_bpf_get_current_task_btf() -> *mut c_void {
 /// `__COMPAT_scx_bpf_cpu_curr` is overridden to a macro returning NULL.
 #[no_mangle]
 pub extern "C" fn scx_bpf_cpu_curr(cpu: i32) -> *mut c_void {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         let idx = cpu as usize;
         if idx >= sim.cpus.len() {
             return ptr::null_mut();
@@ -835,7 +855,7 @@ pub extern "C" fn scx_bpf_cpu_curr(cpu: i32) -> *mut c_void {
 /// state in SimulatorState.
 #[no_mangle]
 pub extern "C" fn sim_dsq_iter_begin(dsq_id: u64, _flags: u64) -> *mut c_void {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::COMPLEX, |sim| {
         let pids = sim.dsqs.ordered_pids(DsqId(dsq_id));
         debug!(dsq_id, count = pids.len(), "dsq_iter_begin");
 
@@ -860,7 +880,7 @@ pub extern "C" fn sim_dsq_iter_begin(dsq_id: u64, _flags: u64) -> *mut c_void {
 /// Advance the DSQ iterator. Returns the next task_struct* or NULL.
 #[no_mangle]
 pub extern "C" fn sim_dsq_iter_next() -> *mut c_void {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::COMPLEX, |sim| {
         let iter = match sim.dsq_iter.as_mut() {
             Some(it) => it,
             None => return ptr::null_mut(),
@@ -892,7 +912,7 @@ pub extern "C" fn sim_dsq_iter_next() -> *mut c_void {
 /// is determined from the active DSQ iterator state.
 #[no_mangle]
 pub extern "C" fn sim_scx_bpf_dsq_move(p: *mut c_void, dst_dsq_id: u64, _enq_flags: u64) -> bool {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::COMPLEX, |sim| {
         let pid = sim.task_pid_from_raw(p);
         let src_dsq_id = match &sim.dsq_iter {
             Some(iter) => iter.dsq_id,
@@ -943,7 +963,7 @@ pub extern "C" fn sim_scx_bpf_dsq_move(p: *mut c_void, dst_dsq_id: u64, _enq_fla
 /// to get the raw pointer from our PID→pointer map.
 #[no_mangle]
 pub extern "C" fn bpf_task_from_pid(pid: i32) -> *mut c_void {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         sim.task_pid_to_raw
             .get(&Pid(pid))
             .map_or(ptr::null_mut(), |&raw| raw as *mut c_void)
@@ -961,7 +981,7 @@ pub extern "C" fn bpf_task_from_pid(pid: i32) -> *mut c_void {
 /// on those CPUs. Flags are OR'd so multiple kicks accumulate.
 #[no_mangle]
 pub extern "C" fn scx_bpf_kick_cpu(cpu: i32, flags: u64) {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
         let cpu_id = CpuId(cpu as u32);
         if (cpu_id.0 as usize) < sim.cpus.len() {
             let new_flags = KickFlags::from_raw(flags);
@@ -1054,7 +1074,7 @@ pub extern "C" fn bpf_map_lookup_percpu_elem(
 /// Check if a task is currently running on any CPU.
 #[no_mangle]
 pub extern "C" fn scx_bpf_task_running(p: *const c_void) -> bool {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::MODERATE, |sim| {
         let pid = sim.task_pid_from_raw(p as *mut c_void);
         let running = sim.cpus.iter().any(|cpu| cpu.current_task == Some(pid));
         debug!(pid = pid.0, running, "kfunc task_running");
@@ -1065,7 +1085,7 @@ pub extern "C" fn scx_bpf_task_running(p: *const c_void) -> bool {
 /// Return the number of possible CPUs.
 #[no_mangle]
 pub extern "C" fn scx_bpf_nr_cpu_ids() -> u32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         let n = sim.cpus.len() as u32;
         debug!(n, "kfunc nr_cpu_ids");
         n
@@ -1075,7 +1095,7 @@ pub extern "C" fn scx_bpf_nr_cpu_ids() -> u32 {
 /// Set CPU performance level. Stores in SimCpu for observability.
 #[no_mangle]
 pub extern "C" fn scx_bpf_cpuperf_set(cpu: i32, perf: u32) {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         if let Some(c) = sim.cpus.get_mut(cpu as usize) {
             c.perf_lvl = perf;
         }
@@ -1086,7 +1106,7 @@ pub extern "C" fn scx_bpf_cpuperf_set(cpu: i32, perf: u32) {
 /// or SCX_CPUPERF_ONE (1024) if never set.
 #[no_mangle]
 pub extern "C" fn scx_bpf_cpuperf_cur(cpu: i32) -> u32 {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         sim.cpus
             .get(cpu as usize)
             .map_or(0, |c| if c.perf_lvl > 0 { c.perf_lvl } else { 1024 })
@@ -1107,7 +1127,7 @@ pub extern "C" fn scx_bpf_cpuperf_cap(_cpu: i32) -> u32 {
 /// and inserts a `TimerFired` event into the event queue.
 #[no_mangle]
 pub extern "C" fn sim_timer_start(nsecs: u64) {
-    with_sim(|sim| {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
         sim.pending_timer_ns = Some(sim.clock + nsecs);
         debug!(nsecs, fire_at = sim.clock + nsecs, "timer_start");
     });
@@ -1155,6 +1175,7 @@ mod tests {
             rbc_counter: None,
             sched_overhead_rbc_ns: None,
             rbc_kfunc_calls: 0,
+            rbc_kfunc_ns: 0,
         }
     }
 

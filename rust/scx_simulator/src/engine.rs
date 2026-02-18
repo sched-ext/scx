@@ -187,6 +187,7 @@ impl Monitor for NoopMonitor {
 fn start_rbc(state: &mut SimulatorState) {
     if let Some(ref rbc) = state.rbc_counter {
         state.rbc_kfunc_calls = 0;
+        state.rbc_kfunc_ns = 0;
         let _ = rbc.reset();
         let _ = rbc.enable();
     }
@@ -199,14 +200,14 @@ fn charge_sched_time(state: &mut SimulatorState, cpu: CpuId, ops: &str) {
         let count = rbc.read().unwrap_or(0);
         if let Some(ns_per_rbc) = state.sched_overhead_rbc_ns {
             let rbc_ns = count * ns_per_rbc;
-            // total_ns = RBC overhead + kfunc cost (currently zero; will
-            // grow when a kfunc cost table is added)
-            let total_ns = rbc_ns;
+            let kfunc_ns = state.rbc_kfunc_ns;
+            let total_ns = rbc_ns + kfunc_ns;
             state.cpus[cpu.0 as usize].local_clock += total_ns;
             trace!(
                 ops,
                 rbc = count,
                 kfuncs = state.rbc_kfunc_calls,
+                kfunc_ns,
                 total_ns,
                 "sched overhead"
             );
@@ -332,6 +333,7 @@ impl<S: Scheduler> Simulator<S> {
             rbc_counter,
             sched_overhead_rbc_ns: rbc_ns,
             rbc_kfunc_calls: 0,
+            rbc_kfunc_ns: 0,
         };
 
         // Initialize scheduler
