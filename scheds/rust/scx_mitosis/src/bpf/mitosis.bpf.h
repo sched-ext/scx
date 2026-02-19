@@ -20,7 +20,7 @@
 
 #include "intf.h"
 #include "dsq.bpf.h"
-#include "cleanup.bpf.h"
+#include <lib/cleanup.bpf.h>
 
 extern const volatile u32 nr_llc;
 
