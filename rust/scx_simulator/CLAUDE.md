@@ -110,3 +110,73 @@ deviate from kernel semantics. The `<issue>` is a minibeads issue ID (e.g.
 // The kernel only calls ops.dequeue when the task is in SCX_OPSS_QUEUED
 // state. We need to model ops_state.
 ```
+
+Multi-Agent Team Mode
+========================================
+
+When you find yourself in a parent directory containing multiple checkouts of
+the same repository (e.g., `/home/newton/work/multi_scx/` with `scx1/`, `scx2/`,
+`scx3/`, `scx4/`), you are in **multi-agent team mode**. This enables parallel
+development with multiple sub-agents working simultaneously.
+
+Directory Structure
+----------------------------------------
+
+```
+/home/newton/work/multi_scx/
+├── scx1/    # Checkout 1 - available for agent work
+├── scx2/    # Checkout 2 - available for agent work
+├── scx3/    # Checkout 3 - available for agent work
+└── scx4/    # Checkout 4 - available for agent work
+```
+
+Each checkout is a complete working copy. Sub-agents can work in different
+checkouts simultaneously without conflicts.
+
+Parallel Development Philosophy
+----------------------------------------
+
+1. **Commit and push early and often** to the same branch. Don't let work
+   accumulate locally — push as soon as `./validate.sh` passes.
+
+2. **Resolve conflicts early**. When multiple agents push to the same branch,
+   the lead agent should pull, rebase, resolve conflicts, and push promptly.
+
+3. **Keep tests passing**. Every commit must pass `./validate.sh` locally.
+   Check CI status with `with-proxy gh run list` and fix failures immediately.
+
+4. **Stay on the same branch** unless explicitly asked to create a feature
+   branch for speculative work.
+
+Spawning Sub-Agents
+----------------------------------------
+
+When spawning a sub-agent to work on a task:
+
+1. **Always specify which checkout directory** the agent should use:
+   ```
+   You are working on the scx_simulator project in /home/newton/work/multi_scx/scx2/rust/scx_simulator
+   ```
+
+2. **Assign different checkouts** to parallel tasks to avoid conflicts.
+
+3. **Include clear instructions** about pulling latest, running validation,
+   committing, and pushing.
+
+After Sub-Agent Completion
+----------------------------------------
+
+When sub-agents complete their work:
+
+1. **Check for conflicts**: If multiple agents pushed, rebase and resolve.
+
+2. **Sync all checkouts**: Pull the merged state to all working copies:
+   ```bash
+   for d in scx1 scx2 scx3 scx4; do
+     cd /path/to/multi_scx/$d && git fetch origin && git reset --hard origin/<branch>
+   done
+   ```
+
+3. **Close issues**: Use `mb close sim-XXXXX` for completed work.
+
+4. **Verify CI**: Check that the merged changes pass CI.
