@@ -1667,3 +1667,56 @@ fn test_lavd_core_compaction_pinned_prev() {
         "pinned task B was never scheduled"
     );
 }
+
+/// Verify that update_idle fixes CPU utilization tracking.
+///
+/// With update_idle implemented, idle CPUs now have their idle_start_clk
+/// set correctly, so `collect_sys_stat()` computes realistic utilization
+/// instead of treating every CPU as 100% busy. With 1 IO task on 8 CPUs,
+/// avg_sc_util should be well below its maximum of 1024.
+#[test]
+fn test_lavd_compaction_diagnostic() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+    sched.lavd_set_no_core_compaction(false);
+
+    type ProbeU64 = unsafe extern "C" fn() -> u64;
+
+    let probe_avg_sc_util: ProbeU64 = unsafe {
+        *sched
+            .get_symbol::<ProbeU64>(b"lavd_probe_sys_avg_sc_util\0")
+            .expect("lavd_probe_sys_avg_sc_util not found")
+    };
+
+    // Very low load: 1 IO task on 8 CPUs. Use a longer duration to let
+    // the exponentially-weighted avg_sc_util decay past warmup overhead.
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task(
+            "io-light",
+            0,
+            workloads::io_bound(100_000, 10_000_000), // 100us work, 10ms sleep (1%)
+        )
+        .duration_ms(200)
+        .build();
+
+    let sim = Simulator::new(sched);
+    let trace = sim.run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+
+    let avg_sc_util = unsafe { probe_avg_sc_util() };
+
+    eprintln!("=== Compaction Diagnostic ===");
+    eprintln!("avg_sc_util = {avg_sc_util} (was 1022 before update_idle fix)");
+
+    // After the update_idle fix, utilization should be significantly lower
+    // than the old saturated value of ~1022. Before the fix, every CPU
+    // appeared 100% busy because idle_start_clk was never set.
+    assert!(
+        avg_sc_util < 512,
+        "avg_sc_util = {avg_sc_util}; expected < 512 for 1 IO task on 8 CPUs"
+    );
+
+    drop(sim);
+}
