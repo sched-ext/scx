@@ -67,6 +67,15 @@
 #define bpf_ksym_exists(sym) (0)
 
 /*
+ * __COMPAT_scx_bpf_dsq_peek -- override the compat wrapper to directly
+ * call scx_bpf_dsq_peek which is implemented in kfuncs.rs. The compat
+ * wrapper normally falls through to bpf_iter_scx_dsq_* when bpf_ksym_exists
+ * returns 0, but those iterators aren't implemented in the simulator.
+ */
+extern struct task_struct *scx_bpf_dsq_peek(u64 dsq_id);
+#define __COMPAT_scx_bpf_dsq_peek(dsq_id) scx_bpf_dsq_peek(dsq_id)
+
+/*
  * __builtin_memcpy_inline fallback for non-Clang or older versions.
  */
 #ifndef __has_builtin
