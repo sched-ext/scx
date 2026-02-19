@@ -175,6 +175,148 @@ Write tests exercising:
 **Projected coverage**: 565 + 256 = 821 / 1090 = **75.3% line coverage**
 (up from 51.8%).
 
+## Shared Cgroup Tree Crate
+
+### Motivation
+
+The `sched-test` project (`~/playground/sched-test`) already has a mature
+cgroup tree implementation in `src/workloads/cgroup_tree.rs` (1549 lines) with
+QuickCheck-based random tree generation, resource modeling, and a fairness
+oracle. Rather than building a separate cgroup data model from scratch, we
+should extract the reusable core into a shared crate that both `sched-test`
+(live-kernel testing) and `scx_simulator` can consume.
+
+### What Can Be Shared
+
+The following types and functions from `sched-test` are platform-independent
+and reusable:
+
+- **`CGroupTreeNode`** — recursive tree: `{ node_id, resources, children }`
+- **`RandResources`** — newtype around `cgroups_rs::Resources` with
+  `Arbitrary` impl for QuickCheck-based random resource generation (cpu.weight,
+  cpu.max quota/period, cpuset, memory limits)
+- **`SystemConstraints`** — `{ num_cpus, total_memory_bytes }` for bounding
+  random generation to realistic values
+- **`NodeStats`** — per-node stats: weight, effective cpu.max, sibling
+  fraction, expected share, deviation
+- **`compute_oracle_stats()`** — fairness oracle computing expected shares
+  among siblings considering weights + bandwidth caps
+- **`compute_expected_shares()`** — iterative algorithm for weight+cap
+  interaction
+- **`arbitrary_tree()`** — random tree generation with configurable
+  max_depth/max_children
+- **`assign_ids()`** — pre-order ID assignment
+- **`simple_test_tree()` / `fixed_random_tree()`** — deterministic test trees
+
+### What Stays Platform-Specific
+
+- **sched-test**: `ActualizedCGroupTree` materializes the tree on the real
+  filesystem via `cgroups_rs::CgroupBuilder`, launches CPU hog processes into
+  leaf cgroups, and reads `/proc/meminfo`. This is inherently live-kernel.
+- **scx_simulator**: Will actualize the tree as C `struct cgroup` allocations,
+  wire up the CSS iterator, and fire cgroup ops through the scheduler FFI.
+
+### Proposed Crate: `scx_cgroup_tree`
+
+```
+rust/scx_simulator/
+├── Cargo.toml              (workspace root)
+├── crates/
+│   ├── scx_cgroup_tree/    (shared cgroup tree library)
+│   │   ├── Cargo.toml
+│   │   └── src/lib.rs      (CGroupTreeNode, RandResources, oracle, etc.)
+│   ├── scx_perf/           (PMU/RBC counter library)
+│   │   ├── Cargo.toml
+│   │   └── src/lib.rs      (PmuConfig, RbcCounter, PerfError)
+│   └── scx_simulator/      (the simulator itself)
+│       ├── Cargo.toml
+│       ├── src/
+│       ├── csrc/
+│       └── schedulers/
+```
+
+The shared crate depends on:
+- `cgroups-rs` — for `Resources` type (already used by sched-test `0.4.0`)
+- `quickcheck` — for `Arbitrary` impls
+- `rand` — for seeded deterministic generation
+
+The crate exposes a trait or function for actualization that each consumer
+implements:
+
+```rust
+/// Platform-independent cgroup tree node.
+pub struct CGroupTreeNode {
+    pub node_id: usize,
+    pub resources: RandResources,
+    pub children: Vec<CGroupTreeNode>,
+}
+
+/// Generate a random tree bounded by system constraints.
+pub fn arbitrary_tree(
+    g: &mut Gen,
+    constraints: &SystemConstraints,
+    max_depth: usize,
+    max_children: usize,
+) -> CGroupTreeNode;
+
+/// Compute expected fair shares among siblings.
+pub fn compute_oracle_stats(
+    tree: &CGroupTreeNode,
+    leaf_times: &[(usize, u64)],
+) -> Vec<NodeStats>;
+```
+
+### Impact on Phase 1
+
+Phase 1 (Cgroup Data Model) should USE `scx_cgroup_tree::CGroupTreeNode` as
+the Rust-side tree representation instead of inventing a new type. The
+simulator-specific C struct allocation becomes an "actualization" layer that
+reads the shared tree and creates `struct cgroup` pointers for the FFI.
+
+### Impact on Phase 6
+
+Phase 6 (Scenario API) can use `arbitrary_tree()` for property-based tests
+with random cgroup hierarchies, and `simple_test_tree()` / `fixed_random_tree()`
+for deterministic regression tests — all from the shared crate.
+
+## Multi-Crate Workspace
+
+### PMU/RBC Crate: `scx_perf`
+
+The existing `src/perf.rs` (285 lines) is self-contained with zero internal
+dependencies — it only uses `std`, `libc`, and `perf-event-open-sys`. It
+defines `PmuConfig`, `RbcCounter`, `PerfError`, and `try_create_rbc_counter()`.
+
+Extracting it into `crates/scx_perf/` is trivial. The simulator's
+`engine.rs` and `kfuncs.rs` use a consistent `start_rbc`/`charge_sched_time`
+pattern that can consume the crate through a simple import change.
+
+### Workspace Layout
+
+Convert `rust/scx_simulator/Cargo.toml` into a workspace root:
+
+```toml
+[workspace]
+members = [
+    "crates/scx_simulator",
+    "crates/scx_cgroup_tree",
+    "crates/scx_perf",
+]
+resolver = "2"
+```
+
+Move the current simulator source into `crates/scx_simulator/`. The
+`validate.sh`, `coverage.sh`, and other scripts update their paths
+accordingly (e.g., `cargo test -p scx_simulator`).
+
+### sched-test Integration
+
+Once `scx_cgroup_tree` is stable, `sched-test` can add it as a dependency
+(via path or git) and replace its local `CGroupTreeNode`, `RandResources`,
+`NodeStats`, and oracle code with imports from the shared crate. The
+`ActualizedCGroupTree` stays in sched-test since it depends on
+`cgroups_rs::CgroupBuilder` and process spawning.
+
 ## Dependencies
 
 - This issue has no blockers.
@@ -193,3 +335,10 @@ Write tests exercising:
 - **Kernel fidelity**: Cgroup ops fire at specific lifecycle points. We must
   match kernel ordering: `cgroup_init` before any task can be scheduled in the
   cgroup, `cgroup_exit` only after all tasks have left.
+- **`cgroups-rs` version alignment**: Both `sched-test` and the shared crate
+  need the same `cgroups-rs` version (`0.4.0`). The `Resources` type is the
+  main coupling point.
+- **Workspace migration**: Moving to a multi-crate workspace requires updating
+  `validate.sh`, `coverage.sh`, CI scripts, and `build.rs` paths. The `csrc/`
+  and `schedulers/` directories need to remain accessible to the simulator
+  crate's build script.
