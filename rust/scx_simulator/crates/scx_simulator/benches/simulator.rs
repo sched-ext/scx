@@ -207,11 +207,153 @@ fn bench_sleep_wake(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_interleave_overhead(c: &mut Criterion) {
+    let _lock = lock();
+    let mut group = c.benchmark_group("interleave_overhead");
+
+    // Compare sequential vs interleaved dispatch for the same workload.
+    // 4 CPUs, 8 tasks — lots of idle-CPU dispatch opportunities.
+    for &interleave in &[false, true] {
+        let label = if interleave { "on" } else { "off" };
+        group.bench_function(BenchmarkId::new("simple_4cpu_8t", label), |b| {
+            b.iter(|| {
+                let scenario = Scenario::builder()
+                    .cpus(4)
+                    .seed(42)
+                    .instant_timing()
+                    .interleave(interleave)
+                    .task(TaskDef {
+                        name: "t1".into(),
+                        pid: Pid(1),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t2".into(),
+                        pid: Pid(2),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t3".into(),
+                        pid: Pid(3),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t4".into(),
+                        pid: Pid(4),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t5".into(),
+                        pid: Pid(5),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t6".into(),
+                        pid: Pid(6),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t7".into(),
+                        pid: Pid(7),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "t8".into(),
+                        pid: Pid(8),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(50_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .duration_ms(200)
+                    .build();
+                Simulator::new(DynamicScheduler::simple()).run(scenario);
+            });
+        });
+    }
+
+    // Sleep/wake with interleaving — frequent idle CPU dispatch.
+    for &interleave in &[false, true] {
+        let label = if interleave { "on" } else { "off" };
+        group.bench_function(BenchmarkId::new("sleep_wake_4cpu", label), |b| {
+            b.iter(|| {
+                let scenario = Scenario::builder()
+                    .cpus(4)
+                    .seed(42)
+                    .instant_timing()
+                    .interleave(interleave)
+                    .task(TaskDef {
+                        name: "sleeper1".into(),
+                        pid: Pid(1),
+                        nice: 0,
+                        behavior: workloads::io_bound(200_000, 5_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "sleeper2".into(),
+                        pid: Pid(2),
+                        nice: 0,
+                        behavior: workloads::io_bound(500_000, 3_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .task(TaskDef {
+                        name: "hog".into(),
+                        pid: Pid(3),
+                        nice: 0,
+                        behavior: workloads::cpu_bound(100_000_000),
+                        start_time_ns: 0,
+                        mm_id: None,
+                        allowed_cpus: None,
+                    })
+                    .duration_ms(200)
+                    .build();
+                Simulator::new(DynamicScheduler::simple()).run(scenario);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_lavd_mixed,
     bench_simple_contention,
     bench_lavd_contention,
     bench_sleep_wake,
+    bench_interleave_overhead,
 );
 criterion_main!(benches);
