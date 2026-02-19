@@ -8,6 +8,38 @@ mod common;
 scheduler_tests!(|nr_cpus| DynamicScheduler::lavd(nr_cpus));
 
 // ---------------------------------------------------------------------------
+// Multi-mode test infrastructure: run tests under multiple LAVD power modes
+// ---------------------------------------------------------------------------
+
+/// Runs a test closure under multiple LAVD power modes.
+///
+/// This helper enables testing behavior that may differ between power modes
+/// (e.g., core compaction is disabled in Performance mode). Each mode is
+/// tested independently with a fresh scheduler instance.
+///
+/// # Example
+/// ```ignore
+/// run_with_power_modes(
+///     &[LavdPowerMode::Performance, LavdPowerMode::Balanced],
+///     |mode| {
+///         let sched = DynamicScheduler::lavd(4);
+///         sched.lavd_set_power_mode(mode);
+///         // ... test body ...
+///     },
+/// );
+/// ```
+fn run_with_power_modes<F>(modes: &[LavdPowerMode], test_fn: F)
+where
+    F: Fn(LavdPowerMode),
+{
+    for &mode in modes {
+        eprintln!("[power_mode_test] Running with {:?}", mode);
+        test_fn(mode);
+        eprintln!("[power_mode_test] {:?} passed", mode);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: configure LAVD globals via dlsym to enable features disabled by
 // default in lavd_setup() (no_core_compaction, is_autopilot_on, etc.)
 // ---------------------------------------------------------------------------
@@ -973,36 +1005,54 @@ fn test_lavd_multi_domain_load_transition() {
 /// previous round. After lavd_init() runs, early timer ticks may see
 /// transient imbalance that sets nr_stealee, followed by balanced ticks
 /// that trigger the reset.
+///
+/// This test runs under multiple power modes:
+/// - Performance: core compaction is disabled automatically
+/// - Balanced: we explicitly disable core compaction to match expected behavior
 #[test]
 fn test_lavd_multi_domain_no_compact_balanced() {
     let _lock = common::setup_test();
-    let sched = DynamicScheduler::lavd_multi_domain(4, 2);
-    sched.lavd_set_no_core_compaction(true);
 
-    // Symmetric load: exactly 1 CPU-bound task per CPU
-    let mut builder = Scenario::builder().cpus(4).duration_ms(500);
-    for i in 1..=4i32 {
-        builder = builder.task(TaskDef {
-            name: format!("symmetric_{i}"),
-            pid: Pid(i),
-            nice: 0,
-            behavior: workloads::cpu_bound(10_000_000),
-            start_time_ns: 0,
-            mm_id: None,
-            allowed_cpus: None,
-            parent_pid: None,
-            cgroup_name: None,
-            task_flags: 0,
-        });
-    }
+    run_with_power_modes(
+        &[LavdPowerMode::Performance, LavdPowerMode::Balanced],
+        |mode| {
+            let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+            sched.lavd_set_power_mode(mode);
 
-    let trace = Simulator::new(sched).run(builder.build());
-    for i in 1..=4i32 {
-        assert!(
-            trace.schedule_count(Pid(i)) > 0,
-            "symmetric_{i} was never scheduled"
-        );
-    }
+            // For Balanced mode, explicitly disable core compaction to match
+            // Performance mode behavior for this specific test.
+            // In Performance mode, core compaction is already disabled.
+            if mode == LavdPowerMode::Balanced {
+                sched.lavd_set_no_core_compaction(true);
+            }
+
+            // Symmetric load: exactly 1 CPU-bound task per CPU
+            let mut builder = Scenario::builder().cpus(4).duration_ms(500);
+            for i in 1..=4i32 {
+                builder = builder.task(TaskDef {
+                    name: format!("symmetric_{i}"),
+                    pid: Pid(i),
+                    nice: 0,
+                    behavior: workloads::cpu_bound(10_000_000),
+                    start_time_ns: 0,
+                    mm_id: None,
+                    allowed_cpus: None,
+                    parent_pid: None,
+                    cgroup_name: None,
+                    task_flags: 0,
+                });
+            }
+
+            let trace = Simulator::new(sched).run(builder.build());
+            for i in 1..=4i32 {
+                assert!(
+                    trace.schedule_count(Pid(i)) > 0,
+                    "[{:?}] symmetric_{i} was never scheduled",
+                    mode
+                );
+            }
+        },
+    );
 }
 
 /// 3 domains without core compaction: exercises "keep as is" and stealee reset.
