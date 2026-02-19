@@ -216,6 +216,18 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code. All pointers must be valid.
     unsafe fn cgroup_move(&self, _p: *mut c_void, _from: *mut c_void, _to: *mut c_void) {}
+
+    /// A CPU came online (ops.cpu_online). Optional.
+    /// Called when a CPU transitions from offline to online.
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn cpu_online(&self, _cpu: i32) {}
+
+    /// A CPU went offline (ops.cpu_offline). Optional.
+    /// Called when a CPU transitions from online to offline.
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn cpu_offline(&self, _cpu: i32) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +259,8 @@ type ExitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type CgroupInitFn = unsafe extern "C" fn(*mut c_void) -> i32;
 type CgroupExitFn = unsafe extern "C" fn(*mut c_void);
 type CgroupMoveFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+type CpuOnlineFn = unsafe extern "C" fn(i32);
+type CpuOfflineFn = unsafe extern "C" fn(i32);
 
 /// Resolved function pointers for a scheduler's ops.
 struct SchedOps {
@@ -273,6 +287,8 @@ struct SchedOps {
     cgroup_init: Option<CgroupInitFn>,
     cgroup_exit: Option<CgroupExitFn>,
     cgroup_move: Option<CgroupMoveFn>,
+    cpu_online: Option<CpuOnlineFn>,
+    cpu_offline: Option<CpuOfflineFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -579,6 +595,10 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), CgroupExitFn>(p)),
             cgroup_move: try_get!("cgroup_move")
                 .map(|p| std::mem::transmute::<*const (), CgroupMoveFn>(p)),
+            cpu_online: try_get!("cpu_online")
+                .map(|p| std::mem::transmute::<*const (), CpuOnlineFn>(p)),
+            cpu_offline: try_get!("cpu_offline")
+                .map(|p| std::mem::transmute::<*const (), CpuOfflineFn>(p)),
         }
     }
 }
@@ -713,6 +733,18 @@ impl Scheduler for DynamicScheduler {
     unsafe fn cgroup_move(&self, p: *mut c_void, from: *mut c_void, to: *mut c_void) {
         if let Some(f) = self.ops.cgroup_move {
             f(p, from, to);
+        }
+    }
+
+    unsafe fn cpu_online(&self, cpu: i32) {
+        if let Some(f) = self.ops.cpu_online {
+            f(cpu);
+        }
+    }
+
+    unsafe fn cpu_offline(&self, cpu: i32) {
+        if let Some(f) = self.ops.cpu_offline {
+            f(cpu);
         }
     }
 }

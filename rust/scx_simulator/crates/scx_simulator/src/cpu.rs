@@ -43,6 +43,8 @@ pub struct SimCpu {
     /// The slice value when the current task started running.
     /// Used by `preempt_current()` to set the remaining slice on the raw task.
     pub task_original_slice: Option<TimeNs>,
+    /// Whether this CPU is online. Offline CPUs don't receive ticks or dispatch.
+    pub is_online: bool,
 }
 
 impl SimCpu {
@@ -57,6 +59,7 @@ impl SimCpu {
             perf_lvl: 0,
             task_started_at: None,
             task_original_slice: None,
+            is_online: true,
         }
     }
 

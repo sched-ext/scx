@@ -484,6 +484,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         sched_overhead_rbc_ns: sched_overhead_rbc_ns_from_env(),
         watchdog_timeout_ns: Some(DEFAULT_WATCHDOG_TIMEOUT_NS),
         ignore_bpf_errors: true,
+        hotplug_events: Vec::new(),
     })
 }
 

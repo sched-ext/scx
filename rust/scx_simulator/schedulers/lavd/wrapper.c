@@ -707,6 +707,11 @@ u32 lavd_probe_sys_nr_active(void)
 	return sys_stat.nr_active;
 }
 
+u32 lavd_probe_sys_nr_cpus_onln(void)
+{
+	return nr_cpus_onln;
+}
+
 /*
  * Direct setter for sys_stat.nr_active.
  * Used by tests to force the dispatch compaction path
