@@ -108,11 +108,6 @@ const volatile bool mm_affinity;
 const volatile u64 perf_config;
 
 /*
- * Performance counter threshold to classify a task as event heavy.
- */
-const volatile u64 perf_threshold;
-
-/*
  * Enable deferred wakeup.
  */
 const volatile bool deferred_wakeups = true;
@@ -122,11 +117,6 @@ const volatile bool deferred_wakeups = true;
  * exceeds perf_sticky_threshold, keep it on the same CPU.
  */
 const volatile u64 perf_sticky;
-
-/*
- * Threshold for sticky event; task is kept on same CPU when exceeded.
- */
-const volatile u64 perf_sticky_threshold;
 
 /*
  * Ignore synchronous wakeup events.
@@ -152,6 +142,16 @@ const volatile u64 busy_threshold;
  * Current global CPU utilization percentage in the range [0 .. 1024].
  */
 volatile u64 cpu_util;
+
+/*
+ * Performance counter threshold to classify a task as event heavy (bss for dynamic updates).
+ */
+volatile u64 perf_threshold;
+
+/*
+ * Threshold for sticky event; task is kept on same CPU when exceeded (bss for dynamic updates).
+ */
+volatile u64 perf_sticky_threshold;
 
 /*
  * Scheduler statistics.
