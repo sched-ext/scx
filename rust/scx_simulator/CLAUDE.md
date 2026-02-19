@@ -48,6 +48,24 @@ If you validate some changes with a new manual or temporary test, that test shou
 
 NEVER add binary files or large serialized artifacts to version control without explicit permission. Always carefully review what you are adding with `git add`, and update `.gitignore` as needed.
 
+Manual Testing Required Before Push
+----------------------------------------
+
+**NEVER push code that has only been validated by automated tests if the feature
+requires manual testing.** Features involving external tools (vng, wprof, rt-app),
+VM execution, or system-level behavior MUST be manually tested before pushing.
+
+If you cannot test due to sandboxing, permissions, or missing dependencies:
+1. **Do NOT push the code**
+2. Ask the user to run the manual test command
+3. Wait for confirmation that it works before pushing
+
+Examples of features requiring manual testing:
+- `--real-run vm` execution
+- `--wprof` tracing
+- Any new vng flags or kernel parameters
+- External tool integrations
+
 Amending commits
 ----------------------------------------
 
