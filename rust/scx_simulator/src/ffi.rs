@@ -57,6 +57,9 @@ extern "C" {
     // Init task args for the init_task callback (implemented in sim_task.c)
     pub fn sim_get_init_task_args() -> *mut c_void;
 
+    // Exit task args for the exit_task callback (implemented in sim_task.c)
+    pub fn sim_get_exit_task_args() -> *mut c_void;
+
     // SDT / arena per-task storage (implemented in sim_sdt_stubs.c)
     pub fn scx_task_init(data_size: u64) -> i32;
     pub fn scx_task_alloc(p: *mut c_void) -> *mut c_void;
@@ -166,6 +169,20 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code. `p` must be a valid task_struct pointer. `dctx` may be null.
     unsafe fn dump_task(&self, _dctx: *mut c_void, _p: *mut c_void) {}
+
+    /// CPU idle state changed (ops.update_idle). Optional.
+    /// Called when a CPU enters (idle=true) or exits (idle=false) the idle state.
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn update_idle(&self, _cpu: i32, _idle: bool) {}
+
+    /// A task is exiting scheduling (ops.exit_task). Optional.
+    /// Called once per task when it is being removed from SCX.
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer.
+    unsafe fn exit_task(&self, _p: *mut c_void) -> i32 {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +209,8 @@ type TickFn = unsafe extern "C" fn(*mut c_void);
 type SetCpumaskFn = unsafe extern "C" fn(*mut c_void, *const c_void);
 type DumpFn = unsafe extern "C" fn(*mut c_void);
 type DumpTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type UpdateIdleFn = unsafe extern "C" fn(i32, bool);
+type ExitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 
 /// Resolved function pointers for a scheduler's ops.
 struct SchedOps {
@@ -213,6 +232,8 @@ struct SchedOps {
     set_cpumask: Option<SetCpumaskFn>,
     dump: Option<DumpFn>,
     dump_task: Option<DumpTaskFn>,
+    update_idle: Option<UpdateIdleFn>,
+    exit_task: Option<ExitTaskFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -509,6 +530,10 @@ impl DynamicScheduler {
             dump: try_get!("dump").map(|p| std::mem::transmute::<*const (), DumpFn>(p)),
             dump_task: try_get!("dump_task")
                 .map(|p| std::mem::transmute::<*const (), DumpTaskFn>(p)),
+            update_idle: try_get!("update_idle")
+                .map(|p| std::mem::transmute::<*const (), UpdateIdleFn>(p)),
+            exit_task: try_get!("exit_task")
+                .map(|p| std::mem::transmute::<*const (), ExitTaskFn>(p)),
         }
     }
 }
@@ -609,6 +634,20 @@ impl Scheduler for DynamicScheduler {
     unsafe fn dump_task(&self, dctx: *mut c_void, p: *mut c_void) {
         if let Some(f) = self.ops.dump_task {
             f(dctx, p);
+        }
+    }
+
+    unsafe fn update_idle(&self, cpu: i32, idle: bool) {
+        if let Some(f) = self.ops.update_idle {
+            f(cpu, idle);
+        }
+    }
+
+    unsafe fn exit_task(&self, p: *mut c_void) -> i32 {
+        if let Some(f) = self.ops.exit_task {
+            f(p, sim_get_exit_task_args())
+        } else {
+            0
         }
     }
 }

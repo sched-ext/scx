@@ -491,6 +491,19 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
+        // Call exit_task for each task (mirrors kernel scheduler unload)
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
+            for task in tasks.values() {
+                start_rbc(&mut state);
+                debug!(pid = task.pid.0, "exit_task");
+                self.scheduler.exit_task(task.raw());
+                charge_sched_time(&mut state, CpuId(0), "exit_task");
+            }
+            kfuncs::exit_sim();
+        }
+
         // Call scheduler exit
         unsafe {
             let cpu = state.current_cpu;
@@ -1281,6 +1294,17 @@ impl<S: Scheduler> Simulator<S> {
             state.update_smt_mask_idle(cpu);
             let local_t = state.cpus[cpu.0 as usize].local_clock;
             kfuncs::set_sim_clock(local_t, Some(cpu));
+
+            // Notify scheduler that CPU is entering idle (ops.update_idle)
+            unsafe {
+                kfuncs::enter_sim(state, cpu);
+                start_rbc(state);
+                debug!("update_idle(idle=true)");
+                self.scheduler.update_idle(cpu.0 as i32, true);
+                charge_sched_time(state, cpu, "update_idle");
+                kfuncs::exit_sim();
+            }
+
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
             info!("IDLE");
         }
@@ -1450,9 +1474,21 @@ impl<S: Scheduler> Simulator<S> {
         state.clear_task_queued(pid);
         // Clear idle bit in the C cpumask (in case scheduler didn't call
         // scx_bpf_test_and_clear_cpu_idle for this CPU)
-        unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };
+        let was_idle = unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };
         // CPU is now busy — core is no longer fully idle
         state.update_smt_mask_busy(cpu);
+
+        // Notify scheduler that CPU is exiting idle (ops.update_idle)
+        if was_idle {
+            unsafe {
+                kfuncs::enter_sim(state, cpu);
+                start_rbc(state);
+                debug!("update_idle(idle=false)");
+                self.scheduler.update_idle(cpu.0 as i32, false);
+                charge_sched_time(state, cpu, "update_idle");
+                kfuncs::exit_sim();
+            }
+        }
 
         let raw = task.raw();
 
