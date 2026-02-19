@@ -39,6 +39,8 @@ fn lavd_mixed_scenario() -> Scenario {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -48,6 +50,8 @@ fn lavd_mixed_scenario() -> Scenario {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "cpu_hog".into(),
@@ -57,6 +61,8 @@ fn lavd_mixed_scenario() -> Scenario {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         })
         .duration_ms(500)
         .build()
@@ -75,6 +81,8 @@ fn contention_scenario(nr_cpus: u32, nr_tasks: i32) -> Scenario {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         });
     }
 
@@ -95,6 +103,8 @@ fn sleep_wake_scenario(nr_cpus: u32) -> Scenario {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "sleeper2".into(),
@@ -104,6 +114,8 @@ fn sleep_wake_scenario(nr_cpus: u32) -> Scenario {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "hog".into(),
@@ -113,6 +125,8 @@ fn sleep_wake_scenario(nr_cpus: u32) -> Scenario {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
         })
         .duration_ms(200)
         .build()
