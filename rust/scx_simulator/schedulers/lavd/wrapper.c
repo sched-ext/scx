@@ -344,12 +344,11 @@ void lavd_fire_timer(void)
  * function implementations instead.
  */
 
-/* Task lookup by PID -- not modeled in simulation */
-struct task_struct *bpf_task_from_pid(s32 pid)
-{
-	(void)pid;
-	return NULL;
-}
+/*
+ * bpf_task_from_pid — provided by the Rust kfuncs (kfuncs.rs).
+ * The extern __ksym declaration from bpf_experimental.h resolves
+ * to the simulator's real PID→task_struct lookup at runtime.
+ */
 
 /* Cgroup lookup by ID -- not modeled */
 struct cgroup *bpf_cgroup_from_id(u64 cgroupid)
@@ -692,4 +691,102 @@ u64 lavd_probe_sys_avg_sc_util(void)
 int lavd_probe_calc_nr_active(void)
 {
 	return calc_nr_active_cpus();
+}
+
+u32 lavd_probe_sys_nr_active(void)
+{
+	return sys_stat.nr_active;
+}
+
+/*
+ * Direct setter for sys_stat.nr_active.
+ * Used by tests to force the dispatch compaction path
+ * (use_full_cpus() returns false when nr_active < nr_cpus_onln).
+ */
+void lavd_set_sys_nr_active(u32 val)
+{
+	sys_stat.nr_active = val;
+}
+
+/*
+ * Direct setter for sys_stat.nr_active_cpdoms.
+ */
+void lavd_set_sys_nr_active_cpdoms(u32 val)
+{
+	sys_stat.nr_active_cpdoms = val;
+}
+
+/*
+ * =================================================================
+ * Direct compaction control
+ * =================================================================
+ *
+ * Force compaction state after lavd_init() has run (cpumasks allocated).
+ * Sets nr_active, marks first nr_active_cpus CPUs as active, rest as
+ * inactive. Uses the PCO ordering table for CPU order.
+ *
+ * Pure memory operations (no kfuncs), safe to call outside sim context.
+ */
+void lavd_force_compaction(int nr_active_cpus)
+{
+	struct bpf_cpumask *active_mask = active_cpumask;
+	struct bpf_cpumask *ovrflw_mask = ovrflw_cpumask;
+	const volatile u16 *cpu_order;
+	int i, cpu;
+
+	if (!active_mask || !ovrflw_mask)
+		return;
+
+	cpu_order = get_cpu_order();
+
+	for (i = 0; i < (int)nr_cpu_ids && i < LAVD_CPU_ID_MAX; i++) {
+		cpu = cpu_order[i];
+		if (cpu >= LAVD_CPU_ID_MAX)
+			break;
+
+		if (i < nr_active_cpus) {
+			bpf_cpumask_set_cpu(cpu, active_mask);
+			bpf_cpumask_clear_cpu(cpu, ovrflw_mask);
+		} else {
+			bpf_cpumask_clear_cpu(cpu, active_mask);
+			bpf_cpumask_clear_cpu(cpu, ovrflw_mask);
+		}
+	}
+
+	sys_stat.nr_active = nr_active_cpus;
+}
+
+/*
+ * =================================================================
+ * Diagnostic probes for core compaction debugging
+ * =================================================================
+ */
+
+u8 lavd_probe_no_core_compaction(void)
+{
+	return (u8)no_core_compaction;
+}
+
+u8 lavd_probe_active_cpumask_null(void)
+{
+	return (u8)(active_cpumask == NULL);
+}
+
+u8 lavd_probe_ovrflw_cpumask_null(void)
+{
+	return (u8)(ovrflw_cpumask == NULL);
+}
+
+u8 lavd_probe_cpuc_is_online(int cpu)
+{
+	if (cpu < 0 || cpu >= MAX_SIM_CPUS)
+		return 0;
+	return (u8)percpu_ctx[cpu].is_online;
+}
+
+u32 lavd_probe_cpuc_eff_cap(int cpu)
+{
+	if (cpu < 0 || cpu >= MAX_SIM_CPUS)
+		return 0;
+	return percpu_ctx[cpu].effective_capacity;
 }
