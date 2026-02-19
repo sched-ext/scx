@@ -359,6 +359,11 @@ impl<S: Scheduler> Simulator<S> {
                 let rc = self.scheduler.init_task(task.raw());
                 charge_sched_time(&mut state, CpuId(0), "init_task");
                 assert!(rc == 0, "init_task failed for pid={} rc={rc}", task.pid.0);
+                // Notify scheduler of initial cpumask (mirrors kernel enumeration)
+                let cpus_ptr = ffi::sim_task_get_cpus_ptr(task.raw());
+                start_rbc(&mut state);
+                self.scheduler.set_cpumask(task.raw(), cpus_ptr);
+                charge_sched_time(&mut state, CpuId(0), "set_cpumask");
             }
             kfuncs::exit_sim();
         }
@@ -449,6 +454,22 @@ impl<S: Scheduler> Simulator<S> {
                     TraceKind::SimulationEnd { pid },
                 );
             }
+        }
+
+        // Call scheduler dump before exit (mirrors kernel dump on scheduler unload)
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
+            start_rbc(&mut state);
+            self.scheduler.dump(std::ptr::null_mut());
+            charge_sched_time(&mut state, CpuId(0), "dump");
+
+            for task in tasks.values() {
+                start_rbc(&mut state);
+                self.scheduler.dump_task(std::ptr::null_mut(), task.raw());
+                charge_sched_time(&mut state, CpuId(0), "dump_task");
+            }
+            kfuncs::exit_sim();
         }
 
         // Call scheduler exit

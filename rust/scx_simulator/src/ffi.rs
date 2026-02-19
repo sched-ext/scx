@@ -148,6 +148,21 @@ pub trait Scheduler {
     /// # Safety
     /// Calls into C code. `p` must be a valid task_struct pointer.
     unsafe fn tick(&self, _p: *mut c_void) {}
+
+    /// Notify scheduler of task cpumask change (ops.set_cpumask). Optional.
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer.
+    unsafe fn set_cpumask(&self, _p: *mut c_void, _cpumask: *const c_void) {}
+
+    /// Dump scheduler state for debugging (ops.dump). Optional.
+    /// # Safety
+    /// Calls into C code. `dctx` may be null.
+    unsafe fn dump(&self, _dctx: *mut c_void) {}
+
+    /// Dump per-task state for debugging (ops.dump_task). Optional.
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer. `dctx` may be null.
+    unsafe fn dump_task(&self, _dctx: *mut c_void, _p: *mut c_void) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +186,9 @@ type FireTimerFn = unsafe extern "C" fn();
 type QuiescentFn = unsafe extern "C" fn(*mut c_void, u64);
 type DequeueFn = unsafe extern "C" fn(*mut c_void, u64);
 type TickFn = unsafe extern "C" fn(*mut c_void);
+type SetCpumaskFn = unsafe extern "C" fn(*mut c_void, *const c_void);
+type DumpFn = unsafe extern "C" fn(*mut c_void);
+type DumpTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 
 /// Resolved function pointers for a scheduler's ops.
 struct SchedOps {
@@ -189,6 +207,9 @@ struct SchedOps {
     quiescent: Option<QuiescentFn>,
     dequeue: Option<DequeueFn>,
     tick: Option<TickFn>,
+    set_cpumask: Option<SetCpumaskFn>,
+    dump: Option<DumpFn>,
+    dump_task: Option<DumpTaskFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -480,6 +501,11 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), QuiescentFn>(p)),
             dequeue: try_get!("dequeue").map(|p| std::mem::transmute::<*const (), DequeueFn>(p)),
             tick: try_get!("tick").map(|p| std::mem::transmute::<*const (), TickFn>(p)),
+            set_cpumask: try_get!("set_cpumask")
+                .map(|p| std::mem::transmute::<*const (), SetCpumaskFn>(p)),
+            dump: try_get!("dump").map(|p| std::mem::transmute::<*const (), DumpFn>(p)),
+            dump_task: try_get!("dump_task")
+                .map(|p| std::mem::transmute::<*const (), DumpTaskFn>(p)),
         }
     }
 }
@@ -562,6 +588,24 @@ impl Scheduler for DynamicScheduler {
     unsafe fn tick(&self, p: *mut c_void) {
         if let Some(f) = self.ops.tick {
             f(p);
+        }
+    }
+
+    unsafe fn set_cpumask(&self, p: *mut c_void, cpumask: *const c_void) {
+        if let Some(f) = self.ops.set_cpumask {
+            f(p, cpumask);
+        }
+    }
+
+    unsafe fn dump(&self, dctx: *mut c_void) {
+        if let Some(f) = self.ops.dump {
+            f(dctx);
+        }
+    }
+
+    unsafe fn dump_task(&self, dctx: *mut c_void, p: *mut c_void) {
+        if let Some(f) = self.ops.dump_task {
+            f(dctx, p);
         }
     }
 }
