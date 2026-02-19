@@ -53,21 +53,28 @@ pub fn run_vm(workload_path: &Path, scheduler: &str, nr_cpus: u32) -> Result<(),
         workload = workload_abs.display(),
     );
 
-    // Launch vng
-    let mut cmd = Command::new("vng");
-    cmd.arg("--cpus")
-        .arg(nr_cpus.to_string())
-        .arg("--")
-        .arg("sh")
+    // Launch vng with the host kernel (-r).
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+
+    // vng requires /proc/self/fd/{0,1,2} to be re-openable, which fails when
+    // stdio are sockets or pipes. Wrap with `script` to allocate a real PTY.
+    let vng_cmd = format!(
+        "vng -r --user {user} --cpus {nr_cpus} --memory 4G --exec {inner}",
+        inner = shell_escape(&inner_cmd),
+    );
+
+    let mut cmd = Command::new("script");
+    cmd.arg("-q") // no header/footer
+        .arg("-e") // propagate exit code
         .arg("-c")
-        .arg(&inner_cmd);
+        .arg(&vng_cmd)
+        .arg("/dev/null"); // discard typescript file
 
     eprintln!("Launching VM...");
-    eprintln!("  vng --cpus {nr_cpus} -- sh -c '...'");
+    eprintln!("  vng -r --user {user} --cpus {nr_cpus} --memory 4G --exec '...'");
     eprintln!();
 
     let status = cmd
-        .stdin(Stdio::null())
         .status()
         .map_err(|e| format!("failed to launch vng: {e}"))?;
 
@@ -184,6 +191,11 @@ fn find_scheduler_binary(scheduler: &str) -> Result<PathBuf, String> {
          cargo build -p {bin_name} --release\n\n\
          Or set SCX_SCHED_BIN environment variable to the path of the scheduler binary."
     ))
+}
+
+/// Single-quote a string for sh, escaping any embedded single quotes.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Check if a command exists in PATH.
