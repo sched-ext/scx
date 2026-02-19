@@ -470,6 +470,13 @@ void lavd_setup(unsigned int num_cpus)
 	nr_llcs = 1;
 	is_smt_active = false;
 
+	/*
+	 * Power mode: default to performance (matches --performance flag).
+	 * This keeps no_core_compaction=true and is_powersave_mode=false.
+	 */
+	power_mode = 0; /* LAVD_PM_PERFORMANCE */
+	is_powersave_mode = false;
+
 	/* Disable complex features for initial simulation */
 	enable_cpu_bw = false;
 	is_autopilot_on = false;
@@ -626,6 +633,71 @@ void lavd_set_is_monitored(unsigned int val)
 void lavd_set_no_core_compaction(unsigned int val)
 {
 	no_core_compaction = !!val;
+}
+
+/*
+ * =================================================================
+ * Power mode configuration
+ * =================================================================
+ *
+ * These functions mimic the effect of scx_lavd CLI power mode flags:
+ *   --performance, --balanced, --powersave, --autopilot
+ *
+ * Power mode constants (from intf.h):
+ *   LAVD_PM_PERFORMANCE = 0
+ *   LAVD_PM_BALANCED = 1
+ *   LAVD_PM_POWERSAVE = 2
+ */
+
+/*
+ * Set power mode (performance=0, balanced=1, powersave=2).
+ *
+ * WARNING: This duplicates logic from the real scx_lavd userspace.
+ * If LAVD's power mode behavior changes, this code must be updated.
+ *
+ * Source of truth (check these if behavior seems wrong):
+ *   - scheds/rust/scx_lavd/src/main.rs: Opts::proc(), init_globals()
+ *   - scheds/rust/scx_lavd/src/bpf/power.bpf.c: do_set_power_profile()
+ *   - scheds/rust/scx_lavd/src/bpf/intf.h: LAVD_PM_* constants
+ */
+void lavd_set_power_mode(int mode)
+{
+	power_mode = mode;
+	switch (mode) {
+	case 0: /* LAVD_PM_PERFORMANCE */
+		no_core_compaction = true;
+		is_powersave_mode = false;
+		break;
+	case 1: /* LAVD_PM_BALANCED */
+		no_core_compaction = false;
+		is_powersave_mode = false;
+		break;
+	case 2: /* LAVD_PM_POWERSAVE */
+		no_core_compaction = false;
+		is_powersave_mode = true;
+		break;
+	}
+}
+
+/*
+ * Enable or disable autopilot mode.
+ *
+ * WARNING: This duplicates logic from the real scx_lavd userspace.
+ * If LAVD's autopilot behavior changes, this code must be updated.
+ *
+ * Source of truth:
+ *   - scheds/rust/scx_lavd/src/main.rs: Opts::proc() for autopilot init
+ *   - scheds/rust/scx_lavd/src/bpf/power.bpf.c: do_autopilot()
+ */
+void lavd_set_autopilot(int on)
+{
+	is_autopilot_on = !!on;
+	/* autopilot starts in balanced mode (matches main.rs behavior) */
+	if (on) {
+		power_mode = 1; /* LAVD_PM_BALANCED */
+		no_core_compaction = false;
+		is_powersave_mode = false;
+	}
 }
 
 /*

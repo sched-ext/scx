@@ -8302,3 +8302,156 @@ fn test_lavd_lat_cri_inheritance() {
         "cpu_hog was never scheduled"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Power mode configuration tests
+// ---------------------------------------------------------------------------
+
+/// Test that power mode can be set to balanced via the API.
+///
+/// This verifies that `lavd_set_power_mode(Balanced)` configures the scheduler
+/// correctly and that a scenario runs successfully in balanced mode.
+#[test]
+fn test_lavd_api_set_power_mode_balanced() {
+    use scx_simulator::LavdPowerMode;
+
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    // Switch to balanced mode (enables core compaction, no powersave)
+    sched.lavd_set_power_mode(LavdPowerMode::Balanced);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000), // 10ms chunks
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Basic sanity: task should have been scheduled
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker was never scheduled in balanced mode"
+    );
+}
+
+/// Test that power mode can be set to powersave via the API.
+#[test]
+fn test_lavd_api_set_power_mode_powersave() {
+    use scx_simulator::LavdPowerMode;
+
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    // Switch to powersave mode
+    sched.lavd_set_power_mode(LavdPowerMode::Powersave);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker was never scheduled in powersave mode"
+    );
+}
+
+/// Test that autopilot can be enabled via the API.
+#[test]
+fn test_lavd_api_set_autopilot() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    // Enable autopilot mode
+    sched.lavd_set_autopilot(true);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker was never scheduled with autopilot enabled"
+    );
+}
+
+/// Test that lavd_noflags() resets to vanilla state.
+#[test]
+fn test_lavd_api_noflags() {
+    use scx_simulator::LavdPowerMode;
+
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    // First set to performance mode
+    sched.lavd_set_power_mode(LavdPowerMode::Performance);
+
+    // Then reset to noflags (balanced, no autopilot, core compaction on)
+    sched.lavd_noflags();
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker was never scheduled after lavd_noflags()"
+    );
+}

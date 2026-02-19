@@ -262,6 +262,41 @@ pub trait Scheduler {
 }
 
 // ---------------------------------------------------------------------------
+// LAVD power mode
+// ---------------------------------------------------------------------------
+
+/// LAVD power mode settings, matching the scx_lavd CLI flags.
+///
+/// # Warning: Duplicated Logic
+///
+/// The C wrapper (`schedulers/lavd/wrapper.c`) duplicates power mode logic
+/// from the real scx_lavd userspace. If LAVD's behavior changes, the wrapper
+/// must be updated to match.
+///
+/// **Source of truth** (check these if behavior seems wrong):
+/// - `scheds/rust/scx_lavd/src/main.rs`: `Opts::proc()`, `init_globals()`
+/// - `scheds/rust/scx_lavd/src/bpf/power.bpf.c`: `do_set_power_profile()`
+/// - `scheds/rust/scx_lavd/src/bpf/intf.h`: `LAVD_PM_*` constants
+///
+/// These correspond to the LAVD_PM_* constants in intf.h:
+/// - `LAVD_PM_PERFORMANCE = 0`
+/// - `LAVD_PM_BALANCED = 1`
+/// - `LAVD_PM_POWERSAVE = 2`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum LavdPowerMode {
+    /// Performance mode: no core compaction, maximum throughput.
+    /// Equivalent to `--performance` flag.
+    Performance = 0,
+    /// Balanced mode: core compaction enabled, moderate power saving.
+    /// Equivalent to `--balanced` flag.
+    Balanced = 1,
+    /// Powersave mode: aggressive core compaction, maximum power saving.
+    /// Equivalent to `--powersave` flag.
+    Powersave = 2,
+}
+
+// ---------------------------------------------------------------------------
 // DynamicScheduler — loads scheduler .so via libloading
 // ---------------------------------------------------------------------------
 
@@ -542,6 +577,57 @@ impl DynamicScheduler {
                 .expect("lavd_set_no_core_compaction not found");
             (sym)(no_compact as u32);
         }
+    }
+
+    /// Set LAVD power mode (performance, balanced, or powersave).
+    ///
+    /// This mimics the effect of the `--performance`, `--balanced`, and
+    /// `--powersave` CLI flags in the real scx_lavd scheduler.
+    ///
+    /// Must be called after construction and before `Simulator::run()`.
+    pub fn lavd_set_power_mode(&self, mode: LavdPowerMode) {
+        type SetPowerModeFn = unsafe extern "C" fn(i32);
+        unsafe {
+            let sym: libloading::Symbol<SetPowerModeFn> = self
+                ._lib
+                .get(b"lavd_set_power_mode")
+                .expect("lavd_set_power_mode not found");
+            (sym)(mode as i32);
+        }
+    }
+
+    /// Enable or disable LAVD autopilot mode.
+    ///
+    /// When autopilot is enabled, the scheduler dynamically switches between
+    /// power modes based on system load. Autopilot starts in balanced mode.
+    ///
+    /// This mimics the effect of the `--autopilot` CLI flag.
+    ///
+    /// Must be called after construction and before `Simulator::run()`.
+    pub fn lavd_set_autopilot(&self, on: bool) {
+        type SetAutopilotFn = unsafe extern "C" fn(i32);
+        unsafe {
+            let sym: libloading::Symbol<SetAutopilotFn> = self
+                ._lib
+                .get(b"lavd_set_autopilot")
+                .expect("lavd_set_autopilot not found");
+            (sym)(on as i32);
+        }
+    }
+
+    /// Reset LAVD to "vanilla" state with no special flags.
+    ///
+    /// This sets:
+    /// - Power mode to balanced
+    /// - Autopilot off
+    /// - Core compaction enabled (no_core_compaction = false)
+    ///
+    /// Use this to test LAVD with default settings rather than the
+    /// performance-optimized defaults from `lavd_setup()`.
+    pub fn lavd_noflags(&self) {
+        self.lavd_set_power_mode(LavdPowerMode::Balanced);
+        self.lavd_set_autopilot(false);
+        self.lavd_set_no_core_compaction(false);
     }
 
     /// Load the scx_cosmos scheduler with NUMA topology.
