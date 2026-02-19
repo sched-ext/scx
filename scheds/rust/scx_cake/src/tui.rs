@@ -355,12 +355,16 @@ fn render_startup_widgets(
         .split(area);
 
     // Split Body into Left (Info), Middle (Heatmap), and Right (Data)
+    // Compute minimum widths based on CPU count to prevent column clipping
+    let nr_cpus = params.latency_matrix.len();
+    let heatmap_min_width = (6 + nr_cpus * 2 + 4) as u16; // row label + cells + borders
+    let data_min_width = (5 + nr_cpus * 3 + 4) as u16; // row label + cells + borders
     let dashboard_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(22), // System info
-            Constraint::Percentage(39), // Latency heatmap
-            Constraint::Fill(1),        // Latency data (fills all remaining space)
+            Constraint::Min(22),                // System info (fixed)
+            Constraint::Min(heatmap_min_width), // Latency heatmap (scales with CPUs)
+            Constraint::Min(data_min_width),    // Latency data (scales with CPUs)
         ])
         .split(outer_layout[1]);
 
