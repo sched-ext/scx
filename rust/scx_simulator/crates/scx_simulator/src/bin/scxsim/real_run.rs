@@ -10,6 +10,12 @@ use std::process::{Command, Stdio};
 /// Path to the rt-app binary.
 const RTAPP_BIN: &str = "/home/newton/bin/rt-app";
 
+/// Path to the workspace directory inside the VM (mounted from host CWD).
+const VM_WORKSPACE: &str = "/usr/workspace";
+
+/// Name of the trace file written by wprof.
+const TRACE_FILENAME: &str = "trace.proto";
+
 /// Run the workload in a virtme-ng VM with the specified scheduler.
 ///
 /// This function:
@@ -17,7 +23,18 @@ const RTAPP_BIN: &str = "/home/newton/bin/rt-app";
 /// 2. Launches vng with the specified number of CPUs
 /// 3. Loads the scheduler and runs rt-app
 /// 4. Captures and displays the output
-pub fn run_vm(workload_path: &Path, scheduler: &str, nr_cpus: u32) -> Result<(), String> {
+///
+/// When `enable_wprof` is true:
+/// - Adds one extra CPU for tracing
+/// - Isolates that CPU using `isolcpus=N` kernel parameter
+/// - Runs wprof pinned to the isolated CPU
+/// - Writes trace to the current working directory
+pub fn run_vm(
+    workload_path: &Path,
+    scheduler: &str,
+    nr_cpus: u32,
+    enable_wprof: bool,
+) -> Result<(), String> {
     // Validate prerequisites
     validate_prerequisites(scheduler)?;
 
@@ -27,51 +44,100 @@ pub fn run_vm(workload_path: &Path, scheduler: &str, nr_cpus: u32) -> Result<(),
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize workload path: {e}"))?;
 
+    // When wprof is enabled, add an extra CPU for tracing
+    let vm_cpus = if enable_wprof { nr_cpus + 1 } else { nr_cpus };
+    let isolated_cpu = nr_cpus; // The last CPU (0-indexed)
+    let workload_cpus = if enable_wprof {
+        format!("0-{}", nr_cpus - 1)
+    } else {
+        String::new()
+    };
+
     eprintln!("=== Real VM Run ===");
     eprintln!("  scheduler:  scx_{scheduler}");
     eprintln!("  workload:   {}", workload_abs.display());
     eprintln!("  cpus:       {nr_cpus}");
+    if enable_wprof {
+        eprintln!("  wprof:      enabled (isolated CPU {isolated_cpu})");
+    }
     eprintln!();
 
     // Build the command to run inside the VM.
-    // We need to:
-    // 1. Start the scheduler in the background
-    // 2. Give it time to attach
-    // 3. Run rt-app
-    // 4. Kill the scheduler
     let sched_bin = find_scheduler_binary(scheduler)?;
-    let inner_cmd = format!(
-        "{sched_bin} &\n\
-         SCHED_PID=$!\n\
-         sleep 1\n\
-         echo '=== Running rt-app ==='\n\
-         {RTAPP_BIN} {workload}\n\
-         echo '=== rt-app completed ==='\n\
-         kill $SCHED_PID 2>/dev/null || true\n\
-         wait $SCHED_PID 2>/dev/null || true",
-        sched_bin = sched_bin.display(),
-        workload = workload_abs.display(),
-    );
+    let inner_cmd = if enable_wprof {
+        // With wprof: pin tracer to isolated CPU, run workload on remaining CPUs
+        format!(
+            "taskset -c {isolated_cpu} wprof -o {VM_WORKSPACE}/{TRACE_FILENAME} &\n\
+             WPROF_PID=$!\n\
+             {sched_bin} &\n\
+             SCHED_PID=$!\n\
+             sleep 1\n\
+             echo '=== Running rt-app ==='\n\
+             taskset -c {workload_cpus} {RTAPP_BIN} {workload}\n\
+             echo '=== rt-app completed ==='\n\
+             kill $WPROF_PID $SCHED_PID 2>/dev/null || true\n\
+             wait $WPROF_PID $SCHED_PID 2>/dev/null || true",
+            sched_bin = sched_bin.display(),
+            workload = workload_abs.display(),
+        )
+    } else {
+        // Without wprof: standard execution
+        format!(
+            "{sched_bin} &\n\
+             SCHED_PID=$!\n\
+             sleep 1\n\
+             echo '=== Running rt-app ==='\n\
+             {RTAPP_BIN} {workload}\n\
+             echo '=== rt-app completed ==='\n\
+             kill $SCHED_PID 2>/dev/null || true\n\
+             wait $SCHED_PID 2>/dev/null || true",
+            sched_bin = sched_bin.display(),
+            workload = workload_abs.display(),
+        )
+    };
 
     // Launch vng with the host kernel (-r).
     let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
 
+    // Get current working directory for rwdir mount
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
+
+    // Build vng command with optional wprof-related flags
+    let mut vng_args = format!("vng -r --user {user} --cpus {vm_cpus} --memory 4G");
+
+    if enable_wprof {
+        // Add rwdir mount for trace output
+        vng_args.push_str(&format!(" --rwdir {VM_WORKSPACE}={}", cwd.display()));
+        // Add isolcpus kernel parameter
+        vng_args.push_str(&format!(" --append isolcpus={isolated_cpu}"));
+    }
+
+    vng_args.push_str(&format!(" --exec {}", shell_escape(&inner_cmd)));
+
     // vng requires /proc/self/fd/{0,1,2} to be re-openable, which fails when
     // stdio are sockets or pipes. Wrap with `script` to allocate a real PTY.
-    let vng_cmd = format!(
-        "vng -r --user {user} --cpus {nr_cpus} --memory 4G --exec {inner}",
-        inner = shell_escape(&inner_cmd),
-    );
-
     let mut cmd = Command::new("script");
     cmd.arg("-q") // no header/footer
         .arg("-e") // propagate exit code
         .arg("-c")
-        .arg(&vng_cmd)
+        .arg(&vng_args)
         .arg("/dev/null"); // discard typescript file
 
     eprintln!("Launching VM...");
-    eprintln!("  vng -r --user {user} --cpus {nr_cpus} --memory 4G --exec '...'");
+    eprintln!(
+        "  vng -r --user {user} --cpus {vm_cpus} --memory 4G{}{}",
+        if enable_wprof {
+            format!(" --rwdir {VM_WORKSPACE}={}", cwd.display())
+        } else {
+            String::new()
+        },
+        if enable_wprof {
+            format!(" --append isolcpus={isolated_cpu}")
+        } else {
+            String::new()
+        },
+    );
     eprintln!();
 
     let status = cmd
@@ -84,6 +150,13 @@ pub fn run_vm(workload_path: &Path, scheduler: &str, nr_cpus: u32) -> Result<(),
 
     eprintln!();
     eprintln!("=== VM run completed ===");
+
+    // Report trace file location if wprof was enabled
+    if enable_wprof {
+        let trace_path = cwd.join(TRACE_FILENAME);
+        eprintln!();
+        eprintln!("Perfetto trace written to: {}", trace_path.display());
+    }
 
     Ok(())
 }
