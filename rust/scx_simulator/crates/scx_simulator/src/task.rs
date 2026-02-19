@@ -129,6 +129,10 @@ pub struct TaskDef {
     /// The cgroup must be defined in the scenario via `.cgroup()`.
     /// If `None`, the task belongs to the root cgroup.
     pub cgroup_name: Option<String>,
+    /// Kernel task_struct `flags` (PF_*). Defaults to 0 (normal user task).
+    /// Common values: `PF_KTHREAD` (0x200000), `PF_WQ_WORKER` (0x20),
+    /// `PF_IO_WORKER` (0x10). Kernel tasks have `mm = NULL` automatically.
+    pub task_flags: u32,
 }
 
 /// A simulated task at runtime.
@@ -188,6 +192,13 @@ impl SimTask {
             ffi::sim_task_set_nr_cpus_allowed(raw, nr_cpus as i32);
             // static_prio = nice + 120
             ffi::sim_task_set_static_prio(raw, def.nice as i32 + 120);
+            // Set task_struct flags (PF_KTHREAD, PF_WQ_WORKER, etc.)
+            if def.task_flags != 0 {
+                ffi::sim_task_set_flags(raw, def.task_flags);
+            }
+            // Set comm from the task name (scheduler code reads p->comm)
+            let comm = std::ffi::CString::new(def.name.as_str()).unwrap_or_default();
+            ffi::sim_task_set_comm(raw, comm.as_ptr());
         }
 
         // Initialize run_remaining from the first phase if it's a Run

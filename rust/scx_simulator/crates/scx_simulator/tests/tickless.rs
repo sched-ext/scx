@@ -31,6 +31,7 @@ fn test_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .task(TaskDef {
             name: "light".into(),
@@ -45,6 +46,7 @@ fn test_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(200)
         .build();

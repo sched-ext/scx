@@ -425,6 +425,7 @@ impl ScenarioBuilder {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         });
         self
     }
@@ -452,6 +453,7 @@ impl ScenarioBuilder {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         });
         self
     }
@@ -597,6 +599,7 @@ impl ScenarioBuilder {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: Some(cgroup.to_string()),
+            task_flags: 0,
         });
         self
     }

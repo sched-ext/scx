@@ -32,6 +32,7 @@ fn test_normal_exit() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(100)
         .build();
@@ -79,6 +80,7 @@ fn test_watchdog_disabled() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(50)
         .build();
@@ -125,6 +127,7 @@ fn test_watchdog_timeout_configured() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(50)
         .build();
@@ -204,6 +207,7 @@ fn test_trace_error_methods() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(10)
         .build();
@@ -240,6 +244,7 @@ fn test_default_watchdog_timeout() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(10)
         .build();

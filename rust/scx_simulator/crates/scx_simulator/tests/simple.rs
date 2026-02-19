@@ -29,6 +29,7 @@ fn test_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .task(TaskDef {
             name: "light".into(),
@@ -43,6 +44,7 @@ fn test_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(200)
         .build();
@@ -82,6 +84,7 @@ fn test_three_way_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .task(TaskDef {
             name: "n2".into(),
@@ -96,6 +99,7 @@ fn test_three_way_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .task(TaskDef {
             name: "n0".into(),
@@ -110,6 +114,7 @@ fn test_three_way_weighted_fairness() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(600) // longer to allow convergence
         .build();
@@ -156,6 +161,7 @@ fn test_slice_preemption() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(200)
         .build();
@@ -198,6 +204,7 @@ fn test_preemption_interleaving() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -212,6 +219,7 @@ fn test_preemption_interleaving() {
             allowed_cpus: None,
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         })
         .duration_ms(100)
         .build();
