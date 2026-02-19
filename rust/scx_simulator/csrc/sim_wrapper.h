@@ -179,13 +179,18 @@ extern struct task_struct *sim_dsq_iter_next(void);
          cur = sim_dsq_iter_next())
 
 /*
- * CSS (cgroup_subsys_state) iterator — stub.
+ * CSS (cgroup_subsys_state) iterator.
  *
- * bpf_for_each(css, cur, root, flags) iterates cgroup children.
- * Until cgroups are fully modeled, this iterates nothing.
+ * bpf_for_each(css, cur, root, flags) iterates cgroup children in pre-order.
+ * The Rust side must populate the iteration list via sim_css_iter_*() before
+ * the for loop begins. sim_css_next() walks through the pre-order list.
  */
+extern struct cgroup_subsys_state *sim_css_next(
+    struct cgroup_subsys_state *root, struct cgroup_subsys_state *prev);
+
 #define _bpf_for_each_css(cur, root, flags) \
-    for (cur = NULL; cur != NULL; )
+    for (cur = sim_css_next(root, NULL); cur != NULL; \
+         cur = sim_css_next(root, cur))
 
 /* BPF_FOR_EACH_ITER is referenced in __COMPAT_scx_bpf_dsq_move calls
  * inside for_each loop bodies. Our dsq_move override ignores it. */

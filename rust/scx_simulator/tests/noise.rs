@@ -21,6 +21,7 @@ fn test_noise_disabled_instant_timing() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .duration_ms(100)
         .build();
@@ -53,6 +54,7 @@ fn test_tick_jitter_varies_intervals() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .duration_ms(50)
         .build();
@@ -118,6 +120,7 @@ fn test_csw_overhead_consumed() {
                 mm_id: None,
                 allowed_cpus: None,
                 parent_pid: None,
+                cgroup_name: None,
             },
             TaskDef {
                 name: "t2".into(),
@@ -131,6 +134,7 @@ fn test_csw_overhead_consumed() {
                 mm_id: None,
                 allowed_cpus: None,
                 parent_pid: None,
+                cgroup_name: None,
             },
         ]
     };
@@ -198,6 +202,7 @@ fn test_noise_determinism() {
                 mm_id: None,
                 allowed_cpus: None,
                 parent_pid: None,
+                cgroup_name: None,
             })
             .task(TaskDef {
                 name: "t2".into(),
@@ -211,6 +216,7 @@ fn test_noise_determinism() {
                 mm_id: None,
                 allowed_cpus: None,
                 parent_pid: None,
+                cgroup_name: None,
             })
             .duration_ms(50)
             .build()

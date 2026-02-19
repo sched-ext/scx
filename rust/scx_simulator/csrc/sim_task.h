@@ -50,3 +50,10 @@ void *sim_get_root_cgroup(void);
 /* Address space (mm_struct pointer) */
 void sim_task_set_mm(struct task_struct *p, void *mm);
 void *sim_task_get_mm(struct task_struct *p);
+
+/* Cgroup allocation and management */
+void *sim_cgroup_alloc(unsigned long long cgid, unsigned int level, void *parent);
+void sim_cgroup_free(void *cgrp);
+void sim_cgroup_set_cpuset(void *cgrp, const unsigned int *cpus, unsigned int nr_cpus);
+void sim_task_set_cgroup(struct task_struct *p, void *cgrp);
+void *sim_task_get_cgroup(struct task_struct *p);

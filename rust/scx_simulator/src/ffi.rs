@@ -66,6 +66,18 @@ extern "C" {
     pub fn scx_task_alloc(p: *mut c_void) -> *mut c_void;
     pub fn scx_task_data(p: *mut c_void) -> *mut c_void;
     pub fn scx_task_free(p: *mut c_void);
+
+    // Cgroup allocation and management (implemented in sim_task.c)
+    pub fn sim_cgroup_alloc(cgid: u64, level: u32, parent: *mut c_void) -> *mut c_void;
+    pub fn sim_cgroup_free(cgrp: *mut c_void);
+    pub fn sim_cgroup_set_cpuset(cgrp: *mut c_void, cpus: *const u32, nr_cpus: u32);
+    pub fn sim_task_set_cgroup(p: *mut c_void, cgrp: *mut c_void);
+    pub fn sim_task_get_cgroup(p: *mut c_void) -> *mut c_void;
+
+    // CSS iterator (implemented in sim_cgroup.c)
+    pub fn sim_css_iter_reset();
+    pub fn sim_css_iter_add(cgrp: *mut c_void);
+    pub fn sim_css_iter_set_root(root: *mut c_void);
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +196,26 @@ pub trait Scheduler {
     unsafe fn exit_task(&self, _p: *mut c_void) -> i32 {
         0
     }
+
+    /// Initialize a cgroup (ops.cgroup_init). Optional.
+    /// Called when a cgroup is created and the scheduler should track it.
+    /// # Safety
+    /// Calls into C code. `cgrp` must be a valid cgroup pointer.
+    unsafe fn cgroup_init(&self, _cgrp: *mut c_void) -> i32 {
+        0
+    }
+
+    /// Exit a cgroup (ops.cgroup_exit). Optional.
+    /// Called when a cgroup is being destroyed.
+    /// # Safety
+    /// Calls into C code. `cgrp` must be a valid cgroup pointer.
+    unsafe fn cgroup_exit(&self, _cgrp: *mut c_void) {}
+
+    /// A task moved between cgroups (ops.cgroup_move). Optional.
+    /// Called when a task is migrated from one cgroup to another.
+    /// # Safety
+    /// Calls into C code. All pointers must be valid.
+    unsafe fn cgroup_move(&self, _p: *mut c_void, _from: *mut c_void, _to: *mut c_void) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +244,9 @@ type DumpFn = unsafe extern "C" fn(*mut c_void);
 type DumpTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type UpdateIdleFn = unsafe extern "C" fn(i32, bool);
 type ExitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+type CgroupInitFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type CgroupExitFn = unsafe extern "C" fn(*mut c_void);
+type CgroupMoveFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
 
 /// Resolved function pointers for a scheduler's ops.
 struct SchedOps {
@@ -235,6 +270,9 @@ struct SchedOps {
     dump_task: Option<DumpTaskFn>,
     update_idle: Option<UpdateIdleFn>,
     exit_task: Option<ExitTaskFn>,
+    cgroup_init: Option<CgroupInitFn>,
+    cgroup_exit: Option<CgroupExitFn>,
+    cgroup_move: Option<CgroupMoveFn>,
 }
 
 /// Metadata about a discovered scheduler .so file.
@@ -535,6 +573,12 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), UpdateIdleFn>(p)),
             exit_task: try_get!("exit_task")
                 .map(|p| std::mem::transmute::<*const (), ExitTaskFn>(p)),
+            cgroup_init: try_get!("cgroup_init")
+                .map(|p| std::mem::transmute::<*const (), CgroupInitFn>(p)),
+            cgroup_exit: try_get!("cgroup_exit")
+                .map(|p| std::mem::transmute::<*const (), CgroupExitFn>(p)),
+            cgroup_move: try_get!("cgroup_move")
+                .map(|p| std::mem::transmute::<*const (), CgroupMoveFn>(p)),
         }
     }
 }
@@ -649,6 +693,26 @@ impl Scheduler for DynamicScheduler {
             f(p, sim_get_exit_task_args())
         } else {
             0
+        }
+    }
+
+    unsafe fn cgroup_init(&self, cgrp: *mut c_void) -> i32 {
+        if let Some(f) = self.ops.cgroup_init {
+            f(cgrp)
+        } else {
+            0
+        }
+    }
+
+    unsafe fn cgroup_exit(&self, cgrp: *mut c_void) {
+        if let Some(f) = self.ops.cgroup_exit {
+            f(cgrp);
+        }
+    }
+
+    unsafe fn cgroup_move(&self, p: *mut c_void, from: *mut c_void, to: *mut c_void) {
+        if let Some(f) = self.ops.cgroup_move {
+            f(p, from, to);
         }
     }
 }

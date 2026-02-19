@@ -3,7 +3,19 @@
 use tracing::warn;
 
 use crate::task::{TaskBehavior, TaskDef};
-use crate::types::{MmId, Pid, TimeNs};
+use crate::types::{CpuId, MmId, Pid, TimeNs};
+
+/// Definition of a cgroup for scenario creation.
+#[derive(Debug, Clone)]
+pub struct CgroupDef {
+    /// Name of the cgroup (used to reference it from tasks).
+    pub name: String,
+    /// Parent cgroup name. If `None`, the parent is the root cgroup.
+    pub parent_name: Option<String>,
+    /// Optional cpuset configuration: list of allowed CPU IDs.
+    /// If `None`, the cgroup inherits the parent's cpuset.
+    pub cpuset: Option<Vec<CpuId>>,
+}
 
 /// Configuration for simulation timing noise (tick jitter).
 ///
@@ -236,6 +248,8 @@ pub struct Scenario {
     /// share core 0 and CPUs 2,3 share core 1.
     pub smt_threads_per_core: u32,
     pub tasks: Vec<TaskDef>,
+    /// Cgroup definitions (excluding root, which always exists).
+    pub cgroups: Vec<CgroupDef>,
     pub duration_ns: TimeNs,
     pub noise: NoiseConfig,
     pub overhead: OverheadConfig,
@@ -254,6 +268,7 @@ pub struct ScenarioBuilder {
     nr_cpus: u32,
     smt_threads_per_core: u32,
     tasks: Vec<TaskDef>,
+    cgroups: Vec<CgroupDef>,
     duration_ns: TimeNs,
     next_pid: Pid,
     noise: NoiseConfig,
@@ -269,6 +284,7 @@ impl Scenario {
             nr_cpus: 1,
             smt_threads_per_core: 1,
             tasks: Vec::new(),
+            cgroups: Vec::new(),
             duration_ns: 100_000_000, // 100ms default
             next_pid: Pid(1),
             noise: NoiseConfig::from_env(),
@@ -319,6 +335,7 @@ impl ScenarioBuilder {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         });
         self
     }
@@ -345,6 +362,7 @@ impl ScenarioBuilder {
             mm_id: Some(mm_id),
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         });
         self
     }
@@ -417,6 +435,57 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Define a cgroup with a cpuset under the root cgroup.
+    ///
+    /// Tasks can be assigned to this cgroup via `TaskDef::cgroup_name`.
+    /// The cpuset determines which CPUs tasks in this cgroup may run on.
+    pub fn cgroup(mut self, name: &str, cpuset: &[CpuId]) -> Self {
+        self.cgroups.push(CgroupDef {
+            name: name.to_string(),
+            parent_name: None, // Under root
+            cpuset: Some(cpuset.to_vec()),
+        });
+        self
+    }
+
+    /// Define a nested cgroup under an existing parent cgroup.
+    ///
+    /// The parent cgroup must have been defined previously via `.cgroup()`.
+    pub fn cgroup_nested(mut self, name: &str, parent: &str, cpuset: Option<&[CpuId]>) -> Self {
+        self.cgroups.push(CgroupDef {
+            name: name.to_string(),
+            parent_name: Some(parent.to_string()),
+            cpuset: cpuset.map(|c| c.to_vec()),
+        });
+        self
+    }
+
+    /// Add a task to a specific cgroup.
+    ///
+    /// This is a convenience wrapper for building a TaskDef with a cgroup assignment.
+    pub fn add_task_in_cgroup(
+        mut self,
+        name: &str,
+        nice: i8,
+        behavior: TaskBehavior,
+        cgroup: &str,
+    ) -> Self {
+        let pid = self.next_pid;
+        self.next_pid = Pid(pid.0 + 1);
+        self.tasks.push(TaskDef {
+            name: name.to_string(),
+            pid,
+            nice,
+            behavior,
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: Some(cgroup.to_string()),
+        });
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -438,6 +507,7 @@ impl ScenarioBuilder {
             nr_cpus: self.nr_cpus,
             smt_threads_per_core: self.smt_threads_per_core,
             tasks: self.tasks,
+            cgroups: self.cgroups,
             duration_ns: self.duration_ns,
             noise: self.noise,
             overhead: self.overhead,

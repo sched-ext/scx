@@ -276,37 +276,65 @@ static void *mitosis_task_storage_get(void *map, void *task, void *value,
 
 /* ---------------------------------------------------------------------------
  * Cgroup implementations
+ *
+ * These functions look up cgroups from the Rust CgroupRegistry.
+ * The registry is installed before simulation starts and provides
+ * full cgroup hierarchy support.
  * ---------------------------------------------------------------------------*/
+
+/* Rust-exported cgroup lookup functions */
+extern void *sim_cgroup_lookup_by_id(u64 id);
+extern void *sim_cgroup_lookup_ancestor(void *cgrp, u32 level);
+extern void *sim_task_get_cgroup(struct task_struct *p);
 
 static struct cgroup *mitosis_cgroup_from_id(u64 id)
 {
-	/* root_cgid is a const volatile global set in mitosis_setup() */
+	/* Look up cgroup by ID from the Rust registry */
+	void *cgrp = sim_cgroup_lookup_by_id(id);
+	if (cgrp)
+		return (struct cgroup *)cgrp;
+
+	/* Fallback: check if it's the root_cgid (for backwards compat) */
 	if (id == root_cgid)
 		return (struct cgroup *)sim_get_root_cgroup();
+
 	return NULL;
 }
 
 static struct cgroup *mitosis_cgroup_ancestor(struct cgroup *cgrp, int level)
 {
 	/*
-	 * In our simplified model, all cgroups are root (level 0).
-	 * bpf_cgroup_ancestor acquires a reference in BPF; here we
-	 * just return the pointer (acquire/release are no-ops).
+	 * Look up the ancestor at the given level from the Rust registry.
+	 * The registry walks the cgroup hierarchy to find the ancestor.
 	 */
-	(void)cgrp;
+	if (level < 0)
+		return NULL;
+
+	void *ancestor = sim_cgroup_lookup_ancestor((void *)cgrp, (u32)level);
+	if (ancestor)
+		return (struct cgroup *)ancestor;
+
+	/* Fallback: if level 0 requested and no registry, return root */
 	if (level == 0)
 		return (struct cgroup *)sim_get_root_cgroup();
+
 	return NULL;
 }
 
 static struct cgroup *mitosis_sim_task_cgroup(struct task_struct *p)
 {
 	/*
-	 * All tasks belong to the root cgroup in the simulator.
-	 * In BPF, this returns an acquired reference; our
-	 * bpf_cgroup_release is a no-op.
+	 * Get the cgroup this task belongs to.
+	 * The task's cgroup is stored in task->cgroups->dfl_cgrp.
 	 */
-	(void)p;
+	if (!p)
+		return (struct cgroup *)sim_get_root_cgroup();
+
+	void *cgrp = sim_task_get_cgroup(p);
+	if (cgrp)
+		return (struct cgroup *)cgrp;
+
+	/* Fallback to root cgroup */
 	return (struct cgroup *)sim_get_root_cgroup();
 }
 
