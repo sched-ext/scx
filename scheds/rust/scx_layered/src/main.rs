@@ -2637,7 +2637,7 @@ impl<'a> Scheduler<'a> {
         // so that we can keep reusing the older map already pinned on scheduler
         // restarts.
         let layered_task_hint_map_path = &opts.task_hint_map;
-        let hint_map = &mut skel.maps.scx_layered_task_hint_map;
+        let hint_map = &mut skel.maps.tld_data_map;
         // Only set pin path if a path is provided.
         if layered_task_hint_map_path.is_empty() == false {
             hint_map.set_pin_path(layered_task_hint_map_path).unwrap();
