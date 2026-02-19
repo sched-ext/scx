@@ -959,6 +959,31 @@ pub extern "C" fn scx_bpf_cpu_curr(cpu: i32) -> *mut c_void {
 }
 
 // ---------------------------------------------------------------------------
+// DSQ peek
+// ---------------------------------------------------------------------------
+
+/// Peek at the first task in a DSQ without consuming it.
+///
+/// Returns a pointer to the first `task_struct` in the DSQ (by priority
+/// order for priq, FIFO order for fifo), or NULL if the DSQ is empty or
+/// does not exist.  This resolves the `__COMPAT_scx_bpf_dsq_peek` runtime
+/// check (`bpf_ksym_exists(scx_bpf_dsq_peek)`) so the compat function
+/// calls this directly instead of falling through to `bpf_iter_scx_dsq_*`
+/// which are not implemented in the simulator.
+#[no_mangle]
+pub extern "C" fn scx_bpf_dsq_peek(dsq_id: u64) -> *mut c_void {
+    with_sim(kfunc_cost::SIMPLE, |sim| {
+        let pids = sim.dsqs.ordered_pids(DsqId(dsq_id));
+        if pids.is_empty() {
+            return ptr::null_mut();
+        }
+        sim.task_pid_to_raw
+            .get(&pids[0])
+            .map_or(ptr::null_mut(), |&raw| raw as *mut c_void)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // DSQ iterator kfuncs for bpf_for_each(scx_dsq, ...)
 // ---------------------------------------------------------------------------
 
