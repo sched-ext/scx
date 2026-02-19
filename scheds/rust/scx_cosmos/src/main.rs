@@ -58,14 +58,21 @@ fn parse_hex(s: &str) -> Result<u64, String> {
     }
 }
 
-/// Setup performance counter events for a specific CPU using perf-event-open-sys crate
-fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<()> {
+/// Must match lib/pmu.bpf.c SCX_PMU_STRIDE for perf_events map key layout.
+const PERF_MAP_STRIDE: u32 = 4096;
+
+/// Setup performance counter events for a specific CPU and counter index.
+/// counter_idx 0 = migration event (-e), 1 = sticky event (-y).
+fn setup_perf_events(
+    skel: &mut BpfSkel,
+    cpu: i32,
+    perf_config: u64,
+    counter_idx: u32,
+) -> Result<()> {
     use perf_event_open_sys as sys;
 
-    // Get the perf_events map
     let map = &skel.maps.scx_pmu_map;
 
-    // Create a raw perf event for the perf counter.
     let mut attrs = sys::bindings::perf_event_attr::default();
     attrs.type_ = sys::bindings::PERF_TYPE_RAW;
     attrs.config = perf_config;
@@ -73,14 +80,7 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
     attrs.set_disabled(0);
     attrs.set_inherit(0);
 
-    // Open the perf event using the syscall wrapper from perf-event crate
-    let fd = unsafe {
-        sys::perf_event_open(
-            &mut attrs, -1, // pid: -1 for all processes
-            cpu, -1, // group_fd
-            0,  // flags
-        )
-    };
+    let fd = unsafe { sys::perf_event_open(&mut attrs, -1, cpu, -1, 0) };
 
     if fd < 0 {
         let err = std::io::Error::last_os_error();
@@ -92,8 +92,7 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
         ));
     }
 
-    // Update the BPF map with the file descriptor
-    let key = cpu as u32;
+    let key = cpu as u32 + counter_idx * PERF_MAP_STRIDE;
 
     map.update(
         &key.to_ne_bytes(),
@@ -101,9 +100,6 @@ fn setup_perf_events(skel: &mut BpfSkel, cpu: i32, perf_config: u64) -> Result<(
         libbpf_rs::MapFlags::ANY,
     )
     .with_context(|| "Failed to update perf_events map")?;
-
-    // Note: We're not closing the fd because it needs to stay open for BPF
-    // The kernel will close it when the program exits
 
     Ok(())
 }
@@ -179,17 +175,17 @@ struct Opts {
     #[clap(short = 'e', long, default_value = "0x0", value_parser = parse_hex)]
     perf_config: u64,
 
-    /// Threshold (perf events/msec) to classify a task as event heavy.
+    /// Threshold (perf events/msec) to classify a task as event heavy; exceeding it triggers migration.
     #[clap(short = 'E', default_value = "0", long)]
     perf_threshold: u64,
 
-    /// Enable sticky perf scheduling.
-    ///
-    /// When enabled, a task that generates a large number of perf events is forced to stay on the
-    /// same CPU. When disabled, the scheduler will move the task to the CPU with the smallest
-    /// amount of tracked perf events.
-    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
-    perf_sticky: bool,
+    /// Sticky perf event (0x0 = disabled). When a task exceeds -Y for this event, keep it on the same CPU.
+    #[clap(short = 'y', long, default_value = "0x0", value_parser = parse_hex)]
+    perf_sticky: u64,
+
+    /// Sticky perf threshold; task is kept on same CPU when its count for -y event exceeds this.
+    #[clap(short = 'Y', default_value = "0", long)]
+    perf_sticky_threshold: u64,
 
     /// Disable NUMA optimizations.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
@@ -466,8 +462,11 @@ impl<'a> Scheduler<'a> {
         // Enable perf event scheduling settings.
         rodata.perf_config = opts.perf_config;
         if opts.perf_config > 0 {
-            rodata.perf_sticky = opts.perf_sticky;
             rodata.perf_threshold = opts.perf_threshold;
+        }
+        rodata.perf_sticky = opts.perf_sticky;
+        if opts.perf_sticky > 0 {
+            rodata.perf_sticky_threshold = opts.perf_sticky_threshold;
         }
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
@@ -532,15 +531,17 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Setup performance events for all CPUs
-        if opts.perf_config > 0 {
-            let nr_cpus = *NR_CPU_IDS;
-            info!("Setting up performance counters for {} CPUs...", nr_cpus);
-            let mut perf_available = true;
-            for cpu in 0..nr_cpus {
-                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, opts.perf_config) {
+        // Setup performance events for all CPUs.
+        // Counter indices must match PMU library install order: migration first (0), then sticky (1).
+        // When only sticky is used, it gets index 0; when both are used, sticky gets index 1.
+        let nr_cpus = *NR_CPU_IDS;
+        info!("Setting up performance counters for {} CPUs...", nr_cpus);
+        let mut perf_available = true;
+        let sticky_counter_idx = if opts.perf_config > 0 { 1 } else { 0 };
+        for cpu in 0..nr_cpus {
+            if opts.perf_config > 0 {
+                if let Err(e) = setup_perf_events(&mut skel, cpu as i32, opts.perf_config, 0) {
                     if cpu == 0 {
-                        // Only warn once on first CPU failure
                         let err_str = e.to_string();
                         if err_str.contains("errno 2") || err_str.contains("os error 2") {
                             warn!("Performance counters not available on this CPU architecture");
@@ -553,9 +554,26 @@ impl<'a> Scheduler<'a> {
                     }
                 }
             }
-            if perf_available {
-                info!("Performance counters configured successfully for all CPUs");
+            if opts.perf_sticky > 0 {
+                if let Err(e) =
+                    setup_perf_events(&mut skel, cpu as i32, opts.perf_sticky, sticky_counter_idx)
+                {
+                    if cpu == 0 {
+                        let err_str = e.to_string();
+                        if err_str.contains("errno 2") || err_str.contains("os error 2") {
+                            warn!("Performance counters not available on this CPU architecture");
+                            warn!("PMU event 0x{:x} not supported - scheduler will run without perf monitoring", opts.perf_sticky);
+                        } else {
+                            warn!("Failed to setup perf events: {}", e);
+                        }
+                        perf_available = false;
+                        break;
+                    }
+                }
             }
+        }
+        if perf_available {
+            info!("Performance counters configured successfully for all CPUs");
         }
 
         // Enable primary scheduling domain, if defined.
@@ -650,6 +668,7 @@ impl<'a> Scheduler<'a> {
             cpu_thresh: self.skel.maps.rodata_data.as_ref().unwrap().busy_threshold,
             cpu_util: self.skel.maps.bss_data.as_ref().unwrap().cpu_util,
             nr_event_dispatches: bss_data.nr_event_dispatches,
+            nr_ev_sticky_dispatches: bss_data.nr_ev_sticky_dispatches,
         }
     }
 
