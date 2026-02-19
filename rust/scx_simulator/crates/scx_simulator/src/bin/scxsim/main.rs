@@ -2,12 +2,24 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use scx_simulator::scenario::{parse_duration_ns, parse_seed};
 use scx_simulator::{
     discover_schedulers, load_rtapp, DynamicScheduler, SimFormat, Simulator, SIM_LOCK,
 };
+
+mod real_run;
+
+/// How to run the workload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum RealRunMode {
+    /// Simulation only (default).
+    #[default]
+    Off,
+    /// Launch virtme-ng VM with rt-app and scheduler.
+    Vm,
+}
 
 /// Run sched_ext scheduler simulations from rt-app workloads.
 #[derive(Parser)]
@@ -79,6 +91,13 @@ struct Cli {
     /// List available schedulers and exit.
     #[arg(long)]
     list_schedulers: bool,
+
+    /// Run workload in real environment.
+    ///
+    /// off: simulation only (default)
+    /// vm: launch virtme-ng VM with rt-app and scheduler
+    #[arg(long, value_enum, default_value_t = RealRunMode::Off)]
+    real_run: RealRunMode,
 }
 
 fn main() {
@@ -133,6 +152,20 @@ fn run(cli: &Cli) -> Result<(), String> {
         scenario.sched_overhead_rbc_ns = Some(0);
     }
 
+    // Handle --real-run mode
+    match cli.real_run {
+        RealRunMode::Off => {
+            run_simulation(cli, scenario)?;
+        }
+        RealRunMode::Vm => {
+            real_run::run_vm(workload_path, &cli.scheduler, cli.cpus)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_simulation(cli: &Cli, scenario: scx_simulator::Scenario) -> Result<(), String> {
     let sched = load_scheduler(&cli.scheduler, cli.cpus)?;
     let _lock = SIM_LOCK.lock().unwrap();
     let trace = Simulator::new(sched).run(scenario);
