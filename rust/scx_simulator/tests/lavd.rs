@@ -668,6 +668,10 @@ fn test_lavd_multi_domain_monitored() {
 ///
 /// Domain 0: heavily loaded (stealee), domain 1: moderately loaded (keep as is),
 /// domain 2: lightly loaded (stealer), domain 3: empty (stealer).
+///
+/// Core compaction is disabled so all domains keep their active CPUs,
+/// preventing overflow_running from masking the gradient load distribution.
+///
 /// This exercises:
 /// - L198-199: "keep as is" for domain 1 (between thresholds)
 /// - L327: !is_stealee when stealer domain checks domain 1 neighbor
@@ -675,6 +679,10 @@ fn test_lavd_multi_domain_monitored() {
 fn test_lavd_four_domains_gradient() {
     let _lock = common::setup_test();
     let sched = DynamicScheduler::lavd_multi_domain(8, 4);
+    // Disable core compaction so all domains keep active CPUs.
+    // Without this, do_core_compaction() deactivates domains, creating
+    // overflow_running=true which prevents the "keep as is" path.
+    sched.lavd_set_no_core_compaction(true);
 
     let mut builder = Scenario::builder().cpus(8).duration_ms(500);
 
@@ -732,10 +740,14 @@ fn test_lavd_four_domains_gradient() {
 /// then balance out when sleeping. Over time, plan_x_cpdom_migration()
 /// first sets stealees (when tasks are running), then resets them
 /// (when tasks sleep and load equalizes), exercising lines 132-144.
+///
+/// Core compaction is disabled to prevent overflow domains from masking
+/// the balanced load condition.
 #[test]
 fn test_lavd_multi_domain_load_transition() {
     let _lock = common::setup_test();
     let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+    sched.lavd_set_no_core_compaction(true);
 
     let mut builder = Scenario::builder().cpus(4).duration_ms(1000);
 
@@ -769,6 +781,162 @@ fn test_lavd_multi_domain_load_transition() {
         assert!(
             trace.schedule_count(Pid(i)) > 0,
             "io_{i} was never scheduled"
+        );
+    }
+}
+
+/// Multi-domain balanced load without core compaction: exercises stealee reset.
+///
+/// With no_core_compaction=true and symmetric load, all domains stay active.
+/// On each timer tick, stealee_threshold > max_sc_load (balanced) triggers
+/// the stealee reset path (L127-144) whenever nr_stealee > 0 from a
+/// previous round. After lavd_init() runs, early timer ticks may see
+/// transient imbalance that sets nr_stealee, followed by balanced ticks
+/// that trigger the reset.
+#[test]
+fn test_lavd_multi_domain_no_compact_balanced() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+    sched.lavd_set_no_core_compaction(true);
+
+    // Symmetric load: exactly 1 CPU-bound task per CPU
+    let mut builder = Scenario::builder().cpus(4).duration_ms(500);
+    for i in 1..=4i32 {
+        builder = builder.task(TaskDef {
+            name: format!("symmetric_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.build());
+    for i in 1..=4i32 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "symmetric_{i} was never scheduled"
+        );
+    }
+}
+
+/// 3 domains without core compaction: exercises "keep as is" and stealee reset.
+///
+/// With no_core_compaction=true, all domains keep active CPUs. With 3 domains
+/// and carefully tuned load, the system transitions between imbalanced and
+/// balanced states across timer ticks, exercising:
+/// - L132-144: stealee reset when load becomes balanced after imbalance
+/// - L197-199: "keep as is" when domain load is between thresholds
+///
+/// Load: Domain 0 overloaded (4 tasks), Domain 1 moderate (2 tasks),
+/// Domain 2 light (1 IO task). The similar utilization between domains 0
+/// and 1 creates fluctuating stealer/stealee assignments that eventually
+/// produce balanced rounds (triggering stealee reset).
+#[test]
+fn test_lavd_three_domains_no_compact() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd_multi_domain(6, 3);
+    sched.lavd_set_no_core_compaction(true);
+
+    let mut builder = Scenario::builder().cpus(6).duration_ms(1000);
+
+    // Domain 0 (CPUs 0-1): overloaded with 4 CPU-bound tasks
+    for i in 1..=4i32 {
+        builder = builder.task(TaskDef {
+            name: format!("heavy_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+        });
+    }
+
+    // Domain 1 (CPUs 2-3): moderate load with 2 CPU-bound tasks
+    for i in 5..=6i32 {
+        builder = builder.task(TaskDef {
+            name: format!("medium_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+        });
+    }
+
+    // Domain 2 (CPUs 4-5): lightly loaded with 1 IO task
+    builder = builder.task(TaskDef {
+        name: "light_7".into(),
+        pid: Pid(7),
+        nice: 0,
+        behavior: workloads::io_bound(500_000, 5_000_000),
+        start_time_ns: 0,
+        mm_id: None,
+        allowed_cpus: Some(vec![CpuId(4), CpuId(5)]),
+    });
+
+    let trace = Simulator::new(sched).run(builder.build());
+    for i in 1..=7i32 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "task {i} was never scheduled"
+        );
+    }
+}
+
+/// 3 domains with narrow migration threshold: targeted at "keep as is" path.
+///
+/// Uses mig_delta_pct=5 for a narrow 5% migration threshold to increase
+/// the chance of a domain landing in the middle band between stealer
+/// and stealee thresholds, exercising L197-199.
+///
+/// - Domain 0: very heavy (4 tasks on 2 CPUs -> stealee)
+/// - Domain 1: moderate (1 task on 2 CPUs -> "keep as is")
+/// - Domain 2: idle (0 tasks -> stealer)
+#[test]
+fn test_lavd_gradient_narrow_threshold() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd_multi_domain(6, 3);
+    sched.lavd_set_no_core_compaction(true);
+    sched.lavd_configure(false, 0, 5); // very narrow 5% migration threshold
+
+    let mut builder = Scenario::builder().cpus(6).duration_ms(1000);
+
+    // Domain 0 (CPUs 0-1): very heavy
+    for i in 1..=4i32 {
+        builder = builder.task(TaskDef {
+            name: format!("heavy_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+        });
+    }
+
+    // Domain 1 (CPUs 2-3): moderate (1 CPU-bound task)
+    builder = builder.task(TaskDef {
+        name: "medium_5".into(),
+        pid: Pid(5),
+        nice: 0,
+        behavior: workloads::cpu_bound(10_000_000),
+        start_time_ns: 0,
+        mm_id: None,
+        allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+    });
+
+    // Domain 2 (CPUs 4-5): empty -> stealer
+
+    let trace = Simulator::new(sched).run(builder.build());
+    for i in 1..=5i32 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "task {i} was never scheduled"
         );
     }
 }
