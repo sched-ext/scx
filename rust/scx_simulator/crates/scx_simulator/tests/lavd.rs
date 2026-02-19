@@ -7436,3 +7436,66 @@ fn test_lavd_compaction_diagnostic() {
 
     drop(sim);
 }
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: CPU hotplug (ops.cpu_online / ops.cpu_offline)
+// ---------------------------------------------------------------------------
+
+/// Test CPU hotplug: take a CPU offline then bring it back online.
+/// Exercises lavd_cpu_offline (L1484-1505) and lavd_cpu_online (L1461-1482),
+/// including cpu_ctx_init_offline (L1438-1459) and cpu_ctx_init_online
+/// (L1415-1436). Together these are ~64 uncovered lines in main.bpf.c.
+#[test]
+fn test_lavd_cpu_hotplug() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker", 0, workloads::io_bound(200_000, 2_000_000))
+        .duration_ms(200)
+        // Take CPU 7 offline at 20ms, bring it back at 100ms
+        .cpu_offline_at(CpuId(7), 20_000_000)
+        .cpu_online_at(CpuId(7), 100_000_000)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker task was never scheduled"
+    );
+}
+
+/// Test CPU hotplug with multiple CPUs going offline and coming back.
+/// Verifies the scheduler handles capacity changes gracefully.
+#[test]
+fn test_lavd_cpu_hotplug_multi() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker-a", 0, workloads::io_bound(200_000, 2_000_000))
+        .add_task("worker-b", 0, workloads::cpu_bound(500_000))
+        .duration_ms(200)
+        // Take CPUs 6 and 7 offline at 10ms, bring them back at 80ms
+        .cpu_offline_at(CpuId(7), 10_000_000)
+        .cpu_offline_at(CpuId(6), 12_000_000)
+        .cpu_online_at(CpuId(6), 80_000_000)
+        .cpu_online_at(CpuId(7), 82_000_000)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker-a was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "worker-b was never scheduled"
+    );
+}

@@ -5,6 +5,17 @@ use tracing::warn;
 use crate::task::{TaskBehavior, TaskDef};
 use crate::types::{CpuId, MmId, Pid, TimeNs};
 
+/// A CPU hotplug event: take a CPU offline or bring it online at a given time.
+#[derive(Debug, Clone)]
+pub struct HotplugEvent {
+    /// Simulated time (ns) when the hotplug event fires.
+    pub time_ns: TimeNs,
+    /// Which CPU transitions.
+    pub cpu: CpuId,
+    /// `true` = CPU comes online, `false` = CPU goes offline.
+    pub online: bool,
+}
+
 /// Definition of a cgroup for scenario creation.
 #[derive(Debug, Clone)]
 pub struct CgroupDef {
@@ -278,6 +289,8 @@ pub struct Scenario {
     ///
     /// Set to `false` to enable strict error detection for new tests.
     pub ignore_bpf_errors: bool,
+    /// CPU hotplug events to inject during the simulation.
+    pub hotplug_events: Vec<HotplugEvent>,
 }
 
 /// Builder for constructing scenarios.
@@ -295,6 +308,7 @@ pub struct ScenarioBuilder {
     sched_overhead_rbc_ns: Option<u64>,
     watchdog_timeout_ns: Option<TimeNs>,
     ignore_bpf_errors: bool,
+    hotplug_events: Vec<HotplugEvent>,
 }
 
 impl Scenario {
@@ -313,6 +327,7 @@ impl Scenario {
             sched_overhead_rbc_ns: None,
             watchdog_timeout_ns: Some(DEFAULT_WATCHDOG_TIMEOUT_NS),
             ignore_bpf_errors: true, // Default true for compatibility
+            hotplug_events: Vec::new(),
         }
     }
 }
@@ -544,6 +559,26 @@ impl ScenarioBuilder {
         self.ignore_bpf_errors(false)
     }
 
+    /// Schedule a CPU to go offline at the given simulated time.
+    pub fn cpu_offline_at(mut self, cpu: CpuId, time_ns: TimeNs) -> Self {
+        self.hotplug_events.push(HotplugEvent {
+            time_ns,
+            cpu,
+            online: false,
+        });
+        self
+    }
+
+    /// Schedule a CPU to come online at the given simulated time.
+    pub fn cpu_online_at(mut self, cpu: CpuId, time_ns: TimeNs) -> Self {
+        self.hotplug_events.push(HotplugEvent {
+            time_ns,
+            cpu,
+            online: true,
+        });
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -574,6 +609,7 @@ impl ScenarioBuilder {
             sched_overhead_rbc_ns: self.sched_overhead_rbc_ns,
             watchdog_timeout_ns: self.watchdog_timeout_ns,
             ignore_bpf_errors: self.ignore_bpf_errors,
+            hotplug_events: self.hotplug_events,
         }
     }
 }

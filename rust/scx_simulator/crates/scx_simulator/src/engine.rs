@@ -180,6 +180,10 @@ enum EventKind {
     TimerFired,
     /// Periodic scheduler tick on a CPU.
     Tick { cpu: CpuId },
+    /// A CPU goes offline (hotplug remove).
+    CpuOffline { cpu: CpuId },
+    /// A CPU comes online (hotplug add).
+    CpuOnline { cpu: CpuId },
 }
 
 /// The main simulator.
@@ -482,6 +486,16 @@ impl<S: Scheduler> Simulator<S> {
             events.push(TICK_INTERVAL_NS, EventKind::Tick { cpu: CpuId(cpu_id) });
         }
 
+        // Seed CPU hotplug events from the scenario
+        for hp in &scenario.hotplug_events {
+            let kind = if hp.online {
+                EventKind::CpuOnline { cpu: hp.cpu }
+            } else {
+                EventKind::CpuOffline { cpu: hp.cpu }
+            };
+            events.push(hp.time_ns, kind);
+        }
+
         // Track the exit kind (may be set by error detection)
         let mut exit_kind = ExitKind::Normal;
         let watchdog_timeout = scenario.watchdog_timeout_ns;
@@ -499,7 +513,9 @@ impl<S: Scheduler> Simulator<S> {
             match &event.kind {
                 EventKind::SliceExpired { cpu }
                 | EventKind::TaskPhaseComplete { cpu }
-                | EventKind::Tick { cpu } => {
+                | EventKind::Tick { cpu }
+                | EventKind::CpuOffline { cpu }
+                | EventKind::CpuOnline { cpu } => {
                     state.advance_cpu_clock(*cpu);
                     kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(*cpu));
                 }
@@ -540,6 +556,12 @@ impl<S: Scheduler> Simulator<S> {
                         }
                     }
                     self.handle_tick(cpu, &mut state, &mut tasks, &mut events, monitor);
+                }
+                EventKind::CpuOffline { cpu } => {
+                    self.handle_cpu_offline(cpu, &mut state, &mut tasks, &mut events, monitor);
+                }
+                EventKind::CpuOnline { cpu } => {
+                    self.handle_cpu_online(cpu, &mut state, &mut tasks, &mut events, monitor);
                 }
             }
 
@@ -672,6 +694,11 @@ impl<S: Scheduler> Simulator<S> {
         events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
+        // Don't schedule further ticks on offline CPUs
+        if !state.cpus[cpu.0 as usize].is_online {
+            return;
+        }
+
         // Always schedule the next tick — ticks are unconditional per-CPU timers
         let jitter = state.tick_jitter();
         let interval = (TICK_INTERVAL_NS as i64 + jitter).max(1) as TimeNs;
@@ -725,6 +752,110 @@ impl<S: Scheduler> Simulator<S> {
         if should_preempt && state.cpus[cpu.0 as usize].current_task.is_some() {
             self.preempt_current(cpu, state, tasks, events, monitor);
         }
+    }
+
+    /// Handle a CPU going offline (hotplug remove).
+    ///
+    /// Preempts any running task, drains the local DSQ, calls
+    /// `ops.cpu_offline`, and marks the CPU offline so ticks and
+    /// dispatch stop targeting it.
+    fn handle_cpu_offline(
+        &self,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        monitor: &mut dyn Monitor,
+    ) {
+        if !state.cpus[cpu.0 as usize].is_online {
+            return; // Already offline
+        }
+
+        info!(cpu = cpu.0, "CPU OFFLINE");
+
+        // Preempt running task (if any) — it will be re-enqueued
+        if state.cpus[cpu.0 as usize].current_task.is_some() {
+            self.preempt_current(cpu, state, tasks, events, monitor);
+        }
+
+        // Drain local DSQ: re-enqueue each task so the scheduler places it
+        // elsewhere. In the kernel, migrate_disabled tasks would stay, but
+        // we don't model that.
+        let local_pids: Vec<Pid> = state.cpus[cpu.0 as usize].local_dsq.drain(..).collect();
+        for pid in local_pids {
+            if let Some(task) = tasks.get(&pid) {
+                let raw = task.raw();
+                unsafe {
+                    kfuncs::enter_sim(state, cpu);
+                    state.ops_context = OpsContext::Enqueue;
+                    start_rbc(state);
+                    self.scheduler.enqueue(raw, 0);
+                    charge_sched_time(state, cpu, "enqueue");
+                    state.ops_context = OpsContext::None;
+                    state.resolve_pending_dispatch(cpu);
+                    kfuncs::exit_sim();
+                }
+            }
+        }
+
+        // Notify the scheduler
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            debug!(cpu = cpu.0, "cpu_offline");
+            self.scheduler.cpu_offline(cpu.0 as i32);
+            charge_sched_time(state, cpu, "cpu_offline");
+            kfuncs::exit_sim();
+        }
+
+        state.cpus[cpu.0 as usize].is_online = false;
+    }
+
+    /// Handle a CPU coming online (hotplug add).
+    ///
+    /// Marks the CPU online, calls `ops.cpu_online`, notifies idle state,
+    /// restarts ticks, and tries to dispatch work to the CPU.
+    fn handle_cpu_online(
+        &self,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        monitor: &mut dyn Monitor,
+    ) {
+        if state.cpus[cpu.0 as usize].is_online {
+            return; // Already online
+        }
+
+        info!(cpu = cpu.0, "CPU ONLINE");
+        state.cpus[cpu.0 as usize].is_online = true;
+
+        // Notify the scheduler
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            debug!(cpu = cpu.0, "cpu_online");
+            self.scheduler.cpu_online(cpu.0 as i32);
+            charge_sched_time(state, cpu, "cpu_online");
+            kfuncs::exit_sim();
+        }
+
+        // CPU starts idle after coming online
+        unsafe { ffi::scx_test_set_idle_cpumask(cpu.0 as i32) };
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            self.scheduler.update_idle(cpu.0 as i32, true);
+            charge_sched_time(state, cpu, "update_idle");
+            kfuncs::exit_sim();
+        }
+
+        // Restart tick chain for this CPU
+        let next_tick = state.cpus[cpu.0 as usize].local_clock + TICK_INTERVAL_NS;
+        events.push(next_tick, EventKind::Tick { cpu });
+
+        // Try to dispatch work to the newly online CPU
+        self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
     }
 
     /// Handle a task waking up.
@@ -1316,6 +1447,11 @@ impl<S: Scheduler> Simulator<S> {
     ) {
         // If CPU is already running something, nothing to do
         if state.cpus[cpu.0 as usize].current_task.is_some() {
+            return;
+        }
+
+        // Don't dispatch to offline CPUs
+        if !state.cpus[cpu.0 as usize].is_online {
             return;
         }
 
