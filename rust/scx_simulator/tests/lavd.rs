@@ -4933,6 +4933,357 @@ fn test_lavd_saturated_io_sync_wakeup() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6: Coverage improvements — is_monitored, pinned_slice_ns, slice boost,
+// SCX_TASK_QUEUED for consume_prev, power mode changes
+// ---------------------------------------------------------------------------
+
+/// Enable `is_monitored` to cover introspection data collection paths.
+/// Covers main.bpf.c lines 378-380 (`resched_interval` tracking in
+/// `update_stat_for_running`) and lines 1256-1259 (`waker_pid` / `waker_comm`
+/// collection in `lavd_runnable`).
+#[test]
+fn test_lavd_is_monitored() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_monitored\0", true);
+    }
+
+    // Ping-pong tasks to exercise waker-wakee tracking with monitoring
+    let mm = MmId(1);
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 100_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "monitored-a".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: beh_a,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "monitored-b".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: beh_b,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Enable `pinned_slice_ns` to cover the pinned-task time slice reduction
+/// path in `calc_time_slice` (main.bpf.c lines 283-287) and the pinned
+/// slice target in `shrink_slice_at_tick` (preempt.bpf.c lines 262-292).
+///
+/// When `pinned_slice_ns > 0` and a CPU has `nr_pinned_tasks > 0`, time
+/// slices are clamped to `min(pinned_slice_ns, sys_stat.slice)`.
+#[test]
+fn test_lavd_pinned_slice_ns() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // Enable pinned_slice_ns: clamp slices to 2ms when pinned tasks exist
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 2_000_000);
+    }
+
+    // Pinned tasks + unpinned tasks to exercise the interaction
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("pinned-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("pinned-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("free-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("free-1", 0, workloads::io_bound(100_000, 500_000))
+        .add_task("free-2", 0, workloads::io_bound(80_000, 400_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=5 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// Exercise the slice boost path in `calc_time_slice` (main.bpf.c lines
+/// 299-345). Slice boost triggers when:
+///   - `no_slice_boost = false` (default)
+///   - `cpuc->nr_pinned_tasks == 0`
+///   - `taskc->avg_runtime >= sys_stat.slice`
+///
+/// With low task count relative to CPUs, `can_boost_slice()` returns true
+/// (nr_queued_task <= nr_active), giving the full boost path (lines 315-324).
+/// With high task count, only lat-cri tasks get partial boost (lines 334-344).
+#[test]
+fn test_lavd_slice_boost_full() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // 2 CPU-bound tasks on 4 CPUs: low load → can_boost_slice() returns true.
+    // Long-running tasks should develop avg_runtime >= sys_stat.slice,
+    // triggering the full boost path.
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("long-0", 0, workloads::cpu_bound(50_000_000))
+        .add_task("long-1", 0, workloads::cpu_bound(50_000_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Exercise the partial slice boost path for latency-critical tasks under
+/// high load (main.bpf.c lines 334-344). When `can_boost_slice()` returns
+/// false but `taskc->lat_cri > sys_stat.avg_lat_cri`, the scheduler boosts
+/// proportional to latency criticality.
+#[test]
+fn test_lavd_slice_boost_partial_lat_cri() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Overloaded system (6 tasks on 4 CPUs) with a mix of IO and CPU-bound.
+    // IO tasks develop high lat_cri. With can_boost_slice() false (overloaded),
+    // only the high-lat_cri IO tasks get partial boost.
+    let mm = MmId(1);
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 200_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "io-cri-a".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "io-cri-b".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // Ping-pong tasks should definitely run (high priority, latency-critical)
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+    // At least some CPU-bound hogs should get CPU time
+    let hog_scheduled: usize = (3..=6)
+        .filter(|&pid_val| trace.schedule_count(Pid(pid_val)) > 0)
+        .count();
+    assert!(
+        hog_scheduled >= 2,
+        "expected at least 2 hogs scheduled, got {hog_scheduled}"
+    );
+}
+
+/// Enable `__SCX_TASK_QUEUED` and manage `scx.flags` to cover
+/// `consume_prev` (main.bpf.c lines 879-920) and `update_stat_for_refill`
+/// (lines 537-552).
+///
+/// In the kernel, `SCX_TASK_QUEUED` (= 1) is set in `p->scx.flags` when
+/// a task is enqueued and cleared when consumed/dispatched. The simulator
+/// must set the `__SCX_TASK_QUEUED` enum value AND set the flag on the
+/// prev task when calling dispatch with a still-runnable prev.
+#[test]
+fn test_lavd_consume_prev() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // Set __SCX_TASK_QUEUED to 1 (matching kernel enum value)
+        let sym: libloading::Symbol<'_, *mut u64> = sched
+            .get_symbol(b"__SCX_TASK_QUEUED\0")
+            .expect("__SCX_TASK_QUEUED not found");
+        std::ptr::write_volatile(*sym, 1);
+    }
+
+    // CPU-bound tasks that run long enough for dispatch to be called
+    // with a still-runnable prev task. With SCX_TASK_QUEUED set, the
+    // dispatch fallback path calls consume_prev to extend the slice.
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("worker-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("worker-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("worker-3", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// Test `is_monitored + is_smt_active` together for comprehensive coverage
+/// of monitoring paths when SMT is enabled.
+#[test]
+fn test_lavd_monitored_smt() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_monitored\0", true);
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    let mm = MmId(1);
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 100_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -5,
+            behavior: beh_a,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -5,
+            behavior: beh_b,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Exercise power mode switching paths in power.bpf.c.
+/// The `do_set_power_profile` function (lines 532-600+) has branches for
+/// LAVD_PM_PERFORMANCE, LAVD_PM_BALANCED, and LAVD_PM_POWERSAVE modes.
+/// Setting different `power_mode` values before running covers these paths
+/// via `update_power_mode_time` (lines 506-530).
+#[test]
+fn test_lavd_power_mode_performance() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // LAVD_PM_PERFORMANCE = 0
+        lavd_set_u64(&sched, "power_mode\0", 0);
+        lavd_set_bool(&sched, "no_core_compaction\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("worker-1", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Exercise powersave mode paths in power.bpf.c.
+/// `LAVD_PM_POWERSAVE = 2` triggers `is_powersave_mode = true` and
+/// sets `pco_idx = 0` in `calc_nr_active_cpus`.
+#[test]
+fn test_lavd_power_mode_powersave() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // LAVD_PM_POWERSAVE = 2
+        lavd_set_u64(&sched, "power_mode\0", 2);
+        lavd_set_bool(&sched, "is_powersave_mode\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("worker-1", 0, workloads::io_bound(100_000, 500_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Test pinned_slice_ns with per_cpu_dsq enabled.
+/// This exercises `use_per_cpu_dsq()` (returns true when `per_cpu_dsq ||
+/// pinned_slice_ns`) and `get_target_dsq_id` returning per-CPU DSQ IDs
+/// for pinned tasks (util.bpf.c line 349).
+#[test]
+fn test_lavd_pinned_slice_per_cpu_dsq() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 3_000_000);
+        lavd_set_bool(&sched, "per_cpu_dsq\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("worker-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 300_000))
+        .add_task("io-1", -5, workloads::io_bound(60_000, 400_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk
