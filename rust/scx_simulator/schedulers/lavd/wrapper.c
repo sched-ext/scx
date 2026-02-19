@@ -191,13 +191,30 @@ extern int scx_task_init(u64 data_size);
  * definition here and lavd_setup() sets the value.
  *
  * cpufreq_cpu_data / hw_pressure: __ksym kernel symbols referenced in
- * power.bpf.c but guarded by bpf_ksym_exists() which returns 0.
- * Provide zero-initialized definitions to satisfy the linker.
+ * power.bpf.c. Provide zero-initialized definitions to satisfy the linker.
  */
 volatile u32 nr_cpu_ids;
 struct cpufreq_policy *cpufreq_cpu_data;
 unsigned long hw_pressure;
 
+/*
+ * bpf_probe_read_kernel override for LAVD.
+ *
+ * The generic sim_wrapper.h implementation does memcpy(dst, src, sz) which
+ * is normally fine. However, update_effective_capacity() in power.bpf.c
+ * uses &cpufreq_cpu_data as an array base and indexes by CPU id. In BPF,
+ * &cpufreq_cpu_data is NULL when the ksym doesn't exist, making the read
+ * fail. In userspace, &cpufreq_cpu_data is always non-NULL, and reading
+ * base[cpu] for cpu > 0 reads beyond the single variable into garbage
+ * memory, causing SIGSEGV when the resulting pointer is dereferenced.
+ *
+ * Since there is no kernel memory in the simulator, bpf_probe_read_kernel
+ * should always fail. This is safe — the only caller in LAVD is in
+ * update_effective_capacity's cpufreq path which gracefully handles failure.
+ */
+#undef bpf_probe_read_kernel
+#define bpf_probe_read_kernel(dst, sz, src) \
+	(__builtin_memset((dst), 0, (sz)), (long)(-14))
 /*
  * =================================================================
  * Include LAVD source files

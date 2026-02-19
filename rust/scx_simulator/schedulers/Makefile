@@ -34,8 +34,19 @@ SCHEDS := $(patsubst %/wrapper.c,%,$(wildcard */wrapper.c))
 SO_TARGETS := $(foreach s,$(SCHEDS),$(BUILD_DIR)/libscx_$(s).so)
 
 # --- Common flags ---
-CFLAGS := -fPIC -DSCX_BPF_UNITTEST \
-          -Wno-unused-parameter -Wno-unknown-attributes
+CFLAGS_BASE := -fPIC -DSCX_BPF_UNITTEST \
+               -Wno-unused-parameter -Wno-unknown-attributes
+
+# --- Coverage support (opt-in via SCX_SIM_COVERAGE=1) ---
+ifeq ($(SCX_SIM_COVERAGE),1)
+CFLAGS_COV := -fprofile-instr-generate -fcoverage-mapping
+LDFLAGS_SO := -shared -fprofile-instr-generate
+else
+CFLAGS_COV :=
+LDFLAGS_SO := -shared -nostdlib
+endif
+
+CFLAGS := $(CFLAGS_BASE) $(CFLAGS_COV)
 
 INCLUDES := -I$(SIMULATOR_DIR)/csrc \
             -I$(ROOT_DIR)/lib/scxtest \
@@ -105,9 +116,13 @@ endef
 
 # Per-scheduler sim_sigfpe.c -> <name>_sim_sigfpe.o
 # NOTE: compiled WITHOUT $(INCLUDES) to avoid vmlinux.h / signal.h conflicts
+# NOTE: compiled WITHOUT coverage flags — the signal handler manually decodes
+# x86 div/idiv instructions at RIP; coverage instrumentation changes the
+# instruction layout around div, causing the handler to miscalculate lengths
+# and jump to invalid addresses.
 define SIGFPE_RULE
 $(BUILD_DIR)/$(1)_sim_sigfpe.o: $(SIMULATOR_DIR)/csrc/sim_sigfpe.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) \
+	$(CC) $(CFLAGS_BASE) \
 		-MMD -MF $(BUILD_DIR)/$(1)_sim_sigfpe.d \
 		-c -o $$@ $$<
 endef
@@ -123,7 +138,7 @@ endef
 # Link .o files into .so
 define SO_RULE
 $(BUILD_DIR)/libscx_$(1).so: $(BUILD_DIR)/$(1)_wrapper.o $(BUILD_DIR)/$(1)_sim_bpf_stubs.o $(BUILD_DIR)/$(1)_sim_sdt_stubs.o $(BUILD_DIR)/$(1)_sim_sigfpe.o $(BUILD_DIR)/$(1)_overrides.o
-	$(CC) -shared -nostdlib -o $$@ $$^
+	$(CC) $(LDFLAGS_SO) -o $$@ $$^
 endef
 
 # Instantiate rules for each scheduler
