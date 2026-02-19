@@ -608,6 +608,12 @@ void lavd_set_is_monitored(unsigned int val)
 	is_monitored = !!val;
 }
 
+/* Enable/disable core compaction. */
+void lavd_set_no_core_compaction(unsigned int val)
+{
+	no_core_compaction = !!val;
+}
+
 /*
  * =================================================================
  * Probe functions — exported accessors for scheduler-internal state

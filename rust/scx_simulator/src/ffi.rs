@@ -392,6 +392,23 @@ impl DynamicScheduler {
         }
     }
 
+    /// Enable or disable LAVD's `no_core_compaction` flag.
+    ///
+    /// When core compaction is enabled (`no_core_compaction = false`),
+    /// `do_core_compaction()` can deactivate CPUs in domains, creating
+    /// overflow domains that prevent the balanced load path from
+    /// triggering. Disabling core compaction keeps all domains active.
+    pub fn lavd_set_no_core_compaction(&self, no_compact: bool) {
+        type SetU32Fn = unsafe extern "C" fn(u32);
+        unsafe {
+            let sym: libloading::Symbol<SetU32Fn> = self
+                ._lib
+                .get(b"lavd_set_no_core_compaction")
+                .expect("lavd_set_no_core_compaction not found");
+            (sym)(no_compact as u32);
+        }
+    }
+
     /// Load the scx_cosmos scheduler with NUMA topology.
     ///
     /// CPUs are grouped sequentially into `nr_nodes` NUMA nodes.

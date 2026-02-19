@@ -4045,6 +4045,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "clap",
+ "criterion",
  "libbpf-sys",
  "libc",
  "libloading",
