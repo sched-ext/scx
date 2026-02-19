@@ -8225,3 +8225,80 @@ fn test_lavd_kernel_task_types() {
         );
     }
 }
+
+/// Asymmetric wake pattern: high-lat-cri IO task wakes low-lat-cri CPU hog.
+///
+/// Exercises the lat_cri inheritance path in lat_cri.bpf.c L194-205:
+///   lat_cri_giver = taskc->lat_cri_waker + taskc->lat_cri_wakee
+///   if (lat_cri_giver > (2 * lat_cri)) { ... }
+///
+/// Task A (IO-bound) rapidly cycles run/sleep/wake, building high lat_cri
+/// from frequent wait/wake. Task B (CPU-bound) sleeps for long periods and
+/// gets woken by A, inheriting A's high lat_cri via lat_cri_waker.
+///
+/// The key filter in lavd_runnable() at L1198 requires `p->real_parent ==
+/// waker->real_parent`, so B must have A as parent_pid.
+#[test]
+fn test_lavd_lat_cri_inheritance() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        // Task A: IO-bound waker — short run/sleep cycles, wakes B each cycle
+        .task(TaskDef {
+            name: "io_waker".into(),
+            pid: Pid(1),
+            nice: -5,
+            behavior: TaskBehavior {
+                phases: vec![
+                    Phase::Run(100_000),   // 100us CPU
+                    Phase::Sleep(200_000), // 200us sleep
+                    Phase::Wake(Pid(2)),   // wake the CPU hog
+                ],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        // Task B: CPU-bound sleeper — long sleep then short CPU, woken by A.
+        // parent_pid = A so lavd_runnable's real_parent check passes.
+        .task(TaskDef {
+            name: "cpu_hog".into(),
+            pid: Pid(2),
+            nice: 10,
+            behavior: TaskBehavior {
+                phases: vec![
+                    Phase::Sleep(50_000_000), // 50ms sleep (will be woken by A)
+                    Phase::Run(2_000_000),    // 2ms CPU burst
+                ],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(1)),
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        // Background CPU load to keep sys_stat active
+        .add_task("bg1", 5, workloads::cpu_bound(10_000_000))
+        .add_task("bg2", 5, workloads::cpu_bound(10_000_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 10,
+        "io_waker should cycle many times"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "cpu_hog was never scheduled"
+    );
+}
