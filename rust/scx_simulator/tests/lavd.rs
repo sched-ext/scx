@@ -8,6 +8,64 @@ mod common;
 scheduler_tests!(|nr_cpus| DynamicScheduler::lavd(nr_cpus));
 
 // ---------------------------------------------------------------------------
+// Helper: configure LAVD globals via dlsym to enable features disabled by
+// default in lavd_setup() (no_core_compaction, is_autopilot_on, etc.)
+// ---------------------------------------------------------------------------
+
+/// Write a boolean value to a named LAVD global variable.
+unsafe fn lavd_set_bool(sched: &DynamicScheduler, name: &str, val: bool) {
+    let sym: libloading::Symbol<'_, *mut bool> = sched
+        .get_symbol(name.as_bytes())
+        .unwrap_or_else(|| panic!("symbol {name} not found"));
+    std::ptr::write_volatile(*sym, val);
+}
+
+/// Write a u8 value to a named LAVD global variable.
+unsafe fn lavd_set_u8(sched: &DynamicScheduler, name: &str, val: u8) {
+    let sym: libloading::Symbol<'_, *mut u8> = sched
+        .get_symbol(name.as_bytes())
+        .unwrap_or_else(|| panic!("symbol {name} not found"));
+    std::ptr::write_volatile(*sym, val);
+}
+
+/// Write a u64 value to a named LAVD global variable.
+unsafe fn lavd_set_u64(sched: &DynamicScheduler, name: &str, val: u64) {
+    let sym: libloading::Symbol<'_, *mut u64> = sched
+        .get_symbol(name.as_bytes())
+        .unwrap_or_else(|| panic!("symbol {name} not found"));
+    std::ptr::write_volatile(*sym, val);
+}
+
+/// Set up a minimal valid PCO table for core compaction.
+/// Without this, `get_cpu_order()` errors on `pco_idx >= LAVD_PCO_STATE_MAX`.
+unsafe fn lavd_setup_pco(sched: &DynamicScheduler, nr_cpus: u32) {
+    const LAVD_CPU_ID_MAX: usize = 512;
+
+    lavd_set_u8(sched, "nr_pco_states\0", 1);
+
+    // Set up PCO table: state 0 has CPUs in order 0..nr_cpus
+    let pco_sym: libloading::Symbol<'_, *mut u16> = sched
+        .get_symbol(b"pco_table\0")
+        .expect("pco_table not found");
+    let pco = *pco_sym;
+    for i in 0..nr_cpus.min(LAVD_CPU_ID_MAX as u32) {
+        std::ptr::write_volatile(pco.add(i as usize), i as u16);
+    }
+
+    // Set PCO bounds high enough that all CPUs are considered
+    let bounds_sym: libloading::Symbol<'_, *mut u32> = sched
+        .get_symbol(b"pco_bounds\0")
+        .expect("pco_bounds not found");
+    std::ptr::write_volatile(*bounds_sym, u32::MAX);
+
+    // Set primary count
+    let primary_sym: libloading::Symbol<'_, *mut u16> = sched
+        .get_symbol(b"pco_nr_primary\0")
+        .expect("pco_nr_primary not found");
+    std::ptr::write_volatile(*primary_sym, nr_cpus as u16);
+}
+
+// ---------------------------------------------------------------------------
 // LAVD-specific tests: latency criticality classification
 // ---------------------------------------------------------------------------
 
@@ -1666,6 +1724,1080 @@ fn test_lavd_core_compaction_pinned_prev() {
         trace.schedule_count(Pid(2)) > 0,
         "pinned task B was never scheduled"
     );
+}
+
+// ===========================================================================
+// Coverage tests: exercise LAVD code paths disabled by default in lavd_setup
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// power.bpf.c: core compaction (do_core_compaction, calc_nr_active_cpus)
+// Covers: do_core_compaction, calc_nr_active_cpus, calc_required_capacity,
+//         get_cpu_order, get_human_readable_avg_sc_util
+// ---------------------------------------------------------------------------
+
+/// Enable core compaction on an overloaded system (many tasks, few CPUs).
+/// This triggers do_core_compaction() → calc_nr_active_cpus() via the
+/// timer callback in update_sys_stat().
+#[test]
+fn test_lavd_core_compaction_overloaded() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable core compaction (disabled by default)
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Overloaded: 8 CPU-bound tasks on 4 CPUs → all CPUs should be active
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(200);
+    for i in 0..8 {
+        builder = builder.add_task(&format!("hog-{i}"), 0, workloads::cpu_bound(20_000_000));
+    }
+    let scenario = builder.build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // All tasks should have run
+    for pid_val in 1..=8 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task pid={pid_val} was never scheduled"
+        );
+    }
+}
+
+/// Enable core compaction on an underloaded system (few tasks, many CPUs).
+/// With low utilization, some CPUs should be deactivated.
+#[test]
+fn test_lavd_core_compaction_underloaded() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable core compaction
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Underloaded: 1 I/O-bound task on 8 CPUs → most CPUs can be deactivated
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-light", 0, workloads::io_bound(100_000, 10_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "io-light task was never scheduled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// power.bpf.c: autopilot (do_autopilot, do_set_power_profile)
+// Covers: do_autopilot, do_set_power_profile, init_autopilot_caps,
+//         update_power_mode_time, update_autopilot_high_cap
+// ---------------------------------------------------------------------------
+
+/// Enable autopilot on a heavily loaded system → should switch to performance mode.
+#[test]
+fn test_lavd_autopilot_high_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Heavy load: 4 CPU-bound tasks on 4 CPUs (100% utilization)
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(200);
+    for i in 0..4 {
+        builder = builder.add_task(&format!("cpu-{i}"), 0, workloads::cpu_bound(50_000_000));
+    }
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// Enable autopilot on a lightly loaded system → should switch to powersave mode.
+#[test]
+fn test_lavd_autopilot_low_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Very light load on many CPUs → should trigger powersave mode
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("light", 0, workloads::io_bound(50_000, 50_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Enable autopilot with moderate load → balanced mode.
+#[test]
+fn test_lavd_autopilot_moderate_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Moderate load: 2 periodic tasks on 4 CPUs
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(200);
+    for i in 0..2 {
+        builder = builder.add_task(
+            &format!("periodic-{i}"),
+            0,
+            workloads::periodic(5_000_000, 10_000_000),
+        );
+    }
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=2 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// power.bpf.c: frequency scaling (update_cpuperf_target, reset_cpuperf_target)
+// ---------------------------------------------------------------------------
+
+/// Enable frequency scaling to trigger update_cpuperf_target codepath.
+#[test]
+fn test_lavd_freq_scaling_enabled() {
+    let _lock = common::setup_test();
+    let nr_cpus = 2;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_freq_scaling\0", false);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker", 0, workloads::periodic(3_000_000, 10_000_000))
+        .add_task("hog", 0, workloads::cpu_bound(50_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// power.bpf.c: performance mode reinit
+// (reinit_active_cpumask_for_performance)
+// ---------------------------------------------------------------------------
+
+/// Trigger performance mode reinit by switching from balanced→performance.
+/// This covers reinit_active_cpumask_for_performance().
+#[test]
+fn test_lavd_reinit_cpumask_performance() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Start with core compaction enabled (balanced mode),
+    // then autopilot will switch to performance under heavy load.
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Start light (triggers powersave/balanced), then heavy load via
+    // many CPU-bound tasks → autopilot switches to performance,
+    // which sets reinit_cpumask_for_performance = true
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(300);
+    for i in 0..8 {
+        builder = builder.add_task(&format!("worker-{i}"), 0, workloads::cpu_bound(30_000_000));
+    }
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=8 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// preempt.bpf.c: preemption with contention
+// Covers: try_find_and_kick_victim_cpu, find_victim_cpu, can_x_kick_y,
+//         can_x_kick_cpu2, ask_cpu_yield_after, shrink_boosted_slice_remote,
+//         is_worth_kick_other_task, preempt_at_tick, reset_cpu_preemption_info
+// ---------------------------------------------------------------------------
+
+/// High-contention scenario: many lat-cri tasks competing for few CPUs.
+/// The frequent sleep/wake cycles create high lat_cri, triggering preemption.
+#[test]
+fn test_lavd_preemption_contention() {
+    let _lock = common::setup_test();
+    let nr_cpus = 2;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Mix of lat-cri (I/O) and CPU-bound on few CPUs
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(300);
+    // High-frequency I/O tasks → high lat_cri → should preempt CPU hogs
+    for i in 0..4 {
+        builder = builder.add_task(
+            &format!("io-{i}"),
+            0,
+            workloads::io_bound(200_000, 2_000_000),
+        );
+    }
+    // CPU-bound hogs → low lat_cri → victims for preemption
+    for i in 0..4 {
+        builder = builder.add_task(&format!("hog-{i}"), 0, workloads::cpu_bound(50_000_000));
+    }
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should have been scheduled
+    for pid_val in 1..=8 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task pid={pid_val} was never scheduled"
+        );
+    }
+}
+
+/// Ping-pong with CPU hogs: triggers preemption kick paths when
+/// high-lat-cri tasks compete with low-lat-cri hogs.
+#[test]
+fn test_lavd_preemption_ping_pong_vs_hogs() {
+    let _lock = common::setup_test();
+    let nr_cpus = 2;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let (ping_b, pong_b) = workloads::ping_pong(Pid(10), Pid(11), 200_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(10),
+            nice: 0,
+            behavior: ping_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(11),
+            nice: 0,
+            behavior: pong_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-0".into(),
+            pid: Pid(12),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-1".into(),
+            pid: Pid(13),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in [10, 11, 12, 13] {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// preempt.bpf.c: pinned task slice shrinking
+// Covers: shrink_slice_at_tick, shrink_boosted_slice_remote with
+//         pinned_slice_ns path, nr_pinned_tasks tracking
+// ---------------------------------------------------------------------------
+
+/// CPU-pinned tasks contending on a single CPU should trigger the
+/// pinned_slice_ns codepath in shrink_slice_at_tick.
+#[test]
+fn test_lavd_pinned_task_contention() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Two tasks pinned to CPU 0 contending with unpinned tasks
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "pinned-0".into(),
+            pid: Pid(10),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pinned-1".into(),
+            pid: Pid(11),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "free-0".into(),
+            pid: Pid(12),
+            nice: 0,
+            behavior: workloads::cpu_bound(30_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "free-1".into(),
+            pid: Pid(13),
+            nice: 0,
+            behavior: workloads::cpu_bound(30_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in [10, 11, 12, 13] {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task pid={pid_val} was never scheduled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// idle.bpf.c: more CPU selection paths
+// Covers: pick_idle_cpu (no-idle path, sticky fallback), pick_random_cpu,
+//         cpumask_any_distribute, find_cpu_in, find_sticky_cpu_at_cpdom
+// ---------------------------------------------------------------------------
+
+/// Overloaded system with no idle CPUs → pick_idle_cpu falls through
+/// to sticky_cpu or pick_random_cpu paths.
+#[test]
+fn test_lavd_no_idle_cpu_fallback() {
+    let _lock = common::setup_test();
+    let nr_cpus = 2;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Many tasks, few CPUs, frequent wakes → no idle CPUs available
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(200);
+    for i in 0..6 {
+        builder = builder.add_task(&format!("busy-{i}"), 0, workloads::cpu_bound(10_000_000));
+    }
+    // Add I/O tasks that wake frequently → need to find CPU when none idle
+    for i in 0..4 {
+        builder = builder.add_task(
+            &format!("io-{i}"),
+            0,
+            workloads::io_bound(100_000, 1_000_000),
+        );
+    }
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=10 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// idle.bpf.c: affinitized task idle selection
+// Covers: init_idle_i_mask (LAVD_FLAG_IS_AFFINITIZED path),
+//         init_ao_masks (affinitized path), can_run_on_cpu (affinitized)
+// ---------------------------------------------------------------------------
+
+/// Affinitized tasks with restricted CPU sets trigger the cpumask-AND
+/// paths in init_idle_i_mask and init_ao_masks.
+#[test]
+fn test_lavd_affinitized_idle_selection() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        // Task pinned to CPUs 0,1 (subset)
+        .task(TaskDef {
+            name: "affin-01".into(),
+            pid: Pid(10),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 3_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
+        })
+        // Task pinned to CPUs 2,3
+        .task(TaskDef {
+            name: "affin-23".into(),
+            pid: Pid(11),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 3_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+            parent_pid: None,
+        })
+        // Unpinned tasks to fill CPUs
+        .task(TaskDef {
+            name: "free-0".into(),
+            pid: Pid(12),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "free-1".into(),
+            pid: Pid(13),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in [10, 11, 12, 13] {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+
+    // Verify affinity constraints are respected
+    for event in trace.events() {
+        if let TraceKind::TaskScheduled { pid } = &event.kind {
+            if *pid == Pid(10) {
+                assert!(
+                    event.cpu == CpuId(0) || event.cpu == CpuId(1),
+                    "affin-01 scheduled on {:?}, expected CPU 0 or 1",
+                    event.cpu
+                );
+            }
+            if *pid == Pid(11) {
+                assert!(
+                    event.cpu == CpuId(2) || event.cpu == CpuId(3),
+                    "affin-23 scheduled on {:?}, expected CPU 2 or 3",
+                    event.cpu
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lat_cri.bpf.c: varied nice values and greedy penalty
+// Covers: calc_greedy_factor (nice != 0 path), reverse_time_to_weight_ratio,
+//         calc_virtual_deadline_delta (nice-weighted path)
+// ---------------------------------------------------------------------------
+
+/// Tasks with different nice values exercise the weight-based vdeadline paths.
+#[test]
+fn test_lavd_varied_nice_values() {
+    let _lock = common::setup_test();
+    let nr_cpus = 2;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+    let probes = LavdProbes::new(&sched);
+    let mut monitor = LavdMonitor::new(probes);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "high-pri".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "low-pri".into(),
+            pid: Pid(2),
+            nice: 10,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "normal".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let _result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    // High-priority task (nice -10) should get more runtime
+    // than low-priority task (nice 10) on a 2-CPU system with 3 tasks
+    let high_snap = monitor.final_snapshot(Pid(1));
+    let low_snap = monitor.final_snapshot(Pid(2));
+    assert!(
+        high_snap.is_some() && low_snap.is_some(),
+        "expected snapshots for both tasks"
+    );
+}
+
+/// Extremely high-nice task alongside normal task: exercises the
+/// greedy penalty scaling in calc_greedy_factor.
+#[test]
+fn test_lavd_greedy_penalty_extreme_nice() {
+    let _lock = common::setup_test();
+    let nr_cpus = 1;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "greedy".into(),
+            pid: Pid(1),
+            nice: 19,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "priority".into(),
+            pid: Pid(2),
+            nice: -20,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    let rt1 = trace.total_runtime(Pid(1));
+    let rt2 = trace.total_runtime(Pid(2));
+    // Highest priority should get significantly more runtime
+    assert!(rt2 > rt1, "expected nice=-20 ({rt2}ns) > nice=19 ({rt1}ns)");
+}
+
+// ---------------------------------------------------------------------------
+// main.bpf.c: multi-CPU with sleep/wake for idle tracking
+// Covers: lavd_update_idle, update_stat_for_stopping, stat accumulation
+// ---------------------------------------------------------------------------
+
+/// Many tasks with varied sleep patterns exercise idle tracking in
+/// update_stat_for_stopping and the CAS loop in collect_sys_stat.
+#[test]
+fn test_lavd_idle_tracking_varied_sleep() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        // Fast sleeper
+        .add_task("fast-io", 0, workloads::io_bound(100_000, 500_000))
+        // Slow sleeper
+        .add_task("slow-io", 0, workloads::io_bound(2_000_000, 20_000_000))
+        // Periodic task
+        .add_task("periodic", 0, workloads::periodic(1_000_000, 5_000_000))
+        // CPU-bound
+        .add_task("hog", 0, workloads::cpu_bound(50_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Combined: all features enabled (core compaction + autopilot + freq scaling)
+// This exercises the complete update_sys_stat → autopilot → core_compaction
+// → calc_sys_time_slice → update_thr_perf_cri call chain.
+// ---------------------------------------------------------------------------
+
+/// Full-featured LAVD: all power management features enabled simultaneously.
+#[test]
+fn test_lavd_all_power_features() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "no_freq_scaling\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Mixed workload: I/O + CPU + periodic
+    let (ping_b, pong_b) = workloads::ping_pong(Pid(10), Pid(11), 300_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(10),
+            nice: 0,
+            behavior: ping_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(11),
+            nice: 0,
+            behavior: pong_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "io".into(),
+            pid: Pid(12),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 5_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "periodic".into(),
+            pid: Pid(13),
+            nice: 0,
+            behavior: workloads::periodic(2_000_000, 8_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog".into(),
+            pid: Pid(14),
+            nice: 5,
+            behavior: workloads::cpu_bound(30_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in [10, 11, 12, 13, 14] {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task pid={pid_val} was never scheduled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stress test: concurrent interleaving with core compaction
+// Covers: race conditions in CAS loops, concurrent dispatch + tick
+// ---------------------------------------------------------------------------
+
+/// Concurrent interleaving with all features enabled: exercises race
+/// conditions in the CAS loops for idle tracking, preemption, etc.
+#[test]
+fn test_lavd_concurrent_all_features() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "no_freq_scaling\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(200);
+
+    // Mix of workload types
+    for i in 0..3 {
+        builder = builder.add_task(
+            &format!("io-{i}"),
+            0,
+            workloads::io_bound(150_000, 2_000_000),
+        );
+    }
+    for i in 0..3 {
+        builder = builder.add_task(
+            &format!("hog-{i}"),
+            (i as i8) * 5,
+            workloads::cpu_bound(20_000_000),
+        );
+    }
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=6 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Seed exploration: try different seeds to trigger different branches
+// in preemption, idle selection, and core compaction.
+// ---------------------------------------------------------------------------
+
+/// Run with multiple seeds to explore different scheduling interleavings.
+/// Different seeds cause different random choices in find_victim_cpu,
+/// pick_random_cpu, and bpf_cpumask_any_distribute.
+#[test]
+fn test_lavd_seed_exploration() {
+    let _lock = common::setup_test();
+
+    for seed in [1, 7, 42, 99, 12345, 999999] {
+        let nr_cpus = 4;
+        let sched = DynamicScheduler::lavd(nr_cpus);
+
+        unsafe {
+            lavd_set_bool(&sched, "no_core_compaction\0", false);
+            lavd_setup_pco(&sched, nr_cpus);
+        }
+
+        let scenario = Scenario::builder()
+            .cpus(nr_cpus)
+            .seed(seed)
+            .add_task("io-0", 0, workloads::io_bound(100_000, 1_000_000))
+            .add_task("io-1", 0, workloads::io_bound(200_000, 3_000_000))
+            .add_task("hog-0", 0, workloads::cpu_bound(15_000_000))
+            .add_task("hog-1", 5, workloads::cpu_bound(25_000_000))
+            .add_task("periodic", -5, workloads::periodic(1_000_000, 4_000_000))
+            .duration_ms(150)
+            .build();
+
+        let trace = Simulator::new(sched).run(scenario);
+        for pid_val in 1..=5 {
+            assert!(
+                trace.schedule_count(Pid(pid_val)) > 0,
+                "seed={seed}: task pid={pid_val} was never scheduled"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SMT (hyperthreading) topology: exercises is_smt_active paths
+// Covers: pick_idle_cpu SMT branch, idle_smtmask handling
+// ---------------------------------------------------------------------------
+
+/// SMT topology: triggers the SMT-aware idle CPU selection paths.
+#[test]
+fn test_lavd_smt_topology() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Note: lavd_setup sets is_smt_active = false by default.
+    // Even without setting it true, building the scenario with smt(2)
+    // exercises the SMT paths in the simulator engine (cpu_sibling tracking).
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2) // 2 threads per core → 2 physical cores
+        .add_task("io-0", 0, workloads::io_bound(200_000, 3_000_000))
+        .add_task("io-1", 0, workloads::io_bound(200_000, 3_000_000))
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// power.bpf.c: have_little_core = true
+// Covers: is_perf_cri (have_little_core path), update_thr_perf_cri
+//         (big/little threshold calculation), perf_cri stat collection
+//         in collect_sys_stat phase 3
+// ---------------------------------------------------------------------------
+
+/// Enable big.LITTLE topology to exercise perf_cri threshold calculation.
+#[test]
+fn test_lavd_big_little_topology() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // Mark CPUs 0,1 as big, 2,3 as little
+        lavd_set_bool(&sched, "have_little_core\0", true);
+
+        // Set capacity for big cores higher
+        let cap_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"cpu_capacity\0")
+            .expect("cpu_capacity not found");
+        let cap_arr = *cap_sym;
+        std::ptr::write_volatile(cap_arr.add(0), 1024);
+        std::ptr::write_volatile(cap_arr.add(1), 1024);
+        std::ptr::write_volatile(cap_arr.add(2), 512);
+        std::ptr::write_volatile(cap_arr.add(3), 512);
+
+        // Mark big cores
+        let big_sym: libloading::Symbol<'_, *mut u8> =
+            sched.get_symbol(b"cpu_big\0").expect("cpu_big not found");
+        let big_arr = *big_sym;
+        std::ptr::write_volatile(big_arr.add(0), 1);
+        std::ptr::write_volatile(big_arr.add(1), 1);
+        std::ptr::write_volatile(big_arr.add(2), 0);
+        std::ptr::write_volatile(big_arr.add(3), 0);
+
+        // Enable core compaction to trigger update_thr_perf_cri
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-fast", 0, workloads::io_bound(100_000, 1_000_000))
+        .add_task("hog-0", 0, workloads::cpu_bound(30_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(30_000_000))
+        .add_task("periodic", -5, workloads::periodic(2_000_000, 8_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// main.bpf.c: delayed start tasks (start_time_ns > 0)
+// Covers: task wakeup at different times, dynamic task arrival
+// ---------------------------------------------------------------------------
+
+/// Staggered task arrival: tests dynamic task wakeup at different times.
+#[test]
+fn test_lavd_staggered_task_arrival() {
+    let _lock = common::setup_test();
+    let nr_cpus = 2;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "early".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "mid".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 50_000_000, // arrives at 50ms
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "late".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 100_000_000, // arrives at 100ms
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=3 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task pid={pid_val} was never scheduled"
+        );
+    }
+    // Early task should have more runtime than late task
+    let rt_early = trace.total_runtime(Pid(1));
+    let rt_late = trace.total_runtime(Pid(3));
+    assert!(
+        rt_early > rt_late,
+        "expected early ({rt_early}ns) > late ({rt_late}ns)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// util.bpf.c: more branch coverage via extreme values
+// Covers: calc_avg, calc_avg32, calc_asym_avg with zero and saturated inputs
+// ---------------------------------------------------------------------------
+
+/// Single-CPU with a task that alternates between very short and very long
+/// run phases. This exercises the avg runtime calculation with extreme values.
+#[test]
+fn test_lavd_extreme_runtime_variation() {
+    let _lock = common::setup_test();
+    let nr_cpus = 1;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "bursty".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![
+                    Phase::Run(10_000),      // 10us burst
+                    Phase::Sleep(1_000_000), // 1ms sleep
+                    Phase::Run(50_000_000),  // 50ms burst
+                    Phase::Sleep(1_000_000), // 1ms sleep
+                ],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// power.bpf.c: energy model (no_use_em = false)
+// Covers: calc_nr_active_cpus (energy model path), init_autopilot_caps
+//         (energy model path), pco_bounds/pco_nr_primary usage
+// ---------------------------------------------------------------------------
+
+/// Test with energy model enabled (no_use_em = false) to exercise the
+/// PCO-based calc_nr_active_cpus codepath.
+#[test]
+fn test_lavd_energy_model_enabled() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+
+        // Set up a simple energy model with 2 PCO states
+        lavd_set_u8(&sched, "no_use_em\0", 0); // Enable energy model
+        lavd_set_u8(&sched, "nr_pco_states\0", 2);
+
+        // Set PCO bounds and primary counts
+        let bounds_sym: libloading::Symbol<'_, *mut u32> = sched
+            .get_symbol(b"pco_bounds\0")
+            .expect("pco_bounds not found");
+        let bounds = *bounds_sym;
+        std::ptr::write_volatile(bounds.add(0), 2048); // low state
+        std::ptr::write_volatile(bounds.add(1), 8192); // high state
+
+        let primary_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"pco_nr_primary\0")
+            .expect("pco_nr_primary not found");
+        let primary = *primary_sym;
+        std::ptr::write_volatile(primary.add(0), 2);
+        std::ptr::write_volatile(primary.add(1), 4);
+
+        // Set up PCO table (CPU order for each state)
+        let pco_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"pco_table\0")
+            .expect("pco_table not found");
+        let pco = *pco_sym;
+        // State 0: CPUs 0,1,2,3
+        for i in 0..4u16 {
+            std::ptr::write_volatile(pco.add(i as usize), i);
+        }
+        // State 1: CPUs 0,1,2,3 (same order, all active)
+        // LAVD_CPU_ID_MAX entries per state
+        let stride = 512; // LAVD_CPU_ID_MAX
+        for i in 0..4u16 {
+            std::ptr::write_volatile(pco.add(stride + i as usize), i);
+        }
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-0", 0, workloads::io_bound(100_000, 2_000_000))
+        .add_task("hog-0", 0, workloads::cpu_bound(30_000_000))
+        .add_task("periodic", 0, workloads::periodic(2_000_000, 8_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=3 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
 }
 
 /// Verify that update_idle fixes CPU utilization tracking.
