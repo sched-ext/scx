@@ -100,67 +100,88 @@ fn validate_prerequisites(scheduler: &str) -> Result<(), String> {
 }
 
 /// Find the scheduler binary.
+///
+/// Search order:
+/// 1. `SCX_SCHED_BIN` environment variable (explicit override)
+/// 2. Repo-relative paths from CWD (`../../target/{release,debug}/scx_<name>`)
+/// 3. CARGO_MANIFEST_DIR-relative paths (when run via `cargo run`)
+/// 4. System PATH / well-known locations
 fn find_scheduler_binary(scheduler: &str) -> Result<PathBuf, String> {
-    // Try common locations for the scheduler binary
-    let candidates = [
-        // Debug build in scx repo
-        format!(
-            "{}/target/debug/scx_{scheduler}",
-            std::env::var("HOME").unwrap_or_default()
-        ),
-        // Installed system-wide
-        format!("/usr/bin/scx_{scheduler}"),
-        // In path
-        format!("scx_{scheduler}"),
-    ];
+    let bin_name = format!("scx_{scheduler}");
 
-    // First check CARGO_MANIFEST_DIR relative path (during development)
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    if !manifest_dir.is_empty() {
-        // Navigate from scx_simulator to repo root
-        let manifest_path = PathBuf::from(&manifest_dir);
-        if let Some(crates_dir) = manifest_path.parent() {
-            if let Some(sim_dir) = crates_dir.parent() {
-                if let Some(rust_dir) = sim_dir.parent() {
-                    if let Some(repo_root) = rust_dir.parent() {
-                        let debug_path = repo_root.join(format!("target/debug/scx_{scheduler}"));
-                        if debug_path.exists() {
-                            return Ok(debug_path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Check SCX_SCHED_BIN environment variable
+    // 1. Explicit override via environment variable
     if let Ok(sched_bin) = std::env::var("SCX_SCHED_BIN") {
         let path = PathBuf::from(&sched_bin);
         if path.exists() {
             return Ok(path);
         }
+        return Err(format!(
+            "SCX_SCHED_BIN set to {sched_bin} but file does not exist"
+        ));
     }
 
-    // Try candidates
-    for candidate in &candidates {
-        let path = PathBuf::from(candidate);
+    // 2. Repo-relative from CWD (scxsim is typically run from rust/scx_simulator/)
+    // The scx repo root is ../../ relative to that, so target/ is at ../../target/
+    let cwd_candidates = ["../../target/release", "../../target/debug"];
+    for dir in cwd_candidates {
+        let path = PathBuf::from(dir).join(&bin_name);
         if path.exists() {
-            return Ok(path);
+            return Ok(path.canonicalize().unwrap_or(path));
         }
-        // Also try resolving from PATH
-        if let Ok(output) = Command::new("which").arg(candidate).output() {
-            if output.status.success() {
-                let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !resolved.is_empty() {
-                    return Ok(PathBuf::from(resolved));
+    }
+
+    // 3. CARGO_MANIFEST_DIR-relative (crates/scx_simulator -> scx_simulator -> rust -> repo_root)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let manifest_path = PathBuf::from(&manifest_dir);
+        // Navigate: crates/scx_simulator -> crates -> scx_simulator -> rust -> repo_root
+        if let Some(repo_root) = manifest_path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            for profile in ["release", "debug"] {
+                let path = repo_root.join("target").join(profile).join(&bin_name);
+                if path.exists() {
+                    return Ok(path);
                 }
             }
         }
     }
 
+    // 4. System locations and PATH
+    let system_candidates = [
+        format!("/usr/bin/{bin_name}"),
+        format!(
+            "{}/target/release/{bin_name}",
+            std::env::var("HOME").unwrap_or_default()
+        ),
+        format!(
+            "{}/target/debug/{bin_name}",
+            std::env::var("HOME").unwrap_or_default()
+        ),
+    ];
+
+    for candidate in &system_candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    // Try PATH resolution
+    if let Ok(output) = Command::new("which").arg(&bin_name).output() {
+        if output.status.success() {
+            let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !resolved.is_empty() {
+                return Ok(PathBuf::from(resolved));
+            }
+        }
+    }
+
     Err(format!(
-        "scheduler binary scx_{scheduler} not found. Build it with:\n\
-         cargo build -p scx_{scheduler}\n\n\
+        "scheduler binary {bin_name} not found. Build it with:\n\
+         cargo build -p {bin_name} --release\n\n\
          Or set SCX_SCHED_BIN environment variable to the path of the scheduler binary."
     ))
 }
