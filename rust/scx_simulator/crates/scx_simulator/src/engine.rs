@@ -465,6 +465,29 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
+        // Call cgroup_set_bandwidth for cgroups that have bandwidth configured.
+        // In the kernel, this is called when writing to cpu.max.
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
+            for cg_def in &scenario.cgroups {
+                if let Some(ref bw) = cg_def.bandwidth {
+                    if let Some(cgrp_info) = cgroup_registry.get_by_name(&cg_def.name) {
+                        let raw = cgrp_info.raw();
+                        start_rbc(&mut state);
+                        self.scheduler.cgroup_set_bandwidth(
+                            raw,
+                            bw.period_us,
+                            bw.quota_us,
+                            bw.burst_us,
+                        );
+                        charge_sched_time(&mut state, CpuId(0), "cgroup_set_bandwidth");
+                    }
+                }
+            }
+            kfuncs::exit_sim();
+        }
+
         // Pre-assign tasks to cgroups before init_task.
         // Build a map from pid to cgroup raw pointer for tasks with cgroup_name.
         let mut task_cgroup_map: HashMap<Pid, *mut c_void> = HashMap::new();

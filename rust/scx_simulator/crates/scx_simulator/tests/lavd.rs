@@ -7634,3 +7634,140 @@ fn test_lavd_cpu_acquire_release() {
         "worker-a was never scheduled"
     );
 }
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: CPU bandwidth control (enable_cpu_bw)
+// ---------------------------------------------------------------------------
+
+/// Test LAVD with CPU bandwidth control enabled.
+///
+/// When `enable_cpu_bw = true`:
+/// - `lavd_init()` calls `scx_cgroup_bw_lib_init()` (main.bpf.c:2206-2211)
+/// - `lavd_cgroup_init()` calls `scx_cgroup_bw_init()` (main.bpf.c:2081-2085)
+/// - `lavd_cgroup_exit()` calls `scx_cgroup_bw_exit()` (main.bpf.c:2094-2097)
+/// - `lavd_enqueue()` calls `cgroup_throttled()` (main.bpf.c:753-758, 638-669)
+/// - `lavd_dequeue()` calls `scx_cgroup_bw_cancel()` (main.bpf.c:864-875)
+/// - `cgroup_set_bandwidth()` calls `scx_cgroup_bw_set()` (main.bpf.c:2112-2121)
+///
+/// The cgroup bandwidth stubs all return 0 (no actual throttling), so tasks
+/// run normally but the code paths are exercised.
+#[test]
+fn test_lavd_enable_cpu_bw() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable CPU bandwidth control before init
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .cgroup_with_bandwidth(
+            "batch",
+            &[CpuId(0), CpuId(1), CpuId(2), CpuId(3)],
+            100_000, // 100ms period
+            50_000,  // 50ms quota
+            10_000,  // 10ms burst
+        )
+        .cgroup_with_bandwidth(
+            "interactive",
+            &[CpuId(0), CpuId(1), CpuId(2), CpuId(3)],
+            100_000, // 100ms period
+            80_000,  // 80ms quota
+            20_000,  // 20ms burst
+        )
+        .add_task_in_cgroup("worker-a", 5, workloads::cpu_bound(10_000_000), "batch")
+        .add_task_in_cgroup("worker-b", 5, workloads::cpu_bound(10_000_000), "batch")
+        .add_task_in_cgroup(
+            "ui",
+            -5,
+            workloads::io_bound(50_000, 300_000),
+            "interactive",
+        )
+        .add_task("unbounded", 0, workloads::cpu_bound(10_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should be scheduled (stubs don't actually throttle)
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker-a was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "worker-b was never scheduled"
+    );
+    assert!(trace.schedule_count(Pid(3)) > 0, "ui was never scheduled");
+    assert!(
+        trace.schedule_count(Pid(4)) > 0,
+        "unbounded was never scheduled"
+    );
+}
+
+/// Test CPU bandwidth with dequeue path exercised via preemption.
+///
+/// When `enable_cpu_bw = true` and tasks are preempted, the dequeue path
+/// calls `scx_cgroup_bw_cancel()` (main.bpf.c:867-875). This test uses
+/// cpu_preempt events to force dequeue while bandwidth control is active.
+///
+/// Also exercises `consume_prev` cgroup_throttled check (main.bpf.c:898-899)
+/// and dispatch cgroup_throttled check (main.bpf.c:1340).
+#[test]
+fn test_lavd_cpu_bw_with_preemption() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 100_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .cgroup_with_bandwidth(
+            "group-a",
+            &[CpuId(0), CpuId(1), CpuId(2), CpuId(3)],
+            100_000,
+            70_000,
+            10_000,
+        )
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: Some("group-a".into()),
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: Some("group-a".into()),
+        })
+        .add_task_in_cgroup("hog", 10, workloads::cpu_bound(10_000_000), "group-a")
+        .add_task("free", 0, workloads::cpu_bound(10_000_000))
+        // CPU preemption to trigger dequeue with enable_cpu_bw
+        .cpu_preempt(CpuId(0), 30_000_000, 35_000_000)
+        .cpu_preempt(CpuId(1), 60_000_000, 65_000_000)
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(trace.schedule_count(Pid(1)) > 0, "ping was never scheduled");
+    assert!(trace.schedule_count(Pid(2)) > 0, "pong was never scheduled");
+}
