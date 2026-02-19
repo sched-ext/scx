@@ -21,6 +21,26 @@ use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
 
+/// How the simulation terminated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitKind {
+    /// Simulation ran to completion (duration exhausted).
+    Normal,
+    /// BPF scheduler called scx_bpf_error().
+    ErrorBpf(String),
+    /// Watchdog detected a stalled runnable task.
+    ErrorStall { pid: Pid, runnable_for_ns: TimeNs },
+    /// Dispatch loop exceeded iteration limit without making progress.
+    ErrorDispatchLoopExhausted { cpu: CpuId },
+}
+
+impl ExitKind {
+    /// Returns true if this is an error exit (not Normal).
+    pub fn is_error(&self) -> bool {
+        !matches!(self, ExitKind::Normal)
+    }
+}
+
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
 /// Synchronous wakeup: waker is about to sleep/yield, hinting the scheduler
@@ -32,6 +52,11 @@ const SCX_DEQ_SLEEP: u64 = 1;
 
 /// Tick interval in nanoseconds (4ms, matching HZ=250).
 const TICK_INTERVAL_NS: TimeNs = 4_000_000;
+
+/// Maximum dispatch loop iterations (matches kernel SCX_DSP_MAX_LOOPS).
+/// TODO(sim-b825e): Use this to implement dispatch loop exhaustion detection.
+#[allow(dead_code)]
+const SCX_DSP_MAX_LOOPS: u32 = 32;
 
 /// A simulation event, ordered by timestamp then tiebreaker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +248,31 @@ impl<S: Scheduler> Simulator<S> {
         Simulator { scheduler }
     }
 
+    /// Check for stalled runnable tasks (watchdog).
+    ///
+    /// Iterates all tasks and checks if any Runnable task has been waiting
+    /// longer than the timeout. Returns the first stall error found, if any.
+    fn check_watchdog(
+        tasks: &HashMap<Pid, SimTask>,
+        current_time: TimeNs,
+        timeout_ns: TimeNs,
+    ) -> Option<ExitKind> {
+        for task in tasks.values() {
+            if matches!(task.state, TaskState::Runnable) {
+                if let Some(runnable_at) = task.runnable_at_ns {
+                    let runnable_for = current_time.saturating_sub(runnable_at);
+                    if runnable_for > timeout_ns {
+                        return Some(ExitKind::ErrorStall {
+                            pid: task.pid,
+                            runnable_for_ns: runnable_for,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Run a scenario and return the trace.
     pub fn run(&self, scenario: Scenario) -> Trace {
         let result = self.run_internal(scenario, &mut NoopMonitor);
@@ -356,6 +406,7 @@ impl<S: Scheduler> Simulator<S> {
             sched_overhead_rbc_ns: rbc_ns,
             rbc_kfunc_calls: 0,
             rbc_kfunc_ns: 0,
+            bpf_error: None,
         };
 
         // Set CPU ID width for log formatting
@@ -431,6 +482,11 @@ impl<S: Scheduler> Simulator<S> {
             events.push(TICK_INTERVAL_NS, EventKind::Tick { cpu: CpuId(cpu_id) });
         }
 
+        // Track the exit kind (may be set by error detection)
+        let mut exit_kind = ExitKind::Normal;
+        let watchdog_timeout = scenario.watchdog_timeout_ns;
+        let ignore_bpf_errors = scenario.ignore_bpf_errors;
+
         // Main event loop
         while let Some(event) = events.pop() {
             if event.time_ns > scenario.duration_ns {
@@ -474,8 +530,28 @@ impl<S: Scheduler> Simulator<S> {
                     self.handle_timer_fired(&mut state, &mut tasks, &mut events, monitor);
                 }
                 EventKind::Tick { cpu } => {
+                    // Check for stalled tasks before handling tick
+                    if let Some(timeout) = watchdog_timeout {
+                        if let Some(stall_error) =
+                            Self::check_watchdog(&tasks, state.clock, timeout)
+                        {
+                            exit_kind = stall_error;
+                            break;
+                        }
+                    }
                     self.handle_tick(cpu, &mut state, &mut tasks, &mut events, monitor);
                 }
+            }
+
+            // Check for BPF error after each event (unless ignored)
+            if !ignore_bpf_errors {
+                if let Some(msg) = state.bpf_error.take() {
+                    exit_kind = ExitKind::ErrorBpf(msg);
+                    break;
+                }
+            } else {
+                // Clear the error so it doesn't accumulate
+                state.bpf_error = None;
             }
         }
 
@@ -534,6 +610,9 @@ impl<S: Scheduler> Simulator<S> {
 
         // Free the synthetic idle task
         unsafe { ffi::sim_task_free(idle_task_raw) };
+
+        // Set the exit kind on the trace
+        state.trace.set_exit_kind(exit_kind);
 
         SimulationResult {
             trace: state.trace,
@@ -677,6 +756,11 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         task.state = TaskState::Runnable;
+        // Track when task became runnable for watchdog stall detection.
+        // Only set if not already set (kernel semantics: only reset when task runs).
+        if task.runnable_at_ns.is_none() {
+            task.runnable_at_ns = Some(state.clock);
+        }
 
         // Make sure the current phase is a Run phase
         // (skip over Wake phases, handle Sleep->Run transitions)
@@ -1498,6 +1582,8 @@ impl<S: Scheduler> Simulator<S> {
 
         task.state = TaskState::Running { cpu };
         task.prev_cpu = cpu;
+        // Clear runnable_at_ns: task is now running (watchdog reset).
+        task.runnable_at_ns = None;
         state.cpus[cpu.0 as usize].current_task = Some(pid);
         state.cpus[cpu.0 as usize].prev_task = None;
         state.task_last_cpu.insert(pid, cpu);

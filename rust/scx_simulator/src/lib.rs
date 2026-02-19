@@ -51,7 +51,7 @@ pub mod workloads;
 pub use cgroup::{
     clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupInfo, CgroupRegistry,
 };
-pub use engine::{SimulationResult, Simulator};
+pub use engine::{ExitKind, SimulationResult, Simulator};
 pub use ffi::{discover_schedulers, DynamicScheduler, Scheduler, SchedulerInfo};
 pub use fmt::{FmtN, FmtTs, SimFormat};
 pub use kfuncs::sim_clock;

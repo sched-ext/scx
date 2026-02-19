@@ -3,6 +3,7 @@
 //! Every scheduling action (task scheduled, preempted, slept, woke, CPU idle)
 //! is recorded as a `TraceEvent` with a simulated timestamp and CPU ID.
 
+use crate::engine::ExitKind;
 use crate::fmt::FmtTs;
 use crate::task::TaskDef;
 use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
@@ -85,6 +86,8 @@ pub struct Trace {
     events: Vec<TraceEvent>,
     pub(crate) nr_cpus: u32,
     task_names: Vec<(Pid, String)>,
+    /// How the simulation terminated.
+    exit_kind: ExitKind,
 }
 
 impl Trace {
@@ -94,6 +97,7 @@ impl Trace {
             events: Vec::new(),
             nr_cpus,
             task_names,
+            exit_kind: ExitKind::Normal,
         }
     }
 
@@ -104,6 +108,21 @@ impl Trace {
             .find(|(p, _)| *p == pid)
             .map(|(_, n)| n.as_str())
             .unwrap_or("???")
+    }
+
+    /// Set the exit kind for this trace.
+    pub(crate) fn set_exit_kind(&mut self, kind: ExitKind) {
+        self.exit_kind = kind;
+    }
+
+    /// Get the exit kind for this simulation.
+    pub fn exit_kind(&self) -> &ExitKind {
+        &self.exit_kind
+    }
+
+    /// Returns true if the simulation exited with an error.
+    pub fn has_error(&self) -> bool {
+        self.exit_kind.is_error()
     }
 
     pub(crate) fn record(&mut self, time_ns: TimeNs, cpu: CpuId, kind: TraceKind) {

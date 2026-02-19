@@ -239,6 +239,9 @@ pub fn sched_overhead_rbc_ns_from_env() -> Option<u64> {
     }
 }
 
+/// Default watchdog timeout: 30 seconds (matches kernel SCX_WATCHDOG_MAX_TIMEOUT).
+pub const DEFAULT_WATCHDOG_TIMEOUT_NS: TimeNs = 30_000_000_000;
+
 /// A complete simulation scenario: CPUs, tasks, and duration.
 #[derive(Debug, Clone)]
 pub struct Scenario {
@@ -261,6 +264,20 @@ pub struct Scenario {
     /// Nanoseconds per retired conditional branch in scheduler C code.
     /// `None` = disabled (no PMU counter). `Some(10)` = 10ns per RBC.
     pub sched_overhead_rbc_ns: Option<u64>,
+    /// Watchdog timeout for detecting stalled runnable tasks.
+    ///
+    /// - `Some(ns)` — watchdog fires after `ns` simulated nanoseconds of stall.
+    /// - `None` — watchdog disabled.
+    /// - Default: `Some(30_000_000_000)` (30s, matching kernel default).
+    pub watchdog_timeout_ns: Option<TimeNs>,
+    /// Whether to ignore BPF errors (scx_bpf_error calls).
+    ///
+    /// - `false` — BPF errors terminate simulation with `ExitKind::ErrorBpf`.
+    /// - `true` — BPF errors are logged but simulation continues.
+    /// - Default: `true` (for compatibility with existing tests).
+    ///
+    /// Set to `false` to enable strict error detection for new tests.
+    pub ignore_bpf_errors: bool,
 }
 
 /// Builder for constructing scenarios.
@@ -276,6 +293,8 @@ pub struct ScenarioBuilder {
     seed: u32,
     fixed_priority: bool,
     sched_overhead_rbc_ns: Option<u64>,
+    watchdog_timeout_ns: Option<TimeNs>,
+    ignore_bpf_errors: bool,
 }
 
 impl Scenario {
@@ -292,6 +311,8 @@ impl Scenario {
             seed: seed_from_env(),
             fixed_priority: false,
             sched_overhead_rbc_ns: None,
+            watchdog_timeout_ns: Some(DEFAULT_WATCHDOG_TIMEOUT_NS),
+            ignore_bpf_errors: true, // Default true for compatibility
         }
     }
 }
@@ -486,6 +507,43 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Set the watchdog timeout for detecting stalled runnable tasks.
+    ///
+    /// - `Some(ns)` — watchdog fires after `ns` simulated nanoseconds of stall.
+    /// - `None` — watchdog disabled.
+    ///
+    /// Default: 30 seconds (matching kernel SCX_WATCHDOG_MAX_TIMEOUT).
+    pub fn watchdog_timeout_ns(mut self, timeout: Option<TimeNs>) -> Self {
+        self.watchdog_timeout_ns = timeout;
+        self
+    }
+
+    /// Disable the watchdog (stall detection).
+    ///
+    /// Shorthand for `.watchdog_timeout_ns(None)`.
+    pub fn no_watchdog(self) -> Self {
+        self.watchdog_timeout_ns(None)
+    }
+
+    /// Enable or disable BPF error detection.
+    ///
+    /// - `false` — BPF errors (scx_bpf_error calls) terminate simulation
+    ///   with `ExitKind::ErrorBpf`.
+    /// - `true` — BPF errors are logged to stderr but simulation continues.
+    ///
+    /// Default: `true` (for compatibility with existing tests).
+    pub fn ignore_bpf_errors(mut self, ignore: bool) -> Self {
+        self.ignore_bpf_errors = ignore;
+        self
+    }
+
+    /// Enable strict BPF error detection.
+    ///
+    /// Shorthand for `.ignore_bpf_errors(false)`.
+    pub fn detect_bpf_errors(self) -> Self {
+        self.ignore_bpf_errors(false)
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -514,6 +572,8 @@ impl ScenarioBuilder {
             seed: self.seed,
             fixed_priority: self.fixed_priority,
             sched_overhead_rbc_ns: self.sched_overhead_rbc_ns,
+            watchdog_timeout_ns: self.watchdog_timeout_ns,
+            ignore_bpf_errors: self.ignore_bpf_errors,
         }
     }
 }

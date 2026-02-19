@@ -155,6 +155,13 @@ pub struct SimTask {
     pub enabled: bool,
     /// The last CPU the task ran on (for select_cpu prev_cpu).
     pub prev_cpu: CpuId,
+    /// Timestamp (simulated ns) when the task became Runnable.
+    ///
+    /// Used by the watchdog to detect stalled tasks. Set when the task
+    /// transitions to Runnable, cleared (set to None) when the task starts
+    /// Running or goes to Sleeping. Matches kernel semantics: only reset
+    /// when the task actually runs, not when dequeued and re-enqueued.
+    pub runnable_at_ns: Option<TimeNs>,
 }
 
 impl SimTask {
@@ -193,6 +200,7 @@ impl SimTask {
             state: TaskState::Sleeping,
             enabled: false,
             prev_cpu: CpuId(0),
+            runnable_at_ns: None,
         }
     }
 
