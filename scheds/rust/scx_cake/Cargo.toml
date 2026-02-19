@@ -26,7 +26,7 @@ tachyonfx = "0.22.0"
 nix = { version = "0.29", features = ["signal", "poll"] }
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
 
 [[bin]]
 name = "scx_cake"
