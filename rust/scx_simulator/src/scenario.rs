@@ -313,6 +313,7 @@ impl ScenarioBuilder {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
         self
     }
@@ -338,6 +339,7 @@ impl ScenarioBuilder {
             start_time_ns: 0,
             mm_id: Some(mm_id),
             allowed_cpus: None,
+            parent_pid: None,
         });
         self
     }

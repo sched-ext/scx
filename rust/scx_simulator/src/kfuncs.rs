@@ -148,7 +148,55 @@ pub struct SimulatorState {
     pub rbc_kfunc_ns: u64,
 }
 
+/// Kernel value of `SCX_TASK_QUEUED` from `enum scx_task_state`.
+/// Propagated to `p->scx.flags` so scheduler C code can check it.
+pub const SCX_TASK_QUEUED: u32 = 1;
+
 impl SimulatorState {
+    /// Set the per-task ops_state and, when transitioning to Queued,
+    /// also set `SCX_TASK_QUEUED` in `p->scx.flags`.
+    ///
+    /// `SCX_TASK_QUEUED` is **not** cleared here when going to None
+    /// (dispatch resolution) — the kernel keeps the flag set until the
+    /// task starts running or goes to sleep.  The engine clears it
+    /// via [`clear_task_queued`] at those points.
+    pub fn set_task_ops_state(&mut self, pid: Pid, new_state: OpsTaskState) {
+        self.task_ops_state.insert(pid, new_state);
+        if new_state == OpsTaskState::Queued {
+            self.set_scx_flag(pid, SCX_TASK_QUEUED);
+        }
+    }
+
+    /// Clear `SCX_TASK_QUEUED` in `p->scx.flags`.
+    ///
+    /// Called when a task starts running or goes to sleep — matching
+    /// kernel semantics where the flag is cleared in `scx_ops_dequeue_task`
+    /// and when the task is picked to run.
+    pub fn clear_task_queued(&mut self, pid: Pid) {
+        if let Some(&raw) = self.task_pid_to_raw.get(&pid) {
+            unsafe {
+                let flags = crate::ffi::sim_task_get_scx_flags(raw as *mut c_void);
+                if flags & SCX_TASK_QUEUED != 0 {
+                    crate::ffi::sim_task_set_scx_flags(
+                        raw as *mut c_void,
+                        flags & !SCX_TASK_QUEUED,
+                    );
+                }
+            }
+        }
+    }
+
+    fn set_scx_flag(&self, pid: Pid, flag: u32) {
+        if let Some(&raw) = self.task_pid_to_raw.get(&pid) {
+            unsafe {
+                let flags = crate::ffi::sim_task_get_scx_flags(raw as *mut c_void);
+                if flags & flag == 0 {
+                    crate::ffi::sim_task_set_scx_flags(raw as *mut c_void, flags | flag);
+                }
+            }
+        }
+    }
+
     pub fn cpu_is_idle(&self, cpu: CpuId) -> bool {
         self.cpus
             .get(cpu.0 as usize)
@@ -313,7 +361,7 @@ impl SimulatorState {
         let pd = self.pending_dispatch.take()?;
 
         // Task has been dispatched — no longer in BPF scheduler's queue.
-        self.task_ops_state.insert(pd.pid, OpsTaskState::None);
+        self.set_task_ops_state(pd.pid, OpsTaskState::None);
 
         let dsq = pd.dsq_id;
         if dsq.is_local() {

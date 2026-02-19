@@ -26,6 +26,7 @@ fn test_smt_topology() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -38,6 +39,7 @@ fn test_smt_topology() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         })
         .duration_ms(200)
         .build();

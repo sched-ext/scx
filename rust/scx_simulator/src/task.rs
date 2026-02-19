@@ -120,6 +120,11 @@ pub struct TaskDef {
     /// CPU affinity mask. `None` means all CPUs are allowed.
     /// When `Some(cpus)`, the task may only run on the listed CPUs.
     pub allowed_cpus: Option<Vec<CpuId>>,
+    /// Parent task PID. When set, `real_parent` on the C `task_struct`
+    /// will point to the specified parent's struct, enabling scheduler
+    /// features that track parent-child relationships (e.g. LAVD's
+    /// waker-wakee latency criticality propagation).
+    pub parent_pid: Option<Pid>,
 }
 
 /// A simulated task at runtime.

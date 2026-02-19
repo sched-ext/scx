@@ -301,6 +301,25 @@ impl<S: Scheduler> Simulator<S> {
             tasks.insert(task.pid, task);
         }
 
+        // Set up parent-child relationships (must happen after all tasks exist).
+        for def in &scenario.tasks {
+            if let Some(parent_pid) = def.parent_pid {
+                let parent_raw = tasks
+                    .get(&parent_pid)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "parent_pid {:?} for task {:?} does not exist",
+                            parent_pid, def.pid
+                        )
+                    })
+                    .raw();
+                let child_raw = tasks[&def.pid].raw();
+                unsafe {
+                    ffi::sim_task_set_real_parent(child_raw, parent_raw);
+                }
+            }
+        }
+
         // Build simulator state (shared with kfuncs via thread-local)
         let rbc_ns = scenario.sched_overhead_rbc_ns.filter(|&ns| ns > 0);
         let rbc_counter = if rbc_ns.is_some() {
@@ -662,7 +681,7 @@ impl<S: Scheduler> Simulator<S> {
         // Call select_cpu
         // Set ops_state to Queued before select_cpu — kernel sets QUEUED in
         // do_enqueue_task before either select_cpu or enqueue.
-        state.task_ops_state.insert(pid, OpsTaskState::Queued);
+        state.set_task_ops_state(pid, OpsTaskState::Queued);
 
         unsafe {
             kfuncs::enter_sim(state, wake_cpu);
@@ -832,7 +851,7 @@ impl<S: Scheduler> Simulator<S> {
 
             // Re-enqueue the preempted task
             state.ops_context = OpsContext::Enqueue;
-            state.task_ops_state.insert(pid, OpsTaskState::Queued);
+            state.set_task_ops_state(pid, OpsTaskState::Queued);
             start_rbc(state);
             debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
@@ -931,6 +950,8 @@ impl<S: Scheduler> Simulator<S> {
         });
 
         if !still_runnable {
+            // Kernel clears SCX_TASK_QUEUED when a task goes to sleep.
+            state.clear_task_queued(pid);
             unsafe {
                 kfuncs::enter_sim(state, cpu);
                 let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
@@ -939,7 +960,7 @@ impl<S: Scheduler> Simulator<S> {
                     debug!(pid = pid.0, "dequeue");
                     self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
                     charge_sched_time(state, cpu, "dequeue");
-                    state.task_ops_state.insert(pid, OpsTaskState::None);
+                    state.set_task_ops_state(pid, OpsTaskState::None);
                 }
                 start_rbc(state);
                 debug!(pid = pid.0, "quiescent");
@@ -1007,7 +1028,7 @@ impl<S: Scheduler> Simulator<S> {
                         state.ops_context = OpsContext::Enqueue;
                         start_rbc(state);
                         debug!(pid = pid.0, "enqueue (yield re-enqueue)");
-                        state.task_ops_state.insert(pid, OpsTaskState::Queued);
+                        state.set_task_ops_state(pid, OpsTaskState::Queued);
                         self.scheduler.enqueue(raw, 0);
                         charge_sched_time(state, cpu, "enqueue");
                         state.ops_context = OpsContext::None;
@@ -1080,7 +1101,7 @@ impl<S: Scheduler> Simulator<S> {
                                         kfuncs::enter_sim(state, cpu);
                                         state.ops_context = OpsContext::Enqueue;
                                         start_rbc(state);
-                                        state.task_ops_state.insert(pid, OpsTaskState::Queued);
+                                        state.set_task_ops_state(pid, OpsTaskState::Queued);
                                         self.scheduler.enqueue(raw, 0);
                                         charge_sched_time(state, cpu, "enqueue");
                                         state.ops_context = OpsContext::None;
@@ -1382,7 +1403,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state, cpu);
             state.ops_context = OpsContext::Enqueue;
-            state.task_ops_state.insert(pid, OpsTaskState::Queued);
+            state.set_task_ops_state(pid, OpsTaskState::Queued);
             start_rbc(state);
             debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
             self.scheduler.enqueue(raw, 0);
@@ -1425,6 +1446,8 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].current_task = Some(pid);
         state.cpus[cpu.0 as usize].prev_task = None;
         state.task_last_cpu.insert(pid, cpu);
+        // Kernel clears SCX_TASK_QUEUED when a task is picked to run.
+        state.clear_task_queued(pid);
         // Clear idle bit in the C cpumask (in case scheduler didn't call
         // scx_bpf_test_and_clear_cpu_idle for this CPU)
         unsafe { ffi::scx_bpf_test_and_clear_cpu_idle(cpu.0 as i32) };

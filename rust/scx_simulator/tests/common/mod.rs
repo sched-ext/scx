@@ -51,6 +51,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -88,6 +89,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -100,6 +102,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -133,6 +136,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -145,6 +149,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -189,6 +194,7 @@ macro_rules! scheduler_tests {
                         start_time_ns: 0,
                         mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                     })
                     .task(TaskDef {
                         name: "t2".into(),
@@ -201,6 +207,7 @@ macro_rules! scheduler_tests {
                         start_time_ns: 0,
                         mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                     })
                     .duration_ms(50)
                     .build()
@@ -257,6 +264,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -269,6 +277,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(500)
                 .build();
@@ -312,6 +321,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -355,6 +365,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -367,6 +378,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(100)
                 .build();
@@ -480,6 +492,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
                 })
                 // Add an unpinned task to occupy other CPUs
                 .task(TaskDef {
@@ -493,6 +506,7 @@ macro_rules! scheduler_tests {
                     start_time_ns: 0,
                     mm_id: None,
                     allowed_cpus: None,
+            parent_pid: None,
                 })
                 .duration_ms(100)
                 .build();

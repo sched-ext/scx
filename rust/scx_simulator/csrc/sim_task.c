@@ -113,6 +113,10 @@ u32 sim_task_get_weight(struct task_struct *p)
 void sim_task_set_static_prio(struct task_struct *p, int prio)
 {
 	p->static_prio = prio;
+	/* For normal (non-RT/DL) tasks, prio == static_prio.
+	 * Setting prio ensures rt_or_dl_task() returns false
+	 * (prio >= MAX_RT_PRIO == 100, since static_prio is 100..139). */
+	p->prio = prio;
 }
 
 void sim_task_set_flags(struct task_struct *p, unsigned int flags)
@@ -209,6 +213,15 @@ void *sim_task_get_mm(struct task_struct *p)
 
 /* Dummy exit_info for the exit callback */
 static struct scx_exit_info sim_exit_info;
+
+/* Set a task's real_parent to another task.
+ * Used to create parent-child relationships so scheduler code
+ * (e.g. LAVD's waker-wakee tracking) can see related tasks. */
+void sim_task_set_real_parent(struct task_struct *child,
+			      struct task_struct *parent)
+{
+	child->real_parent = parent;
+}
 
 struct scx_exit_info *sim_get_exit_info(void)
 {

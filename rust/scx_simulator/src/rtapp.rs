@@ -367,6 +367,7 @@ fn parse_task(
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: allowed_cpus.clone(),
+            parent_pid: None,
         });
     }
 
