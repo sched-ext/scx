@@ -69,8 +69,8 @@ recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
 	if (!cell)
 		return -ENOENT;
 
-	CPUMASK_GUARD(tmp_guard);
-	if (!tmp_guard.mask) {
+	struct bpf_cpumask *tmp_mask __free(bpf_cpumask) = bpf_cpumask_create();
+	if (!tmp_mask) {
 		scx_bpf_error(
 			"recalc_cell_llc_counts: failed to create tmp mask");
 		return -ENOMEM;
@@ -95,10 +95,9 @@ recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
 		if (!llc_mask)
 			return -ENOENT;
 
-		bpf_cpumask_and(tmp_guard.mask, cell_mask, llc_mask);
+		bpf_cpumask_and(tmp_mask, cell_mask, llc_mask);
 
-		u32 cnt = bpf_cpumask_weight(
-			(const struct cpumask *)tmp_guard.mask);
+		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp_mask);
 
 		llc_cpu_cnt_tmp[llc] = cnt;
 
@@ -111,14 +110,15 @@ recalc_cell_llc_counts(u32 cell_idx, const struct cpumask *explicit_mask)
 	}
 
 	// Write to cell
-	bpf_spin_lock(&cell->lock);
-	for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
-		cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
-	}
+	scoped_guard(spin_lock, &cell->lock)
+	{
+		for (u32 llc_idx = 0; llc_idx < nr_llc; llc_idx++) {
+			cell->llcs[llc_idx].cpu_cnt = llc_cpu_cnt_tmp[llc_idx];
+		}
 
-	cell->llc_present_cnt = llcs_present;
-	cell->cpu_cnt	      = total_cpus;
-	bpf_spin_unlock(&cell->lock);
+		cell->llc_present_cnt = llcs_present;
+		cell->cpu_cnt	      = total_cpus;
+	}
 	return 0;
 }
 
@@ -145,13 +145,15 @@ static inline s32 pick_llc_for_task(u32 cell_id)
 	 * large cell struct on the stack (would exceed BPF stack limit).
 	 */
 	u32 llc_cpu_cnt[MAX_LLCS];
+	u32 total_cpu_cnt;
 
-	bpf_spin_lock(&cell->lock);
-	for (u32 i = 0; i < MAX_LLCS; i++)
-		llc_cpu_cnt[i] = cell->llcs[i].cpu_cnt;
+	scoped_guard(spin_lock, &cell->lock)
+	{
+		for (u32 i = 0; i < MAX_LLCS; i++)
+			llc_cpu_cnt[i] = cell->llcs[i].cpu_cnt;
 
-	u32 total_cpu_cnt = cell->cpu_cnt;
-	bpf_spin_unlock(&cell->lock);
+		total_cpu_cnt = cell->cpu_cnt;
+	}
 
 	if (!total_cpu_cnt) {
 		scx_bpf_error(

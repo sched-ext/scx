@@ -156,9 +156,10 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 		 *
 		 * p->cgroups is RCU-protected, so we need RCU lock.
 		 */
-		bpf_rcu_read_lock();
-		cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
-		bpf_rcu_read_unlock();
+		scoped_guard(rcu)
+		{
+			cgrp = bpf_cgroup_acquire(p->cgroups->dfl_cgrp);
+		}
 	}
 
 	if (!cgrp)
@@ -507,14 +508,10 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 static __always_inline int refresh_task_cell(struct task_struct *p,
 					     struct task_ctx	*tctx)
 {
-	struct cgroup *cgrp;
-	int	       ret;
-
-	if (!(cgrp = task_cgroup(p)))
+	struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
+	if (!cgrp)
 		return -1;
-	ret = update_task_cell(p, tctx, cgrp);
-	bpf_cgroup_release(cgrp);
-	return ret;
+	return update_task_cell(p, tctx, cgrp);
 }
 
 /* Helper function for picking an idle cpu out of a candidate set */
@@ -561,9 +558,10 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 	if (cpu_controller_disabled) {
 		u64 current_cgid;
 
-		bpf_rcu_read_lock();
-		current_cgid = p->cgroups->dfl_cgrp->kn->id;
-		bpf_rcu_read_unlock();
+		scoped_guard(rcu)
+		{
+			current_cgid = p->cgroups->dfl_cgrp->kn->id;
+		}
 
 		if (current_cgid != tctx->cgid)
 			return refresh_task_cell(p, tctx);
@@ -576,28 +574,28 @@ static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 					 struct cpu_ctx	 *cctx,
 					 struct task_ctx *tctx)
 {
-	struct cpumask	     *task_cpumask;
-	const struct cpumask *idle_smtmask;
-	s32		      cpu;
+	struct cpumask *task_cpumask;
 
-	if (!(task_cpumask = (struct cpumask *)tctx->cpumask) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask())) {
-		scx_bpf_error("Failed to get task cpumask or idle smtmask");
+	if (!(task_cpumask = (struct cpumask *)tctx->cpumask)) {
+		scx_bpf_error("Failed to get task cpumask");
+		return -1;
+	}
+
+	const struct cpumask *idle_smtmask __free(idle_cpumask) =
+		scx_bpf_get_idle_smtmask();
+	if (!idle_smtmask) {
+		scx_bpf_error("Failed to get idle smtmask");
 		return -1;
 	}
 
 	/* No overlap between cell cpus and task cpus, just find some idle cpu */
 	if (bpf_cpumask_empty(task_cpumask)) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-		cpu = pick_idle_cpu_from(p, p->cpus_ptr, prev_cpu,
-					 idle_smtmask);
-		goto out;
+		return pick_idle_cpu_from(p, p->cpus_ptr, prev_cpu,
+					  idle_smtmask);
 	}
 
-	cpu = pick_idle_cpu_from(p, task_cpumask, prev_cpu, idle_smtmask);
-out:
-	scx_bpf_put_idle_cpumask(idle_smtmask);
-	return cpu;
+	return pick_idle_cpu_from(p, task_cpumask, prev_cpu, idle_smtmask);
 }
 
 /*
@@ -881,16 +879,9 @@ static inline void free_cpumask_entry(struct cpumask_entry *entry)
 	WRITE_ONCE(entry->used, 0);
 }
 
-/* For use by cleanup attribute */
-static inline void __free_cpumask_entry(struct cpumask_entry **entry)
-{
-	if (entry)
-		if (*entry)
-			free_cpumask_entry(*entry);
-}
-
-#define DECLARE_CPUMASK_ENTRY(var) \
-	struct cpumask_entry *var __attribute__((cleanup(__free_cpumask_entry)))
+/* Cpumask entry — uses RAII framework from mitosis.bpf.h */
+DEFINE_FREE(cpumask_entry, struct cpumask_entry *,
+	    if (_T) free_cpumask_entry(_T))
 
 /* Define types for cpumasks in-situ vs as a ptr in struct cpuset */
 struct cpumask___local {};
@@ -990,7 +981,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	if (local_configuration_seq == READ_ONCE(applied_configuration_seq))
 		return 0;
 
-	DECLARE_CPUMASK_ENTRY(entry) = allocate_cpumask_entry();
+	struct cpumask_entry *entry __free(cpumask_entry) =
+		allocate_cpumask_entry();
 	if (!entry)
 		return 0;
 
@@ -1003,8 +995,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		return 0;
 	}
 
-	struct bpf_cpumask *root_bpf_cpumask;
-	root_bpf_cpumask =
+	struct bpf_cpumask *root_bpf_cpumask __free(bpf_cpumask) =
 		bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask, NULL);
 	if (!root_bpf_cpumask) {
 		scx_bpf_error("tmp_cpumask should never be null");
@@ -1012,13 +1003,13 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	}
 	if (!root_cell_cpumaskw->cpumask) {
 		scx_bpf_error("root cpumasks should never be null");
-		goto out;
+		return 0;
 	}
 
-	bpf_rcu_read_lock();
+	guard(rcu)();
 	if (!all_cpumask) {
 		scx_bpf_error("NULL all_cpumask");
-		goto out_rcu_unlock;
+		return 0;
 	}
 
 	/*
@@ -1028,25 +1019,27 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	bpf_cpumask_copy(root_bpf_cpumask, (const struct cpumask *)all_cpumask);
 
 	struct cgroup_subsys_state *root_css, *pos;
-	struct cgroup		   *cur_cgrp, *root_cgrp_ref;
+	struct cgroup		   *cur_cgrp;
 
 	if (!root_cgrp) {
 		scx_bpf_error("root_cgrp should not be null");
-		goto out_rcu_unlock;
+		return 0;
 	}
 
 	struct cgrp_ctx *root_cgrp_ctx;
 	if (!(root_cgrp_ctx = lookup_cgrp_ctx(root_cgrp)))
-		goto out_rcu_unlock;
+		return 0;
 
 	if (!root_cgrp) {
 		scx_bpf_error("root_cgrp should not be null");
-		goto out_rcu_unlock;
+		return 0;
 	}
 
-	if (!(root_cgrp_ref = bpf_cgroup_acquire(root_cgrp))) {
+	struct cgroup *root_cgrp_ref __free(cgroup) =
+		bpf_cgroup_acquire(root_cgrp);
+	if (!root_cgrp_ref) {
 		scx_bpf_error("Failed to acquire reference to root_cgrp");
-		goto out_rcu_unlock;
+		return 0;
 	}
 	root_css = &root_cgrp_ref->self;
 
@@ -1079,7 +1072,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 					scx_bpf_error(
 						"Cgroup hierarchy is too deep: %d",
 						level);
-					goto out_root_cgrp;
+					return 0;
 				}
 				/*
 				 * This is a janky way of getting the parent cell, ideally we'd
@@ -1101,7 +1094,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			}
 			continue;
 		} else if (rc < 0)
-			goto out_root_cgrp;
+			return 0;
 
 		/*
 		 * cgroup has a cpumask, allocate a new cell if needed, and assign cpus
@@ -1110,7 +1103,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		if (!cgrp_ctx->cell_owner) {
 			cell_idx = allocate_cell();
 			if (cell_idx < 0)
-				goto out_root_cgrp;
+				return 0;
 			cgrp_ctx->cell_owner = true;
 		}
 
@@ -1119,14 +1112,14 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			      bpf_map_lookup_elem(&cell_cpumasks, &cell_idx))) {
 			scx_bpf_error("Failed to find cell cpumask: %d",
 				      cell_idx);
-			goto out_root_cgrp;
+			return 0;
 		}
 
-		struct bpf_cpumask *bpf_cpumask;
-		bpf_cpumask = bpf_kptr_xchg(&cell_cpumaskw->tmp_cpumask, NULL);
+		struct bpf_cpumask *bpf_cpumask __free(bpf_cpumask) =
+			bpf_kptr_xchg(&cell_cpumaskw->tmp_cpumask, NULL);
 		if (!bpf_cpumask) {
 			scx_bpf_error("tmp_cpumask should never be null");
-			goto out_root_cgrp;
+			return 0;
 		}
 		bpf_cpumask_copy(bpf_cpumask,
 				 (const struct cpumask *)&entry->cpumask);
@@ -1137,10 +1130,8 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 				    cpu_idx,
 				    (const struct cpumask *)&entry->cpumask)) {
 				struct cpu_ctx *cpu_ctx;
-				if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx))) {
-					bpf_cpumask_release(bpf_cpumask);
-					goto out_root_cgrp;
-				}
+				if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx)))
+					return 0;
 				cpu_ctx->cell = cell_idx;
 				bpf_cpumask_clear_cpu(cpu_idx,
 						      root_bpf_cpumask);
@@ -1155,25 +1146,23 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		if (enable_llc_awareness) {
 			if (recalc_cell_llc_counts(
 				    cell_idx,
-				    (const struct cpumask *)bpf_cpumask)) {
-				bpf_cpumask_release(bpf_cpumask);
-				goto out_root_cgrp;
-			}
+				    (const struct cpumask *)bpf_cpumask))
+				return 0;
 		}
 
-		bpf_cpumask =
-			bpf_kptr_xchg(&cell_cpumaskw->cpumask, bpf_cpumask);
+		bpf_cpumask = bpf_kptr_xchg(&cell_cpumaskw->cpumask,
+					    no_free_ptr(bpf_cpumask));
 		if (!bpf_cpumask) {
 			scx_bpf_error("cpumask should never be null");
-			goto out_root_cgrp;
+			return 0;
 		}
 
-		bpf_cpumask =
-			bpf_kptr_xchg(&cell_cpumaskw->tmp_cpumask, bpf_cpumask);
-		if (bpf_cpumask) {
+		/* bpf_cpumask now holds the old cpumask, put it back as tmp */
+		struct bpf_cpumask *stale __free(bpf_cpumask) = bpf_kptr_xchg(
+			&cell_cpumaskw->tmp_cpumask, no_free_ptr(bpf_cpumask));
+		if (stale) {
 			scx_bpf_error("tmp_cpumask should be null");
-			bpf_cpumask_release(bpf_cpumask);
-			goto out_root_cgrp;
+			return 0;
 		}
 
 		barrier();
@@ -1182,7 +1171,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		if (level <= 0 || level >= MAX_CG_DEPTH) {
 			scx_bpf_error("Cgroup hierarchy is too deep: %d",
 				      level);
-			goto out_root_cgrp;
+			return 0;
 		}
 		level_cells[level] = cell_idx;
 	}
@@ -1197,7 +1186,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 							  root_bpf_cpumask)) {
 			struct cpu_ctx *cpu_ctx;
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx)))
-				goto out_root_cgrp;
+				return 0;
 			cpu_ctx->cell = 0;
 		}
 	}
@@ -1211,40 +1200,31 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		if (recalc_cell_llc_counts(
 			    ROOT_CELL_ID,
 			    (const struct cpumask *)root_bpf_cpumask))
-			goto out_root_cgrp;
+			return 0;
 
 	/*
-	* Publish: swap new cpumask in, get old one back.
-	* After this point, all CPUs see the new mask.
-	*/
-	root_bpf_cpumask =
-		bpf_kptr_xchg(&root_cell_cpumaskw->cpumask, root_bpf_cpumask);
+	 * Publish: swap new cpumask in, get old one back.
+	 * After this point, all CPUs see the new mask.
+	 */
+	root_bpf_cpumask = bpf_kptr_xchg(&root_cell_cpumaskw->cpumask,
+					 no_free_ptr(root_bpf_cpumask));
 	if (!root_bpf_cpumask) {
 		scx_bpf_error("root cpumask should never be null");
-		bpf_rcu_read_unlock();
-		bpf_cgroup_release(root_cgrp_ref);
 		return 0;
 	}
 
-	root_bpf_cpumask = bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask,
-					 root_bpf_cpumask);
-	if (root_bpf_cpumask) {
+	/* root_bpf_cpumask now holds the old mask, put it back as tmp */
+	struct bpf_cpumask *root_stale __free(bpf_cpumask) =
+		bpf_kptr_xchg(&root_cell_cpumaskw->tmp_cpumask,
+			      no_free_ptr(root_bpf_cpumask));
+	if (root_stale) {
 		scx_bpf_error("root tmp_cpumask should be null");
-		goto out_root_cgrp;
+		return 0;
 	}
 
 	barrier();
 	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
 
-	bpf_rcu_read_unlock();
-	bpf_cgroup_release(root_cgrp_ref);
-	return 0;
-out_root_cgrp:
-	bpf_cgroup_release(root_cgrp_ref);
-out_rcu_unlock:
-	bpf_rcu_read_unlock();
-out:
-	bpf_cpumask_release(root_bpf_cpumask);
 	return 0;
 }
 
@@ -1382,7 +1362,8 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 		return 0;
 	}
 
-	DECLARE_CPUMASK_ENTRY(entry) = allocate_cpumask_entry();
+	struct cpumask_entry *entry __free(cpumask_entry) =
+		allocate_cpumask_entry();
 	if (!entry)
 		return -EINVAL;
 	int rc = get_cgroup_cpumask(cgrp, entry);
@@ -1397,17 +1378,15 @@ static int init_cgrp_ctx(struct cgroup *cgrp)
 	}
 
 	/* Initialize to parent's cell */
-	struct cgroup *parent_cg;
-	if (!(parent_cg = lookup_cgrp_ancestor(cgrp, cgrp->level - 1)))
+	struct cgroup *parent_cg __free(cgroup) =
+		lookup_cgrp_ancestor(cgrp, cgrp->level - 1);
+	if (!parent_cg)
 		return -ENOENT;
 
 	struct cgrp_ctx *parent_cgc;
-	if (!(parent_cgc = lookup_cgrp_ctx(parent_cg))) {
-		bpf_cgroup_release(parent_cg);
+	if (!(parent_cgc = lookup_cgrp_ctx(parent_cg)))
 		return -ENOENT;
-	}
 
-	bpf_cgroup_release(parent_cg);
 	cgc->cell = parent_cgc->cell;
 	return 0;
 }
@@ -1429,7 +1408,8 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 	/* Initialize ancestors first (replicates SCX cgroup_init order) */
 	bpf_for(level, 1, target_level)
 	{
-		struct cgroup *ancestor = lookup_cgrp_ancestor(cgrp, level);
+		struct cgroup *ancestor __free(cgroup) =
+			lookup_cgrp_ancestor(cgrp, level);
 		if (!ancestor)
 			return -ENOENT;
 
@@ -1437,12 +1417,9 @@ static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp)
 		if (!cgrp_is_dying(ancestor) &&
 		    !lookup_cgrp_ctx_fallible(ancestor)) {
 			ret = init_cgrp_ctx(ancestor);
-			if (ret) {
-				bpf_cgroup_release(ancestor);
+			if (ret)
 				return ret;
-			}
 		}
-		bpf_cgroup_release(ancestor);
 	}
 
 	/* Skip if already initialized */
@@ -1659,20 +1636,16 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	 * SCX cgroup callbacks won't fire.
 	 */
 	if (cpu_controller_disabled) {
-		struct cgroup *cgrp = task_cgroup(p);
+		struct cgroup *cgrp __free(cgroup) = task_cgroup(p);
 		if (!cgrp)
 			return -ENOENT;
 
 		/* Ensure cgroup hierarchy is initialized (handles ancestors + this cgroup) */
 		int ret = init_cgrp_ctx_with_ancestors(cgrp);
-		if (ret) {
-			bpf_cgroup_release(cgrp);
+		if (ret)
 			return ret;
-		}
 
-		ret = init_task_impl(p, cgrp);
-		bpf_cgroup_release(cgrp);
-		return ret;
+		return init_task_impl(p, cgrp);
 	}
 
 	return init_task_impl(p, args->cgroup);
@@ -1841,21 +1814,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if ((ret = validate_userspace_data()))
 		return ret;
 
-	struct cgroup *rootcg;
-	if (!(rootcg = bpf_cgroup_from_id(root_cgid)))
+	struct cgroup *rootcg __free(cgroup) = bpf_cgroup_from_id(root_cgid);
+	if (!rootcg)
 		return -ENOENT;
 
 	/* initialize cgrp storage for rootcg so that it is always available in the timer */
 	if (!bpf_cgrp_storage_get(&cgrp_ctxs, rootcg, 0,
 				  BPF_LOCAL_STORAGE_GET_F_CREATE)) {
 		scx_bpf_error("cgrp_ctx creation failed for rootcg");
-		bpf_cgroup_release(rootcg);
 		return -ENOENT;
 	}
 
-	rootcg = bpf_kptr_xchg(&root_cgrp, rootcg);
-	if (rootcg)
-		bpf_cgroup_release(rootcg);
+	struct cgroup *old __free(cgroup) =
+		bpf_kptr_xchg(&root_cgrp, no_free_ptr(rootcg));
 
 	/* setup all_cpumask - must be done before cgroup iteration */
 	cpumask = bpf_cpumask_create();
@@ -1916,12 +1887,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	 * The tracepoint handles new cgroups created after attach.
 	 */
 	if (cpu_controller_disabled) {
-		struct cgroup *iter_root = NULL;
+		struct cgroup *iter_root __free(cgroup) = NULL;
 
-		bpf_rcu_read_lock();
-		if (root_cgrp)
-			iter_root = bpf_cgroup_acquire(root_cgrp);
-		bpf_rcu_read_unlock();
+		scoped_guard(rcu)
+		{
+			if (root_cgrp)
+				iter_root = bpf_cgroup_acquire(root_cgrp);
+		}
 
 		if (!iter_root) {
 			scx_bpf_error(
@@ -1932,25 +1904,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		struct cgroup_subsys_state *root_css = &iter_root->self;
 		struct cgroup_subsys_state *pos;
 
-		bpf_rcu_read_lock();
-		bpf_for_each(css, pos, root_css,
-			     BPF_CGROUP_ITER_DESCENDANTS_PRE) {
-			/*
-			 * pos->cgroup dereference loses RCU tracking in verifier,
-			 * so we can't use it directly with bpf_cgroup_acquire or
-			 * pass it to functions that call bpf_cgroup_ancestor.
-			 * Instead, read the cgroup ID and use bpf_cgroup_from_id
-			 * to get a trusted, acquired reference.
-			 */
-			u64	       cgid = pos->cgroup->kn->id;
-			struct cgroup *cgrp = bpf_cgroup_from_id(cgid);
-			if (cgrp) {
-				init_cgrp_ctx(cgrp);
-				bpf_cgroup_release(cgrp);
+		scoped_guard(rcu)
+		{
+			bpf_for_each(css, pos, root_css,
+				     BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+				/*
+				 * pos->cgroup dereference loses RCU tracking in verifier,
+				 * so we can't use it directly with bpf_cgroup_acquire or
+				 * pass it to functions that call bpf_cgroup_ancestor.
+				 * Instead, read the cgroup ID and use bpf_cgroup_from_id
+				 * to get a trusted, acquired reference.
+				 */
+				u64		    cgid = pos->cgroup->kn->id;
+				struct cgroup *cgrp __free(cgroup) =
+					bpf_cgroup_from_id(cgid);
+				if (cgrp)
+					init_cgrp_ctx(cgrp);
 			}
 		}
-		bpf_rcu_read_unlock();
-		bpf_cgroup_release(iter_root);
 	}
 
 	bpf_for(i, 0, MAX_CELLS)
@@ -2013,7 +1984,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	if (enable_llc_awareness) {
 		{
-			RCU_READ_GUARD();
+			guard(rcu)();
 			if (recalc_cell_llc_counts(ROOT_CELL_ID, NULL))
 				return -EINVAL;
 		}

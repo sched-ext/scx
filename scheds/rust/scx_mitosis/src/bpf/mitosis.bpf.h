@@ -20,6 +20,7 @@
 
 #include "intf.h"
 #include "dsq.bpf.h"
+#include "cleanup.bpf.h"
 
 extern const volatile u32 nr_llc;
 
@@ -92,51 +93,6 @@ struct cell_map {
 	__type(value, struct cell);
 	__uint(max_entries, MAX_CELLS);
 };
-
-struct rcu_read_guard {
-	bool active;
-};
-
-static inline struct rcu_read_guard rcu_read_lock_guard(void)
-{
-	bpf_rcu_read_lock();
-	return (struct rcu_read_guard){ .active = true };
-}
-
-static inline void rcu_read_guard_release(struct rcu_read_guard *guard)
-{
-	if (guard->active) {
-		bpf_rcu_read_unlock();
-		guard->active = false;
-	}
-}
-#define RCU_READ_GUARD()                                               \
-	struct rcu_read_guard __rcu_guard                              \
-		__attribute__((__cleanup__(rcu_read_guard_release))) = \
-			rcu_read_lock_guard()
-
-struct cpumask_guard {
-	struct bpf_cpumask *mask;
-};
-
-static inline struct cpumask_guard cpumask_create_guard(void)
-{
-	struct bpf_cpumask *mask = bpf_cpumask_create();
-	return (struct cpumask_guard){ .mask = mask };
-}
-
-static inline void cpumask_guard_release(struct cpumask_guard *guard)
-{
-	if (guard->mask) {
-		bpf_cpumask_release(guard->mask);
-		guard->mask = NULL;
-	}
-}
-
-#define CPUMASK_GUARD(var_name)                                       \
-	struct cpumask_guard var_name                                 \
-		__attribute__((__cleanup__(cpumask_guard_release))) = \
-			cpumask_create_guard()
 
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx	 *tctx);
