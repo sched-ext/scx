@@ -35,6 +35,7 @@ pub mod dsq;
 pub mod engine;
 pub mod ffi;
 pub mod fmt;
+pub mod interleave;
 pub mod kfuncs;
 pub mod monitor;
 pub mod perf;

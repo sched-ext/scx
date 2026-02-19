@@ -42,6 +42,14 @@ impl ExitKind {
     }
 }
 
+/// Wrapper for raw pointers that need to cross thread boundaries.
+///
+/// SAFETY: only sound when the caller ensures exclusive access (e.g.,
+/// via token passing where only one thread is active at a time).
+struct SendPtr<T>(*mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T> Sync for SendPtr<T> {}
+
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
 /// Synchronous wakeup: waker is about to sleep/yield, hinting the scheduler
@@ -432,6 +440,7 @@ impl<S: Scheduler> Simulator<S> {
             rbc_kfunc_calls: 0,
             rbc_kfunc_ns: 0,
             bpf_error: None,
+            interleave: scenario.interleave,
         };
 
         // Set CPU ID width for log formatting
@@ -1330,8 +1339,12 @@ impl<S: Scheduler> Simulator<S> {
                     .map(|c| c.id)
                     .collect();
 
-                for cpu in idle_cpus {
-                    self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
+                if state.interleave && idle_cpus.len() >= 2 {
+                    self.dispatch_concurrent(&idle_cpus, state, tasks, events, monitor);
+                } else {
+                    for cpu in idle_cpus {
+                        self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
+                    }
                 }
             }
         }
@@ -1878,6 +1891,172 @@ impl<S: Scheduler> Simulator<S> {
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
             info!("IDLE");
         }
+    }
+
+    /// Run `scheduler.dispatch()` concurrently for multiple CPUs with
+    /// PRNG-driven token passing at kfunc yield points.
+    ///
+    /// Phase 1 (concurrent): each CPU's dispatch callback runs on a
+    /// separate OS thread, interleaved at kfunc boundaries by the
+    /// [`TokenRing`]. Only one thread is active at a time.
+    ///
+    /// Phase 2 (sequential): global DSQ fallback, start_running, and
+    /// kicked-CPU processing happen on the engine thread.
+    fn dispatch_concurrent(
+        &self,
+        cpus: &[CpuId],
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        monitor: &mut dyn Monitor,
+    ) {
+        use crate::interleave::{self, TokenRing, WorkerId};
+
+        // Filter to CPUs that actually need dispatch (idle + empty local DSQ).
+        let dispatch_cpus: Vec<CpuId> = cpus
+            .iter()
+            .copied()
+            .filter(|&cpu| {
+                state.cpus[cpu.0 as usize].current_task.is_none()
+                    && state.cpus[cpu.0 as usize].local_dsq.is_empty()
+            })
+            .collect();
+
+        // Fall back to sequential for 0–1 CPUs (no interleaving benefit).
+        if dispatch_cpus.len() < 2 {
+            for &cpu in cpus {
+                self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
+            }
+            return;
+        }
+
+        let interleave_seed = state.next_prng();
+        let ring = TokenRing::new(dispatch_cpus.len(), interleave_seed);
+
+        // Clear kicked_cpus before the concurrent block — each worker's
+        // kfunc calls will accumulate new kicks into this shared map.
+        state.kicked_cpus.clear();
+
+        // Phase 1: concurrent dispatch via scoped threads.
+        //
+        // SAFETY: token passing ensures only one thread accesses state/
+        // scheduler at a time. Raw pointers avoid Send/Sync bounds on
+        // types that are effectively single-threaded under the token.
+        let state_send = SendPtr(state as *mut SimulatorState);
+        let sched_send = SendPtr(&self.scheduler as *const S as *mut S);
+
+        // Advance each CPU's clock before spawning (pure per-CPU, no races).
+        for &cpu in &dispatch_cpus {
+            state.advance_cpu_clock(cpu);
+        }
+
+        std::thread::scope(|s| {
+            let ring_ref = &ring;
+            let state_ref = &state_send;
+            let sched_ref = &sched_send;
+
+            for (i, &cpu) in dispatch_cpus.iter().enumerate() {
+                let worker_id = WorkerId(i);
+
+                s.spawn(move || {
+                    interleave::install(ring_ref, worker_id);
+                    let sp = state_ref.0;
+                    let schp = sched_ref.0 as *const S;
+
+                    // Install the SimulatorState pointer in this thread's
+                    // thread-local so kfuncs (via with_sim) can find it.
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
+
+                    ring_ref.wait_for_token(worker_id);
+
+                    // Set up per-CPU context and run dispatch.
+                    unsafe {
+                        let sim = &mut *sp;
+                        sim.current_cpu = cpu;
+                        sim.ops_context = OpsContext::Dispatch;
+
+                        let prev_pid = sim.cpus[cpu.0 as usize].prev_task;
+                        let prev_raw = prev_pid
+                            .and_then(|pid| sim.task_pid_to_raw.get(&pid).copied())
+                            .map_or(std::ptr::null_mut(), |raw| raw as *mut c_void);
+
+                        debug!(cpu = cpu.0, "dispatch (concurrent)");
+                        (*schp).dispatch(cpu.0 as i32, prev_raw);
+                        sim.ops_context = OpsContext::None;
+                        sim.resolve_pending_dispatch(cpu);
+                    }
+
+                    ring_ref.finish(worker_id);
+                    kfuncs::exit_sim();
+                    interleave::uninstall();
+                });
+            }
+
+            ring.start();
+            ring.wait_all_done();
+        });
+
+        // Phase 2: sequential post-processing on the engine thread.
+        for &cpu in &dispatch_cpus {
+            let prev_pid = state.cpus[cpu.0 as usize].prev_task;
+            state.trace.record(
+                state.cpus[cpu.0 as usize].local_clock,
+                cpu,
+                TraceKind::Balance { prev_pid },
+            );
+
+            // Monitor: Dispatched probe
+            if let Some(ppid) = prev_pid {
+                if let Some(task) = tasks.get(&ppid) {
+                    monitor.sample(&ProbeContext {
+                        point: ProbePoint::Dispatched,
+                        pid: ppid,
+                        cpu,
+                        time_ns: state.cpus[cpu.0 as usize].local_clock,
+                        task_raw: task.raw(),
+                        trace: &state.trace,
+                    });
+                }
+            }
+
+            // Global DSQ fallback (same as try_dispatch_and_run).
+            if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
+                let cpu_idx = cpu.0 as usize;
+                let cpus_ptr = state.cpus.as_mut_ptr();
+                let sim_cpu = unsafe { &mut *cpus_ptr.add(cpu_idx) };
+                let consumed = state.dsqs.move_to_local(DsqId::GLOBAL, sim_cpu);
+                if consumed {
+                    state.trace.record(
+                        state.cpus[cpu_idx].local_clock,
+                        cpu,
+                        TraceKind::DsqMoveToLocal {
+                            dsq_id: DsqId::GLOBAL,
+                            success: true,
+                        },
+                    );
+                }
+            }
+
+            // Try to start running a task from the local DSQ.
+            if let Some(pid) = state.cpus[cpu.0 as usize].local_dsq.pop_front() {
+                state.trace.record(
+                    state.cpus[cpu.0 as usize].local_clock,
+                    cpu,
+                    TraceKind::PickTask { pid },
+                );
+                self.start_running(cpu, pid, state, tasks, events, monitor);
+            } else {
+                unsafe { ffi::scx_test_set_idle_cpumask(cpu.0 as i32) };
+                state.update_smt_mask_idle(cpu);
+                let local_t = state.cpus[cpu.0 as usize].local_clock;
+                kfuncs::set_sim_clock(local_t, Some(cpu));
+                state.trace.record(local_t, cpu, TraceKind::CpuIdle);
+                info!(cpu = cpu.0, "IDLE");
+            }
+        }
+
+        // Process all kicked CPUs accumulated during the concurrent dispatches.
+        self.process_kicked_cpus(None, state, tasks, events, monitor);
     }
 
     /// Process CPUs kicked via `scx_bpf_kick_cpu` during a callback.
