@@ -88,10 +88,14 @@ struct cake_task_ctx {
                             * Widened from u16 to prevent 21-218s wrap cascade.
                             * u32 at 50K/s wraps at 23.9 hours — effectively never. */
 
-    /* prev_prev_cpu REMOVED: was reserved for Gate 1a LAST2_TRACK,
-     * never implemented in BPF. Absorbed into padding. */
+    /* CACHED AFFINITY MASK (Rule 41: Locality Promotion)
+     * Replaces bpf_cpumask_test_cpu kfunc (~15ns) with inline bit test (~0.2ns)
+     * for restricted-affinity tasks (Wine/Proton pinning, ~5% of gaming wakeups).
+     * Populated in cake_init_task, updated event-driven by cake_set_cpumask.
+     * Zero hot-path cost: no polling in cake_running or cake_stopping. */
+    u64 cached_cpumask;    /* 8B: Cached p->cpus_ptr bitmask (max 64 CPUs) */
 
-    u8 __pad[48];          /* Pad to 64 bytes: 8+4+4+48 = 64 */
+    u8 __pad[40];          /* Pad to 64 bytes: 8+4+4+8+40 = 64 */
 } __attribute__((aligned(64)));
 
 /* Bitfield layout for packed_info (write-set co-located, Rule 24 mask fusion):
