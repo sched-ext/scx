@@ -336,6 +336,9 @@ impl<S: Scheduler> Simulator<S> {
             rbc_kfunc_ns: 0,
         };
 
+        // Set CPU ID width for log formatting
+        kfuncs::set_sim_cpu_width(nr_cpus);
+
         // Initialize scheduler
         unsafe {
             kfuncs::enter_sim(&mut state);
@@ -398,11 +401,11 @@ impl<S: Scheduler> Simulator<S> {
                 | EventKind::TaskPhaseComplete { cpu }
                 | EventKind::Tick { cpu } => {
                     state.advance_cpu_clock(*cpu);
-                    kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock);
+                    kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(*cpu));
                 }
                 EventKind::TaskWake { .. } | EventKind::TimerFired => {
                     // No specific CPU yet; use event queue time for tracing
-                    kfuncs::set_sim_clock(state.clock);
+                    kfuncs::set_sim_clock(state.clock, None);
                 }
             }
 
@@ -541,7 +544,7 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
             start_rbc(state);
-            debug!(pid = pid.0, cpu = cpu.0, "tick");
+            debug!(pid = pid.0, "tick");
             self.scheduler.tick(raw);
             charge_sched_time(state, cpu, "tick");
             kfuncs::exit_sim();
@@ -622,6 +625,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Call runnable callback
         let raw = task.raw();
+        kfuncs::set_sim_clock(state.clock, Some(wake_cpu));
         unsafe {
             kfuncs::enter_sim(state);
             state.waker_task_raw = waker_raw;
@@ -653,6 +657,7 @@ impl<S: Scheduler> Simulator<S> {
             charge_sched_time(state, selected_cpu, "select_cpu");
             state.ops_context = OpsContext::None;
             state.waker_task_raw = None;
+            kfuncs::set_sim_clock(state.clock, Some(selected_cpu));
             debug!(
                 pid = pid.0,
                 prev_cpu = prev_cpu.0,
@@ -680,7 +685,8 @@ impl<S: Scheduler> Simulator<S> {
 
             if let Some(dd_cpu) = direct_dispatched {
                 // Task was directly dispatched — skip enqueue (kernel semantics)
-                debug!(pid = pid.0, cpu = dd_cpu.0, "direct dispatch");
+                kfuncs::set_sim_clock(state.clock, Some(dd_cpu));
+                debug!(pid = pid.0, target_cpu = dd_cpu.0, "direct dispatch");
                 self.try_dispatch_and_run(dd_cpu, state, tasks, events, monitor);
             } else {
                 // Task was not directly dispatched; call enqueue
@@ -746,7 +752,6 @@ impl<S: Scheduler> Simulator<S> {
 
         let task_name = task.name.as_str();
         info!(
-            cpu = cpu.0,
             task = task_name,
             pid = pid.0,
             ran_ns = %FmtN(slice),
@@ -773,7 +778,7 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
             start_rbc(state);
-            debug!(pid = pid.0, cpu = cpu.0, runnable = true, "stopping");
+            debug!(pid = pid.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
             charge_sched_time(state, cpu, "stopping");
             kfuncs::exit_sim();
@@ -887,7 +892,7 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
             start_rbc(state);
-            debug!(pid = pid.0, cpu = cpu.0, still_runnable, "stopping");
+            debug!(pid = pid.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
             charge_sched_time(state, cpu, "stopping");
             kfuncs::exit_sim();
@@ -910,13 +915,13 @@ impl<S: Scheduler> Simulator<S> {
                 let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
                 if ops_state == OpsTaskState::Queued {
                     start_rbc(state);
-                    debug!(pid = pid.0, cpu = cpu.0, "dequeue");
+                    debug!(pid = pid.0, "dequeue");
                     self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
                     charge_sched_time(state, cpu, "dequeue");
                     state.task_ops_state.insert(pid, OpsTaskState::None);
                 }
                 start_rbc(state);
-                debug!(pid = pid.0, cpu = cpu.0, "quiescent");
+                debug!(pid = pid.0, "quiescent");
                 self.scheduler.quiescent(raw, SCX_DEQ_SLEEP);
                 charge_sched_time(state, cpu, "quiescent");
                 kfuncs::exit_sim();
@@ -951,12 +956,7 @@ impl<S: Scheduler> Simulator<S> {
                 cpu,
                 TraceKind::TaskCompleted { pid },
             );
-            info!(
-                cpu = cpu.0,
-                task = task.name.as_str(),
-                pid = pid.0,
-                "COMPLETED"
-            );
+            info!(task = task.name.as_str(), pid = pid.0, "COMPLETED");
         } else {
             match next_phase {
                 Some(Phase::Sleep(sleep_ns)) => {
@@ -966,12 +966,7 @@ impl<S: Scheduler> Simulator<S> {
                     state
                         .trace
                         .record(local_t, cpu, TraceKind::TaskSlept { pid });
-                    info!(
-                        cpu = cpu.0,
-                        task = task.name.as_str(),
-                        pid = pid.0,
-                        "SLEEPING"
-                    );
+                    info!(task = task.name.as_str(), pid = pid.0, "SLEEPING");
 
                     // Schedule wake event
                     let wake_time = local_t.saturating_add(sleep_ns);
@@ -1012,12 +1007,7 @@ impl<S: Scheduler> Simulator<S> {
                         cpu,
                         TraceKind::TaskYielded { pid },
                     );
-                    info!(
-                        cpu = cpu.0,
-                        task = task.name.as_str(),
-                        pid = pid.0,
-                        "YIELDED"
-                    );
+                    info!(task = task.name.as_str(), pid = pid.0, "YIELDED");
                 }
                 Some(Phase::Wake(target_pid)) => {
                     let local_t = state.cpus[cpu.0 as usize].local_clock;
@@ -1089,7 +1079,6 @@ impl<S: Scheduler> Simulator<S> {
                                         TraceKind::TaskYielded { pid },
                                     );
                                     info!(
-                                        cpu = cpu.0,
                                         task = task.name.as_str(),
                                         pid = pid.0,
                                         "YIELDED (after wake)"
@@ -1103,7 +1092,6 @@ impl<S: Scheduler> Simulator<S> {
                                         .trace
                                         .record(local_t, cpu, TraceKind::TaskSlept { pid });
                                     info!(
-                                        cpu = cpu.0,
                                         task = task.name.as_str(),
                                         pid = pid.0,
                                         "SLEEPING (after wake)"
@@ -1165,7 +1153,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Advance this CPU's clock to at least the event queue time
         state.advance_cpu_clock(cpu);
-
+        kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(cpu));
         // Check if local DSQ has tasks
         if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
             // Look up the previously-running task's raw pointer for dispatch
@@ -1181,7 +1169,7 @@ impl<S: Scheduler> Simulator<S> {
                 state.current_cpu = cpu;
                 state.kicked_cpus.clear();
                 start_rbc(state);
-                debug!(cpu = cpu.0, "dispatch");
+                debug!("dispatch");
                 self.scheduler.dispatch(cpu.0 as i32, prev_raw);
                 charge_sched_time(state, cpu, "dispatch");
                 state.ops_context = OpsContext::None;
@@ -1253,9 +1241,9 @@ impl<S: Scheduler> Simulator<S> {
             // Check if all siblings are idle too (full-idle core)
             state.update_smt_mask_idle(cpu);
             let local_t = state.cpus[cpu.0 as usize].local_clock;
-            kfuncs::set_sim_clock(local_t);
+            kfuncs::set_sim_clock(local_t, Some(cpu));
             state.trace.record(local_t, cpu, TraceKind::CpuIdle);
-            info!(cpu = cpu.0, "IDLE");
+            info!("IDLE");
         }
     }
 
@@ -1332,7 +1320,6 @@ impl<S: Scheduler> Simulator<S> {
 
         let task_name = task.name.as_str();
         info!(
-            cpu = cpu.0,
             task = task_name,
             pid = pid.0,
             ran_ns = %FmtN(consumed),
@@ -1359,12 +1346,7 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
             start_rbc(state);
-            debug!(
-                pid = pid.0,
-                cpu = cpu.0,
-                runnable = true,
-                "stopping (tick preempt)"
-            );
+            debug!(pid = pid.0, runnable = true, "stopping (tick preempt)");
             self.scheduler.stopping(raw, true);
             charge_sched_time(state, cpu, "stopping");
             kfuncs::exit_sim();
@@ -1435,6 +1417,10 @@ impl<S: Scheduler> Simulator<S> {
 
         let raw = task.raw();
 
+        // Set sim context early so enable/running callbacks have the right CPU
+        let local_t = state.cpus[cpu.0 as usize].local_clock;
+        kfuncs::set_sim_clock(local_t, Some(cpu));
+
         // Call enable on first schedule
         if !task.enabled {
             task.enabled = true;
@@ -1442,7 +1428,7 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::enter_sim(state);
                 state.current_cpu = cpu;
                 start_rbc(state);
-                debug!(pid = pid.0, cpu = cpu.0, "enable");
+                debug!(pid = pid.0, "enable");
                 self.scheduler.enable(raw);
                 charge_sched_time(state, cpu, "enable");
                 kfuncs::exit_sim();
@@ -1454,7 +1440,7 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state);
             state.current_cpu = cpu;
             start_rbc(state);
-            debug!(pid = pid.0, cpu = cpu.0, "running");
+            debug!(pid = pid.0, "running");
             self.scheduler.running(raw);
             charge_sched_time(state, cpu, "running");
             kfuncs::exit_sim();
@@ -1477,7 +1463,7 @@ impl<S: Scheduler> Simulator<S> {
         );
 
         let local_t = state.cpus[cpu.0 as usize].local_clock;
-        kfuncs::set_sim_clock(local_t);
+        kfuncs::set_sim_clock(local_t, Some(cpu));
 
         state
             .trace
@@ -1493,7 +1479,6 @@ impl<S: Scheduler> Simulator<S> {
         state.cpus[cpu.0 as usize].task_original_slice = Some(slice);
 
         info!(
-            cpu = cpu.0,
             task = task.name.as_str(),
             pid = pid.0,
             slice_ns = %FmtN(slice),

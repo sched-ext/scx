@@ -203,6 +203,11 @@ impl Trace {
 
     /// Pretty-print the trace for debugging.
     pub fn dump(&self) {
+        let cpu_width = if self.nr_cpus == 0 {
+            1u8
+        } else {
+            ((self.nr_cpus as f64).log10().floor() as u8) + 1
+        };
         for event in &self.events {
             let desc = match &event.kind {
                 TraceKind::TaskScheduled { pid } => format!("SCHED    pid={}", pid.0),
@@ -262,7 +267,7 @@ impl Trace {
             };
             eprintln!(
                 "[{}] cpu={:<3} {}",
-                FmtTs::local(event.time_ns),
+                FmtTs::local(event.time_ns, Some(event.cpu), cpu_width),
                 event.cpu.0,
                 desc
             );

@@ -318,7 +318,7 @@ impl SimulatorState {
         let dsq = pd.dsq_id;
         if dsq.is_local() {
             self.cpus[local_cpu.0 as usize].local_dsq.push_back(pd.pid);
-            debug!(pid = pd.pid.0, cpu = local_cpu.0, "resolved SCX_DSQ_LOCAL");
+            debug!(pid = pd.pid.0, "resolved SCX_DSQ_LOCAL");
             Some(local_cpu)
         } else if dsq.is_local_on() {
             let cpu = dsq.local_on_cpu();
@@ -340,9 +340,30 @@ impl SimulatorState {
 // Thread-local simulator state access
 // ---------------------------------------------------------------------------
 
+/// Thread-local simulation context for the trace formatter.
+///
+/// Carries the current CPU's local clock, the active CPU ID (if any),
+/// and the zero-padding width for CPU IDs in log output.
+#[derive(Debug, Clone, Copy)]
+pub struct SimContext {
+    pub clock: TimeNs,
+    pub cpu: Option<CpuId>,
+    pub cpu_width: u8,
+}
+
+impl SimContext {
+    const fn new() -> Self {
+        Self {
+            clock: 0,
+            cpu: None,
+            cpu_width: 1,
+        }
+    }
+}
+
 thread_local! {
     static SIM_STATE: RefCell<Option<*mut SimulatorState>> = const { RefCell::new(None) };
-    static SIM_LOCAL_CLOCK: std::cell::Cell<TimeNs> = const { std::cell::Cell::new(0) };
+    static SIM_CONTEXT: std::cell::Cell<SimContext> = const { std::cell::Cell::new(SimContext::new()) };
 }
 
 /// Install a simulator state pointer for the duration of ops callbacks.
@@ -368,13 +389,44 @@ pub fn exit_sim() {
 /// Returns the local clock set by the engine for the current event's CPU.
 /// Used by the custom trace formatter to show simulated time.
 pub fn sim_clock() -> TimeNs {
-    SIM_LOCAL_CLOCK.with(|c| c.get())
+    SIM_CONTEXT.with(|c| c.get().clock)
 }
 
-/// Update the local clock thread-local. Called by the engine before
+/// Read the current CPU ID from the thread-local (if set).
+pub fn sim_cpu() -> Option<CpuId> {
+    SIM_CONTEXT.with(|c| c.get().cpu)
+}
+
+/// Read the CPU ID zero-padding width from the thread-local.
+pub fn sim_cpu_width() -> u8 {
+    SIM_CONTEXT.with(|c| c.get().cpu_width)
+}
+
+/// Update the thread-local simulation context. Called by the engine before
 /// `info!`/`debug!` calls so the trace formatter has access.
-pub fn set_sim_clock(local: TimeNs) {
-    SIM_LOCAL_CLOCK.with(|c| c.set(local));
+pub fn set_sim_clock(local: TimeNs, cpu: Option<CpuId>) {
+    SIM_CONTEXT.with(|c| {
+        let mut ctx = c.get();
+        ctx.clock = local;
+        ctx.cpu = cpu;
+        c.set(ctx);
+    });
+}
+
+/// Set the CPU ID zero-padding width based on total CPU count.
+/// Called once at simulation start.
+pub fn set_sim_cpu_width(nr_cpus: u32) {
+    let width = if nr_cpus == 0 {
+        1
+    } else {
+        // number of digits needed
+        ((nr_cpus as f64).log10().floor() as u8) + 1
+    };
+    SIM_CONTEXT.with(|c| {
+        let mut ctx = c.get();
+        ctx.cpu_width = width;
+        c.set(ctx);
+    });
 }
 
 /// Access the simulator state from within a kfunc.
@@ -673,7 +725,7 @@ pub extern "C" fn scx_bpf_dsq_nr_queued(dsq_id: u64) -> i32 {
         if dsq.is_local() {
             let cpu = sim.current_cpu.0 as usize;
             let n = sim.cpus[cpu].local_dsq.len() as i32;
-            debug!(dsq_id, cpu, n, "kfunc dsq_nr_queued LOCAL");
+            debug!(dsq_id, n, "kfunc dsq_nr_queued LOCAL");
             return n;
         }
         if dsq.is_local_on() {
@@ -754,7 +806,7 @@ pub extern "C" fn scx_bpf_error_bstr(fmt: *const i8, _data: *const u64, _data_sz
 #[no_mangle]
 pub extern "C" fn scx_bpf_reenqueue_local() -> u32 {
     with_sim(kfunc_cost::TRIVIAL, |sim| {
-        debug!(cpu = sim.current_cpu.0, "kfunc reenqueue_local");
+        debug!("kfunc reenqueue_local");
         sim.reenqueue_local_requested = true;
         0
     })
@@ -936,7 +988,7 @@ pub extern "C" fn sim_scx_bpf_dsq_move(p: *mut c_void, dst_dsq_id: u64, _enq_fla
         if dst.is_local() {
             let cpu_idx = sim.current_cpu.0 as usize;
             sim.cpus[cpu_idx].local_dsq.push_back(pid);
-            debug!(pid = pid.0, cpu = sim.current_cpu.0, "dsq_move → LOCAL");
+            debug!(pid = pid.0, "dsq_move → LOCAL");
         } else if dst.is_local_on() {
             let cpu = dst.local_on_cpu();
             if (cpu.0 as usize) < sim.cpus.len() {
