@@ -4040,22 +4040,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scx_simulator"
-version = "0.1.0"
-dependencies = [
- "cc",
- "clap",
- "criterion",
- "libbpf-sys",
- "libc",
- "libloading",
- "perf-event-open-sys",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "scx_stats"
 version = "1.0.22"
 dependencies = [
@@ -4299,7 +4283,6 @@ version = "1.0.145"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
 dependencies = [
- "indexmap",
  "itoa",
  "memchr",
  "ryu",
