@@ -359,11 +359,16 @@ void lavd_fire_timer(void)
  * to the simulator's real PID→task_struct lookup at runtime.
  */
 
-/* Cgroup lookup by ID -- not modeled */
+/*
+ * Cgroup lookup by ID -- delegates to the Rust cgroup registry.
+ * Returns the struct cgroup pointer for the given cgroup ID,
+ * or NULL if no registry is installed or the ID is not found.
+ */
+extern void *sim_cgroup_lookup_by_id(u64 cgid);
+
 struct cgroup *bpf_cgroup_from_id(u64 cgroupid)
 {
-	(void)cgroupid;
-	return NULL;
+	return (struct cgroup *)sim_cgroup_lookup_by_id(cgroupid);
 }
 
 /* Cgroup reference release -- no-op */

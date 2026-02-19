@@ -31,6 +31,17 @@ pub struct CpuPreemptEvent {
     pub acquire_at_ns: TimeNs,
 }
 
+/// CPU bandwidth configuration for a cgroup (cpu.max parameters).
+#[derive(Debug, Clone)]
+pub struct CgroupBandwidth {
+    /// Bandwidth period in microseconds.
+    pub period_us: u64,
+    /// Quota within the period in microseconds.
+    pub quota_us: u64,
+    /// Burst allowance in microseconds.
+    pub burst_us: u64,
+}
+
 /// Definition of a cgroup for scenario creation.
 #[derive(Debug, Clone)]
 pub struct CgroupDef {
@@ -41,6 +52,9 @@ pub struct CgroupDef {
     /// Optional cpuset configuration: list of allowed CPU IDs.
     /// If `None`, the cgroup inherits the parent's cpuset.
     pub cpuset: Option<Vec<CpuId>>,
+    /// Optional CPU bandwidth configuration (cpu.max).
+    /// If set, `cgroup_set_bandwidth` is called after `cgroup_init`.
+    pub bandwidth: Option<CgroupBandwidth>,
 }
 
 /// Configuration for simulation timing noise (tick jitter).
@@ -499,6 +513,7 @@ impl ScenarioBuilder {
             name: name.to_string(),
             parent_name: None, // Under root
             cpuset: Some(cpuset.to_vec()),
+            bandwidth: None,
         });
         self
     }
@@ -511,6 +526,31 @@ impl ScenarioBuilder {
             name: name.to_string(),
             parent_name: Some(parent.to_string()),
             cpuset: cpuset.map(|c| c.to_vec()),
+            bandwidth: None,
+        });
+        self
+    }
+
+    /// Define a cgroup with bandwidth limits (cpu.max) under the root cgroup.
+    ///
+    /// After `cgroup_init`, `cgroup_set_bandwidth` is called with the given parameters.
+    pub fn cgroup_with_bandwidth(
+        mut self,
+        name: &str,
+        cpuset: &[CpuId],
+        period_us: u64,
+        quota_us: u64,
+        burst_us: u64,
+    ) -> Self {
+        self.cgroups.push(CgroupDef {
+            name: name.to_string(),
+            parent_name: None,
+            cpuset: Some(cpuset.to_vec()),
+            bandwidth: Some(CgroupBandwidth {
+                period_us,
+                quota_us,
+                burst_us,
+            }),
         });
         self
     }

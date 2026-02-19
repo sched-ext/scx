@@ -231,6 +231,19 @@ pub trait Scheduler {
     /// Calls into C code. All pointers must be valid.
     unsafe fn cgroup_move(&self, _p: *mut c_void, _from: *mut c_void, _to: *mut c_void) {}
 
+    /// Cgroup bandwidth was configured (ops.cgroup_set_bandwidth). Optional.
+    /// Called when cpu.max is written for a cgroup.
+    /// # Safety
+    /// Calls into C code. `cgrp` must be a valid cgroup pointer.
+    unsafe fn cgroup_set_bandwidth(
+        &self,
+        _cgrp: *mut c_void,
+        _period_us: u64,
+        _quota_us: u64,
+        _burst_us: u64,
+    ) {
+    }
+
     /// A CPU came online (ops.cpu_online). Optional.
     /// Called when a CPU transitions from offline to online.
     /// # Safety
@@ -274,6 +287,7 @@ type CgroupInitFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type CgroupExitFn = unsafe extern "C" fn(*mut c_void);
 type CgroupMoveFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
 type CpuAcquireFn = unsafe extern "C" fn(i32, *mut c_void);
+type CgroupSetBandwidthFn = unsafe extern "C" fn(*mut c_void, u64, u64, u64);
 type CpuOnlineFn = unsafe extern "C" fn(i32);
 type CpuOfflineFn = unsafe extern "C" fn(i32);
 
@@ -302,6 +316,7 @@ struct SchedOps {
     cgroup_init: Option<CgroupInitFn>,
     cgroup_exit: Option<CgroupExitFn>,
     cgroup_move: Option<CgroupMoveFn>,
+    cgroup_set_bandwidth: Option<CgroupSetBandwidthFn>,
     cpu_acquire: Option<CpuAcquireFn>,
     cpu_online: Option<CpuOnlineFn>,
     cpu_offline: Option<CpuOfflineFn>,
@@ -611,6 +626,8 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), CgroupExitFn>(p)),
             cgroup_move: try_get!("cgroup_move")
                 .map(|p| std::mem::transmute::<*const (), CgroupMoveFn>(p)),
+            cgroup_set_bandwidth: try_get!("cgroup_set_bandwidth")
+                .map(|p| std::mem::transmute::<*const (), CgroupSetBandwidthFn>(p)),
             cpu_acquire: try_get!("cpu_acquire")
                 .map(|p| std::mem::transmute::<*const (), CpuAcquireFn>(p)),
             cpu_online: try_get!("cpu_online")
@@ -770,6 +787,18 @@ impl Scheduler for DynamicScheduler {
     unsafe fn cgroup_move(&self, p: *mut c_void, from: *mut c_void, to: *mut c_void) {
         if let Some(f) = self.ops.cgroup_move {
             f(p, from, to);
+        }
+    }
+
+    unsafe fn cgroup_set_bandwidth(
+        &self,
+        cgrp: *mut c_void,
+        period_us: u64,
+        quota_us: u64,
+        burst_us: u64,
+    ) {
+        if let Some(f) = self.ops.cgroup_set_bandwidth {
+            f(cgrp, period_us, quota_us, burst_us);
         }
     }
 
