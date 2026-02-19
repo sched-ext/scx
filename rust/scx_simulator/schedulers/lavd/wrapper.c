@@ -465,6 +465,7 @@ void lavd_setup(unsigned int num_cpus)
 	no_preemption = false;
 	no_wake_sync = false;
 	no_slice_boost = false;
+	no_use_em = true; /* no kernel energy model in the simulator */
 	verbose = 0;
 
 	/* Per-CPU topology: uniform capacity, no big/little, no SMT */
