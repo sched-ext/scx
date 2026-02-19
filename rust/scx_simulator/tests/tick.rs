@@ -21,6 +21,7 @@ fn test_tick_events_recorded() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "runner2".into(),
@@ -34,6 +35,7 @@ fn test_tick_events_recorded() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .duration_ms(100)
         .build();
@@ -71,6 +73,7 @@ fn test_lavd_tick_preemption() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -84,6 +87,7 @@ fn test_lavd_tick_preemption() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "t3".into(),
@@ -97,6 +101,7 @@ fn test_lavd_tick_preemption() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .task(TaskDef {
             name: "t4".into(),
@@ -110,6 +115,7 @@ fn test_lavd_tick_preemption() {
             mm_id: None,
             allowed_cpus: None,
             parent_pid: None,
+            cgroup_name: None,
         })
         .duration_ms(200)
         .build();

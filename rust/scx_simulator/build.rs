@@ -78,6 +78,13 @@ fn main() {
     configure_build(&mut sim_sdt);
     sim_sdt.compile("sim_sdt_stubs");
 
+    // Build the cgroup CSS iterator support.
+    // Provides sim_css_next() and related functions for bpf_for_each(css, ...).
+    let mut sim_cgroup = cc::Build::new();
+    sim_cgroup.file(manifest_dir.join("csrc/sim_cgroup.c"));
+    configure_build(&mut sim_cgroup);
+    sim_cgroup.compile("sim_cgroup");
+
     // ---------------------------------------------------------------
     // Shared libraries (.so) for schedulers — built via Makefile
     // ---------------------------------------------------------------

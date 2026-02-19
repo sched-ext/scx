@@ -252,3 +252,198 @@ struct scx_exit_task_args *sim_get_exit_task_args(void)
 	sim_exit_task_args.cancelled = false;
 	return &sim_exit_task_args;
 }
+
+/* ---------------------------------------------------------------------------
+ * Cgroup allocation for non-root cgroups
+ *
+ * Each cgroup needs:
+ * - struct cgroup (main structure)
+ * - struct kernfs_node (for kn->id)
+ * - struct css_set (for task->cgroups)
+ * - struct cpuset + cpumask (for cpuset modeling)
+ *
+ * We allocate these together and wire up the pointers.
+ * ---------------------------------------------------------------------------*/
+
+/* Maximum depth of cgroup hierarchy (from kernel/cgroup/cgroup.c) */
+#ifndef CGROUP_ANCESTOR_MAX
+#define CGROUP_ANCESTOR_MAX 32
+#endif
+
+/*
+ * Allocate a new cgroup with the given ID and level.
+ * parent is the parent cgroup's struct cgroup pointer (or NULL for root).
+ */
+void *sim_cgroup_alloc(u64 cgid, u32 level, void *parent)
+{
+	struct cgroup *cgrp;
+	struct kernfs_node *kn;
+	struct css_set *css_set;
+
+	cgrp = calloc(1, sizeof(struct cgroup));
+	if (!cgrp)
+		return NULL;
+
+	kn = calloc(1, sizeof(struct kernfs_node));
+	if (!kn) {
+		free(cgrp);
+		return NULL;
+	}
+
+	css_set = calloc(1, sizeof(struct css_set));
+	if (!css_set) {
+		free(kn);
+		free(cgrp);
+		return NULL;
+	}
+
+	/* Set up kernfs_node */
+	kn->id = cgid;
+
+	/* Set up cgroup */
+	cgrp->kn = kn;
+	cgrp->self.cgroup = cgrp;
+	cgrp->level = level;
+	/* percpu_count_ptr = 0 means not dying */
+
+	/* Set up css_set to point at this cgroup */
+	css_set->dfl_cgrp = cgrp;
+
+	/* Store parent pointer in ancestors array if parent is valid */
+	if (parent) {
+		struct cgroup *pcgrp = (struct cgroup *)parent;
+		/* Copy parent's ancestors and add parent */
+		u32 i;
+		u32 plevel = pcgrp->level;
+		for (i = 0; i < plevel && i < (u32)(CGROUP_ANCESTOR_MAX - 1); i++)
+			cgrp->ancestors[i] = pcgrp->ancestors[i];
+		if (plevel < (u32)CGROUP_ANCESTOR_MAX)
+			cgrp->ancestors[plevel] = pcgrp;
+	}
+	/* Self is at our own level */
+	if (level < CGROUP_ANCESTOR_MAX)
+		cgrp->ancestors[level] = cgrp;
+
+	return cgrp;
+}
+
+/*
+ * Free a cgroup allocated by sim_cgroup_alloc.
+ */
+void sim_cgroup_free(void *cgrp_ptr)
+{
+	struct cgroup *cgrp = (struct cgroup *)cgrp_ptr;
+	if (!cgrp)
+		return;
+
+	/* Free the kernfs_node */
+	if (cgrp->kn)
+		free(cgrp->kn);
+
+	/* Free the cpuset if allocated (cpuset_cgrp_id == 0) */
+	if (cgrp->subsys[cpuset_cgrp_id]) {
+		struct cpuset *cs = container_of(
+			cgrp->subsys[cpuset_cgrp_id], struct cpuset, css);
+		if (cs) {
+			/* cpus_allowed is an embedded array, no separate free needed */
+			free(cs);
+		}
+	}
+
+	free(cgrp);
+}
+
+/*
+ * Set a cgroup's cpuset.cpus allowed mask.
+ *
+ * This allocates a struct cpuset and wires it into cgrp->subsys[0]
+ * (cpuset_cgrp_id == 0). The cpuset's cpus_allowed field is set to
+ * contain the specified CPU IDs.
+ *
+ * cpus is an array of CPU IDs, nr_cpus is the count.
+ */
+void sim_cgroup_set_cpuset(void *cgrp_ptr, const u32 *cpus, u32 nr_cpus)
+{
+	struct cgroup *cgrp = (struct cgroup *)cgrp_ptr;
+	struct cpuset *cs;
+	u32 i;
+
+	if (!cgrp || !cpus || nr_cpus == 0)
+		return;
+
+	/* Free any existing cpuset */
+	if (cgrp->subsys[cpuset_cgrp_id]) {
+		struct cpuset *old_cs = container_of(
+			cgrp->subsys[cpuset_cgrp_id], struct cpuset, css);
+		free(old_cs);
+		cgrp->subsys[cpuset_cgrp_id] = NULL;
+	}
+
+	/* Allocate a new cpuset */
+	cs = calloc(1, sizeof(struct cpuset));
+	if (!cs)
+		return;
+
+	/* Wire up the CSS <-> cgroup relationship */
+	cs->css.cgroup = cgrp;
+	cgrp->subsys[cpuset_cgrp_id] = &cs->css;
+
+	/*
+	 * Set cpus_allowed bitmask.
+	 *
+	 * cpumask_var_t is defined as `struct cpumask[1]` when
+	 * CONFIG_CPUMASK_OFFSTACK is disabled (the common case).
+	 * This means cpus_allowed is an embedded array, not a pointer.
+	 * We can directly access cs->cpus_allowed[0] as the cpumask.
+	 */
+	memset(&cs->cpus_allowed[0], 0, sizeof(struct cpumask));
+
+	/* Set the specified CPU bits */
+	for (i = 0; i < nr_cpus; i++) {
+		u32 cpu = cpus[i];
+		/* Set bit in cpumask (assuming __bits_per_long = 64) */
+		unsigned long *bits = (unsigned long *)&cs->cpus_allowed[0];
+		u32 word = cpu / (sizeof(unsigned long) * 8);
+		u32 bit = cpu % (sizeof(unsigned long) * 8);
+		bits[word] |= (1UL << bit);
+	}
+}
+
+/*
+ * Assign a task to a cgroup (update task->cgroups to point to the cgroup's css_set).
+ */
+void sim_task_set_cgroup(struct task_struct *p, void *cgrp_ptr)
+{
+	struct cgroup *cgrp = (struct cgroup *)cgrp_ptr;
+	struct css_set *css;
+
+	if (!cgrp) {
+		/* Fall back to root */
+		sim_init_root_cgroup();
+		p->cgroups = &sim_root_css_set;
+		return;
+	}
+
+	/* We need a css_set for this cgroup. For dynamically allocated cgroups,
+	 * we allocated one in sim_cgroup_alloc. We need to find or create it.
+	 * For simplicity, allocate a new css_set per task assignment. */
+	css = calloc(1, sizeof(struct css_set));
+	if (!css) {
+		/* Fall back to root on allocation failure */
+		sim_init_root_cgroup();
+		p->cgroups = &sim_root_css_set;
+		return;
+	}
+	css->dfl_cgrp = cgrp;
+	p->cgroups = css;
+}
+
+/*
+ * Get the cgroup a task belongs to.
+ */
+void *sim_task_get_cgroup(struct task_struct *p)
+{
+	if (!p || !p->cgroups)
+		return sim_get_root_cgroup();
+	return p->cgroups->dfl_cgrp;
+}

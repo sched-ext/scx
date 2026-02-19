@@ -368,6 +368,7 @@ fn parse_task(
             mm_id: None,
             allowed_cpus: allowed_cpus.clone(),
             parent_pid: None,
+            cgroup_name: None,
         });
     }
 
@@ -473,6 +474,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         nr_cpus,
         smt_threads_per_core: 1,
         tasks: all_tasks,
+        cgroups: Vec::new(), // rt-app doesn't use cgroups
         duration_ns,
         noise: NoiseConfig::from_env(),
         overhead: OverheadConfig::from_env(),

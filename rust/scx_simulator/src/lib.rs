@@ -29,6 +29,7 @@
 //! trace.dump();
 //! ```
 
+pub mod cgroup;
 pub mod cpu;
 pub mod dsq;
 pub mod engine;
@@ -47,6 +48,9 @@ pub mod types;
 pub mod workloads;
 
 // Re-export the main public types for convenience.
+pub use cgroup::{
+    clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupInfo, CgroupRegistry,
+};
 pub use engine::{SimulationResult, Simulator};
 pub use ffi::{discover_schedulers, DynamicScheduler, Scheduler, SchedulerInfo};
 pub use fmt::{FmtN, FmtTs, SimFormat};
@@ -54,7 +58,7 @@ pub use kfuncs::sim_clock;
 pub use monitor::{Monitor, ProbeContext, ProbePoint};
 pub use perf::RbcCounter;
 pub use rtapp::load_rtapp;
-pub use scenario::{NoiseConfig, OverheadConfig, Scenario};
+pub use scenario::{CgroupDef, NoiseConfig, OverheadConfig, Scenario};
 pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, RepeatMode, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
 pub use types::{CpuId, DsqId, KickFlags, MmId, Pid, TimeNs, Vtime};

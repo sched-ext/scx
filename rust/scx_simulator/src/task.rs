@@ -125,6 +125,10 @@ pub struct TaskDef {
     /// features that track parent-child relationships (e.g. LAVD's
     /// waker-wakee latency criticality propagation).
     pub parent_pid: Option<Pid>,
+    /// Cgroup name. When set, the task belongs to the named cgroup.
+    /// The cgroup must be defined in the scenario via `.cgroup()`.
+    /// If `None`, the task belongs to the root cgroup.
+    pub cgroup_name: Option<String>,
 }
 
 /// A simulated task at runtime.
