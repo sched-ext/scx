@@ -341,7 +341,8 @@ impl<S: Scheduler> Simulator<S> {
 
         // Initialize scheduler
         unsafe {
-            kfuncs::enter_sim(&mut state);
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
             start_rbc(&mut state);
             let rc = self.scheduler.init();
             charge_sched_time(&mut state, CpuId(0), "init");
@@ -351,7 +352,8 @@ impl<S: Scheduler> Simulator<S> {
 
         // Call init_task for each task (after scheduler init)
         unsafe {
-            kfuncs::enter_sim(&mut state);
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
             for task in tasks.values() {
                 start_rbc(&mut state);
                 let rc = self.scheduler.init_task(task.raw());
@@ -451,7 +453,8 @@ impl<S: Scheduler> Simulator<S> {
 
         // Call scheduler exit
         unsafe {
-            kfuncs::enter_sim(&mut state);
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
             start_rbc(&mut state);
             self.scheduler.exit();
             charge_sched_time(&mut state, CpuId(0), "exit");
@@ -480,7 +483,8 @@ impl<S: Scheduler> Simulator<S> {
         monitor: &mut dyn Monitor,
     ) {
         unsafe {
-            kfuncs::enter_sim(state);
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             self.scheduler.fire_timer();
             charge_sched_time(state, CpuId(0), "fire_timer");
@@ -541,8 +545,7 @@ impl<S: Scheduler> Simulator<S> {
         let pre_tick_slice = unsafe { ffi::sim_task_get_slice(raw) };
 
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             debug!(pid = pid.0, "tick");
             self.scheduler.tick(raw);
@@ -625,11 +628,9 @@ impl<S: Scheduler> Simulator<S> {
 
         // Call runnable callback
         let raw = task.raw();
-        kfuncs::set_sim_clock(state.clock, Some(wake_cpu));
         unsafe {
-            kfuncs::enter_sim(state);
+            kfuncs::enter_sim(state, wake_cpu);
             state.waker_task_raw = waker_raw;
-            state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
             start_rbc(state);
             debug!(pid = pid.0, "runnable");
             self.scheduler.runnable(raw, SCX_ENQ_WAKEUP);
@@ -643,11 +644,10 @@ impl<S: Scheduler> Simulator<S> {
         state.task_ops_state.insert(pid, OpsTaskState::Queued);
 
         unsafe {
-            kfuncs::enter_sim(state);
+            kfuncs::enter_sim(state, wake_cpu);
             state.pending_dispatch = None;
             state.ops_context = OpsContext::SelectCpu;
             state.waker_task_raw = waker_raw;
-            state.current_cpu = waker.as_ref().map_or(prev_cpu, |w| w.cpu);
             start_rbc(state);
 
             let selected_cpu_raw =
@@ -657,7 +657,11 @@ impl<S: Scheduler> Simulator<S> {
             charge_sched_time(state, selected_cpu, "select_cpu");
             state.ops_context = OpsContext::None;
             state.waker_task_raw = None;
-            kfuncs::set_sim_clock(state.clock, Some(selected_cpu));
+            state.current_cpu = selected_cpu;
+            kfuncs::set_sim_clock(
+                state.cpus[selected_cpu.0 as usize].local_clock,
+                Some(selected_cpu),
+            );
             debug!(
                 pid = pid.0,
                 prev_cpu = prev_cpu.0,
@@ -685,14 +689,14 @@ impl<S: Scheduler> Simulator<S> {
 
             if let Some(dd_cpu) = direct_dispatched {
                 // Task was directly dispatched — skip enqueue (kernel semantics)
-                kfuncs::set_sim_clock(state.clock, Some(dd_cpu));
+                state.current_cpu = dd_cpu;
+                kfuncs::set_sim_clock(state.cpus[dd_cpu.0 as usize].local_clock, Some(dd_cpu));
                 debug!(pid = pid.0, target_cpu = dd_cpu.0, "direct dispatch");
                 self.try_dispatch_and_run(dd_cpu, state, tasks, events, monitor);
             } else {
                 // Task was not directly dispatched; call enqueue
-                kfuncs::enter_sim(state);
+                kfuncs::enter_sim(state, selected_cpu);
                 state.ops_context = OpsContext::Enqueue;
-                state.current_cpu = selected_cpu;
                 start_rbc(state);
                 debug!(pid = pid.0, enq_flags = SCX_ENQ_WAKEUP, "enqueue");
                 self.scheduler.enqueue(raw, SCX_ENQ_WAKEUP);
@@ -775,8 +779,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe { crate::ffi::sim_task_set_slice(raw, 0) };
 
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             debug!(pid = pid.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
@@ -795,8 +798,7 @@ impl<S: Scheduler> Simulator<S> {
         });
 
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
 
             state.trace.record(
                 state.cpus[cpu.0 as usize].local_clock,
@@ -889,8 +891,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe { crate::ffi::sim_task_set_slice(raw, remaining_slice) };
 
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             debug!(pid = pid.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
@@ -910,8 +911,7 @@ impl<S: Scheduler> Simulator<S> {
 
         if !still_runnable {
             unsafe {
-                kfuncs::enter_sim(state);
-                state.current_cpu = cpu;
+                kfuncs::enter_sim(state, cpu);
                 let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
                 if ops_state == OpsTaskState::Queued {
                     start_rbc(state);
@@ -982,9 +982,8 @@ impl<S: Scheduler> Simulator<S> {
                     // Re-enqueue (part of put_prev_task for runnable tasks)
                     let raw = task.raw();
                     unsafe {
-                        kfuncs::enter_sim(state);
+                        kfuncs::enter_sim(state, cpu);
                         state.ops_context = OpsContext::Enqueue;
-                        state.current_cpu = cpu;
                         start_rbc(state);
                         debug!(pid = pid.0, "enqueue (yield re-enqueue)");
                         state.task_ops_state.insert(pid, OpsTaskState::Queued);
@@ -1057,9 +1056,8 @@ impl<S: Scheduler> Simulator<S> {
                                     task.state = TaskState::Runnable;
                                     let raw = task.raw();
                                     unsafe {
-                                        kfuncs::enter_sim(state);
+                                        kfuncs::enter_sim(state, cpu);
                                         state.ops_context = OpsContext::Enqueue;
-                                        state.current_cpu = cpu;
                                         start_rbc(state);
                                         state.task_ops_state.insert(pid, OpsTaskState::Queued);
                                         self.scheduler.enqueue(raw, 0);
@@ -1153,7 +1151,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Advance this CPU's clock to at least the event queue time
         state.advance_cpu_clock(cpu);
-        kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(cpu));
+
         // Check if local DSQ has tasks
         if state.cpus[cpu.0 as usize].local_dsq.is_empty() {
             // Look up the previously-running task's raw pointer for dispatch
@@ -1164,9 +1162,8 @@ impl<S: Scheduler> Simulator<S> {
 
             // Call scheduler dispatch to try to fill the local DSQ
             unsafe {
-                kfuncs::enter_sim(state);
+                kfuncs::enter_sim(state, cpu);
                 state.ops_context = OpsContext::Dispatch;
-                state.current_cpu = cpu;
                 state.kicked_cpus.clear();
                 start_rbc(state);
                 debug!("dispatch");
@@ -1343,8 +1340,7 @@ impl<S: Scheduler> Simulator<S> {
         unsafe { crate::ffi::sim_task_set_slice(raw, remaining_slice) };
 
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             debug!(pid = pid.0, runnable = true, "stopping (tick preempt)");
             self.scheduler.stopping(raw, true);
@@ -1363,8 +1359,7 @@ impl<S: Scheduler> Simulator<S> {
         });
 
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
             state.ops_context = OpsContext::Enqueue;
             state.task_ops_state.insert(pid, OpsTaskState::Queued);
             start_rbc(state);
@@ -1417,16 +1412,11 @@ impl<S: Scheduler> Simulator<S> {
 
         let raw = task.raw();
 
-        // Set sim context early so enable/running callbacks have the right CPU
-        let local_t = state.cpus[cpu.0 as usize].local_clock;
-        kfuncs::set_sim_clock(local_t, Some(cpu));
-
         // Call enable on first schedule
         if !task.enabled {
             task.enabled = true;
             unsafe {
-                kfuncs::enter_sim(state);
-                state.current_cpu = cpu;
+                kfuncs::enter_sim(state, cpu);
                 start_rbc(state);
                 debug!(pid = pid.0, "enable");
                 self.scheduler.enable(raw);
@@ -1437,8 +1427,7 @@ impl<S: Scheduler> Simulator<S> {
 
         // Call running
         unsafe {
-            kfuncs::enter_sim(state);
-            state.current_cpu = cpu;
+            kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             debug!(pid = pid.0, "running");
             self.scheduler.running(raw);

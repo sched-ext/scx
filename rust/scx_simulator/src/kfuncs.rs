@@ -368,10 +368,17 @@ thread_local! {
 
 /// Install a simulator state pointer for the duration of ops callbacks.
 ///
+/// Sets `state.current_cpu` and syncs `SIM_CONTEXT` so the trace formatter
+/// shows the correct CPU in the timestamp suffix. Every callback scope must
+/// declare which CPU it runs on; use `state.current_cpu` for scopes where the
+/// CPU doesn't change (init, exit, fire_timer).
+///
 /// # Safety
 /// The caller must ensure `state` remains valid and unaliased for the
 /// duration between `enter_sim` and `exit_sim`.
-pub unsafe fn enter_sim(state: &mut SimulatorState) {
+pub unsafe fn enter_sim(state: &mut SimulatorState, cpu: CpuId) {
+    state.current_cpu = cpu;
+    set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(cpu));
     SIM_STATE.with(|cell| {
         *cell.borrow_mut() = Some(state as *mut SimulatorState);
     });
@@ -1257,7 +1264,8 @@ mod tests {
     where
         F: FnOnce(&mut SimulatorState) -> R,
     {
-        unsafe { enter_sim(state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(state, cpu) };
         let result = f(state);
         exit_sim();
         result
@@ -1272,7 +1280,8 @@ mod tests {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(1);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         assert_eq!(scx_bpf_create_dsq(42, -1), 0);
         // Creating the same DSQ again should fail
         assert_eq!(scx_bpf_create_dsq(42, -1), -1);
@@ -1287,7 +1296,8 @@ mod tests {
         let mut state = test_state(1);
         state.dsqs.create(DsqId(100));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         assert_eq!(scx_bpf_dsq_nr_queued(100), 0);
         exit_sim();
     }
@@ -1300,7 +1310,8 @@ mod tests {
         state.dsqs.insert_fifo(DsqId(100), Pid(1));
         state.dsqs.insert_fifo(DsqId(100), Pid(2));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         assert_eq!(scx_bpf_dsq_nr_queued(100), 2);
         exit_sim();
     }
@@ -1315,7 +1326,8 @@ mod tests {
         let mut state = test_state(1);
         let p = register_task(&mut state, Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         scx_bpf_dsq_insert(p, DsqId::GLOBAL.0, 5_000_000, 0);
         exit_sim();
 
@@ -1338,7 +1350,8 @@ mod tests {
         state.dsqs.create(DsqId(50));
         let p = register_task(&mut state, Pid(3));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         scx_bpf_dsq_insert_vtime(p, 50, 5_000_000, 1000, 0);
         exit_sim();
 
@@ -1356,7 +1369,8 @@ mod tests {
         let mut state = test_state(2);
         let p = register_task(&mut state, Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         scx_bpf_dsq_insert(p, DsqId::GLOBAL.0, 5_000_000, 0);
         exit_sim();
 
@@ -1374,7 +1388,8 @@ mod tests {
         let mut state = test_state(2);
         let p = register_task(&mut state, Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         scx_bpf_dsq_insert(p, DsqId::LOCAL.0, 5_000_000, 0);
         exit_sim();
 
@@ -1400,7 +1415,8 @@ mod tests {
         state.dsqs.insert_fifo(DsqId(77), Pid(11));
         state.current_cpu = CpuId(1);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let moved = scx_bpf_dsq_move_to_local(77);
         exit_sim();
 
@@ -1416,7 +1432,8 @@ mod tests {
         let mut state = test_state(1);
         state.dsqs.create(DsqId(77));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let moved = scx_bpf_dsq_move_to_local(77);
         exit_sim();
 
@@ -1435,7 +1452,8 @@ mod tests {
         // All CPUs idle, prev_cpu=2 should be returned
         let p = register_task(&mut state, Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let mut is_idle = false;
         let cpu = scx_bpf_select_cpu_dfl(p, 2, 0, &mut is_idle);
         exit_sim();
@@ -1454,7 +1472,8 @@ mod tests {
         state.cpus[1].current_task = Some(Pid(99));
         let p = register_task(&mut state, Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let mut is_idle = false;
         let cpu = scx_bpf_select_cpu_dfl(p, 1, 0, &mut is_idle);
         exit_sim();
@@ -1474,7 +1493,8 @@ mod tests {
         state.cpus[1].current_task = Some(Pid(11));
         let p = register_task(&mut state, Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let mut is_idle = false;
         let cpu = scx_bpf_select_cpu_dfl(p, 0, 0, &mut is_idle);
         exit_sim();
@@ -1496,7 +1516,8 @@ mod tests {
         state.current_cpu = CpuId(1);
         state.cpus[1].local_clock = 42_000_000;
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let now = scx_bpf_now();
         exit_sim();
 
@@ -1509,7 +1530,8 @@ mod tests {
         let mut state = test_state(1);
         state.cpus[0].local_clock = 99_000;
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let t = bpf_ktime_get_ns();
         exit_sim();
 
@@ -1526,7 +1548,8 @@ mod tests {
         let mut state = test_state(4);
         state.current_cpu = CpuId(3);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         assert_eq!(bpf_get_smp_processor_id(), 3);
         assert_eq!(sim_bpf_get_smp_processor_id(), 3);
         exit_sim();
@@ -1537,7 +1560,8 @@ mod tests {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(8);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         assert_eq!(scx_bpf_nr_cpu_ids(), 8);
         exit_sim();
     }
@@ -1552,14 +1576,16 @@ mod tests {
         let mut state = test_state(1);
         state.prng_state = 12345;
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let a = sim_bpf_get_prandom_u32();
         let b = sim_bpf_get_prandom_u32();
         exit_sim();
 
         // Replay with same seed
         state.prng_state = 12345;
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let a2 = sim_bpf_get_prandom_u32();
         let b2 = sim_bpf_get_prandom_u32();
         exit_sim();
@@ -1579,7 +1605,8 @@ mod tests {
         let mut state = test_state(1);
         let raw = register_task(&mut state, Pid(42));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let found = bpf_task_from_pid(42);
         let not_found = bpf_task_from_pid(999);
         exit_sim();
@@ -1598,7 +1625,8 @@ mod tests {
         state.cpus[0].current_task = Some(Pid(7));
         state.current_cpu = CpuId(0);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let current = bpf_get_current_task_btf();
         exit_sim();
 
@@ -1613,7 +1641,8 @@ mod tests {
         let mut state = test_state(1);
         // No task running on CPU 0
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let current = bpf_get_current_task_btf();
         exit_sim();
 
@@ -1631,7 +1660,8 @@ mod tests {
         let raw = register_task(&mut state, Pid(5));
         state.cpus[1].current_task = Some(Pid(5));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let p = scx_bpf_cpu_curr(1);
         let idle = scx_bpf_cpu_curr(0);
         let oob = scx_bpf_cpu_curr(99);
@@ -1653,7 +1683,8 @@ mod tests {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(4);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         scx_bpf_kick_cpu(1, 0);
         scx_bpf_kick_cpu(3, 2); // SCX_KICK_PREEMPT
         scx_bpf_kick_cpu(1, 2); // OR flags: 0 | 2 = PREEMPT
@@ -1673,7 +1704,8 @@ mod tests {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(2);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         scx_bpf_kick_cpu(99, 0);
         exit_sim();
 
@@ -1690,7 +1722,8 @@ mod tests {
         let mut state = test_state(1);
         state.dsqs.create(DsqId(200));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         let first = sim_dsq_iter_begin(200, 0);
         exit_sim();
 
@@ -1711,7 +1744,8 @@ mod tests {
         let raw2 = register_task(&mut state, Pid(2));
         let raw3 = register_task(&mut state, Pid(3));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
 
         let p1 = sim_dsq_iter_begin(200, 0);
         assert_eq!(p1, raw1);
@@ -1748,7 +1782,8 @@ mod tests {
         let raw1 = register_task(&mut state, Pid(1));
         let _raw2 = register_task(&mut state, Pid(2));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
 
         // Start iterating DSQ 300
         let p = sim_dsq_iter_begin(300, 0);
@@ -1779,7 +1814,8 @@ mod tests {
         let raw_idle = register_task(&mut state, Pid(2));
         state.cpus[0].current_task = Some(Pid(1));
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
         assert!(scx_bpf_task_running(raw_running));
         assert!(!scx_bpf_task_running(raw_idle));
         exit_sim();
@@ -1839,7 +1875,8 @@ mod tests {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(1);
 
-        unsafe { enter_sim(&mut state) };
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
 
         assert!(scx_bpf_task_cgroup(ptr::null_mut(), 0).is_null());
         assert!(bpf_cgroup_from_id(123).is_null());
