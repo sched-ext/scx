@@ -88,6 +88,14 @@ struct Cli {
     #[arg(long, conflicts_with = "rbc_ns")]
     no_rbc: bool,
 
+    /// Enable concurrent callback interleaving at kfunc yield points.
+    ///
+    /// Runs dispatch callbacks for multiple idle CPUs on separate OS
+    /// threads with PRNG-driven token passing, enabling deterministic
+    /// exploration of different interleavings.
+    #[arg(long)]
+    interleave: bool,
+
     /// List available schedulers and exit.
     #[arg(long)]
     list_schedulers: bool,
@@ -148,6 +156,9 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
     if cli.fixed_priority {
         scenario.fixed_priority = true;
+    }
+    if cli.interleave {
+        scenario.interleave = true;
     }
     if let Some(ref end_time) = cli.end_time {
         scenario.duration_ns =

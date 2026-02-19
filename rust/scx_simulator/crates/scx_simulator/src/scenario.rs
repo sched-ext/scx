@@ -340,6 +340,12 @@ pub struct Scenario {
     pub cpu_preempt_events: Vec<CpuPreemptEvent>,
     /// Cgroup migration events (task moves between cgroups at runtime).
     pub cgroup_migrate_events: Vec<CgroupMigrateEvent>,
+    /// Enable concurrent callback interleaving at kfunc yield points.
+    ///
+    /// When true, dispatch callbacks for multiple idle CPUs run on
+    /// separate OS threads with PRNG-driven token passing, enabling
+    /// deterministic exploration of different interleavings.
+    pub interleave: bool,
 }
 
 /// Builder for constructing scenarios.
@@ -360,6 +366,7 @@ pub struct ScenarioBuilder {
     hotplug_events: Vec<HotplugEvent>,
     cpu_preempt_events: Vec<CpuPreemptEvent>,
     cgroup_migrate_events: Vec<CgroupMigrateEvent>,
+    interleave: bool,
 }
 
 impl Scenario {
@@ -381,6 +388,7 @@ impl Scenario {
             hotplug_events: Vec::new(),
             cpu_preempt_events: Vec::new(),
             cgroup_migrate_events: Vec::new(),
+            interleave: false,
         }
     }
 }
@@ -699,6 +707,12 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Enable concurrent callback interleaving at kfunc yield points.
+    pub fn interleave(mut self, enabled: bool) -> Self {
+        self.interleave = enabled;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -732,6 +746,7 @@ impl ScenarioBuilder {
             hotplug_events: self.hotplug_events,
             cpu_preempt_events: self.cpu_preempt_events,
             cgroup_migrate_events: self.cgroup_migrate_events,
+            interleave: self.interleave,
         }
     }
 }
