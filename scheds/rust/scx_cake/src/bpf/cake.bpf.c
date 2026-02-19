@@ -47,13 +47,6 @@ _Static_assert(sizeof(struct cake_scratch) <= 128,
     "cake_scratch exceeds 128B -- adjacent CPUs will false-share");
 struct cake_scratch __arena *arena_scratch;
 
-/* Per-LLC tier-occupancy bitmask — arena-backed (2nd pass item C).
- * 4 bits per LLC (bit 0 = T0, bit 3 = T3). Set in cake_enqueue when
- * inserting to a tier DSQ. Read by cake_dispatch to skip empty tiers,
- * avoiding ~25ns kfunc trampoline per skipped tier. Cleared after
- * successful dsq_move_to_local. Racy but safe: worst case is one
- * extra dsq_move_to_local that returns false instantly. */
-u8 __arena *arena_tier_occupied;
 
 /* Global stats BSS array - 0ns lookup vs 25ns helper, 256-byte aligned per CPU */
 struct cake_stats global_stats[CAKE_MAX_CPUS] SEC(".bss") __attribute__((aligned(256)));
@@ -365,8 +358,12 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
      * AFFINITY GATE: Wine/Proton tasks may dynamically restrict cpumask.
      * prev_cpu could be outside the allowed set after affinity change.
      * Fast path: nr_cpus_allowed == nr_cpus is RODATA-const, JIT folds
-     * to single register cmp — zero kfunc cost for full-affinity tasks. */
+     * to single register cmp — zero kfunc cost for full-affinity tasks.
+     *
+     */
     bool restricted = (p->nr_cpus_allowed != nr_cpus);
+    u64 aff_mask = ~0ULL;  /* lazy: loaded on Gate 1 miss for restricted tasks */
+    bool aff_loaded = false;
     u32 prev_idx = (u32)prev_cpu & (CAKE_MAX_CPUS - 1);
     if ((!restricted || bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) &&
         scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -424,6 +421,19 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     u64 staged = p->scx.dsq_vtime;
     u8 tier = (staged >> 56) & 3;
 
+    /* LAZY AFFINITY LOAD: Gate 1 missed — load cached mask once.
+     * MUST be before confidence routing: goto gate_2/3/4 would skip this
+     * block if placed later, leaving aff_mask = ~0ULL for restricted tasks.
+     * get_task_ctx → bpf_task_storage_get is expensive (hash lookup).
+     * Only pay this cost on Gate 1 miss (~9% of wakeups).
+     * Saves 1-7 bpf_cpumask_test_cpu kfuncs in subsequent gates. */
+    if (restricted && !aff_loaded) {
+        struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+        if (tctx)
+            aff_mask = tctx->cached_cpumask;
+        aff_loaded = true;
+    }
+
     /* ── CONFIDENCE ROUTING: skip intermediate gates if predictable ──
      * After WSC miss, if this CPU's wakeups consistently exit through
      * the same gate, jump directly to that gate (forward goto).
@@ -451,6 +461,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (arena_mailbox[prev_idx].migration_cooldown != 4)
         arena_mailbox[prev_idx].migration_cooldown = 4;
 
+
     /* ── GATE 1b: SMT sibling fallback — L2 still warm ──
      * When prev_cpu is busy, try its SMT sibling before Gate 2's full scan.
      * Same physical core → L2 cache shared → 1.5µs migration vs 8µs full.
@@ -461,7 +472,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
     if (nr_cpus > nr_phys_cpus) {
         s32 sib = prev_cpu ^ nr_phys_cpus;  /* SMT sibling (P↔V) */
         if ((u32)sib < nr_cpus &&
-            (!restricted || bpf_cpumask_test_cpu(sib, p->cpus_ptr)) &&
+            (aff_mask & (1ULL << (u32)sib)) &&
             scx_bpf_test_and_clear_cpu_idle(sib)) {
             u64 slice = p->scx.slice ?: quantum_ns;
             scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | sib, slice, wake_flags);
@@ -497,7 +508,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                 s32 c = (s32)(half_base + off);
                 if (c == prev_cpu) continue;  /* already tried in Gate 1 */
                 if ((u32)c < nr_cpus &&
-                    (!restricted || bpf_cpumask_test_cpu(c, p->cpus_ptr)) &&
+                    (aff_mask & (1ULL << (u32)c)) &&
                     scx_bpf_test_and_clear_cpu_idle(c)) {
                     u64 slice = p->scx.slice ?: quantum_ns;
                     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
@@ -513,7 +524,7 @@ s32 BPF_STRUCT_OPS(cake_select_cpu, struct task_struct *p, s32 prev_cpu,
                     /* Skip prev_cpu's sibling — already tried in Gate 1b */
                     if (c == (prev_cpu ^ (s32)nr_phys_cpus)) continue;
                     if ((u32)c < nr_cpus &&
-                        (!restricted || bpf_cpumask_test_cpu(c, p->cpus_ptr)) &&
+                        (aff_mask & (1ULL << (u32)c)) &&
                         scx_bpf_test_and_clear_cpu_idle(c)) {
                         u64 slice = p->scx.slice ?: quantum_ns;
                         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
@@ -552,7 +563,7 @@ gate_2_entry: __attribute__((unused));
             if (phys_cand) {
                 s32 c = __builtin_ctzll(phys_cand);
                 if ((u32)c < CAKE_MAX_CPUS &&
-                    (!restricted || bpf_cpumask_test_cpu(c, p->cpus_ptr)) &&
+                    (aff_mask & (1ULL << (u32)c)) &&
                     scx_bpf_test_and_clear_cpu_idle(c)) {
                     u64 slice = p->scx.slice ?: quantum_ns;
                     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
@@ -565,7 +576,7 @@ gate_2_entry: __attribute__((unused));
             if (virt_cand) {
                 s32 c = __builtin_ctzll(virt_cand);
                 if ((u32)c < CAKE_MAX_CPUS &&
-                    (!restricted || bpf_cpumask_test_cpu(c, p->cpus_ptr)) &&
+                    (aff_mask & (1ULL << (u32)c)) &&
                     scx_bpf_test_and_clear_cpu_idle(c)) {
                     u64 slice = p->scx.slice ?: quantum_ns;
                     scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | c, slice, wake_flags);
@@ -582,7 +593,7 @@ gate_3_entry: __attribute__((unused));
      * This is the cold path (~2-5% of wakeups in gaming). */
     s32 cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
-    if (is_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+    if (is_idle && (aff_mask & (1ULL << (u32)cpu))) {
         u64 slice = p->scx.slice ?: quantum_ns;
         scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice, wake_flags);
         CAKE_GATE_RECORD(prev_idx, CAKE_GATE_3);
@@ -621,7 +632,7 @@ gate_4_entry: __attribute__((unused));
         }
 
         if (victim >= 0 && (u32)victim < CAKE_MAX_CPUS &&
-            (!restricted || bpf_cpumask_test_cpu(victim, p->cpus_ptr))) {
+            (aff_mask & (1ULL << (u32)victim))) {
             u64 slice = p->scx.slice ?: quantum_ns;
             scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | victim, slice, wake_flags);
             CAKE_GATE_RECORD(prev_idx, CAKE_GATE_4);
@@ -667,11 +678,27 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
 
     /* KFUNC TUNNELING: Reuse LLC ID + timestamp cached by select_cpu in scratch.
      * Eliminates 2 kfunc trampolines (~40-60ns) — select_cpu always runs on
-     * the same CPU immediately before enqueue, so values are fresh. */
+     * the same CPU immediately before enqueue, so values are fresh for WAKEUP.
+     *
+     * PREEMPT PATH (multi-LLC only): select_cpu was NOT called — scratch may
+     * contain stale cached_llc from a different task's wakeup on this CPU.
+     * On single-LLC (9800x3d), LLC is always 0 regardless of staleness, so
+     * the branch is dead-code-eliminated by BPF JIT (Rule 5: no work < some work).
+     * On multi-LLC (9950X, EPYC), fetch fresh LLC + timestamp to prevent
+     * cross-LLC DSQ insertion. Tier is always correct (from p->scx.dsq_vtime,
+     * staged by cake_stopping on the task itself). */
     u32 enq_cpu = bpf_get_smp_processor_id() & (CAKE_MAX_CPUS - 1);
     struct cake_scratch __arena *scr = &arena_scratch[enq_cpu];
     u64 now_cached = scr->cached_now;
     u32 enq_llc = scr->cached_llc;
+
+    /* Multi-LLC guard: stale scratch can cause cross-CCD DSQ insertion.
+     * RODATA gate: nr_llcs <= 1 is constant-folded → entire block eliminated
+     * on single-LLC systems. Zero cost on 9800x3d. */
+    if (nr_llcs > 1 && !(enq_flags & SCX_ENQ_WAKEUP)) {
+        now_cached = scx_bpf_now();
+        enq_llc = cpu_llc_id[enq_cpu];
+    }
 
     if (unlikely(!(staged & (1ULL << 63)))) {
         /* No staged context: first dispatch or kthread without alloc.
@@ -685,14 +712,14 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         /* J6 V1: per-tier DSQ — reduce contention ~75% */
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + fallback_tier,
                                  quantum_ns, vtime, enq_flags);
-        arena_tier_occupied[enq_llc & (CAKE_MAX_LLCS - 1)] |= (1 << fallback_tier);
+
         return;
     }
 
     /* Handle Yields/Background — preserve staged tier from stopping.
-     * Re-enqueues (slice exhaust, yield) don't go through select_cpu,
-     * so cached_now is stale. Get fresh timestamp. Use staged tier/slice
-     * from cake_stopping if available (bit 63 set). */
+     * Re-enqueues (slice exhaust, yield) don't go through select_cpu.
+     * now_cached and enq_llc are already fresh (fetched in the non-wakeup
+     * branch above). Use staged tier/slice from cake_stopping. */
     if (!(enq_flags & (SCX_ENQ_WAKEUP | SCX_ENQ_PREEMPT))) {
         u64 now_fresh = scx_bpf_now();
         u8 requeue_tier = (staged >> 56) & 3;
@@ -709,7 +736,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
         /* J6 V1: per-tier DSQ */
         scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + requeue_tier,
                                  requeue_slice, vtime, enq_flags);
-        arena_tier_occupied[enq_llc & (CAKE_MAX_LLCS - 1)] |= (1 << requeue_tier);
+
         return;
     }
 
@@ -752,8 +779,7 @@ void BPF_STRUCT_OPS(cake_enqueue, struct task_struct *p, u64 enq_flags)
      * scans T0 before T1 before T2 before T3. The vtime_tier promotion
      * only affects ordering within the DSQ, not DSQ selection. */
     scx_bpf_dsq_insert_vtime(p_reg, LLC_DSQ_BASE + enq_llc * 4 + tier, slice, vtime, enq_flags);
-    /* Mark tier as occupied for dispatch skip optimization */
-    arena_tier_occupied[enq_llc & (CAKE_MAX_LLCS - 1)] |= (1 << tier);
+
 }
 
 /* Dispatch: per-LLC DSQ scan with cross-LLC stealing fallback.
@@ -764,26 +790,16 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
 {
     u32 my_llc = cpu_llc_id[raw_cpu & (CAKE_MAX_CPUS - 1)];
     u32 base = LLC_DSQ_BASE + my_llc * 4;
-    ARENA_ASSOC();
 
-    /* J6 V2: Arena-filtered local LLC dispatch.
-     * Read arena_tier_occupied to skip tiers known-empty.
-     * Each skipped tier avoids a ~25ns dsq_move_to_local kfunc trampoline.
-     * Racy: bit may be stale (another CPU consumed last task), but
-     * dsq_move_to_local returns false instantly in that case. */
-    u8 occ = arena_tier_occupied[my_llc & (CAKE_MAX_LLCS - 1)];
+    /* Zero-contention dispatch: try all 4 tiers unconditionally.
+     * dsq_move_to_local on empty DSQ returns false in ~25ns.
+     * Worst case: 3 empty tiers × 25ns = 75ns.
+     * BUT: zero MESI bouncing, zero atomics, zero arena allocation.
+     * On single-LLC 9800x3d (16 CPUs), eliminates 16-way contention
+     * that was bouncing a shared u32 between all L1 caches. */
     for (u32 t = 0; t < 4; t++) {
-        if (!(occ & (1 << t)))
-            continue;  /* Skip empty tier — save ~25ns kfunc trampoline */
-        if (scx_bpf_dsq_move_to_local(base + t)) {
-            /* Clear bit: we consumed from this tier. Racy but safe —
-             * worst case: another enqueue re-sets it next cycle. */
-            arena_tier_occupied[my_llc & (CAKE_MAX_LLCS - 1)] &= ~(1 << t);
+        if (scx_bpf_dsq_move_to_local(base + t))
             return;
-        }
-        /* dsq_move_to_local returned false: tier actually empty.
-         * Clear the stale bit so future dispatches skip it. */
-        arena_tier_occupied[my_llc & (CAKE_MAX_LLCS - 1)] &= ~(1 << t);
     }
 
     /* Steal from other LLCs (only when all local tiers empty).
@@ -797,12 +813,8 @@ void BPF_STRUCT_OPS(cake_dispatch, s32 raw_cpu, struct task_struct *prev)
         u32 victim = my_llc + i;
         if (victim >= nr_llcs)
             victim -= nr_llcs;
-        u8 vocc = arena_tier_occupied[victim & (CAKE_MAX_LLCS - 1)];
         u32 vbase = LLC_DSQ_BASE + victim * 4;
-        /* Steal in tier priority order from victim LLC */
         for (u32 t = 0; t < 4; t++) {
-            if (!(vocc & (1 << t)))
-                continue;
             if (scx_bpf_dsq_move_to_local(vbase + t))
                 return;
         }
@@ -1226,7 +1238,54 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init_task, struct task_struct *p,
     packed |= (((u32)(init_tier & MASK_TIER) << 4) | (CAKE_FLOW_NEW & MASK_FLAGS)) << SHIFT_FLAGS;
     tctx->packed_info = packed;
 
+    /* CACHED AFFINITY: Build mask from p->cpus_ptr at init time.
+     * p->cpus_ptr is RCU-protected — must hold bpf_rcu_read_lock.
+     * Updated event-driven by cake_set_cpumask (zero polling). */
+    bpf_rcu_read_lock();
+    {
+        u64 mask = 0;
+        #pragma unroll
+        for (u32 i = 0; i < 16 && i < CAKE_MAX_CPUS; i++) {
+            if (bpf_cpumask_test_cpu(i, p->cpus_ptr))
+                mask |= (1ULL << i);
+        }
+        if (nr_cpus > 16) {
+            for (u32 i = 16; i < 64 && i < nr_cpus; i++) {
+                if (bpf_cpumask_test_cpu(i, p->cpus_ptr))
+                    mask |= (1ULL << i);
+            }
+        }
+        tctx->cached_cpumask = mask;
+    }
+    bpf_rcu_read_unlock();
+
     return 0;
+}
+
+/* EVENT-DRIVEN AFFINITY UPDATE (Rule 41: Locality Promotion)
+ * Kernel calls this when sched_setaffinity() changes a task's cpumask.
+ * Replaces polling — zero hot-path cost.
+ * Cost: 16 kfuncs × 15ns = 240ns per call — amortized to ~0ns/cycle. */
+void BPF_STRUCT_OPS(cake_set_cpumask, struct task_struct *p __arg_trusted,
+                    const struct cpumask *cpumask __arg_trusted)
+{
+    struct cake_task_ctx __arena *tctx = get_task_ctx(p);
+    if (!tctx)
+        return;
+
+    u64 mask = 0;
+    #pragma unroll
+    for (u32 i = 0; i < 16 && i < CAKE_MAX_CPUS; i++) {
+        if (bpf_cpumask_test_cpu(i, cpumask))
+            mask |= (1ULL << i);
+    }
+    if (nr_cpus > 16) {
+        for (u32 i = 16; i < 64 && i < nr_cpus; i++) {
+            if (bpf_cpumask_test_cpu(i, cpumask))
+                mask |= (1ULL << i);
+        }
+    }
+    tctx->cached_cpumask = mask;
 }
 
 /* Free per-task arena storage on task exit. */
@@ -1270,12 +1329,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cake_init)
     if (!arena_scratch)
         return -ENOMEM;
 
-    /* 2nd pass item C: per-LLC tier-occupancy bitmask.
-     * CAKE_MAX_LLCS bytes (4 bits per LLC), 1 page is overkill but minimum. */
-    arena_tier_occupied = (u8 __arena *)
-        bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
-    if (!arena_tier_occupied)
-        return -ENOMEM;
 
     return 0;
 }
@@ -1293,6 +1346,7 @@ SCX_OPS_DEFINE(cake_ops,
                /* .tick removed: tick-less architecture (see cake_running) */
                .running        = (void *)cake_running,
                .stopping       = (void *)cake_stopping,
+               .set_cpumask    = (void *)cake_set_cpumask,
                .init_task      = (void *)cake_init_task,
                .exit_task      = (void *)cake_exit_task,
                .init           = (void *)cake_init,
