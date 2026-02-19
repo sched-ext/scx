@@ -1521,3 +1521,149 @@ fn test_lavd_underloaded_cpdom_dsq_affinity() {
         "free task was never scheduled"
     );
 }
+
+/// Test core compaction dispatch: a task pinned to a CPU outside the active
+/// set forces the dispatch path through the core compaction branch (L970-L1128
+/// in main.bpf.c). Core compaction reduces nr_active below nr_cpus_onln, so
+/// use_full_cpus() returns false. When the pinned task wakes on an inactive
+/// CPU, lavd_dispatch enters the compaction logic.
+#[test]
+fn test_lavd_core_compaction_dispatch() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(8);
+    // Enable core compaction so nr_active can drop below nr_cpus_onln
+    sched.lavd_set_no_core_compaction(false);
+
+    let scenario = Scenario::builder()
+        .cpus(8)
+        // A task pinned to CPU 4 — after compaction, CPU 4 will NOT be in
+        // the active set (since cpu_order maps everything to CPU 0 in sim).
+        // This forces the dispatch through the core compaction overflow path.
+        .task(TaskDef {
+            name: "pinned_4".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::io_bound(100_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(4)]),
+            parent_pid: None,
+        })
+        // An unpinned task to generate some scheduling activity
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::io_bound(100_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(1000)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "pinned task on CPU 4 was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "free task was never scheduled"
+    );
+}
+
+/// Test core compaction with per-CPU DSQ fast path. When core compaction
+/// is active and per_cpu_dsq is enabled, a task on an inactive CPU with
+/// something in its per-CPU DSQ takes the fast path (L1000-L1004).
+#[test]
+fn test_lavd_core_compaction_per_cpu_dsq() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(8);
+    sched.lavd_set_no_core_compaction(false);
+    sched.lavd_configure(true, 0, 0); // per_cpu_dsq = true
+
+    let scenario = Scenario::builder()
+        .cpus(8)
+        // Pinned task on CPU 6 — outside active set after compaction
+        .task(TaskDef {
+            name: "pinned_6".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::io_bound(50_000, 1_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(6)]),
+            parent_pid: None,
+        })
+        // Another pinned task on CPU 5
+        .task(TaskDef {
+            name: "pinned_5".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::io_bound(50_000, 1_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(5)]),
+            parent_pid: None,
+        })
+        .duration_ms(1000)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "pinned task on CPU 6 was never scheduled"
+    );
+}
+
+/// Test core compaction with a prev task that is pinned and still queued.
+/// When dispatch is called with a prev task that is_pinned, the compaction
+/// logic extends the overflow set for that CPU (L1011-L1014).
+#[test]
+fn test_lavd_core_compaction_pinned_prev() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(8);
+    sched.lavd_set_no_core_compaction(false);
+
+    let scenario = Scenario::builder()
+        .cpus(8)
+        // Two tasks both pinned to CPU 7, forcing context switches between them.
+        // When one is "prev" during dispatch, it triggers the is_pinned(prev) path.
+        .task(TaskDef {
+            name: "pin7_a".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(100_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pin7_b".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(100_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "pinned task A was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "pinned task B was never scheduled"
+    );
+}

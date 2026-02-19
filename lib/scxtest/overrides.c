@@ -6,9 +6,36 @@
 
 __weak unsigned long CONFIG_NR_CPUS = 1024;
 
-struct cpumask;
 struct task_struct;
 struct scx_minheap_elem;
+
+/* Forward declarations for libc functions to avoid header conflicts */
+extern void *calloc(unsigned long nmemb, unsigned long size);
+extern void free(void *ptr);
+extern void *memcpy(void *dst, const void *src, unsigned long n);
+extern void *memset(void *s, int c, unsigned long n);
+
+#ifndef BITS_PER_LONG
+#define BITS_PER_LONG (sizeof(unsigned long) * 8)
+#endif
+
+#ifndef NR_CPUS
+#define NR_CPUS 128
+#endif
+
+/*
+ * Local struct definitions matching vmlinux.h layout.
+ * overrides.c is compiled separately from vmlinux.h, so we define
+ * these locally (same pattern as scx_test_cpumask.c).
+ */
+struct cpumask {
+	unsigned long bits[NR_CPUS / BITS_PER_LONG];
+};
+
+struct bpf_cpumask {
+	struct cpumask cpumask;
+	int usage; /* refcount_t — not used in simulator */
+};
 
 __weak
 void scx_bpf_error_bstr(char *fmt __attribute__((unused)),
@@ -17,15 +44,128 @@ void scx_bpf_error_bstr(char *fmt __attribute__((unused)),
 {
 }
 
+/*
+ * =================================================================
+ * BPF cpumask operations — real implementations
+ *
+ * These replace the no-op stubs so that schedulers using BPF cpumask
+ * allocation (e.g. LAVD's active_cpumask, ovrflw_cpumask) get working
+ * bit manipulation. struct bpf_cpumask starts with cpumask_t followed
+ * by refcount_t, so casting to struct cpumask * is safe.
+ * =================================================================
+ */
+
 __weak
 struct bpf_cpumask *bpf_cpumask_create(void)
 {
-	return NULL;
+	struct bpf_cpumask *m = calloc(1, sizeof(struct bpf_cpumask));
+	return m;
 }
 
 __weak
-void bpf_cpumask_release(struct bpf_cpumask *cpumask __attribute__((unused)))
+void bpf_cpumask_release(struct bpf_cpumask *cpumask)
 {
+	if (cpumask)
+		free(cpumask);
+}
+
+__weak
+void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask)
+{
+	if (!cpumask || cpu >= NR_CPUS)
+		return;
+	unsigned long *bits = (unsigned long *)cpumask;
+	bits[cpu / BITS_PER_LONG] |= (1UL << (cpu % BITS_PER_LONG));
+}
+
+__weak
+void bpf_cpumask_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask)
+{
+	if (!cpumask || cpu >= NR_CPUS)
+		return;
+	unsigned long *bits = (unsigned long *)cpumask;
+	bits[cpu / BITS_PER_LONG] &= ~(1UL << (cpu % BITS_PER_LONG));
+}
+
+__weak
+bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask)
+{
+	if (!cpumask || cpu >= NR_CPUS)
+		return false;
+	unsigned long *bits = (unsigned long *)cpumask;
+	unsigned long mask = 1UL << (cpu % BITS_PER_LONG);
+	unsigned long word = cpu / BITS_PER_LONG;
+	bool was_set = (bits[word] & mask) != 0;
+	bits[word] |= mask;
+	return was_set;
+}
+
+__weak
+void bpf_cpumask_copy(struct bpf_cpumask *dst,
+		      const struct cpumask *src)
+{
+	if (!dst || !src)
+		return;
+	memcpy(dst, src, sizeof(struct cpumask));
+}
+
+__weak
+u32 bpf_cpumask_weight(const struct cpumask *cpumask)
+{
+	if (!cpumask)
+		return 0;
+	u32 count = 0;
+	for (int i = 0; i < NR_CPUS / BITS_PER_LONG; i++) {
+		unsigned long w = cpumask->bits[i];
+		while (w) {
+			count += w & 1;
+			w >>= 1;
+		}
+	}
+	return count;
+}
+
+__weak
+bool bpf_cpumask_intersects(const struct cpumask *src1,
+			    const struct cpumask *src2)
+{
+	if (!src1 || !src2)
+		return false;
+	for (int i = 0; i < NR_CPUS / BITS_PER_LONG; i++) {
+		if (src1->bits[i] & src2->bits[i])
+			return true;
+	}
+	return false;
+}
+
+__weak
+bool bpf_cpumask_and(struct bpf_cpumask *dst,
+		     const struct cpumask *src1,
+		     const struct cpumask *src2)
+{
+	if (!dst || !src1 || !src2)
+		return false;
+	unsigned long *d = (unsigned long *)dst;
+	bool any = false;
+	for (int i = 0; i < NR_CPUS / BITS_PER_LONG; i++) {
+		d[i] = src1->bits[i] & src2->bits[i];
+		if (d[i])
+			any = true;
+	}
+	return any;
+}
+
+__weak
+u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask)
+{
+	if (!cpumask)
+		return NR_CPUS;
+	for (int i = 0; i < NR_CPUS; i++) {
+		if ((cpumask->bits[i / BITS_PER_LONG] >>
+		     (i % BITS_PER_LONG)) & 1)
+			return i;
+	}
+	return NR_CPUS;
 }
 
 __weak
@@ -72,32 +212,6 @@ void bpf_rcu_read_lock(void)
 __weak
 void bpf_rcu_read_unlock(void)
 {
-}
-
-__weak
-void bpf_cpumask_set_cpu(u32 cpu __attribute__((unused)),
-		         struct bpf_cpumask *cpumask __attribute__((unused)))
-{
-}
-
-__weak
-u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask __attribute__((unused)))
-{
-	return 0;
-}
-
-__weak
-bool bpf_cpumask_and(struct bpf_cpumask *dst __attribute__((unused)),
-		     const struct cpumask *src1 __attribute__((unused)),
-		     const struct cpumask *src2 __attribute__((unused)))
-{
-	return false;
-}
-
-__weak
-u32 bpf_cpumask_weight(const struct cpumask *cpumask __attribute__((unused)))
-{
-	return 0;
 }
 
 __weak
