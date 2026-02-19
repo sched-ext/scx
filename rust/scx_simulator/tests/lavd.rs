@@ -4138,6 +4138,416 @@ fn test_lavd_slice_boost_preemption_cancel() {
     assert!(trace.schedule_count(Pid(2)) > 0);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4: Core compaction dispatch path coverage
+//
+// The simulator's utilization tracking inflates avg_sc_util, preventing the
+// natural timer-driven compaction from reducing nr_active. To exercise the
+// compaction dispatch path (main.bpf.c lines 964-1134), we use
+// lavd_force_compaction() to directly set the active/overflow cpumasks
+// and nr_active after lavd_init() has run.
+//
+// The ForceCompactionMonitor re-forces compaction whenever the timer
+// resets nr_active back to full, ensuring compaction persists across
+// timer ticks. This lets tasks complete time slices so prev_task is set
+// when dispatch runs, covering pinned/affinitized prev sub-paths.
+// ---------------------------------------------------------------------------
+
+/// Function pointer type for lavd_force_compaction(int nr_active_cpus).
+type ForceCompactionFn = unsafe extern "C" fn(i32);
+
+/// Monitor that persistently forces compaction by re-applying it whenever
+/// the timer resets nr_active. Observes min_nr_active to confirm the
+/// dispatch compaction path is entered.
+///
+/// All operations are pure memory writes/reads (no kfuncs), safe outside
+/// the sim context.
+struct ForceCompactionMonitor {
+    force_fn: ForceCompactionFn,
+    nr_active_fn: unsafe extern "C" fn() -> u32,
+    target_nr_active: i32,
+    min_nr_active: u32,
+    nr_cpus: u32,
+    forced: bool,
+}
+
+impl ForceCompactionMonitor {
+    fn new(
+        force_fn: ForceCompactionFn,
+        nr_active_fn: unsafe extern "C" fn() -> u32,
+        target_nr_active: i32,
+        nr_cpus: u32,
+    ) -> Self {
+        Self {
+            force_fn,
+            nr_active_fn,
+            target_nr_active,
+            min_nr_active: nr_cpus,
+            nr_cpus,
+            forced: false,
+        }
+    }
+
+    fn compaction_occurred(&self) -> bool {
+        self.min_nr_active < self.nr_cpus
+    }
+}
+
+impl Monitor for ForceCompactionMonitor {
+    fn sample(&mut self, _ctx: &ProbeContext) {
+        let nr = unsafe { (self.nr_active_fn)() };
+        // Re-force compaction whenever the timer resets it back to full.
+        // This ensures compaction persists across timer ticks so that
+        // dispatch sees prev != NULL on inactive CPUs (after the first
+        // time slice completes and prev_task is set).
+        if nr >= self.nr_cpus {
+            unsafe { (self.force_fn)(self.target_nr_active) };
+            self.forced = true;
+        }
+        let nr = unsafe { (self.nr_active_fn)() };
+        if nr < self.min_nr_active {
+            self.min_nr_active = nr;
+        }
+    }
+}
+
+/// Helper to resolve force_compaction and nr_active probe from sched.
+fn resolve_compaction_fns(
+    sched: &DynamicScheduler,
+) -> (ForceCompactionFn, unsafe extern "C" fn() -> u32) {
+    type SysProbeU32 = unsafe extern "C" fn() -> u32;
+    unsafe {
+        let force_fn = *sched
+            .get_symbol::<ForceCompactionFn>(b"lavd_force_compaction\0")
+            .expect("lavd_force_compaction not found");
+        let nr_active_fn = *sched
+            .get_symbol::<SysProbeU32>(b"lavd_probe_sys_nr_active\0")
+            .expect("lavd_probe_sys_nr_active not found");
+        (force_fn, nr_active_fn)
+    }
+}
+
+/// Verify that lavd_force_compaction() reduces nr_active and the
+/// dispatch compaction path (use_full_cpus() == false) is entered.
+#[test]
+fn test_lavd_compaction_monitor_verify() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 2, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        .add_task("light-io", 0, workloads::io_bound(100_000, 5_000_000))
+        .duration_ms(200)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    assert!(result.trace.schedule_count(Pid(1)) > 0);
+    assert!(
+        monitor.compaction_occurred(),
+        "compaction not observed (min_nr_active={})",
+        monitor.min_nr_active,
+    );
+}
+
+/// Pinned task on inactive CPU under forced compaction.
+/// Exercises is_pinned(prev) overflow extension path (main.bpf.c:1011-1014).
+/// A CPU-bound task pinned to CPU 7 dispatches on CPU 7 which is inactive
+/// under compaction, triggering the pinned-prev overflow extension.
+#[test]
+fn test_lavd_compaction_pinned_prev_forced() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 2, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        .add_task("light", 0, workloads::io_bound(100_000, 5_000_000))
+        .task(TaskDef {
+            name: "pinned-7".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    assert!(result.trace.schedule_count(Pid(1)) > 0);
+    assert!(
+        result.trace.schedule_count(Pid(2)) > 0,
+        "pinned task never ran"
+    );
+    assert!(monitor.compaction_occurred(), "compaction didn't fire");
+}
+
+/// Affinitized task on inactive CPUs under forced compaction.
+/// Exercises LAVD_FLAG_IS_AFFINITIZED overflow extension path
+/// (main.bpf.c:1024-1033). A periodic task affinitized to CPUs {5,6,7}
+/// dispatches on those inactive CPUs.
+#[test]
+fn test_lavd_compaction_affinitized_prev_forced() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 2, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        .add_task("light", 0, workloads::io_bound(100_000, 5_000_000))
+        .task(TaskDef {
+            name: "affinity-567".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::periodic(500_000, 3_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(5), CpuId(6), CpuId(7)]),
+            parent_pid: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    assert!(result.trace.schedule_count(Pid(1)) > 0);
+    assert!(
+        result.trace.schedule_count(Pid(2)) > 0,
+        "affinitized task never ran"
+    );
+    assert!(monitor.compaction_occurred(), "compaction didn't fire");
+}
+
+/// Per-CPU DSQ mode under compaction: exercises the per-CPU DSQ fast path
+/// (main.bpf.c:1000-1004) and the !use_cpdom_dsq early exit (line 1040-1043).
+#[test]
+fn test_lavd_compaction_per_cpu_dsq_mode() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_set_bool(&sched, "per_cpu_dsq\0", true);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 2, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        .add_task("io-0", 0, workloads::io_bound(200_000, 3_000_000))
+        .add_task("io-1", 0, workloads::io_bound(200_000, 3_000_000))
+        .add_task("cpu-0", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    assert!(result.trace.schedule_count(Pid(1)) > 0);
+    assert!(result.trace.schedule_count(Pid(2)) > 0);
+    assert!(monitor.compaction_occurred(), "compaction didn't fire");
+}
+
+/// DSQ iteration entry: exercises the bpf_for_each(scx_dsq, ...) loop
+/// at main.bpf.c:1055-1126. Affinitized tasks on inactive CPUs create
+/// DSQ entries for the iteration loop. bpf_task_from_pid resolves from
+/// the Rust kfuncs for actual PID→task_struct lookup.
+#[test]
+fn test_lavd_compaction_dsq_iteration() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 2, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        .add_task("light", 0, workloads::io_bound(100_000, 5_000_000))
+        .task(TaskDef {
+            name: "aff-67".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::periodic(400_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(6), CpuId(7)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "aff-45".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::periodic(300_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(4), CpuId(5)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pin-3".into(),
+            pid: Pid(4),
+            nice: 0,
+            behavior: workloads::periodic(200_000, 3_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(3)]),
+            parent_pid: None,
+        })
+        .duration_ms(400)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    assert!(result.trace.schedule_count(Pid(1)) > 0);
+    assert!(result.trace.schedule_count(Pid(2)) > 0);
+    assert!(monitor.compaction_occurred(), "compaction didn't fire");
+}
+
+/// Large CPU count compaction: 32 CPUs with very light workload.
+/// Tests core compaction with many inactive CPUs, exercising the
+/// PCO iteration and cpumask operations at scale.
+#[test]
+fn test_lavd_compaction_large_cpu_count() {
+    let _lock = common::setup_test();
+    let nr_cpus = 32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 4, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        .add_task("tiny", 0, workloads::io_bound(50_000, 10_000_000))
+        .duration_ms(300)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    assert!(result.trace.schedule_count(Pid(1)) > 0);
+    assert!(
+        monitor.compaction_occurred(),
+        "compaction didn't fire on 32 CPUs (min_nr_active={})",
+        monitor.min_nr_active,
+    );
+}
+
+/// Combined: pinned + affinitized + free tasks under forced compaction.
+/// Exercises multiple compaction sub-paths in a single simulation run.
+#[test]
+fn test_lavd_compaction_combined_stress() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 2, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .instant_timing()
+        // Free tasks (can migrate anywhere)
+        .add_task("free-0", 0, workloads::io_bound(100_000, 4_000_000))
+        .add_task("free-1", 0, workloads::io_bound(150_000, 3_000_000))
+        // Pinned tasks on inactive CPUs
+        .task(TaskDef {
+            name: "pin-6".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::periodic(300_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(6)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pin-7".into(),
+            pid: Pid(4),
+            nice: 0,
+            behavior: workloads::periodic(200_000, 3_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        // Affinitized task on inactive CPUs
+        .task(TaskDef {
+            name: "aff-345".into(),
+            pid: Pid(5),
+            nice: 0,
+            behavior: workloads::periodic(400_000, 2_500_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(3), CpuId(4), CpuId(5)]),
+            parent_pid: None,
+        })
+        .duration_ms(400)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    for pid in 1..=5 {
+        assert!(
+            result.trace.schedule_count(Pid(pid)) > 0,
+            "pid {} was never scheduled",
+            pid,
+        );
+    }
+    assert!(monitor.compaction_occurred(), "compaction didn't fire");
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk

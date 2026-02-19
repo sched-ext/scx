@@ -730,6 +730,9 @@ impl<S: Scheduler> Simulator<S> {
             state.ops_context = OpsContext::None;
             state.waker_task_raw = None;
             state.current_cpu = selected_cpu;
+            // Update task_last_cpu after select_cpu (kernel sets task_cpu
+            // in set_task_cpu after select_task_rq, before enqueue).
+            state.task_last_cpu.insert(pid, selected_cpu);
             kfuncs::set_sim_clock(
                 state.cpus[selected_cpu.0 as usize].local_clock,
                 Some(selected_cpu),
