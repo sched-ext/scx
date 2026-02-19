@@ -238,3 +238,12 @@ struct scx_init_task_args *sim_get_init_task_args(void)
 	sim_init_task_args.cgroup = &sim_root_cgroup;
 	return &sim_init_task_args;
 }
+
+/* Exit task args for the exit_task callback */
+static struct scx_exit_task_args sim_exit_task_args;
+
+struct scx_exit_task_args *sim_get_exit_task_args(void)
+{
+	sim_exit_task_args.cancelled = false;
+	return &sim_exit_task_args;
+}
