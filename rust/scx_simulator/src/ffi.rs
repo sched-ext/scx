@@ -39,6 +39,9 @@ extern "C" {
     pub fn sim_task_set_mm(p: *mut c_void, mm: *mut c_void);
     pub fn sim_task_get_mm(p: *mut c_void) -> *mut c_void;
 
+    // Parent-child relationship
+    pub fn sim_task_set_real_parent(child: *mut c_void, parent: *mut c_void);
+
     // Cpumask management (implemented in scx_test_cpumask.c)
     pub fn scx_test_set_all_cpumask(cpu: i32);
     pub fn scx_test_set_idle_cpumask(cpu: i32);

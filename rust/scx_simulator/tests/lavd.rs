@@ -30,6 +30,7 @@ fn test_lavd_ping_pong_is_lat_cri() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -39,6 +40,7 @@ fn test_lavd_ping_pong_is_lat_cri() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
         })
         .duration_ms(500)
         .build();
@@ -84,6 +86,7 @@ fn test_lavd_cpu_bound_not_lat_cri() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         })
         .duration_ms(500)
         .build();
@@ -124,6 +127,7 @@ fn test_lavd_mixed_classification() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -133,6 +137,7 @@ fn test_lavd_mixed_classification() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
         })
         .task(TaskDef {
             name: "cpu_hog".into(),
@@ -142,6 +147,7 @@ fn test_lavd_mixed_classification() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         })
         .duration_ms(500)
         .build();
@@ -183,6 +189,7 @@ fn test_lavd_io_bound_vs_cpu() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         })
         .task(TaskDef {
             name: "cpu_task".into(),
@@ -192,6 +199,7 @@ fn test_lavd_io_bound_vs_cpu() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         })
         .duration_ms(500)
         .build();
@@ -245,6 +253,7 @@ fn test_lavd_wake_chain_propagation() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)), // same address space for wake_freq
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
     let scenario = builder.duration_ms(500).build();
@@ -285,6 +294,7 @@ fn test_lavd_lat_cri_convergence() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -294,6 +304,7 @@ fn test_lavd_lat_cri_convergence() {
             start_time_ns: 0,
             mm_id: Some(MmId(1)),
             allowed_cpus: None,
+            parent_pid: None,
         })
         .duration_ms(500)
         .build();
@@ -356,6 +367,7 @@ fn test_lavd_multi_domain_balance() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -392,6 +404,7 @@ fn test_lavd_multi_domain_force_steal() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: domain0_cpus.clone(),
+            parent_pid: None,
         });
     }
 
@@ -427,6 +440,7 @@ fn test_lavd_multi_domain_mixed_workload() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -440,6 +454,7 @@ fn test_lavd_multi_domain_mixed_workload() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -476,6 +491,7 @@ fn test_lavd_multi_domain_mig_delta_pct() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -510,6 +526,7 @@ fn test_lavd_multi_domain_pinned_slice() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -542,6 +559,7 @@ fn test_lavd_multi_domain_per_cpu_dsq() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -577,6 +595,7 @@ fn test_lavd_three_domains_partial_load() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
         });
     }
     // Tasks pinned to domain 1 (CPUs 2-3), lighter load
@@ -588,6 +607,7 @@ fn test_lavd_three_domains_partial_load() {
         start_time_ns: 0,
         mm_id: None,
         allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+        parent_pid: None,
     });
     // Domain 2 (CPUs 4-5) has no tasks → idle stealer
 
@@ -620,6 +640,7 @@ fn test_lavd_multi_domain_balanced_load() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -652,6 +673,7 @@ fn test_lavd_multi_domain_monitored() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -696,6 +718,7 @@ fn test_lavd_four_domains_gradient() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
         });
     }
 
@@ -709,6 +732,7 @@ fn test_lavd_four_domains_gradient() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+            parent_pid: None,
         });
     }
 
@@ -721,6 +745,7 @@ fn test_lavd_four_domains_gradient() {
         start_time_ns: 0,
         mm_id: None,
         allowed_cpus: Some(vec![CpuId(4), CpuId(5)]),
+        parent_pid: None,
     });
 
     // Domain 3 (CPUs 6-7): empty → idle stealer
@@ -762,6 +787,7 @@ fn test_lavd_multi_domain_load_transition() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
         });
     }
 
@@ -774,6 +800,7 @@ fn test_lavd_multi_domain_load_transition() {
         start_time_ns: 0,
         mm_id: None,
         allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+        parent_pid: None,
     });
 
     let trace = Simulator::new(sched).run(builder.build());
@@ -810,6 +837,7 @@ fn test_lavd_multi_domain_no_compact_balanced() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: None,
+            parent_pid: None,
         });
     }
 
@@ -852,6 +880,7 @@ fn test_lavd_three_domains_no_compact() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
         });
     }
 
@@ -865,6 +894,7 @@ fn test_lavd_three_domains_no_compact() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+            parent_pid: None,
         });
     }
 
@@ -877,6 +907,7 @@ fn test_lavd_three_domains_no_compact() {
         start_time_ns: 0,
         mm_id: None,
         allowed_cpus: Some(vec![CpuId(4), CpuId(5)]),
+        parent_pid: None,
     });
 
     let trace = Simulator::new(sched).run(builder.build());
@@ -916,6 +947,7 @@ fn test_lavd_gradient_narrow_threshold() {
             start_time_ns: 0,
             mm_id: None,
             allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
         });
     }
 
@@ -928,6 +960,7 @@ fn test_lavd_gradient_narrow_threshold() {
         start_time_ns: 0,
         mm_id: None,
         allowed_cpus: Some(vec![CpuId(2), CpuId(3)]),
+        parent_pid: None,
     });
 
     // Domain 2 (CPUs 4-5): empty -> stealer
@@ -939,4 +972,552 @@ fn test_lavd_gradient_narrow_threshold() {
             "task {i} was never scheduled"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: waker-wakee latency criticality propagation
+// ---------------------------------------------------------------------------
+
+/// Ping-pong tasks with shared parent: exercises lavd_runnable waker-wakee
+/// latency criticality propagation path (main.bpf.c L1198-1260).
+///
+/// The key gate at L1198 is `p->real_parent != waker->real_parent` — when
+/// both tasks share the same parent_pid, this check passes and the function
+/// continues to:
+/// - Update waker's wake_freq (L1227-1233)
+/// - Propagate latency criticality forward/backward (L1248-1250)
+/// - Record waker_pid when is_monitored (L1255-1259)
+#[test]
+fn test_lavd_waker_wakee_with_parent() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+    let probes = LavdProbes::new(&sched);
+    let mut monitor = LavdMonitor::new(probes);
+
+    // Create a "parent" task (Pid(1)) and two children (Pid(2), Pid(3))
+    // that ping-pong with each other. The parent just runs CPU-bound.
+    let (ping_b, pong_b) = workloads::ping_pong(Pid(2), Pid(3), 500_000);
+    let scenario = Scenario::builder()
+        .cpus(4)
+        // Parent task
+        .task(TaskDef {
+            name: "parent".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        // Child ping — shares parent with pong
+        .task(TaskDef {
+            name: "child_ping".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: ping_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(1)),
+        })
+        // Child pong — shares parent with ping
+        .task(TaskDef {
+            name: "child_pong".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: pong_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(1)),
+        })
+        .duration_ms(500)
+        .build();
+
+    let _result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    let p2 = monitor.final_snapshot(Pid(2)).unwrap();
+    let p3 = monitor.final_snapshot(Pid(3)).unwrap();
+
+    eprintln!(
+        "waker-wakee: p2 lat_cri={}, wake_freq={}, p3 lat_cri={}, wake_freq={}",
+        p2.lat_cri, p2.wake_freq, p3.lat_cri, p3.wake_freq
+    );
+
+    // With shared parent, waker-wakee tracking should produce non-zero
+    // wake_freq on both tasks (propagated through lavd_runnable L1227-1233)
+    assert!(
+        p2.wake_freq > 0,
+        "expected child_ping wake_freq > 0 (waker-wakee path), got {}",
+        p2.wake_freq
+    );
+    assert!(
+        p3.wake_freq > 0,
+        "expected child_pong wake_freq > 0 (waker-wakee path), got {}",
+        p3.wake_freq
+    );
+}
+
+/// Wake chain with shared parent and is_monitored: exercises waker_pid
+/// and waker_comm recording in lavd_runnable (main.bpf.c L1255-1259).
+#[test]
+fn test_lavd_waker_wakee_monitored() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+    sched.lavd_set_monitored(true);
+
+    let pids = [Pid(2), Pid(3), Pid(4)];
+    let behaviors = workloads::wake_chain(&pids, 100_000, 10_000_000);
+
+    let mut builder = Scenario::builder().cpus(4);
+    // Parent task
+    builder = builder.task(TaskDef {
+        name: "parent".into(),
+        pid: Pid(1),
+        nice: 0,
+        behavior: workloads::cpu_bound(50_000_000),
+        start_time_ns: 0,
+        mm_id: Some(MmId(1)),
+        allowed_cpus: None,
+        parent_pid: None,
+    });
+    // Chain tasks all share parent Pid(1)
+    for (i, behavior) in behaviors.into_iter().enumerate() {
+        builder = builder.task(TaskDef {
+            name: format!("chain_{i}"),
+            pid: pids[i],
+            nice: 0,
+            behavior,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(1)),
+        });
+    }
+    let scenario = builder.duration_ms(500).build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should have been scheduled
+    for pid in &pids {
+        assert!(
+            trace.schedule_count(*pid) > 0,
+            "chain task {:?} was never scheduled",
+            pid
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: under-loaded system (core compaction dispatch path)
+// ---------------------------------------------------------------------------
+
+/// Under-loaded system: exercises lavd_dispatch core compaction path
+/// (main.bpf.c L964-1134).
+///
+/// When `use_full_cpus()` returns false (nr_active < nr_cpus_onln),
+/// lavd_dispatch enters the core compaction path instead of going directly
+/// to consume_out. This exercises cpumask checking, overflow set extension,
+/// and per-domain DSQ iteration.
+#[test]
+fn test_lavd_underloaded_dispatch() {
+    let _lock = common::setup_test();
+    // Use multi-domain to have cpdom DSQs
+    let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        // Only 1 task for 4 CPUs — system is heavily under-loaded
+        .task(TaskDef {
+            name: "lonely".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::io_bound(500_000, 5_000_000), // 0.5ms run, 5ms sleep
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "lonely task was never scheduled"
+    );
+}
+
+/// Under-loaded system with pinned tasks: exercises overflow set extension
+/// paths in lavd_dispatch (main.bpf.c L1006-1034).
+///
+/// When a CPU's prev task is pinned but the CPU is not in the active set,
+/// the dispatch code extends the overflow set (L1011-1014). Similarly,
+/// when prev can run on this CPU but not on active/overflow sets, the
+/// overflow set is extended (L1024-1033).
+#[test]
+fn test_lavd_underloaded_pinned_overflow() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        // One task pinned to CPU 3 only — with under-loaded system,
+        // CPU 3 may not be in the active set
+        .task(TaskDef {
+            name: "pinned_3".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(3)]),
+            parent_pid: None,
+        })
+        // One IO task on any CPU
+        .task(TaskDef {
+            name: "io_free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 5_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "pinned task was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "io task was never scheduled"
+    );
+}
+
+/// Lightly loaded system with per-CPU DSQ: exercises the per-CPU DSQ
+/// fast path in core compaction (main.bpf.c L1000-1004).
+#[test]
+fn test_lavd_underloaded_per_cpu_dsq() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+    sched.lavd_configure(true, 0, 0); // per-CPU DSQ mode
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        // 2 tasks for 4 CPUs — under-loaded
+        .task(TaskDef {
+            name: "worker_1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "worker_2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::io_bound(500_000, 5_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker_1 was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "worker_2 was never scheduled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: init_task parent inheritance
+// ---------------------------------------------------------------------------
+
+/// Tasks with parent_pid: exercises lavd_init_task parent context inheritance
+/// path (main.bpf.c L1726-1729).
+#[test]
+fn test_lavd_init_task_parent_inheritance() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    let (ping_b, pong_b) = workloads::ping_pong(Pid(1), Pid(2), 500_000);
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "parent_task".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: ping_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "child_a".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: pong_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(1)),
+        })
+        .task(TaskDef {
+            name: "child_b".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: Some(Pid(1)),
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for i in 1..=3i32 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "task {i} was never scheduled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: consume_prev with SCX_TASK_QUEUED
+// ---------------------------------------------------------------------------
+
+/// Overloaded system with many IO tasks: exercises consume_prev body
+/// (main.bpf.c L884-920).
+#[test]
+fn test_lavd_consume_prev_queued() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(2);
+
+    let mut builder = Scenario::builder().cpus(2).duration_ms(500);
+    for i in 1..=8i32 {
+        builder = builder.task(TaskDef {
+            name: format!("io_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.build());
+    for i in 1..=8i32 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "io_{i} was never scheduled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: slice boost paths in calc_time_slice
+// ---------------------------------------------------------------------------
+
+/// Under-loaded system with long-running tasks: exercises can_boost_slice()
+/// path in calc_time_slice (main.bpf.c L315-325).
+#[test]
+fn test_lavd_slice_boost_underloaded() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "long_1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(500_000_000), // 500ms chunks
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "long_2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(500_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(1000)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "long_1 was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "long_2 was never scheduled"
+    );
+}
+
+/// Overloaded system with high-lat_cri tasks: exercises the
+/// lat_cri > avg_lat_cri slice boost path (main.bpf.c L334-344).
+#[test]
+fn test_lavd_slice_boost_lat_cri() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(2);
+
+    let (ping_b, pong_b) = workloads::ping_pong(Pid(1), Pid(2), 2_000_000);
+    let mut builder = Scenario::builder().cpus(2);
+
+    builder = builder
+        .task(TaskDef {
+            name: "parent".into(),
+            pid: Pid(10),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: ping_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(10)),
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: pong_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: Some(Pid(10)),
+        });
+
+    for i in 3..=4i32 {
+        builder = builder.task(TaskDef {
+            name: format!("cpu_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.duration_ms(1000).build());
+    for i in 1..=4i32 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "task {i} was never scheduled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: misc coverage paths
+// ---------------------------------------------------------------------------
+
+/// Under-loaded system with single domain: exercises the early return
+/// at L1040-1042 in lavd_dispatch when use_cpdom_dsq() is false.
+#[test]
+fn test_lavd_underloaded_no_dsq_early_return() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "sparse".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::io_bound(100_000, 10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "sparse task was never scheduled"
+    );
+}
+
+/// Multi-domain under-loaded with affinitized task: exercises per-domain
+/// DSQ iteration for affinitized tasks (main.bpf.c L1055-1126).
+#[test]
+fn test_lavd_underloaded_cpdom_dsq_affinity() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd_multi_domain(4, 2);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "affine_3".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::io_bound(500_000, 5_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(3)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 5_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "affinitized task was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "free task was never scheduled"
+    );
 }
