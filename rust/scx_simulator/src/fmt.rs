@@ -8,8 +8,8 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
-use crate::kfuncs::sim_clock;
-use crate::types::TimeNs;
+use crate::kfuncs::{sim_clock, sim_cpu, sim_cpu_width};
+use crate::types::{CpuId, TimeNs};
 
 /// Wrapper that displays large round numbers compactly.
 ///
@@ -43,31 +43,30 @@ impl fmt::Display for FmtN {
 /// Whether a timestamp is a per-CPU local time or a global time.
 #[derive(Debug, Clone, Copy)]
 pub enum TsKind {
-    Local,
+    /// Per-CPU local time, optionally carrying the CPU ID and zero-pad width.
+    Local(Option<CpuId>, u8),
     Global,
 }
 
 /// Timestamp formatter with underscore-grouped digits and `:L`/`:G` suffix.
 ///
 /// Formats nanosecond timestamps for trace output with room for 12 digits
-/// (up to ~15 seconds), grouped in 3s with underscores, right-aligned
-/// in a 15-char field plus a 2-char suffix.
+/// (up to ~15 seconds), grouped in 3s with underscores, right-aligned.
 ///
-/// Examples:
-/// - `0` → `              0:L`
-/// - `10_000` → `         10_000:L`
-/// - `20_000_000` → `     20_000_000:L`
-/// - `999_999_000_000` → `999_999_000_000:G`
+/// When a CPU ID is present, the suffix includes the zero-padded CPU number:
+/// - `[   988_779_026:L01]` — CPU 1, 2-digit padding
+/// - `[   988_779_026:L]`   — no CPU context (e.g. timer events)
+/// - `[   988_779_026:G]`   — global timestamp
 pub struct FmtTs {
     pub ns: TimeNs,
     pub kind: TsKind,
 }
 
 impl FmtTs {
-    pub fn local(ns: TimeNs) -> Self {
+    pub fn local(ns: TimeNs, cpu: Option<CpuId>, width: u8) -> Self {
         Self {
             ns,
-            kind: TsKind::Local,
+            kind: TsKind::Local(cpu, width),
         }
     }
 
@@ -99,12 +98,18 @@ pub(crate) fn fmt_grouped(v: u64) -> String {
 impl fmt::Display for FmtTs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let grouped = fmt_grouped(self.ns);
-        let suffix = match self.kind {
-            TsKind::Local => ":L",
-            TsKind::Global => ":G",
-        };
-        // 15 chars for the grouped number, 2 for suffix = 17 total
-        write!(f, "{:>15}{}", grouped, suffix)
+        match self.kind {
+            TsKind::Local(Some(cpu), width) => {
+                let w = width as usize;
+                write!(f, "{:>15}:L{:0>w$}", grouped, cpu.0, w = w)
+            }
+            TsKind::Local(None, _) => {
+                write!(f, "{:>15}:L", grouped)
+            }
+            TsKind::Global => {
+                write!(f, "{:>15}:G", grouped)
+            }
+        }
     }
 }
 
@@ -125,7 +130,9 @@ where
     ) -> fmt::Result {
         // Simulated timestamp
         let clock = sim_clock();
-        write!(writer, "[{}] ", FmtTs::local(clock))?;
+        let cpu = sim_cpu();
+        let width = sim_cpu_width();
+        write!(writer, "[{}] ", FmtTs::local(clock, cpu, width))?;
 
         // Level with color (no italic, no background)
         let level = *event.metadata().level();
@@ -233,9 +240,42 @@ mod tests {
 
     #[test]
     fn test_fmt_ts() {
-        assert_eq!(FmtTs::local(0).to_string(), "              0:L");
-        assert_eq!(FmtTs::local(10_000).to_string(), "         10_000:L");
-        assert_eq!(FmtTs::local(20_000_000).to_string(), "     20_000_000:L");
+        use crate::types::CpuId;
+
+        // No CPU context (e.g. timer events)
+        assert_eq!(FmtTs::local(0, None, 1).to_string(), "              0:L");
+        assert_eq!(
+            FmtTs::local(10_000, None, 1).to_string(),
+            "         10_000:L"
+        );
+
+        // With CPU ID, width=1
+        assert_eq!(
+            FmtTs::local(10_000, Some(CpuId(0)), 1).to_string(),
+            "         10_000:L0"
+        );
+        assert_eq!(
+            FmtTs::local(10_000, Some(CpuId(3)), 1).to_string(),
+            "         10_000:L3"
+        );
+
+        // With CPU ID, width=2
+        assert_eq!(
+            FmtTs::local(20_000_000, Some(CpuId(1)), 2).to_string(),
+            "     20_000_000:L01"
+        );
+        assert_eq!(
+            FmtTs::local(20_000_000, Some(CpuId(12)), 2).to_string(),
+            "     20_000_000:L12"
+        );
+
+        // With CPU ID, width=3
+        assert_eq!(
+            FmtTs::local(0, Some(CpuId(5)), 3).to_string(),
+            "              0:L005"
+        );
+
+        // Global timestamp
         assert_eq!(
             FmtTs::global(999_999_000_000).to_string(),
             "999_999_000_000:G"
