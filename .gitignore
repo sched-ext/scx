@@ -19,3 +19,6 @@ CLAUDE.md
 rust/scx_simulator/schedulers/cosmos/cosmos_main_patched.c
 mp3-*.log
 rt-app-*.log
+*.profraw
+*.profdata
+coverage-out/
