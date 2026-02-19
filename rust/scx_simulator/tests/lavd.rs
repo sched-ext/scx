@@ -5945,6 +5945,575 @@ fn test_lavd_combined_features() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase 8: Coverage improvement — introspection, big/little, multi-domain
+// ---------------------------------------------------------------------------
+
+/// Set up introspection with LAVD_CMD_SCHED_N command.
+///
+/// Sets `is_monitored=true`, `intrspc.cmd=LAVD_CMD_SCHED_N (0x1)`,
+/// and `intrspc.arg=count` to allow `count` introspection events.
+///
+/// # Safety
+/// Caller must ensure `sched` is a loaded LAVD scheduler.
+unsafe fn lavd_setup_introspec(sched: &DynamicScheduler, count: u64) {
+    const LAVD_CMD_SCHED_N: u32 = 0x1;
+
+    lavd_set_bool(sched, "is_monitored\0", true);
+
+    // intrspc struct layout: { volatile u64 arg; volatile u32 cmd; }
+    let sym: libloading::Symbol<'_, *mut u8> =
+        sched.get_symbol(b"intrspc\0").expect("intrspc not found");
+    let base = *sym;
+    // Write arg (u64 at offset 0)
+    std::ptr::write_volatile(base as *mut u64, count);
+    // Write cmd (u32 at offset 8)
+    std::ptr::write_volatile(base.add(8) as *mut u32, LAVD_CMD_SCHED_N);
+}
+
+/// Set up mixed big/little core topology.
+///
+/// CPUs listed in `big_cpus` get `cpu_big[cpu]=1` and full capacity (1024).
+/// All other CPUs get `cpu_big[cpu]=0` and reduced capacity (512).
+///
+/// Must be called after `DynamicScheduler::lavd()` but before `run()`.
+///
+/// # Safety
+/// Caller must ensure `sched` is a loaded LAVD scheduler and `big_cpus`
+/// contains valid CPU IDs < `nr_cpus`.
+unsafe fn lavd_setup_big_little(sched: &DynamicScheduler, nr_cpus: u32, big_cpus: &[u32]) {
+    const LAVD_CPU_ID_MAX: usize = 512;
+
+    let cpu_big_sym: libloading::Symbol<'_, *mut u8> =
+        sched.get_symbol(b"cpu_big\0").expect("cpu_big not found");
+    let cpu_big_ptr = *cpu_big_sym;
+
+    let cpu_cap_sym: libloading::Symbol<'_, *mut u16> = sched
+        .get_symbol(b"cpu_capacity\0")
+        .expect("cpu_capacity not found");
+    let cpu_cap_ptr = *cpu_cap_sym;
+
+    for cpu in 0..nr_cpus.min(LAVD_CPU_ID_MAX as u32) {
+        if big_cpus.contains(&cpu) {
+            std::ptr::write_volatile(cpu_big_ptr.add(cpu as usize), 1);
+            std::ptr::write_volatile(cpu_cap_ptr.add(cpu as usize), 1024);
+        } else {
+            std::ptr::write_volatile(cpu_big_ptr.add(cpu as usize), 0);
+            std::ptr::write_volatile(cpu_cap_ptr.add(cpu as usize), 512);
+        }
+    }
+}
+
+/// Set up two compute domains with disjoint CPU sets.
+///
+/// Domain 0: CPUs [0, split), Domain 1: CPUs [split, nr_cpus).
+/// Each domain lists the other as a neighbor at distance 0.
+///
+/// Must be called after `DynamicScheduler::lavd()` but before `run()`.
+///
+/// # Safety
+/// Caller must ensure `sched` is a loaded LAVD scheduler, `split > 0`,
+/// and `split < nr_cpus`.
+unsafe fn lavd_setup_two_domains(sched: &DynamicScheduler, nr_cpus: u32, split: u32) {
+    const LAVD_CPU_ID_MAX: usize = 512;
+    let sym: libloading::Symbol<'_, *mut u8> = sched
+        .get_symbol(b"cpdom_ctxs\0")
+        .expect("cpdom_ctxs not found");
+    let base = *sym;
+
+    // Field offsets within cpdom_ctx (empirically from struct layout):
+    const OFF_ID: usize = 0; // u64
+    const OFF_ALT_ID: usize = 8; // u64
+    const OFF_NUMA_ID: usize = 16; // u8
+    const OFF_LLC_ID: usize = 17; // u8
+    const OFF_IS_BIG: usize = 18; // u8
+    const OFF_IS_VALID: usize = 19; // u8
+    const OFF_NR_NEIGHBORS: usize = 20; // u8[3]
+                                        // padding to align __cpumask to u64
+    const OFF_CPUMASK: usize = 24; // u64[8] (512/64=8)
+    const OFF_NEIGHBOR_IDS: usize = 24 + 8 * 8; // = 88, u8[3*128=384]
+                                                // End of first section: 88 + 384 = 472, padded to 512
+    const SECTION2_START: usize = 512;
+    const OFF_NR_ACTIVE_CPUS: usize = SECTION2_START + 2; // u16
+    const OFF_CAP_SUM_ACTIVE: usize = SECTION2_START + 12; // u32
+    const CPDOM_CTX_SIZE: usize = 576; // 512 + 64
+
+    // Zero out both entries first
+    std::ptr::write_bytes(base, 0, CPDOM_CTX_SIZE * 2);
+
+    // --- Domain 0: CPUs [0, split) ---
+    let d0 = base;
+    std::ptr::write_volatile(d0.add(OFF_ID) as *mut u64, 0);
+    std::ptr::write_volatile(d0.add(OFF_ALT_ID) as *mut u64, 1);
+    std::ptr::write_volatile(d0.add(OFF_NUMA_ID), 0);
+    std::ptr::write_volatile(d0.add(OFF_LLC_ID), 0);
+    std::ptr::write_volatile(d0.add(OFF_IS_BIG), 0);
+    std::ptr::write_volatile(d0.add(OFF_IS_VALID), 1);
+    // nr_neighbors[0] = 1 (one neighbor at distance 0)
+    std::ptr::write_volatile(d0.add(OFF_NR_NEIGHBORS), 1);
+    // neighbor_ids[0 * LAVD_CPDOM_MAX_NR + 0] = 1
+    std::ptr::write_volatile(d0.add(OFF_NEIGHBOR_IDS), 1);
+    // __cpumask: set bits for CPUs [0, split)
+    let mask0 = d0.add(OFF_CPUMASK) as *mut u64;
+    for cpu in 0..split.min(LAVD_CPU_ID_MAX as u32) {
+        let word = cpu as usize / 64;
+        let bit = cpu as usize % 64;
+        let cur = std::ptr::read_volatile(mask0.add(word));
+        std::ptr::write_volatile(mask0.add(word), cur | (1u64 << bit));
+    }
+    // nr_active_cpus
+    std::ptr::write_volatile(d0.add(OFF_NR_ACTIVE_CPUS) as *mut u16, split as u16);
+    // cap_sum_active_cpus
+    std::ptr::write_volatile(d0.add(OFF_CAP_SUM_ACTIVE) as *mut u32, split * 1024);
+
+    // --- Domain 1: CPUs [split, nr_cpus) ---
+    let d1 = base.add(CPDOM_CTX_SIZE);
+    std::ptr::write_volatile(d1.add(OFF_ID) as *mut u64, 1);
+    std::ptr::write_volatile(d1.add(OFF_ALT_ID) as *mut u64, 0);
+    std::ptr::write_volatile(d1.add(OFF_NUMA_ID), 1);
+    std::ptr::write_volatile(d1.add(OFF_LLC_ID), 1);
+    std::ptr::write_volatile(d1.add(OFF_IS_BIG), 0);
+    std::ptr::write_volatile(d1.add(OFF_IS_VALID), 1);
+    // nr_neighbors[0] = 1 (one neighbor at distance 0)
+    std::ptr::write_volatile(d1.add(OFF_NR_NEIGHBORS), 1);
+    // neighbor_ids[0 * LAVD_CPDOM_MAX_NR + 0] = 0
+    std::ptr::write_volatile(d1.add(OFF_NEIGHBOR_IDS), 0);
+    // __cpumask: set bits for CPUs [split, nr_cpus)
+    let mask1 = d1.add(OFF_CPUMASK) as *mut u64;
+    for cpu in split..nr_cpus.min(LAVD_CPU_ID_MAX as u32) {
+        let word = cpu as usize / 64;
+        let bit = cpu as usize % 64;
+        let cur = std::ptr::read_volatile(mask1.add(word));
+        std::ptr::write_volatile(mask1.add(word), cur | (1u64 << bit));
+    }
+    let d1_cpus = nr_cpus - split;
+    std::ptr::write_volatile(d1.add(OFF_NR_ACTIVE_CPUS) as *mut u16, d1_cpus as u16);
+    std::ptr::write_volatile(d1.add(OFF_CAP_SUM_ACTIVE) as *mut u32, d1_cpus * 1024);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8a: Introspection with SCHED_N command
+// ---------------------------------------------------------------------------
+
+/// Introspection with LAVD_CMD_SCHED_N exercises the introspection code path.
+///
+/// Covers: introspec.bpf.c `try_proc_introspec_cmd` → `proc_introspec_sched_n`
+/// → `submit_task_ctx` (up to ringbuf reserve failure).
+/// Also covers `is_monitored` paths in main.bpf.c (resched_interval tracking,
+/// waker_pid/waker_comm in lavd_runnable) and balance.bpf.c (dsq_consume_lat).
+#[test]
+fn test_lavd_introspection_sched_n() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_introspec(&sched, 1000);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 200_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Introspection NOP command: exercises the switch default/NOP path.
+///
+/// Covers: introspec.bpf.c `try_proc_introspec_cmd` LAVD_CMD_NOP case.
+#[test]
+fn test_lavd_introspection_nop() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Set is_monitored=true but leave intrspc.cmd = 0 (LAVD_CMD_NOP)
+    unsafe {
+        lavd_set_bool(&sched, "is_monitored\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8b: Big/little core topology
+// ---------------------------------------------------------------------------
+
+/// Mixed big/little core topology exercises heterogeneous scheduling paths.
+///
+/// Covers: power.bpf.c `is_perf_cri()` (actual big/little check instead of
+/// always-true), util.bpf.c `set_on_core_type()` (big vs little classification),
+/// main.bpf.c `update_stat_for_running()` (perf_cri tracking when
+/// have_little_core), sys_stat.bpf.c `collect_sys_stat()` phase 3
+/// (big/little core statistics).
+#[test]
+fn test_lavd_big_little_8cpu_ping_pong() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // CPUs 0-3 are big, CPUs 4-7 are little
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 300_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "lat-cri-a".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "lat-cri-b".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 10, workloads::cpu_bound(20_000_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // Latency-critical tasks should get scheduled on big cores
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Big/little topology with core compaction: big cores in active set,
+/// little cores in overflow set.
+///
+/// Covers: power.bpf.c `reinit_active_cpumask_for_performance()` (big/little
+/// aware compaction), `update_thr_perf_cri()` (big_core_scale computation
+/// with actual big+little cores).
+#[test]
+fn test_lavd_big_little_compaction() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-0", -10, workloads::io_bound(50_000, 200_000))
+        .add_task("io-1", -10, workloads::io_bound(60_000, 250_000))
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // At least IO tasks should run
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Big/little with SMT: exercises core type matching in find_sticky_cpu.
+///
+/// Covers: idle.bpf.c `find_sticky_cpu_and_cpdom()` (big_core matching logic),
+/// power.bpf.c `update_thr_perf_cri()` different big_core_scale branches
+/// (little_core_scale >= 50% path).
+#[test]
+fn test_lavd_big_little_smt() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // CPUs 0-3 big (2 big physical cores, each with 2 SMT threads)
+        // CPUs 4-7 little (2 little physical cores, each with 2 SMT threads)
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 150_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -5,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -5,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8d: Multi-domain (2 compute domains for balance.bpf.c coverage)
+// ---------------------------------------------------------------------------
+
+/// Two compute domains with imbalanced load exercises cross-domain migration.
+///
+/// Covers: balance.bpf.c `plan_x_cpdom_migration()` (stealer/stealee
+/// classification), `try_to_steal_task()` (cross-domain task stealing),
+/// `pick_most_loaded_dsq()` (finding DSQ with most queued tasks).
+/// sys_stat.bpf.c `update_sys_stat()` (plan_x_cpdom_migration call when
+/// nr_cpdoms > 1).
+#[test]
+fn test_lavd_two_domain_load_imbalance() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Domain 0: CPUs 0-3, Domain 1: CPUs 4-7
+    unsafe {
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+    }
+
+    // Put heavy load on domain 0 (4 hogs on 4 CPUs) and light load on
+    // domain 1 (1 IO task on 4 CPUs). This creates a load imbalance that
+    // should trigger cross-domain migration.
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 200_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // All tasks should get scheduled
+    for pid_val in 1..=7 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task pid={pid_val} should be scheduled"
+        );
+    }
+}
+
+/// Two domains with per-CPU DSQ mode exercises domain-specific dispatch.
+///
+/// Covers: balance.bpf.c `consume_dsq()` domain iteration with nr_cpdoms>1,
+/// `force_to_steal_task()` (steal when migration delta is zero),
+/// idle.bpf.c `migrate_to_neighbor()` path (when sticky domain is stealee).
+#[test]
+fn test_lavd_two_domain_per_cpu_dsq() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+        lavd_set_bool(&sched, "per_cpu_dsq\0", true);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 200_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -5,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -5,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Two domains with is_monitored exercises consume latency tracking.
+///
+/// Covers: balance.bpf.c `consume_dsq()` dsq_consume_lat measurement path
+/// (only active when is_monitored=true), multi-domain sys_stat accumulation.
+#[test]
+fn test_lavd_two_domain_monitored() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+        lavd_setup_introspec(&sched, 500);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 150_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Two domains with big/little: domain 0 is big, domain 1 is little.
+///
+/// Covers: balance.bpf.c domain-aware load balancing with heterogeneous
+/// core types, idle.bpf.c domain matching with core type awareness,
+/// power.bpf.c `update_thr_perf_cri()` with multi-domain big/little.
+#[test]
+fn test_lavd_two_domain_big_little() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // Domain 0 (CPUs 0-3) = big, Domain 1 (CPUs 4-7) = little
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 200_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("batch-0", 10, workloads::cpu_bound(20_000_000))
+        .add_task("batch-1", 10, workloads::cpu_bound(20_000_000))
+        .add_task("batch-2", 10, workloads::cpu_bound(20_000_000))
+        .add_task("batch-3", 10, workloads::cpu_bound(20_000_000))
+        .add_task("batch-4", 10, workloads::cpu_bound(20_000_000))
+        .add_task("batch-5", 10, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk
