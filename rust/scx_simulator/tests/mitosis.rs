@@ -2022,3 +2022,125 @@ fn test_timer_many_reconfigurations() {
         assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
     }
 }
+
+/// Exercise dump_cpumask with > 32 CPUs to cover the comma separator branch.
+/// When `nr_possible_cpus >= 33`, `nr_words = (nr_cpus + 31) / 32 >= 2`,
+/// so the `dump_cpumask` loop iterates more than once and hits the
+/// `if (word)` branch (line 1601) that prints a comma separator.
+#[test]
+fn test_dump_cpumask_many_cpus() {
+    let _lock = common::setup_test();
+    let nr_cpus = 33;
+    let sched = DynamicScheduler::mitosis(nr_cpus);
+    unsafe {
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+    }
+
+    let mut builder = Scenario::builder().cpus(nr_cpus);
+    for i in 1..=4 {
+        builder = builder.task(TaskDef {
+            name: format!("t{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.duration_ms(100).build());
+    trace.dump();
+
+    for i in 1..=4 {
+        assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
+    }
+}
+
+/// Exercise many debug events to cover more dump iteration paths.
+/// With debug_events_enabled=true and many tasks, `record_init_task`
+/// fires for each task, populating the debug_events buffer.
+/// The dump function then iterates through all recorded events.
+#[test]
+fn test_many_debug_events() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let nr_tasks: i32 = 32;
+    let sched = DynamicScheduler::mitosis(nr_cpus);
+    unsafe {
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+    }
+
+    let mut builder = Scenario::builder().cpus(nr_cpus);
+    for i in 1..=nr_tasks {
+        builder = builder.task(TaskDef {
+            name: format!("t{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(2_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: (i as u64 - 1) * 500_000,
+            mm_id: None,
+            allowed_cpus: None,
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.duration_ms(200).build());
+    trace.dump();
+
+    let running = (1..=nr_tasks)
+        .filter(|&i| trace.total_runtime(Pid(i)) > 0)
+        .count();
+    assert!(
+        running >= nr_tasks as usize / 2,
+        "expected at least half of {nr_tasks} tasks to run, got {running}"
+    );
+}
+
+/// Combine 33+ CPUs with cpu_controller_disabled=false, SMT, and timer reconfig
+/// to exercise dump paths with large cpumasks alongside other coverage targets.
+#[test]
+fn test_large_cpu_count_all_features() {
+    let _lock = common::setup_test();
+    let nr_cpus = 36;
+    let sched = DynamicScheduler::mitosis(nr_cpus);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+        set_mitosis_bool(&sched, b"smt_enabled\0", true);
+        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    let mut builder = Scenario::builder().cpus(nr_cpus);
+    for i in 1..=8i32 {
+        builder = builder.task(TaskDef {
+            name: format!("t{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(2_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: if i <= 2 {
+                Some(vec![CpuId((i as u32 - 1) * 16)])
+            } else {
+                None
+            },
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.duration_ms(300).build());
+    trace.dump();
+
+    for i in 1..=8i32 {
+        assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
+    }
+}
