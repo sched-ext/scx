@@ -387,6 +387,26 @@ impl<'a> Scheduler<'a> {
             rodata.nr_llcs = llc_count.max(1);
             rodata.nr_cpus = topo.nr_cpus.min(64) as u32; // Rule 39: bounds kick scan loop
             rodata.nr_phys_cpus = topo.nr_phys_cpus.min(64) as u32; // V3: PHYS_FIRST scan mask
+
+            // Ferry explicit 64-bit topology arrays down into BPF (O(1) execution replacements)
+
+            // Heterogeneous Gaming Topology
+            rodata.big_core_phys_mask = topo.big_core_phys_mask;
+            rodata.big_core_smt_mask = topo.big_core_smt_mask;
+            rodata.little_core_mask = topo.little_core_mask;
+            rodata.vcache_llc_mask = topo.vcache_llc_mask;
+            rodata.has_vcache = topo.has_vcache;
+
+            for i in 0..topo.cpu_sibling_map.len() {
+                rodata.cpu_sibling_map[i] = topo.cpu_sibling_map[i];
+            }
+            for i in 0..topo.llc_cpu_mask.len().min(8) {
+                rodata.llc_cpu_mask[i] = topo.llc_cpu_mask[i];
+            }
+            for i in 0..topo.core_cpu_mask.len().min(32) {
+                rodata.core_cpu_mask[i] = topo.core_cpu_mask[i];
+            }
+
             for (i, &llc_id) in topo.cpu_llc_id.iter().enumerate() {
                 rodata.cpu_llc_id[i] = llc_id as u32;
             }
