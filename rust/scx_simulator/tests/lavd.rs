@@ -6514,6 +6514,381 @@ fn test_lavd_two_domain_big_little() {
     assert!(trace.schedule_count(Pid(2)) > 0);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 9: Deeper coverage — power branches, multi-domain load imbalance
+// ---------------------------------------------------------------------------
+
+/// All-big core topology: every CPU is big, no little cores.
+///
+/// Covers: power.bpf.c `update_thr_perf_cri()` `LAVD_SCALE` case (line 642)
+/// where `cur_big_core_scale == 1024` → `thr_perf_cri = 0`.
+#[test]
+fn test_lavd_all_big_topology() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Set ALL CPUs as big with full capacity
+    unsafe {
+        let cpu_big_sym: libloading::Symbol<'_, *mut u8> =
+            sched.get_symbol(b"cpu_big\0").expect("cpu_big not found");
+        let cpu_big_ptr = *cpu_big_sym;
+        for cpu in 0..nr_cpus {
+            std::ptr::write_volatile(cpu_big_ptr.add(cpu as usize), 1);
+        }
+        // Note: capacity is already 1024 from lavd_setup()
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 200_000))
+        .add_task("io-1", -5, workloads::io_bound(60_000, 250_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// 2 big + 6 little topology: little cores have >= 50% of total capacity.
+///
+/// Covers: power.bpf.c `update_thr_perf_cri()` `little_core_scale >= 50%`
+/// path (lines 693, 718-721) — uses `max_perf_cri - avg_perf_cri` delta.
+#[test]
+fn test_lavd_mostly_little_topology() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // CPUs 0-1 are big, CPUs 2-7 are little
+    // big capacity: 2*1024 = 2048
+    // little capacity: 6*512 = 3072
+    // total = 5120, big_scale = 2048*1024/5120 = 409
+    // little_scale = 1024 - 409 = 615 >= 512
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1]);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 200_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 10, workloads::cpu_bound(20_000_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Two domains with heavy pinned load imbalance creates stealer/stealee roles.
+///
+/// 8 CPU hogs pinned to domain 0 (CPUs 0-3) with only 1 IO task on domain 1.
+/// This forces `max_sc_load >> stealee_threshold`, triggering the full
+/// stealer/stealee classification in `plan_x_cpdom_migration()`.
+///
+/// Covers: balance.bpf.c `plan_x_cpdom_migration()` lines 154-203
+/// (stealer/stealee loop), `try_to_steal_task()` (when is_stealer=true).
+#[test]
+fn test_lavd_two_domain_pinned_imbalance() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+    }
+
+    // 8 CPU hogs pinned to domain 0 CPUs [0-3] -> 8 tasks for 4 CPUs
+    // 1 IO task unpinned -> can go to domain 1 CPUs [4-7]
+    let d0_cpus = vec![CpuId(0), CpuId(1), CpuId(2), CpuId(3)];
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "hog-d0-0".into(),
+            pid: Pid(1),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-1".into(),
+            pid: Pid(2),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-2".into(),
+            pid: Pid(3),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-3".into(),
+            pid: Pid(4),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-4".into(),
+            pid: Pid(5),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-5".into(),
+            pid: Pid(6),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-6".into(),
+            pid: Pid(7),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-7".into(),
+            pid: Pid(8),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus),
+            parent_pid: None,
+        })
+        .add_task("io-d1", -5, workloads::io_bound(50_000, 500_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // Domain 0 hogs should definitely run
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    // IO task should also run
+    assert!(trace.schedule_count(Pid(9)) > 0);
+}
+
+/// Two domains with mig_delta_pct > 0 takes the fixed-percentage path.
+///
+/// Covers: balance.bpf.c `plan_x_cpdom_migration()` `mig_delta_pct > 0` path
+/// (lines 108-110), `avg_util_sum` usage (line 84).
+#[test]
+fn test_lavd_two_domain_mig_delta_pct() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+        // Set mig_delta_pct to 10% — uses fixed percentage instead of dynamic
+        lavd_set_u8(&sched, "mig_delta_pct\0", 10);
+    }
+
+    // Create load imbalance: many tasks pinned to domain 0
+    let d0_cpus = vec![CpuId(0), CpuId(1), CpuId(2), CpuId(3)];
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "hog-d0-0".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-1".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-2".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-3".into(),
+            pid: Pid(4),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus.clone()),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-d0-4".into(),
+            pid: Pid(5),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(d0_cpus),
+            parent_pid: None,
+        })
+        .add_task("io-d1", -5, workloads::io_bound(30_000, 200_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(6)) > 0);
+}
+
+/// All-big with compaction: exercises PCO with homogeneous big cores.
+///
+/// Covers: power.bpf.c `do_core_compaction()` with all-big topology.
+#[test]
+fn test_lavd_all_big_compaction_reduce() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        let cpu_big_sym: libloading::Symbol<'_, *mut u8> =
+            sched.get_symbol(b"cpu_big\0").expect("cpu_big not found");
+        let cpu_big_ptr = *cpu_big_sym;
+        for cpu in 0..nr_cpus {
+            std::ptr::write_volatile(cpu_big_ptr.add(cpu as usize), 1);
+        }
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-0", -10, workloads::io_bound(30_000, 200_000))
+        .add_task("io-1", -10, workloads::io_bound(40_000, 300_000))
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Mostly-big (6 big + 2 little): little_core_scale < 50%.
+///
+/// Covers: power.bpf.c `update_thr_perf_cri()` `little_core_scale < 50%`
+/// (lines 689-691) with actual big/little distinction.
+#[test]
+fn test_lavd_mostly_big_compaction() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // CPUs 0-5 big (cap 1024), CPUs 6-7 little (cap 512)
+    // little_scale = 1024 - 877 = 147 < 512
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3, 4, 5]);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 150_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk
