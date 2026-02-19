@@ -20,6 +20,7 @@ extern "C" {
     pub fn sim_task_set_static_prio(p: *mut c_void, prio: i32);
     pub fn sim_task_set_flags(p: *mut c_void, flags: u32);
     pub fn sim_task_set_nr_cpus_allowed(p: *mut c_void, nr: i32);
+    pub fn sim_task_get_nr_cpus_allowed(p: *mut c_void) -> i32;
 
     pub fn sim_task_get_dsq_vtime(p: *mut c_void) -> u64;
     pub fn sim_task_set_dsq_vtime(p: *mut c_void, vtime: u64);

@@ -5284,6 +5284,667 @@ fn test_lavd_pinned_slice_per_cpu_dsq() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7: Direct ops coverage — pinned tasks, compaction dispatch DSQ
+// iteration, SCX_TASK_QUEUED paths, cpu_acquire/release, update_idle,
+// set_cpumask, and lock holder paths.
+// ---------------------------------------------------------------------------
+
+/// Pinned tasks (allowed_cpus = single CPU) with pinned_slice_ns enabled.
+///
+/// When a task has `nr_cpus_allowed == 1` (is_pinned), LAVD:
+///  1. Increments `cpuc->nr_pinned_tasks` in enqueue (main.bpf.c:763-770)
+///  2. Routes to per-CPU DSQ in `get_target_dsq_id` (util.bpf.c:349-350)
+///  3. Clamps time slice in `calc_time_slice` (main.bpf.c:283-287)
+///
+/// Covers: main.bpf.c lines 284-287 (pinned slice path), lines 763-770
+/// (nr_pinned_tasks increment), util.bpf.c line 349-350.
+#[test]
+fn test_lavd_pinned_single_cpu_slice_clamp() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 1_000_000); // 1ms
+    }
+
+    // Two tasks pinned to CPU 0 — forces nr_pinned_tasks > 0 on CPU 0
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "pinned-a".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pinned-b".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+        })
+        // Unpinned tasks on other CPUs
+        .add_task("free-0", 0, workloads::cpu_bound(10_000_000))
+        .add_task("free-1", 0, workloads::cpu_bound(10_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // Both pinned tasks should run (they contend for CPU 0)
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "pinned-a should be scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "pinned-b should be scheduled"
+    );
+}
+
+/// Dispatch compaction DSQ iteration for affinitized tasks on non-active CPUs.
+///
+/// When `!use_full_cpus()` (compaction active) and a CPU is not in the
+/// active or overflow sets, the dispatch function iterates the cpdom DSQ
+/// to find tasks affinitized to inactive CPUs (main.bpf.c:1055-1126).
+///
+/// Covers: main.bpf.c lines 964-1004 (use_full_cpus check, compaction
+/// mask tests, fast path for per-CPU DSQ on inactive CPU), lines 1055-1126
+/// (DSQ iteration finding affinitized tasks on inactive CPUs).
+#[test]
+fn test_lavd_dispatch_compaction_dsq_iteration() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Compact to 4 active CPUs (CPUs 0-3 active, 4-7 inactive).
+    // Place affinitized tasks on CPU 6 — when CPU 6 dispatches,
+    // it must iterate the cpdom DSQ to find its affinitized task.
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 4, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "affinity-6".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(6)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "affinity-7".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        // Regular tasks on active CPUs
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    // Compaction should have been applied
+    assert!(
+        monitor.compaction_occurred(),
+        "compaction should reduce nr_active below {}",
+        nr_cpus
+    );
+    // Affinitized tasks should still get scheduled (overflow set expansion)
+    assert!(
+        result.trace.schedule_count(Pid(1)) > 0,
+        "affinity-6 should run on CPU 6"
+    );
+    assert!(
+        result.trace.schedule_count(Pid(2)) > 0,
+        "affinity-7 should run on CPU 7"
+    );
+}
+
+/// Compaction with pinned tasks on non-active CPUs.
+///
+/// When compaction is active and a task is pinned to a non-active CPU,
+/// the dispatch DSQ iteration should find the pinned task and extend the
+/// overflow set (main.bpf.c:1073-1080).
+///
+/// Covers: main.bpf.c lines 1006-1014 (prev is_pinned path),
+/// lines 1073-1080 (pinned task found during DSQ iteration, overflow extend).
+#[test]
+fn test_lavd_compaction_pinned_overflow_extend() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 2_000_000);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 4, nr_cpus);
+
+    // Pinned task on CPU 5 (not in active set 0-3)
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "pinned-5".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(5)]),
+            parent_pid: None,
+        })
+        // IO tasks to create dispatch pressure
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 200_000))
+        .duration_ms(400)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    assert!(monitor.compaction_occurred(), "compaction must be active");
+    assert!(
+        result.trace.schedule_count(Pid(1)) > 0,
+        "pinned task on CPU 5 should still run via overflow"
+    );
+}
+
+/// Dequeue path: enable_cpu_bw is false, so lavd_dequeue should
+/// early-return. This covers main.bpf.c lines 864-865 (the early
+/// return path when enable_cpu_bw is false).
+///
+/// The dequeue op is called by the engine when a running task is
+/// interrupted. With enable_cpu_bw = false (default), the entire
+/// body is skipped via early return.
+#[test]
+fn test_lavd_dequeue_early_return() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Default: enable_cpu_bw = false
+    // Preemption scenario: high-priority task wakes while low-priority runs
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 100_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 10, workloads::cpu_bound(20_000_000))
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Dispatch with per_cpu_dsq mode: when `per_cpu_dsq = true`, all tasks
+/// use per-CPU DSQs instead of per-domain DSQs.
+///
+/// Covers: main.bpf.c lines 938-939 (cpu_to_dsq), util.bpf.c line 349
+/// (per_cpu_dsq path in get_target_dsq_id), and the init_per_cpu_dsqs()
+/// codepath in lavd_init (main.bpf.c:2037-2071).
+#[test]
+fn test_lavd_per_cpu_dsq_mode() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "per_cpu_dsq\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("cpu-0", 0, workloads::cpu_bound(10_000_000))
+        .add_task("cpu-1", 0, workloads::cpu_bound(10_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 300_000))
+        .add_task("io-1", -5, workloads::io_bound(80_000, 400_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task {pid_val} should be scheduled"
+        );
+    }
+}
+
+/// Autopilot transitions with varied load — exercise the autopilot
+/// mode switching paths in sys_stat.bpf.c that respond to load changes.
+///
+/// Covers: sys_stat.bpf.c autopilot high/low/moderate load transitions,
+/// main.bpf.c lines 1895-1930 (init_per_cpu_ctx error/debug paths).
+#[test]
+fn test_lavd_autopilot_dynamic_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_autopilot_on\0", true);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Mix of CPU-bound and IO-bound to create dynamic load
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -10, workloads::io_bound(30_000, 500_000))
+        .add_task("io-1", -10, workloads::io_bound(50_000, 800_000))
+        .add_task("io-2", -5, workloads::io_bound(40_000, 600_000))
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // At least 4 of the 6 tasks should run
+    let scheduled = (1..=6)
+        .filter(|&p| trace.schedule_count(Pid(p)) > 0)
+        .count();
+    assert!(
+        scheduled >= 4,
+        "expected at least 4 tasks scheduled, got {scheduled}"
+    );
+}
+
+/// Exercise the reenq path: when SCX_ENQ_REENQ is set, lavd_enqueue
+/// skips deadline/timeslice recalculation (main.bpf.c:693-700).
+///
+/// The engine sets SCX_ENQ_REENQ when re-enqueueing tasks after
+/// cpu_release. This test creates conditions that trigger reenqueue.
+///
+/// Also covers: main.bpf.c lines 693-700 (SCX_ENQ_REENQ skip path).
+#[test]
+fn test_lavd_reenq_skip_recalc() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Many tasks contending on few CPUs — triggers preemption and
+    // potential reenqueue paths through the engine
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 50_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -15,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -15,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 10, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 10, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Exercise preemption with affinitized tasks: when an affinitized task
+/// is enqueued and its preferred CPU is running a boosted task, the
+/// preemption code cancels the slice boost (preempt.bpf.c:385-390).
+///
+/// Covers: preempt.bpf.c lines 373-390 (can_x_kick_cpu2 for affinitized
+/// task, slice boost cancellation).
+#[test]
+fn test_lavd_preemption_affinitized_cancel_boost() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Affinitized task targets CPU 0, which runs a long CPU-bound task
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "affinity-0".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: workloads::io_bound(50_000, 500_000),
+            start_time_ns: 500_000, // start after hog is running
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "hog-on-0".into(),
+            pid: Pid(2),
+            nice: 5,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Exercise the `no_wake_sync = true` path.
+/// When wake sync is disabled, the waker's CPU is not preferred for
+/// the wakee (idle.bpf.c sync_wakeup path disabled).
+///
+/// Covers: idle.bpf.c lines 486-510 (is_sync_waker_idle when
+/// no_wake_sync is true → sync path skipped).
+#[test]
+fn test_lavd_no_wake_sync_mode() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_wake_sync\0", true);
+    }
+
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 100_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: beh_a,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: beh_b,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Compaction dispatch with prev affinitized on inactive CPU.
+///
+/// When compaction is active and the previous task on a non-active CPU
+/// is affinitized (can't run on active CPUs), the dispatch function
+/// extends the overflow set (main.bpf.c:1024-1033).
+///
+/// Covers: main.bpf.c lines 1024-1033 (taskc_prev LAVD_FLAG_IS_AFFINITIZED,
+/// bpf_cpumask_intersects checks, overflow extension for prev task).
+#[test]
+fn test_lavd_compaction_prev_affinitized_overflow() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 4, nr_cpus);
+
+    // Task affinitized to CPUs 5,6,7 — none in active set (0-3)
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "affinity-567".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(5), CpuId(6), CpuId(7)]),
+            parent_pid: None,
+        })
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 300_000))
+        .duration_ms(400)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    assert!(monitor.compaction_occurred(), "compaction should be active");
+    assert!(
+        result.trace.schedule_count(Pid(1)) > 0,
+        "affinitized task should run via overflow extension"
+    );
+}
+
+/// Compaction with per_cpu_dsq: when compaction is active and per_cpu_dsq
+/// is enabled, the fast path at main.bpf.c:1000-1004 checks if the
+/// per-CPU DSQ has queued tasks and adds the CPU to overflow if so.
+///
+/// Covers: main.bpf.c lines 1000-1004 (per-CPU DSQ fast path on inactive CPU).
+#[test]
+fn test_lavd_compaction_per_cpu_dsq_fast_path() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+
+    unsafe {
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "per_cpu_dsq\0", true);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 4, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(50_000, 300_000))
+        .add_task("io-1", -5, workloads::io_bound(80_000, 400_000))
+        .duration_ms(400)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    assert!(monitor.compaction_occurred(), "compaction should be active");
+    // At least 6 of 8 tasks should run
+    let scheduled = (1..=8)
+        .filter(|&p| result.trace.schedule_count(Pid(p)) > 0)
+        .count();
+    assert!(
+        scheduled >= 6,
+        "expected at least 6 tasks scheduled, got {scheduled}"
+    );
+}
+
+/// Extreme overload with high preemption: many high-priority IO tasks
+/// and low-priority CPU hogs creates intense preemption.
+///
+/// Covers: preempt.bpf.c lines 326-331 (victim selection with high
+/// contention), lines 398-405 (cpumask preparation for victim search),
+/// lines 428-446 (reset_cpu_preemption_info both branches).
+#[test]
+fn test_lavd_extreme_preemption_contention() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // 4 high-priority IO tasks competing with 4 low-priority hogs
+    // on only 4 CPUs → heavy preemption
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-0", -15, workloads::io_bound(20_000, 100_000))
+        .add_task("io-1", -15, workloads::io_bound(25_000, 120_000))
+        .add_task("io-2", -15, workloads::io_bound(30_000, 150_000))
+        .add_task("io-3", -15, workloads::io_bound(35_000, 180_000))
+        .add_task("hog-0", 15, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 15, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 15, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 15, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // IO tasks should definitely get scheduled
+    for pid_val in 1..=4 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "io-{} should be scheduled",
+            pid_val - 1
+        );
+    }
+}
+
+/// Combined test: is_monitored + pinned_slice_ns + compaction + SMT.
+/// Exercises many interacting features together, maximizing code path
+/// coverage through feature interaction.
+#[test]
+fn test_lavd_combined_features() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_set_bool(&sched, "is_monitored\0", true);
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 2_000_000);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    let mm = MmId(1);
+    let (beh_a, beh_b) = workloads::ping_pong(Pid(1), Pid(2), 80_000);
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10,
+            behavior: beh_a,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: -10,
+            behavior: beh_b,
+            mm_id: Some(mm),
+            start_time_ns: 0,
+            allowed_cpus: None,
+            parent_pid: None,
+        })
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", -5, workloads::io_bound(40_000, 200_000))
+        .add_task("io-1", -5, workloads::io_bound(60_000, 300_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    // Ping-pong tasks should definitely run
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+    // Most tasks should get scheduled (some low-prio may not under compaction)
+    let total_scheduled: usize = (1..=8)
+        .filter(|&pid_val| trace.schedule_count(Pid(pid_val)) > 0)
+        .count();
+    assert!(
+        total_scheduled >= 5,
+        "expected at least 5 tasks scheduled, got {total_scheduled}"
+    );
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk
