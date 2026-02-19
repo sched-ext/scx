@@ -247,6 +247,12 @@ pub struct Scenario {
     /// Nanoseconds per retired conditional branch in scheduler C code.
     /// `None` = disabled (no PMU counter). `Some(10)` = 10ns per RBC.
     pub sched_overhead_rbc_ns: Option<u64>,
+    /// Enable concurrent callback interleaving at kfunc yield points.
+    ///
+    /// When true, dispatch callbacks for multiple idle CPUs run on
+    /// separate OS threads with PRNG-driven token passing, enabling
+    /// deterministic exploration of different interleavings.
+    pub interleave: bool,
 }
 
 /// Builder for constructing scenarios.
@@ -261,6 +267,7 @@ pub struct ScenarioBuilder {
     seed: u32,
     fixed_priority: bool,
     sched_overhead_rbc_ns: Option<u64>,
+    interleave: bool,
 }
 
 impl Scenario {
@@ -276,6 +283,7 @@ impl Scenario {
             seed: seed_from_env(),
             fixed_priority: false,
             sched_overhead_rbc_ns: None,
+            interleave: false,
         }
     }
 }
@@ -410,6 +418,12 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Enable concurrent callback interleaving at kfunc yield points.
+    pub fn interleave(mut self, enabled: bool) -> Self {
+        self.interleave = enabled;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -437,6 +451,7 @@ impl ScenarioBuilder {
             seed: self.seed,
             fixed_priority: self.fixed_priority,
             sched_overhead_rbc_ns: self.sched_overhead_rbc_ns,
+            interleave: self.interleave,
         }
     }
 }

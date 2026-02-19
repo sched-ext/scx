@@ -478,6 +478,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         seed: seed_from_env(),
         fixed_priority: false,
         sched_overhead_rbc_ns: sched_overhead_rbc_ns_from_env(),
+        interleave: false,
     })
 }
 
