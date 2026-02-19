@@ -339,15 +339,23 @@ impl<'a> Scheduler<'a> {
         let (quantum, new_flow_bonus, _starvation) = args.effective_values();
 
         // ETD: Empirical Topology Discovery — display-grade measurement
-        // Measures inter-core CAS latency for startup heatmap and TUI display
-        info!("Starting ETD calibration...");
-        let latency_matrix = calibrate::calibrate_full_matrix(
-            topo.nr_cpus,
-            &calibrate::EtdConfig::default(),
-            |current, total, is_complete| {
-                tui::render_calibration_progress(current, total, is_complete);
-            },
-        );
+        // Measures inter-core CAS latency for startup heatmap and TUI display.
+        // Skip in headless mode: latency_matrix is display-only (splash + TUI heatmap),
+        // never feeds into RODATA, BPF, or scheduling decisions.
+        let is_tty = std::io::stdout().is_terminal();
+        let latency_matrix = if is_tty {
+            info!("Starting ETD calibration...");
+            calibrate::calibrate_full_matrix(
+                topo.nr_cpus,
+                &calibrate::EtdConfig::default(),
+                |current, total, is_complete| {
+                    tui::render_calibration_progress(current, total, is_complete);
+                },
+            )
+        } else {
+            info!("Headless mode: skipping ETD calibration (display-only)");
+            vec![vec![0.0; topo.nr_cpus]; topo.nr_cpus]
+        };
 
         // Configure the scheduler via rodata (read-only data)
         if let Some(rodata) = &mut open_skel.maps.rodata_data {
@@ -415,7 +423,7 @@ impl<'a> Scheduler<'a> {
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
         // Attach the scheduler
-        let _link = self
+        let link = self
             .skel
             .maps
             .cake_ops
@@ -424,6 +432,7 @@ impl<'a> Scheduler<'a> {
 
         // Detect headless: skip TUI/splash when no TTY (CI VMs, piped output)
         let is_tty = std::io::stdout().is_terminal();
+        // Note: ETD calibration was already skipped in new() when !is_tty
 
         if is_tty {
             self.show_startup_splash()?;
@@ -444,12 +453,10 @@ impl<'a> Scheduler<'a> {
                 warn!("TUI disabled: no terminal detected (headless mode)");
             }
             // Event-based silent mode - block on signalfd, poll with 60s timeout for UEI check
-
-            // Block SIGINT and SIGTERM from normal delivery
+            // Signals are already blocked from main() — just create signalfd to read them
             let mut mask = SigSet::empty();
             mask.add(Signal::SIGINT);
             mask.add(Signal::SIGTERM);
-            mask.thread_block().context("Failed to block signals")?;
 
             // Create signalfd to receive signals as readable events
             let sfd = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK)
@@ -506,7 +513,14 @@ impl<'a> Scheduler<'a> {
         }
 
         info!("scx_cake scheduler shutting down");
-        Ok(())
+
+        // Drop struct_ops link BEFORE uei_report — this triggers the kernel to
+        // set UEI kind=SCX_EXIT_UNREG. Matches scx_bpfland/scx_p2dq/scx_lavd
+        // pattern: `let _ = self.struct_ops.take(); uei_report!(...)`
+        drop(link);
+
+        // Standard UEI exit report — produces "EXIT: unregistered from user space".
+        scx_utils::uei_report!(&self.skel, uei).map(|_| ())
     }
 
     fn show_startup_splash(&self) -> Result<()> {
@@ -528,7 +542,17 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Set up signal handler
+    // Block SIGINT/SIGTERM early, before any threads spawn (ctrlc crate spawns one).
+    // This ensures signals are never delivered via default handler (which would
+    // exit with 128+signum=143 in CI). signalfd in run() reads them cleanly.
+    {
+        let mut mask = SigSet::empty();
+        mask.add(Signal::SIGINT);
+        mask.add(Signal::SIGTERM);
+        mask.thread_block().ok(); // best-effort; signalfd will catch in run()
+    }
+
+    // Set up signal handler (ctrlc thread inherits our signal mask)
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
