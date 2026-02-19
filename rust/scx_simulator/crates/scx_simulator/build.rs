@@ -4,14 +4,17 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir: PathBuf = env::var("CARGO_MANIFEST_DIR").unwrap().into();
-    let root_dir = manifest_dir.join("../..");
+    // Workspace root is two levels up from crates/scx_simulator
+    let workspace_dir = manifest_dir.join("../..").canonicalize().unwrap();
+    // SCX repo root is two levels up from the workspace
+    let root_dir = workspace_dir.join("../..").canonicalize().unwrap();
     let out_dir: PathBuf = env::var("OUT_DIR").unwrap().into();
 
     let coverage = env::var("SCX_SIM_COVERAGE").as_deref() == Ok("1");
 
     let include_paths: Vec<PathBuf> = vec![
-        // Our own C source directory
-        manifest_dir.join("csrc"),
+        // Our own C source directory (at workspace root)
+        workspace_dir.join("csrc"),
         // Existing unit test infrastructure
         root_dir.join("lib/scxtest"),
         // Scheduler include paths
@@ -65,7 +68,7 @@ fn main() {
 
     // Build the task_struct accessor library
     let mut sim_task = cc::Build::new();
-    sim_task.file(manifest_dir.join("csrc/sim_task.c"));
+    sim_task.file(workspace_dir.join("csrc/sim_task.c"));
     configure_build(&mut sim_task);
     sim_task.compile("sim_task");
 
@@ -74,14 +77,14 @@ fn main() {
     // the __weak stubs in overrides.c. Linked into the main binary for unit
     // tests and exported via -rdynamic for .so schedulers.
     let mut sim_sdt = cc::Build::new();
-    sim_sdt.file(manifest_dir.join("csrc/sim_sdt_stubs.c"));
+    sim_sdt.file(workspace_dir.join("csrc/sim_sdt_stubs.c"));
     configure_build(&mut sim_sdt);
     sim_sdt.compile("sim_sdt_stubs");
 
     // Build the cgroup CSS iterator support.
     // Provides sim_css_next() and related functions for bpf_for_each(css, ...).
     let mut sim_cgroup = cc::Build::new();
-    sim_cgroup.file(manifest_dir.join("csrc/sim_cgroup.c"));
+    sim_cgroup.file(workspace_dir.join("csrc/sim_cgroup.c"));
     configure_build(&mut sim_cgroup);
     sim_cgroup.compile("sim_cgroup");
 
@@ -98,9 +101,9 @@ fn main() {
 
     let mut make = Command::new("make");
     make.arg("-C")
-        .arg(manifest_dir.join("schedulers"))
+        .arg(workspace_dir.join("schedulers"))
         .arg(format!("BUILD_DIR={}", scheduler_dir.display()))
-        .arg(format!("SIMULATOR_DIR={}", manifest_dir.display()))
+        .arg(format!("SIMULATOR_DIR={}", workspace_dir.display()))
         .arg(format!("ROOT_DIR={}", root_dir.display()))
         .arg(format!("BPF_INCLUDE={bpf_include}"))
         .arg(format!("CC={compiler}"));
@@ -155,11 +158,26 @@ fn main() {
         scheduler_dir.display()
     );
 
-    // Rebuild triggers
-    println!("cargo:rerun-if-changed=schedulers/");
-    println!("cargo:rerun-if-changed=csrc/");
-    println!("cargo:rerun-if-changed=../../lib/scxtest/");
-    println!("cargo:rerun-if-changed=../../scheds/rust/scx_tickless/src/bpf/");
-    println!("cargo:rerun-if-changed=../../scheds/rust/scx_cosmos/src/bpf/");
+    // Rebuild triggers (relative to workspace root, which is ../../ from crate)
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_dir.join("schedulers").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_dir.join("csrc").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root_dir.join("lib/scxtest").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root_dir.join("scheds/rust/scx_tickless/src/bpf").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root_dir.join("scheds/rust/scx_cosmos/src/bpf").display()
+    );
     println!("cargo:rerun-if-env-changed=SCX_SIM_COVERAGE");
 }

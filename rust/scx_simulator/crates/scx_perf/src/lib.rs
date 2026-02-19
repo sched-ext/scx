@@ -7,7 +7,7 @@
 //! CPU detection covers Intel (family 0x06) and AMD Zen 1-5 (families 0x17/0x19/0x1A).
 //!
 //! Extracted from Reverie (BSD-2-Clause). Only the minimal subset needed:
-//! open → reset → enable → disable → read.
+//! open -> reset -> enable -> disable -> read.
 
 use std::fmt;
 use std::io;
@@ -92,7 +92,7 @@ impl PmuConfig {
 
         let rcb_event = match info.vendor_str() {
             "GenuineIntel" if info.family == 0x06 => {
-                // Intel: BR_INST_RETIRED.COND — event=0xC4, umask=0x01
+                // Intel: BR_INST_RETIRED.COND - event=0xC4, umask=0x01
                 0x01c4
             }
             "AuthenticAMD" => match info.family {
@@ -256,7 +256,7 @@ mod tests {
             }
         };
 
-        // Basic lifecycle: reset → enable → disable → read
+        // Basic lifecycle: reset -> enable -> disable -> read
         counter.reset().unwrap();
         counter.enable().unwrap();
 

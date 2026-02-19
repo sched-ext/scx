@@ -92,10 +92,10 @@ export SCX_SIM_COVERAGE=1
 export LLVM_PROFILE_FILE="$COVERAGE_OUT/scxsim-%p-%m.profraw"
 
 # Clean the build cache so we get a fresh instrumented build
-cargo clean -p scx_simulator 2>/dev/null || true
+cargo clean -p scx_simulator -p scx_perf -p scx_cgroup_tree 2>/dev/null || true
 
 # Build tests (this also triggers build.rs with SCX_SIM_COVERAGE=1)
-cargo test -p scx_simulator --no-run --message-format=json 2>/dev/null \
+cargo test --all --no-run --message-format=json 2>/dev/null \
     | tee "$COVERAGE_OUT/test-build.json" \
     | jq -r 'select(.executable != null) | .executable' \
     > "$COVERAGE_OUT/test-binaries.txt" || true
@@ -111,7 +111,7 @@ echo "  Found $(wc -l < "$COVERAGE_OUT/test-binaries.txt") test binary/binaries"
 # --- Run tests ---
 echo ""
 echo "=== Running tests to generate coverage data ==="
-cargo test -p scx_simulator 2>&1 | tee "$COVERAGE_OUT/test-output.txt"
+cargo test --all 2>&1 | tee "$COVERAGE_OUT/test-output.txt"
 
 # --- Merge profraw files ---
 echo ""
