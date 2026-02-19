@@ -110,7 +110,7 @@ const volatile u64 perf_config;
 /*
  * Performance counter threshold to classify a task as event heavy.
  */
-const volatile u64 perf_threshold;
+volatile u64 perf_threshold;
 
 /*
  * Enable deferred wakeup.
@@ -126,7 +126,7 @@ const volatile u64 perf_sticky;
 /*
  * Threshold for sticky event; task is kept on same CPU when exceeded.
  */
-const volatile u64 perf_sticky_threshold;
+volatile u64 perf_sticky_threshold;
 
 /*
  * Enable tick-based preemption enforcement.
@@ -1078,31 +1078,31 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Immediately dispatch perf event-heavy tasks to a new CPU. Skip if
-	 * task exceeds sticky threshold (keep on same CPU).
+	 * Immediately dispatch sticky event-heavy tasks to the same CPU.
 	 */
-	if (!is_migration_disabled(p)) {
-		if (is_sticky_event_heavy(tctx)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+	if (is_sticky_event_heavy(tctx)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
+		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+
+		if (!scx_bpf_task_running(p))
+			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return;
+	}
+
+	/*
+	 * Immediately dispatch migration event-heavy tasks to a new CPU
+	 * (if the task is allowed to migrate).
+	 */
+	if (!is_migration_disabled(p) && is_event_heavy(tctx)) {
+		new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
+		if (new_cpu >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu,
 					   task_slice(p), enq_flags);
-			__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
+			__sync_fetch_and_add(&nr_event_dispatches, 1);
 
-			if (!scx_bpf_task_running(p))
-				wakeup_cpu(prev_cpu);
+			if (new_cpu != prev_cpu || !scx_bpf_task_running(p))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
 			return;
-		}
-
-		if (is_event_heavy(tctx)) {
-			new_cpu = pick_least_busy_event_cpu(p, prev_cpu, tctx);
-			if (new_cpu >= 0) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | new_cpu,
-						   task_slice(p), enq_flags);
-				__sync_fetch_and_add(&nr_event_dispatches, 1);
-
-				if (new_cpu != prev_cpu || !scx_bpf_task_running(p))
-					wakeup_cpu(new_cpu);
-				return;
-			}
 		}
 	}
 

@@ -385,6 +385,73 @@ pub fn parse_cpu_list(optarg: &str) -> Result<Vec<usize>, String> {
     Ok(cpus)
 }
 
+/// Initial value for the dynamic threshold (in BPF units).
+const DYNAMIC_THRESHOLD_INIT_VALUE: u64 = 1000;
+
+/// Target event rate (per second) above which we consider migrations/sticky dispatches too high.
+const DYNAMIC_THRESHOLD_RATE_HIGH: f64 = 4000.0;
+
+/// Target event rate (per second) below which we consider migrations/sticky dispatches too low.
+const DYNAMIC_THRESHOLD_RATE_LOW: f64 = 2000.0;
+
+/// Minimum scale factor when just outside the target band (slow convergence near optimal).
+const DYNAMIC_THRESHOLD_SCALE_MIN: f64 = 0.0001;
+
+/// Maximum scale factor when far from target (fast convergence when initial threshold is way off).
+const DYNAMIC_THRESHOLD_SCALE_MAX: f64 = 1000.0;
+
+/// Slope for "too high" case: scale grows with (rate/HIGH - 1) so we step much harder when rate is
+/// many times over target.
+const DYNAMIC_THRESHOLD_SLOPE_HIGH: f64 = 0.35;
+
+/// Slope for "too low" case: scale grows with deficit so we step harder when rate is near zero.
+const DYNAMIC_THRESHOLD_SLOPE_LOW: f64 = 0.58;
+
+fn dynamic_threshold_scale(rate_per_sec: f64, too_high: bool) -> f64 {
+    if too_high {
+        let excess = ((rate_per_sec / DYNAMIC_THRESHOLD_RATE_HIGH) - 1.0).max(0.0);
+        let scale = DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_HIGH * excess.min(4.0);
+        scale.min(DYNAMIC_THRESHOLD_SCALE_MAX)
+    } else {
+        if rate_per_sec <= 0.0 {
+            return DYNAMIC_THRESHOLD_SCALE_MAX;
+        }
+        let deficit = (DYNAMIC_THRESHOLD_RATE_LOW - rate_per_sec) / DYNAMIC_THRESHOLD_RATE_LOW;
+        let t = deficit.min(1.0).max(0.0);
+        DYNAMIC_THRESHOLD_SCALE_MIN + DYNAMIC_THRESHOLD_SLOPE_LOW * t
+    }
+}
+
+fn adjust_dynamic_threshold(current: u64, rate_per_sec: f64, base_threshold: u64) -> u64 {
+    let (scale_pct, raise_threshold) = if rate_per_sec > DYNAMIC_THRESHOLD_RATE_HIGH {
+        (dynamic_threshold_scale(rate_per_sec, true), true)
+    } else if rate_per_sec < DYNAMIC_THRESHOLD_RATE_LOW && rate_per_sec >= 0.0 {
+        (dynamic_threshold_scale(rate_per_sec, false), false)
+    } else {
+        return current;
+    };
+
+    let factor = if raise_threshold {
+        1.0 + scale_pct
+    } else {
+        1.0 - scale_pct
+    };
+    let new = ((current as f64) * factor).round() as u64;
+
+    let min_val = if base_threshold == 0 {
+        1
+    } else {
+        base_threshold / 100
+    };
+    let max_val = if base_threshold == 0 {
+        u64::MAX
+    } else {
+        base_threshold.saturating_mul(10000)
+    };
+
+    new.clamp(min_val.max(1), max_val)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CpuTimes {
     user: u64,
@@ -461,13 +528,7 @@ impl<'a> Scheduler<'a> {
 
         // Enable perf event scheduling settings.
         rodata.perf_config = opts.perf_config;
-        if opts.perf_config > 0 {
-            rodata.perf_threshold = opts.perf_threshold;
-        }
         rodata.perf_sticky = opts.perf_sticky;
-        if opts.perf_sticky > 0 {
-            rodata.perf_sticky_threshold = opts.perf_sticky_threshold;
-        }
 
         // Normalize CPU busy threshold in the range [0 .. 1024].
         rodata.busy_threshold = opts.cpu_busy_thresh * 1024 / 100;
@@ -516,6 +577,24 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, cosmos_ops, uei)?;
+
+        // Initial perf thresholds in bss. When threshold is 0 we use dynamic logic; when user
+        // specifies a value > 0 we use it as a static threshold.
+        let bss = skel.maps.bss_data.as_mut().unwrap();
+        if opts.perf_config > 0 {
+            bss.perf_threshold = if opts.perf_threshold == 0 {
+                DYNAMIC_THRESHOLD_INIT_VALUE
+            } else {
+                opts.perf_threshold
+            };
+        }
+        if opts.perf_sticky > 0 {
+            bss.perf_sticky_threshold = if opts.perf_sticky_threshold == 0 {
+                DYNAMIC_THRESHOLD_INIT_VALUE
+            } else {
+                opts.perf_sticky_threshold
+            };
+        }
 
         // Configure CPU->node mapping (must be done after skeleton is loaded).
         for node in topo.nodes.values() {
@@ -731,6 +810,10 @@ impl<'a> Scheduler<'a> {
         let mut prev_cputime = Self::read_cpu_times().expect("Failed to read initial CPU stats");
         let mut last_update = Instant::now();
 
+        // Dynamic perf thresholds: scale based on migration and sticky dispatch rates.
+        let mut prev_nr_event_dispatches: u64 = 0;
+        let mut prev_nr_ev_sticky_dispatches: u64 = 0;
+
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             // Update CPU utilization.
             if !polling_time.is_zero() && last_update.elapsed() >= polling_time {
@@ -739,6 +822,65 @@ impl<'a> Scheduler<'a> {
                         .map(|util| self.skel.maps.bss_data.as_mut().unwrap().cpu_util = util);
                     prev_cputime = curr_cputime;
                 }
+
+                // Update dynamic perf thresholds based on event rates.
+                let nr_event = self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
+                    .unwrap()
+                    .nr_event_dispatches;
+                let nr_sticky = self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_ref()
+                    .unwrap()
+                    .nr_ev_sticky_dispatches;
+                let elapsed_secs = last_update.elapsed().as_secs_f64();
+                if elapsed_secs > 0.0 {
+                    let migration_rate =
+                        (nr_event.saturating_sub(prev_nr_event_dispatches) as f64) / elapsed_secs;
+                    let sticky_rate = (nr_sticky.saturating_sub(prev_nr_ev_sticky_dispatches)
+                        as f64)
+                        / elapsed_secs;
+
+                    let bss = self.skel.maps.bss_data.as_mut().unwrap();
+                    // Dynamic threshold only when user did not specify a value (threshold == 0).
+                    if self.opts.perf_config > 0 && self.opts.perf_threshold == 0 {
+                        let base = 0u64; // dynamic mode: use 0 so clamp is [1, u64::MAX]
+                        let current = bss.perf_threshold;
+                        let new_thresh = adjust_dynamic_threshold(current, migration_rate, base);
+                        if new_thresh != current {
+                            bss.perf_threshold = new_thresh;
+                            if self.opts.verbose {
+                                info!(
+                                    "perf_threshold: {} (migration rate {:.1}/s)",
+                                    new_thresh, migration_rate
+                                );
+                            }
+                        }
+                    }
+                    if self.opts.perf_sticky > 0 && self.opts.perf_sticky_threshold == 0 {
+                        let base = 0u64;
+                        let current = bss.perf_sticky_threshold;
+                        let new_thresh = adjust_dynamic_threshold(current, sticky_rate, base);
+                        if new_thresh != current {
+                            bss.perf_sticky_threshold = new_thresh;
+                            if self.opts.verbose {
+                                info!(
+                                    "perf_sticky_threshold: {} (sticky rate {:.1}/s)",
+                                    new_thresh, sticky_rate
+                                );
+                            }
+                        }
+                    }
+
+                    prev_nr_event_dispatches = nr_event;
+                    prev_nr_ev_sticky_dispatches = nr_sticky;
+                }
+
                 last_update = Instant::now();
             }
 
