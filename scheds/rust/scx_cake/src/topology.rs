@@ -41,6 +41,13 @@ pub struct TopologyInfo {
     pub llc_cpu_mask: [u64; MAX_LLCS],
     pub big_cpu_mask: u64,
 
+    /// Heterogeneous Routing Masks
+    pub big_core_phys_mask: u64,
+    pub big_core_smt_mask: u64,
+    pub little_core_mask: u64,
+    pub vcache_llc_mask: u64,
+    pub has_vcache: bool,
+
     // Info
     pub cpus_per_ccd: u32,
 }
@@ -87,6 +94,14 @@ pub fn detect() -> Result<TopologyInfo> {
         core_thread_mask: [0; 32],
         llc_cpu_mask: [0; MAX_LLCS],
         big_cpu_mask: 0,
+
+        // Heterogeneous Masks
+        big_core_phys_mask: 0,
+        big_core_smt_mask: 0,
+        little_core_mask: 0,
+        vcache_llc_mask: 0,
+        has_vcache: false,
+
         cpus_per_ccd: 0,
     };
 
@@ -120,10 +135,14 @@ pub fn detect() -> Result<TopologyInfo> {
         llc_idx += 1;
     }
 
-    // 2. Identify P-cores vs E-cores
-    // Reset defaults to recalculate based on CoreType
+    // 2. Identify P-cores vs E-cores and V-Cache
     info.cpu_is_big = [0; MAX_CPUS];
     info.big_cpu_mask = 0;
+    info.big_core_phys_mask = 0;
+    info.big_core_smt_mask = 0;
+    info.little_core_mask = 0;
+    info.vcache_llc_mask = 0;
+    info.has_vcache = false;
 
     let mut p_cores_found = 0;
     let mut e_cores_found = 0;
@@ -132,8 +151,6 @@ pub fn detect() -> Result<TopologyInfo> {
         let core_id = *core_id_usize;
 
         // Determine is_big.
-        // If CoreType::Efficiency -> 0.
-        // If Performance or Unknown -> 1.
         let is_big = match core.core_type {
             CoreType::Little => 0,
             _ => 1,
@@ -169,8 +186,52 @@ pub fn detect() -> Result<TopologyInfo> {
 
                 if is_big == 1 {
                     info.big_cpu_mask |= 1u64 << cpu;
+                    if thread_idx == 0 {
+                        info.big_core_phys_mask |= 1u64 << cpu;
+                    } else {
+                        info.big_core_smt_mask |= 1u64 << cpu;
+                    }
+                } else {
+                    info.little_core_mask |= 1u64 << cpu;
                 }
+
                 thread_idx += 1;
+            }
+        }
+    }
+
+    // Evaluate V-Cache / LLC Asymmetry
+    let mut max_llc_cache_size = 0;
+    let mut max_llc_idx = 0;
+
+    // Find the LLC cluster with the absolute largest cache_size
+    for llc in topo.all_llcs.values() {
+        let mut cluster_cache_size = 0;
+        if let Some(cpu) = llc.all_cpus.values().next() {
+            cluster_cache_size += cpu.cache_size;
+            // All CPUs in the LLC report the same size
+        }
+
+        if cluster_cache_size > max_llc_cache_size {
+            max_llc_cache_size = cluster_cache_size;
+            max_llc_idx = llc.id;
+        }
+    }
+
+    // Verify if there is actual Cache Asymmetry (V-Cache detection)
+    // We only flag V-Cache if there is MORE THAN 1 LLC and they have UNEQUAL cache sizes.
+    if info.has_dual_ccd {
+        for llc in topo.all_llcs.values() {
+            let mut expected_size = 0;
+            if let Some(cpu) = llc.all_cpus.values().next() {
+                expected_size += cpu.cache_size;
+            }
+            // Significant cache disparity = Asymmetric CCD (V-CACHE)
+            if expected_size > 0 && max_llc_cache_size > (expected_size * 2) {
+                info.has_vcache = true;
+                if max_llc_idx < 8 {
+                    info.vcache_llc_mask = info.llc_cpu_mask[max_llc_idx];
+                }
             }
         }
     }
@@ -180,11 +241,8 @@ pub fn detect() -> Result<TopologyInfo> {
         info.has_hybrid_cores = true;
     } else {
         info.has_hybrid_cores = false;
-        // If not hybrid, ensure all marked as Big for consistency (though mask handles it)
-        if p_cores_found == 0 && e_cores_found > 0 {
-            // Weird case: All E-cores? Treat as "Big" relative to nothing.
-            // But we keep as is.
-        }
+        // On Homogenous CPUs (Like 9800X3D), everything is a "Big Phys" core.
+        // If there's no V-Cache Asymmetry, everything collapses perfectly to prevent extra BPF scans.
     }
 
     // Log detected topology (debug level - use RUST_LOG=debug to see)
@@ -198,7 +256,12 @@ pub fn detect() -> Result<TopologyInfo> {
     }
     log::debug!("  Hybrid cores:  {}", info.has_hybrid_cores);
     if info.has_hybrid_cores {
-        log::debug!("    P-core mask: {:016x}", info.big_cpu_mask);
+        log::debug!("    P-core Phys mask: {:016x}", info.big_core_phys_mask);
+        log::debug!("    E-core mask:      {:016x}", info.little_core_mask);
+    }
+    log::debug!("  V-Cache CCD:   {}", info.has_vcache);
+    if info.has_vcache {
+        log::debug!("    V-Cache mask: {:016x}", info.vcache_llc_mask);
     }
 
     Ok(info)
