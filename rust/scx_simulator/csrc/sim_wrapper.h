@@ -256,6 +256,17 @@ extern struct task_struct *sim_bpf_get_current_task_btf(void);
 #define bpf_get_current_task_btf() sim_bpf_get_current_task_btf()
 
 /*
+ * bpf_ktime_get_ns override.
+ *
+ * In BPF, this is a helper at (void *)5 returning the current
+ * kernel timestamp. In the simulator, it returns the per-CPU
+ * local clock from the Rust engine.
+ */
+extern unsigned long long sim_bpf_ktime_get_ns(void);
+#undef bpf_ktime_get_ns
+#define bpf_ktime_get_ns() sim_bpf_ktime_get_ns()
+
+/*
  * BPF_PROG override for tracepoint/fentry programs.
  *
  * BPF_PROG from bpf_tracing.h uses ___bpf_ctx_cast and
