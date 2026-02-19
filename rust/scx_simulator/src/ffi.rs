@@ -318,6 +318,80 @@ impl DynamicScheduler {
         Self::load(&format!("{dir}/libscx_lavd.so"), "lavd", nr_cpus)
     }
 
+    /// Load the scx_lavd scheduler with multiple compute domains.
+    ///
+    /// CPUs are split evenly across `nr_domains` domains, each as a
+    /// neighbor of all others. This enables cross-domain migration code
+    /// paths in balance.bpf.c (`plan_x_cpdom_migration`,
+    /// `try_to_steal_task`, `force_to_steal_task`).
+    ///
+    /// `nr_cpus` must be >= `nr_domains` and `nr_domains` must be >= 2.
+    pub fn lavd_multi_domain(nr_cpus: u32, nr_domains: u32) -> Self {
+        assert!(nr_domains >= 2, "need at least 2 domains");
+        assert!(
+            nr_cpus >= nr_domains,
+            "nr_cpus ({nr_cpus}) must be >= nr_domains ({nr_domains})"
+        );
+        let sched = Self::lavd(nr_cpus);
+        type SetupMultiDomainFn = unsafe extern "C" fn(u32);
+        unsafe {
+            let sym: libloading::Symbol<SetupMultiDomainFn> = sched
+                ._lib
+                .get(b"lavd_setup_multi_domain")
+                .expect("lavd_setup_multi_domain not found");
+            (sym)(nr_domains);
+        }
+        sched
+    }
+
+    /// Configure a LAVD scheduler's DSQ and migration mode.
+    ///
+    /// Must be called after construction and before `Simulator::run()`.
+    /// - `per_cpu_dsq`: use per-CPU DSQs (enables `is_per_cpu_dsq_migratable`)
+    /// - `pinned_slice_ns`: if non-zero, enables dual-DSQ mode (both per-CPU
+    ///   and per-cpdom DSQs with vtime comparison)
+    /// - `mig_delta_pct`: if non-zero, uses fixed migration threshold
+    ///   percentage instead of dynamic `calc_mig_delta`
+    pub fn lavd_configure(&self, per_cpu_dsq: bool, pinned_slice_ns: u64, mig_delta_pct: u8) {
+        type SetU32Fn = unsafe extern "C" fn(u32);
+        type SetU64Fn = unsafe extern "C" fn(u64);
+        unsafe {
+            let sym: libloading::Symbol<SetU32Fn> = self
+                ._lib
+                .get(b"lavd_set_per_cpu_dsq")
+                .expect("lavd_set_per_cpu_dsq not found");
+            (sym)(per_cpu_dsq as u32);
+
+            let sym: libloading::Symbol<SetU64Fn> = self
+                ._lib
+                .get(b"lavd_set_pinned_slice_ns")
+                .expect("lavd_set_pinned_slice_ns not found");
+            (sym)(pinned_slice_ns);
+
+            let sym: libloading::Symbol<SetU32Fn> = self
+                ._lib
+                .get(b"lavd_set_mig_delta_pct")
+                .expect("lavd_set_mig_delta_pct not found");
+            (sym)(mig_delta_pct as u32);
+        }
+    }
+
+    /// Enable or disable LAVD's `is_monitored` flag.
+    ///
+    /// When enabled, `consume_dsq()` measures DSQ consume latency
+    /// using `bpf_ktime_get_ns()`. This exercises the monitoring
+    /// instrumentation paths in balance.bpf.c.
+    pub fn lavd_set_monitored(&self, monitored: bool) {
+        type SetU32Fn = unsafe extern "C" fn(u32);
+        unsafe {
+            let sym: libloading::Symbol<SetU32Fn> = self
+                ._lib
+                .get(b"lavd_set_is_monitored")
+                .expect("lavd_set_is_monitored not found");
+            (sym)(monitored as u32);
+        }
+    }
+
     /// Load the scx_cosmos scheduler with NUMA topology.
     ///
     /// CPUs are grouped sequentially into `nr_nodes` NUMA nodes.

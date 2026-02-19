@@ -499,6 +499,117 @@ void lavd_setup(unsigned int num_cpus)
 
 /*
  * =================================================================
+ * Multi-domain setup for load balancing coverage
+ * =================================================================
+ *
+ * Reconfigures the compute domain topology created by lavd_setup()
+ * into multiple domains with neighbor relationships. This enables
+ * cross-domain migration code paths in balance.bpf.c.
+ *
+ * Must be called AFTER lavd_setup() and BEFORE lavd_init().
+ *
+ * Parameters:
+ *   nr_domains: number of compute domains to create (must be >= 2)
+ *
+ * CPUs are split evenly across domains. Remaining CPUs go to the
+ * last domain. All domains are neighbors of each other at distance 0.
+ */
+void lavd_setup_multi_domain(unsigned int nr_domains)
+{
+	unsigned int cpus_per_domain, cpu, d, i;
+
+	if (nr_domains < 2 || nr_domains > LAVD_CPDOM_MAX_NR)
+		return;
+	if (nr_cpus_onln < nr_domains)
+		return;
+
+	cpus_per_domain = nr_cpus_onln / nr_domains;
+
+	/* Clear domain 0 that lavd_setup() created */
+	__builtin_memset(&cpdom_ctxs[0], 0, sizeof(cpdom_ctxs[0]));
+
+	/* Create nr_domains domains with disjoint CPU sets */
+	for (d = 0; d < nr_domains; d++) {
+		struct cpdom_ctx *cpdomc = &cpdom_ctxs[d];
+		unsigned int first_cpu = d * cpus_per_domain;
+		unsigned int last_cpu = (d == nr_domains - 1)
+			? nr_cpus_onln
+			: first_cpu + cpus_per_domain;
+
+		cpdomc->id = d;
+		cpdomc->alt_id = (d == 0) ? 1 : 0;
+		cpdomc->numa_id = d;
+		cpdomc->llc_id = d;
+		cpdomc->is_big = 0;
+		cpdomc->is_valid = 1;
+		cpdomc->nr_active_cpus = last_cpu - first_cpu;
+		cpdomc->cap_sum_active_cpus =
+			cpdomc->nr_active_cpus * 1024;
+
+		/* Set cpumask for this domain's CPUs */
+		for (cpu = first_cpu;
+		     cpu < last_cpu && cpu < LAVD_CPU_ID_MAX;
+		     cpu++) {
+			cpdomc->__cpumask[cpu / 64] |=
+				(1ULL << (cpu % 64));
+		}
+
+		/*
+		 * All other domains are neighbors at distance 0.
+		 * This enables cross-domain task stealing.
+		 */
+		cpdomc->nr_neighbors[0] = nr_domains - 1;
+		i = 0;
+		for (unsigned int n = 0; n < nr_domains; n++) {
+			if (n == d)
+				continue;
+			cpdomc->neighbor_ids[0 * LAVD_CPDOM_MAX_NR + i] = n;
+			i++;
+		}
+	}
+
+	/*
+	 * Enable core compaction so do_core_compaction() runs during
+	 * update_sys_stat() and keeps nr_active_cpdoms up to date.
+	 */
+	no_core_compaction = false;
+}
+
+/*
+ * =================================================================
+ * Configuration setters for DSQ and migration modes
+ * =================================================================
+ *
+ * These set globals that control balance.bpf.c code paths.
+ * Must be called AFTER lavd_setup() and BEFORE lavd_init().
+ */
+
+/* Enable per-CPU DSQ mode: tasks enqueue to per-CPU DSQs. */
+void lavd_set_per_cpu_dsq(unsigned int val)
+{
+	per_cpu_dsq = !!val;
+}
+
+/* Set pinned_slice_ns: dual-DSQ mode (both per-CPU and per-cpdom). */
+void lavd_set_pinned_slice_ns(unsigned long long val)
+{
+	pinned_slice_ns = val;
+}
+
+/* Set mig_delta_pct: fixed migration threshold percentage. */
+void lavd_set_mig_delta_pct(unsigned int val)
+{
+	mig_delta_pct = (u8)val;
+}
+
+/* Enable/disable the is_monitored flag (introspection latency tracking). */
+void lavd_set_is_monitored(unsigned int val)
+{
+	is_monitored = !!val;
+}
+
+/*
+ * =================================================================
  * Probe functions — exported accessors for scheduler-internal state
  * =================================================================
  *

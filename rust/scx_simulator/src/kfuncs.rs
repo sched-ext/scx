@@ -839,6 +839,13 @@ pub extern "C" fn bpf_ktime_get_ns() -> u64 {
     })
 }
 
+/// Alias for C macro override (`sim_wrapper.h` redirects `bpf_ktime_get_ns()`
+/// to this to avoid the static function pointer in `bpf_helper_defs.h`).
+#[no_mangle]
+pub extern "C" fn sim_bpf_ktime_get_ns() -> u64 {
+    bpf_ktime_get_ns()
+}
+
 // RCU stubs -- no-op in simulator
 #[no_mangle]
 pub extern "C" fn bpf_rcu_read_lock() {}
