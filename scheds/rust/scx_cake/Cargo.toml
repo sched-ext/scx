@@ -18,7 +18,7 @@ ratatui = { version = "0.30" }
 crossterm = "0.29"
 arboard = "3.6"
 
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
 core_affinity = "0.8"
 quanta = "0.12"
 crossbeam-utils = "0.8"
@@ -26,7 +26,7 @@ tachyonfx = "0.22.0"
 nix = { version = "0.29", features = ["signal", "poll"] }
 
 [build-dependencies]
-scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.25" }
+scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
 
 [[bin]]
 name = "scx_cake"
