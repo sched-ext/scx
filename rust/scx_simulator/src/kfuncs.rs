@@ -146,6 +146,11 @@ pub struct SimulatorState {
     pub rbc_kfunc_calls: u32,
     /// Accumulated kfunc nanosecond cost during the current RBC measurement window.
     pub rbc_kfunc_ns: u64,
+    /// BPF error message set by `scx_bpf_error()`.
+    ///
+    /// When set, the engine should stop the simulation and report
+    /// `ExitKind::ErrorBpf`. Only the first error is recorded.
+    pub bpf_error: Option<String>,
 }
 
 /// Kernel value of `SCX_TASK_QUEUED` from `enum scx_task_state`.
@@ -840,16 +845,24 @@ pub extern "C" fn scx_bpf_task_cpu(p: *const c_void) -> i32 {
     })
 }
 
-/// Report a scheduler error. In the simulator, we panic.
+/// Report a scheduler error.
+///
+/// Sets a flag in SimulatorState that causes the engine to stop the
+/// simulation with `ExitKind::ErrorBpf`. Only the first error is recorded.
 #[no_mangle]
 pub extern "C" fn scx_bpf_error_bstr(fmt: *const i8, _data: *const u64, _data_sz: u32) {
     let msg = if fmt.is_null() {
         "scheduler error (null fmt)".to_string()
     } else {
         let cstr = unsafe { std::ffi::CStr::from_ptr(fmt) };
-        format!("scheduler error: {}", cstr.to_string_lossy())
+        cstr.to_string_lossy().into_owned()
     };
-    eprintln!("scx_bpf_error: {msg}");
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
+        if sim.bpf_error.is_none() {
+            debug!(msg = %msg, "scx_bpf_error");
+            sim.bpf_error = Some(msg);
+        }
+    });
 }
 
 /// Request re-enqueue of all tasks on the current CPU's local DSQ.
@@ -1315,6 +1328,7 @@ mod tests {
             sched_overhead_rbc_ns: None,
             rbc_kfunc_calls: 0,
             rbc_kfunc_ns: 0,
+            bpf_error: None,
         }
     }
 

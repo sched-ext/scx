@@ -31,6 +31,7 @@ pub fn setup_test() -> MutexGuard<'static, ()> {
 macro_rules! scheduler_tests {
     ($make_sched:expr) => {
         use std::collections::HashSet;
+        use scx_simulator::ExitKind;
 
         /// Smoke test: single task on single CPU runs to completion.
         #[test]
@@ -60,6 +61,7 @@ macro_rules! scheduler_tests {
             let trace = Simulator::new(sched_factory(1)).run(scenario);
             trace.dump();
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             assert!(trace.schedule_count(Pid(1)) > 0, "task was never scheduled");
             assert!(
                 trace.events().iter().any(|e| matches!(
@@ -113,6 +115,7 @@ macro_rules! scheduler_tests {
             let trace = Simulator::new(sched_factory(1)).run(scenario);
             trace.dump();
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             assert!(trace.schedule_count(Pid(1)) > 0, "task 1 was never scheduled");
             assert!(trace.schedule_count(Pid(2)) > 0, "task 2 was never scheduled");
             let rt1 = trace.total_runtime(Pid(1));
@@ -161,6 +164,7 @@ macro_rules! scheduler_tests {
 
             let trace = Simulator::new(sched_factory(4)).run(scenario);
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             assert!(trace.total_runtime(Pid(1)) > 0);
             assert!(trace.total_runtime(Pid(2)) > 0);
 
@@ -223,6 +227,8 @@ macro_rules! scheduler_tests {
             let trace1 = Simulator::new(sched_factory(2)).run(make_scenario());
             let trace2 = Simulator::new(sched_factory(2)).run(make_scenario());
 
+            assert_eq!(trace1.exit_kind(), &ExitKind::Normal, "trace1 should complete normally");
+            assert_eq!(trace2.exit_kind(), &ExitKind::Normal, "trace2 should complete normally");
             assert_eq!(
                 trace1.events().len(),
                 trace2.events().len(),
@@ -294,6 +300,7 @@ macro_rules! scheduler_tests {
             let trace = Simulator::new(sched_factory(1)).run(scenario);
             trace.dump();
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             let rt1 = trace.total_runtime(Pid(1));
             let rt2 = trace.total_runtime(Pid(2));
 
@@ -339,6 +346,7 @@ macro_rules! scheduler_tests {
             let trace = Simulator::new(sched_factory(1)).run(scenario);
             trace.dump();
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             let count = trace.schedule_count(Pid(1));
             assert!(count > 1, "expected multiple schedules, got {count}");
 
@@ -398,6 +406,7 @@ macro_rules! scheduler_tests {
             let trace = Simulator::new(sched_factory(2)).run(scenario);
             trace.dump();
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             let events = trace.events();
 
             // Every TaskScheduled must be preceded by PickTask and SetNextTask
@@ -528,6 +537,7 @@ macro_rules! scheduler_tests {
             let trace = Simulator::new(sched_factory(4)).run(scenario);
             trace.dump();
 
+            assert_eq!(trace.exit_kind(), &ExitKind::Normal, "simulation should complete normally");
             // Pinned task must have been scheduled
             let pinned_schedules = trace.schedule_count(Pid(1));
             assert!(

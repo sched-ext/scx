@@ -32,6 +32,7 @@ use tracing::warn;
 
 use crate::scenario::{
     sched_overhead_rbc_ns_from_env, seed_from_env, NoiseConfig, OverheadConfig, Scenario,
+    DEFAULT_WATCHDOG_TIMEOUT_NS,
 };
 use crate::task::{Phase, RepeatMode, TaskBehavior, TaskDef};
 use crate::types::{CpuId, Pid};
@@ -481,6 +482,8 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         seed: seed_from_env(),
         fixed_priority: false,
         sched_overhead_rbc_ns: sched_overhead_rbc_ns_from_env(),
+        watchdog_timeout_ns: Some(DEFAULT_WATCHDOG_TIMEOUT_NS),
+        ignore_bpf_errors: true,
     })
 }
 
