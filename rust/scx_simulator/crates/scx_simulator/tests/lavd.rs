@@ -581,10 +581,7 @@ fn test_lavd_multi_domain_mig_delta_pct() {
 /// Multi-domain with pinned_slice_ns: dual-DSQ mode (per-CPU + per-cpdom).
 ///
 /// Tests the dual-DSQ vtime comparison path in consume_task (lines 434-458).
-/// TODO(sim-fa170): This test requires __COMPAT_scx_bpf_dsq_peek which
-/// is not yet implemented in the simulator. Enable when available.
 #[test]
-#[ignore]
 fn test_lavd_multi_domain_pinned_slice() {
     let _lock = common::setup_test();
     let sched = DynamicScheduler::lavd_multi_domain(4, 2);
