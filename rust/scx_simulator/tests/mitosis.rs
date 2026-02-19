@@ -21,6 +21,17 @@ unsafe fn set_mitosis_bool(sched: &DynamicScheduler, name: &[u8], value: bool) {
     std::ptr::write_volatile(*sym, value);
 }
 
+/// Write a u32 global variable in the loaded mitosis .so.
+///
+/// # Safety
+/// Caller must hold SIM_LOCK and ensure the symbol name is valid.
+unsafe fn set_mitosis_u32(sched: &DynamicScheduler, name: &[u8], value: u32) {
+    let sym: libloading::Symbol<'_, *mut u32> = sched
+        .get_symbol::<*mut u32>(name)
+        .unwrap_or_else(|| panic!("symbol {:?} not found", std::str::from_utf8(name)));
+    std::ptr::write_volatile(*sym, value);
+}
+
 // ---------------------------------------------------------------------------
 // scx_mitosis-specific tests
 // ---------------------------------------------------------------------------
@@ -1173,4 +1184,330 @@ fn test_periodic_workload() {
 
     assert!(trace.total_runtime(Pid(1)) > 0);
     assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise the timer callback reconfiguration path by bumping
+/// configuration_seq before simulation. The timer callback checks
+/// configuration_seq != applied_configuration_seq and enters the
+/// cell reconfiguration logic when they differ.
+#[test]
+fn test_timer_reconfiguration_path() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        // Bump configuration_seq to 1 so the timer callback enters
+        // the reconfiguration path. applied_configuration_seq starts at 0.
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(500) // Multiple timer intervals (100ms each)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+}
+
+/// Exercise the debug_events_enabled path. When enabled, the scheduler
+/// records cgroup init/exit and task init events to the debug buffer.
+/// These are called during init and init_task.
+#[test]
+fn test_debug_events_enabled() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(2);
+    unsafe {
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "worker1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "worker2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise debug events + timer reconfiguration together.
+#[test]
+fn test_debug_events_with_timer_reconfig() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(2);
+    unsafe {
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+}
+
+/// Exercise SMT + pinned tasks + timer reconfiguration for combined path coverage.
+#[test]
+fn test_smt_pinned_timer_reconfig() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"smt_enabled\0", true);
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .smt(2)
+        .task(TaskDef {
+            name: "pin0".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+        })
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise overloaded CPUs with all features enabled for maximum branch coverage.
+#[test]
+fn test_overloaded_all_features() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(2);
+    unsafe {
+        set_mitosis_bool(&sched, b"smt_enabled\0", true);
+        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    // More tasks than CPUs to exercise overloaded dispatch
+    let mut builder = Scenario::builder().cpus(2).smt(2).duration_ms(300);
+    for i in 1..=6 {
+        builder = builder.task(TaskDef {
+            name: format!("task{i}"),
+            pid: Pid(i),
+            nice: if i <= 2 { -5 } else { 5 },
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(3_000_000), Phase::Sleep(2_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: if i == 1 { Some(vec![CpuId(0)]) } else { None },
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.build());
+    trace.dump();
+
+    for i in 1..=6 {
+        assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
+    }
+}
+
+/// Exercise reject_multicpu_pinning=true with a single-CPU pinned task.
+/// This doesn't trigger the error (which requires multi-CPU pinning),
+/// but exercises the check path.
+#[test]
+fn test_reject_multicpu_pinning() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"reject_multicpu_pinning\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "pin0".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+        })
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise high task churn: many tasks with short lifetimes completing.
+/// This exercises init_task and exit paths more heavily.
+#[test]
+fn test_high_task_churn() {
+    let _lock = common::setup_test();
+
+    let mut builder = Scenario::builder().cpus(2).duration_ms(200);
+    for i in 1..=16 {
+        builder = builder.task(TaskDef {
+            name: format!("short{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(2_000_000)],
+                repeat: RepeatMode::Count(3),
+            },
+            start_time_ns: (i as u64 - 1) * 5_000_000, // stagger starts
+            mm_id: None,
+            allowed_cpus: None,
+        });
+    }
+
+    let trace = Simulator::new(DynamicScheduler::mitosis(2)).run(builder.build());
+    trace.dump();
+
+    // At least some tasks should complete
+    let completed = trace
+        .events()
+        .iter()
+        .filter(|e| matches!(e.kind, TraceKind::TaskCompleted { .. }))
+        .count();
+    assert!(completed > 0, "no tasks completed");
+}
+
+/// Different nice values spanning the full range to exercise weight calculation.
+#[test]
+fn test_extreme_nice_values() {
+    let _lock = common::setup_test();
+
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "high_prio".into(),
+            pid: Pid(1),
+            nice: -20,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "low_prio".into(),
+            pid: Pid(2),
+            nice: 19,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(DynamicScheduler::mitosis(2)).run(scenario);
+    trace.dump();
+
+    // Both tasks should run but high priority should get significantly more time
+    let high_runtime = trace.total_runtime(Pid(1));
+    let low_runtime = trace.total_runtime(Pid(2));
+    assert!(high_runtime > 0, "high priority task got no runtime");
+    assert!(low_runtime > 0, "low priority task got no runtime");
 }

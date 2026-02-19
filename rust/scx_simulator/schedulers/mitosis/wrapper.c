@@ -120,6 +120,33 @@ static void *mitosis_cgrp_storage_get(void *map, void *cgrp, void *value,
 	mitosis_cgrp_storage_get(map, cgrp, value, flags)
 
 /* ---------------------------------------------------------------------------
+ * BPF timer overrides
+ *
+ * bpf_timer_set_callback stores the callback pointer.
+ * bpf_timer_start calls sim_timer_start() (Rust kfunc) to schedule
+ * a TimerFired event in the simulator's event queue.
+ * mitosis_fire_timer() invokes the stored callback from the engine.
+ * ---------------------------------------------------------------------------*/
+static int (*mitosis_timer_cb)(void *, int *, struct bpf_timer *);
+static struct bpf_timer *mitosis_timer_ptr;
+static void *mitosis_timer_map;
+
+extern void sim_timer_start(unsigned long long nsecs);
+
+#undef bpf_timer_init
+#define bpf_timer_init(timer, map, flags) \
+	(mitosis_timer_map = (void *)(map), 0)
+
+#undef bpf_timer_set_callback
+#define bpf_timer_set_callback(timer, cb) \
+	(mitosis_timer_cb = (typeof(mitosis_timer_cb))(cb), \
+	 mitosis_timer_ptr = (struct bpf_timer *)(timer), 0)
+
+#undef bpf_timer_start
+#define bpf_timer_start(timer, nsecs, flags) \
+	(sim_timer_start(nsecs), 0)
+
+/* ---------------------------------------------------------------------------
  * Include mitosis source
  * ---------------------------------------------------------------------------*/
 #include "intf.h"
@@ -329,6 +356,16 @@ static void *mitosis_cgrp_storage_get(void *map, void *cgrp, void *value,
 }
 
 /* ---------------------------------------------------------------------------
+ * fire_timer: called from the Rust engine when a TimerFired event fires.
+ * ---------------------------------------------------------------------------*/
+void mitosis_fire_timer(void)
+{
+	int key = 0;
+	if (mitosis_timer_cb && mitosis_timer_ptr)
+		mitosis_timer_cb(mitosis_timer_map, &key, mitosis_timer_ptr);
+}
+
+/* ---------------------------------------------------------------------------
  * Setup function called from Rust before mitosis_init().
  *
  * Sets global variables, populates the all_cpus bitmask, and clears
@@ -347,6 +384,11 @@ void mitosis_setup(unsigned int num_cpus)
 	memset(task_ctx_arr, 0, sizeof(task_ctx_arr));
 	memset(task_ctx_in_use, 0, sizeof(task_ctx_in_use));
 	memset(cgrp_storage_entries, 0, sizeof(cgrp_storage_entries));
+
+	/* Clear timer state from previous runs */
+	mitosis_timer_cb = NULL;
+	mitosis_timer_ptr = NULL;
+	mitosis_timer_map = NULL;
 
 	/* Set globals to safe simulator values */
 	nr_possible_cpus = num_cpus;
