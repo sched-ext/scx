@@ -205,6 +205,17 @@ void sim_task_set_scx_flags(struct task_struct *p, u32 flags)
 	p->scx.flags = flags;
 }
 
+/* Execution time accounting (sum_exec_runtime) */
+u64 sim_task_get_sum_exec_runtime(struct task_struct *p)
+{
+	return p->se.sum_exec_runtime;
+}
+
+void sim_task_set_sum_exec_runtime(struct task_struct *p, u64 ns)
+{
+	p->se.sum_exec_runtime = ns;
+}
+
 /* Address space (mm_struct pointer) */
 void sim_task_set_mm(struct task_struct *p, void *mm)
 {

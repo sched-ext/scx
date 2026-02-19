@@ -36,6 +36,10 @@ extern "C" {
     pub fn sim_task_get_scx_flags(p: *mut c_void) -> u32;
     pub fn sim_task_set_scx_flags(p: *mut c_void, flags: u32);
 
+    // Execution time accounting (se.sum_exec_runtime)
+    pub fn sim_task_get_sum_exec_runtime(p: *mut c_void) -> u64;
+    pub fn sim_task_set_sum_exec_runtime(p: *mut c_void, ns: u64);
+
     // Address space (mm_struct pointer)
     pub fn sim_task_set_mm(p: *mut c_void, mm: *mut c_void);
     pub fn sim_task_get_mm(p: *mut c_void) -> *mut c_void;
