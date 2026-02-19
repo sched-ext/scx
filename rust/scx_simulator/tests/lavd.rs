@@ -4548,6 +4548,391 @@ fn test_lavd_compaction_combined_stress() {
     assert!(monitor.compaction_occurred(), "compaction didn't fire");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5: idle.bpf.c — SMT topology, CPU saturation, sync wakeup
+// ---------------------------------------------------------------------------
+
+/// Configure LAVD's BPF globals for SMT: set `is_smt_active = true` and
+/// pair adjacent CPUs as siblings (0↔1, 2↔3, …).
+///
+/// # Safety
+/// Must be called after `DynamicScheduler::lavd()` init completes.
+unsafe fn lavd_setup_smt(sched: &DynamicScheduler, nr_cpus: u32) {
+    lavd_set_bool(sched, "is_smt_active\0", true);
+
+    const LAVD_CPU_ID_MAX: usize = 512;
+    let sibling_sym: libloading::Symbol<'_, *mut u16> = sched
+        .get_symbol(b"cpu_sibling\0")
+        .expect("cpu_sibling not found");
+    let sibling = *sibling_sym;
+    for i in (0..nr_cpus.min(LAVD_CPU_ID_MAX as u32)).step_by(2) {
+        let sib = i + 1;
+        if sib < nr_cpus {
+            std::ptr::write_volatile(sibling.add(i as usize), sib as u16);
+            std::ptr::write_volatile(sibling.add(sib as usize), i as u16);
+        }
+    }
+}
+
+/// SMT idle-core selection: with `is_smt_active = true` and paired siblings,
+/// LAVD should prefer fully idle cores (both siblings idle) over partially
+/// idle ones.
+///
+/// Covers: idle.bpf.c lines 687-714 (SMT idle mask acquisition, sticky CPU
+/// fully-idle check, fully-idle-core search in sticky domain).
+#[test]
+fn test_lavd_smt_idle_core_selection() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    // 4 tasks on 8 CPUs (4 cores of 2 threads each).
+    // With some CPUs idle, the scheduler should prefer fully idle cores.
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2) // 2 threads per core
+        .add_task("io-0", 0, workloads::io_bound(100_000, 2_000_000))
+        .add_task("io-1", 0, workloads::io_bound(150_000, 2_500_000))
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=4 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// SMT with no idle cores: all 8 CPUs busy so the idle SMT mask is empty.
+/// LAVD falls through the SMT-preferred path and uses the non-SMT idle
+/// CPU selection or fallback.
+///
+/// Covers: idle.bpf.c `i_smt_empty = true` path when SMT active but
+/// all cores have at least one sibling busy.
+#[test]
+fn test_lavd_smt_no_idle_core() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    // 6 tasks on 4 CPUs — all cores partially or fully busy
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2) // 2 threads per core → 2 physical cores
+        .add_task("io-0", 0, workloads::io_bound(100_000, 1_000_000))
+        .add_task("io-1", 0, workloads::io_bound(150_000, 1_500_000))
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=6 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// CPU saturation: more tasks than CPUs forces the scheduler through
+/// fallback paths when no idle CPU is found. Exercises `find_sticky_cpu_at_cpdom`
+/// and potentially `pick_random_cpu` in idle.bpf.c.
+#[test]
+fn test_lavd_cpu_saturation() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // 8 CPU-bound tasks competing for 4 CPUs — no CPU idle at wakeup
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-6", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-7", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=8 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// SMT + sync wakeup: exercises the intersection of sync wakeup logic
+/// (SCX_WAKE_SYNC) with SMT idle-core selection paths.
+///
+/// Covers: idle.bpf.c `is_sync_wakeup()` returning true combined with
+/// SMT-aware CPU placement.
+#[test]
+fn test_lavd_smt_sync_wakeup() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    // Mix of IO-bound tasks (frequent sync wakeups) and CPU-bound tasks
+    // on an SMT system. IO tasks have short compute / long sleep, producing
+    // waker→wakee patterns that trigger SCX_WAKE_SYNC.
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .add_task("io-fast-0", -10, workloads::io_bound(50_000, 500_000))
+        .add_task("io-fast-1", -10, workloads::io_bound(80_000, 800_000))
+        .add_task("io-fast-2", -5, workloads::io_bound(60_000, 600_000))
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=6 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// SMT + compaction: exercises fully idle core preference during
+/// compaction dispatch, where a subset of CPUs are active.
+#[test]
+fn test_lavd_smt_compaction() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_smt(&sched, nr_cpus);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    let (force_fn, nr_active_fn) = resolve_compaction_fns(&sched);
+    // Only 4 out of 8 CPUs active (2 out of 4 cores)
+    let mut monitor = ForceCompactionMonitor::new(force_fn, nr_active_fn, 4, nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .instant_timing()
+        .add_task("io-0", 0, workloads::io_bound(100_000, 2_000_000))
+        .add_task("io-1", 0, workloads::io_bound(150_000, 2_500_000))
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+    for pid_val in 1..=3 {
+        assert!(result.trace.schedule_count(Pid(pid_val)) > 0);
+    }
+    assert!(
+        monitor.compaction_occurred(),
+        "SMT compaction didn't fire (min_nr_active={})",
+        monitor.min_nr_active,
+    );
+}
+
+/// Saturation with SMT: all cores busy, exercises the idle.bpf.c path
+/// where `i_empty = true` (no idle CPUs at all) and the scheduler must
+/// fall through to `find_sticky_cpu_at_cpdom` / `pick_random_cpu`.
+#[test]
+fn test_lavd_smt_saturation() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_smt(&sched, nr_cpus);
+    }
+
+    // 8 CPU-bound tasks on 4 CPUs (2 cores): system fully saturated
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-6", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-7", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=8 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// Big/little + CPU saturation: exercises the `find_sticky_cpu_at_cpdom`
+/// path (idle.bpf.c lines 676-679) when `i_empty = true` AND `sticky_cpu`
+/// is -ENOENT due to big/little mismatch.
+///
+/// When a task is perf_cri (big) but its prev_cpu is on a little core,
+/// `find_sticky_cpu_and_cpdom` puts it in the not_match bucket and returns
+/// -ENOENT for sticky_cpu. If all CPUs are also busy (i_empty), the code
+/// falls through to `find_sticky_cpu_at_cpdom`.
+#[test]
+fn test_lavd_big_little_saturation() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // CPUs 0,1 = big, CPUs 2,3 = little
+        lavd_set_bool(&sched, "have_little_core\0", true);
+
+        let cap_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"cpu_capacity\0")
+            .expect("cpu_capacity not found");
+        let cap_arr = *cap_sym;
+        std::ptr::write_volatile(cap_arr.add(0), 1024);
+        std::ptr::write_volatile(cap_arr.add(1), 1024);
+        std::ptr::write_volatile(cap_arr.add(2), 512);
+        std::ptr::write_volatile(cap_arr.add(3), 512);
+
+        let big_sym: libloading::Symbol<'_, *mut u8> =
+            sched.get_symbol(b"cpu_big\0").expect("cpu_big not found");
+        let big_arr = *big_sym;
+        std::ptr::write_volatile(big_arr.add(0), 1);
+        std::ptr::write_volatile(big_arr.add(1), 1);
+        std::ptr::write_volatile(big_arr.add(2), 0);
+        std::ptr::write_volatile(big_arr.add(3), 0);
+    }
+
+    // 8 CPU-bound tasks on 4 CPUs: fully saturated with big/little mismatch
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-6", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-7", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(300)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=8 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// Big/little + SMT + IO: exercises the `is_sync_waker_idle` path deeper
+/// (idle.bpf.c lines 496-510) when sync wakeup occurs with busy CPUs.
+/// Also exercises `i_nm == 2` path in `find_sticky_cpu_and_cpdom` when
+/// both prev_cpu and waker_cpu are on not-matching cores.
+#[test]
+fn test_lavd_big_little_smt_sync_wakeup() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_smt(&sched, nr_cpus);
+        lavd_set_bool(&sched, "have_little_core\0", true);
+
+        let cap_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"cpu_capacity\0")
+            .expect("cpu_capacity not found");
+        let cap_arr = *cap_sym;
+        // CPUs 0-3 = big (cores 0-1), CPUs 4-7 = little (cores 2-3)
+        for i in 0..4 {
+            std::ptr::write_volatile(cap_arr.add(i), 1024);
+        }
+        for i in 4..8 {
+            std::ptr::write_volatile(cap_arr.add(i), 512);
+        }
+
+        let big_sym: libloading::Symbol<'_, *mut u8> =
+            sched.get_symbol(b"cpu_big\0").expect("cpu_big not found");
+        let big_arr = *big_sym;
+        for i in 0..4 {
+            std::ptr::write_volatile(big_arr.add(i), 1);
+        }
+        for i in 4..8 {
+            std::ptr::write_volatile(big_arr.add(i), 0);
+        }
+    }
+
+    // Mix of IO (frequent sync wakeups) and CPU-bound tasks on big/little + SMT
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .smt(2)
+        .add_task("io-fast-0", -10, workloads::io_bound(50_000, 500_000))
+        .add_task("io-fast-1", -10, workloads::io_bound(80_000, 800_000))
+        .add_task("io-fast-2", -5, workloads::io_bound(60_000, 600_000))
+        .add_task("io-fast-3", -5, workloads::io_bound(70_000, 700_000))
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-4", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-5", 0, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=10 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
+/// Saturated IO with sync wakeups: many IO-bound tasks that wake each other
+/// up in a chain pattern, exercising the `is_sync_waker_idle` function when
+/// the waker's local DSQ is non-empty (queued_on_cpu check) and when
+/// ia_empty && io_empty at line 744 (no idle CPU in active/overflow).
+#[test]
+fn test_lavd_saturated_io_sync_wakeup() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // 12 IO-bound tasks with very short sleep on 4 CPUs:
+    // frequent sync wakeups with all CPUs often busy
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("io-0", 0, workloads::io_bound(50_000, 200_000))
+        .add_task("io-1", 0, workloads::io_bound(60_000, 250_000))
+        .add_task("io-2", 0, workloads::io_bound(70_000, 300_000))
+        .add_task("io-3", 0, workloads::io_bound(80_000, 350_000))
+        .add_task("io-4", -5, workloads::io_bound(40_000, 150_000))
+        .add_task("io-5", -5, workloads::io_bound(45_000, 180_000))
+        .add_task("io-6", -5, workloads::io_bound(55_000, 220_000))
+        .add_task("io-7", -5, workloads::io_bound(65_000, 280_000))
+        .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("hog-3", 5, workloads::cpu_bound(20_000_000))
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    for pid_val in 1..=12 {
+        assert!(trace.schedule_count(Pid(pid_val)) > 0);
+    }
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk
