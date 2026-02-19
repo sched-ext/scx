@@ -28,12 +28,56 @@ unsafe fn lavd_set_u8(sched: &DynamicScheduler, name: &str, val: u8) {
     std::ptr::write_volatile(*sym, val);
 }
 
+/// Write a u32 value to a named LAVD global variable.
+#[allow(dead_code)]
+unsafe fn lavd_set_u32(sched: &DynamicScheduler, name: &str, val: u32) {
+    let sym: libloading::Symbol<'_, *mut u32> = sched
+        .get_symbol(name.as_bytes())
+        .unwrap_or_else(|| panic!("symbol {name} not found"));
+    std::ptr::write_volatile(*sym, val);
+}
+
 /// Write a u64 value to a named LAVD global variable.
 unsafe fn lavd_set_u64(sched: &DynamicScheduler, name: &str, val: u64) {
     let sym: libloading::Symbol<'_, *mut u64> = sched
         .get_symbol(name.as_bytes())
         .unwrap_or_else(|| panic!("symbol {name} not found"));
     std::ptr::write_volatile(*sym, val);
+}
+
+/// Monitor that injects high-load sys_stat values after init.
+///
+/// `init_sys_stat()` resets `sys_stat.nr_active` and `sys_stat.slice`,
+/// so pre-init writes are overwritten. This monitor continuously writes
+/// to `sys_stat` on every scheduling event to maintain the illusion of
+/// high system load.
+///
+/// sys_stat field offsets (from intf.h struct sys_stat):
+///   32: nr_queued_task (u64)
+///   40: slice (u64)
+struct HighLoadInjector {
+    /// Raw pointer to the `sys_stat` global in the scheduler .so.
+    sys_stat_ptr: *mut u8,
+}
+
+// SAFETY: The raw pointer points into the scheduler .so's global data,
+// which lives as long as the Simulator owns the scheduler.
+unsafe impl Send for HighLoadInjector {}
+unsafe impl Sync for HighLoadInjector {}
+
+impl Monitor for HighLoadInjector {
+    fn sample(&mut self, _ctx: &ProbeContext<'_>) {
+        unsafe {
+            // sys_stat.nr_queued_task at offset 32 (u64): set high to make
+            // can_boost_slice() return false (nr_queued_task > nr_active)
+            let nr_queued = self.sys_stat_ptr.add(32) as *mut u64;
+            std::ptr::write_volatile(nr_queued, 100);
+            // sys_stat.slice at offset 40 (u64): set to 1 so nearly all tasks
+            // satisfy avg_runtime >= slice
+            let slice = self.sys_stat_ptr.add(40) as *mut u64;
+            std::ptr::write_volatile(slice, 1);
+        }
+    }
 }
 
 /// Set up a minimal valid PCO table for core compaction.
@@ -7744,6 +7788,54 @@ fn test_lavd_cgroup_move() {
         trace.schedule_count(Pid(3)) > 0,
         "dest-task was never scheduled"
     );
+}
+
+/// Test slice boost under high system load.
+///
+/// When `can_boost_slice()` returns false (high load), `adjust_slice()` takes
+/// the fallback path (main.bpf.c:334-344) that boosts time slice proportionally
+/// to `lat_cri` for latency-critical tasks. Uses a HighLoadInjector monitor to
+/// set sys_stat after init (since init_sys_stat resets the values).
+#[test]
+fn test_lavd_high_load_slice_boost() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Get raw pointer to sys_stat before the scheduler is consumed by Simulator
+    let sys_stat_ptr: *mut u8 = unsafe {
+        let sym: libloading::Symbol<'_, *mut u8> =
+            sched.get_symbol(b"sys_stat\0").expect("sys_stat not found");
+        *sym
+    };
+
+    // Use mixed workload: IO-bound tasks develop high lat_cri,
+    // CPU-bound tasks develop high avg_runtime (>= sys_stat.slice)
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        // IO-bound tasks: short run + sleep → high lat_cri
+        .add_task("io-cri-1", -10, workloads::io_bound(50_000, 200_000))
+        .add_task("io-cri-2", -10, workloads::io_bound(30_000, 150_000))
+        // CPU-bound tasks: long run → high avg_runtime, exercise slice boost
+        .add_task("cpu-hog-1", 5, workloads::cpu_bound(20_000_000))
+        .add_task("cpu-hog-2", 5, workloads::cpu_bound(20_000_000))
+        .add_task("cpu-hog-3", 10, workloads::cpu_bound(20_000_000))
+        .add_task("cpu-hog-4", 10, workloads::cpu_bound(20_000_000))
+        .add_task("cpu-hog-5", 15, workloads::cpu_bound(20_000_000))
+        .add_task("cpu-hog-6", 15, workloads::cpu_bound(20_000_000))
+        .duration_ms(200)
+        .build();
+
+    let mut monitor = HighLoadInjector { sys_stat_ptr };
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    // All tasks should run despite high-load conditions
+    for pid in 1..=8 {
+        assert!(
+            result.trace.schedule_count(Pid(pid)) > 0,
+            "task Pid({pid}) was never scheduled"
+        );
+    }
 }
 
 /// Test CPU bandwidth with dequeue path exercised via preemption.

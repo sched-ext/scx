@@ -236,6 +236,16 @@ fn start_rbc(state: &mut SimulatorState) {
     }
 }
 
+/// Update `p->se.sum_exec_runtime` before a scheduler callback.
+///
+/// In the kernel, `update_curr()` increments `sum_exec_runtime` by the
+/// CPU time consumed since `exec_start`. The simulator mirrors this by
+/// computing elapsed time from `task_started_at` and adding it to the
+/// base snapshot taken when the task started running.
+fn update_sum_exec(raw: *mut c_void, base: TimeNs, elapsed: TimeNs) {
+    unsafe { ffi::sim_task_set_sum_exec_runtime(raw, base + elapsed) };
+}
+
 /// Disable the RBC counter, read the count, and charge RBC-derived time to `cpu`.
 fn charge_sched_time(state: &mut SimulatorState, cpu: CpuId, ops: &str) {
     if let Some(ref rbc) = state.rbc_counter {
@@ -878,6 +888,17 @@ impl<S: Scheduler> Simulator<S> {
         // Save pre-tick slice to detect if scheduler zeroed it
         let pre_tick_slice = unsafe { ffi::sim_task_get_slice(raw) };
 
+        // Update sum_exec_runtime before tick (LAVD reads it via
+        // task_exec_time in account_task_runtime).
+        {
+            let task = tasks.get(&pid).unwrap();
+            let started_at = state.cpus[cpu.0 as usize].task_started_at.unwrap_or(0);
+            let elapsed = state.cpus[cpu.0 as usize]
+                .local_clock
+                .saturating_sub(started_at);
+            update_sum_exec(raw, task.sum_exec_base, elapsed);
+        }
+
         unsafe {
             kfuncs::enter_sim(state, cpu);
             start_rbc(state);
@@ -1363,6 +1384,12 @@ impl<S: Scheduler> Simulator<S> {
         // Set slice to 0: the full slice was consumed (used by stopping() for vtime)
         unsafe { crate::ffi::sim_task_set_slice(raw, 0) };
 
+        // Update sum_exec_runtime: task consumed its full slice on-CPU
+        {
+            let task = tasks.get(&pid).unwrap();
+            update_sum_exec(raw, task.sum_exec_base, slice);
+        }
+
         unsafe {
             kfuncs::enter_sim(state, cpu);
             start_rbc(state);
@@ -1474,6 +1501,12 @@ impl<S: Scheduler> Simulator<S> {
         // Set slice to reflect consumed time (used by stopping() for vtime)
         let remaining_slice = original_slice.saturating_sub(time_consumed);
         unsafe { crate::ffi::sim_task_set_slice(raw, remaining_slice) };
+
+        // Update sum_exec_runtime: task consumed time_consumed ns on-CPU
+        {
+            let task = tasks.get(&pid).unwrap();
+            update_sum_exec(raw, task.sum_exec_base, time_consumed);
+        }
 
         unsafe {
             kfuncs::enter_sim(state, cpu);
@@ -1942,6 +1975,12 @@ impl<S: Scheduler> Simulator<S> {
         let remaining_slice = original_slice.saturating_sub(consumed);
         unsafe { crate::ffi::sim_task_set_slice(raw, remaining_slice) };
 
+        // Update sum_exec_runtime: task consumed `consumed` ns on-CPU
+        {
+            let task = tasks.get(&pid).unwrap();
+            update_sum_exec(raw, task.sum_exec_base, consumed);
+        }
+
         unsafe {
             kfuncs::enter_sim(state, cpu);
             start_rbc(state);
@@ -2030,6 +2069,12 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         let raw = task.raw();
+
+        // Save sum_exec_runtime base for this run period. LAVD's
+        // running() captures last_sum_exec_clk = task_exec_time(p),
+        // so sum_exec_runtime must be correct at this point (it is,
+        // from the last stopping() update or 0 for the first run).
+        task.sum_exec_base = unsafe { ffi::sim_task_get_sum_exec_runtime(raw) };
 
         // Call enable on first schedule
         if !task.enabled {

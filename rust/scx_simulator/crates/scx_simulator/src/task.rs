@@ -162,6 +162,13 @@ pub struct SimTask {
     /// Running or goes to Sleeping. Matches kernel semantics: only reset
     /// when the task actually runs, not when dequeued and re-enqueued.
     pub runnable_at_ns: Option<TimeNs>,
+    /// Snapshot of `sum_exec_runtime` when the task last started running.
+    ///
+    /// The kernel's `update_curr()` increments `p->se.sum_exec_runtime`
+    /// by CPU time consumed. The simulator mirrors this by saving the
+    /// base value at `running()` and computing `base + elapsed` before
+    /// `tick()` and `stopping()` callbacks.
+    pub sum_exec_base: TimeNs,
 }
 
 impl SimTask {
@@ -201,6 +208,7 @@ impl SimTask {
             enabled: false,
             prev_cpu: CpuId(0),
             runnable_at_ns: None,
+            sum_exec_base: 0,
         }
     }
 
