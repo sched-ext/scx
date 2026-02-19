@@ -98,6 +98,14 @@ struct Cli {
     /// vm: launch virtme-ng VM with rt-app and scheduler
     #[arg(long, value_enum, default_value_t = RealRunMode::Off)]
     real_run: RealRunMode,
+
+    /// Record a Perfetto trace using wprof during VM execution.
+    ///
+    /// Requires --real-run vm. When enabled, an extra CPU is added to the VM
+    /// and isolated using isolcpus for running the wprof tracer. The trace
+    /// file is written to the current working directory.
+    #[arg(long)]
+    wprof: bool,
 }
 
 fn main() {
@@ -152,13 +160,18 @@ fn run(cli: &Cli) -> Result<(), String> {
         scenario.sched_overhead_rbc_ns = Some(0);
     }
 
+    // Validate --wprof requires --real-run vm
+    if cli.wprof && cli.real_run != RealRunMode::Vm {
+        return Err("--wprof requires --real-run vm".into());
+    }
+
     // Handle --real-run mode
     match cli.real_run {
         RealRunMode::Off => {
             run_simulation(cli, scenario)?;
         }
         RealRunMode::Vm => {
-            real_run::run_vm(workload_path, &cli.scheduler, cli.cpus)?;
+            real_run::run_vm(workload_path, &cli.scheduler, cli.cpus, cli.wprof)?;
         }
     }
 
