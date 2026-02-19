@@ -31,6 +31,22 @@ pub struct CpuPreemptEvent {
     pub acquire_at_ns: TimeNs,
 }
 
+/// Cgroup migration event: move a task between cgroups at a given time.
+///
+/// Simulates a task being moved between cgroups (e.g., via cgroup.procs write).
+/// The engine calls `cgroup_move` at `at_ns`.
+#[derive(Debug, Clone)]
+pub struct CgroupMigrateEvent {
+    /// PID of the task to migrate.
+    pub pid: Pid,
+    /// Name of the source cgroup.
+    pub from_cgroup: String,
+    /// Name of the destination cgroup.
+    pub to_cgroup: String,
+    /// Simulation time at which the migration occurs.
+    pub at_ns: TimeNs,
+}
+
 /// CPU bandwidth configuration for a cgroup (cpu.max parameters).
 #[derive(Debug, Clone)]
 pub struct CgroupBandwidth {
@@ -322,6 +338,8 @@ pub struct Scenario {
     pub hotplug_events: Vec<HotplugEvent>,
     /// CPU preemption events (higher-priority scheduler class).
     pub cpu_preempt_events: Vec<CpuPreemptEvent>,
+    /// Cgroup migration events (task moves between cgroups at runtime).
+    pub cgroup_migrate_events: Vec<CgroupMigrateEvent>,
 }
 
 /// Builder for constructing scenarios.
@@ -341,6 +359,7 @@ pub struct ScenarioBuilder {
     ignore_bpf_errors: bool,
     hotplug_events: Vec<HotplugEvent>,
     cpu_preempt_events: Vec<CpuPreemptEvent>,
+    cgroup_migrate_events: Vec<CgroupMigrateEvent>,
 }
 
 impl Scenario {
@@ -361,6 +380,7 @@ impl Scenario {
             ignore_bpf_errors: true, // Default true for compatibility
             hotplug_events: Vec::new(),
             cpu_preempt_events: Vec::new(),
+            cgroup_migrate_events: Vec::new(),
         }
     }
 }
@@ -656,6 +676,26 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Schedule a task cgroup migration at a specific simulation time.
+    ///
+    /// At `at_ns`, the engine calls `cgroup_move` for the task, moving it
+    /// from `from_cgroup` to `to_cgroup`.
+    pub fn cgroup_migrate(
+        mut self,
+        pid: Pid,
+        from_cgroup: &str,
+        to_cgroup: &str,
+        at_ns: TimeNs,
+    ) -> Self {
+        self.cgroup_migrate_events.push(CgroupMigrateEvent {
+            pid,
+            from_cgroup: from_cgroup.to_string(),
+            to_cgroup: to_cgroup.to_string(),
+            at_ns,
+        });
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -688,6 +728,7 @@ impl ScenarioBuilder {
             ignore_bpf_errors: self.ignore_bpf_errors,
             hotplug_events: self.hotplug_events,
             cpu_preempt_events: self.cpu_preempt_events,
+            cgroup_migrate_events: self.cgroup_migrate_events,
         }
     }
 }

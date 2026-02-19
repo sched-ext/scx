@@ -59,8 +59,8 @@ pub use monitor::{Monitor, ProbeContext, ProbePoint};
 pub use perf::RbcCounter;
 pub use rtapp::load_rtapp;
 pub use scenario::{
-    CgroupBandwidth, CgroupDef, CpuPreemptEvent, HotplugEvent, NoiseConfig, OverheadConfig,
-    Scenario,
+    CgroupBandwidth, CgroupDef, CgroupMigrateEvent, CpuPreemptEvent, HotplugEvent, NoiseConfig,
+    OverheadConfig, Scenario,
 };
 pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, RepeatMode, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
