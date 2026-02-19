@@ -1,0 +1,10 @@
+[package]
+name = "scx_cgroup_tree"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Platform-independent cgroup tree types for testing and simulation"
+
+[dependencies]
+# No dependencies required for basic functionality
+# QuickCheck support can be added later for property-based testing
