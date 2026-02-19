@@ -65,18 +65,24 @@ pub fn run_vm(
     // Build the command to run inside the VM.
     let sched_bin = find_scheduler_binary(scheduler)?;
     let inner_cmd = if enable_wprof {
-        // With wprof: pin tracer to isolated CPU, run workload on remaining CPUs
+        // With wprof: pin tracer to isolated CPU, run workload on remaining CPUs.
+        // Use -T for Perfetto trace output, -d60000 for 60s max duration.
+        // Send SIGINT to wprof for clean shutdown and trace flush.
+        // Note: We run as root in the VM when wprof is enabled, so no sudo needed.
         format!(
-            "taskset -c {isolated_cpu} wprof -o {VM_WORKSPACE}/{TRACE_FILENAME} &\n\
+            "taskset -c {isolated_cpu} wprof -d60000 -T {VM_WORKSPACE}/{TRACE_FILENAME} &\n\
              WPROF_PID=$!\n\
+             sleep 0.5\n\
              {sched_bin} &\n\
              SCHED_PID=$!\n\
              sleep 1\n\
              echo '=== Running rt-app ==='\n\
              taskset -c {workload_cpus} {RTAPP_BIN} {workload}\n\
              echo '=== rt-app completed ==='\n\
-             kill $WPROF_PID $SCHED_PID 2>/dev/null || true\n\
-             wait $WPROF_PID $SCHED_PID 2>/dev/null || true",
+             kill -INT $WPROF_PID 2>/dev/null || true\n\
+             kill $SCHED_PID 2>/dev/null || true\n\
+             wait $WPROF_PID 2>/dev/null || true\n\
+             wait $SCHED_PID 2>/dev/null || true",
             sched_bin = sched_bin.display(),
             workload = workload_abs.display(),
         )
@@ -97,7 +103,12 @@ pub fn run_vm(
     };
 
     // Launch vng with the host kernel (-r).
-    let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+    // Use root when wprof is enabled (wprof needs CAP_SYS_ADMIN for BPF tracing).
+    let user = if enable_wprof {
+        "root".to_string()
+    } else {
+        std::env::var("USER").unwrap_or_else(|_| "root".into())
+    };
 
     // Get current working directory for rwdir mount
     let cwd =
