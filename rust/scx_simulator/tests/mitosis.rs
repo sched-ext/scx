@@ -1511,3 +1511,514 @@ fn test_extreme_nice_values() {
     assert!(high_runtime > 0, "high priority task got no runtime");
     assert!(low_runtime > 0, "low priority task got no runtime");
 }
+
+/// Exercise `cpu_controller_disabled=false` path.
+/// When CPU controller is NOT disabled, `init_task` uses `args->cgroup`
+/// directly (line 1578) instead of calling `task_cgroup()` → `init_cgrp_ctx_with_ancestors()`.
+/// Also covers the `!cpu_controller_disabled` branch in `task_cgroup()` (line 147)
+/// and the `maybe_refresh_cell` path that skips the cgroup-change check (line 573).
+#[test]
+fn test_cpu_controller_enabled() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "t1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "t2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise `cpu_controller_disabled=false` with pinned tasks.
+/// Covers the `__COMPAT_scx_bpf_task_cgroup(p)` call inside `task_cgroup()`
+/// when the cgroup change detection is skipped in `maybe_refresh_cell()`.
+#[test]
+fn test_cpu_controller_enabled_pinned() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "pin0".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+        })
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(15_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise `cpu_controller_disabled=false` with timer reconfiguration.
+/// When CPU controller is enabled, the `maybe_refresh_cell` skips the
+/// cgroup-change check (line 573), but still checks `configuration_seq`.
+#[test]
+fn test_cpu_controller_enabled_timer_reconfig() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(500)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+}
+
+/// Exercise `exiting_task_workaround_enabled=true` combined with
+/// `cpu_controller_disabled=false`.
+/// When CPU controller is enabled, init_task goes through args->cgroup
+/// (the root cgroup), so the cgrp_ctx lookup should succeed for root
+/// and the workaround path won't trigger normally — but having the
+/// flag enabled exercises the guard checks differently.
+#[test]
+fn test_exiting_task_workaround_enabled() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(2);
+    unsafe {
+        set_mitosis_bool(&sched, b"exiting_task_workaround_enabled\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000)],
+                repeat: RepeatMode::Count(3),
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "bg".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise `reject_multicpu_pinning=true` with multi-CPU pinning.
+/// The task is pinned to 2 CPUs (not all cell CPUs), which exercises
+/// the `reject_multicpu_pinning` branch in `update_task_cpumask`.
+/// Since all tasks are in cell 0 in the simulator (tctx->cell == 0),
+/// the check `tctx->cell != 0` will prevent the error — but we
+/// exercise the condition evaluation path.
+#[test]
+fn test_reject_multicpu_pinning_two_cpus() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"reject_multicpu_pinning\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "multi_pin".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+        })
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise the `stopping()` path where `cidx == 0 && !all_cell_cpus_allowed`.
+/// This skips the `cell_cycles += used` accounting (line 1260-1267).
+/// A pinned task in cell 0 with limited CPU affinity will have
+/// `all_cell_cpus_allowed=false` and `cidx=0`.
+#[test]
+fn test_stopping_skip_cell_cycles() {
+    let _lock = common::setup_test();
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "pin0".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(5_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            // Pinned to one CPU => all_cell_cpus_allowed = false
+            allowed_cpus: Some(vec![CpuId(0)]),
+        })
+        .task(TaskDef {
+            name: "free".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(DynamicScheduler::mitosis(4)).run(scenario);
+    trace.dump();
+
+    // Pinned task runs on CPU 0 only
+    for event in trace.events() {
+        if let TraceKind::TaskScheduled { pid } = &event.kind {
+            if *pid == Pid(1) {
+                assert_eq!(event.cpu, CpuId(0));
+            }
+        }
+    }
+    assert!(trace.total_runtime(Pid(1)) > 0);
+}
+
+/// Exercise the `split_vtime_updates` + `cpu_controller_disabled=false` combo.
+/// Covers both the split vtime path and the CPU controller enabled path.
+#[test]
+fn test_split_vtime_cpu_controller_enabled() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(2);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "t1".into(),
+            pid: Pid(1),
+            nice: -3,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "t2".into(),
+            pid: Pid(2),
+            nice: 3,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(8_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    assert!(trace.total_runtime(Pid(1)) > 0);
+    assert!(trace.total_runtime(Pid(2)) > 0);
+}
+
+/// Exercise all features enabled with `cpu_controller_disabled=false`.
+/// This combines timer reconfig, debug events, SMT, split vtime, and
+/// CPU controller enabled for maximum branch coverage.
+#[test]
+fn test_all_features_cpu_controller_enabled() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+        set_mitosis_bool(&sched, b"smt_enabled\0", true);
+        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
+        set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
+        set_mitosis_u32(&sched, b"configuration_seq\0", 1);
+    }
+
+    let mut builder = Scenario::builder().cpus(4).smt(2).duration_ms(500);
+    for i in 1..=6 {
+        builder = builder.task(TaskDef {
+            name: format!("t{i}"),
+            pid: Pid(i),
+            nice: (i as i8 % 5) - 2,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(3_000_000), Phase::Sleep(2_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: if i == 1 { Some(vec![CpuId(0)]) } else { None },
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.build());
+    trace.dump();
+
+    for i in 1..=6 {
+        assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
+    }
+}
+
+/// Exercise many tasks with staggered starts to maximize timer
+/// interaction with various task lifecycle phases.
+#[test]
+fn test_staggered_many_tasks_timer() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_u32(&sched, b"configuration_seq\0", 2);
+    }
+
+    let mut builder = Scenario::builder().cpus(4).duration_ms(600);
+    for i in 1..=12 {
+        builder = builder.task(TaskDef {
+            name: format!("t{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: (i as u64 - 1) * 10_000_000,
+            mm_id: None,
+            allowed_cpus: None,
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.build());
+    trace.dump();
+
+    // At least half should have run
+    let running = (1..=12)
+        .filter(|&i| trace.total_runtime(Pid(i)) > 0)
+        .count();
+    assert!(
+        running >= 6,
+        "expected at least 6/12 tasks to run, got {running}"
+    );
+}
+
+/// Exercise SMT enabled with cpu_controller_disabled=false.
+#[test]
+fn test_smt_cpu_controller_enabled() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(4);
+    unsafe {
+        set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
+        set_mitosis_bool(&sched, b"smt_enabled\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .smt(2)
+        .task(TaskDef {
+            name: "t1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(8_000_000), Phase::Sleep(4_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "t2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(8_000_000), Phase::Sleep(4_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .task(TaskDef {
+            name: "t3".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(20_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    trace.dump();
+
+    for pid in 1..=3 {
+        assert!(
+            trace.total_runtime(Pid(pid)) > 0,
+            "task {pid} got no runtime"
+        );
+    }
+}
+
+/// Long-running simulation to exercise many timer firings at different
+/// configuration_seq values. Bumps seq higher to test convergence.
+#[test]
+fn test_timer_many_reconfigurations() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::mitosis(8);
+    unsafe {
+        set_mitosis_u32(&sched, b"configuration_seq\0", 5);
+    }
+
+    let mut builder = Scenario::builder().cpus(8).duration_ms(800);
+    for i in 1..=8 {
+        builder = builder.task(TaskDef {
+            name: format!("t{i}"),
+            pid: Pid(i),
+            nice: (i as i8 % 5) - 2,
+            behavior: TaskBehavior {
+                phases: vec![
+                    Phase::Run(4_000_000 + (i as u64) * 1_000_000),
+                    Phase::Sleep(3_000_000),
+                ],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: if i <= 2 {
+                Some(vec![CpuId((i - 1) as u32)])
+            } else {
+                None
+            },
+        });
+    }
+
+    let trace = Simulator::new(sched).run(builder.build());
+    trace.dump();
+
+    for i in 1..=8 {
+        assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
+    }
+}
