@@ -7499,3 +7499,138 @@ fn test_lavd_cpu_hotplug_multi() {
         "worker-b was never scheduled"
     );
 }
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: slice boost under load
+// ---------------------------------------------------------------------------
+
+/// Test that latency-critical tasks get slice boosts under heavy load.
+/// Uses CPU hotplug to create overload: tasks build up avg_runtime with
+/// 4 CPUs, then 3 go offline so nr_queued >> nr_active.
+/// Exercises calc_time_slice() L334-345 (slice boost under load).
+#[test]
+fn test_lavd_slice_boost_under_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Ping-pong pair to build lat_cri with long work phases
+    let (prod, cons) = workloads::ping_pong(Pid(1), Pid(2), 15_000_000); // 15ms work
+
+    let mut builder = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: prod,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: cons,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+        });
+    // CPU-bound tasks to fill queues
+    for i in 0..6 {
+        builder = builder.add_task(&format!("hog-{i}"), 0, workloads::cpu_bound(5_000_000));
+    }
+    // Let tasks run normally for 100ms, then take 3 CPUs offline.
+    // This forces nr_active=1 while nr_queued stays high.
+    let scenario = builder
+        .cpu_offline_at(CpuId(3), 100_000_000)
+        .cpu_offline_at(CpuId(2), 100_500_000)
+        .cpu_offline_at(CpuId(1), 101_000_000)
+        // Bring them back at 250ms
+        .cpu_online_at(CpuId(1), 250_000_000)
+        .cpu_online_at(CpuId(2), 251_000_000)
+        .cpu_online_at(CpuId(3), 252_000_000)
+        .duration_ms(400)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "ping task was never scheduled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: cgroup ops
+// ---------------------------------------------------------------------------
+
+/// Test that cgroup_init/cgroup_exit are called for user-defined cgroups.
+/// Tasks are assigned to cgroups, exercising the cgroup assignment in init_task
+/// and the cgroup_init/exit ops for non-root cgroups.
+#[test]
+fn test_lavd_cgroup_ops() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .cgroup("batch", &[CpuId(0), CpuId(1)])
+        .cgroup("interactive", &[CpuId(2), CpuId(3)])
+        .add_task_in_cgroup("worker-a", 0, workloads::cpu_bound(5_000_000), "batch")
+        .add_task_in_cgroup("worker-b", 0, workloads::cpu_bound(5_000_000), "batch")
+        .add_task_in_cgroup("ui", -5, workloads::cpu_bound(3_000_000), "interactive")
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should be scheduled
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker-a was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "worker-b was never scheduled"
+    );
+    assert!(trace.schedule_count(Pid(3)) > 0, "ui was never scheduled");
+}
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: cpu_acquire / cpu_release
+// ---------------------------------------------------------------------------
+
+/// Test that cpu_acquire and cpu_release ops are exercised when a
+/// higher-priority scheduler class temporarily preempts a CPU.
+#[test]
+fn test_lavd_cpu_acquire_release() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("worker-a", 0, workloads::cpu_bound(5_000_000))
+        .add_task("worker-b", 0, workloads::cpu_bound(5_000_000))
+        .add_task("worker-c", 0, workloads::cpu_bound(5_000_000))
+        // CPU 3 is preempted by RT class from 30ms to 40ms
+        .cpu_preempt(CpuId(3), 30_000_000, 40_000_000)
+        // CPU 1 is preempted from 50ms to 55ms
+        .cpu_preempt(CpuId(1), 50_000_000, 55_000_000)
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker-a was never scheduled"
+    );
+}

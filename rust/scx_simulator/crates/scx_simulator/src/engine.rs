@@ -9,6 +9,7 @@ use std::ffi::c_void;
 
 use tracing::{debug, info, trace};
 
+use crate::cgroup::{clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupRegistry};
 use crate::cpu::{LastStopReason, SimCpu};
 use crate::dsq::DsqManager;
 use crate::ffi::{self, Scheduler};
@@ -184,6 +185,10 @@ enum EventKind {
     CpuOffline { cpu: CpuId },
     /// A CPU comes online (hotplug add).
     CpuOnline { cpu: CpuId },
+    /// A higher-priority scheduler class takes a CPU (cpu_release).
+    CpuRelease { cpu: CpuId },
+    /// sched_ext regains a CPU from higher-priority class (cpu_acquire).
+    CpuAcquire { cpu: CpuId },
 }
 
 /// The main simulator.
@@ -427,13 +432,66 @@ impl<S: Scheduler> Simulator<S> {
             assert!(rc == 0, "scheduler init failed with rc={rc}");
         }
 
-        // Call init_task for each task (after scheduler init)
+        // Build cgroup registry from scenario definitions and call cgroup_init
+        // for each cgroup (including root). In the kernel, cgroup_init is called
+        // for all existing cgroups when the scheduler is loaded.
+        let mut cgroup_registry = CgroupRegistry::new(nr_cpus);
+        for cg_def in &scenario.cgroups {
+            let parent_cgid = match &cg_def.parent_name {
+                Some(parent) => {
+                    cgroup_registry
+                        .get_by_name(parent)
+                        .unwrap_or_else(|| panic!("parent cgroup '{parent}' not found"))
+                        .cgid
+                }
+                None => CgroupId::ROOT,
+            };
+            cgroup_registry.create(&cg_def.name, parent_cgid, cg_def.cpuset.clone());
+        }
+        unsafe { install_cgroup_registry(&mut cgroup_registry) };
+
+        // Call cgroup_init for each cgroup (root first, then children in order)
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
+            for cgid in cgroup_registry.all_cgids_preorder() {
+                if let Some(raw) = cgroup_registry.get_raw(cgid) {
+                    start_rbc(&mut state);
+                    let rc = self.scheduler.cgroup_init(raw, std::ptr::null_mut());
+                    charge_sched_time(&mut state, CpuId(0), "cgroup_init");
+                    assert!(rc == 0, "cgroup_init failed for cgid={} rc={rc}", cgid.0);
+                }
+            }
+            kfuncs::exit_sim();
+        }
+
+        // Pre-assign tasks to cgroups before init_task.
+        // Build a map from pid to cgroup raw pointer for tasks with cgroup_name.
+        let mut task_cgroup_map: HashMap<Pid, *mut c_void> = HashMap::new();
+        for def in &scenario.tasks {
+            if let Some(ref cg_name) = def.cgroup_name {
+                let cgrp_raw = cgroup_registry
+                    .get_by_name(cg_name)
+                    .unwrap_or_else(|| {
+                        panic!("cgroup '{cg_name}' not found for task {:?}", def.pid)
+                    })
+                    .raw();
+                unsafe { ffi::sim_task_set_cgroup(tasks[&def.pid].raw(), cgrp_raw) };
+                task_cgroup_map.insert(def.pid, cgrp_raw);
+            }
+        }
+
+        // Call init_task for each task (after scheduler init + cgroup assignment)
         unsafe {
             let cpu = state.current_cpu;
             kfuncs::enter_sim(&mut state, cpu);
             for task in tasks.values() {
                 start_rbc(&mut state);
-                let rc = self.scheduler.init_task(task.raw());
+                let rc = if let Some(&cgrp_raw) = task_cgroup_map.get(&task.pid) {
+                    self.scheduler.init_task_in_cgroup(task.raw(), cgrp_raw)
+                } else {
+                    self.scheduler.init_task(task.raw())
+                };
                 charge_sched_time(&mut state, CpuId(0), "init_task");
                 assert!(rc == 0, "init_task failed for pid={} rc={rc}", task.pid.0);
                 // Notify scheduler of initial cpumask (mirrors kernel enumeration)
@@ -496,6 +554,12 @@ impl<S: Scheduler> Simulator<S> {
             events.push(hp.time_ns, kind);
         }
 
+        // Seed CPU preemption events (higher-priority scheduler class)
+        for pe in &scenario.cpu_preempt_events {
+            events.push(pe.release_at_ns, EventKind::CpuRelease { cpu: pe.cpu });
+            events.push(pe.acquire_at_ns, EventKind::CpuAcquire { cpu: pe.cpu });
+        }
+
         // Track the exit kind (may be set by error detection)
         let mut exit_kind = ExitKind::Normal;
         let watchdog_timeout = scenario.watchdog_timeout_ns;
@@ -515,7 +579,9 @@ impl<S: Scheduler> Simulator<S> {
                 | EventKind::TaskPhaseComplete { cpu }
                 | EventKind::Tick { cpu }
                 | EventKind::CpuOffline { cpu }
-                | EventKind::CpuOnline { cpu } => {
+                | EventKind::CpuOnline { cpu }
+                | EventKind::CpuRelease { cpu }
+                | EventKind::CpuAcquire { cpu } => {
                     state.advance_cpu_clock(*cpu);
                     kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(*cpu));
                 }
@@ -562,6 +628,12 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 EventKind::CpuOnline { cpu } => {
                     self.handle_cpu_online(cpu, &mut state, &mut tasks, &mut events, monitor);
+                }
+                EventKind::CpuRelease { cpu } => {
+                    self.handle_cpu_release(cpu, &mut state, &mut tasks, &mut events, monitor);
+                }
+                EventKind::CpuAcquire { cpu } => {
+                    self.handle_cpu_acquire(cpu, &mut state, &mut tasks, &mut events, monitor);
                 }
             }
 
@@ -620,6 +692,25 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
+        // Call cgroup_exit for each cgroup (reverse order: children before root)
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(&mut state, cpu);
+            let cgids: Vec<CgroupId> = cgroup_registry
+                .all_cgids_preorder()
+                .into_iter()
+                .rev()
+                .collect();
+            for cgid in cgids {
+                if let Some(raw) = cgroup_registry.get_raw(cgid) {
+                    start_rbc(&mut state);
+                    self.scheduler.cgroup_exit(raw);
+                    charge_sched_time(&mut state, CpuId(0), "cgroup_exit");
+                }
+            }
+            kfuncs::exit_sim();
+        }
+
         // Call scheduler exit
         unsafe {
             let cpu = state.current_cpu;
@@ -629,6 +720,9 @@ impl<S: Scheduler> Simulator<S> {
             charge_sched_time(&mut state, CpuId(0), "exit");
             kfuncs::exit_sim();
         }
+
+        // Clean up cgroup registry
+        clear_cgroup_registry();
 
         // Free the synthetic idle task
         unsafe { ffi::sim_task_free(idle_task_raw) };
@@ -855,6 +949,89 @@ impl<S: Scheduler> Simulator<S> {
         events.push(next_tick, EventKind::Tick { cpu });
 
         // Try to dispatch work to the newly online CPU
+        self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
+    }
+
+    /// Handle a higher-priority scheduler class taking a CPU (cpu_release).
+    ///
+    /// Preempts any running SCX task, calls `ops.cpu_release`, and stops
+    /// ticks on the CPU until `cpu_acquire` fires.
+    fn handle_cpu_release(
+        &self,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        monitor: &mut dyn Monitor,
+    ) {
+        if !state.cpus[cpu.0 as usize].is_online {
+            return;
+        }
+
+        info!(cpu = cpu.0, "CPU RELEASE (higher-priority class)");
+
+        // Preempt running task (if any)
+        if state.cpus[cpu.0 as usize].current_task.is_some() {
+            self.preempt_current(cpu, state, tasks, events, monitor);
+        }
+
+        // Call cpu_release
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            self.scheduler
+                .cpu_release(cpu.0 as i32, std::ptr::null_mut());
+            charge_sched_time(state, cpu, "cpu_release");
+            kfuncs::exit_sim();
+        }
+
+        // Mark CPU as temporarily unavailable (reuse is_online)
+        state.cpus[cpu.0 as usize].is_online = false;
+    }
+
+    /// Handle sched_ext regaining a CPU from a higher-priority class (cpu_acquire).
+    ///
+    /// Calls `ops.cpu_acquire`, marks the CPU available, and tries to dispatch.
+    fn handle_cpu_acquire(
+        &self,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        monitor: &mut dyn Monitor,
+    ) {
+        info!(
+            cpu = cpu.0,
+            "CPU ACQUIRE (regained from higher-priority class)"
+        );
+
+        state.cpus[cpu.0 as usize].is_online = true;
+
+        // Call cpu_acquire
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            self.scheduler
+                .cpu_acquire(cpu.0 as i32, std::ptr::null_mut());
+            charge_sched_time(state, cpu, "cpu_acquire");
+            kfuncs::exit_sim();
+        }
+
+        // CPU starts idle after being reacquired
+        unsafe { ffi::scx_test_set_idle_cpumask(cpu.0 as i32) };
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            self.scheduler.update_idle(cpu.0 as i32, true);
+            charge_sched_time(state, cpu, "update_idle");
+            kfuncs::exit_sim();
+        }
+
+        // Restart tick chain
+        let next_tick = state.cpus[cpu.0 as usize].local_clock + TICK_INTERVAL_NS;
+        events.push(next_tick, EventKind::Tick { cpu });
+
+        // Try to dispatch work
         self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
     }
 

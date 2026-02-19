@@ -16,6 +16,21 @@ pub struct HotplugEvent {
     pub online: bool,
 }
 
+/// A higher-priority scheduler class preemption event.
+///
+/// Simulates a CPU being temporarily taken by a higher-priority scheduler
+/// class (e.g., RT or DL). The engine calls `cpu_release` at `release_at_ns`
+/// and `cpu_acquire` at `acquire_at_ns`.
+#[derive(Debug, Clone)]
+pub struct CpuPreemptEvent {
+    /// Which CPU is preempted by the higher-priority class.
+    pub cpu: CpuId,
+    /// When the higher-priority class takes the CPU (calls cpu_release).
+    pub release_at_ns: TimeNs,
+    /// When sched_ext regains the CPU (calls cpu_acquire).
+    pub acquire_at_ns: TimeNs,
+}
+
 /// Definition of a cgroup for scenario creation.
 #[derive(Debug, Clone)]
 pub struct CgroupDef {
@@ -291,6 +306,8 @@ pub struct Scenario {
     pub ignore_bpf_errors: bool,
     /// CPU hotplug events to inject during the simulation.
     pub hotplug_events: Vec<HotplugEvent>,
+    /// CPU preemption events (higher-priority scheduler class).
+    pub cpu_preempt_events: Vec<CpuPreemptEvent>,
 }
 
 /// Builder for constructing scenarios.
@@ -309,6 +326,7 @@ pub struct ScenarioBuilder {
     watchdog_timeout_ns: Option<TimeNs>,
     ignore_bpf_errors: bool,
     hotplug_events: Vec<HotplugEvent>,
+    cpu_preempt_events: Vec<CpuPreemptEvent>,
 }
 
 impl Scenario {
@@ -328,6 +346,7 @@ impl Scenario {
             watchdog_timeout_ns: Some(DEFAULT_WATCHDOG_TIMEOUT_NS),
             ignore_bpf_errors: true, // Default true for compatibility
             hotplug_events: Vec::new(),
+            cpu_preempt_events: Vec::new(),
         }
     }
 }
@@ -579,6 +598,24 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Schedule a higher-priority scheduler class preemption on a CPU.
+    ///
+    /// At `release_at_ns`, the engine calls `cpu_release` on the CPU
+    /// (simulating a higher-priority class taking over). At `acquire_at_ns`,
+    /// `cpu_acquire` is called (sched_ext regains control).
+    pub fn cpu_preempt(mut self, cpu: CpuId, release_at_ns: TimeNs, acquire_at_ns: TimeNs) -> Self {
+        assert!(
+            acquire_at_ns > release_at_ns,
+            "cpu_acquire must come after cpu_release"
+        );
+        self.cpu_preempt_events.push(CpuPreemptEvent {
+            cpu,
+            release_at_ns,
+            acquire_at_ns,
+        });
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -610,6 +647,7 @@ impl ScenarioBuilder {
             watchdog_timeout_ns: self.watchdog_timeout_ns,
             ignore_bpf_errors: self.ignore_bpf_errors,
             hotplug_events: self.hotplug_events,
+            cpu_preempt_events: self.cpu_preempt_events,
         }
     }
 }

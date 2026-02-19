@@ -57,3 +57,6 @@ void sim_cgroup_free(void *cgrp);
 void sim_cgroup_set_cpuset(void *cgrp, const unsigned int *cpus, unsigned int nr_cpus);
 void sim_task_set_cgroup(struct task_struct *p, void *cgrp);
 void *sim_task_get_cgroup(struct task_struct *p);
+
+/* Override the cgroup in init_task_args before calling init_task */
+void sim_set_init_task_cgroup(void *cgrp);

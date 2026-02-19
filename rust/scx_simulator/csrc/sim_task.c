@@ -240,8 +240,14 @@ struct scx_init_task_args *sim_get_init_task_args(void)
 {
 	sim_init_root_cgroup();
 	sim_init_task_args.fork = false;
+	/* Default to root cgroup; engine overrides via sim_set_init_task_cgroup() */
 	sim_init_task_args.cgroup = &sim_root_cgroup;
 	return &sim_init_task_args;
+}
+
+void sim_set_init_task_cgroup(void *cgrp)
+{
+	sim_init_task_args.cgroup = (struct cgroup *)cgrp;
 }
 
 /* Exit task args for the exit_task callback */

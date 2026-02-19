@@ -73,6 +73,7 @@ extern "C" {
     pub fn sim_cgroup_set_cpuset(cgrp: *mut c_void, cpus: *const u32, nr_cpus: u32);
     pub fn sim_task_set_cgroup(p: *mut c_void, cgrp: *mut c_void);
     pub fn sim_task_get_cgroup(p: *mut c_void) -> *mut c_void;
+    pub fn sim_set_init_task_cgroup(cgrp: *mut c_void);
 
     // CSS iterator (implemented in sim_cgroup.c)
     pub fn sim_css_iter_reset();
@@ -147,10 +148,23 @@ pub trait Scheduler {
         0
     }
 
+    /// Initialize a task in a specific cgroup (ops.init_task with cgroup override).
+    /// # Safety
+    /// Calls into C code. `p` must be a valid task_struct pointer.
+    /// `cgrp` must be a valid cgroup pointer.
+    unsafe fn init_task_in_cgroup(&self, _p: *mut c_void, _cgrp: *mut c_void) -> i32 {
+        0
+    }
+
     /// A CPU was released by a higher scheduling class (ops.cpu_release).
     /// # Safety
     /// Calls into C code.
     unsafe fn cpu_release(&self, _cpu: i32, _args: *mut c_void) {}
+
+    /// A CPU was acquired back from a higher scheduling class (ops.cpu_acquire).
+    /// # Safety
+    /// Calls into C code.
+    unsafe fn cpu_acquire(&self, _cpu: i32, _args: *mut c_void) {}
 
     /// Scheduler is being unloaded (ops.exit). Called once during shutdown.
     /// # Safety
@@ -201,7 +215,7 @@ pub trait Scheduler {
     /// Called when a cgroup is created and the scheduler should track it.
     /// # Safety
     /// Calls into C code. `cgrp` must be a valid cgroup pointer.
-    unsafe fn cgroup_init(&self, _cgrp: *mut c_void) -> i32 {
+    unsafe fn cgroup_init(&self, _cgrp: *mut c_void, _args: *mut c_void) -> i32 {
         0
     }
 
@@ -256,9 +270,10 @@ type DumpFn = unsafe extern "C" fn(*mut c_void);
 type DumpTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type UpdateIdleFn = unsafe extern "C" fn(i32, bool);
 type ExitTaskFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
-type CgroupInitFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type CgroupInitFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
 type CgroupExitFn = unsafe extern "C" fn(*mut c_void);
 type CgroupMoveFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+type CpuAcquireFn = unsafe extern "C" fn(i32, *mut c_void);
 type CpuOnlineFn = unsafe extern "C" fn(i32);
 type CpuOfflineFn = unsafe extern "C" fn(i32);
 
@@ -287,6 +302,7 @@ struct SchedOps {
     cgroup_init: Option<CgroupInitFn>,
     cgroup_exit: Option<CgroupExitFn>,
     cgroup_move: Option<CgroupMoveFn>,
+    cpu_acquire: Option<CpuAcquireFn>,
     cpu_online: Option<CpuOnlineFn>,
     cpu_offline: Option<CpuOfflineFn>,
 }
@@ -595,6 +611,8 @@ impl DynamicScheduler {
                 .map(|p| std::mem::transmute::<*const (), CgroupExitFn>(p)),
             cgroup_move: try_get!("cgroup_move")
                 .map(|p| std::mem::transmute::<*const (), CgroupMoveFn>(p)),
+            cpu_acquire: try_get!("cpu_acquire")
+                .map(|p| std::mem::transmute::<*const (), CpuAcquireFn>(p)),
             cpu_online: try_get!("cpu_online")
                 .map(|p| std::mem::transmute::<*const (), CpuOnlineFn>(p)),
             cpu_offline: try_get!("cpu_offline")
@@ -642,7 +660,20 @@ impl Scheduler for DynamicScheduler {
 
     unsafe fn init_task(&self, p: *mut c_void) -> i32 {
         if let Some(f) = self.ops.init_task {
-            f(p, sim_get_init_task_args())
+            let args = sim_get_init_task_args();
+            f(p, args)
+        } else {
+            0
+        }
+    }
+
+    /// Like `init_task` but overrides the cgroup in init_task_args.
+    /// Used when the task belongs to a non-root cgroup.
+    unsafe fn init_task_in_cgroup(&self, p: *mut c_void, cgrp: *mut c_void) -> i32 {
+        if let Some(f) = self.ops.init_task {
+            let args = sim_get_init_task_args();
+            sim_set_init_task_cgroup(cgrp);
+            f(p, args)
         } else {
             0
         }
@@ -650,6 +681,12 @@ impl Scheduler for DynamicScheduler {
 
     unsafe fn cpu_release(&self, cpu: i32, args: *mut c_void) {
         if let Some(f) = self.ops.cpu_release {
+            f(cpu, args);
+        }
+    }
+
+    unsafe fn cpu_acquire(&self, cpu: i32, args: *mut c_void) {
+        if let Some(f) = self.ops.cpu_acquire {
             f(cpu, args);
         }
     }
@@ -716,9 +753,9 @@ impl Scheduler for DynamicScheduler {
         }
     }
 
-    unsafe fn cgroup_init(&self, cgrp: *mut c_void) -> i32 {
+    unsafe fn cgroup_init(&self, cgrp: *mut c_void, args: *mut c_void) -> i32 {
         if let Some(f) = self.ops.cgroup_init {
-            f(cgrp)
+            f(cgrp, args)
         } else {
             0
         }
