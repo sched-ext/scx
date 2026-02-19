@@ -23,6 +23,9 @@ use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
 
 /// SCX wake flags.
 const SCX_ENQ_WAKEUP: u64 = 0x1;
+/// Synchronous wakeup: waker is about to sleep/yield, hinting the scheduler
+/// to place the wakee on the same CPU.  Matches kernel SCX_WAKE_SYNC (= 16).
+const SCX_WAKE_SYNC: u64 = 16;
 
 /// SCX dequeue flags: task is going to sleep.
 const SCX_DEQ_SLEEP: u64 = 1;
@@ -700,12 +703,20 @@ impl<S: Scheduler> Simulator<S> {
 
         // Call runnable callback
         let raw = task.raw();
+        // Sync wakeup: kernel sets WF_SYNC when the waker explicitly
+        // requests it (e.g. pipe write, futex unlock). In the simulator,
+        // a waker-driven wake (Phase::Wake) models this pattern.
+        let enq_flags = if waker_raw.is_some() {
+            SCX_ENQ_WAKEUP | SCX_WAKE_SYNC
+        } else {
+            SCX_ENQ_WAKEUP
+        };
         unsafe {
             kfuncs::enter_sim(state, wake_cpu);
             state.waker_task_raw = waker_raw;
             start_rbc(state);
             debug!(pid = pid.0, "runnable");
-            self.scheduler.runnable(raw, SCX_ENQ_WAKEUP);
+            self.scheduler.runnable(raw, enq_flags);
             charge_sched_time(state, wake_cpu, "runnable");
             kfuncs::exit_sim();
         }
@@ -722,9 +733,7 @@ impl<S: Scheduler> Simulator<S> {
             state.waker_task_raw = waker_raw;
             start_rbc(state);
 
-            let selected_cpu_raw =
-                self.scheduler
-                    .select_cpu(raw, prev_cpu.0 as i32, SCX_ENQ_WAKEUP);
+            let selected_cpu_raw = self.scheduler.select_cpu(raw, prev_cpu.0 as i32, enq_flags);
             let selected_cpu = CpuId(selected_cpu_raw as u32);
             charge_sched_time(state, selected_cpu, "select_cpu");
             state.ops_context = OpsContext::None;
@@ -773,8 +782,8 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::enter_sim(state, selected_cpu);
                 state.ops_context = OpsContext::Enqueue;
                 start_rbc(state);
-                debug!(pid = pid.0, enq_flags = SCX_ENQ_WAKEUP, "enqueue");
-                self.scheduler.enqueue(raw, SCX_ENQ_WAKEUP);
+                debug!(pid = pid.0, enq_flags, "enqueue");
+                self.scheduler.enqueue(raw, enq_flags);
                 charge_sched_time(state, selected_cpu, "enqueue");
                 state.ops_context = OpsContext::None;
                 // Resolve any deferred dispatch from enqueue
