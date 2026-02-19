@@ -1079,16 +1079,6 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 		prev->scx.slice = task_slice(prev);
 }
 
-void BPF_STRUCT_OPS(cosmos_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
-{
-	/*
-	 * A higher scheduler class stole the CPU, re-enqueue all the tasks
-	 * that are waiting on this CPU and give them a chance to pick
-	 * another idle CPU.
-	 */
-	scx_bpf_reenqueue_local();
-}
-
 void BPF_STRUCT_OPS(cosmos_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = scx_bpf_now(), delta_t;
@@ -1292,7 +1282,6 @@ SCX_OPS_DEFINE(cosmos_ops,
 	       .runnable		= (void *)cosmos_runnable,
 	       .running			= (void *)cosmos_running,
 	       .stopping		= (void *)cosmos_stopping,
-	       .cpu_release		= (void *)cosmos_cpu_release,
 	       .enable			= (void *)cosmos_enable,
 	       .init_task		= (void *)cosmos_init_task,
 	       .exit_task		= (void *)cosmos_exit_task,
