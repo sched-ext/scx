@@ -370,6 +370,7 @@ fn parse_task(
             allowed_cpus: allowed_cpus.clone(),
             parent_pid: None,
             cgroup_name: None,
+            task_flags: 0,
         });
     }
 
