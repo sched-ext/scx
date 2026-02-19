@@ -683,3 +683,13 @@ u64 lavd_probe_sys_nr_lat_cri(void)
 {
 	return sys_stat.nr_lat_cri;
 }
+
+u64 lavd_probe_sys_avg_sc_util(void)
+{
+	return sys_stat.avg_sc_util;
+}
+
+int lavd_probe_calc_nr_active(void)
+{
+	return calc_nr_active_cpus();
+}

@@ -387,6 +387,21 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::exit_sim();
         }
 
+        // All CPUs start idle — notify the scheduler so it can begin
+        // tracking idle time (e.g., LAVD's idle_start_clk). We
+        // temporarily set local_clock to 1 because LAVD treats
+        // idle_start_clk == 0 as a sentinel for "not idle".
+        for cpu_id in 0..nr_cpus {
+            let cpu = CpuId(cpu_id);
+            state.cpus[cpu.0 as usize].local_clock = 1;
+            unsafe {
+                kfuncs::enter_sim(&mut state, cpu);
+                self.scheduler.update_idle(cpu.0 as i32, true);
+                kfuncs::exit_sim();
+            }
+            state.cpus[cpu.0 as usize].local_clock = 0;
+        }
+
         // Build event queue
         let mut events = EventQueue::new(scenario.seed, scenario.fixed_priority);
 
@@ -536,7 +551,11 @@ impl<S: Scheduler> Simulator<S> {
         monitor: &mut dyn Monitor,
     ) {
         unsafe {
-            let cpu = state.current_cpu;
+            // Timer fires on CPU 0 by convention. Advance its clock to the
+            // event queue time so scx_bpf_now() inside the callback returns
+            // a value consistent with (or later than) all CPU local clocks.
+            let cpu = CpuId(0);
+            state.advance_cpu_clock(cpu);
             kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             self.scheduler.fire_timer();
