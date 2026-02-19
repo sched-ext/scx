@@ -6889,6 +6889,304 @@ fn test_lavd_mostly_big_compaction() {
     assert!(trace.schedule_count(Pid(2)) > 0);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 10: Compaction depth, powersave, dispatch on inactive CPUs
+// ---------------------------------------------------------------------------
+
+/// Low-load compaction: very few IO tasks on many CPUs.
+///
+/// With low utilization, `calc_nr_active_cpus()` should return a small
+/// number, causing `reinit_active_cpumask_for_compaction()` to deactivate
+/// most CPUs. This covers the `i >= nr_active` branch in the compaction
+/// inner loop (power.bpf.c lines 425-462) and the dispatch paths for
+/// inactive CPUs (main.bpf.c lines 964-1018).
+#[test]
+fn test_lavd_compaction_low_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        // Must have big/little for compaction to run (have_little_core check)
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        // Ensure compaction is on (default for balanced mode)
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+    }
+
+    // Very low load: 1 IO task with short bursts and long sleeps
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task(
+            "io-light",
+            0,
+            workloads::io_bound(100_000, 5_000_000), // 100us work, 5ms sleep
+        )
+        .duration_ms(50) // Long enough for stats to stabilize
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Powersave mode with compaction.
+///
+/// Sets `is_powersave_mode = true` to cover power.bpf.c line 291:
+/// `WRITE_ONCE(pco_idx, 0)` in the powersave path of `calc_nr_active_cpus`.
+#[test]
+fn test_lavd_powersave_mode_compaction() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "is_powersave_mode\0", true);
+    }
+
+    // Moderate load in powersave mode
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", 0, workloads::io_bound(200_000, 2_000_000))
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Compaction with pinned task on a likely-inactive CPU.
+///
+/// Pins a task to the last CPU (CPU 7), which is likely to be deactivated
+/// by compaction. When dispatch runs on CPU 7, it's not in the active set
+/// but has a pinned prev task, extending the overflow set.
+///
+/// Covers: main.bpf.c lines 1011-1014 (pinned prev on inactive CPU extends
+/// overflow) and power.bpf.c lines 428-436 (pinned task overflow in compaction).
+#[test]
+fn test_lavd_compaction_pinned_on_inactive() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+    }
+
+    // Pin a task to CPU 7 (last little core, likely inactive under compaction)
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "pinned-7".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        .add_task("io-light", 0, workloads::io_bound(100_000, 5_000_000))
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Compaction with per-CPU DSQ and queued tasks on inactive CPU.
+///
+/// Uses `per_cpu_dsq = true` with tasks dispatched to per-CPU DSQs.
+/// When compaction deactivates a CPU that has tasks in its per-CPU DSQ,
+/// the dispatch code adds it to the overflow set.
+///
+/// Covers: main.bpf.c lines 1000-1004 (per-CPU DSQ fast path for inactive CPU).
+#[test]
+fn test_lavd_compaction_per_cpu_dsq_overflow() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "per_cpu_dsq\0", true);
+    }
+
+    // Multiple tasks including some pinned to likely-inactive CPUs
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .task(TaskDef {
+            name: "pinned-6".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(6)]),
+            parent_pid: None,
+        })
+        .task(TaskDef {
+            name: "pinned-7".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(20_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(7)]),
+            parent_pid: None,
+        })
+        .add_task("io-light", 0, workloads::io_bound(100_000, 5_000_000))
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+    assert!(trace.schedule_count(Pid(2)) > 0);
+}
+
+/// Moderate load compaction: 3 CPU-bound tasks on 8 CPUs.
+///
+/// With 3 tasks on 8 CPUs, utilization is ~37.5%. Compaction should
+/// activate 4-5 CPUs and deactivate the rest. The deactivated CPUs
+/// go through the overflow check path, and idle CPU selection must
+/// handle the reduced active set.
+///
+/// Covers deeper branches in power.bpf.c compaction loop and
+/// dispatch cpumask checking.
+#[test]
+fn test_lavd_compaction_moderate_load() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
+        .add_task("hog-2", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", 0, workloads::io_bound(200_000, 2_000_000))
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Two domains with powersave mode and low load.
+///
+/// Combines multi-domain with powersave mode compaction. The powersave
+/// path in `calc_nr_active_cpus()` uses `pco_idx = 0`, and multi-domain
+/// drives load-balancing paths in `reinit_active_cpumask_for_compaction`
+/// at lines 483-498 (per-domain active CPU accounting).
+#[test]
+fn test_lavd_two_domain_powersave_compaction() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_set_u8(&sched, "no_use_em\0", 1);
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+        lavd_set_bool(&sched, "is_powersave_mode\0", true);
+    }
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", 0, workloads::io_bound(200_000, 2_000_000))
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
+/// Energy model compaction path: `no_use_em = false` with valid PCO setup.
+///
+/// When the energy model is available (no_use_em = false), `calc_nr_active_cpus`
+/// takes the else branch (power.bpf.c lines 321-351) that iterates PCO states
+/// to find the minimum active CPU count that meets capacity requirements.
+///
+/// Covers: power.bpf.c lines 321-351 (energy model path in calc_nr_active_cpus).
+#[test]
+fn test_lavd_compaction_energy_model() {
+    let _lock = common::setup_test();
+    let nr_cpus = 8;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_big_little(&sched, nr_cpus, &[0, 1, 2, 3]);
+        // Set up 2 PCO states: state 0 with 4 CPUs, state 1 with 8 CPUs
+        lavd_set_u8(&sched, "nr_pco_states\0", 2);
+
+        let pco_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"pco_table\0")
+            .expect("pco_table not found");
+        let pco = *pco_sym;
+        // State 0: CPUs 0,1,2,3 (big cores first)
+        for i in 0..nr_cpus.min(512) {
+            std::ptr::write_volatile(pco.add(i as usize), i as u16);
+        }
+        // State 1: All CPUs
+        let state1_offset = 512; // LAVD_CPU_ID_MAX
+        for i in 0..nr_cpus.min(512) {
+            std::ptr::write_volatile(pco.add(state1_offset + i as usize), i as u16);
+        }
+
+        // Set PCO bounds: state 0 fits moderate load, state 1 fits everything
+        let bounds_sym: libloading::Symbol<'_, *mut u32> = sched
+            .get_symbol(b"pco_bounds\0")
+            .expect("pco_bounds not found");
+        let bounds = *bounds_sym;
+        std::ptr::write_volatile(bounds, 4 * 1024); // state 0: 4 CPUs worth
+        std::ptr::write_volatile(bounds.add(1), u32::MAX); // state 1: unlimited
+
+        // Set primary counts
+        let primary_sym: libloading::Symbol<'_, *mut u16> = sched
+            .get_symbol(b"pco_nr_primary\0")
+            .expect("pco_nr_primary not found");
+        let primary = *primary_sym;
+        std::ptr::write_volatile(primary, 4); // state 0: 4 primary CPUs
+        std::ptr::write_volatile(primary.add(1), nr_cpus as u16); // state 1: all
+
+        lavd_set_u8(&sched, "no_use_em\0", 0); // Enable energy model
+        lavd_set_bool(&sched, "no_core_compaction\0", false);
+    }
+
+    // Low-moderate load so state 0 might be sufficient
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
+        .add_task("io-0", 0, workloads::io_bound(200_000, 2_000_000))
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(trace.schedule_count(Pid(1)) > 0);
+}
+
 /// Verify that update_idle fixes CPU utilization tracking.
 ///
 /// With update_idle implemented, idle CPUs now have their idle_start_clk
