@@ -4,19 +4,18 @@
 
 char _license[] SEC("license") = "GPL";
 
-/* 
- * XXXETSAL Single counter for now, can adjust later. All the code
- * except for bpf_perf_event_read_value is compatible with multiple
- * counters.
+/*
+ * Only support up to two counters for now.
  */
-#define SCX_MAX_PMU_COUNTERS (1)
+#define SCX_PMU_STRIDE 4096
+#define SCX_MAX_PMU_COUNTERS (2)
 
 /* Cannot define an array of per-cpu counters, do so manually. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(int));
-	__uint(max_entries, 4096);
+	__uint(max_entries, SCX_PMU_STRIDE * SCX_MAX_PMU_COUNTERS);
 } scx_pmu_map SEC(".maps");
 
 /*
@@ -51,12 +50,14 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 	struct bpf_perf_event_value value;
 	int idx;
 	int ret;
+	__u32 key;
 
 	cntrs = bpf_task_storage_get(&scx_pmu_tasks, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!cntrs)
 		return -ENOENT;
 
-	bpf_for(idx, 0, SCX_MAX_PMU_COUNTERS) {
+#pragma unroll(2)
+	for (idx = 0; idx < SCX_MAX_PMU_COUNTERS; idx++) {
 		/* Is the counter even installed? */
 		if (scx_event_idx[idx] == 0ULL)
 			continue;
@@ -70,7 +71,8 @@ int scx_pmu_event_stop(struct task_struct __arg_trusted *p)
 			continue;
 		}
 
-		ret = bpf_perf_event_read_value(&scx_pmu_map, BPF_F_CURRENT_CPU, &value, sizeof(value));
+		key = bpf_get_smp_processor_id() + idx * SCX_PMU_STRIDE;
+		ret = bpf_perf_event_read_value(&scx_pmu_map, key, &value, sizeof(value));
 		if (ret)
 			return ret;
 
@@ -95,12 +97,14 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 	struct scx_pmu_counters *cntrs;
 	int idx;
 	int ret;
+	__u32 key;
 
 	cntrs = bpf_task_storage_get(&scx_pmu_tasks, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!cntrs)
 		return -ENOENT;
 
-	bpf_for(idx, 0, SCX_MAX_PMU_COUNTERS) {
+#pragma unroll(2)
+	for (idx = 0; idx < SCX_MAX_PMU_COUNTERS; idx++) {
 		/* Is the counter even installed? */
 		if (scx_event_idx[idx] == 0ULL)
 			continue;
@@ -109,7 +113,8 @@ int scx_pmu_event_start(struct task_struct __arg_trusted *p, bool update)
 		if (unlikely(cntrs->gen != scx_pmu_gen))
 			cntrs->agg[idx] = 0;
 
-		ret = bpf_perf_event_read_value(&scx_pmu_map, BPF_F_CURRENT_CPU, &value, sizeof(value));
+		key = bpf_get_smp_processor_id() + idx * SCX_PMU_STRIDE;
+		ret = bpf_perf_event_read_value(&scx_pmu_map, key, &value, sizeof(value));
 		if (ret)
 			return ret;
 
@@ -132,7 +137,8 @@ int scx_pmu_event_to_idx(u64 event)
 {
 	int i;
 
-	bpf_for(i, 0, SCX_MAX_PMU_COUNTERS) {
+#pragma unroll(2)
+	for (i = 0; i < SCX_MAX_PMU_COUNTERS; i++) {
 		if (scx_event_idx[i] == event)
 			break;
 	}
@@ -146,7 +152,8 @@ int scx_pmu_find_free_idx(void)
 {
 	int i;
 
-	bpf_for(i, 0, SCX_MAX_PMU_COUNTERS) {
+#pragma unroll(2)
+	for (i = 0; i < SCX_MAX_PMU_COUNTERS; i++) {
 		if (scx_event_idx[i] == 0ULL)
 			break;
 	}
