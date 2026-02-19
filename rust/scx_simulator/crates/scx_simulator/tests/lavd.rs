@@ -7708,6 +7708,44 @@ fn test_lavd_enable_cpu_bw() {
     );
 }
 
+/// Test cgroup migration: move a task between cgroups at runtime.
+///
+/// Exercises `lavd_cgroup_move` (main.bpf.c:2099-2108) which updates
+/// `taskc->cgrp_id` when a task moves between cgroups.
+#[test]
+fn test_lavd_cgroup_move() {
+    let _lock = common::setup_test();
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .cgroup("source", &[CpuId(0), CpuId(1), CpuId(2), CpuId(3)])
+        .cgroup("dest", &[CpuId(0), CpuId(1), CpuId(2), CpuId(3)])
+        .add_task_in_cgroup("mover", 0, workloads::cpu_bound(10_000_000), "source")
+        .add_task_in_cgroup("stayer", 0, workloads::cpu_bound(10_000_000), "source")
+        .add_task_in_cgroup("dest-task", 0, workloads::cpu_bound(10_000_000), "dest")
+        // Migrate "mover" (Pid(1)) from "source" to "dest" at 50ms
+        .cgroup_migrate(Pid(1), "source", "dest", 50_000_000)
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "mover was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "stayer was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(3)) > 0,
+        "dest-task was never scheduled"
+    );
+}
+
 /// Test CPU bandwidth with dequeue path exercised via preemption.
 ///
 /// When `enable_cpu_bw = true` and tasks are preempted, the dequeue path

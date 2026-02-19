@@ -189,6 +189,12 @@ enum EventKind {
     CpuRelease { cpu: CpuId },
     /// sched_ext regains a CPU from higher-priority class (cpu_acquire).
     CpuAcquire { cpu: CpuId },
+    /// A task is migrated between cgroups at runtime.
+    CgroupMigrate {
+        pid: Pid,
+        from_cgroup: String,
+        to_cgroup: String,
+    },
 }
 
 /// The main simulator.
@@ -583,6 +589,18 @@ impl<S: Scheduler> Simulator<S> {
             events.push(pe.acquire_at_ns, EventKind::CpuAcquire { cpu: pe.cpu });
         }
 
+        // Seed cgroup migration events
+        for me in &scenario.cgroup_migrate_events {
+            events.push(
+                me.at_ns,
+                EventKind::CgroupMigrate {
+                    pid: me.pid,
+                    from_cgroup: me.from_cgroup.clone(),
+                    to_cgroup: me.to_cgroup.clone(),
+                },
+            );
+        }
+
         // Track the exit kind (may be set by error detection)
         let mut exit_kind = ExitKind::Normal;
         let watchdog_timeout = scenario.watchdog_timeout_ns;
@@ -610,6 +628,10 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 EventKind::TaskWake { .. } | EventKind::TimerFired => {
                     // No specific CPU yet; use event queue time for tracing
+                    kfuncs::set_sim_clock(state.clock, None);
+                }
+                EventKind::CgroupMigrate { .. } => {
+                    // Cgroup migration is not CPU-specific
                     kfuncs::set_sim_clock(state.clock, None);
                 }
             }
@@ -657,6 +679,20 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 EventKind::CpuAcquire { cpu } => {
                     self.handle_cpu_acquire(cpu, &mut state, &mut tasks, &mut events, monitor);
+                }
+                EventKind::CgroupMigrate {
+                    pid,
+                    from_cgroup,
+                    to_cgroup,
+                } => {
+                    self.handle_cgroup_migrate(
+                        pid,
+                        &from_cgroup,
+                        &to_cgroup,
+                        &mut state,
+                        &tasks,
+                        &cgroup_registry,
+                    );
                 }
             }
 
@@ -1056,6 +1092,56 @@ impl<S: Scheduler> Simulator<S> {
 
         // Try to dispatch work
         self.try_dispatch_and_run(cpu, state, tasks, events, monitor);
+    }
+
+    /// Handle a cgroup migration: move a task between cgroups.
+    ///
+    /// In the kernel, this is triggered by writing a PID to cgroup.procs.
+    /// The engine calls `cgroup_move` and updates the task's C-side cgroup.
+    fn handle_cgroup_migrate(
+        &self,
+        pid: Pid,
+        from_name: &str,
+        to_name: &str,
+        state: &mut SimulatorState,
+        tasks: &HashMap<Pid, SimTask>,
+        cgroup_registry: &CgroupRegistry,
+    ) {
+        let task = match tasks.get(&pid) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let from_info = cgroup_registry
+            .get_by_name(from_name)
+            .unwrap_or_else(|| panic!("cgroup '{from_name}' not found for migration"));
+        let to_info = cgroup_registry
+            .get_by_name(to_name)
+            .unwrap_or_else(|| panic!("cgroup '{to_name}' not found for migration"));
+
+        info!(
+            pid = pid.0,
+            from = from_name,
+            to = to_name,
+            "CGROUP MIGRATE"
+        );
+
+        // Update the task's cgroup in C-side
+        let raw = task.raw();
+        unsafe {
+            ffi::sim_task_set_cgroup(raw, to_info.raw());
+        }
+
+        // Call cgroup_move
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            self.scheduler
+                .cgroup_move(raw, from_info.raw(), to_info.raw());
+            charge_sched_time(state, cpu, "cgroup_move");
+            kfuncs::exit_sim();
+        }
     }
 
     /// Handle a task waking up.

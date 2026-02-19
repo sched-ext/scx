@@ -486,6 +486,7 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         ignore_bpf_errors: true,
         hotplug_events: Vec::new(),
         cpu_preempt_events: Vec::new(),
+        cgroup_migrate_events: Vec::new(),
     })
 }
 
