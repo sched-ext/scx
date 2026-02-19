@@ -1772,16 +1772,6 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 	}
 }
 
-void BPF_STRUCT_OPS(flash_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
-{
-	/*
-	 * When a CPU is taken by a higher priority scheduler class,
-	 * re-enqueue all the tasks that are waiting in the local DSQ, so
-	 * that we can give them a chance to run on another CPU.
-	 */
-	scx_bpf_reenqueue_local();
-}
-
 void BPF_STRUCT_OPS(flash_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -2261,7 +2251,6 @@ SCX_OPS_DEFINE(flash_ops,
 	       .stopping		= (void *)flash_stopping,
 	       .runnable		= (void *)flash_runnable,
 	       .quiescent		= (void *)flash_quiescent,
-	       .cpu_release		= (void *)flash_cpu_release,
 	       .set_cpumask		= (void *)flash_set_cpumask,
 	       .enable			= (void *)flash_enable,
 	       .init_task		= (void *)flash_init_task,
