@@ -1698,6 +1698,30 @@ mod tests {
     }
 
     #[test]
+    fn test_nr_cpus_allowed_roundtrip() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let raw = unsafe { ffi::sim_task_alloc() };
+        assert!(!raw.is_null());
+
+        // Default after calloc should be 0
+        let initial = unsafe { ffi::sim_task_get_nr_cpus_allowed(raw) };
+        assert_eq!(
+            initial, 0,
+            "calloc-zeroed task should have nr_cpus_allowed=0"
+        );
+
+        // Set to 4 (like SimTask::new does)
+        unsafe { ffi::sim_task_set_nr_cpus_allowed(raw, 4) };
+        assert_eq!(unsafe { ffi::sim_task_get_nr_cpus_allowed(raw) }, 4);
+
+        // Override to 1 (like engine does for pinned tasks)
+        unsafe { ffi::sim_task_set_nr_cpus_allowed(raw, 1) };
+        assert_eq!(unsafe { ffi::sim_task_get_nr_cpus_allowed(raw) }, 1);
+
+        unsafe { ffi::sim_task_free(raw) };
+    }
+
+    #[test]
     fn test_get_current_task_btf() {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(2);

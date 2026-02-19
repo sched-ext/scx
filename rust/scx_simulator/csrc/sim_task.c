@@ -129,6 +129,11 @@ void sim_task_set_nr_cpus_allowed(struct task_struct *p, int nr)
 	p->nr_cpus_allowed = nr;
 }
 
+int sim_task_get_nr_cpus_allowed(struct task_struct *p)
+{
+	return p->nr_cpus_allowed;
+}
+
 /* SCX entity fields */
 u64 sim_task_get_dsq_vtime(struct task_struct *p)
 {

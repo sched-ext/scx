@@ -297,6 +297,11 @@ impl ScenarioBuilder {
 
     /// Add a task with a full TaskDef.
     pub fn task(mut self, def: TaskDef) -> Self {
+        // Advance next_pid past this task's PID to avoid collisions
+        // with subsequent add_task() calls.
+        if def.pid.0 >= self.next_pid.0 {
+            self.next_pid = Pid(def.pid.0 + 1);
+        }
         self.tasks.push(def);
         self
     }

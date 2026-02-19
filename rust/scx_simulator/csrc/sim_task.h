@@ -25,6 +25,7 @@ unsigned int sim_task_get_weight(struct task_struct *p);
 void sim_task_set_static_prio(struct task_struct *p, int prio);
 void sim_task_set_flags(struct task_struct *p, unsigned int flags);
 void sim_task_set_nr_cpus_allowed(struct task_struct *p, int nr);
+int sim_task_get_nr_cpus_allowed(struct task_struct *p);
 
 /* SCX entity fields */
 unsigned long long sim_task_get_dsq_vtime(struct task_struct *p);
