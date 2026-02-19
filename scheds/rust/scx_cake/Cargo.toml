@@ -18,7 +18,7 @@ ratatui = { version = "0.30" }
 crossterm = "0.29"
 arboard = "3.6"
 
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.25" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26" }
 core_affinity = "0.8"
 quanta = "0.12"
 crossbeam-utils = "0.8"
