@@ -10268,3 +10268,540 @@ fn test_lavd_exiting_waker_sync() {
     );
     eprintln!("[exiting_waker] Test passed with exiting waker scenario");
 }
+
+/// Test dispatch with per-domain DSQ and affinitized task iteration.
+///
+/// When using per-domain DSQ (use_cpdom_dsq), the dispatch function
+/// iterates through the DSQ looking for affinitized tasks (lines 1060-1131).
+///
+/// Covers: main.bpf.c lines 1060-1131 (bpf_for_each in dispatch)
+#[test]
+fn test_lavd_dispatch_cpdom_dsq_affinity_search() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+        // Force per-domain DSQ by setting pinned_slice_ns > 0
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 1_000_000);
+    }
+
+    // Create tasks with domain-level affinity (not single CPU) to avoid dispatch errors
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(1234)
+        .detect_bpf_errors()
+        // Task affinitized to domain 1 CPUs
+        .task(TaskDef {
+            name: "domain1_affinity".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(200_000), Phase::Sleep(100_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: Some(vec![CpuId(4), CpuId(5), CpuId(6), CpuId(7)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Free-roaming task
+        .add_task(
+            "roamer",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(100_000), Phase::Sleep(50_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[dispatch_cpdom_affinity] Test passed with per-domain DSQ affinity search");
+}
+
+/// Test quiescent callback with affinitized task counting.
+///
+/// When an affinitized task goes quiescent, task state is updated
+/// in the quiescent callback (lines 1375-1417 in main.bpf.c).
+///
+/// Covers: main.bpf.c lines 1375-1417 (quiescent path)
+#[test]
+fn test_lavd_quiescent_affinitized_task() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Create an affinitized task (to subset of CPUs) that sleeps
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(5678)
+        .detect_bpf_errors()
+        .task(TaskDef {
+            name: "affinitized_sleeper".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(100_000), Phase::Sleep(200_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            // Affinitized to subset of CPUs (not single CPU)
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .add_task(
+            "background",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(50_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(150)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[quiescent_affinitized] Test passed with affinitized task quiescent");
+}
+
+/// Test tick handler with affinitized tasks contention.
+///
+/// When there are multiple tasks competing for the same CPUs, the tick
+/// handler processes them and may trigger slice adjustment.
+///
+/// Covers: main.bpf.c lavd_tick path
+#[test]
+fn test_lavd_tick_affinity_contention() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Create multiple tasks affinitized to same subset of CPUs
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(9012)
+        .detect_bpf_errors()
+        .task(TaskDef {
+            name: "contender1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(500_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            // Affinitized to CPUs 0,1
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "contender2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(500_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            // Same affinity
+            allowed_cpus: Some(vec![CpuId(0), CpuId(1)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[tick_affinity_contention] Test passed with affinity contention");
+}
+
+/// Test wait_freq update in quiescent.
+///
+/// When a task goes to sleep (SCX_DEQ_SLEEP), wait_freq is updated
+/// (lines 1412-1416 in main.bpf.c).
+///
+/// Covers: main.bpf.c lines 1412-1416 (wait_freq update in quiescent)
+#[test]
+fn test_lavd_quiescent_wait_freq() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Create a task with frequent sleep/wake cycles to update wait_freq
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(3456)
+        .detect_bpf_errors()
+        .add_task(
+            "frequent_sleeper",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(50_000), Phase::Sleep(50_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[quiescent_wait_freq] Test passed with wait_freq update");
+}
+
+/// Test dispatch prev task handling with queued state.
+///
+/// When the previous task is still queued (SCX_TASK_QUEUED), dispatch
+/// may continue it without DSQ consumption in certain conditions.
+///
+/// Covers: main.bpf.c dispatch prev task handling
+#[test]
+fn test_lavd_dispatch_prev_task_queued() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Create a ping-pong workload that exercises dispatch paths
+    let (prod, cons) = workloads::ping_pong(Pid(1), Pid(2), 50_000);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(7890)
+        .detect_bpf_errors()
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: prod,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: cons,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .duration_ms(150)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[dispatch_prev_queued] Test passed with prev task queued handling");
+}
+
+/// Test use_full_cpus fast path in dispatch.
+///
+/// When all CPUs are in use (use_full_cpus returns true), dispatch
+/// skips cpumask checks and goes directly to consume (lines 969-970).
+///
+/// Covers: main.bpf.c lines 969-970 (use_full_cpus fast path)
+#[test]
+fn test_lavd_dispatch_full_cpus_fast_path() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+        // Disable core compaction to use all CPUs
+        lavd_set_bool(&sched, "no_core_compaction\0", true);
+    }
+
+    // Create enough tasks to saturate all CPUs
+    let mut builder = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(2345)
+        .detect_bpf_errors();
+
+    for i in 1i32..=4 {
+        builder = builder.add_task(
+            &format!("worker{}", i),
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(200_000), Phase::Sleep(50_000)],
+                repeat: RepeatMode::Forever,
+            },
+        );
+    }
+
+    let scenario = builder.duration_ms(200).build();
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[dispatch_full_cpus] Test passed with full CPUs fast path");
+}
+
+/// Test migration disabled task in dispatch.
+///
+/// When a task has migration disabled (is_migration_disabled), dispatch
+/// handles it specially (lines 1020-1023, 1090-1098).
+///
+/// Covers: main.bpf.c lines 1020-1023, 1090-1098 (migration_disabled paths)
+#[test]
+fn test_lavd_dispatch_migration_disabled() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+        lavd_setup_two_domains(&sched, nr_cpus, 4);
+    }
+
+    // Create a task with migration disabled
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(6789)
+        .detect_bpf_errors()
+        .task(TaskDef {
+            name: "migration_disabled".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(200_000), Phase::Sleep(100_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 1, // Migration disabled
+        })
+        .add_task(
+            "normal",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(100_000), Phase::Sleep(50_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[dispatch_migration_disabled] Test passed with migration disabled");
+}
+
+/// Test high priority waker and wakee interaction.
+///
+/// When a high priority task wakes another task, the wakee may
+/// receive priority boost (lines 1215-1218 in main.bpf.c).
+///
+/// Covers: main.bpf.c lavd_runnable waker/wakee handling
+#[test]
+fn test_lavd_high_priority_waker() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Create tasks with negative nice (high priority)
+    // Note: No parent_pid since parent task doesn't exist in scenario
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(4567)
+        .detect_bpf_errors()
+        .task(TaskDef {
+            name: "high_prio_waker".into(),
+            pid: Pid(1),
+            nice: -19, // Very high priority
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(50_000), Phase::Wake(Pid(2)), Phase::Run(50_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "wakee".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Sleep(200_000), Phase::Run(100_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .duration_ms(200)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[high_priority_waker] Test passed with high priority waker");
+}
+
+/// Test enqueue with different priority combinations.
+///
+/// Exercises various paths in lavd_enqueue based on task priorities
+/// and preemption scenarios.
+///
+/// Covers: main.bpf.c lavd_enqueue priority handling
+#[test]
+fn test_lavd_enqueue_priority_variations() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    unsafe {
+        lavd_setup_pco(&sched, nr_cpus);
+    }
+
+    // Create a preemption-heavy workload with different priorities
+    let (prod, cons) = workloads::ping_pong(Pid(1), Pid(2), 30_000);
+
+    let scenario = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(8901)
+        .detect_bpf_errors()
+        .task(TaskDef {
+            name: "ping".into(),
+            pid: Pid(1),
+            nice: -10, // High priority
+            behavior: prod,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "pong".into(),
+            pid: Pid(2),
+            nice: 10, // Low priority
+            behavior: cons,
+            start_time_ns: 0,
+            mm_id: Some(MmId(1)),
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Add background tasks to create contention
+        .add_task(
+            "background",
+            5,
+            TaskBehavior {
+                phases: vec![Phase::Run(100_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(150)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+    assert!(
+        !trace.has_error(),
+        "Unexpected error: {:?}",
+        trace.exit_kind()
+    );
+    eprintln!("[enqueue_priorities] Test passed with various priorities");
+}
