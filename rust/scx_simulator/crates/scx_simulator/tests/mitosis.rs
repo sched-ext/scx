@@ -2343,3 +2343,14 @@ fn test_large_cpu_count_all_features() {
         assert!(trace.total_runtime(Pid(i)) > 0, "task {i} got no runtime");
     }
 }
+
+// ---------------------------------------------------------------------------
+// NOTE: LLC awareness tests require proper LLC topology setup which is complex.
+// The llc_aware.bpf.h code has 0% coverage because:
+// 1. enable_work_stealing requires enable_llc_awareness to be true
+// 2. enable_llc_awareness requires cpu_to_llc and llc_to_cpus arrays populated
+// 3. This requires userspace setup that's not yet implemented in the simulator
+//
+// TODO(sim-llc): Add proper LLC topology support to the simulator to test
+// llc_aware.bpf.h code paths.
+// ---------------------------------------------------------------------------
