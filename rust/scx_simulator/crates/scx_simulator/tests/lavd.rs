@@ -9339,3 +9339,183 @@ fn test_lavd_cgroup_resource_tracking() {
         NUM_CGROUPS, MAX_CGROUPS
     );
 }
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: Production bug reproduction (cgroup ENOMEM)
+// ---------------------------------------------------------------------------
+
+/// Reproduce production LAVD bug: cgroup_init fails with ENOMEM (-12).
+///
+/// # Production Bug Details
+///
+/// ```text
+/// scx_lavd_alpha[3801850] triggered exit kind 1025:
+///   scx_bpf_error (././main/scheds/rust/scx_lavd/src/bpf/main.bpf.c:2089:
+///     Failed to init a cgroup: -12)
+///
+/// Backtrace:
+///   scx_kf_exit+0x62/0x70
+///   scx_bpf_error_bstr+0x76/0x80
+///   bpf_prog_05e793d23f72903b_lavd_cgroup_init+0x72/0x79
+/// ```
+///
+/// The bug occurs after ~10 hours of running, suggesting resource exhaustion
+/// from cgroup churn (continuous creation/destruction of cgroups).
+///
+/// # Root Cause
+///
+/// In production LAVD with `enable_cpu_bw=true`:
+/// - `lavd_cgroup_init` calls `scx_cgroup_bw_init` (main.bpf.c:2087)
+/// - `scx_cgroup_bw_init` allocates entries in BPF hash maps:
+///   - `cbw_cgrp_map` (cgroup storage)
+///   - `cbw_cgrp_llc_map` (max_entries = CBW_NR_CGRP_LLC_MAX = 65536)
+/// - When these maps fill up (e.g., 2048 cgroups * 32 LLCs), ENOMEM is returned
+///
+/// # This Test
+///
+/// This test creates cgroups dynamically at runtime (not at init time)
+/// with `enable_cpu_bw=true` to simulate production behavior where
+/// containers/services are continuously started and stopped.
+///
+/// When the configurable `max_cgroups` limit is exceeded, the scheduler's
+/// `cgroup_init` returns -12 (ENOMEM) and the simulation terminates with
+/// `ExitKind::ErrorCgroupExhausted`.
+#[test]
+fn test_lavd_cgroup_init_enomem_production_repro() {
+    let _lock = common::setup_test();
+
+    // Production-like configuration
+    let nr_cpus = 36u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable CPU bandwidth control - required for the ENOMEM path
+    // In production this is enabled via --enable-cpu-bw or similar flag
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    // Simulate a low BPF map limit (production limit is 2048)
+    // Root cgroup counts as 1, so with max_cgroups=10 we can create 9 more
+    const MAX_CGROUPS: u32 = 10;
+
+    let mut builder = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(42)
+        .max_cgroups(MAX_CGROUPS)
+        .detect_bpf_errors()
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(1_000_000), Phase::Sleep(1_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(500);
+
+    // Dynamically create cgroups at runtime (simulating container churn)
+    // This mimics production where services start/stop over 10 hours
+    for i in 0..20 {
+        let at_ns = (i + 1) * 10_000_000; // Every 10ms
+        builder = builder.cgroup_create_at(&format!("container_{i}"), None, None, at_ns);
+    }
+
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Verify we hit the expected error
+    match trace.exit_kind() {
+        ExitKind::ErrorCgroupExhausted {
+            cgroup_name,
+            active_count,
+            max_cgroups: max,
+        } => {
+            eprintln!(
+                "[production_repro] Reproduced ENOMEM: cgroup='{}', active={}, max={}",
+                cgroup_name, active_count, max
+            );
+            assert_eq!(*max, MAX_CGROUPS);
+            // active_count should equal max when we hit the limit
+            assert_eq!(*active_count, MAX_CGROUPS);
+        }
+        other => {
+            panic!(
+                "Expected ErrorCgroupExhausted (ENOMEM repro) but got {:?}",
+                other
+            );
+        }
+    }
+}
+
+/// Test that rapid cgroup create/destroy cycles don't leak resources.
+///
+/// This simulates 10 hours of container churn in accelerated form:
+/// - Create batch of containers
+/// - Destroy them
+/// - Repeat
+///
+/// With proper cleanup in cgroup_exit, this should stay under the limit.
+/// If there's a resource leak, the limit will eventually be hit.
+#[test]
+fn test_lavd_cgroup_lifecycle_no_leak() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable CPU bandwidth control for full code path coverage
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    // Moderate limit - should NOT be exhausted if cleanup works
+    const MAX_CGROUPS: u32 = 30;
+
+    let mut builder = Scenario::builder()
+        .cpus(nr_cpus)
+        .seed(12345)
+        .max_cgroups(MAX_CGROUPS)
+        .detect_bpf_errors()
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(500_000), Phase::Sleep(500_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(300);
+
+    // Simulate 10 cycles of container churn
+    // Each cycle: create 5 containers, then destroy them
+    // Total cgroups created: 50, but never more than 5 active at once (+ root = 6)
+    let interval_ns: u64 = 1_000_000; // 1ms
+    for cycle in 0..10 {
+        let base: u64 = cycle * 15_000_000;
+        // Create 5 cgroups
+        for i in 0..5 {
+            let name = format!("cycle{}_{}", cycle, i);
+            builder = builder.cgroup_create_at(&name, None, None, base + (i as u64) * interval_ns);
+        }
+        // Destroy them 5ms later
+        for i in 0..5 {
+            let name = format!("cycle{}_{}", cycle, i);
+            builder = builder.cgroup_destroy_at(&name, base + 5_000_000 + (i as u64) * interval_ns);
+        }
+    }
+
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Should complete successfully - no resource exhaustion
+    assert!(
+        !trace.has_error(),
+        "Cgroup lifecycle leaked resources, got: {:?}",
+        trace.exit_kind()
+    );
+
+    eprintln!(
+        "[cgroup_no_leak] {} create/destroy cycles completed without exhaustion",
+        10
+    );
+}
