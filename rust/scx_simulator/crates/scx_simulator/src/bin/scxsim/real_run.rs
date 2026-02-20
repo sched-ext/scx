@@ -120,16 +120,19 @@ pub fn run_vm(
             )
         }
         TraceMode::BpfTrace => {
-            // With bpftrace: pin tracer daemon to isolated CPU, trace workload CPUs.
+            // With bpftrace: start scheduler first, then attach tracer.
+            // Order matters: the scheduler must attach its struct_ops before
+            // bpftrace attaches fexit probes to scx_bpf_* kfuncs, otherwise
+            // EINVAL occurs on struct_ops attachment.
             // The script accepts nr_cpus as $1 to filter probes to CPUs 0..nr_cpus-1.
             // Output goes to a file in the mounted workspace directory.
             format!(
-                "taskset -c {isolated_cpu} bpftrace {BPFTRACE_SCRIPT} {nr_cpus} \
+                "{sched_bin} &\n\
+                 SCHED_PID=$!\n\
+                 sleep 1\n\
+                 taskset -c {isolated_cpu} bpftrace {BPFTRACE_SCRIPT} {nr_cpus} \
                  > {VM_WORKSPACE}/{BPF_TRACE_FILENAME} 2>&1 &\n\
                  TRACER_PID=$!\n\
-                 sleep 2\n\
-                 {sched_bin} &\n\
-                 SCHED_PID=$!\n\
                  sleep 1\n\
                  echo '=== Running rt-app ==='\n\
                  taskset -c {workload_cpus} {RTAPP_BIN} {workload}\n\
@@ -178,8 +181,9 @@ pub fn run_vm(
     if tracing {
         // Add rwdir mount for trace output
         vng_args.push_str(&format!(" --rwdir {VM_WORKSPACE}={}", cwd.display()));
-        // Add isolcpus kernel parameter
-        vng_args.push_str(&format!(" --append isolcpus={isolated_cpu}"));
+        // Note: we previously used --append isolcpus={isolated_cpu} here to prevent
+        // scheduler noise from the tracing CPU. However, isolcpus causes sched_ext
+        // struct_ops attachment to fail with EINVAL. Use taskset pinning only.
     }
 
     vng_args.push_str(&format!(" --exec {}", shell_escape(&inner_cmd)));
@@ -195,14 +199,9 @@ pub fn run_vm(
 
     eprintln!("Launching VM...");
     eprintln!(
-        "  vng -r --user {user} --cpus {vm_cpus} --memory 4G{}{}",
+        "  vng -r --user {user} --cpus {vm_cpus} --memory 4G{}",
         if tracing {
             format!(" --rwdir {VM_WORKSPACE}={}", cwd.display())
-        } else {
-            String::new()
-        },
-        if tracing {
-            format!(" --append isolcpus={isolated_cpu}")
         } else {
             String::new()
         },
@@ -348,7 +347,8 @@ fn find_scheduler_binary(scheduler: &str) -> Result<PathBuf, String> {
 
     Err(format!(
         "scheduler binary {bin_name} not found. Build it with:\n\
-         cargo build -p {bin_name} --release\n\n\
+         cd ../../  # repo root\n\
+         cargo build --bin {bin_name} --release\n\n\
          Or set SCX_SCHED_BIN environment variable to the path of the scheduler binary."
     ))
 }
