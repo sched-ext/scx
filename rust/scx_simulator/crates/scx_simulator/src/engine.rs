@@ -1214,31 +1214,29 @@ impl<S: Scheduler> Simulator<S> {
     /// Handle runtime cgroup creation.
     ///
     /// Creates a new cgroup in the registry and calls `cgroup_init`.
-    /// If `max_cgroups` is set and the limit would be exceeded, returns
-    /// an error instead of creating the cgroup.
+    /// If the `max_cgroups` limit would be exceeded, returns an error
+    /// instead of creating the cgroup.
     fn handle_cgroup_create(
         &self,
         event: &CgroupCreateEvent,
         state: &mut SimulatorState,
         cgroup_registry: &mut CgroupRegistry,
-        max_cgroups: Option<u32>,
+        max_cgroups: u32,
     ) -> Option<ExitKind> {
         // Check resource limit before creating
         let current_count = cgroup_registry.len() as u32;
-        if let Some(max) = max_cgroups {
-            if current_count >= max {
-                info!(
-                    name = %event.name,
-                    current = current_count,
-                    max,
-                    "CGROUP EXHAUSTED (ENOMEM)"
-                );
-                return Some(ExitKind::ErrorCgroupExhausted {
-                    cgroup_name: event.name.clone(),
-                    active_count: current_count,
-                    max_cgroups: max,
-                });
-            }
+        if current_count >= max_cgroups {
+            info!(
+                name = %event.name,
+                current = current_count,
+                max = max_cgroups,
+                "CGROUP EXHAUSTED (ENOMEM)"
+            );
+            return Some(ExitKind::ErrorCgroupExhausted {
+                cgroup_name: event.name.clone(),
+                active_count: current_count,
+                max_cgroups,
+            });
         }
 
         let parent_cgid = match &event.parent_name {
@@ -1280,7 +1278,7 @@ impl<S: Scheduler> Simulator<S> {
                 return Some(ExitKind::ErrorCgroupExhausted {
                     cgroup_name: event.name.clone(),
                     active_count: current_count,
-                    max_cgroups: max_cgroups.unwrap_or(0),
+                    max_cgroups,
                 });
             }
         }
