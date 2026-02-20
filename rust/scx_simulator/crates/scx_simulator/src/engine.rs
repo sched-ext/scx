@@ -165,8 +165,28 @@ impl EventQueue {
     }
 
     /// Pop the next event (earliest timestamp, then lowest tiebreaker).
+    #[allow(dead_code)]
     fn pop(&mut self) -> Option<Event> {
         self.heap.pop().map(|Reverse(e)| e)
+    }
+
+    /// Peek at the next event's timestamp without removing it.
+    fn peek_time(&self) -> Option<TimeNs> {
+        self.heap.peek().map(|Reverse(e)| e.time_ns)
+    }
+
+    /// Pop all events at exactly timestamp `t`.
+    ///
+    /// Returns events in priority order (lowest `seq` first).
+    fn drain_at(&mut self, t: TimeNs) -> Vec<Event> {
+        let mut batch = Vec::new();
+        while let Some(Reverse(e)) = self.heap.peek() {
+            if e.time_ns != t {
+                break;
+            }
+            batch.push(self.heap.pop().unwrap().0);
+        }
+        batch
     }
 }
 
@@ -222,6 +242,48 @@ enum EventKind {
     },
     /// An interrupt handler completes on a CPU.
     IrqEnd { cpu: CpuId },
+}
+
+impl EventKind {
+    /// Return the CPU this event is associated with, or `None` for global events.
+    ///
+    /// Per-CPU events (ticks, slice expiry, phase completion, hotplug, etc.)
+    /// are eligible for concurrent batch processing when multiple CPUs have
+    /// events at the same timestamp. Global events (task wakes, timer fired,
+    /// cgroup operations) are processed sequentially first.
+    fn cpu(&self) -> Option<CpuId> {
+        match self {
+            EventKind::Tick { cpu }
+            | EventKind::SliceExpired { cpu }
+            | EventKind::TaskPhaseComplete { cpu }
+            | EventKind::CpuOffline { cpu }
+            | EventKind::CpuOnline { cpu }
+            | EventKind::CpuRelease { cpu }
+            | EventKind::CpuAcquire { cpu }
+            | EventKind::IrqStart { cpu, .. }
+            | EventKind::IrqEnd { cpu } => Some(*cpu),
+            EventKind::TaskWake { .. }
+            | EventKind::TimerFired
+            | EventKind::CgroupMigrate { .. }
+            | EventKind::CgroupCreate(_)
+            | EventKind::CgroupDestroy(_) => None,
+        }
+    }
+}
+
+/// Partition a batch of same-timestamp events into global (no CPU) and
+/// per-CPU buckets. Global events should be processed sequentially first;
+/// per-CPU events on distinct CPUs can be processed concurrently.
+fn group_events_by_cpu(batch: Vec<Event>) -> (Vec<Event>, HashMap<CpuId, Vec<Event>>) {
+    let mut global = Vec::new();
+    let mut per_cpu: HashMap<CpuId, Vec<Event>> = HashMap::new();
+    for event in batch {
+        match event.kind.cpu() {
+            Some(cpu) => per_cpu.entry(cpu).or_default().push(event),
+            None => global.push(event),
+        }
+    }
+    (global, per_cpu)
 }
 
 /// The main simulator.
@@ -461,6 +523,7 @@ impl<S: Scheduler> Simulator<S> {
             bpf_error: None,
             interleave: scenario.interleave,
             preemptive: scenario.preemptive.clone(),
+            in_concurrent_batch: false,
         };
 
         // Set CPU ID width for log formatting
@@ -680,143 +743,124 @@ impl<S: Scheduler> Simulator<S> {
             info!("cooperative interleaving enabled (kfunc boundaries only)");
         }
 
-        // Main event loop
-        while let Some(event) = events.pop() {
-            if event.time_ns > scenario.duration_ns {
+        // Main event loop: process events in same-timestamp batches.
+        //
+        // When interleaving is enabled, events at the same timestamp
+        // targeting different CPUs are processed concurrently through
+        // token-passing. This models real kernel behavior where scheduler
+        // callbacks on different CPUs race with each other.
+        //
+        // When interleaving is disabled, all events are processed
+        // sequentially in their original priority order (by seq
+        // tiebreaker), preserving backward-compatible determinism.
+        let interleave_enabled = state.interleave || state.preemptive.is_some();
+
+        'event_loop: while let Some(t) = events.peek_time() {
+            if t > scenario.duration_ns {
                 break;
             }
+            state.clock = t;
 
-            state.clock = event.time_ns;
+            let batch = events.drain_at(t);
 
-            // Advance per-CPU clock for CPU-specific events
-            match &event.kind {
-                EventKind::SliceExpired { cpu }
-                | EventKind::TaskPhaseComplete { cpu }
-                | EventKind::Tick { cpu }
-                | EventKind::CpuOffline { cpu }
-                | EventKind::CpuOnline { cpu }
-                | EventKind::CpuRelease { cpu }
-                | EventKind::CpuAcquire { cpu }
-                | EventKind::IrqStart { cpu, .. }
-                | EventKind::IrqEnd { cpu } => {
-                    state.advance_cpu_clock(*cpu);
-                    kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(*cpu));
-                }
-                EventKind::TaskWake { .. } | EventKind::TimerFired => {
-                    // No specific CPU yet; use event queue time for tracing
-                    kfuncs::set_sim_clock(state.clock, None);
-                }
-                EventKind::CgroupMigrate { .. }
-                | EventKind::CgroupCreate(_)
-                | EventKind::CgroupDestroy(_) => {
-                    // Cgroup operations are not CPU-specific
-                    kfuncs::set_sim_clock(state.clock, None);
-                }
-            }
+            if interleave_enabled {
+                // Partition into global (sequential) and per-CPU (concurrent).
+                let (global, per_cpu) = group_events_by_cpu(batch);
 
-            match event.kind {
-                EventKind::TaskWake { pid, waker } => {
-                    self.handle_task_wake(pid, waker, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::SliceExpired { cpu } => {
-                    self.handle_slice_expired(cpu, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::TaskPhaseComplete { cpu } => {
-                    self.handle_task_phase_complete(
-                        cpu,
+                // 1. Global events: always processed sequentially first
+                for event in global {
+                    if let Some(err) = self.process_event(
+                        event,
                         &mut state,
                         &mut tasks,
                         &mut events,
+                        watchdog_timeout,
                         scenario.duration_ns,
-                        monitor,
-                    );
-                }
-                EventKind::TimerFired => {
-                    self.handle_timer_fired(&mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::Tick { cpu } => {
-                    // Check for stalled tasks before handling tick
-                    if let Some(timeout) = watchdog_timeout {
-                        if let Some(stall_error) =
-                            Self::check_watchdog(&tasks, state.clock, timeout)
-                        {
-                            exit_kind = stall_error;
-                            break;
-                        }
-                    }
-                    self.handle_tick(cpu, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::CpuOffline { cpu } => {
-                    self.handle_cpu_offline(cpu, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::CpuOnline { cpu } => {
-                    self.handle_cpu_online(cpu, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::CpuRelease { cpu } => {
-                    self.handle_cpu_release(cpu, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::CpuAcquire { cpu } => {
-                    self.handle_cpu_acquire(cpu, &mut state, &mut tasks, &mut events, monitor);
-                }
-                EventKind::CgroupMigrate {
-                    pid,
-                    from_cgroup,
-                    to_cgroup,
-                } => {
-                    self.handle_cgroup_migrate(
-                        pid,
-                        &from_cgroup,
-                        &to_cgroup,
-                        &mut state,
-                        &tasks,
-                        &cgroup_registry,
-                    );
-                }
-                EventKind::CgroupCreate(event) => {
-                    if let Some(err) = self.handle_cgroup_create(
-                        &event,
-                        &mut state,
                         &mut cgroup_registry,
                         max_cgroups,
+                        monitor,
                     ) {
                         exit_kind = err;
-                        break;
+                        break 'event_loop;
+                    }
+                    if !ignore_bpf_errors {
+                        if let Some(msg) = state.bpf_error.take() {
+                            exit_kind = ExitKind::ErrorBpf(msg);
+                            break 'event_loop;
+                        }
+                    } else {
+                        state.bpf_error = None;
                     }
                 }
-                EventKind::CgroupDestroy(event) => {
-                    self.handle_cgroup_destroy(&event, &mut state, &mut cgroup_registry);
-                }
-                EventKind::IrqStart {
-                    cpu,
-                    irq_type,
-                    duration_ns,
-                    wake_pids,
-                } => {
-                    self.handle_irq_start(
-                        cpu,
-                        irq_type,
-                        duration_ns,
-                        &wake_pids,
+
+                // 2. Per-CPU events: concurrent if 2+ CPUs
+                if per_cpu.len() >= 2 {
+                    self.process_batch_concurrent(
+                        per_cpu,
                         &mut state,
                         &mut tasks,
                         &mut events,
+                        watchdog_timeout,
+                        scenario.duration_ns,
+                        &mut cgroup_registry,
+                        max_cgroups,
                         monitor,
                     );
-                }
-                EventKind::IrqEnd { cpu } => {
-                    self.handle_irq_end(cpu, &mut state);
-                }
-            }
-
-            // Check for BPF error after each event (unless ignored)
-            if !ignore_bpf_errors {
-                if let Some(msg) = state.bpf_error.take() {
-                    exit_kind = ExitKind::ErrorBpf(msg);
-                    break;
+                } else {
+                    // Single CPU or empty: sequential
+                    for event in per_cpu.into_values().flatten() {
+                        if let Some(err) = self.process_event(
+                            event,
+                            &mut state,
+                            &mut tasks,
+                            &mut events,
+                            watchdog_timeout,
+                            scenario.duration_ns,
+                            &mut cgroup_registry,
+                            max_cgroups,
+                            monitor,
+                        ) {
+                            exit_kind = err;
+                            break 'event_loop;
+                        }
+                        if !ignore_bpf_errors {
+                            if let Some(msg) = state.bpf_error.take() {
+                                exit_kind = ExitKind::ErrorBpf(msg);
+                                break 'event_loop;
+                            }
+                        } else {
+                            state.bpf_error = None;
+                        }
+                    }
                 }
             } else {
-                // Clear the error so it doesn't accumulate
-                state.bpf_error = None;
+                // No interleaving: process all events sequentially in
+                // original priority order (preserves backward-compatible
+                // determinism).
+                for event in batch {
+                    if let Some(err) = self.process_event(
+                        event,
+                        &mut state,
+                        &mut tasks,
+                        &mut events,
+                        watchdog_timeout,
+                        scenario.duration_ns,
+                        &mut cgroup_registry,
+                        max_cgroups,
+                        monitor,
+                    ) {
+                        exit_kind = err;
+                        break 'event_loop;
+                    }
+                    if !ignore_bpf_errors {
+                        if let Some(msg) = state.bpf_error.take() {
+                            exit_kind = ExitKind::ErrorBpf(msg);
+                            break 'event_loop;
+                        }
+                    } else {
+                        state.bpf_error = None;
+                    }
+                }
             }
         }
 
@@ -905,6 +949,128 @@ impl<S: Scheduler> Simulator<S> {
             trace: state.trace,
             tasks,
         }
+    }
+
+    /// Process a single event: advance clocks and dispatch to the handler.
+    ///
+    /// Returns `Some(ExitKind)` if the simulation should stop (watchdog stall,
+    /// cgroup exhaustion). The caller checks BPF errors separately.
+    #[allow(clippy::too_many_arguments)]
+    fn process_event(
+        &self,
+        event: Event,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        watchdog_timeout: Option<TimeNs>,
+        duration_ns: TimeNs,
+        cgroup_registry: &mut CgroupRegistry,
+        max_cgroups: u32,
+        monitor: &mut dyn Monitor,
+    ) -> Option<ExitKind> {
+        // Advance per-CPU clock for CPU-specific events
+        match &event.kind {
+            EventKind::SliceExpired { cpu }
+            | EventKind::TaskPhaseComplete { cpu }
+            | EventKind::Tick { cpu }
+            | EventKind::CpuOffline { cpu }
+            | EventKind::CpuOnline { cpu }
+            | EventKind::CpuRelease { cpu }
+            | EventKind::CpuAcquire { cpu }
+            | EventKind::IrqStart { cpu, .. }
+            | EventKind::IrqEnd { cpu } => {
+                state.advance_cpu_clock(*cpu);
+                kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(*cpu));
+            }
+            EventKind::TaskWake { .. } | EventKind::TimerFired => {
+                kfuncs::set_sim_clock(state.clock, None);
+            }
+            EventKind::CgroupMigrate { .. }
+            | EventKind::CgroupCreate(_)
+            | EventKind::CgroupDestroy(_) => {
+                kfuncs::set_sim_clock(state.clock, None);
+            }
+        }
+
+        match event.kind {
+            EventKind::TaskWake { pid, waker } => {
+                self.handle_task_wake(pid, waker, state, tasks, events, monitor);
+            }
+            EventKind::SliceExpired { cpu } => {
+                self.handle_slice_expired(cpu, state, tasks, events, monitor);
+            }
+            EventKind::TaskPhaseComplete { cpu } => {
+                self.handle_task_phase_complete(cpu, state, tasks, events, duration_ns, monitor);
+            }
+            EventKind::TimerFired => {
+                self.handle_timer_fired(state, tasks, events, monitor);
+            }
+            EventKind::Tick { cpu } => {
+                if let Some(timeout) = watchdog_timeout {
+                    if let Some(stall_error) = Self::check_watchdog(tasks, state.clock, timeout) {
+                        return Some(stall_error);
+                    }
+                }
+                self.handle_tick(cpu, state, tasks, events, monitor);
+            }
+            EventKind::CpuOffline { cpu } => {
+                self.handle_cpu_offline(cpu, state, tasks, events, monitor);
+            }
+            EventKind::CpuOnline { cpu } => {
+                self.handle_cpu_online(cpu, state, tasks, events, monitor);
+            }
+            EventKind::CpuRelease { cpu } => {
+                self.handle_cpu_release(cpu, state, tasks, events, monitor);
+            }
+            EventKind::CpuAcquire { cpu } => {
+                self.handle_cpu_acquire(cpu, state, tasks, events, monitor);
+            }
+            EventKind::CgroupMigrate {
+                pid,
+                from_cgroup,
+                to_cgroup,
+            } => {
+                self.handle_cgroup_migrate(
+                    pid,
+                    &from_cgroup,
+                    &to_cgroup,
+                    state,
+                    tasks,
+                    cgroup_registry,
+                );
+            }
+            EventKind::CgroupCreate(event) => {
+                if let Some(err) =
+                    self.handle_cgroup_create(&event, state, cgroup_registry, max_cgroups)
+                {
+                    return Some(err);
+                }
+            }
+            EventKind::CgroupDestroy(event) => {
+                self.handle_cgroup_destroy(&event, state, cgroup_registry);
+            }
+            EventKind::IrqStart {
+                cpu,
+                irq_type,
+                duration_ns,
+                wake_pids,
+            } => {
+                self.handle_irq_start(
+                    cpu,
+                    irq_type,
+                    duration_ns,
+                    &wake_pids,
+                    state,
+                    tasks,
+                    events,
+                    monitor,
+                );
+            }
+            EventKind::IrqEnd { cpu } => {
+                self.handle_irq_end(cpu, state);
+            }
+        }
+        None
     }
 
     /// Handle a BPF timer firing.
@@ -1631,7 +1797,10 @@ impl<S: Scheduler> Simulator<S> {
                     .map(|c| c.id)
                     .collect();
 
-                if (state.interleave || state.preemptive.is_some()) && idle_cpus.len() >= 2 {
+                if (state.interleave || state.preemptive.is_some())
+                    && !state.in_concurrent_batch
+                    && idle_cpus.len() >= 2
+                {
                     self.dispatch_concurrent(&idle_cpus, state, tasks, events, monitor);
                 } else {
                     for cpu in idle_cpus {
@@ -2528,6 +2697,299 @@ impl<S: Scheduler> Simulator<S> {
         preempt::uninstall_signal_handler();
     }
 
+    /// Process per-CPU events at the same timestamp concurrently.
+    ///
+    /// Each CPU's events are handled on a separate OS thread, interleaved
+    /// at kfunc boundaries via token passing. This models the real kernel
+    /// where scheduler callbacks on different CPUs race with each other
+    /// (e.g., tick on CPU 0 racing with dispatch on CPU 1).
+    ///
+    /// During the concurrent phase:
+    /// - `in_concurrent_batch` is set, suppressing `process_kicked_cpus`
+    ///   and `dispatch_concurrent` to prevent nesting
+    /// - Kicked CPUs accumulate in `state.kicked_cpus`
+    ///
+    /// After all workers complete:
+    /// - `in_concurrent_batch` is cleared
+    /// - Deferred kicked CPUs are processed
+    #[allow(clippy::too_many_arguments)]
+    fn process_batch_concurrent(
+        &self,
+        per_cpu: HashMap<CpuId, Vec<Event>>,
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        watchdog_timeout: Option<TimeNs>,
+        duration_ns: TimeNs,
+        cgroup_registry: &mut CgroupRegistry,
+        max_cgroups: u32,
+        monitor: &mut dyn Monitor,
+    ) {
+        let mut cpu_ids: Vec<CpuId> = per_cpu.keys().copied().collect();
+        cpu_ids.sort(); // deterministic worker-to-CPU assignment
+        let nr_workers = cpu_ids.len();
+
+        // Single CPU: no interleaving benefit, process sequentially.
+        if nr_workers < 2 {
+            let mut flat: Vec<Event> = per_cpu.into_values().flatten().collect();
+            flat.sort();
+            for event in flat {
+                self.process_event(
+                    event,
+                    state,
+                    tasks,
+                    events,
+                    watchdog_timeout,
+                    duration_ns,
+                    cgroup_registry,
+                    max_cgroups,
+                    monitor,
+                );
+            }
+            return;
+        }
+
+        state.in_concurrent_batch = true;
+        state.kicked_cpus.clear();
+
+        // Advance each CPU's clock before spawning.
+        for &cpu in &cpu_ids {
+            state.advance_cpu_clock(cpu);
+        }
+
+        let interleave_seed = state.next_prng();
+
+        // SAFETY: token passing ensures only one thread accesses shared
+        // state at a time. Raw pointers avoid Send/Sync bounds on types
+        // that are effectively single-threaded under the token.
+        let sim_send = SendPtr(self as *const Simulator<S> as *mut Simulator<S>);
+        let state_send = SendPtr(state as *mut SimulatorState);
+        let tasks_send = SendPtr(tasks as *mut HashMap<Pid, SimTask>);
+        let events_send = SendPtr(events as *mut EventQueue);
+        let cgroup_send = SendPtr(cgroup_registry as *mut CgroupRegistry);
+
+        if let Some(ref preemptive_cfg) = state.preemptive.clone() {
+            Self::process_batch_concurrent_preemptive(
+                per_cpu,
+                &cpu_ids,
+                &sim_send,
+                &state_send,
+                &tasks_send,
+                &events_send,
+                &cgroup_send,
+                interleave_seed,
+                watchdog_timeout,
+                duration_ns,
+                max_cgroups,
+                preemptive_cfg.timeslice_min,
+                preemptive_cfg.timeslice_max,
+            );
+        } else {
+            Self::process_batch_concurrent_cooperative(
+                per_cpu,
+                &cpu_ids,
+                &sim_send,
+                &state_send,
+                &tasks_send,
+                &events_send,
+                &cgroup_send,
+                interleave_seed,
+                watchdog_timeout,
+                duration_ns,
+                max_cgroups,
+            );
+        }
+
+        state.in_concurrent_batch = false;
+
+        // Process deferred kicked CPUs from the concurrent batch.
+        self.process_kicked_cpus(None, state, tasks, events, monitor);
+    }
+
+    /// Cooperative batch-concurrent processing via `TokenRing`.
+    #[allow(clippy::too_many_arguments)]
+    fn process_batch_concurrent_cooperative(
+        per_cpu: HashMap<CpuId, Vec<Event>>,
+        cpu_ids: &[CpuId],
+        sim_send: &SendPtr<Simulator<S>>,
+        state_send: &SendPtr<SimulatorState>,
+        tasks_send: &SendPtr<HashMap<Pid, SimTask>>,
+        events_send: &SendPtr<EventQueue>,
+        cgroup_send: &SendPtr<CgroupRegistry>,
+        seed: u32,
+        watchdog_timeout: Option<TimeNs>,
+        duration_ns: TimeNs,
+        max_cgroups: u32,
+    ) {
+        use crate::interleave::{self, TokenRing, WorkerId};
+
+        let ring = TokenRing::new(cpu_ids.len(), seed);
+
+        std::thread::scope(|s| {
+            let ring_ref = &ring;
+            let sim_ref = sim_send;
+            let state_ref = state_send;
+            let tasks_ref = tasks_send;
+            let events_ref = events_send;
+            let cgroup_ref = cgroup_send;
+            let per_cpu_ref = &per_cpu;
+
+            for (i, &cpu) in cpu_ids.iter().enumerate() {
+                let worker_id = WorkerId(i);
+                let cpu_events = per_cpu_ref.get(&cpu).cloned().unwrap_or_default();
+
+                s.spawn(move || {
+                    let simp = sim_ref.0 as *const Simulator<S>;
+                    let sp = state_ref.0;
+
+                    interleave::install(ring_ref, worker_id);
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
+
+                    ring_ref.wait_for_token(worker_id);
+
+                    // Process all events for this CPU sequentially.
+                    // Yields happen at kfunc boundaries within handlers.
+                    for event in cpu_events {
+                        unsafe {
+                            (*simp).process_event(
+                                event,
+                                &mut *sp,
+                                &mut *tasks_ref.0,
+                                &mut *events_ref.0,
+                                watchdog_timeout,
+                                duration_ns,
+                                &mut *cgroup_ref.0,
+                                max_cgroups,
+                                &mut NoopMonitor,
+                            );
+                        }
+                    }
+
+                    ring_ref.finish(worker_id);
+                    kfuncs::exit_sim();
+                    interleave::uninstall();
+                });
+            }
+
+            ring.start();
+            ring.wait_all_done();
+        });
+
+        debug!(
+            workers = cpu_ids.len(),
+            "batch-concurrent cooperative: complete"
+        );
+    }
+
+    /// Preemptive batch-concurrent processing via `PreemptRing` + PMU timer.
+    #[allow(clippy::too_many_arguments)]
+    fn process_batch_concurrent_preemptive(
+        per_cpu: HashMap<CpuId, Vec<Event>>,
+        cpu_ids: &[CpuId],
+        sim_send: &SendPtr<Simulator<S>>,
+        state_send: &SendPtr<SimulatorState>,
+        tasks_send: &SendPtr<HashMap<Pid, SimTask>>,
+        events_send: &SendPtr<EventQueue>,
+        cgroup_send: &SendPtr<CgroupRegistry>,
+        seed: u32,
+        watchdog_timeout: Option<TimeNs>,
+        duration_ns: TimeNs,
+        max_cgroups: u32,
+        timeslice_min: u64,
+        timeslice_max: u64,
+    ) {
+        use crate::interleave::WorkerId;
+        use crate::preempt::{self, PreemptRing};
+
+        let ring = PreemptRing::new(cpu_ids.len(), seed);
+        preempt::install_signal_handler();
+
+        std::thread::scope(|s| {
+            let ring_ref = &ring;
+            let sim_ref = sim_send;
+            let state_ref = state_send;
+            let tasks_ref = tasks_send;
+            let events_ref = events_send;
+            let cgroup_ref = cgroup_send;
+            let per_cpu_ref = &per_cpu;
+
+            for (i, &cpu) in cpu_ids.iter().enumerate() {
+                let worker_id = WorkerId(i);
+                let cpu_events = per_cpu_ref.get(&cpu).cloned().unwrap_or_default();
+
+                s.spawn(move || {
+                    let simp = sim_ref.0 as *const Simulator<S>;
+                    let sp = state_ref.0;
+
+                    // Create per-thread PMU timer.
+                    let timer = perf::try_create_rbc_timer();
+                    let timer_fd = match &timer {
+                        Some(t) => {
+                            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+                            if let Err(e) = t.set_signal_delivery(tid, preempt::PREEMPT_SIGNAL) {
+                                tracing::warn!(
+                                    "batch preemptive: signal delivery setup failed: {e}"
+                                );
+                                -1
+                            } else {
+                                t.raw_fd()
+                            }
+                        }
+                        None => -1,
+                    };
+
+                    preempt::install(ring_ref, worker_id, timer_fd, timeslice_min, timeslice_max);
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
+
+                    ring_ref.wait_for_token(worker_id);
+
+                    // Don't arm the PMU timer upfront. Unlike
+                    // dispatch_concurrent_preemptive (which runs a tight
+                    // C-only loop), batch workers run full handler chains
+                    // that include Rust engine code (advance_cpu_clock,
+                    // enter_sim, exit_sim). The timer is armed naturally
+                    // by with_sim's resume_timer() after each kfunc call,
+                    // ensuring it only fires during C scheduler code.
+
+                    for event in cpu_events {
+                        unsafe {
+                            (*simp).process_event(
+                                event,
+                                &mut *sp,
+                                &mut *tasks_ref.0,
+                                &mut *events_ref.0,
+                                watchdog_timeout,
+                                duration_ns,
+                                &mut *cgroup_ref.0,
+                                max_cgroups,
+                                &mut NoopMonitor,
+                            );
+                        }
+                    }
+
+                    if let Some(ref t) = timer {
+                        let _ = t.disable();
+                    }
+
+                    ring_ref.finish(worker_id);
+                    kfuncs::exit_sim();
+                    preempt::uninstall();
+                });
+            }
+
+            ring.start();
+            ring.wait_all_done();
+        });
+
+        debug!(
+            signal_preemptions = ring.signal_preemptions(),
+            cooperative_yields = ring.cooperative_yields(),
+            workers = cpu_ids.len(),
+            "batch-concurrent preemptive: complete"
+        );
+        preempt::uninstall_signal_handler();
+    }
+
     /// Process CPUs kicked via `scx_bpf_kick_cpu` during a callback.
     ///
     /// Drains the kicked_cpus map and handles each entry based on its flags:
@@ -2544,6 +3006,12 @@ impl<S: Scheduler> Simulator<S> {
         events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
+        // During concurrent batch processing, kicks accumulate in
+        // state.kicked_cpus but are not processed until the batch
+        // completes (post-batch phase on the engine thread).
+        if state.in_concurrent_batch {
+            return;
+        }
         let kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
         for (kicked_cpu, flags) in kicked {
             if Some(kicked_cpu) == exclude_cpu {
