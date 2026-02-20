@@ -9,6 +9,8 @@
 #include <lib/sdt_task.h>
 #include <lib/rbtree.h>
 
+static struct scx_allocator scx_rbtree_allocator;
+
 int rb_integrity_check(rbtree_t __arg_arena *rbtree);
 void rbnode_print(size_t depth, rbnode_t *rbn);
 static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replacement);
@@ -22,13 +24,23 @@ static int rbnode_replace(rbtree_t *rbtree, rbnode_t *existing, rbnode_t *replac
 	}									\
 } while (0)
 
+__weak
+int scx_rb_init(void)
+{
+	return scx_alloc_init(&scx_rbtree_allocator, sizeof(rbtree_t));
+}
+
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert)
 {
+	struct sdt_data __arena *data = NULL;
 	rbtree_t *rbtree;
 
-	rbtree = (rbtree_t *)scx_static_alloc(sizeof(*rbtree), 1);
-	if (!rbtree)
-		return (u64)NULL;
+	data = scx_alloc(&scx_rbtree_allocator);
+	if (unlikely(!data))
+		return (u64)(NULL);
+
+	rbtree = (rbtree_t *)data->payload;
+	rbtree->tid = data->tid;
 
 	rbtree->root = NULL;
 	rbtree->alloc = alloc;
@@ -42,12 +54,15 @@ int rb_destroy(rbtree_t __arg_arena *rbtree)
 {
 	int ret;
 
+	scx_arena_subprog_init();
+
 	while (rbtree->root && can_loop) {
 		ret = rb_remove(rbtree, rbtree->root->key);
 		if (ret)
 			return ret;
 	}
 
+	scx_alloc_free_idx(&scx_rbtree_allocator, rbtree->tid.idx);
 	return 0;
 }
 
