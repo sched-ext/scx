@@ -8505,3 +8505,225 @@ fn test_lavd_api_noflags() {
         "worker was never scheduled after lavd_noflags()"
     );
 }
+
+// ---------------------------------------------------------------------------
+// LAVD-specific tests: Cgroup exhaustion stress test
+// ---------------------------------------------------------------------------
+
+/// Test LAVD with many cgroups to stress test cgroup init/exit code paths.
+///
+/// # Production Failure Context (sim-d80a2)
+///
+/// In production, after 10 hours of runtime, LAVD failed with:
+/// ```text
+/// scx_lavd_alpha triggered exit kind 1025:
+///   scx_bpf_error (main.bpf.c:2089: Failed to init a cgroup: -12)
+/// ```
+///
+/// The error code -12 is ENOMEM. The failure occurs in `scx_cgroup_bw_init()`
+/// (lib/cgroup_bw.bpf.c) when the `cbw_cgrp_llc_map` hash map is full.
+///
+/// # LAVD Cgroup Limits
+///
+/// From lib/cgroup_bw.bpf.c:
+/// - `CBW_NR_CGRP_MAX = 2048` - Maximum number of cgroups
+/// - `CBW_NR_CGRP_LLC_MAX = CBW_NR_CGRP_MAX * 32 = 65536` - Max LLC contexts
+/// - Each cgroup with tasks allocates up to TOPO_NR(LLC) entries in the
+///   `cbw_cgrp_llc_map` hash map
+///
+/// The production failure likely happened when:
+/// 1. Many cgroups were created and destroyed over 10 hours
+/// 2. The BPF hash map filled up (no automatic cleanup of dead cgroups)
+/// 3. A new cgroup creation triggered `bpf_map_update_elem()` with BPF_NOEXIST
+///    which returned -ENOMEM when the map was at capacity
+///
+/// # Test Strategy
+///
+/// We cannot fully reproduce this in the simulator because:
+/// 1. The `scx_cgroup_bw_*` functions are weak stubs (return 0, no map alloc)
+/// 2. The simulator doesn't support dynamic cgroup creation at runtime
+/// 3. We'd need the actual BPF map implementation to hit the limit
+///
+/// However, this test:
+/// 1. Creates many cgroups to stress the cgroup code paths
+/// 2. Exercises `lavd_cgroup_init` / `lavd_cgroup_exit` with `enable_cpu_bw=true`
+/// 3. Verifies the simulator handles large cgroup counts correctly
+/// 4. Documents the limits for future investigation
+///
+/// # Configuration matching production failure
+///
+/// - Performance mode (no_core_compaction=true)
+/// - enable_cpu_bw=true
+/// - 36 CPUs
+/// - pinned_slice_us=3000
+#[test]
+fn test_lavd_cgroup_exhaustion_stress() {
+    let _lock = common::setup_test();
+
+    // Match production configuration: 36 CPUs, performance mode
+    let nr_cpus = 36u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable CPU bandwidth control (the code path where -ENOMEM occurs)
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+        // Match production: performance mode
+        lavd_set_bool(&sched, "no_core_compaction\0", true);
+        // Match production: pinned_slice_us=3000 (3ms = 3_000_000 ns)
+        lavd_set_u64(&sched, "pinned_slice_ns\0", 3_000_000);
+    }
+
+    // Create a scenario with many cgroups (stress test)
+    // Note: The real limit is CBW_NR_CGRP_MAX=2048, but the simulator's weak
+    // stubs don't enforce this. We use a smaller number to keep the test fast
+    // while still exercising the code paths.
+    const NUM_CGROUPS: usize = 100;
+
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(200);
+
+    // Create many cgroups
+    for i in 0..NUM_CGROUPS {
+        let cpus: Vec<CpuId> = (0..nr_cpus).map(CpuId).collect();
+        builder = builder.cgroup_with_bandwidth(
+            &format!("cgroup_{i}"),
+            &cpus,
+            100_000, // 100ms period
+            50_000,  // 50ms quota (50% CPU)
+            10_000,  // 10ms burst
+        );
+    }
+
+    // Add tasks to some cgroups to exercise the task<->cgroup interaction
+    for i in 0..20 {
+        let cgroup_name = format!("cgroup_{}", i % NUM_CGROUPS);
+        builder = builder.add_task_in_cgroup(
+            &format!("worker_{i}"),
+            0,
+            workloads::cpu_bound(10_000_000),
+            &cgroup_name,
+        );
+    }
+
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All workers should have been scheduled
+    for i in 0..20i32 {
+        assert!(
+            trace.schedule_count(Pid(i + 1)) > 0,
+            "worker_{i} was never scheduled"
+        );
+    }
+
+    // Document the actual limit for posterity
+    eprintln!(
+        "[cgroup_exhaustion_stress] Successfully ran with {} cgroups",
+        NUM_CGROUPS
+    );
+    eprintln!("[cgroup_exhaustion_stress] Production limit: CBW_NR_CGRP_MAX = 2048");
+    eprintln!("[cgroup_exhaustion_stress] To fully reproduce ENOMEM:");
+    eprintln!("  1. Need actual BPF map implementation (not weak stubs)");
+    eprintln!("  2. Need dynamic cgroup lifecycle events in simulator");
+    eprintln!("  3. Create >2048 cgroups with enable_cpu_bw=true");
+}
+
+/// Test LAVD cgroup churn: tasks migrating between cgroups.
+///
+/// This simulates the kind of cgroup activity that can lead to resource
+/// exhaustion over time. In production, cgroups are created/destroyed
+/// as containers/services start and stop.
+///
+/// While the simulator doesn't support dynamic cgroup creation, we can
+/// exercise cgroup migration paths that update internal state.
+#[test]
+fn test_lavd_cgroup_churn() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 8u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable bandwidth control for more thorough testing
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    let cpus: Vec<CpuId> = (0..nr_cpus).map(CpuId).collect();
+
+    // Create 10 cgroups for migration targets
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(300);
+    for i in 0..10 {
+        builder =
+            builder.cgroup_with_bandwidth(&format!("group_{i}"), &cpus, 100_000, 80_000, 10_000);
+    }
+
+    // Create tasks and schedule migrations
+    for i in 0..10 {
+        let cgroup_name = format!("group_{}", i);
+        builder = builder.add_task_in_cgroup(
+            &format!("task_{i}"),
+            0,
+            workloads::cpu_bound(10_000_000),
+            &cgroup_name,
+        );
+    }
+
+    // Schedule many migrations to exercise cgroup_move
+    for t in 0..10u64 {
+        let time_ns = 50_000_000 + t * 20_000_000; // Every 20ms starting at 50ms
+        for task_id in 0..5i32 {
+            let from = format!("group_{}", (task_id as u64 + t) % 10);
+            let to = format!("group_{}", (task_id as u64 + t + 1) % 10);
+            builder = builder.cgroup_migrate(Pid(task_id + 1), &from, &to, time_ns);
+        }
+    }
+
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should have been scheduled despite frequent migrations
+    for i in 0..10i32 {
+        assert!(
+            trace.schedule_count(Pid(i + 1)) > 0,
+            "task_{i} was never scheduled"
+        );
+    }
+}
+
+/// Test LAVD with the maximum number of statically-defined cgroups.
+///
+/// This test pushes the simulator's cgroup handling to verify it can
+/// manage a large number of cgroups without issues. The actual BPF
+/// limit is 2048, but we use a smaller number for reasonable test time.
+#[test]
+fn test_lavd_many_cgroups() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Test with a significant but manageable number of cgroups
+    const NUM_CGROUPS: usize = 200;
+
+    let cpus: Vec<CpuId> = (0..nr_cpus).map(CpuId).collect();
+    let mut builder = Scenario::builder().cpus(nr_cpus).duration_ms(100);
+
+    for i in 0..NUM_CGROUPS {
+        builder = builder.cgroup(&format!("cg_{i}"), &cpus);
+    }
+
+    // Add a single task (we're testing cgroup init, not task scheduling)
+    builder = builder.add_task_in_cgroup("worker", 0, workloads::cpu_bound(10_000_000), "cg_0");
+
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker was never scheduled"
+    );
+
+    eprintln!(
+        "[many_cgroups] Successfully initialized and exited {} cgroups",
+        NUM_CGROUPS
+    );
+}
