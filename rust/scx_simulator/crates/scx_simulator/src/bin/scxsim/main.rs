@@ -6,7 +6,8 @@ use clap::{Parser, ValueEnum};
 
 use scx_simulator::scenario::{parse_duration_ns, parse_seed};
 use scx_simulator::{
-    discover_schedulers, load_rtapp, DynamicScheduler, SimFormat, Simulator, SIM_LOCK,
+    discover_schedulers, load_rtapp, DynamicScheduler, PreemptiveConfig, SimFormat, Simulator,
+    SIM_LOCK,
 };
 
 mod real_run;
@@ -96,6 +97,28 @@ struct Cli {
     #[arg(long)]
     interleave: bool,
 
+    /// Enable preemptive interleaving via PMU retired branch counter signals.
+    ///
+    /// Like --interleave, but also preempts mid-C-code at random retired
+    /// conditional branch intervals. Implies --interleave. Falls back to
+    /// cooperative-only interleaving if PMU counters are unavailable (VM).
+    #[arg(long)]
+    preemptive: bool,
+
+    /// Minimum preemptive timeslice in retired conditional branches.
+    ///
+    /// Controls the lower bound of the random timeslice range used by
+    /// --preemptive mode. Default: 100.
+    #[arg(long, default_value_t = 100, requires = "preemptive")]
+    timeslice_min: u64,
+
+    /// Maximum preemptive timeslice in retired conditional branches.
+    ///
+    /// Controls the upper bound of the random timeslice range used by
+    /// --preemptive mode. Default: 1000.
+    #[arg(long, default_value_t = 1000, requires = "preemptive")]
+    timeslice_max: u64,
+
     /// List available schedulers and exit.
     #[arg(long)]
     list_schedulers: bool,
@@ -170,6 +193,13 @@ fn run(cli: &Cli) -> Result<(), String> {
         scenario.fixed_priority = true;
     }
     if cli.interleave {
+        scenario.interleave = true;
+    }
+    if cli.preemptive {
+        scenario.preemptive = Some(PreemptiveConfig {
+            timeslice_min: cli.timeslice_min,
+            timeslice_max: cli.timeslice_max,
+        });
         scenario.interleave = true;
     }
     if let Some(ref end_time) = cli.end_time {
