@@ -1721,6 +1721,155 @@ mod tests {
         free_task(&mut state, Pid(1));
     }
 
+    /// Test SCX_DSQ_LOCAL_ON dispatch to different CPU for migration-disabled task fails.
+    ///
+    /// This reproduces the production LAVD bug:
+    /// ```text
+    /// kworker/8:1[3065910] triggered exit kind 1024:
+    ///   runtime error (SCX_DSQ_LOCAL[_ON] cannot move migration disabled
+    ///   kworker/u208:2[4181193] from CPU 8 to 31)
+    /// ```
+    ///
+    /// A migration-disabled task (migration_disabled > 0) cannot be dispatched
+    /// to a different CPU than its last known CPU, even if that CPU is in the
+    /// task's cpumask.
+    #[test]
+    fn test_resolve_pending_dispatch_local_on_migration_disabled_violation() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(32);
+        let p = register_task(&mut state, Pid(1));
+
+        // Task was last running on CPU 8
+        state.task_last_cpu.insert(Pid(1), CpuId(8));
+
+        // Task has migration_disabled > 0 (like a kworker in BPF code)
+        // In production, migration_disabled > 1 means pre-existing disable
+        // (BPF prolog adds 1, so >1 means it was already disabled before BPF)
+        unsafe {
+            ffi::sim_task_set_migration_disabled(p, 2);
+        }
+
+        // Try to dispatch to CPU 31 (different from last CPU 8)
+        let local_on_dsq = DsqId::LOCAL_ON_MASK | 31;
+
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
+        scx_bpf_dsq_insert(p, local_on_dsq, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(0));
+
+        // Dispatch should be rejected
+        assert_eq!(result, None);
+        // CPU 31's local DSQ should be empty
+        assert!(state.cpus[31].local_dsq.is_empty());
+        // BPF error should be set
+        assert!(state.bpf_error.is_some());
+        let error_msg = state.bpf_error.as_ref().unwrap();
+        assert!(
+            error_msg.contains("SCX_DSQ_LOCAL_ON"),
+            "error should mention SCX_DSQ_LOCAL_ON: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("migration disabled"),
+            "error should mention migration disabled: {}",
+            error_msg
+        );
+
+        // Verify trace event was recorded with correct reason
+        let events = state.trace.events();
+        let dispatch_reject = events.iter().find(|e| {
+            matches!(
+                e.kind,
+                TraceKind::DispatchRejected {
+                    pid,
+                    target_cpu,
+                    reason: DispatchRejectReason::MigrationDisabled
+                } if pid == Pid(1) && target_cpu == CpuId(31)
+            )
+        });
+        assert!(
+            dispatch_reject.is_some(),
+            "DispatchRejected with MigrationDisabled reason should be recorded"
+        );
+
+        free_task(&mut state, Pid(1));
+    }
+
+    /// Test SCX_DSQ_LOCAL_ON dispatch to same CPU for migration-disabled task succeeds.
+    ///
+    /// A migration-disabled task CAN be dispatched to its last known CPU.
+    /// Only cross-CPU dispatch is rejected.
+    #[test]
+    fn test_resolve_pending_dispatch_local_on_migration_disabled_same_cpu_ok() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(16);
+        let p = register_task(&mut state, Pid(1));
+
+        // Task was last running on CPU 8
+        state.task_last_cpu.insert(Pid(1), CpuId(8));
+
+        // Task has migration_disabled > 0
+        unsafe {
+            ffi::sim_task_set_migration_disabled(p, 2);
+        }
+
+        // Dispatch to CPU 8 (same as last CPU) - should succeed
+        let local_on_dsq = DsqId::LOCAL_ON_MASK | 8;
+
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
+        scx_bpf_dsq_insert(p, local_on_dsq, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(0));
+
+        // Dispatch should succeed
+        assert_eq!(result, Some(CpuId(8)));
+        assert_eq!(state.cpus[8].local_dsq.len(), 1);
+        assert_eq!(state.cpus[8].local_dsq[0], Pid(1));
+        assert!(state.bpf_error.is_none());
+
+        free_task(&mut state, Pid(1));
+    }
+
+    /// Test that migration_disabled=0 tasks can move to different CPUs.
+    ///
+    /// Only migration_disabled > 0 restricts cross-CPU dispatch.
+    #[test]
+    fn test_resolve_pending_dispatch_local_on_migration_enabled_can_move() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(16);
+        let p = register_task(&mut state, Pid(1));
+
+        // Task was last running on CPU 8
+        state.task_last_cpu.insert(Pid(1), CpuId(8));
+
+        // Task has migration_disabled = 0 (migration enabled)
+        unsafe {
+            ffi::sim_task_set_migration_disabled(p, 0);
+        }
+
+        // Dispatch to CPU 12 (different from last CPU 8) - should succeed
+        let local_on_dsq = DsqId::LOCAL_ON_MASK | 12;
+
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
+        scx_bpf_dsq_insert(p, local_on_dsq, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(0));
+
+        // Dispatch should succeed (migration is enabled)
+        assert_eq!(result, Some(CpuId(12)));
+        assert_eq!(state.cpus[12].local_dsq.len(), 1);
+        assert_eq!(state.cpus[12].local_dsq[0], Pid(1));
+        assert!(state.bpf_error.is_none());
+
+        free_task(&mut state, Pid(1));
+    }
+
     // -----------------------------------------------------------------------
     // DSQ move_to_local
     // -----------------------------------------------------------------------
