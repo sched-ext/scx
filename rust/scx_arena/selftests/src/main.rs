@@ -18,6 +18,8 @@ use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
+use clap::Parser;
+
 use scx_utils::init_libbpf_logging;
 use scx_utils::Core;
 use scx_utils::Llc;
@@ -35,6 +37,62 @@ use libbpf_rs::ProgramInput;
 
 const BPF_STDOUT: u32 = 1;
 const BPF_STDERR: u32 = 2;
+
+// Mirrors enum scx_selftest_id in lib/selftests/selftest.h.
+// SCX_SELFTEST_ID_ALL (0) is reserved for "run all" and is not listed in
+// TEST_CASES; only the named per-test IDs appear there.
+#[repr(u32)]
+#[allow(non_camel_case_types)]
+enum SelfTestId {
+    #[allow(dead_code)]
+    SCX_SELFTEST_ID_ALL = 0,
+    SCX_SELFTEST_ID_ARENA_TOPOLOGY_TIMER = 1,
+    SCX_SELFTEST_ID_ATQ = 2,
+    SCX_SELFTEST_ID_DHQ = 3,
+    SCX_SELFTEST_ID_BTREE = 4,
+    SCX_SELFTEST_ID_LVQUEUE = 5,
+    SCX_SELFTEST_ID_MINHEAP = 6,
+    SCX_SELFTEST_ID_RBTREE = 7,
+    SCX_SELFTEST_ID_TOPOLOGY = 8,
+    SCX_SELFTEST_ID_BITMAP = 9,
+}
+
+fn available_tests() -> String {
+    TEST_CASES
+        .iter()
+        .map(|(name, _)| format!("  {}", name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const TEST_CASES: &[(&str, u32)] = &[
+    (
+        "arena_topology_timer",
+        SelfTestId::SCX_SELFTEST_ID_ARENA_TOPOLOGY_TIMER as u32,
+    ),
+    ("atq", SelfTestId::SCX_SELFTEST_ID_ATQ as u32),
+    ("dhq", SelfTestId::SCX_SELFTEST_ID_DHQ as u32),
+    ("btree", SelfTestId::SCX_SELFTEST_ID_BTREE as u32),
+    ("lvqueue", SelfTestId::SCX_SELFTEST_ID_LVQUEUE as u32),
+    ("minheap", SelfTestId::SCX_SELFTEST_ID_MINHEAP as u32),
+    ("rbtree", SelfTestId::SCX_SELFTEST_ID_RBTREE as u32),
+    ("topology", SelfTestId::SCX_SELFTEST_ID_TOPOLOGY as u32),
+    ("bitmap", SelfTestId::SCX_SELFTEST_ID_BITMAP as u32),
+];
+
+#[derive(Debug, Parser)]
+#[clap(about = "scx_arena library selftests")]
+struct Opts {
+    /// List all available test cases and exit.
+    #[clap(long)]
+    list: bool,
+
+    /// Run one or more specific test cases. Multiple names can be given after a
+    /// single --test flag (e.g. --test rbtree atq), or the flag can be repeated.
+    /// If not specified, all tests are run.
+    #[clap(long = "test", value_name = "NAME", num_args(1..))]
+    tests: Vec<String>,
+}
 
 fn setup_arenas(skel: &mut BpfSkel<'_>) -> Result<()> {
     const STATIC_ALLOC_PAGES_GRANULARITY: c_ulong = 512;
@@ -164,6 +222,7 @@ fn setup_topology(skel: &mut BpfSkel<'_>) -> Result<()> {
 }
 
 fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
+    let prog_fd = skel.progs.arena_selftest.as_fd().as_raw_fd();
     let mut buf = vec![0u8; 4096];
     let name = if stream_id == 1 { "OUTPUT" } else { "ERROR" };
     let mut started = false;
@@ -171,7 +230,7 @@ fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
     loop {
         let ret = unsafe {
             libbpf_sys::bpf_prog_stream_read(
-                skel.progs.arena_selftest.as_fd().as_raw_fd(),
+                prog_fd,
                 stream_id,
                 buf.as_mut_ptr() as *mut c_void,
                 buf.len() as u32,
@@ -198,6 +257,30 @@ fn print_stream(skel: &mut BpfSkel<'_>, stream_id: u32) -> () {
     println!("\n====END STREAM  {}====", name);
 }
 
+// Run the named test by setting selftest_run_id in the BPF bss and calling
+// arena_selftest. The ID comes from enum scx_selftest_id in selftest.h.
+fn run_test_by_name(skel: &mut BpfSkel<'_>, name: &str) -> Result<i32> {
+    let id = TEST_CASES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, id)| *id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown test: '{}'. Use --list to see available tests.",
+                name
+            )
+        })?;
+
+    skel.maps.bss_data.as_mut().unwrap().selftest_run_id = id;
+
+    let input = ProgramInput {
+        ..Default::default()
+    };
+    let output = skel.progs.arena_selftest.test_run(input)?;
+
+    Ok(output.return_value as i32)
+}
+
 fn main() {
     TermLogger::init(
         simplelog::LevelFilter::Info,
@@ -206,6 +289,25 @@ fn main() {
         ColorChoice::Auto,
     )
     .unwrap();
+
+    let opts = Opts::parse();
+
+    if opts.list {
+        println!("Available test cases:\n{}", available_tests());
+        return;
+    }
+
+    // Validate test names before loading BPF.
+    for name in &opts.tests {
+        if !TEST_CASES.iter().any(|(n, _)| *n == name.as_str()) {
+            eprintln!(
+                "Unknown test: '{}'.\nAvailable tests:\n{}",
+                name,
+                available_tests()
+            );
+            std::process::exit(1);
+        }
+    }
 
     let mut open_object = MaybeUninit::uninit();
     let mut builder = BpfSkelBuilder::default();
@@ -225,20 +327,34 @@ fn main() {
     setup_arenas(&mut skel).unwrap();
     setup_topology(&mut skel).unwrap();
 
-    let input = ProgramInput {
-        ..Default::default()
+    let to_run: Vec<&str> = if opts.tests.is_empty() {
+        TEST_CASES.iter().map(|(n, _)| *n).collect()
+    } else {
+        opts.tests.iter().map(String::as_str).collect()
     };
 
-    let output = skel.progs.arena_selftest.test_run(input).unwrap();
-    if output.return_value != 0 {
-        eprintln!(
-            "Selftest returned {}, please check bpf tracelog for more details.",
-            output.return_value as i32
-        );
-    } else {
-        println!("Selftest successful.");
+    let mut any_failed = false;
+    for &name in &to_run {
+        match run_test_by_name(&mut skel, name) {
+            Ok(0) => println!("[ PASS ] {}", name),
+            Ok(ret) => {
+                eprintln!("[ FAIL ] {} (returned {})", name, ret);
+                any_failed = true;
+            }
+            Err(e) => {
+                eprintln!("[ FAIL ] {} (error: {})", name, e);
+                any_failed = true;
+            }
+        }
+
+        print_stream(&mut skel, BPF_STDOUT);
+        print_stream(&mut skel, BPF_STDERR);
     }
 
-    print_stream(&mut skel, BPF_STDOUT);
-    print_stream(&mut skel, BPF_STDERR);
+    if any_failed {
+        eprintln!("One or more selftests failed.");
+        std::process::exit(1);
+    } else {
+        println!("All selftests passed.");
+    }
 }
