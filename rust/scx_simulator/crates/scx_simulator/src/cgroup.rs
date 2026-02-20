@@ -47,10 +47,18 @@ impl CgroupInfo {
     }
 }
 
+/// Default maximum cgroup limit (high value for normal tests).
+pub const DEFAULT_MAX_CGROUPS: u32 = 10000;
+
 /// Registry managing the cgroup hierarchy.
 ///
 /// The registry always contains the root cgroup (cgid=1, level=0).
 /// Additional cgroups can be created as children of existing cgroups.
+///
+/// The registry also tracks BPF map-style resource limits. In production,
+/// LAVD uses BPF hash maps with size limits (CBW_NR_CGRP_MAX = 2048,
+/// CBW_NR_CGRP_LLC_MAX = 65536). When these maps fill up, cgroup init
+/// fails with ENOMEM. The registry simulates this with configurable limits.
 pub struct CgroupRegistry {
     /// Map from cgroup ID to cgroup info.
     cgroups: HashMap<CgroupId, CgroupInfo>,
@@ -61,6 +69,12 @@ pub struct CgroupRegistry {
     /// Number of CPUs in the system (for cpuset validation in Phase 5).
     #[allow(dead_code)]
     nr_cpus: u32,
+    /// Maximum number of cgroups that can have BPF map entries allocated.
+    /// This simulates BPF map capacity limits (e.g., CBW_NR_CGRP_MAX = 2048).
+    max_cgroups: u32,
+    /// Number of cgroups with BPF map entries currently allocated.
+    /// Incremented by `try_allocate_bpf_entry()`, decremented by `free_bpf_entry()`.
+    allocated_bpf_entries: u32,
 }
 
 // FFI declarations for C cgroup allocation functions.
@@ -73,7 +87,13 @@ extern "C" {
 
 impl CgroupRegistry {
     /// Create a new cgroup registry with only the root cgroup.
-    pub fn new(nr_cpus: u32) -> Self {
+    ///
+    /// # Arguments
+    /// * `nr_cpus` - Number of CPUs in the system.
+    /// * `max_cgroups` - Maximum number of cgroups that can have BPF map entries.
+    ///   Use `DEFAULT_MAX_CGROUPS` (10000) for normal tests, or a lower value
+    ///   (e.g., 50) to test resource exhaustion scenarios.
+    pub fn new(nr_cpus: u32, max_cgroups: u32) -> Self {
         let root_raw = unsafe { sim_get_root_cgroup() };
         let root = CgroupInfo {
             cgid: CgroupId::ROOT,
@@ -92,7 +112,42 @@ impl CgroupRegistry {
             name_to_id: HashMap::new(),
             next_cgid: 2, // Start after root (1)
             nr_cpus,
+            max_cgroups,
+            allocated_bpf_entries: 0,
         }
+    }
+
+    /// Try to allocate a BPF map entry for a cgroup.
+    ///
+    /// Returns `Ok(())` if allocation succeeds, `Err(-12)` (ENOMEM) if the
+    /// maximum cgroup limit has been reached.
+    ///
+    /// This simulates the behavior of BPF hash map insertions that fail
+    /// when the map is full (e.g., cgroup_bw_map in LAVD).
+    pub fn try_allocate_bpf_entry(&mut self) -> Result<(), i32> {
+        if self.allocated_bpf_entries >= self.max_cgroups {
+            return Err(-12); // ENOMEM
+        }
+        self.allocated_bpf_entries += 1;
+        Ok(())
+    }
+
+    /// Free a BPF map entry for a cgroup.
+    ///
+    /// Decrements the allocated entry count. Safe to call even if no entry
+    /// was allocated (saturates at 0).
+    pub fn free_bpf_entry(&mut self) {
+        self.allocated_bpf_entries = self.allocated_bpf_entries.saturating_sub(1);
+    }
+
+    /// Get the current number of allocated BPF entries.
+    pub fn allocated_bpf_entries(&self) -> u32 {
+        self.allocated_bpf_entries
+    }
+
+    /// Get the maximum cgroup limit.
+    pub fn max_cgroups(&self) -> u32 {
+        self.max_cgroups
     }
 
     /// Look up a cgroup by ID.
@@ -322,6 +377,74 @@ pub extern "C" fn sim_cgroup_lookup_ancestor(cgrp: *mut c_void, level: u32) -> *
     }
 }
 
+// ---------------------------------------------------------------------------
+// FFI functions for BPF map entry allocation (called from C schedulers)
+// ---------------------------------------------------------------------------
+
+/// Try to allocate a BPF map entry for a cgroup (called from C).
+///
+/// Returns 0 on success, -12 (ENOMEM) if the maximum cgroup limit has been
+/// reached. This simulates BPF hash map insertion failures.
+///
+/// # Safety
+/// Must be called while a cgroup registry is installed.
+#[no_mangle]
+pub extern "C" fn sim_cgroup_registry_allocate() -> i32 {
+    let registry = CGROUP_REGISTRY.load(Ordering::SeqCst);
+    if registry.is_null() {
+        // No registry installed - always succeed
+        return 0;
+    }
+    let registry = unsafe { &mut *registry };
+    match registry.try_allocate_bpf_entry() {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// Free a BPF map entry for a cgroup (called from C).
+///
+/// Decrements the allocated entry count. Safe to call even if no entry
+/// was allocated.
+///
+/// # Safety
+/// Must be called while a cgroup registry is installed.
+#[no_mangle]
+pub extern "C" fn sim_cgroup_registry_free() {
+    let registry = CGROUP_REGISTRY.load(Ordering::SeqCst);
+    if registry.is_null() {
+        return;
+    }
+    let registry = unsafe { &mut *registry };
+    registry.free_bpf_entry();
+}
+
+/// Get the current number of allocated BPF entries (called from C).
+///
+/// Returns 0 if no registry is installed.
+#[no_mangle]
+pub extern "C" fn sim_cgroup_registry_allocated_count() -> u32 {
+    let registry = CGROUP_REGISTRY.load(Ordering::SeqCst);
+    if registry.is_null() {
+        return 0;
+    }
+    let registry = unsafe { &*registry };
+    registry.allocated_bpf_entries()
+}
+
+/// Get the maximum cgroup limit (called from C).
+///
+/// Returns 0 if no registry is installed.
+#[no_mangle]
+pub extern "C" fn sim_cgroup_registry_max() -> u32 {
+    let registry = CGROUP_REGISTRY.load(Ordering::SeqCst);
+    if registry.is_null() {
+        return 0;
+    }
+    let registry = unsafe { &*registry };
+    registry.max_cgroups()
+}
+
 // FFI declarations for CSS iterator
 extern "C" {
     fn sim_css_iter_reset();
@@ -368,8 +491,43 @@ mod tests {
 
     #[test]
     fn test_registry_has_root() {
-        let registry = CgroupRegistry::new(4);
+        let registry = CgroupRegistry::new(4, DEFAULT_MAX_CGROUPS);
         assert!(registry.get(CgroupId::ROOT).is_some());
         assert_eq!(registry.get(CgroupId::ROOT).unwrap().level, 0);
+    }
+
+    #[test]
+    fn test_bpf_entry_allocation() {
+        let mut registry = CgroupRegistry::new(4, 3);
+        assert_eq!(registry.allocated_bpf_entries(), 0);
+        assert_eq!(registry.max_cgroups(), 3);
+
+        // First 3 allocations should succeed
+        assert!(registry.try_allocate_bpf_entry().is_ok());
+        assert!(registry.try_allocate_bpf_entry().is_ok());
+        assert!(registry.try_allocate_bpf_entry().is_ok());
+        assert_eq!(registry.allocated_bpf_entries(), 3);
+
+        // 4th allocation should fail with ENOMEM
+        assert_eq!(registry.try_allocate_bpf_entry(), Err(-12));
+        assert_eq!(registry.allocated_bpf_entries(), 3);
+
+        // Free one entry
+        registry.free_bpf_entry();
+        assert_eq!(registry.allocated_bpf_entries(), 2);
+
+        // Now allocation should succeed again
+        assert!(registry.try_allocate_bpf_entry().is_ok());
+        assert_eq!(registry.allocated_bpf_entries(), 3);
+    }
+
+    #[test]
+    fn test_free_bpf_entry_saturates() {
+        let mut registry = CgroupRegistry::new(4, 10);
+        assert_eq!(registry.allocated_bpf_entries(), 0);
+
+        // Free with zero entries should not underflow
+        registry.free_bpf_entry();
+        assert_eq!(registry.allocated_bpf_entries(), 0);
     }
 }

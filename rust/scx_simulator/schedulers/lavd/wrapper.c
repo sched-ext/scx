@@ -379,12 +379,20 @@ void bpf_cgroup_release(struct cgroup *cgrp)
 
 /*
  * =================================================================
- * Cgroup bandwidth stubs
+ * Cgroup bandwidth stubs with resource tracking
  * =================================================================
  *
- * With enable_cpu_bw = false, all cgroup ops short-circuit before
- * calling these. Provide stubs to satisfy the linker.
+ * These stubs simulate BPF map resource limits. In production LAVD,
+ * cgroup_bw_map has size CBW_NR_CGRP_MAX = 2048. When this map fills
+ * up, scx_cgroup_bw_init fails with -ENOMEM.
+ *
+ * The simulator tracks cgroup BPF map entries in the Rust CgroupRegistry.
+ * sim_cgroup_registry_allocate() returns 0 or -ENOMEM based on the
+ * scenario's max_cgroups limit.
  */
+extern int sim_cgroup_registry_allocate(void);
+extern void sim_cgroup_registry_free(void);
+
 __attribute__((weak)) int scx_cgroup_bw_lib_init(
 	struct scx_cgroup_bw_config *config)
 {
@@ -396,12 +404,20 @@ __attribute__((weak)) int scx_cgroup_bw_init(
 	struct cgroup *cgrp, struct scx_cgroup_init_args *args)
 {
 	(void)cgrp; (void)args;
-	return 0;
+	/*
+	 * Attempt to allocate a BPF map entry. Returns -ENOMEM if the
+	 * scenario's max_cgroups limit has been reached.
+	 */
+	return sim_cgroup_registry_allocate();
 }
 
 __attribute__((weak)) int scx_cgroup_bw_exit(struct cgroup *cgrp)
 {
 	(void)cgrp;
+	/*
+	 * Free the BPF map entry allocated in scx_cgroup_bw_init.
+	 */
+	sim_cgroup_registry_free();
 	return 0;
 }
 

@@ -2,6 +2,7 @@
 
 use tracing::warn;
 
+use crate::cgroup::DEFAULT_MAX_CGROUPS;
 use crate::task::{TaskBehavior, TaskDef};
 use crate::types::{CpuId, MmId, Pid, TimeNs};
 
@@ -346,6 +347,15 @@ pub struct Scenario {
     /// separate OS threads with PRNG-driven token passing, enabling
     /// deterministic exploration of different interleavings.
     pub interleave: bool,
+    /// Maximum number of cgroups that can have BPF map entries allocated.
+    ///
+    /// This simulates BPF hash map capacity limits. In production LAVD,
+    /// `CBW_NR_CGRP_MAX = 2048` limits the cgroup_bw_map size.
+    /// When this limit is reached, `cgroup_init` fails with ENOMEM.
+    ///
+    /// - Default: 10000 (high value for normal tests).
+    /// - Set to a low value (e.g., 50) to test resource exhaustion.
+    pub max_cgroups: u32,
 }
 
 /// Builder for constructing scenarios.
@@ -367,6 +377,7 @@ pub struct ScenarioBuilder {
     cpu_preempt_events: Vec<CpuPreemptEvent>,
     cgroup_migrate_events: Vec<CgroupMigrateEvent>,
     interleave: bool,
+    max_cgroups: u32,
 }
 
 impl Scenario {
@@ -389,6 +400,7 @@ impl Scenario {
             cpu_preempt_events: Vec::new(),
             cgroup_migrate_events: Vec::new(),
             interleave: false,
+            max_cgroups: DEFAULT_MAX_CGROUPS,
         }
     }
 }
@@ -713,6 +725,19 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Set the maximum number of cgroups that can have BPF map entries.
+    ///
+    /// This simulates BPF hash map capacity limits. In production LAVD,
+    /// `CBW_NR_CGRP_MAX = 2048` limits the cgroup_bw_map size.
+    /// When this limit is reached, `cgroup_init` fails with ENOMEM.
+    ///
+    /// - Default: 10000 (high value for normal tests).
+    /// - Set to a low value (e.g., 50) to test resource exhaustion.
+    pub fn max_cgroups(mut self, max: u32) -> Self {
+        self.max_cgroups = max;
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -747,6 +772,7 @@ impl ScenarioBuilder {
             cpu_preempt_events: self.cpu_preempt_events,
             cgroup_migrate_events: self.cgroup_migrate_events,
             interleave: self.interleave,
+            max_cgroups: self.max_cgroups,
         }
     }
 }

@@ -51,6 +51,7 @@ pub mod workloads;
 // Re-export the main public types for convenience.
 pub use cgroup::{
     clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupInfo, CgroupRegistry,
+    DEFAULT_MAX_CGROUPS,
 };
 pub use engine::{ExitKind, SimulationResult, Simulator};
 pub use ffi::{discover_schedulers, DynamicScheduler, LavdPowerMode, Scheduler, SchedulerInfo};

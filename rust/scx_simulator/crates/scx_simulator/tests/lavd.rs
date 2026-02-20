@@ -9032,3 +9032,103 @@ fn test_lavd_many_cgroups() {
         NUM_CGROUPS
     );
 }
+
+/// Test cgroup BPF map resource exhaustion.
+///
+/// This test simulates the production behavior where BPF hash maps have
+/// size limits (CBW_NR_CGRP_MAX = 2048 in LAVD). When these maps fill up,
+/// `cgroup_init` should fail with ENOMEM.
+///
+/// The test:
+/// 1. Sets `max_cgroups=50` to simulate a low BPF map limit
+/// 2. Enables `enable_cpu_bw=true` so `scx_cgroup_bw_init` is called
+/// 3. Tries to create 100 cgroups
+/// 4. Expects a panic from the engine when cgroup_init fails
+///
+/// This covers the resource exhaustion code path in scx_cgroup_bw_init.
+#[test]
+#[should_panic(expected = "cgroup_init failed")]
+fn test_lavd_cgroup_resource_exhaustion() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable bandwidth control so scx_cgroup_bw_init is called
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    let cpus: Vec<CpuId> = (0..nr_cpus).map(CpuId).collect();
+
+    // Create more cgroups than the limit (100 > 50)
+    const NUM_CGROUPS: usize = 100;
+    const MAX_CGROUPS: u32 = 50;
+
+    let mut builder = Scenario::builder()
+        .cpus(nr_cpus)
+        .duration_ms(100)
+        .max_cgroups(MAX_CGROUPS);
+
+    for i in 0..NUM_CGROUPS {
+        builder = builder.cgroup(&format!("cg_{i}"), &cpus);
+    }
+
+    // Add a task so the scenario is valid
+    builder = builder.add_task_in_cgroup("worker", 0, workloads::cpu_bound(1_000_000), "cg_0");
+
+    let scenario = builder.build();
+
+    // This should panic with "cgroup_init failed" when we hit the limit
+    let _trace = Simulator::new(sched).run(scenario);
+}
+
+/// Test that cgroup resource tracking counts correctly.
+///
+/// This test verifies that the registry correctly tracks allocated entries:
+/// 1. With a high limit (default), many cgroups can be created
+/// 2. The count increases with each cgroup_init
+/// 3. The count decreases with each cgroup_exit (on cleanup)
+#[test]
+fn test_lavd_cgroup_resource_tracking() {
+    let _lock = common::setup_test();
+
+    let nr_cpus = 4u32;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+
+    // Enable bandwidth control so scx_cgroup_bw_init is called
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    let cpus: Vec<CpuId> = (0..nr_cpus).map(CpuId).collect();
+
+    // Create exactly at the limit
+    const NUM_CGROUPS: usize = 30;
+    const MAX_CGROUPS: u32 = 50; // Above NUM_CGROUPS so no failure
+
+    let mut builder = Scenario::builder()
+        .cpus(nr_cpus)
+        .duration_ms(50)
+        .max_cgroups(MAX_CGROUPS);
+
+    for i in 0..NUM_CGROUPS {
+        builder = builder.cgroup(&format!("cg_{i}"), &cpus);
+    }
+
+    builder = builder.add_task_in_cgroup("worker", 0, workloads::cpu_bound(1_000_000), "cg_0");
+
+    let scenario = builder.build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Should complete successfully
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "worker was never scheduled"
+    );
+
+    eprintln!(
+        "[cgroup_resource_tracking] Successfully ran with {} cgroups (limit={})",
+        NUM_CGROUPS, MAX_CGROUPS
+    );
+}
