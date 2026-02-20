@@ -919,6 +919,40 @@ pub extern "C" fn sim_bpf_get_smp_processor_id() -> u32 {
     with_sim(kfunc_cost::TRIVIAL, |sim| sim.current_cpu.0)
 }
 
+/// Returns 1 if the current CPU is in hardirq context, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn sim_bpf_in_hardirq() -> u32 {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
+        let cpu = sim.current_cpu;
+        u32::from(sim.cpus[cpu.0 as usize].irq_context == crate::cpu::IrqContext::HardIrq)
+    })
+}
+
+/// Returns 0 — the simulator does not model NMIs.
+#[no_mangle]
+pub extern "C" fn sim_bpf_in_nmi() -> u32 {
+    0
+}
+
+/// Returns 1 if the current CPU is serving a softirq, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn sim_bpf_in_serving_softirq() -> u32 {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
+        let cpu = sim.current_cpu;
+        u32::from(sim.cpus[cpu.0 as usize].irq_context == crate::cpu::IrqContext::ServingSoftIrq)
+    })
+}
+
+/// Returns 1 if the current CPU is in any interrupt context
+/// (hardirq or softirq), 0 otherwise.
+#[no_mangle]
+pub extern "C" fn sim_bpf_in_interrupt() -> u32 {
+    with_sim(kfunc_cost::TRIVIAL, |sim| {
+        let cpu = sim.current_cpu;
+        u32::from(sim.cpus[cpu.0 as usize].irq_context != crate::cpu::IrqContext::None)
+    })
+}
+
 /// Deterministic PRNG replacement for bpf_get_prandom_u32.
 #[no_mangle]
 pub extern "C" fn sim_bpf_get_prandom_u32() -> u32 {

@@ -14,6 +14,18 @@ pub enum LastStopReason {
     Involuntary,
 }
 
+/// Current interrupt context on a CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IrqContext {
+    /// No interrupt context (normal task execution).
+    #[default]
+    None,
+    /// In hardware interrupt handler (top half).
+    HardIrq,
+    /// In softirq handler (bottom half, inline).
+    ServingSoftIrq,
+}
+
 /// A simulated CPU.
 #[derive(Debug)]
 pub struct SimCpu {
@@ -45,6 +57,11 @@ pub struct SimCpu {
     pub task_original_slice: Option<TimeNs>,
     /// Whether this CPU is online. Offline CPUs don't receive ticks or dispatch.
     pub is_online: bool,
+    /// Current interrupt context on this CPU.
+    pub irq_context: IrqContext,
+    /// Accumulated IRQ time stolen from the current running task (ns).
+    /// Reset when the task stops or when accounted for in phase/slice events.
+    pub irq_stolen_ns: TimeNs,
 }
 
 impl SimCpu {
@@ -60,6 +77,8 @@ impl SimCpu {
             task_started_at: None,
             task_original_slice: None,
             is_online: true,
+            irq_context: IrqContext::None,
+            irq_stolen_ns: 0,
         }
     }
 

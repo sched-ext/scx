@@ -5,6 +5,7 @@
 
 use crate::engine::ExitKind;
 use crate::fmt::FmtTs;
+use crate::scenario::IrqType;
 use crate::task::TaskDef;
 use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
@@ -128,6 +129,12 @@ pub enum TraceKind {
         target_cpu: CpuId,
         reason: DispatchRejectReason,
     },
+
+    // ----- IRQ events -----
+    /// An interrupt starts on a CPU (hardirq or softirq).
+    IrqStart { cpu: CpuId, irq_type: IrqType },
+    /// An interrupt handler completes on a CPU.
+    IrqEnd { cpu: CpuId },
 }
 
 /// Reason why a dispatch to a local DSQ was rejected.
@@ -483,6 +490,14 @@ impl Trace {
                         pid.0, target_cpu.0, reason_str
                     )
                 }
+                TraceKind::IrqStart { cpu, irq_type } => {
+                    let kind_str = match irq_type {
+                        IrqType::HardIrq => "hardirq",
+                        IrqType::SoftIrq => "softirq",
+                    };
+                    format!("IRQ_START cpu={} type={}", cpu.0, kind_str)
+                }
+                TraceKind::IrqEnd { cpu } => format!("IRQ_END  cpu={}", cpu.0),
             };
             eprintln!(
                 "[{}] cpu={:<3} {}",

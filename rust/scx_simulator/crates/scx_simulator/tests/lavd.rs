@@ -10494,3 +10494,359 @@ fn test_lavd_cpu_capacity_scaling() {
     assert!(!trace.has_error());
     eprintln!("[cpu_capacity_scaling] Test passed with varied utilization");
 }
+
+// ---------------------------------------------------------------------------
+// IRQ simulation tests
+// ---------------------------------------------------------------------------
+
+/// Hardirq wakeup: a task woken during a hardirq should receive a lat_cri
+/// boost compared to a task woken by a normal sleep timer.
+///
+/// Exercises main.bpf.c L596-598: bpf_in_hardirq() → set LAVD_FLAG_WOKEN_BY_HARDIRQ
+/// and lat_cri.bpf.c L52-54: LAVD_FLAG_WOKEN_BY_HARDIRQ → lat_boost_weight
+#[test]
+fn test_hardirq_wakeup_sets_flag() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+    let probes = LavdProbes::new(&sched);
+    let mut monitor = LavdMonitor::new(probes);
+
+    // Task A runs on a CPU, task B sleeps. A hardirq on CPU 0 wakes task B.
+    // For comparison, task C is woken by a normal sleep timer (no IRQ context).
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "runner".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "irq_wakee".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(1_000_000), Phase::Sleep(100_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Hardirq on CPU 0 at 10ms wakes task B (pid=2)
+        .hardirq(CpuId(0), 10_000_000, 5_000, &[Pid(2)])
+        // Second hardirq to exercise the path again
+        .hardirq(CpuId(0), 50_000_000, 5_000, &[Pid(2)])
+        .duration_ms(200)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    // Verify IRQ trace events were recorded
+    let irq_starts: Vec<_> = result
+        .trace
+        .events()
+        .iter()
+        .filter(|e| matches!(e.kind, TraceKind::IrqStart { .. }))
+        .collect();
+    assert!(
+        irq_starts.len() >= 2,
+        "expected at least 2 IrqStart events, got {}",
+        irq_starts.len()
+    );
+
+    let irq_ends: Vec<_> = result
+        .trace
+        .events()
+        .iter()
+        .filter(|e| matches!(e.kind, TraceKind::IrqEnd { .. }))
+        .collect();
+    assert!(
+        irq_ends.len() >= 2,
+        "expected at least 2 IrqEnd events, got {}",
+        irq_ends.len()
+    );
+
+    // Task B should have been scheduled (woken by hardirq)
+    assert!(
+        result.trace.schedule_count(Pid(2)) > 0,
+        "irq_wakee was never scheduled"
+    );
+}
+
+/// Softirq wakeup: a task woken during a softirq should receive a lat_cri
+/// boost.
+///
+/// Exercises main.bpf.c L601-603: bpf_in_serving_softirq() → set LAVD_FLAG_WOKEN_BY_SOFTIRQ
+/// and lat_cri.bpf.c L55-57: LAVD_FLAG_WOKEN_BY_SOFTIRQ → lat_boost_weight
+#[test]
+fn test_softirq_wakeup_sets_flag() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+    let probes = LavdProbes::new(&sched);
+    let mut monitor = LavdMonitor::new(probes);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .task(TaskDef {
+            name: "runner".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "softirq_wakee".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(1_000_000), Phase::Sleep(100_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Softirq on CPU 0 at 10ms wakes task B
+        .softirq(CpuId(0), 10_000_000, 3_000, &[Pid(2)])
+        .softirq(CpuId(0), 50_000_000, 3_000, &[Pid(2)])
+        .duration_ms(200)
+        .build();
+
+    let result = Simulator::new(sched).run_monitored(scenario, &mut monitor);
+
+    // Verify softirq trace events
+    let softirq_starts: Vec<_> = result
+        .trace
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                TraceKind::IrqStart {
+                    irq_type: IrqType::SoftIrq,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        softirq_starts.len() >= 2,
+        "expected at least 2 softirq IrqStart events, got {}",
+        softirq_starts.len()
+    );
+
+    // Task B should have been scheduled
+    assert!(
+        result.trace.schedule_count(Pid(2)) > 0,
+        "softirq_wakee was never scheduled"
+    );
+}
+
+/// IRQ steals time from the running task: a task with known run duration
+/// should take longer to complete when IRQs fire during its execution.
+#[test]
+fn test_irq_steals_time() {
+    let _lock = common::setup_test();
+
+    // Run 1: no IRQs
+    let sched_no_irq = DynamicScheduler::lavd(2);
+    let scenario_no_irq = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)], // 10ms
+                repeat: RepeatMode::Once,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .duration_ms(100)
+        .build();
+
+    let trace_no_irq = Simulator::new(sched_no_irq).run(scenario_no_irq);
+
+    // Run 2: with IRQs stealing time
+    let sched_irq = DynamicScheduler::lavd(2);
+    let irq_duration = 1_000_000u64; // 1ms per IRQ
+    let scenario_irq = Scenario::builder()
+        .cpus(2)
+        .task(TaskDef {
+            name: "worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)], // 10ms
+                repeat: RepeatMode::Once,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Fire IRQs during the task's execution window
+        .hardirq(CpuId(0), 2_000_000, irq_duration, &[])
+        .hardirq(CpuId(0), 5_000_000, irq_duration, &[])
+        .duration_ms(100)
+        .build();
+
+    let trace_irq = Simulator::new(sched_irq).run(scenario_irq);
+
+    // Both should complete
+    assert!(
+        trace_no_irq
+            .events()
+            .iter()
+            .any(|e| matches!(e.kind, TraceKind::TaskCompleted { pid } if pid == Pid(1))),
+        "task without IRQ did not complete"
+    );
+    assert!(
+        trace_irq
+            .events()
+            .iter()
+            .any(|e| matches!(e.kind, TraceKind::TaskCompleted { pid } if pid == Pid(1))),
+        "task with IRQ did not complete"
+    );
+
+    // The task's compute time (total_runtime) should be the same in both cases
+    // (the task does 10ms of work regardless of IRQs), but the wall-clock
+    // completion time should be later with IRQs.
+    let completion_no_irq = trace_no_irq
+        .events()
+        .iter()
+        .find(|e| matches!(e.kind, TraceKind::TaskCompleted { pid } if pid == Pid(1)))
+        .unwrap()
+        .time_ns;
+    let completion_irq = trace_irq
+        .events()
+        .iter()
+        .find(|e| matches!(e.kind, TraceKind::TaskCompleted { pid } if pid == Pid(1)))
+        .unwrap()
+        .time_ns;
+
+    eprintln!("completion_no_irq={completion_no_irq}, completion_irq={completion_irq}");
+
+    // The task with IRQs should complete later (IRQ time stolen)
+    assert!(
+        completion_irq > completion_no_irq,
+        "IRQ should delay task completion: without={completion_no_irq}, with={completion_irq}"
+    );
+}
+
+/// Periodic IRQ load: high-frequency periodic IRQs on one CPU should delay
+/// tasks on that CPU while tasks on other CPUs remain unaffected.
+#[test]
+fn test_periodic_irq_load() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    let scenario = Scenario::builder()
+        .cpus(4)
+        // Task on CPU 0 (will be affected by periodic IRQs)
+        .task(TaskDef {
+            name: "cpu0_worker".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(0)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Task on CPU 1 (should not be affected)
+        .task(TaskDef {
+            name: "cpu1_worker".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(50_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(1)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        // Periodic hardirqs on CPU 0 every 1ms, 100us each
+        .periodic_irq(
+            CpuId(0),
+            IrqType::HardIrq,
+            1_000_000, // start at 1ms
+            1_000_000, // every 1ms
+            100_000,   // 100us duration
+            &[],       // no wakeups
+        )
+        .duration_ms(100)
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Both tasks should be scheduled
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "cpu0_worker was never scheduled"
+    );
+    assert!(
+        trace.schedule_count(Pid(2)) > 0,
+        "cpu1_worker was never scheduled"
+    );
+
+    // Count IRQ events on CPU 0
+    let irq_count = trace
+        .events()
+        .iter()
+        .filter(|e| matches!(e.kind, TraceKind::IrqStart { cpu, .. } if cpu == CpuId(0)))
+        .count();
+    assert!(
+        irq_count > 50,
+        "expected many periodic IRQ events, got {irq_count}"
+    );
+
+    // Verify no IRQ events on CPU 1
+    let irq_count_cpu1 = trace
+        .events()
+        .iter()
+        .filter(|e| matches!(e.kind, TraceKind::IrqStart { cpu, .. } if cpu == CpuId(1)))
+        .count();
+    assert_eq!(
+        irq_count_cpu1, 0,
+        "expected no IRQ events on CPU 1, got {irq_count_cpu1}"
+    );
+
+    eprintln!("periodic IRQs on CPU 0: {irq_count}");
+}

@@ -76,6 +76,30 @@ pub struct CgroupDestroyEvent {
     pub at_ns: TimeNs,
 }
 
+/// Type of interrupt to simulate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrqType {
+    /// Hardware interrupt (top half). Sets `bpf_in_hardirq()=true`.
+    HardIrq,
+    /// Software interrupt (bottom half, inline). Sets `bpf_in_serving_softirq()=true`.
+    SoftIrq,
+}
+
+/// An interrupt event to inject during simulation.
+#[derive(Debug, Clone)]
+pub struct IrqEvent {
+    /// Which CPU the interrupt fires on.
+    pub cpu: CpuId,
+    /// When the interrupt fires (simulated ns).
+    pub at_ns: TimeNs,
+    /// Duration the interrupt handler runs (ns). Steals time from running task.
+    pub duration_ns: TimeNs,
+    /// Type of interrupt (hardirq or softirq).
+    pub irq_type: IrqType,
+    /// Tasks to wake during this interrupt (e.g., I/O completion handlers).
+    pub wake_pids: Vec<Pid>,
+}
+
 /// CPU bandwidth configuration for a cgroup (cpu.max parameters).
 #[derive(Debug, Clone)]
 pub struct CgroupBandwidth {
@@ -388,6 +412,8 @@ pub struct Scenario {
     /// - Default: 10000 (high value for normal tests).
     /// - Set to a low value (e.g., 50) to test resource exhaustion.
     pub max_cgroups: u32,
+    /// IRQ events to inject during the simulation.
+    pub irq_events: Vec<IrqEvent>,
 }
 
 /// Builder for constructing scenarios.
@@ -412,6 +438,7 @@ pub struct ScenarioBuilder {
     cgroup_destroy_events: Vec<CgroupDestroyEvent>,
     interleave: bool,
     max_cgroups: u32,
+    irq_events: Vec<IrqEvent>,
 }
 
 impl Scenario {
@@ -437,6 +464,7 @@ impl Scenario {
             cgroup_destroy_events: Vec::new(),
             interleave: false,
             max_cgroups: DEFAULT_MAX_CGROUPS,
+            irq_events: Vec::new(),
         }
     }
 }
@@ -811,6 +839,75 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Schedule a hardware interrupt on a CPU.
+    pub fn hardirq(
+        mut self,
+        cpu: CpuId,
+        at_ns: TimeNs,
+        duration_ns: TimeNs,
+        wake_pids: &[Pid],
+    ) -> Self {
+        self.irq_events.push(IrqEvent {
+            cpu,
+            at_ns,
+            duration_ns,
+            irq_type: IrqType::HardIrq,
+            wake_pids: wake_pids.to_vec(),
+        });
+        self
+    }
+
+    /// Schedule a software interrupt (inline softirq) on a CPU.
+    pub fn softirq(
+        mut self,
+        cpu: CpuId,
+        at_ns: TimeNs,
+        duration_ns: TimeNs,
+        wake_pids: &[Pid],
+    ) -> Self {
+        self.irq_events.push(IrqEvent {
+            cpu,
+            at_ns,
+            duration_ns,
+            irq_type: IrqType::SoftIrq,
+            wake_pids: wake_pids.to_vec(),
+        });
+        self
+    }
+
+    /// Schedule repeating IRQs (for high-IRQ-load simulation).
+    ///
+    /// Generates IRQ events starting at `start_ns` and repeating every
+    /// `interval_ns` until the scenario duration. Each instance has the
+    /// specified `duration_ns` and `irq_type`.
+    pub fn periodic_irq(
+        mut self,
+        cpu: CpuId,
+        irq_type: IrqType,
+        start_ns: TimeNs,
+        interval_ns: TimeNs,
+        duration_ns: TimeNs,
+        wake_pids: &[Pid],
+    ) -> Self {
+        assert!(interval_ns > 0, "periodic_irq interval must be > 0");
+        let mut t = start_ns;
+        // Generate events up to a reasonable bound. The engine will clip
+        // events past duration_ns at run time, but we cap here to avoid
+        // generating billions of events for tiny intervals.
+        let limit = self.duration_ns;
+        while t <= limit {
+            self.irq_events.push(IrqEvent {
+                cpu,
+                at_ns: t,
+                duration_ns,
+                irq_type,
+                wake_pids: wake_pids.to_vec(),
+            });
+            t += interval_ns;
+        }
+        self
+    }
+
     /// Build the scenario.
     pub fn build(self) -> Scenario {
         assert!(
@@ -848,6 +945,7 @@ impl ScenarioBuilder {
             cgroup_destroy_events: self.cgroup_destroy_events,
             interleave: self.interleave,
             max_cgroups: self.max_cgroups,
+            irq_events: self.irq_events,
         }
     }
 }

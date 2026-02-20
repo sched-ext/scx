@@ -267,18 +267,24 @@ unsigned long hw_pressure;
  * Also override the IRQ/NMI context checks (get_preempt_count,
  * bpf_in_hardirq, bpf_in_nmi, bpf_in_serving_softirq) which access
  * per-CPU kernel variables via bpf_this_cpu_ptr/bpf_core_field_exists.
- * The simulator never runs in interrupt context.
+ * The simulator routes these to Rust kfuncs that read per-CPU IRQ state.
  */
 #include <bpf_experimental.h>
 #undef can_loop
 #define can_loop true
 #undef __cond_break
 #define __cond_break(expr) expr
-#define get_preempt_count() (0)
-#define bpf_in_hardirq() (0)
-#define bpf_in_nmi() (0)
-#define bpf_in_serving_softirq() (0)
-#define bpf_in_interrupt() (0)
+
+extern unsigned int sim_bpf_in_hardirq(void);
+extern unsigned int sim_bpf_in_nmi(void);
+extern unsigned int sim_bpf_in_serving_softirq(void);
+extern unsigned int sim_bpf_in_interrupt(void);
+
+#define get_preempt_count() (sim_bpf_in_hardirq() ? 0x10000 : 0)
+#define bpf_in_hardirq() sim_bpf_in_hardirq()
+#define bpf_in_nmi() sim_bpf_in_nmi()
+#define bpf_in_serving_softirq() sim_bpf_in_serving_softirq()
+#define bpf_in_interrupt() sim_bpf_in_interrupt()
 
 #include "util.bpf.c"
 #include "power.bpf.c"

@@ -10,14 +10,14 @@ use std::ffi::c_void;
 use tracing::{debug, info, trace};
 
 use crate::cgroup::{clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupRegistry};
-use crate::cpu::{LastStopReason, SimCpu};
+use crate::cpu::{IrqContext, LastStopReason, SimCpu};
 use crate::dsq::DsqManager;
 use crate::ffi::{self, Scheduler};
 use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::monitor::{Monitor, ProbeContext, ProbePoint};
 use crate::perf;
-use crate::scenario::{CgroupCreateEvent, CgroupDestroyEvent, Scenario};
+use crate::scenario::{CgroupCreateEvent, CgroupDestroyEvent, IrqType, Scenario};
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
@@ -213,6 +213,15 @@ enum EventKind {
     CgroupCreate(CgroupCreateEvent),
     /// A cgroup is destroyed at runtime.
     CgroupDestroy(CgroupDestroyEvent),
+    /// An interrupt starts on a CPU (hardirq or softirq).
+    IrqStart {
+        cpu: CpuId,
+        irq_type: IrqType,
+        duration_ns: TimeNs,
+        wake_pids: Vec<Pid>,
+    },
+    /// An interrupt handler completes on a CPU.
+    IrqEnd { cpu: CpuId },
 }
 
 /// The main simulator.
@@ -638,6 +647,19 @@ impl<S: Scheduler> Simulator<S> {
             events.push(de.at_ns, EventKind::CgroupDestroy(de.clone()));
         }
 
+        // Seed IRQ events from the scenario
+        for irq in &scenario.irq_events {
+            events.push(
+                irq.at_ns,
+                EventKind::IrqStart {
+                    cpu: irq.cpu,
+                    irq_type: irq.irq_type,
+                    duration_ns: irq.duration_ns,
+                    wake_pids: irq.wake_pids.clone(),
+                },
+            );
+        }
+
         // Track cgroup resource limit
         let max_cgroups = scenario.max_cgroups;
 
@@ -662,7 +684,9 @@ impl<S: Scheduler> Simulator<S> {
                 | EventKind::CpuOffline { cpu }
                 | EventKind::CpuOnline { cpu }
                 | EventKind::CpuRelease { cpu }
-                | EventKind::CpuAcquire { cpu } => {
+                | EventKind::CpuAcquire { cpu }
+                | EventKind::IrqStart { cpu, .. }
+                | EventKind::IrqEnd { cpu } => {
                     state.advance_cpu_clock(*cpu);
                     kfuncs::set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(*cpu));
                 }
@@ -749,6 +773,26 @@ impl<S: Scheduler> Simulator<S> {
                 }
                 EventKind::CgroupDestroy(event) => {
                     self.handle_cgroup_destroy(&event, &mut state, &mut cgroup_registry);
+                }
+                EventKind::IrqStart {
+                    cpu,
+                    irq_type,
+                    duration_ns,
+                    wake_pids,
+                } => {
+                    self.handle_irq_start(
+                        cpu,
+                        irq_type,
+                        duration_ns,
+                        &wake_pids,
+                        &mut state,
+                        &mut tasks,
+                        &mut events,
+                        monitor,
+                    );
+                }
+                EventKind::IrqEnd { cpu } => {
+                    self.handle_irq_end(cpu, &mut state);
                 }
             }
 
@@ -1323,6 +1367,80 @@ impl<S: Scheduler> Simulator<S> {
         }
     }
 
+    /// Handle an interrupt starting on a CPU.
+    ///
+    /// Sets the IRQ context, records stolen time, processes wakeups inline
+    /// (so `bpf_in_hardirq()` returns true during `select_cpu`), and
+    /// schedules the `IrqEnd` event.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_irq_start(
+        &self,
+        cpu: CpuId,
+        irq_type: IrqType,
+        duration_ns: TimeNs,
+        wake_pids: &[Pid],
+        state: &mut SimulatorState,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
+        monitor: &mut dyn Monitor,
+    ) {
+        let irq_context = match irq_type {
+            IrqType::HardIrq => IrqContext::HardIrq,
+            IrqType::SoftIrq => IrqContext::ServingSoftIrq,
+        };
+
+        // Set IRQ context on the CPU
+        state.cpus[cpu.0 as usize].irq_context = irq_context;
+
+        let irq_label = match irq_type {
+            IrqType::HardIrq => "hardirq",
+            IrqType::SoftIrq => "softirq",
+        };
+        info!(
+            cpu = cpu.0,
+            duration_ns,
+            wakes = wake_pids.len(),
+            "IRQ START ({irq_label})"
+        );
+
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::IrqStart { cpu, irq_type },
+        );
+
+        // Accumulate stolen time if a task is running
+        if state.cpus[cpu.0 as usize].current_task.is_some() {
+            state.cpus[cpu.0 as usize].irq_stolen_ns += duration_ns;
+        }
+
+        // Process wakeups inline — the IRQ context is active, so
+        // bpf_in_hardirq()/bpf_in_serving_softirq() returns true during
+        // select_cpu. This matches kernel behavior: wake_up_process()
+        // called inside an IRQ handler runs synchronously with the
+        // interrupt context still active.
+        for &pid in wake_pids {
+            self.handle_task_wake(pid, None, state, tasks, events, monitor);
+        }
+
+        // Schedule IrqEnd
+        let end_time = state.cpus[cpu.0 as usize].local_clock + duration_ns;
+        events.push(end_time, EventKind::IrqEnd { cpu });
+    }
+
+    /// Handle an interrupt completing on a CPU.
+    fn handle_irq_end(&self, cpu: CpuId, state: &mut SimulatorState) {
+        state.cpus[cpu.0 as usize].irq_context = IrqContext::None;
+
+        state.trace.record(
+            state.cpus[cpu.0 as usize].local_clock,
+            cpu,
+            TraceKind::IrqEnd { cpu },
+        );
+
+        info!(cpu = cpu.0, "IRQ END");
+    }
+
     /// Handle a task waking up.
     ///
     /// If `waker` is provided (from a `Phase::Wake`), the waker's context is
@@ -1521,6 +1639,15 @@ impl<S: Scheduler> Simulator<S> {
         events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
+        // If IRQ time was stolen, re-schedule the event later.
+        let stolen = state.cpus[cpu.0 as usize].irq_stolen_ns;
+        if stolen > 0 {
+            state.cpus[cpu.0 as usize].irq_stolen_ns = 0;
+            let local_t = state.cpus[cpu.0 as usize].local_clock;
+            events.push(local_t + stolen, EventKind::SliceExpired { cpu });
+            return;
+        }
+
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
             None => return,
@@ -1638,6 +1765,15 @@ impl<S: Scheduler> Simulator<S> {
         duration_ns: TimeNs,
         monitor: &mut dyn Monitor,
     ) {
+        // If IRQ time was stolen, re-schedule the event later.
+        let stolen = state.cpus[cpu.0 as usize].irq_stolen_ns;
+        if stolen > 0 {
+            state.cpus[cpu.0 as usize].irq_stolen_ns = 0;
+            let local_t = state.cpus[cpu.0 as usize].local_clock;
+            events.push(local_t + stolen, EventKind::TaskPhaseComplete { cpu });
+            return;
+        }
+
         let pid = match state.cpus[cpu.0 as usize].current_task {
             Some(pid) => pid,
             None => return,
@@ -2388,6 +2524,8 @@ impl<S: Scheduler> Simulator<S> {
         task.runnable_at_ns = None;
         state.cpus[cpu.0 as usize].current_task = Some(pid);
         state.cpus[cpu.0 as usize].prev_task = None;
+        // Reset IRQ stolen time for this new run period.
+        state.cpus[cpu.0 as usize].irq_stolen_ns = 0;
         state.task_last_cpu.insert(pid, cpu);
         // Kernel clears SCX_TASK_QUEUED when a task is picked to run.
         state.clear_task_queued(pid);

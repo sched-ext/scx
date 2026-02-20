@@ -9,6 +9,7 @@ use std::io::Write;
 
 use serde_json::json;
 
+use crate::scenario::IrqType;
 use crate::trace::{DispatchRejectReason, Trace, TraceKind};
 use crate::types::DsqId;
 
@@ -341,6 +342,44 @@ pub(crate) fn write_json(trace: &Trace, writer: &mut impl Write) -> std::io::Res
                         "pid": pid.0,
                         "target_cpu": target_cpu.0,
                         "reason": reason_str
+                    }
+                })
+            }
+
+            TraceKind::IrqStart {
+                cpu: irq_cpu,
+                irq_type,
+            } => {
+                let kind_str = match irq_type {
+                    IrqType::HardIrq => "hardirq",
+                    IrqType::SoftIrq => "softirq",
+                };
+                json!({
+                    "ph": "i",
+                    "pid": cpu,
+                    "tid": 0,
+                    "ts": ts,
+                    "name": "irq_start",
+                    "cat": "irq",
+                    "s": "t",
+                    "args": {
+                        "cpu": irq_cpu.0,
+                        "type": kind_str
+                    }
+                })
+            }
+
+            TraceKind::IrqEnd { cpu: irq_cpu } => {
+                json!({
+                    "ph": "i",
+                    "pid": cpu,
+                    "tid": 0,
+                    "ts": ts,
+                    "name": "irq_end",
+                    "cat": "irq",
+                    "s": "t",
+                    "args": {
+                        "cpu": irq_cpu.0
                     }
                 })
             }
