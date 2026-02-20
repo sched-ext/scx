@@ -669,6 +669,17 @@ impl<S: Scheduler> Simulator<S> {
         let watchdog_timeout = scenario.watchdog_timeout_ns;
         let ignore_bpf_errors = scenario.ignore_bpf_errors;
 
+        // Log interleaving mode
+        if let Some(ref cfg) = state.preemptive {
+            info!(
+                timeslice_min = cfg.timeslice_min,
+                timeslice_max = cfg.timeslice_max,
+                "preemptive interleaving enabled (PMU RBC timer)"
+            );
+        } else if state.interleave {
+            info!("cooperative interleaving enabled (kfunc boundaries only)");
+        }
+
         // Main event loop
         while let Some(event) = events.pop() {
             if event.time_ns > scenario.duration_ns {
@@ -2410,6 +2421,14 @@ impl<S: Scheduler> Simulator<S> {
         use crate::preempt::{self, PreemptRing};
 
         let ring = PreemptRing::new(dispatch_cpus.len(), seed);
+        debug!(
+            workers = dispatch_cpus.len(),
+            timeslice_min,
+            timeslice_max,
+            seed,
+            cpus = ?dispatch_cpus.iter().map(|c| c.0).collect::<Vec<_>>(),
+            "preemptive interleave: starting dispatch"
+        );
         preempt::install_signal_handler();
 
         std::thread::scope(|s| {
@@ -2445,6 +2464,15 @@ impl<S: Scheduler> Simulator<S> {
                         None => -1,
                     };
 
+                    if timer_fd >= 0 {
+                        debug!(worker = i, cpu = cpu.0, "preempt: PMU timer armed");
+                    } else {
+                        debug!(
+                            worker = i,
+                            cpu = cpu.0,
+                            "preempt: PMU unavailable, cooperative-only"
+                        );
+                    }
                     preempt::install(ring_ref, worker_id, timer_fd, timeslice_min, timeslice_max);
                     unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
@@ -2492,6 +2520,11 @@ impl<S: Scheduler> Simulator<S> {
             ring.wait_all_done();
         });
 
+        debug!(
+            signal_preemptions = ring.signal_preemptions(),
+            cooperative_yields = ring.cooperative_yields(),
+            "preemptive interleave: dispatch complete"
+        );
         preempt::uninstall_signal_handler();
     }
 

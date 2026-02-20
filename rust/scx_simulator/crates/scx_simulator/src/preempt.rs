@@ -92,6 +92,10 @@ pub struct PreemptRing {
     finished_mask: AtomicU64,
     /// Orchestrator wake word: 0 = not all done, 1 = all done.
     all_done: AtomicU32,
+    /// Count of signal-driven (PMU) preemptions (signal-safe increment).
+    signal_preempt_count: AtomicU64,
+    /// Count of cooperative yields at kfunc boundaries (safe Rust).
+    cooperative_yield_count: AtomicU64,
 }
 
 impl PreemptRing {
@@ -112,6 +116,8 @@ impl PreemptRing {
             total,
             finished_mask: AtomicU64::new(0),
             all_done: AtomicU32::new(0),
+            signal_preempt_count: AtomicU64::new(0),
+            cooperative_yield_count: AtomicU64::new(0),
         }
     }
 
@@ -152,6 +158,28 @@ impl PreemptRing {
             return min;
         }
         min + (self.next_prng() as u64) % (range + 1)
+    }
+
+    /// Increment the signal-driven preemption counter.
+    ///
+    /// **Async-signal-safe**: uses only an atomic fetch_add.
+    pub fn inc_signal_preempt(&self) {
+        self.signal_preempt_count.fetch_add(1, SeqCst);
+    }
+
+    /// Increment the cooperative yield counter.
+    pub fn inc_cooperative_yield(&self) {
+        self.cooperative_yield_count.fetch_add(1, SeqCst);
+    }
+
+    /// Total signal-driven (PMU) preemptions since creation.
+    pub fn signal_preemptions(&self) -> u64 {
+        self.signal_preempt_count.load(SeqCst)
+    }
+
+    /// Total cooperative yields (kfunc boundary) since creation.
+    pub fn cooperative_yields(&self) -> u64 {
+        self.cooperative_yield_count.load(SeqCst)
     }
 
     /// Orchestrator: select the first worker via PRNG and wake it.
@@ -311,9 +339,20 @@ pub fn maybe_yield_preemptive() {
     };
 
     // Release token and block until re-selected (futex-based).
+    ring.inc_cooperative_yield();
+    tracing::debug!(
+        worker = ctx.worker_id.0,
+        cpu = saved_cpu.0,
+        "preempt: cooperative yield (kfunc boundary)"
+    );
     ring.yield_token(ctx.worker_id);
 
     // Resumed — restore our context to SimulatorState.
+    tracing::debug!(
+        worker = ctx.worker_id.0,
+        cpu = saved_cpu.0,
+        "preempt: resumed after cooperative yield"
+    );
     unsafe {
         (*sim_ptr).current_cpu = saved_cpu;
         (*sim_ptr).ops_context = saved_ops_ctx;
@@ -423,6 +462,7 @@ extern "C" fn preempt_handler(
     };
 
     // 3. Yield token (futex-based, signal-safe). Blocks until re-selected.
+    ring.inc_signal_preempt(); // atomic, signal-safe
     ring.yield_token(pctx.worker_id);
 
     // 4. Resumed — restore SimulatorState context.
