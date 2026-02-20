@@ -8,22 +8,35 @@
  * Arena task queue implementation.
  */
 
+static struct scx_allocator scx_atq_allocator;
+
+__weak
+int scx_atq_init(void)
+{
+	return scx_alloc_init(&scx_atq_allocator, sizeof(scx_atq_t));
+}
+
 __weak
 u64 scx_atq_create_internal(bool fifo, size_t capacity)
 {
+	struct sdt_data __arena *data = NULL;
 	scx_atq_t *atq;
 
-	atq = scx_static_alloc(sizeof(*atq), 1);
-	if (!atq)
+	data = scx_zalloc(&scx_atq_allocator);
+	if (unlikely(!data))
 		return (u64)NULL;
 
+	atq = (scx_atq_t *)data->payload;
+	atq->tid = data->tid;
+
 	atq->tree = rb_create(RB_NOALLOC, RB_DUPLICATE);
-	if (!atq->tree)
+	if (!atq->tree) {
+		scx_alloc_free_idx(&scx_atq_allocator, atq->tid.idx);
 		return (u64)NULL;
+	}
 
 	atq->fifo = fifo;
 	atq->capacity = capacity;
-	atq->size = 0;
 
 	return (u64)atq;
 }
@@ -38,6 +51,7 @@ int scx_atq_destroy(scx_atq_t __arg_arena *atq)
 	}
 	rb_destroy(atq->tree);
 
+	scx_alloc_free_idx(&scx_atq_allocator, atq->tid.idx);
 	return 0;
 }
 

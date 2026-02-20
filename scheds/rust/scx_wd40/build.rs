@@ -22,6 +22,7 @@ fn main() {
         .add_source("../../../lib/sdt_alloc.bpf.c")
         .add_source("../../../lib/topology.bpf.c")
         .add_source("../../../lib/rbtree.bpf.c")
+        .add_source("../../../lib/atq.bpf.c")
         .compile_link_gen()
         .unwrap();
 }
