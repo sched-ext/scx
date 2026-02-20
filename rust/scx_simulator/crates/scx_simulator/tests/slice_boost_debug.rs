@@ -21,10 +21,10 @@ fn test_slice_boost_debug() {
     let _lock = common::setup_test();
 
     let json = include_str!("../workloads/two_runners.json");
-    let scenario = load_rtapp(json, 2).unwrap();
+    let scenario = load_rtapp(json, 4).unwrap();
 
     // Create LAVD scheduler and monitor
-    let sched = DynamicScheduler::lavd(2);
+    let sched = DynamicScheduler::lavd(4);
     let probes = LavdProbes::new(&sched);
     let mut monitor = LavdMonitor::new(probes);
 

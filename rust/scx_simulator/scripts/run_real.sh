@@ -6,8 +6,8 @@
 #   sudo ./scripts/run_real.sh [workload.json] [scheduler] [nr_cpus]
 #
 # Examples:
-#   sudo ./scripts/run_real.sh workloads/two_runners.json mitosis 2
-#   sudo ./scripts/run_real.sh  # defaults: two_runners.json, mitosis, 2
+#   sudo ./scripts/run_real.sh workloads/two_runners.json mitosis 4
+#   sudo ./scripts/run_real.sh  # defaults: two_runners.json, mitosis, 4
 #
 # Output:
 #   /tmp/scx_real_trace.log  - raw bpftrace output
@@ -24,7 +24,7 @@ REPO_ROOT="$(cd "$SIM_DIR/../.." && pwd)"
 
 WORKLOAD="${1:-$SIM_DIR/workloads/two_runners.json}"
 SCHEDULER="${2:-mitosis}"
-NR_CPUS="${3:-2}"
+NR_CPUS="${3:-4}"
 OUTFILE="${SCX_REAL_TRACE:-/tmp/scx_real_trace.log}"
 
 SCHED_BIN="$REPO_ROOT/target/debug/scx_${SCHEDULER}"

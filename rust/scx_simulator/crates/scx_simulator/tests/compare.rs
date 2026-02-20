@@ -17,9 +17,9 @@ mod common;
 fn test_compare_two_runners_mitosis() {
     let _lock = common::setup_test();
     let json = include_str!("../workloads/two_runners.json");
-    let scenario = load_rtapp(json, 2).unwrap();
+    let scenario = load_rtapp(json, 4).unwrap();
 
-    let trace = Simulator::new(DynamicScheduler::mitosis(2)).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::mitosis(4)).run(scenario);
     trace.dump();
 
     // Sanity: both tasks should run
@@ -56,9 +56,9 @@ fn test_compare_two_runners_mitosis() {
 fn test_mitosis_trace_stats() {
     let _lock = common::setup_test();
     let json = include_str!("../workloads/two_runners.json");
-    let scenario = load_rtapp(json, 2).unwrap();
+    let scenario = load_rtapp(json, 4).unwrap();
 
-    let trace = Simulator::new(DynamicScheduler::mitosis(2)).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::mitosis(4)).run(scenario);
 
     // Compute and print statistics
     let stats = TraceStats::from_trace(&trace);
@@ -124,9 +124,9 @@ fn test_mitosis_trace_stats() {
 fn test_compare_lavd_trace_stats() {
     let _lock = common::setup_test();
     let json = include_str!("../workloads/two_runners.json");
-    let scenario = load_rtapp(json, 2).unwrap();
+    let scenario = load_rtapp(json, 4).unwrap();
 
-    let trace = Simulator::new(DynamicScheduler::lavd(2)).run(scenario);
+    let trace = Simulator::new(DynamicScheduler::lavd(4)).run(scenario);
 
     // Print high-level summary
     let summary = trace.summary();
@@ -430,8 +430,8 @@ fn test_full_real_vs_sim_comparison() {
 
     // Run simulation with same workload
     let json = include_str!("../workloads/two_runners.json");
-    let scenario = load_rtapp(json, 2).unwrap();
-    let sim_trace = Simulator::new(DynamicScheduler::lavd(2)).run(scenario);
+    let scenario = load_rtapp(json, 4).unwrap();
+    let sim_trace = Simulator::new(DynamicScheduler::lavd(4)).run(scenario);
     let sim_stats = TraceStats::from_trace(&sim_trace);
     eprintln!(
         "Simulated trace: {} events, {:.3}ms duration\n",
