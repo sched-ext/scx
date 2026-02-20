@@ -3,6 +3,24 @@
 #include <lib/atq.h>
 #include <lib/rbtree.h>
 
+/*
+ * Test IDs for arena_selftest's selftest_run_id selector.
+ * SCX_SELFTEST_ID_ALL (0) runs all tests; any other value runs only the
+ * matching test.
+ */
+enum scx_selftest_id {
+	SCX_SELFTEST_ID_ALL			= 0,
+	SCX_SELFTEST_ID_ARENA_TOPOLOGY_TIMER	= 1,
+	SCX_SELFTEST_ID_ATQ			= 2,
+	SCX_SELFTEST_ID_DHQ			= 3,
+	SCX_SELFTEST_ID_BTREE			= 4,
+	SCX_SELFTEST_ID_LVQUEUE			= 5,
+	SCX_SELFTEST_ID_MINHEAP			= 6,
+	SCX_SELFTEST_ID_RBTREE			= 7,
+	SCX_SELFTEST_ID_TOPOLOGY		= 8,
+	SCX_SELFTEST_ID_BITMAP			= 9,
+};
+
 #define SCX_SELFTEST(func, ...)		\
 	do {				\
 		int ret = func(__VA_ARGS__);	\
