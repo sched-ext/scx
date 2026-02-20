@@ -2503,9 +2503,28 @@ impl<S: Scheduler> Simulator<S> {
         state: &mut SimulatorState,
         events: &mut EventQueue,
     ) {
+        let pid = task.pid;
         loop {
             match task.current_phase() {
-                Some(Phase::Run(_)) => break,
+                Some(Phase::Run(ns)) => {
+                    // Ensure run_remaining_ns is initialized for the Run phase.
+                    // This handles the case where a task wakes from Sleep:
+                    // the previous advance_phase() moved to Sleep and set
+                    // run_remaining_ns=0. When waking, we're still "in" the
+                    // Sleep phase conceptually, but the wake event means the
+                    // sleep is complete. The task will immediately trigger
+                    // TaskPhaseComplete (because remaining=0), which advances
+                    // to the next phase. If that phase is Run, we need to
+                    // initialize run_remaining_ns here to avoid a spurious yield.
+                    //
+                    // Note: We only reinitialize if run_remaining_ns==0. If it's
+                    // non-zero, the task was preempted mid-Run and we should
+                    // resume where it left off.
+                    if task.run_remaining_ns == 0 {
+                        task.run_remaining_ns = *ns;
+                    }
+                    break;
+                }
                 Some(Phase::Wake(target_pid)) => {
                     let target = *target_pid;
                     events.push(
@@ -2517,20 +2536,41 @@ impl<S: Scheduler> Simulator<S> {
                     );
                     if !task.advance_phase() {
                         task.state = TaskState::Exited;
+                        state.trace.record(
+                            state.clock,
+                            state.current_cpu,
+                            TraceKind::TaskCompleted { pid },
+                        );
+                        info!(task = task.name.as_str(), pid = pid.0, "COMPLETED");
                         return;
                     }
                 }
                 Some(Phase::Sleep(_)) => {
-                    // The wake event fired, so the sleep is complete.
-                    // Advance to the next phase.
+                    // Task is waking from a Sleep phase. The sleep duration
+                    // has elapsed, so advance to the next phase (typically Run).
+                    // This handles the common [Run, Sleep] loop pattern where
+                    // the wake event fires while the task is still "in" the
+                    // Sleep phase.
                     if !task.advance_phase() {
                         task.state = TaskState::Exited;
+                        state.trace.record(
+                            state.clock,
+                            state.current_cpu,
+                            TraceKind::TaskCompleted { pid },
+                        );
+                        info!(task = task.name.as_str(), pid = pid.0, "COMPLETED");
                         return;
                     }
-                    // Continue loop to handle Wake phases or find Run
+                    // Continue looping to handle Wake phases or verify Run
                 }
                 None => {
                     task.state = TaskState::Exited;
+                    state.trace.record(
+                        state.clock,
+                        state.current_cpu,
+                        TraceKind::TaskCompleted { pid },
+                    );
+                    info!(task = task.name.as_str(), pid = pid.0, "COMPLETED");
                     return;
                 }
             }
