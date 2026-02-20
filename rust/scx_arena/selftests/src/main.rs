@@ -13,6 +13,7 @@ use anyhow::Result;
 
 use std::ffi::c_ulong;
 use std::ffi::c_void;
+use std::io::IsTerminal;
 
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
@@ -37,6 +38,18 @@ use libbpf_rs::ProgramInput;
 
 const BPF_STDOUT: u32 = 1;
 const BPF_STDERR: u32 = 2;
+
+const COLOR_BRIGHT_GREEN: &str = "\x1b[92m";
+const COLOR_BRIGHT_RED: &str = "\x1b[91m";
+const COLOR_RESET: &str = "\x1b[0m";
+
+fn colorize(text: &str, color: &str, is_tty: bool) -> String {
+    if is_tty {
+        format!("{}{}{}", color, text, COLOR_RESET)
+    } else {
+        text.to_string()
+    }
+}
 
 // Mirrors enum scx_selftest_id in lib/selftests/selftest.h.
 // SCX_SELFTEST_ID_ALL (0) is reserved for "run all" and is not listed in
@@ -333,16 +346,21 @@ fn main() {
         opts.tests.iter().map(String::as_str).collect()
     };
 
+    let stdout_tty = std::io::stdout().is_terminal();
+    let stderr_tty = std::io::stderr().is_terminal();
+    let pass_label = colorize("[ PASS ]", COLOR_BRIGHT_GREEN, stdout_tty);
+    let fail_label = colorize("[ FAIL ]", COLOR_BRIGHT_RED, stderr_tty);
+
     let mut any_failed = false;
     for &name in &to_run {
         match run_test_by_name(&mut skel, name) {
-            Ok(0) => println!("[ PASS ] {}", name),
+            Ok(0) => println!("{} {}", pass_label, name),
             Ok(ret) => {
-                eprintln!("[ FAIL ] {} (returned {})", name, ret);
+                eprintln!("{} {} (returned {})", fail_label, name, ret);
                 any_failed = true;
             }
             Err(e) => {
-                eprintln!("[ FAIL ] {} (error: {})", name, e);
+                eprintln!("{} {} (error: {})", fail_label, name, e);
                 any_failed = true;
             }
         }
@@ -352,9 +370,19 @@ fn main() {
     }
 
     if any_failed {
-        eprintln!("One or more selftests failed.");
+        eprintln!(
+            "{}",
+            colorize(
+                "One or more selftests failed.",
+                COLOR_BRIGHT_RED,
+                stderr_tty
+            )
+        );
         std::process::exit(1);
     } else {
-        println!("All selftests passed.");
+        println!(
+            "{}",
+            colorize("All selftests passed.", COLOR_BRIGHT_GREEN, stdout_tty)
+        );
     }
 }
