@@ -4,7 +4,7 @@ This document analyzes the 6 realism gaps identified in issue sim-6b003, based o
 comparing bpftrace captures of real kernel scheduling behavior against simulator
 traces for the `two_runners.json` workload (mitosis scheduler, 2 CPUs).
 
-## Gap 1: Spurious Yield/Re-enqueue Cycle (MOST IMPORTANT)
+## Gap 1: Spurious Yield/Re-enqueue Cycle (PARTIALLY FIXED)
 
 ### Symptom
 The simulator runs 98 cycles of:
@@ -17,32 +17,39 @@ This pattern NEVER happens in the real trace for CPU-bound tasks.
 
 ### Root Cause
 The simulator's workload model uses `Phase::Run(duration)` to represent task work.
-When a task completes its Run phase and transitions to another Run phase (e.g.,
-`Run(10ms) -> Run(10ms)` in a repeating workload), the engine treats this as a
-**yield** event.
+There were TWO bugs causing spurious yields:
 
-In contrast, the real kernel behavior is:
-1. CPU-bound tasks run until their slice is exhausted (via tick preemption)
-2. On slice exhaustion, `stopping(still_runnable=true)` is called
-3. The task is re-enqueued via `enqueue()`
-4. On next dispatch, `select_cpu` finds an idle CPU and does **direct dispatch**
-   via `scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, ...)`, skipping the enqueue callback
+1. **Sleep phase not advancing on wake** (FIXED): When a task's sleep timer fired,
+   `advance_to_run_phase()` would see the Sleep phase and return without advancing
+   it, leaving the task in an inconsistent state where the phase was Sleep but the
+   state was Runnable.
 
-The key difference is that real mitosis uses **direct dispatch in select_cpu** for
-waking tasks. The simulator's Phase model creates artificial "wake" points at
-phase boundaries that don't correspond to real kernel wake events.
+2. **Run -> Run transitions trigger yield** (REMAINING): When a task completes a Run
+   phase and has another Run phase waiting (Run -> Run), it goes through the yield
+   code path. This doesn't match real CPU-bound behavior where tasks run until
+   preempted by ticks.
 
-### Evidence from TraceStats
+### Fix Applied (commit a3c0f5d4)
+Fixed `advance_to_run_phase()` to advance past Sleep phases when called from
+`handle_task_wake()`, since the wake event means the sleep is complete.
+
+### Evidence from TraceStats (AFTER FIX)
 ```
 Task PID=1:
-    Yield ratio: 49.5% (49 yields / 99 schedules)
-    Direct dispatch ratio: 0.0%
+    Schedules:       50
+    Yield ratio: 0.0% (0 yields / 50 schedules)
+    Sleeps:          50
 ```
 
-In reality, yield ratio should be near 0% for CPU-bound tasks, and direct dispatch
-should be the dominant path.
+This is correct for a `Run(10ms) + Sleep(10ms)` periodic workload! The task now
+properly cycles through Run -> Sleep phases without spurious yields.
 
-### Fix Approach
+### Remaining Work
+For pure CPU-bound workloads (Phase::Run with no Sleep), the yield issue may still
+occur if the workload has multiple Run phases. But for the two_runners.json workload
+which uses Run+Sleep, the fix is complete.
+
+### Original Fix Approach (for reference)
 1. **Workload model improvement**: Don't treat Phase::Run -> Phase::Run transitions
    as yields. A true yield in the kernel requires an explicit `sched_yield()` syscall.
    CPU-bound tasks that just run continuously should NOT trigger the yield path.
@@ -166,18 +173,19 @@ The simulator advances time deterministically. Real systems have:
 
 ## Summary Table
 
-| Gap | Severity | Root Cause | Fix Feasibility |
-|-----|----------|------------|-----------------|
-| 1: Spurious yield | HIGH | Phase model | Medium - requires workload model changes |
-| 2: Tick frequency | MEDIUM | Config/modeling | Easy - adjust TICK_INTERVAL_NS |
+| Gap | Severity | Root Cause | Status |
+|-----|----------|------------|--------|
+| 1: Spurious yield | HIGH | Phase model | **PARTIALLY FIXED** - Sleep advancement bug fixed |
+| 2: Tick frequency | MEDIUM | Config/modeling | Open - TICK_INTERVAL_NS is hardcoded |
 | 3: System noise | LOW | Fundamental | Accept limitation or add noise injection |
-| 4: Missing kfuncs | MEDIUM | Missing traces | Easy - add TraceKind variants |
+| 4: Missing kfuncs | MEDIUM | Missing traces | Open - need TraceKind variants |
 | 5: Coordinator | LOW | Scheduler-specific | Not feasible without scheduler internals |
-| 6: Run variance | LOW | Determinism | Easy - add jitter config |
+| 6: Run variance | LOW | Determinism | Open - need jitter config |
 
 ## Recommendations
 
-1. **Priority 1**: Fix Gap 1 by changing how Phase::Run boundaries are handled
+1. **Priority 1**: ~~Fix Gap 1 by changing how Phase::Run boundaries are handled~~
+   DONE for Run+Sleep workloads (commit a3c0f5d4)
 2. **Priority 2**: Improve tick frequency accuracy (Gap 2)
 3. **Priority 3**: Add missing kfunc trace events (Gap 4)
 4. Accept Gaps 3, 5, 6 as intentional simplifications or add optional noise
