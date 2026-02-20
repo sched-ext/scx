@@ -431,7 +431,6 @@ void mitosis_setup(unsigned int num_cpus)
 	root_cgid = 1;
 	debug_events_enabled = false;
 	exiting_task_workaround_enabled = false;
-	split_vtime_updates = false;
 	cpu_controller_disabled = true;
 	reject_multicpu_pinning = false;
 

@@ -771,7 +771,7 @@ u64 lavd_probe_wake_freq(struct task_struct *p)
 u64 lavd_probe_avg_runtime(struct task_struct *p)
 {
 	struct task_ctx *taskc = get_task_ctx(p);
-	return taskc ? taskc->avg_runtime : 0;
+	return taskc ? taskc->avg_runtime_wall : 0;
 }
 
 u16 lavd_probe_lat_cri_waker(struct task_struct *p)
@@ -810,7 +810,7 @@ u64 lavd_probe_sys_nr_lat_cri(void)
 
 u64 lavd_probe_sys_avg_sc_util(void)
 {
-	return sys_stat.avg_sc_util;
+	return sys_stat.avg_util_invr;
 }
 
 int lavd_probe_calc_nr_active(void)
