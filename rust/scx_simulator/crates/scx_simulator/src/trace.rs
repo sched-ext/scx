@@ -78,6 +78,24 @@ pub enum TraceKind {
     KickCpu { target_cpu: CpuId },
     /// A periodic scheduler tick fired on this CPU.
     Tick { pid: Pid },
+    /// Dispatch to local DSQ rejected (cpumask violation).
+    ///
+    /// Emitted when a scheduler dispatches to `SCX_DSQ_LOCAL_ON | cpu` but
+    /// the task cannot run on that CPU (cpumask or migration-disabled).
+    DispatchRejected {
+        pid: Pid,
+        target_cpu: CpuId,
+        reason: DispatchRejectReason,
+    },
+}
+
+/// Reason why a dispatch to a local DSQ was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchRejectReason {
+    /// Target CPU is not in the task's cpumask.
+    CpumaskViolation,
+    /// Task is migration-disabled and cannot move to a different CPU.
+    MigrationDisabled,
 }
 
 /// A complete simulation trace, containing all events in chronological order.
@@ -283,6 +301,20 @@ impl Trace {
                     format!("KICK     cpu={}", target_cpu.0)
                 }
                 TraceKind::Tick { pid } => format!("TICK     pid={}", pid.0),
+                TraceKind::DispatchRejected {
+                    pid,
+                    target_cpu,
+                    reason,
+                } => {
+                    let reason_str = match reason {
+                        DispatchRejectReason::CpumaskViolation => "cpumask",
+                        DispatchRejectReason::MigrationDisabled => "migration_disabled",
+                    };
+                    format!(
+                        "DISPATCH_REJECT pid={} target_cpu={} reason={}",
+                        pid.0, target_cpu.0, reason_str
+                    )
+                }
             };
             eprintln!(
                 "[{}] cpu={:<3} {}",

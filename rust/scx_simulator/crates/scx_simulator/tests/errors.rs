@@ -1,8 +1,18 @@
 //! Tests for error detection infrastructure.
 //!
 //! Tests for ExitKind, watchdog configuration, and error reporting.
-//! Note: Full integration tests for ErrorBpf and ErrorStall would require
-//! special scheduler variants that call scx_bpf_error() or fail to dispatch.
+//!
+//! # Dispatch Validation
+//!
+//! The simulator validates `SCX_DSQ_LOCAL_ON | cpu` dispatches to match kernel
+//! behavior. When a scheduler dispatches to a CPU outside the task's cpumask,
+//! the dispatch is rejected with `ErrorBpf`. Unit tests for this are in
+//! `src/kfuncs.rs` (test_resolve_pending_dispatch_local_on_cpumask_violation).
+//!
+//! # Integration Test Limitations
+//!
+//! Full integration tests for ErrorBpf and ErrorStall would require special
+//! scheduler variants that call scx_bpf_error() or fail to dispatch.
 
 use scx_simulator::*;
 

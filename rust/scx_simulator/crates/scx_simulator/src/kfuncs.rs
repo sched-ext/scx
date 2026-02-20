@@ -29,7 +29,7 @@ use crate::fmt::FmtN;
 use crate::perf::RbcCounter;
 use crate::scenario::{NoiseConfig, OverheadConfig};
 use crate::task::OpsTaskState;
-use crate::trace::{Trace, TraceKind};
+use crate::trace::{DispatchRejectReason, Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
 /// Nanosecond cost for each simulated kernel function.
@@ -376,11 +376,53 @@ impl SimulatorState {
             debug!(pid = pd.pid.0, "resolved SCX_DSQ_LOCAL");
             Some(local_cpu)
         } else if dsq.is_local_on() {
-            let cpu = dsq.local_on_cpu();
-            if (cpu.0 as usize) < self.cpus.len() {
-                self.cpus[cpu.0 as usize].local_dsq.push_back(pd.pid);
+            let target_cpu = dsq.local_on_cpu();
+
+            // Validate that the task can run on the target CPU (kernel behavior).
+            // The kernel validates in task_can_run_on_remote_rq() and rejects
+            // dispatches to CPUs not in the task's cpumask.
+            if let Some(reason) = self.check_local_on_dispatch(pd.pid, target_cpu) {
+                // Record trace event for rejected dispatch
+                let cpu = self.current_cpu;
+                let local_t = self.cpus[cpu.0 as usize].local_clock;
+                self.trace.record(
+                    local_t,
+                    cpu,
+                    TraceKind::DispatchRejected {
+                        pid: pd.pid,
+                        target_cpu,
+                        reason,
+                    },
+                );
+
+                // Set BPF error (matches kernel's scx_bpf_error behavior)
+                let msg = match reason {
+                    DispatchRejectReason::CpumaskViolation => {
+                        format!(
+                            "SCX_DSQ_LOCAL_ON cannot dispatch task {} to CPU {} \
+                             (not in cpumask)",
+                            pd.pid.0, target_cpu.0
+                        )
+                    }
+                    DispatchRejectReason::MigrationDisabled => {
+                        format!(
+                            "SCX_DSQ_LOCAL_ON cannot move migration disabled {} \
+                             to CPU {}",
+                            pd.pid.0, target_cpu.0
+                        )
+                    }
+                };
+                debug!(pid = pd.pid.0, target_cpu = target_cpu.0, %msg, "dispatch rejected");
+                if self.bpf_error.is_none() {
+                    self.bpf_error = Some(msg);
+                }
+                return None;
             }
-            Some(cpu)
+
+            if (target_cpu.0 as usize) < self.cpus.len() {
+                self.cpus[target_cpu.0 as usize].local_dsq.push_back(pd.pid);
+            }
+            Some(target_cpu)
         } else if let Some(vtime) = pd.vtime {
             self.dsqs.insert_vtime(dsq, pd.pid, vtime);
             None
@@ -388,6 +430,32 @@ impl SimulatorState {
             self.dsqs.insert_fifo(dsq, pd.pid);
             None
         }
+    }
+
+    /// Check if a dispatch to `SCX_DSQ_LOCAL_ON | target_cpu` is valid.
+    ///
+    /// Returns `Some(reason)` if the dispatch should be rejected, `None` if valid.
+    /// Mirrors the kernel's `task_can_run_on_remote_rq()` validation.
+    fn check_local_on_dispatch(&self, pid: Pid, target_cpu: CpuId) -> Option<DispatchRejectReason> {
+        // Get the task's raw pointer to access cpumask
+        let task_raw = self.task_pid_to_raw.get(&pid)?;
+        let task_ptr = *task_raw as *mut c_void;
+
+        // Check cpumask: task must be allowed to run on target CPU
+        let cpus_ptr = unsafe { ffi::sim_task_get_cpus_ptr(task_ptr) };
+        if !cpus_ptr.is_null() {
+            let allowed = unsafe { ffi::bpf_cpumask_test_cpu(target_cpu.0, cpus_ptr) };
+            if !allowed {
+                return Some(DispatchRejectReason::CpumaskViolation);
+            }
+        }
+
+        // TODO(sim-7cc89): Check migration_disabled when we model that field.
+        // For now, we only validate cpumask. When migration_disabled is modeled,
+        // we would also check if the task is currently on a different CPU and
+        // has migration_disabled > 0.
+
+        None
     }
 }
 
@@ -1521,6 +1589,127 @@ mod tests {
         assert_eq!(result, Some(CpuId(1)));
         assert_eq!(state.cpus[1].local_dsq.len(), 1);
         assert_eq!(state.cpus[1].local_dsq[0], Pid(1));
+
+        free_task(&mut state, Pid(1));
+    }
+
+    /// Test that SCX_DSQ_LOCAL_ON dispatch to valid CPU succeeds.
+    #[test]
+    fn test_resolve_pending_dispatch_local_on_valid() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(4);
+        let p = register_task(&mut state, Pid(1));
+
+        // Create LOCAL_ON DSQ for CPU 2
+        let local_on_dsq = DsqId::LOCAL_ON_MASK | 2;
+
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
+        scx_bpf_dsq_insert(p, local_on_dsq, 5_000_000, 0);
+        exit_sim();
+
+        // Task has no cpumask restriction (cpus_ptr is null), so all CPUs allowed
+        let result = state.resolve_pending_dispatch(CpuId(0));
+        // LOCAL_ON dispatch resolves to the specified target CPU
+        assert_eq!(result, Some(CpuId(2)));
+        assert_eq!(state.cpus[2].local_dsq.len(), 1);
+        assert_eq!(state.cpus[2].local_dsq[0], Pid(1));
+        assert!(state.bpf_error.is_none());
+
+        free_task(&mut state, Pid(1));
+    }
+
+    /// Test that SCX_DSQ_LOCAL_ON dispatch to a CPU outside cpumask fails.
+    #[test]
+    fn test_resolve_pending_dispatch_local_on_cpumask_violation() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(4);
+        let p = register_task(&mut state, Pid(1));
+
+        // Set up cpumask: task can only run on CPUs 0 and 1
+        unsafe {
+            ffi::sim_task_clear_cpumask(p);
+            ffi::sim_task_set_cpumask_cpu(p, 0);
+            ffi::sim_task_set_cpumask_cpu(p, 1);
+        }
+
+        // Try to dispatch to CPU 3 (not in cpumask)
+        let local_on_dsq = DsqId::LOCAL_ON_MASK | 3;
+
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
+        scx_bpf_dsq_insert(p, local_on_dsq, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(0));
+
+        // Dispatch should be rejected
+        assert_eq!(result, None);
+        // CPU 3's local DSQ should be empty
+        assert!(state.cpus[3].local_dsq.is_empty());
+        // BPF error should be set
+        assert!(state.bpf_error.is_some());
+        let error_msg = state.bpf_error.as_ref().unwrap();
+        assert!(
+            error_msg.contains("SCX_DSQ_LOCAL_ON"),
+            "error should mention SCX_DSQ_LOCAL_ON: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("cpumask"),
+            "error should mention cpumask: {}",
+            error_msg
+        );
+
+        // Verify trace event was recorded
+        let events = state.trace.events();
+        let dispatch_reject = events.iter().find(|e| {
+            matches!(
+                e.kind,
+                TraceKind::DispatchRejected {
+                    pid,
+                    target_cpu,
+                    reason: DispatchRejectReason::CpumaskViolation
+                } if pid == Pid(1) && target_cpu == CpuId(3)
+            )
+        });
+        assert!(
+            dispatch_reject.is_some(),
+            "DispatchRejected trace event should be recorded"
+        );
+
+        free_task(&mut state, Pid(1));
+    }
+
+    /// Test that SCX_DSQ_LOCAL_ON dispatch to a CPU in cpumask succeeds.
+    #[test]
+    fn test_resolve_pending_dispatch_local_on_cpumask_valid() {
+        let _lock = SIM_LOCK.lock().unwrap();
+        let mut state = test_state(4);
+        let p = register_task(&mut state, Pid(1));
+
+        // Set up cpumask: task can only run on CPUs 0 and 2
+        unsafe {
+            ffi::sim_task_clear_cpumask(p);
+            ffi::sim_task_set_cpumask_cpu(p, 0);
+            ffi::sim_task_set_cpumask_cpu(p, 2);
+        }
+
+        // Dispatch to CPU 2 (in cpumask)
+        let local_on_dsq = DsqId::LOCAL_ON_MASK | 2;
+
+        let cpu = state.current_cpu;
+        unsafe { enter_sim(&mut state, cpu) };
+        scx_bpf_dsq_insert(p, local_on_dsq, 5_000_000, 0);
+        exit_sim();
+
+        let result = state.resolve_pending_dispatch(CpuId(0));
+
+        // Dispatch should succeed
+        assert_eq!(result, Some(CpuId(2)));
+        assert_eq!(state.cpus[2].local_dsq.len(), 1);
+        assert_eq!(state.cpus[2].local_dsq[0], Pid(1));
+        assert!(state.bpf_error.is_none());
 
         free_task(&mut state, Pid(1));
     }

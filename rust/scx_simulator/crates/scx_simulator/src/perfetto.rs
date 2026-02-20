@@ -9,7 +9,7 @@ use std::io::Write;
 
 use serde_json::json;
 
-use crate::trace::{Trace, TraceKind};
+use crate::trace::{DispatchRejectReason, Trace, TraceKind};
 use crate::types::DsqId;
 
 /// Write the trace as Chrome Trace Event Format JSON.
@@ -317,6 +317,31 @@ pub(crate) fn write_json(trace: &Trace, writer: &mut impl Write) -> std::io::Res
                     "cat": "kfunc",
                     "s": "t",
                     "args": { "pid": pid.0 }
+                })
+            }
+
+            TraceKind::DispatchRejected {
+                pid,
+                target_cpu,
+                reason,
+            } => {
+                let reason_str = match reason {
+                    DispatchRejectReason::CpumaskViolation => "cpumask_violation",
+                    DispatchRejectReason::MigrationDisabled => "migration_disabled",
+                };
+                json!({
+                    "ph": "i",
+                    "pid": cpu,
+                    "tid": 0,
+                    "ts": ts,
+                    "name": "dispatch_rejected",
+                    "cat": "error",
+                    "s": "t",
+                    "args": {
+                        "pid": pid.0,
+                        "target_cpu": target_cpu.0,
+                        "reason": reason_str
+                    }
                 })
             }
         };
