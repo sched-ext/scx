@@ -48,6 +48,34 @@ pub struct CgroupMigrateEvent {
     pub at_ns: TimeNs,
 }
 
+/// Cgroup creation event: create a new cgroup at runtime.
+///
+/// Simulates a cgroup being created (e.g., via mkdir in cgroup filesystem).
+/// The engine calls `cgroup_init` at `at_ns`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupCreateEvent {
+    /// Name of the new cgroup.
+    pub name: String,
+    /// Parent cgroup name. If `None`, the parent is the root cgroup.
+    pub parent_name: Option<String>,
+    /// Optional cpuset configuration: list of allowed CPU IDs.
+    pub cpuset: Option<Vec<CpuId>>,
+    /// Simulation time at which the cgroup is created.
+    pub at_ns: TimeNs,
+}
+
+/// Cgroup destruction event: destroy a cgroup at runtime.
+///
+/// Simulates a cgroup being removed (e.g., via rmdir in cgroup filesystem).
+/// The engine calls `cgroup_exit` at `at_ns`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupDestroyEvent {
+    /// Name of the cgroup to destroy.
+    pub name: String,
+    /// Simulation time at which the cgroup is destroyed.
+    pub at_ns: TimeNs,
+}
+
 /// CPU bandwidth configuration for a cgroup (cpu.max parameters).
 #[derive(Debug, Clone)]
 pub struct CgroupBandwidth {
@@ -341,6 +369,17 @@ pub struct Scenario {
     pub cpu_preempt_events: Vec<CpuPreemptEvent>,
     /// Cgroup migration events (task moves between cgroups at runtime).
     pub cgroup_migrate_events: Vec<CgroupMigrateEvent>,
+    /// Cgroup creation events (new cgroups created at runtime).
+    pub cgroup_create_events: Vec<CgroupCreateEvent>,
+    /// Cgroup destruction events (cgroups destroyed at runtime).
+    pub cgroup_destroy_events: Vec<CgroupDestroyEvent>,
+    /// Maximum number of cgroups allowed (for resource limit simulation).
+    ///
+    /// - `None` — no limit (default).
+    /// - `Some(n)` — `cgroup_init` returns `-ENOMEM` when creating beyond `n` cgroups.
+    ///
+    /// This simulates `CBW_NR_CGRP_MAX = 2048` from production LAVD.
+    pub max_cgroups: Option<u32>,
     /// Enable concurrent callback interleaving at kfunc yield points.
     ///
     /// When true, dispatch callbacks for multiple idle CPUs run on
@@ -376,6 +415,9 @@ pub struct ScenarioBuilder {
     hotplug_events: Vec<HotplugEvent>,
     cpu_preempt_events: Vec<CpuPreemptEvent>,
     cgroup_migrate_events: Vec<CgroupMigrateEvent>,
+    cgroup_create_events: Vec<CgroupCreateEvent>,
+    cgroup_destroy_events: Vec<CgroupDestroyEvent>,
+    max_cgroups: Option<u32>,
     interleave: bool,
     max_cgroups: u32,
 }
@@ -399,6 +441,9 @@ impl Scenario {
             hotplug_events: Vec::new(),
             cpu_preempt_events: Vec::new(),
             cgroup_migrate_events: Vec::new(),
+            cgroup_create_events: Vec::new(),
+            cgroup_destroy_events: Vec::new(),
+            max_cgroups: None,
             interleave: false,
             max_cgroups: DEFAULT_MAX_CGROUPS,
         }
@@ -719,6 +764,50 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Schedule a cgroup to be created at a specific simulation time.
+    ///
+    /// At `at_ns`, the engine creates the cgroup in the registry and calls
+    /// `cgroup_init`. If `max_cgroups` is set and the limit would be exceeded,
+    /// `cgroup_init` returns `-ENOMEM`.
+    pub fn cgroup_create_at(
+        mut self,
+        name: &str,
+        parent: Option<&str>,
+        cpuset: Option<&[CpuId]>,
+        at_ns: TimeNs,
+    ) -> Self {
+        self.cgroup_create_events.push(CgroupCreateEvent {
+            name: name.to_string(),
+            parent_name: parent.map(|s| s.to_string()),
+            cpuset: cpuset.map(|c| c.to_vec()),
+            at_ns,
+        });
+        self
+    }
+
+    /// Schedule a cgroup to be destroyed at a specific simulation time.
+    ///
+    /// At `at_ns`, the engine calls `cgroup_exit` and removes the cgroup
+    /// from the registry. All tasks in this cgroup should have been moved
+    /// out before destruction.
+    pub fn cgroup_destroy_at(mut self, name: &str, at_ns: TimeNs) -> Self {
+        self.cgroup_destroy_events.push(CgroupDestroyEvent {
+            name: name.to_string(),
+            at_ns,
+        });
+        self
+    }
+
+    /// Set the maximum number of cgroups for resource limit simulation.
+    ///
+    /// When set, `cgroup_init` returns `-ENOMEM` if creating a cgroup would
+    /// exceed this limit. This simulates production cgroup exhaustion bugs
+    /// like `CBW_NR_CGRP_MAX = 2048` in LAVD.
+    pub fn max_cgroups(mut self, max: u32) -> Self {
+        self.max_cgroups = Some(max);
+        self
+    }
+
     /// Enable concurrent callback interleaving at kfunc yield points.
     pub fn interleave(mut self, enabled: bool) -> Self {
         self.interleave = enabled;
@@ -771,6 +860,9 @@ impl ScenarioBuilder {
             hotplug_events: self.hotplug_events,
             cpu_preempt_events: self.cpu_preempt_events,
             cgroup_migrate_events: self.cgroup_migrate_events,
+            cgroup_create_events: self.cgroup_create_events,
+            cgroup_destroy_events: self.cgroup_destroy_events,
+            max_cgroups: self.max_cgroups,
             interleave: self.interleave,
             max_cgroups: self.max_cgroups,
         }

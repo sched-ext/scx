@@ -630,6 +630,35 @@ impl DynamicScheduler {
         self.lavd_set_no_core_compaction(false);
     }
 
+    /// Set the maximum number of cgroups for cgroup_bw exhaustion simulation.
+    ///
+    /// When `max > 0`, `scx_cgroup_bw_init()` returns `-ENOMEM` once the count
+    /// exceeds this limit. This simulates `CBW_NR_CGRP_MAX = 2048` from production.
+    ///
+    /// Set to `0` to disable the limit (default).
+    pub fn lavd_set_cgroup_bw_max(&self, max: u32) {
+        type SetU32Fn = unsafe extern "C" fn(u32);
+        unsafe {
+            let sym: libloading::Symbol<SetU32Fn> = self
+                ._lib
+                .get(b"lavd_set_cgroup_bw_max")
+                .expect("lavd_set_cgroup_bw_max not found");
+            (sym)(max);
+        }
+    }
+
+    /// Get the current cgroup_bw count (number of active cgroups tracked).
+    pub fn lavd_get_cgroup_bw_count(&self) -> u32 {
+        type GetU32Fn = unsafe extern "C" fn() -> u32;
+        unsafe {
+            let sym: libloading::Symbol<GetU32Fn> = self
+                ._lib
+                .get(b"lavd_get_cgroup_bw_count")
+                .expect("lavd_get_cgroup_bw_count not found");
+            (sym)()
+        }
+    }
+
     /// Load the scx_cosmos scheduler with NUMA topology.
     ///
     /// CPUs are grouped sequentially into `nr_nodes` NUMA nodes.
