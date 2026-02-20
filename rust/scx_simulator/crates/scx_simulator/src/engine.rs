@@ -17,7 +17,7 @@ use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::monitor::{Monitor, ProbeContext, ProbePoint};
 use crate::perf;
-use crate::scenario::Scenario;
+use crate::scenario::{CgroupCreateEvent, CgroupDestroyEvent, Scenario};
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
@@ -33,6 +33,12 @@ pub enum ExitKind {
     ErrorStall { pid: Pid, runnable_for_ns: TimeNs },
     /// Dispatch loop exceeded iteration limit without making progress.
     ErrorDispatchLoopExhausted { cpu: CpuId },
+    /// Cgroup creation failed due to resource exhaustion (ENOMEM).
+    ErrorCgroupExhausted {
+        cgroup_name: String,
+        active_count: u32,
+        max_cgroups: u32,
+    },
 }
 
 impl ExitKind {
@@ -203,6 +209,10 @@ enum EventKind {
         from_cgroup: String,
         to_cgroup: String,
     },
+    /// A cgroup is created at runtime.
+    CgroupCreate(CgroupCreateEvent),
+    /// A cgroup is destroyed at runtime.
+    CgroupDestroy(CgroupDestroyEvent),
 }
 
 /// The main simulator.
@@ -620,6 +630,17 @@ impl<S: Scheduler> Simulator<S> {
             );
         }
 
+        // Seed cgroup lifecycle events
+        for ce in &scenario.cgroup_create_events {
+            events.push(ce.at_ns, EventKind::CgroupCreate(ce.clone()));
+        }
+        for de in &scenario.cgroup_destroy_events {
+            events.push(de.at_ns, EventKind::CgroupDestroy(de.clone()));
+        }
+
+        // Track cgroup resource limit
+        let max_cgroups = scenario.max_cgroups;
+
         // Track the exit kind (may be set by error detection)
         let mut exit_kind = ExitKind::Normal;
         let watchdog_timeout = scenario.watchdog_timeout_ns;
@@ -649,8 +670,10 @@ impl<S: Scheduler> Simulator<S> {
                     // No specific CPU yet; use event queue time for tracing
                     kfuncs::set_sim_clock(state.clock, None);
                 }
-                EventKind::CgroupMigrate { .. } => {
-                    // Cgroup migration is not CPU-specific
+                EventKind::CgroupMigrate { .. }
+                | EventKind::CgroupCreate(_)
+                | EventKind::CgroupDestroy(_) => {
+                    // Cgroup operations are not CPU-specific
                     kfuncs::set_sim_clock(state.clock, None);
                 }
             }
@@ -712,6 +735,20 @@ impl<S: Scheduler> Simulator<S> {
                         &tasks,
                         &cgroup_registry,
                     );
+                }
+                EventKind::CgroupCreate(event) => {
+                    if let Some(err) = self.handle_cgroup_create(
+                        &event,
+                        &mut state,
+                        &mut cgroup_registry,
+                        max_cgroups,
+                    ) {
+                        exit_kind = err;
+                        break;
+                    }
+                }
+                EventKind::CgroupDestroy(event) => {
+                    self.handle_cgroup_destroy(&event, &mut state, &mut cgroup_registry);
                 }
             }
 
@@ -1171,6 +1208,120 @@ impl<S: Scheduler> Simulator<S> {
                 .cgroup_move(raw, from_info.raw(), to_info.raw());
             charge_sched_time(state, cpu, "cgroup_move");
             kfuncs::exit_sim();
+        }
+    }
+
+    /// Handle runtime cgroup creation.
+    ///
+    /// Creates a new cgroup in the registry and calls `cgroup_init`.
+    /// If `max_cgroups` is set and the limit would be exceeded, returns
+    /// an error instead of creating the cgroup.
+    fn handle_cgroup_create(
+        &self,
+        event: &CgroupCreateEvent,
+        state: &mut SimulatorState,
+        cgroup_registry: &mut CgroupRegistry,
+        max_cgroups: Option<u32>,
+    ) -> Option<ExitKind> {
+        // Check resource limit before creating
+        let current_count = cgroup_registry.len() as u32;
+        if let Some(max) = max_cgroups {
+            if current_count >= max {
+                info!(
+                    name = %event.name,
+                    current = current_count,
+                    max,
+                    "CGROUP EXHAUSTED (ENOMEM)"
+                );
+                return Some(ExitKind::ErrorCgroupExhausted {
+                    cgroup_name: event.name.clone(),
+                    active_count: current_count,
+                    max_cgroups: max,
+                });
+            }
+        }
+
+        let parent_cgid = match &event.parent_name {
+            Some(parent) => {
+                cgroup_registry
+                    .get_by_name(parent)
+                    .unwrap_or_else(|| panic!("parent cgroup '{parent}' not found"))
+                    .cgid
+            }
+            None => CgroupId::ROOT,
+        };
+
+        let cgid = cgroup_registry.create(&event.name, parent_cgid, event.cpuset.clone());
+
+        info!(
+            name = %event.name,
+            cgid = cgid.0,
+            count = cgroup_registry.len(),
+            "CGROUP CREATE"
+        );
+
+        // Call cgroup_init
+        unsafe {
+            let cpu = state.current_cpu;
+            let raw = cgroup_registry.get_raw(cgid).unwrap();
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            let rc = self.scheduler.cgroup_init(raw, std::ptr::null_mut());
+            charge_sched_time(state, cpu, "cgroup_init");
+            kfuncs::exit_sim();
+
+            if rc != 0 {
+                info!(
+                    name = %event.name,
+                    rc,
+                    "CGROUP INIT FAILED"
+                );
+                // Scheduler returned an error - treat as exhaustion
+                return Some(ExitKind::ErrorCgroupExhausted {
+                    cgroup_name: event.name.clone(),
+                    active_count: current_count,
+                    max_cgroups: max_cgroups.unwrap_or(0),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Handle runtime cgroup destruction.
+    ///
+    /// Calls `cgroup_exit` and removes the cgroup from the registry.
+    fn handle_cgroup_destroy(
+        &self,
+        event: &CgroupDestroyEvent,
+        state: &mut SimulatorState,
+        cgroup_registry: &mut CgroupRegistry,
+    ) {
+        let raw = match cgroup_registry.destroy_by_name(&event.name) {
+            Some(r) => r,
+            None => {
+                debug!(name = %event.name, "cgroup not found for destruction");
+                return;
+            }
+        };
+
+        info!(
+            name = %event.name,
+            remaining = cgroup_registry.len(),
+            "CGROUP DESTROY"
+        );
+
+        // Call cgroup_exit
+        unsafe {
+            let cpu = state.current_cpu;
+            kfuncs::enter_sim(state, cpu);
+            start_rbc(state);
+            self.scheduler.cgroup_exit(raw);
+            charge_sched_time(state, cpu, "cgroup_exit");
+            kfuncs::exit_sim();
+
+            // Free the C-side cgroup struct
+            cgroup_registry.free_raw(raw);
         }
     }
 

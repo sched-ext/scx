@@ -500,3 +500,218 @@ fn stress_determinism_check() {
         "determinism check failed: different event counts"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cgroup lifecycle stress tests
+// ---------------------------------------------------------------------------
+
+/// Test cgroup creation at runtime.
+#[test]
+fn stress_cgroup_create_runtime() {
+    let _lock = common::setup_test();
+
+    // Create initial scenario with a simple task
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .seed(42)
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(1_000_000), Phase::Sleep(1_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        // Create cgroups at runtime
+        .cgroup_create_at("cg1", None, None, 10_000_000)
+        .cgroup_create_at("cg2", None, None, 20_000_000)
+        .cgroup_create_at("cg3", None, None, 30_000_000)
+        // Destroy one
+        .cgroup_destroy_at("cg2", 40_000_000)
+        // Create another
+        .cgroup_create_at("cg4", None, None, 50_000_000)
+        .duration_ms(100)
+        .build();
+
+    let sched = DynamicScheduler::lavd(2);
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        !trace.has_error(),
+        "cgroup create test failed: exit={:?}",
+        trace.exit_kind()
+    );
+}
+
+/// Test cgroup exhaustion with a low limit.
+#[test]
+fn stress_cgroup_exhaustion_lavd() {
+    let _lock = common::setup_test();
+
+    // Configure a low cgroup limit to trigger exhaustion
+    let max_cgroups = 5; // Root + 4 cgroups = exhaustion at 5th create
+
+    let mut builder = Scenario::builder()
+        .cpus(2)
+        .seed(42)
+        .max_cgroups(max_cgroups)
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(1_000_000), Phase::Sleep(1_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(500);
+
+    // Schedule creation of more cgroups than the limit allows
+    // Root counts as 1, so we can create max_cgroups - 1 more
+    for i in 0..10 {
+        let at_ns = (i + 1) * 10_000_000;
+        builder = builder.cgroup_create_at(&format!("cg{i}"), None, None, at_ns);
+    }
+
+    let scenario = builder.build();
+
+    let sched = DynamicScheduler::lavd(2);
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Should have hit the cgroup limit
+    match trace.exit_kind() {
+        ExitKind::ErrorCgroupExhausted {
+            cgroup_name,
+            active_count,
+            max_cgroups: max,
+        } => {
+            eprintln!(
+                "Got expected cgroup exhaustion: name={}, active={}, max={}",
+                cgroup_name, active_count, max
+            );
+            assert_eq!(*max, max_cgroups);
+        }
+        other => {
+            panic!("Expected ErrorCgroupExhausted but got {:?}", other);
+        }
+    }
+}
+
+/// Test rapid cgroup create/destroy cycles.
+#[test]
+fn stress_cgroup_rapid_lifecycle() {
+    let _lock = common::setup_test();
+
+    let mut builder = Scenario::builder()
+        .cpus(4)
+        .seed(12345)
+        .max_cgroups(20)
+        .detect_bpf_errors()
+        .watchdog_timeout_ns(Some(2_000_000_000))
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(500_000), Phase::Sleep(500_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .duration_ms(200);
+
+    // Create and destroy cgroups in rapid succession
+    // This stays under the limit because we destroy before creating new ones
+    let interval_ns = 1_000_000; // 1ms between operations
+    for cycle in 0..10 {
+        let base = cycle * 10_000_000;
+        // Create 5 cgroups
+        for i in 0..5 {
+            let name = format!("cycle{}_{}", cycle, i);
+            builder = builder.cgroup_create_at(&name, None, None, base + i * interval_ns);
+        }
+        // Destroy them
+        for i in 0..5 {
+            let name = format!("cycle{}_{}", cycle, i);
+            builder = builder.cgroup_destroy_at(&name, base + 5_000_000 + i * interval_ns);
+        }
+    }
+
+    let scenario = builder.build();
+
+    let sched = DynamicScheduler::lavd(4);
+    let trace = Simulator::new(sched).run(scenario);
+
+    // Should complete without hitting the limit
+    assert!(
+        !trace.has_error(),
+        "rapid cgroup lifecycle test failed: exit={:?}",
+        trace.exit_kind()
+    );
+}
+
+/// Test cgroup lifecycle with simple scheduler (basic functionality).
+#[test]
+fn stress_cgroup_lifecycle_simple() {
+    let _lock = common::setup_test();
+
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .seed(42)
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(2_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        .cgroup_create_at("test_cg", None, None, 5_000_000)
+        .cgroup_destroy_at("test_cg", 50_000_000)
+        .duration_ms(100)
+        .build();
+
+    let sched = DynamicScheduler::simple();
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        !trace.has_error(),
+        "simple scheduler cgroup lifecycle failed: exit={:?}",
+        trace.exit_kind()
+    );
+}
+
+/// Test cgroup_bw tracking in LAVD wrapper.
+#[test]
+fn stress_cgroup_bw_tracking() {
+    let _lock = common::setup_test();
+
+    // Build a simple scenario
+    let scenario = Scenario::builder()
+        .cpus(2)
+        .seed(42)
+        .add_task(
+            "worker",
+            0,
+            TaskBehavior {
+                phases: vec![Phase::Run(1_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+        )
+        // Create several cgroups
+        .cgroup("cg1", &[CpuId(0), CpuId(1)])
+        .cgroup("cg2", &[CpuId(0), CpuId(1)])
+        .cgroup("cg3", &[CpuId(0), CpuId(1)])
+        .duration_ms(50)
+        .build();
+
+    let sched = DynamicScheduler::lavd(2);
+
+    // Set a cgroup_bw limit higher than our cgroup count
+    sched.lavd_set_cgroup_bw_max(10);
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    assert!(
+        !trace.has_error(),
+        "cgroup_bw tracking test failed: exit={:?}",
+        trace.exit_kind()
+    );
+}

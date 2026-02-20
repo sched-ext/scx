@@ -488,6 +488,9 @@ pub fn load_rtapp(json_str: &str, nr_cpus: u32) -> Result<Scenario, RtAppError> 
         hotplug_events: Vec::new(),
         cpu_preempt_events: Vec::new(),
         cgroup_migrate_events: Vec::new(),
+        cgroup_create_events: Vec::new(),
+        cgroup_destroy_events: Vec::new(),
+        max_cgroups: None,
         interleave: false,
         max_cgroups: crate::cgroup::DEFAULT_MAX_CGROUPS,
     })

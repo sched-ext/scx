@@ -288,6 +288,36 @@ impl CgroupRegistry {
     pub fn is_empty(&self) -> bool {
         self.cgroups.is_empty()
     }
+
+    /// Destroy a cgroup by name.
+    ///
+    /// Returns the raw pointer to the destroyed cgroup (for calling cgroup_exit),
+    /// or `None` if the cgroup was not found. The root cgroup cannot be destroyed.
+    ///
+    /// # Panics
+    /// Panics if attempting to destroy the root cgroup.
+    pub fn destroy_by_name(&mut self, name: &str) -> Option<*mut c_void> {
+        let cgid = self.name_to_id.remove(name)?;
+        assert!(cgid != CgroupId::ROOT, "cannot destroy root cgroup");
+
+        let info = self.cgroups.remove(&cgid)?;
+        let raw = info.raw;
+
+        // Don't free here - the caller needs the raw pointer for cgroup_exit.
+        // The raw pointer will be freed after cgroup_exit is called.
+        Some(raw)
+    }
+
+    /// Free a raw cgroup pointer after cgroup_exit has been called.
+    ///
+    /// # Safety
+    /// Must only be called with a pointer returned from `destroy_by_name`,
+    /// and only after `cgroup_exit` has been called for that cgroup.
+    pub unsafe fn free_raw(&self, raw: *mut c_void) {
+        if !raw.is_null() {
+            sim_cgroup_free(raw);
+        }
+    }
 }
 
 impl Drop for CgroupRegistry {
