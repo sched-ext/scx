@@ -215,17 +215,21 @@ pub fn uninstall() {
 
 /// Yield point called at the top of each state-accessing kfunc.
 ///
-/// If interleaving is not active on this thread, this is a no-op.
-/// Otherwise: saves per-callback context (current_cpu, ops_context,
-/// waker_task_raw), releases the token (allowing another worker to
-/// run), and blocks until re-selected by the PRNG. On resume, the
-/// saved context is restored to [`SimulatorState`].
+/// Dispatches to the appropriate interleaving backend:
+/// - If preemptive context is installed: uses [`preempt::maybe_yield_preemptive`]
+///   (futex-based, signal-safe, PMU timer aware).
+/// - If cooperative context is installed: uses the `TokenRing` (Mutex/Condvar).
+/// - If neither is installed: no-op.
 ///
 /// # Safety contract
 ///
 /// Must be called BEFORE `with_sim()`, so no `&mut SimulatorState`
 /// reference exists when the worker yields.
 pub fn maybe_yield() {
+    // Try preemptive yield first (no-op if preempt context not installed).
+    crate::preempt::maybe_yield_preemptive();
+
+    // Cooperative yield fallback (no-op if interleave context not installed).
     let ctx = INTERLEAVE_CTX.with(|c| c.get());
     let ctx = match ctx {
         Some(ctx) => ctx,

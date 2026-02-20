@@ -1,19 +1,34 @@
-//! Minimal PMU-based Retired Branch Conditional (RBC) counter.
+//! Minimal PMU-based Retired Branch Conditional (RBC) counter and timer.
 //!
-//! Provides a deterministic, architecture-grounded measure of scheduler overhead
-//! by counting retired conditional branches during scheduler C code execution.
-//! Each retired conditional branch maps to a configurable number of nanoseconds.
+//! Provides two PMU abstractions:
+//!
+//! - [`RbcCounter`]: A pure counting counter for measuring scheduler overhead.
+//!   Each retired conditional branch maps to a configurable number of nanoseconds.
+//!
+//! - [`RbcTimer`]: A sampling counter that delivers a signal on overflow. Used
+//!   for preemptive interleaving — after N retired branches, the PMU fires a
+//!   signal that interrupts the running thread.
 //!
 //! CPU detection covers Intel (family 0x06) and AMD Zen 1-5 (families 0x17/0x19/0x1A).
 //!
-//! Extracted from Reverie (BSD-2-Clause). Only the minimal subset needed:
-//! open -> reset -> enable -> disable -> read.
+//! Extracted from Reverie (BSD-2-Clause).
 
 use std::fmt;
 use std::io;
 use std::os::unix::io::RawFd;
 
 use perf_event_open_sys as perf;
+
+/// fcntl constants not available in the libc crate.
+const F_SETOWN_EX: libc::c_int = 15;
+const F_SETSIG: libc::c_int = 10;
+const F_OWNER_TID: libc::c_int = 0;
+
+#[repr(C)]
+struct FOwnerEx {
+    type_: libc::c_int,
+    pid: libc::pid_t,
+}
 
 /// Errors from PMU counter operations.
 #[derive(Debug)]
@@ -24,6 +39,8 @@ pub enum PerfError {
     Open(io::Error),
     /// ioctl on the perf fd failed.
     Ioctl(io::Error),
+    /// fcntl on the perf fd failed.
+    Fcntl(io::Error),
     /// read on the perf fd failed.
     Read(io::Error),
 }
@@ -34,6 +51,7 @@ impl fmt::Display for PerfError {
             PerfError::UnsupportedCpu => write!(f, "CPU does not support RBC counting"),
             PerfError::Open(e) => write!(f, "perf_event_open failed: {e}"),
             PerfError::Ioctl(e) => write!(f, "perf ioctl failed: {e}"),
+            PerfError::Fcntl(e) => write!(f, "perf fcntl failed: {e}"),
             PerfError::Read(e) => write!(f, "perf read failed: {e}"),
         }
     }
@@ -141,63 +159,22 @@ impl RbcCounter {
 
     /// Enable the counter.
     pub fn enable(&self) -> Result<(), PerfError> {
-        let ret = unsafe {
-            libc::ioctl(
-                self.fd,
-                perf::bindings::ENABLE as libc::c_ulong,
-                0 as libc::c_ulong,
-            )
-        };
-        if ret < 0 {
-            return Err(PerfError::Ioctl(io::Error::last_os_error()));
-        }
-        Ok(())
+        ioctl_no_arg(self.fd, perf::bindings::ENABLE)
     }
 
     /// Disable the counter.
     pub fn disable(&self) -> Result<(), PerfError> {
-        let ret = unsafe {
-            libc::ioctl(
-                self.fd,
-                perf::bindings::DISABLE as libc::c_ulong,
-                0 as libc::c_ulong,
-            )
-        };
-        if ret < 0 {
-            return Err(PerfError::Ioctl(io::Error::last_os_error()));
-        }
-        Ok(())
+        ioctl_no_arg(self.fd, perf::bindings::DISABLE)
     }
 
     /// Reset the counter to zero.
     pub fn reset(&self) -> Result<(), PerfError> {
-        let ret = unsafe {
-            libc::ioctl(
-                self.fd,
-                perf::bindings::RESET as libc::c_ulong,
-                0 as libc::c_ulong,
-            )
-        };
-        if ret < 0 {
-            return Err(PerfError::Ioctl(io::Error::last_os_error()));
-        }
-        Ok(())
+        ioctl_no_arg(self.fd, perf::bindings::RESET)
     }
 
     /// Read the current counter value.
     pub fn read(&self) -> Result<u64, PerfError> {
-        let mut count: u64 = 0;
-        let ret = unsafe {
-            libc::read(
-                self.fd,
-                &mut count as *mut u64 as *mut libc::c_void,
-                std::mem::size_of::<u64>(),
-            )
-        };
-        if ret < 0 {
-            return Err(PerfError::Read(io::Error::last_os_error()));
-        }
-        Ok(count)
+        read_counter(self.fd)
     }
 }
 
@@ -205,6 +182,196 @@ impl Drop for RbcCounter {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
     }
+}
+
+/// A PMU timer that delivers a signal after a specified number of retired
+/// conditional branches.
+///
+/// Unlike [`RbcCounter`] (which is a pure counting counter), `RbcTimer` is a
+/// sampling counter: it fires a signal when the counter overflows past the
+/// configured sample period.
+///
+/// # Signal Delivery
+///
+/// After creation, call [`set_signal_delivery`](Self::set_signal_delivery) to
+/// route the overflow notification to a specific thread as a specific signal.
+/// The recommended signal is `SIGSTKFLT` (unused by the kernel, safe as a
+/// private marker signal).
+///
+/// # Lifecycle
+///
+/// ```text
+/// new() → set_signal_delivery() → set_period() → reset() → enable()
+///   ... branches execute ... signal fires ...
+/// disable() → [repeat from set_period()]
+/// ```
+pub struct RbcTimer {
+    fd: RawFd,
+}
+
+impl RbcTimer {
+    /// A very large period that effectively disables overflow signals.
+    ///
+    /// Use this as the initial `sample_period` when creating a timer that will
+    /// have its period set later via [`set_period`](Self::set_period).
+    pub const DISABLE_SAMPLE_PERIOD: u64 = 1 << 60;
+
+    /// Open a new RBC timer for the current thread.
+    ///
+    /// The timer starts disabled. The `sample_period` controls how many retired
+    /// conditional branches must occur before an overflow notification fires.
+    /// Use [`DISABLE_SAMPLE_PERIOD`](Self::DISABLE_SAMPLE_PERIOD) to create a
+    /// timer without immediate overflow, then set the real period later with
+    /// [`set_period`](Self::set_period).
+    pub fn new(config: &PmuConfig, sample_period: u64) -> Result<Self, PerfError> {
+        let mut attr = perf::bindings::perf_event_attr {
+            type_: perf::bindings::PERF_TYPE_RAW,
+            size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
+            config: config.rcb_event,
+            ..Default::default()
+        };
+        attr.__bindgen_anon_1.sample_period = sample_period;
+        attr.set_disabled(1);
+        attr.set_exclude_kernel(1);
+        attr.set_exclude_hv(1);
+        attr.set_pinned(1);
+        // Generate a wakeup (overflow notification) after one sample event.
+        attr.__bindgen_anon_2.wakeup_events = 1;
+
+        let fd = unsafe { perf::perf_event_open(&mut attr, 0, -1, -1, 0) };
+        if fd < 0 {
+            return Err(PerfError::Open(io::Error::last_os_error()));
+        }
+
+        Ok(RbcTimer { fd })
+    }
+
+    /// Configure signal delivery on counter overflow.
+    ///
+    /// Routes the overflow notification to thread `tid` as signal `signo`.
+    /// The signal is delivered asynchronously when the counter overflows past
+    /// the sample period.
+    ///
+    /// `tid` is a Linux thread ID (from `gettid(2)`). `signo` is the signal
+    /// number to deliver (e.g. `libc::SIGSTKFLT`).
+    pub fn set_signal_delivery(
+        &self,
+        tid: libc::pid_t,
+        signo: libc::c_int,
+    ) -> Result<(), PerfError> {
+        let owner = FOwnerEx {
+            type_: F_OWNER_TID,
+            pid: tid,
+        };
+        let ret = unsafe { libc::fcntl(self.fd, F_SETOWN_EX, &owner as *const FOwnerEx) };
+        if ret < 0 {
+            return Err(PerfError::Fcntl(io::Error::last_os_error()));
+        }
+        let ret = unsafe { libc::fcntl(self.fd, libc::F_SETFL, libc::O_ASYNC) };
+        if ret < 0 {
+            return Err(PerfError::Fcntl(io::Error::last_os_error()));
+        }
+        let ret = unsafe { libc::fcntl(self.fd, F_SETSIG, signo) };
+        if ret < 0 {
+            return Err(PerfError::Fcntl(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// Change the overflow period.
+    ///
+    /// The counter will fire an overflow notification after `ticks` more
+    /// retired conditional branches. This takes effect from the current
+    /// counter position.
+    pub fn set_period(&self, ticks: u64) -> Result<(), PerfError> {
+        // PERF_EVENT_IOC_PERIOD expects a pointer to u64.
+        let mut ticks = ticks;
+        let ret = unsafe {
+            libc::ioctl(
+                self.fd,
+                perf::bindings::PERIOD as libc::c_ulong,
+                &mut ticks as *mut u64,
+            )
+        };
+        if ret < 0 {
+            return Err(PerfError::Ioctl(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// Enable the timer.
+    pub fn enable(&self) -> Result<(), PerfError> {
+        ioctl_no_arg(self.fd, perf::bindings::ENABLE)
+    }
+
+    /// Disable the timer.
+    pub fn disable(&self) -> Result<(), PerfError> {
+        ioctl_no_arg(self.fd, perf::bindings::DISABLE)
+    }
+
+    /// Reset the counter to zero.
+    pub fn reset(&self) -> Result<(), PerfError> {
+        ioctl_no_arg(self.fd, perf::bindings::RESET)
+    }
+
+    /// Read the current counter value.
+    pub fn read(&self) -> Result<u64, PerfError> {
+        read_counter(self.fd)
+    }
+
+    /// Return the raw file descriptor for this timer.
+    ///
+    /// Useful for signal handler identification (matching `si_fd` against
+    /// known timer fds).
+    pub fn raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+impl Drop for RbcTimer {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+/// Raw ioctl request code for `PERF_EVENT_IOC_ENABLE`.
+///
+/// Exported for use in async-signal-safe code paths that cannot call
+/// higher-level `RbcTimer` methods.
+pub const PERF_IOC_ENABLE: libc::c_ulong = perf::bindings::ENABLE as libc::c_ulong;
+
+/// Raw ioctl request code for `PERF_EVENT_IOC_DISABLE`.
+pub const PERF_IOC_DISABLE: libc::c_ulong = perf::bindings::DISABLE as libc::c_ulong;
+
+/// Raw ioctl request code for `PERF_EVENT_IOC_RESET`.
+pub const PERF_IOC_RESET: libc::c_ulong = perf::bindings::RESET as libc::c_ulong;
+
+/// Raw ioctl request code for `PERF_EVENT_IOC_PERIOD`.
+pub const PERF_IOC_PERIOD: libc::c_ulong = perf::bindings::PERIOD as libc::c_ulong;
+
+/// Shared ioctl helper for ENABLE/DISABLE/RESET (no argument).
+fn ioctl_no_arg(fd: RawFd, request: u32) -> Result<(), PerfError> {
+    let ret = unsafe { libc::ioctl(fd, request as libc::c_ulong, 0 as libc::c_ulong) };
+    if ret < 0 {
+        return Err(PerfError::Ioctl(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Shared read helper for counter value.
+fn read_counter(fd: RawFd) -> Result<u64, PerfError> {
+    let mut count: u64 = 0;
+    let ret = unsafe {
+        libc::read(
+            fd,
+            &mut count as *mut u64 as *mut libc::c_void,
+            std::mem::size_of::<u64>(),
+        )
+    };
+    if ret < 0 {
+        return Err(PerfError::Read(io::Error::last_os_error()));
+    }
+    Ok(count)
 }
 
 /// Try to create an RBC counter, returning `None` with a warning if unavailable.
@@ -223,6 +390,27 @@ pub fn try_create_rbc_counter() -> Option<RbcCounter> {
         Ok(counter) => Some(counter),
         Err(e) => {
             tracing::warn!("RBC counter unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// Try to create an RBC timer, returning `None` with a warning if unavailable.
+///
+/// The timer starts with [`RbcTimer::DISABLE_SAMPLE_PERIOD`] so it won't
+/// fire until a real period is set via [`RbcTimer::set_period`].
+pub fn try_create_rbc_timer() -> Option<RbcTimer> {
+    let config = match PmuConfig::detect() {
+        Some(c) => c,
+        None => {
+            tracing::warn!("RBC timer: CPU not supported (no CPUID match)");
+            return None;
+        }
+    };
+    match RbcTimer::new(&config, RbcTimer::DISABLE_SAMPLE_PERIOD) {
+        Ok(timer) => Some(timer),
+        Err(e) => {
+            tracing::warn!("RBC timer unavailable: {e}");
             None
         }
     }
@@ -285,5 +473,127 @@ mod tests {
     fn test_try_create_rbc_counter() {
         // Should not panic regardless of platform
         let _counter = try_create_rbc_counter();
+    }
+
+    #[test]
+    fn test_try_create_rbc_timer() {
+        // Should not panic regardless of platform
+        let _timer = try_create_rbc_timer();
+    }
+
+    #[test]
+    fn test_rbc_timer_signal_delivery() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+        extern "C" fn handler(_signo: libc::c_int) {
+            SIGNAL_RECEIVED.store(true, Ordering::SeqCst);
+        }
+
+        let config = match PmuConfig::detect() {
+            Some(c) => c,
+            None => {
+                eprintln!("skipping RBC timer test: unsupported CPU");
+                return;
+            }
+        };
+
+        // Create timer with a small period (100 branches).
+        let timer = match RbcTimer::new(&config, 100) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping RBC timer test: {e}");
+                return;
+            }
+        };
+
+        // Install SIGSTKFLT handler.
+        let sa = libc::sigaction {
+            sa_sigaction: handler as libc::sighandler_t,
+            sa_mask: unsafe { std::mem::zeroed() },
+            sa_flags: libc::SA_SIGINFO,
+            sa_restorer: None,
+        };
+        let ret = unsafe { libc::sigaction(libc::SIGSTKFLT, &sa, std::ptr::null_mut()) };
+        assert_eq!(ret, 0, "sigaction failed");
+
+        // Route signal to this thread.
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+        timer
+            .set_signal_delivery(tid, libc::SIGSTKFLT)
+            .expect("set_signal_delivery");
+
+        // Enable and run some branches to trigger overflow.
+        timer.reset().expect("reset");
+        timer.enable().expect("enable");
+
+        let mut sum = 0u64;
+        for i in 0..100_000u64 {
+            if i % 2 == 0 {
+                sum += i;
+            }
+        }
+        std::hint::black_box(sum);
+
+        timer.disable().expect("disable");
+
+        // Restore default handler.
+        let sa_default = libc::sigaction {
+            sa_sigaction: libc::SIG_DFL,
+            sa_mask: unsafe { std::mem::zeroed() },
+            sa_flags: 0,
+            sa_restorer: None,
+        };
+        unsafe {
+            libc::sigaction(libc::SIGSTKFLT, &sa_default, std::ptr::null_mut());
+        }
+
+        // In VMs/containers, the counter may not actually fire.
+        let count = timer.read().unwrap_or(0);
+        if count == 0 {
+            eprintln!("skipping RBC timer signal assertion: counter reads 0 (likely VM/container)");
+            return;
+        }
+
+        assert!(
+            SIGNAL_RECEIVED.load(Ordering::SeqCst),
+            "expected SIGSTKFLT signal after {count} retired branches with period=100"
+        );
+    }
+
+    #[test]
+    fn test_rbc_timer_set_period() {
+        let config = match PmuConfig::detect() {
+            Some(c) => c,
+            None => {
+                eprintln!("skipping RBC timer period test: unsupported CPU");
+                return;
+            }
+        };
+
+        // Create with large period, then set a real one.
+        let timer = match RbcTimer::new(&config, RbcTimer::DISABLE_SAMPLE_PERIOD) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping RBC timer period test: {e}");
+                return;
+            }
+        };
+
+        timer.set_period(500).expect("set_period should succeed");
+        timer.reset().expect("reset");
+        timer.enable().expect("enable");
+
+        let mut sum = 0u64;
+        for i in 0..1000u64 {
+            if i % 2 == 0 {
+                sum += i;
+            }
+        }
+        std::hint::black_box(sum);
+
+        timer.disable().expect("disable");
+        // Just verify it didn't crash; actual counting may not work in VMs.
     }
 }

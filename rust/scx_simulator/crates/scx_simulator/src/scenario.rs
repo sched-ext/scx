@@ -174,6 +174,31 @@ impl NoiseConfig {
     }
 }
 
+/// Configuration for preemptive interleaving via PMU timer signals.
+///
+/// When enabled, dispatch callbacks are preempted at random retired
+/// conditional branch count intervals, enabling exploration of mid-C-code
+/// interleavings beyond the cooperative kfunc-boundary yield points.
+///
+/// The timeslice (in retired conditional branches) is rolled uniformly
+/// in `[timeslice_min, timeslice_max]` from the interleave PRNG.
+#[derive(Debug, Clone)]
+pub struct PreemptiveConfig {
+    /// Minimum timeslice in retired conditional branches.
+    pub timeslice_min: u64,
+    /// Maximum timeslice in retired conditional branches.
+    pub timeslice_max: u64,
+}
+
+impl Default for PreemptiveConfig {
+    fn default() -> Self {
+        PreemptiveConfig {
+            timeslice_min: 100,
+            timeslice_max: 1000,
+        }
+    }
+}
+
 /// Configuration for context switch overhead.
 ///
 /// Models real CPU time consumed during task transitions. A voluntary yield
@@ -403,6 +428,13 @@ pub struct Scenario {
     /// separate OS threads with PRNG-driven token passing, enabling
     /// deterministic exploration of different interleavings.
     pub interleave: bool,
+    /// Preemptive interleaving configuration.
+    ///
+    /// When `Some`, dispatch callbacks are additionally preempted at random
+    /// retired branch count intervals via PMU timer signals. Implies
+    /// `interleave = true`. When the PMU is unavailable (VMs, containers),
+    /// falls back to cooperative-only interleaving with the PreemptRing.
+    pub preemptive: Option<PreemptiveConfig>,
     /// Maximum number of cgroups that can have BPF map entries allocated.
     ///
     /// This simulates BPF hash map capacity limits. In production LAVD,
@@ -437,6 +469,7 @@ pub struct ScenarioBuilder {
     cgroup_create_events: Vec<CgroupCreateEvent>,
     cgroup_destroy_events: Vec<CgroupDestroyEvent>,
     interleave: bool,
+    preemptive: Option<PreemptiveConfig>,
     max_cgroups: u32,
     irq_events: Vec<IrqEvent>,
 }
@@ -463,6 +496,7 @@ impl Scenario {
             cgroup_create_events: Vec::new(),
             cgroup_destroy_events: Vec::new(),
             interleave: false,
+            preemptive: None,
             max_cgroups: DEFAULT_MAX_CGROUPS,
             irq_events: Vec::new(),
         }
@@ -826,6 +860,17 @@ impl ScenarioBuilder {
         self
     }
 
+    /// Enable preemptive interleaving with the given configuration.
+    ///
+    /// Implies `interleave(true)`. Each dispatch callback will be
+    /// preempted at random retired branch count intervals via PMU timer
+    /// signals, in addition to cooperative yields at kfunc boundaries.
+    pub fn preemptive(mut self, config: PreemptiveConfig) -> Self {
+        self.preemptive = Some(config);
+        self.interleave = true;
+        self
+    }
+
     /// Set the maximum number of cgroups that can have BPF map entries.
     ///
     /// This simulates BPF hash map capacity limits. In production LAVD,
@@ -944,6 +989,7 @@ impl ScenarioBuilder {
             cgroup_create_events: self.cgroup_create_events,
             cgroup_destroy_events: self.cgroup_destroy_events,
             interleave: self.interleave,
+            preemptive: self.preemptive,
             max_cgroups: self.max_cgroups,
             irq_events: self.irq_events,
         }
