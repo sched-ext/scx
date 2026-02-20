@@ -373,13 +373,6 @@ pub struct Scenario {
     pub cgroup_create_events: Vec<CgroupCreateEvent>,
     /// Cgroup destruction events (cgroups destroyed at runtime).
     pub cgroup_destroy_events: Vec<CgroupDestroyEvent>,
-    /// Maximum number of cgroups allowed (for resource limit simulation).
-    ///
-    /// - `None` — no limit (default).
-    /// - `Some(n)` — `cgroup_init` returns `-ENOMEM` when creating beyond `n` cgroups.
-    ///
-    /// This simulates `CBW_NR_CGRP_MAX = 2048` from production LAVD.
-    pub max_cgroups: Option<u32>,
     /// Enable concurrent callback interleaving at kfunc yield points.
     ///
     /// When true, dispatch callbacks for multiple idle CPUs run on
@@ -417,7 +410,6 @@ pub struct ScenarioBuilder {
     cgroup_migrate_events: Vec<CgroupMigrateEvent>,
     cgroup_create_events: Vec<CgroupCreateEvent>,
     cgroup_destroy_events: Vec<CgroupDestroyEvent>,
-    max_cgroups: Option<u32>,
     interleave: bool,
     max_cgroups: u32,
 }
@@ -443,7 +435,6 @@ impl Scenario {
             cgroup_migrate_events: Vec::new(),
             cgroup_create_events: Vec::new(),
             cgroup_destroy_events: Vec::new(),
-            max_cgroups: None,
             interleave: false,
             max_cgroups: DEFAULT_MAX_CGROUPS,
         }
@@ -801,16 +792,6 @@ impl ScenarioBuilder {
         self
     }
 
-    /// Set the maximum number of cgroups for resource limit simulation.
-    ///
-    /// When set, `cgroup_init` returns `-ENOMEM` if creating a cgroup would
-    /// exceed this limit. This simulates production cgroup exhaustion bugs
-    /// like `CBW_NR_CGRP_MAX = 2048` in LAVD.
-    pub fn max_cgroups(mut self, max: u32) -> Self {
-        self.max_cgroups = Some(max);
-        self
-    }
-
     /// Enable concurrent callback interleaving at kfunc yield points.
     pub fn interleave(mut self, enabled: bool) -> Self {
         self.interleave = enabled;
@@ -865,7 +846,6 @@ impl ScenarioBuilder {
             cgroup_migrate_events: self.cgroup_migrate_events,
             cgroup_create_events: self.cgroup_create_events,
             cgroup_destroy_events: self.cgroup_destroy_events,
-            max_cgroups: self.max_cgroups,
             interleave: self.interleave,
             max_cgroups: self.max_cgroups,
         }

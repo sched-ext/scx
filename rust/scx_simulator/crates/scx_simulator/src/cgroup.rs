@@ -150,6 +150,13 @@ impl CgroupRegistry {
         self.max_cgroups
     }
 
+    /// Set the maximum cgroup limit.
+    ///
+    /// This can be used to dynamically change the limit during simulation.
+    pub fn set_max_cgroups(&mut self, max: u32) {
+        self.max_cgroups = max;
+    }
+
     /// Look up a cgroup by ID.
     pub fn get(&self, cgid: CgroupId) -> Option<&CgroupInfo> {
         self.cgroups.get(&cgid)
@@ -473,6 +480,20 @@ pub extern "C" fn sim_cgroup_registry_max() -> u32 {
     }
     let registry = unsafe { &*registry };
     registry.max_cgroups()
+}
+
+/// Set the maximum cgroup limit (called from C).
+///
+/// This allows schedulers to dynamically configure the cgroup limit.
+/// No-op if no registry is installed.
+#[no_mangle]
+pub extern "C" fn sim_cgroup_registry_set_max(max: u32) {
+    let registry = CGROUP_REGISTRY.load(Ordering::SeqCst);
+    if registry.is_null() {
+        return;
+    }
+    let registry = unsafe { &mut *registry };
+    registry.set_max_cgroups(max);
 }
 
 // FFI declarations for CSS iterator

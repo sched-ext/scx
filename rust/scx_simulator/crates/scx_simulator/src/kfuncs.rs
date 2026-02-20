@@ -452,8 +452,7 @@ impl SimulatorState {
 
         // Check migration_disabled: task with migration_disabled > 0 cannot be
         // dispatched to a different CPU than its last known CPU.
-        let migration_disabled =
-            unsafe { ffi::sim_task_get_migration_disabled(task_ptr) };
+        let migration_disabled = unsafe { ffi::sim_task_get_migration_disabled(task_ptr) };
         if migration_disabled > 0 {
             // Migration-disabled task: must dispatch to its last known CPU.
             if let Some(&last_cpu) = self.task_last_cpu.get(&pid) {

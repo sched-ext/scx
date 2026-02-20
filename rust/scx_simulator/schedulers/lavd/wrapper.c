@@ -727,6 +727,19 @@ void lavd_set_autopilot(int on)
 }
 
 /*
+ * Set the maximum number of cgroups that can have BPF map entries.
+ *
+ * This simulates CBW_NR_CGRP_MAX in production LAVD. Once the limit
+ * is reached, scx_cgroup_bw_init() will return -ENOMEM.
+ */
+extern void sim_cgroup_registry_set_max(unsigned int max);
+
+void lavd_set_cgroup_bw_max(unsigned int max)
+{
+	sim_cgroup_registry_set_max(max);
+}
+
+/*
  * =================================================================
  * Probe functions — exported accessors for scheduler-internal state
  * =================================================================
