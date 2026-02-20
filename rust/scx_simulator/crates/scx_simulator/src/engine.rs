@@ -460,6 +460,7 @@ impl<S: Scheduler> Simulator<S> {
             rbc_kfunc_ns: 0,
             bpf_error: None,
             interleave: scenario.interleave,
+            preemptive: scenario.preemptive.clone(),
         };
 
         // Set CPU ID width for log formatting
@@ -1619,7 +1620,7 @@ impl<S: Scheduler> Simulator<S> {
                     .map(|c| c.id)
                     .collect();
 
-                if state.interleave && idle_cpus.len() >= 2 {
+                if (state.interleave || state.preemptive.is_some()) && idle_cpus.len() >= 2 {
                     self.dispatch_concurrent(&idle_cpus, state, tasks, events, monitor);
                 } else {
                     for cpu in idle_cpus {
@@ -2196,7 +2197,8 @@ impl<S: Scheduler> Simulator<S> {
     ///
     /// Phase 1 (concurrent): each CPU's dispatch callback runs on a
     /// separate OS thread, interleaved at kfunc boundaries by the
-    /// [`TokenRing`]. Only one thread is active at a time.
+    /// [`TokenRing`] (cooperative mode) or [`PreemptRing`] (preemptive
+    /// mode). Only one thread is active at a time.
     ///
     /// Phase 2 (sequential): global DSQ fallback, start_running, and
     /// kicked-CPU processing happen on the engine thread.
@@ -2208,8 +2210,6 @@ impl<S: Scheduler> Simulator<S> {
         events: &mut EventQueue,
         monitor: &mut dyn Monitor,
     ) {
-        use crate::interleave::{self, TokenRing, WorkerId};
-
         // Filter to CPUs that actually need dispatch (idle + empty local DSQ).
         let dispatch_cpus: Vec<CpuId> = cpus
             .iter()
@@ -2228,9 +2228,6 @@ impl<S: Scheduler> Simulator<S> {
             return;
         }
 
-        let interleave_seed = state.next_prng();
-        let ring = TokenRing::new(dispatch_cpus.len(), interleave_seed);
-
         // Clear kicked_cpus before the concurrent block — each worker's
         // kfunc calls will accumulate new kicks into this shared map.
         state.kicked_cpus.clear();
@@ -2248,51 +2245,27 @@ impl<S: Scheduler> Simulator<S> {
             state.advance_cpu_clock(cpu);
         }
 
-        std::thread::scope(|s| {
-            let ring_ref = &ring;
-            let state_ref = &state_send;
-            let sched_ref = &sched_send;
+        let interleave_seed = state.next_prng();
 
-            for (i, &cpu) in dispatch_cpus.iter().enumerate() {
-                let worker_id = WorkerId(i);
-
-                s.spawn(move || {
-                    interleave::install(ring_ref, worker_id);
-                    let sp = state_ref.0;
-                    let schp = sched_ref.0 as *const S;
-
-                    // Install the SimulatorState pointer in this thread's
-                    // thread-local so kfuncs (via with_sim) can find it.
-                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
-
-                    ring_ref.wait_for_token(worker_id);
-
-                    // Set up per-CPU context and run dispatch.
-                    unsafe {
-                        let sim = &mut *sp;
-                        sim.current_cpu = cpu;
-                        sim.ops_context = OpsContext::Dispatch;
-
-                        let prev_pid = sim.cpus[cpu.0 as usize].prev_task;
-                        let prev_raw = prev_pid
-                            .and_then(|pid| sim.task_pid_to_raw.get(&pid).copied())
-                            .map_or(std::ptr::null_mut(), |raw| raw as *mut c_void);
-
-                        debug!(cpu = cpu.0, "dispatch (concurrent)");
-                        (*schp).dispatch(cpu.0 as i32, prev_raw);
-                        sim.ops_context = OpsContext::None;
-                        sim.resolve_pending_dispatch(cpu);
-                    }
-
-                    ring_ref.finish(worker_id);
-                    kfuncs::exit_sim();
-                    interleave::uninstall();
-                });
-            }
-
-            ring.start();
-            ring.wait_all_done();
-        });
+        if let Some(ref preemptive_cfg) = state.preemptive {
+            let timeslice_min = preemptive_cfg.timeslice_min;
+            let timeslice_max = preemptive_cfg.timeslice_max;
+            self.dispatch_concurrent_preemptive(
+                &dispatch_cpus,
+                &state_send,
+                &sched_send,
+                interleave_seed,
+                timeslice_min,
+                timeslice_max,
+            );
+        } else {
+            self.dispatch_concurrent_cooperative(
+                &dispatch_cpus,
+                &state_send,
+                &sched_send,
+                interleave_seed,
+            );
+        }
 
         // Phase 2: sequential post-processing on the engine thread.
         for &cpu in &dispatch_cpus {
@@ -2355,6 +2328,171 @@ impl<S: Scheduler> Simulator<S> {
 
         // Process all kicked CPUs accumulated during the concurrent dispatches.
         self.process_kicked_cpus(None, state, tasks, events, monitor);
+    }
+
+    /// Phase 1 cooperative: run dispatch via `TokenRing` (Mutex/Condvar).
+    ///
+    /// Each worker yields at kfunc boundaries via `interleave::maybe_yield()`.
+    /// No mid-C-code preemption points.
+    fn dispatch_concurrent_cooperative(
+        &self,
+        dispatch_cpus: &[CpuId],
+        state_send: &SendPtr<SimulatorState>,
+        sched_send: &SendPtr<S>,
+        seed: u32,
+    ) {
+        use crate::interleave::{self, TokenRing, WorkerId};
+
+        let ring = TokenRing::new(dispatch_cpus.len(), seed);
+
+        std::thread::scope(|s| {
+            let ring_ref = &ring;
+            // Capture &SendPtr (which is Send+Sync) rather than raw
+            // pointers (which are !Send).
+            let state_ref = state_send;
+            let sched_ref = sched_send;
+
+            for (i, &cpu) in dispatch_cpus.iter().enumerate() {
+                let worker_id = WorkerId(i);
+
+                s.spawn(move || {
+                    let sp = state_ref.0;
+                    let schp = sched_ref.0 as *const S;
+
+                    interleave::install(ring_ref, worker_id);
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
+
+                    ring_ref.wait_for_token(worker_id);
+
+                    unsafe {
+                        let sim = &mut *sp;
+                        sim.current_cpu = cpu;
+                        sim.ops_context = OpsContext::Dispatch;
+
+                        let prev_pid = sim.cpus[cpu.0 as usize].prev_task;
+                        let prev_raw = prev_pid
+                            .and_then(|pid| sim.task_pid_to_raw.get(&pid).copied())
+                            .map_or(std::ptr::null_mut(), |raw| raw as *mut c_void);
+
+                        debug!(cpu = cpu.0, "dispatch (concurrent)");
+                        (*schp).dispatch(cpu.0 as i32, prev_raw);
+                        sim.ops_context = OpsContext::None;
+                        sim.resolve_pending_dispatch(cpu);
+                    }
+
+                    ring_ref.finish(worker_id);
+                    kfuncs::exit_sim();
+                    interleave::uninstall();
+                });
+            }
+
+            ring.start();
+            ring.wait_all_done();
+        });
+    }
+
+    /// Phase 1 preemptive: run dispatch via `PreemptRing` + PMU timer.
+    ///
+    /// Each worker yields at kfunc boundaries (cooperative) AND is also
+    /// preempted mid-C-code by a PMU timer overflow signal. If the PMU
+    /// is unavailable (VMs, containers), falls back to cooperative-only
+    /// interleaving with the `PreemptRing`.
+    fn dispatch_concurrent_preemptive(
+        &self,
+        dispatch_cpus: &[CpuId],
+        state_send: &SendPtr<SimulatorState>,
+        sched_send: &SendPtr<S>,
+        seed: u32,
+        timeslice_min: u64,
+        timeslice_max: u64,
+    ) {
+        use crate::interleave::WorkerId;
+        use crate::preempt::{self, PreemptRing};
+
+        let ring = PreemptRing::new(dispatch_cpus.len(), seed);
+        preempt::install_signal_handler();
+
+        std::thread::scope(|s| {
+            let ring_ref = &ring;
+            // Capture &SendPtr (which is Send+Sync) rather than raw
+            // pointers (which are !Send).
+            let state_ref = state_send;
+            let sched_ref = sched_send;
+
+            for (i, &cpu) in dispatch_cpus.iter().enumerate() {
+                let worker_id = WorkerId(i);
+
+                s.spawn(move || {
+                    let sp = state_ref.0;
+                    let schp = sched_ref.0 as *const S;
+
+                    // Create per-thread PMU timer (may be unavailable in VMs).
+                    let timer = perf::try_create_rbc_timer();
+                    let timer_fd = match &timer {
+                        Some(t) => {
+                            // Route overflow signal to this thread.
+                            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+                            if let Err(e) = t.set_signal_delivery(tid, preempt::PREEMPT_SIGNAL) {
+                                tracing::warn!(
+                                    "preemptive interleave: signal delivery \
+                                     setup failed: {e}"
+                                );
+                                -1
+                            } else {
+                                t.raw_fd()
+                            }
+                        }
+                        None => -1,
+                    };
+
+                    preempt::install(ring_ref, worker_id, timer_fd, timeslice_min, timeslice_max);
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
+
+                    ring_ref.wait_for_token(worker_id);
+
+                    // Arm the PMU timer before entering scheduler C code.
+                    if timer_fd >= 0 {
+                        let ts = ring_ref.roll_timeslice(timeslice_min, timeslice_max);
+                        if let Some(ref t) = timer {
+                            let _ = t.reset();
+                            let _ = t.set_period(ts);
+                            let _ = t.enable();
+                        }
+                    }
+
+                    unsafe {
+                        let sim = &mut *sp;
+                        sim.current_cpu = cpu;
+                        sim.ops_context = OpsContext::Dispatch;
+
+                        let prev_pid = sim.cpus[cpu.0 as usize].prev_task;
+                        let prev_raw = prev_pid
+                            .and_then(|pid| sim.task_pid_to_raw.get(&pid).copied())
+                            .map_or(std::ptr::null_mut(), |raw| raw as *mut c_void);
+
+                        debug!(cpu = cpu.0, "dispatch (preemptive)");
+                        (*schp).dispatch(cpu.0 as i32, prev_raw);
+                        sim.ops_context = OpsContext::None;
+                        sim.resolve_pending_dispatch(cpu);
+                    }
+
+                    // Disable timer before finishing.
+                    if let Some(ref t) = timer {
+                        let _ = t.disable();
+                    }
+
+                    ring_ref.finish(worker_id);
+                    kfuncs::exit_sim();
+                    preempt::uninstall();
+                    // timer dropped here — closes the perf fd
+                });
+            }
+
+            ring.start();
+            ring.wait_all_done();
+        });
+
+        preempt::uninstall_signal_handler();
     }
 
     /// Process CPUs kicked via `scx_bpf_kick_cpu` during a callback.

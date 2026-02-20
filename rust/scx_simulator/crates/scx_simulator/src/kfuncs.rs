@@ -27,7 +27,7 @@ use crate::dsq::DsqManager;
 use crate::ffi;
 use crate::fmt::FmtN;
 use crate::perf::RbcCounter;
-use crate::scenario::{NoiseConfig, OverheadConfig};
+use crate::scenario::{NoiseConfig, OverheadConfig, PreemptiveConfig};
 use crate::task::OpsTaskState;
 use crate::trace::{DispatchRejectReason, Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
@@ -153,6 +153,8 @@ pub struct SimulatorState {
     pub bpf_error: Option<String>,
     /// Enable concurrent callback interleaving at kfunc yield points.
     pub interleave: bool,
+    /// Preemptive interleaving configuration (None = disabled).
+    pub preemptive: Option<PreemptiveConfig>,
 }
 
 /// Kernel value of `SCX_TASK_QUEUED` from `enum scx_task_state`.
@@ -601,7 +603,13 @@ where
         if let Some(ref rbc) = sim.rbc_counter {
             let _ = rbc.disable();
         }
+        // Pause preemption timer — prevent signals while &mut SimulatorState exists
+        crate::preempt::pause_timer();
+
         let result = f(sim);
+
+        // Resume preemption timer — returning to scheduler C code
+        crate::preempt::resume_timer();
         // Resume RBC counter — returning to scheduler C code
         if let Some(ref rbc) = sim.rbc_counter {
             let _ = rbc.enable();
@@ -1467,6 +1475,7 @@ mod tests {
             rbc_kfunc_ns: 0,
             bpf_error: None,
             interleave: false,
+            preemptive: None,
         }
     }
 
