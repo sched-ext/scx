@@ -1362,7 +1362,20 @@ impl<S: Scheduler> Simulator<S> {
         // (skip over Wake phases, handle Sleep->Run transitions)
         self.advance_to_run_phase(task, state, events);
 
-        if matches!(task.state, TaskState::Exited | TaskState::Sleeping) {
+        if task.state == TaskState::Exited {
+            // Task completed all its phases; record the completion event.
+            let wake_cpu = waker.as_ref().map_or(task.prev_cpu, |w| w.cpu);
+            state
+                .trace
+                .record(state.clock, wake_cpu, TraceKind::TaskCompleted { pid });
+            tracing::info!(
+                task = task.name.as_str(),
+                pid = pid.0,
+                "COMPLETED (from wake)"
+            );
+            return;
+        }
+        if task.state == TaskState::Sleeping {
             return;
         }
 
@@ -2478,7 +2491,12 @@ impl<S: Scheduler> Simulator<S> {
         }
     }
 
-    /// Advance a task past any Wake phases to the next Run or Sleep phase.
+    /// Advance a task past completed Sleep/Wake phases to the next Run phase.
+    ///
+    /// Called when a wake event fires. The current phase (Sleep) is considered
+    /// complete (the wake timer fired), so we advance past it. We also skip
+    /// any Wake phases (triggering wakes for other tasks) until we reach a
+    /// Run phase that the task can execute.
     fn advance_to_run_phase(
         &self,
         task: &mut SimTask,
@@ -2502,12 +2520,17 @@ impl<S: Scheduler> Simulator<S> {
                         return;
                     }
                 }
-                Some(Phase::Sleep(_)) | None => {
-                    // Task shouldn't wake into a Sleep phase normally,
-                    // but if behavior is unusual, just mark sleeping/exited
-                    if task.current_phase().is_none() {
+                Some(Phase::Sleep(_)) => {
+                    // The wake event fired, so the sleep is complete.
+                    // Advance to the next phase.
+                    if !task.advance_phase() {
                         task.state = TaskState::Exited;
+                        return;
                     }
+                    // Continue loop to handle Wake phases or find Run
+                }
+                None => {
+                    task.state = TaskState::Exited;
                     return;
                 }
             }

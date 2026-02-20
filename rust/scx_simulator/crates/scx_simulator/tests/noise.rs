@@ -181,12 +181,18 @@ fn test_csw_overhead_consumed() {
     let total_overhead =
         trace_overhead.total_runtime(Pid(1)) + trace_overhead.total_runtime(Pid(2));
 
-    eprintln!("exact total runtime: {total_exact}ns, overhead total runtime: {total_overhead}ns");
+    let schedules_exact = trace_exact.schedule_count(Pid(1)) + trace_exact.schedule_count(Pid(2));
+    let schedules_overhead =
+        trace_overhead.schedule_count(Pid(1)) + trace_overhead.schedule_count(Pid(2));
 
-    // CSW overhead eats into available runtime
+    eprintln!("exact total runtime: {total_exact}ns, overhead total runtime: {total_overhead}ns");
+    eprintln!("exact schedules: {schedules_exact}, overhead schedules: {schedules_overhead}");
+
+    // CSW overhead consumes time, reducing the number of schedule cycles
+    // that fit within the fixed simulation duration.
     assert!(
-        total_overhead < total_exact,
-        "expected overhead runtime ({total_overhead}ns) < exact runtime ({total_exact}ns) due to CSW overhead"
+        schedules_overhead < schedules_exact,
+        "expected overhead schedules ({schedules_overhead}) < exact schedules ({schedules_exact}) due to CSW overhead"
     );
 }
 
