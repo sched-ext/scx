@@ -15,7 +15,6 @@
 // would be meaningless.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
@@ -155,6 +154,11 @@ pub struct SimulatorState {
     pub interleave: bool,
     /// Preemptive interleaving configuration (None = disabled).
     pub preemptive: Option<PreemptiveConfig>,
+    /// True while inside a concurrent batch (same-timestamp per-CPU events
+    /// being processed in parallel). When set, `process_kicked_cpus` defers
+    /// kicks (accumulates in `kicked_cpus` but does not process) and
+    /// `dispatch_concurrent` is suppressed to prevent nesting.
+    pub in_concurrent_batch: bool,
 }
 
 /// Kernel value of `SCX_TASK_QUEUED` from `enum scx_task_state`.
@@ -494,7 +498,7 @@ impl SimContext {
 }
 
 thread_local! {
-    static SIM_STATE: RefCell<Option<*mut SimulatorState>> = const { RefCell::new(None) };
+    static SIM_STATE: std::cell::Cell<Option<*mut SimulatorState>> = const { std::cell::Cell::new(None) };
     static SIM_CONTEXT: std::cell::Cell<SimContext> = const { std::cell::Cell::new(SimContext::new()) };
 }
 
@@ -511,16 +515,12 @@ thread_local! {
 pub unsafe fn enter_sim(state: &mut SimulatorState, cpu: CpuId) {
     state.current_cpu = cpu;
     set_sim_clock(state.cpus[cpu.0 as usize].local_clock, Some(cpu));
-    SIM_STATE.with(|cell| {
-        *cell.borrow_mut() = Some(state as *mut SimulatorState);
-    });
+    SIM_STATE.with(|cell| cell.set(Some(state as *mut SimulatorState)));
 }
 
 /// Remove the simulator state pointer after ops callbacks complete.
 pub fn exit_sim() {
-    SIM_STATE.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
+    SIM_STATE.with(|cell| cell.set(None));
 }
 
 /// Get the raw SimulatorState pointer from the thread-local.
@@ -528,7 +528,7 @@ pub fn exit_sim() {
 /// Returns `None` if not inside an `enter_sim`/`exit_sim` scope.
 /// Used by the interleave module to save/restore per-callback context.
 pub fn sim_state_ptr() -> Option<*mut SimulatorState> {
-    SIM_STATE.with(|cell| *cell.borrow())
+    SIM_STATE.with(|cell| cell.get())
 }
 
 /// Read the current CPU's local clock from the thread-local.
@@ -591,7 +591,7 @@ where
 {
     SIM_STATE.with(|cell| {
         let ptr = cell
-            .borrow()
+            .get()
             .expect("kfunc called outside of simulator context");
         // SAFETY: We hold a valid pointer installed by enter_sim, and
         // the simulation is single-threaded.
@@ -1476,6 +1476,7 @@ mod tests {
             bpf_error: None,
             interleave: false,
             preemptive: None,
+            in_concurrent_batch: false,
         }
     }
 

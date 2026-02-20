@@ -1,0 +1,65 @@
+{
+    "global": {
+        "duration": 1,
+        "default_policy": "SCHED_OTHER",
+        "calibration": 19
+    },
+    "tasks": {
+        "worker0": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker1": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker2": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker3": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker4": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker5": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker6": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        },
+        "worker7": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 2000,
+            "sleep": 1000
+        }
+    }
+}
