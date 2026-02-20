@@ -33,29 +33,26 @@ From a 100ms simulation run:
 
 ## Identified Realism Gaps
 
-### Gap 1: Spurious Yield/Re-enqueue Cycles (CRITICAL)
+### Gap 1: Spurious Yield/Re-enqueue Cycles (FIXED)
 
-**Observation**: The simulator produces 6 "yield re-enqueue" events over 100ms,
-representing ~26% of all scheduling cycles.
+**Status**: FIXED in commit 7400bd4b (sim-70d93)
 
-**Root Cause**: The Phase model (`Phase::Run` -> `Phase::Run` transition) treats
-phase boundaries as yields, calling:
-1. `stopping(still_runnable=true)`
-2. `enqueue()` with "yield re-enqueue"
-3. Full dispatch cycle
+**Previous Observation**: The simulator produced 6 "yield re-enqueue" events over 100ms,
+representing ~26% of all scheduling cycles (39.5% yield ratio).
 
-**Real Kernel Behavior**: CPU-bound tasks that don't explicitly call `sched_yield()`
-continue running until their time slice expires. They never enter this yield path.
-The kernel only calls `stopping()` for:
-- Slice expiration (preemption)
-- Voluntary sleep
-- Explicit `sched_yield()`
+**Root Cause**: When a task woke from Sleep, `advance_to_run_phase()` did not
+advance past the Sleep phase. The task ran with `run_remaining_ns=0`, causing
+immediate TaskPhaseComplete, which advanced to the next Run phase and triggered
+the "yield re-enqueue" path.
 
-**Impact**: Tests vtime-based dispatch paths that CPU-bound tasks would never exercise.
-LAVD's `dsq_insert_vtime` is called for yield re-enqueues but real CPU-bound tasks
-would stay dispatched via `dsq_insert` (FIFO) from `select_cpu`.
+**Fix**: In `advance_to_run_phase()`, advance past Sleep phases (the sleep has
+completed when the wake event fires) and reinitialize `run_remaining_ns` for
+Run phases when it's 0.
 
-**Severity**: HIGH - Tests unrealistic code paths.
+**Results after fix**:
+- Yield ratio: 0.0% (was 39.5%)
+- Global DSQ ratio: 1.2% (was 42.5%)
+- Total trace events: ~50% fewer (no spurious yield events)
 
 ### Gap 2: Tick Frequency Mismatch
 
