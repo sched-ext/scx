@@ -617,7 +617,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		 * No free operation so just forget about the previous
 		 * allocation memory.
 		 */
-		page_cnt = scx_static.max_alloc_bytes / PAGE_SIZE,
+		page_cnt = scx_static.max_alloc_bytes / PAGE_SIZE;
 		memory = bpf_arena_alloc_pages(&arena, NULL, page_cnt,
 					       NUMA_NO_NODE, 0);
 		if (!memory)
