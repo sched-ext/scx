@@ -28,6 +28,19 @@ u64 scx_atq_create_internal(bool fifo, size_t capacity)
 	return (u64)atq;
 }
 
+__weak
+int scx_atq_destroy(scx_atq_t __arg_arena *atq)
+{
+	scx_arena_subprog_init();
+
+	while (scx_atq_pop(atq) && can_loop) {
+		/* Do nothing. Just drain all the queued tasks. */
+	}
+	rb_destroy(atq->tree);
+
+	return 0;
+}
+
 __hidden __inline
 int scx_atq_insert_vtime_unlocked(scx_atq_t __arg_arena *atq, scx_task_common __arg_arena *taskc, u64 vtime)
 {
