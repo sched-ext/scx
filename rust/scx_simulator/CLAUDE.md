@@ -27,6 +27,10 @@ Adhere to high-performance Rust patterns (unboxing, minimizing allocation, etc).
 
 Read OPTIMIZATION.md for more details.
 
+NEVER commit files containing your local username, home directory paths, or other
+machine-specific absolute paths. Use relative paths, `~`, environment variables,
+or generic placeholders like `<REPO_ROOT>` instead.
+
 Documentation and Analysis
 ========================================
 
@@ -136,15 +140,15 @@ Multi-Agent Team Mode
 ========================================
 
 When you find yourself in a parent directory containing multiple checkouts of
-the same repository (e.g., `/home/newton/work/multi_scx/` with `scx1/`, `scx2/`,
-`scx3/`, `scx4/`), you are in **multi-agent team mode**. This enables parallel
-development with multiple sub-agents working simultaneously.
+the same repository (e.g., `<MULTI_SCX>/` with `scx1/`, `scx2/`, `scx3/`, `scx4/`),
+you are in **multi-agent team mode**. This enables parallel development with
+multiple sub-agents working simultaneously.
 
 Directory Structure
 ----------------------------------------
 
 ```
-/home/newton/work/multi_scx/
+<MULTI_SCX>/
 ├── scx1/    # Checkout 1 - available for agent work
 ├── scx2/    # Checkout 2 - available for agent work
 ├── scx3/    # Checkout 3 - available for agent work
@@ -176,7 +180,7 @@ When spawning a sub-agent to work on a task:
 
 1. **Always specify which checkout directory** the agent should use:
    ```
-   You are working on the scx_simulator project in /home/newton/work/multi_scx/scx2/rust/scx_simulator
+   You are working on the scx_simulator project in <MULTI_SCX>/scx2/rust/scx_simulator
    ```
 
 2. **Assign different checkouts** to parallel tasks to avoid conflicts.
