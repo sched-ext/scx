@@ -29,6 +29,7 @@
 //! trace.dump();
 //! ```
 
+pub mod bpf_trace;
 pub mod cgroup;
 pub mod cpu;
 pub mod dsq;
@@ -50,6 +51,9 @@ pub mod types;
 pub mod workloads;
 
 // Re-export the main public types for convenience.
+pub use bpf_trace::{
+    BpfEventKind, BpfTrace, BpfTraceEvent, TraceComparisonResult, TraceDifferences,
+};
 pub use cgroup::{
     clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupInfo, CgroupRegistry,
     DEFAULT_MAX_CGROUPS,
