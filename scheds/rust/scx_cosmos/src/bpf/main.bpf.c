@@ -1105,6 +1105,19 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	return cpu >= 0 ? cpu : prev_cpu;
 }
 
+/*
+ * Return true if @cpu is in the primary domain, false otherwise.
+ */
+static inline bool is_primary_cpu(s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	if (primary_all)
+		return true;
+
+	return mask && bpf_cpumask_test_cpu(cpu, mask);
+}
+
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
@@ -1171,7 +1184,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
 	 */
-	if (task_should_migrate(p, enq_flags)) {
+	if (task_should_migrate(p, enq_flags) || !is_primary_cpu(prev_cpu)) {
 		if (is_pcpu_task(p))
 			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 		else
@@ -1206,19 +1219,27 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/*
-	 * Check if the there's any task waiting in the shared DSQ and
-	 * dispatch.
-	 */
+	bool keep_running = prev && (prev->scx.flags & SCX_TASK_QUEUED);
+
 	if (scx_bpf_dsq_move_to_local(shared_dsq(cpu)))
 		return;
 
+	if (!primary_all && keep_running) {
+		struct task_ctx *tctx;
+
+		tctx = try_lookup_task_ctx(prev);
+		if (!tctx)
+			return;
+
+		keep_running = is_primary_cpu(cpu) || is_sticky_event_heavy(tctx);
+	}
+
 	/*
 	 * If the previous task expired its time slice, but no other task
-	 * wants to run on this SMT core, allow the previous task to run
-	 * for another time slot.
+	 * wants to run on this CPU and the CPU is still eligible for the
+	 * task, give it another time slot.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+	if (keep_running)
 		prev->scx.slice = task_slice(prev);
 }
 
