@@ -89,6 +89,24 @@ bool bpf_cpumask_empty(const struct cpumask *cpumask)
 	return true;
 }
 
+u32 bpf_cpumask_first(const struct cpumask *cpumask)
+{
+	unsigned int i;
+	for (i = 0; i < 128; i++) {
+		if (cpumask->bits[i]) {
+			unsigned long v = cpumask->bits[i];
+			u32 bit = 0;
+			while (!(v & 1)) {
+				v >>= 1;
+				bit++;
+			}
+			return i * (sizeof(unsigned long) * 8) + bit;
+		}
+	}
+	/* No bits set — return >= nr_cpu_ids to signal "none found". */
+	return 128 * sizeof(unsigned long) * 8;
+}
+
 u32 bpf_cpumask_weight(const struct cpumask *cpumask)
 {
 	u32 count = 0;
