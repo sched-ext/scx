@@ -1110,7 +1110,6 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	return cpu >= 0 ? cpu : prev_cpu;
 }
 
-
 void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 {
 	struct task_ctx *tctx;
@@ -1140,6 +1139,19 @@ void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 		if (smt_contention || (is_system_busy() && cpu_busy))
 			p->scx.slice = 0;
 	}
+}
+
+/*
+ * Return true if @cpu is in the primary domain, false otherwise.
+ */
+static inline bool is_primary_cpu(s32 cpu)
+{
+	const struct cpumask *mask = cast_mask(primary_cpumask);
+
+	if (primary_all)
+		return true;
+
+	return mask && bpf_cpumask_test_cpu(cpu, mask);
 }
 
 void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1178,7 +1190,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Immediately dispatch sticky event-heavy tasks to the same CPU.
 	 */
-	if (is_sticky_event_heavy(tctx)) {
+	if (is_sticky_event_heavy(tctx) && is_primary_cpu(prev_cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
 		__sync_fetch_and_add(&nr_ev_sticky_dispatches, 1);
 
@@ -1208,7 +1220,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Attempt to dispatch directly to an idle CPU if the task can
 	 * migrate.
 	 */
-	if (task_should_migrate(p, enq_flags)) {
+	if (task_should_migrate(p, enq_flags) || !is_primary_cpu(prev_cpu)) {
 		if (is_pcpu_task(p))
 			cpu = scx_bpf_test_and_clear_cpu_idle(prev_cpu) ? prev_cpu : -EBUSY;
 		else
@@ -1224,7 +1236,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Keep using the same CPU if the system is not busy.
 	 */
-	if (!is_system_busy()) {
+	if (!is_system_busy() && is_primary_cpu(prev_cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
@@ -1252,10 +1264,10 @@ void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
 
 	/*
 	 * If the previous task expired its time slice, but no other task
-	 * wants to run on this SMT core, allow the previous task to run
-	 * for another time slot.
+	 * wants to run on this CPU, give it another time slot if the CPU
+	 * is on the primary domain.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && is_primary_cpu(cpu))
 		prev->scx.slice = task_slice(prev);
 }
 
