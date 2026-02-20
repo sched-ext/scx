@@ -62,6 +62,8 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment);
 #define scx_static_alloc(bytes, alignment) ((void __arena *)scx_static_alloc_internal((bytes), (alignment)))
 int scx_static_init(size_t max_alloc_pages);
 
+u64 scx_alloc_get_pages_used(void);
+
 u64 scx_stk_alloc(struct scx_stk *stack);
 int scx_stk_init(struct scx_stk *stackp, __u64 data_size, __u64 nr_pages_per_alloc);
 int scx_stk_free_internal(struct scx_stk *stack, __u64 elem);
