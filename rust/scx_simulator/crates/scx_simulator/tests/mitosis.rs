@@ -541,126 +541,6 @@ fn test_smt_pinned_tasks() {
     }
 }
 
-/// Enable split_vtime_updates to exercise the alternative vtime update
-/// path in running() and stopping().
-#[test]
-fn test_split_vtime_updates() {
-    let _lock = common::setup_test();
-    let nr_cpus = 2u32;
-    let sched = DynamicScheduler::mitosis(nr_cpus);
-
-    unsafe {
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
-    }
-
-    let scenario = Scenario::builder()
-        .cpus(nr_cpus)
-        .task(TaskDef {
-            name: "t1".into(),
-            pid: Pid(1),
-            nice: 0,
-            behavior: TaskBehavior {
-                phases: vec![Phase::Run(10_000_000)],
-                repeat: RepeatMode::Forever,
-            },
-            start_time_ns: 0,
-            mm_id: None,
-            allowed_cpus: None,
-            parent_pid: None,
-            cgroup_name: None,
-            task_flags: 0,
-            migration_disabled: 0,
-        })
-        .task(TaskDef {
-            name: "t2".into(),
-            pid: Pid(2),
-            nice: 0,
-            behavior: TaskBehavior {
-                phases: vec![Phase::Run(10_000_000)],
-                repeat: RepeatMode::Forever,
-            },
-            start_time_ns: 0,
-            mm_id: None,
-            allowed_cpus: None,
-            parent_pid: None,
-            cgroup_name: None,
-            task_flags: 0,
-            migration_disabled: 0,
-        })
-        .duration_ms(200)
-        .build();
-
-    let trace = Simulator::new(sched).run(scenario);
-    trace.dump();
-
-    // Both tasks should still get fair runtime with split vtime updates
-    let rt1 = trace.total_runtime(Pid(1));
-    let rt2 = trace.total_runtime(Pid(2));
-    assert!(rt1 > 0 && rt2 > 0, "both tasks must run");
-
-    let total = rt1 + rt2;
-    assert!(
-        rt1 >= total / 4 && rt2 >= total / 4,
-        "expected roughly fair scheduling: t1={rt1}ns, t2={rt2}ns"
-    );
-}
-
-/// split_vtime_updates with pinned tasks exercises both the running()
-/// and stopping() vtime paths for per-CPU DSQ tasks.
-#[test]
-fn test_split_vtime_with_pinned() {
-    let _lock = common::setup_test();
-    let nr_cpus = 2u32;
-    let sched = DynamicScheduler::mitosis(nr_cpus);
-
-    unsafe {
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
-    }
-
-    let scenario = Scenario::builder()
-        .cpus(nr_cpus)
-        .task(TaskDef {
-            name: "pinned".into(),
-            pid: Pid(1),
-            nice: 0,
-            behavior: TaskBehavior {
-                phases: vec![Phase::Run(5_000_000), Phase::Sleep(5_000_000)],
-                repeat: RepeatMode::Forever,
-            },
-            start_time_ns: 0,
-            mm_id: None,
-            allowed_cpus: Some(vec![CpuId(0)]),
-            parent_pid: None,
-            cgroup_name: None,
-            task_flags: 0,
-            migration_disabled: 0,
-        })
-        .task(TaskDef {
-            name: "free".into(),
-            pid: Pid(2),
-            nice: 0,
-            behavior: TaskBehavior {
-                phases: vec![Phase::Run(20_000_000)],
-                repeat: RepeatMode::Forever,
-            },
-            start_time_ns: 0,
-            mm_id: None,
-            allowed_cpus: None,
-            parent_pid: None,
-            cgroup_name: None,
-            task_flags: 0,
-            migration_disabled: 0,
-        })
-        .duration_ms(100)
-        .build();
-
-    let trace = Simulator::new(sched).run(scenario);
-    trace.dump();
-
-    assert!(trace.total_runtime(Pid(1)) > 0);
-    assert!(trace.total_runtime(Pid(2)) > 0);
-}
-
 /// Test weighted scheduling with different nice values.
 /// Higher priority (lower nice) tasks should get more runtime.
 #[test]
@@ -1257,17 +1137,16 @@ fn test_repeat_count_mode() {
     assert!(trace.total_runtime(Pid(2)) > 0);
 }
 
-/// SMT + split_vtime_updates together to exercise both features
-/// interacting.
+/// SMT with multiple tasks and varying nice values to exercise
+/// vtime scheduling with SMT enabled.
 #[test]
-fn test_smt_with_split_vtime() {
+fn test_smt_with_varied_nice() {
     let _lock = common::setup_test();
     let nr_cpus = 4u32;
     let sched = DynamicScheduler::mitosis(nr_cpus);
 
     unsafe {
         set_mitosis_bool(&sched, b"smt_enabled\0", true);
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
     }
 
     let scenario = Scenario::builder()
@@ -1569,7 +1448,6 @@ fn test_overloaded_all_features() {
     let sched = DynamicScheduler::mitosis(2);
     unsafe {
         set_mitosis_bool(&sched, b"smt_enabled\0", true);
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
         set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
         set_mitosis_u32(&sched, b"configuration_seq\0", 1);
     }
@@ -2074,15 +1952,14 @@ fn test_stopping_skip_cell_cycles() {
     assert!(trace.total_runtime(Pid(1)) > 0);
 }
 
-/// Exercise the `split_vtime_updates` + `cpu_controller_disabled=false` combo.
-/// Covers both the split vtime path and the CPU controller enabled path.
+/// Exercise `cpu_controller_disabled=false` with varied nice values.
+/// Covers vtime scheduling with CPU controller enabled.
 #[test]
-fn test_split_vtime_cpu_controller_enabled() {
+fn test_vtime_cpu_controller_enabled() {
     let _lock = common::setup_test();
     let sched = DynamicScheduler::mitosis(2);
     unsafe {
         set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
     }
 
     let scenario = Scenario::builder()
@@ -2130,7 +2007,7 @@ fn test_split_vtime_cpu_controller_enabled() {
 }
 
 /// Exercise all features enabled with `cpu_controller_disabled=false`.
-/// This combines timer reconfig, debug events, SMT, split vtime, and
+/// This combines timer reconfig, debug events, SMT, and
 /// CPU controller enabled for maximum branch coverage.
 #[test]
 fn test_all_features_cpu_controller_enabled() {
@@ -2139,7 +2016,6 @@ fn test_all_features_cpu_controller_enabled() {
     unsafe {
         set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
         set_mitosis_bool(&sched, b"smt_enabled\0", true);
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
         set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
         set_mitosis_u32(&sched, b"configuration_seq\0", 1);
     }
@@ -2432,7 +2308,6 @@ fn test_large_cpu_count_all_features() {
     unsafe {
         set_mitosis_bool(&sched, b"cpu_controller_disabled\0", false);
         set_mitosis_bool(&sched, b"smt_enabled\0", true);
-        set_mitosis_bool(&sched, b"split_vtime_updates\0", true);
         set_mitosis_bool(&sched, b"debug_events_enabled\0", true);
         set_mitosis_u32(&sched, b"configuration_seq\0", 1);
     }

@@ -153,6 +153,73 @@ extern void sim_timer_start(unsigned long long nsecs);
 	(sim_timer_start(nsecs), 0)
 
 /* ---------------------------------------------------------------------------
+ * RAII cleanup neutralization
+ *
+ * The upstream mitosis BPF code uses gcc cleanup attributes for automatic
+ * resource management (RAII). The pattern is:
+ *   struct cgroup *cgrp __free(cgroup) = bpf_cgroup_from_id(id);
+ *
+ * This calls __free_cgroup(cgrp) when the scope exits, which calls
+ * bpf_cgroup_release(). In the simulator, we don't do reference counting,
+ * so we neutralize these macros.
+ *
+ * The macros are defined in cleanup.bpf.h which is included via mitosis.bpf.h.
+ * We include cleanup.bpf.h FIRST to let it define its macros, then we
+ * override them with our neutralized versions.
+ * ---------------------------------------------------------------------------*/
+
+/*
+ * RCU read lock stubs - must be defined before cleanup.bpf.h since it
+ * references them. The simulator doesn't have real RCU.
+ */
+#undef bpf_rcu_read_lock
+#define bpf_rcu_read_lock() ((void)0)
+
+#undef bpf_rcu_read_unlock
+#define bpf_rcu_read_unlock() ((void)0)
+
+/* Include cleanup.bpf.h to let it define its RAII framework first */
+#include "cleanup.bpf.h"
+
+/* Now override the RAII macros with neutralized versions */
+
+/* Strip __free() cleanup attributes - simulator manages resources manually */
+#undef __free
+#define __free(x)
+
+/* no_free_ptr just returns the pointer unchanged */
+#undef no_free_ptr
+#define no_free_ptr(p) (p)
+
+/* bpf_kptr_xchg: atomically exchange pointer, return old value */
+static inline void *sim_kptr_xchg(void **kptr, void *new_val) {
+	void *old = *kptr;
+	*kptr = new_val;
+	return old;
+}
+#undef bpf_kptr_xchg
+#define bpf_kptr_xchg(kptr, val) sim_kptr_xchg((void **)(kptr), (void *)(val))
+
+/* Cgroup acquire/release - simulator doesn't do reference counting */
+static inline struct cgroup *sim_cgroup_acquire(struct cgroup *cgrp) {
+	return cgrp;
+}
+#undef bpf_cgroup_acquire
+#define bpf_cgroup_acquire(cgrp) sim_cgroup_acquire(cgrp)
+
+#undef bpf_cgroup_release
+#define bpf_cgroup_release(cgrp) ((void)0)
+
+/*
+ * cpumask acquire/release:
+ * - acquire: just return the cpumask (no refcounting)
+ * - release: must actually free since bpf_cpumask_create allocates
+ *
+ * Note: bpf_cpumask_release is already handled by scx_test_map.h or
+ * we need to provide our own implementation that calls sim_cpumask_release.
+ */
+
+/* ---------------------------------------------------------------------------
  * Include mitosis source
  * ---------------------------------------------------------------------------*/
 #include "intf.h"
@@ -178,6 +245,9 @@ static struct cpu_ctx percpu_ctx[MAX_SIM_CPUS];
 
 /* cell_cpumasks: ARRAY, MAX_CELLS entries */
 static struct cell_cpumask_wrapper cell_cpumasks_arr[MAX_CELLS];
+
+/* cells: ARRAY, MAX_CELLS entries */
+static struct cell cells_arr[MAX_CELLS];
 
 /* debug_events: ARRAY, DEBUG_EVENTS_BUF_SIZE entries */
 static struct debug_event debug_events_arr[DEBUG_EVENTS_BUF_SIZE];
@@ -221,6 +291,11 @@ static void *mitosis_map_lookup_elem(void *map, const void *key)
 		if (idx >= MAX_CELLS)
 			return NULL;
 		return &cell_cpumasks_arr[idx];
+	}
+	if (map == &cells) {
+		if (idx >= MAX_CELLS)
+			return NULL;
+		return &cells_arr[idx];
 	}
 	if (map == &debug_events) {
 		if (idx >= DEBUG_EVENTS_BUF_SIZE)
@@ -412,6 +487,7 @@ void mitosis_setup(unsigned int num_cpus)
 	/* Clear all static map arrays */
 	memset(percpu_ctx, 0, sizeof(percpu_ctx));
 	memset(cell_cpumasks_arr, 0, sizeof(cell_cpumasks_arr));
+	memset(cells_arr, 0, sizeof(cells_arr));
 	memset(debug_events_arr, 0, sizeof(debug_events_arr));
 	memset(update_timer_arr, 0, sizeof(update_timer_arr));
 	memset(cgrp_init_cpumask_arr, 0, sizeof(cgrp_init_cpumask_arr));
