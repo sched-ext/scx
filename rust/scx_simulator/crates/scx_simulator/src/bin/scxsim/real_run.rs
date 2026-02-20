@@ -460,7 +460,7 @@ pub fn scenario_to_rtapp_json(scenario: &scx_simulator::Scenario) -> Result<Stri
         "global": {
             "duration": duration_secs,
             "default_policy": "SCHED_OTHER",
-            "calibration": 19
+            "calibration": "CPU0"
         },
         "tasks": tasks
     });
