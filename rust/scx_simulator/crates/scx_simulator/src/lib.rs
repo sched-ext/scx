@@ -43,6 +43,7 @@ mod perfetto;
 pub mod probes;
 pub mod rtapp;
 pub mod scenario;
+pub mod stats;
 pub mod task;
 pub mod trace;
 pub mod types;
@@ -64,6 +65,7 @@ pub use scenario::{
     CgroupBandwidth, CgroupCreateEvent, CgroupDef, CgroupDestroyEvent, CgroupMigrateEvent,
     CpuPreemptEvent, HotplugEvent, NoiseConfig, OverheadConfig, Scenario,
 };
+pub use stats::{CpuStats, DistributionStats, TaskStats, TraceComparison, TraceStats};
 pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, RepeatMode, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
 pub use types::{CpuId, DsqId, KickFlags, MmId, Pid, TimeNs, Vtime};

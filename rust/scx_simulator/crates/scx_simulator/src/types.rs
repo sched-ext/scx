@@ -12,11 +12,11 @@ use std::fmt;
 pub struct DsqId(pub u64);
 
 /// Process identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pid(pub i32);
 
 /// CPU identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct CpuId(pub u32);
 
 impl DsqId {
