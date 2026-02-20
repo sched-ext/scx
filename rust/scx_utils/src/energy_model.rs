@@ -24,7 +24,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PerfState {
     pub cost: usize,
     pub frequency: usize,
@@ -33,7 +33,7 @@ pub struct PerfState {
     pub power: usize,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PerfDomain {
     /// Monotonically increasing unique id.
     pub id: usize,
@@ -130,12 +130,6 @@ impl PerfDomain {
     }
 }
 
-impl PartialEq for PerfDomain {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.span == other.span && self.perf_table == other.perf_table
-    }
-}
-
 impl PerfState {
     /// Build a PerfState
     pub fn new(root: String) -> Result<PerfState> {
@@ -152,15 +146,6 @@ impl PerfState {
             performance,
             power,
         })
-    }
-}
-
-impl PartialEq for PerfState {
-    fn eq(&self, other: &Self) -> bool {
-        self.cost == other.cost
-            && self.frequency == other.frequency
-            && self.performance == other.performance
-            && self.power == other.power
     }
 }
 
