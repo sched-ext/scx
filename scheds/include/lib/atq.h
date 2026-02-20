@@ -22,6 +22,7 @@ enum scx_task_throttle {
 };
 
 struct scx_atq {
+	union sdt_id tid;
 	rbtree_t *tree;
 	arena_spinlock_t lock;
 	u64 capacity;
@@ -32,6 +33,8 @@ struct scx_atq {
 
 
 typedef struct scx_atq __arena scx_atq_t;
+
+int scx_atq_init(void);
 
 struct scx_task_common {
 	struct rbnode node;	/* rbnode for being inserted into ATQs */
