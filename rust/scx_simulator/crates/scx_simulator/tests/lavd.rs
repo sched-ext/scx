@@ -8507,6 +8507,311 @@ fn test_lavd_api_noflags() {
 }
 
 // ---------------------------------------------------------------------------
+// Production bug reproduction: migration-disabled kworker dispatched to wrong CPU
+// ---------------------------------------------------------------------------
+
+/// Attempt to reproduce production bug where LAVD dispatches a migration-disabled
+/// task to a different CPU via SCX_DSQ_LOCAL_ON.
+///
+/// # Production Error
+/// ```text
+/// kworker/8:1[3065910] triggered exit kind 1024:
+///   runtime error (SCX_DSQ_LOCAL[_ON] cannot move migration disabled
+///   kworker/u208:2[4181193] from CPU 8 to 31)
+///
+/// Backtrace:
+///   task_can_run_on_remote_rq+0x8b/0x120
+///   dispatch_to_local_dsq+0x62/0x260
+/// ```
+///
+/// # Root Cause Analysis
+///
+/// The bug occurs when:
+/// 1. A kworker has `migration_disabled > 1` (cannot migrate, pinned to CPU 8)
+/// 2. Task wakes up and LAVD calls `pick_idle_cpu()`
+/// 3. Because `is_migration_disabled()` is not properly checked (or returns false
+///    when it should return true), LAVD finds a different idle CPU (e.g., 31)
+/// 4. LAVD dispatches to `SCX_DSQ_LOCAL_ON | 31` in `lavd_enqueue()`
+/// 5. Kernel rejects this in `task_can_run_on_remote_rq()` with scx_bpf_error()
+///
+/// # Simulator Limitations
+///
+/// The simulator currently stubs `is_migration_disabled()` to always return false
+/// in `schedulers/lavd/wrapper.c`:
+/// ```c
+/// #define is_migration_disabled(p) ((void)(p), false)
+/// ```
+///
+/// This means we cannot fully reproduce the bug because LAVD's code path in
+/// `pick_idle_cpu()` that handles migration-disabled tasks (idle.bpf.c L622-629)
+/// is never taken.
+///
+/// # What This Test Verifies
+///
+/// Even without `migration_disabled` modeling, this test:
+/// 1. Creates a scenario similar to production (many CPUs, pinned kworker, CPU BW)
+/// 2. Uses a pinned task to exercise the `is_pinned()` code path
+/// 3. Documents the production configuration for future work
+///
+/// # Future Work (sim-7cc89)
+///
+/// To properly reproduce this bug, we need to:
+/// 1. Add `migration_disabled` field to the simulated task_struct accessors
+/// 2. Remove the `is_migration_disabled()` stub in wrapper.c
+/// 3. Add `scx_bpf_dsq_insert` validation to check task can run on target CPU
+/// 4. The simulator should call `scx_bpf_error()` when dispatching a
+///    migration-disabled task to a CPU it cannot run on
+#[test]
+fn test_lavd_migration_disabled_kworker_scenario() {
+    let _lock = common::setup_test();
+
+    // Production configuration: 52 CPUs, performance mode, enable_cpu_bw
+    let nr_cpus = 52;
+    let sched = DynamicScheduler::lavd(nr_cpus);
+    sched.lavd_set_power_mode(LavdPowerMode::Performance);
+    // Note: pinned_slice_us=3000 in production, but we use the default for now
+
+    // Enable CPU bandwidth control (from production)
+    unsafe {
+        lavd_set_bool(&sched, "enable_cpu_bw\0", true);
+    }
+
+    // Create a kworker-like task pinned to CPU 8
+    // In production, kworkers have PF_WQ_WORKER (0x20) and PF_KTHREAD (0x200000)
+    const PF_KTHREAD: u32 = 0x00200000;
+    const PF_WQ_WORKER: u32 = 0x00000020;
+    let kworker_flags = PF_KTHREAD | PF_WQ_WORKER;
+
+    let mut builder = Scenario::builder().cpus(nr_cpus);
+
+    // The kworker is pinned to CPU 8 only
+    // In production, this would also have migration_disabled > 1
+    builder = builder.task(TaskDef {
+        name: "kworker/8:1".into(),
+        pid: Pid(1),
+        nice: 0,
+        behavior: workloads::io_bound(100_000, 1_000_000), // 0.1ms work, 1ms sleep
+        start_time_ns: 0,
+        mm_id: None,
+        allowed_cpus: Some(vec![CpuId(8)]), // Pinned to CPU 8
+        parent_pid: None,
+        cgroup_name: None,
+        task_flags: kworker_flags,
+    });
+
+    // Add other tasks spread across CPUs to create load imbalance
+    // These might cause LAVD to try migrating tasks
+    for i in 2..=20 {
+        builder = builder.task(TaskDef {
+            name: format!("worker_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000), // 10ms chunks
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None, // Can run anywhere
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        });
+    }
+
+    // Add tasks that wake the kworker from different CPUs
+    // This exercises the wake path where LAVD might pick a wrong idle CPU
+    for i in 21..=24 {
+        // Wake the kworker after doing some work
+        let phases = vec![
+            scx_simulator::task::Phase::Run(500_000),     // 0.5ms
+            scx_simulator::task::Phase::Wake(Pid(1)),     // Wake kworker
+            scx_simulator::task::Phase::Sleep(2_000_000), // 2ms sleep
+        ];
+        builder = builder.task(TaskDef {
+            name: format!("waker_{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: scx_simulator::task::TaskBehavior {
+                phases,
+                repeat: scx_simulator::task::RepeatMode::Forever,
+            },
+            start_time_ns: (i as u64 - 21) * 500_000, // Stagger start times
+            mm_id: None,
+            // Pin wakers to CPUs far from CPU 8 to trigger cross-CPU wake
+            allowed_cpus: Some(vec![CpuId(30 + i as u32 - 21)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        });
+    }
+
+    let scenario = builder
+        .duration_ms(500)
+        // Enable BPF error detection - if the simulator properly modeled
+        // migration_disabled, this would catch the invalid dispatch
+        .detect_bpf_errors()
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // The kworker should have been scheduled
+    assert!(
+        trace.schedule_count(Pid(1)) > 0,
+        "kworker was never scheduled"
+    );
+
+    // In the current simulator, this test passes because:
+    // 1. is_migration_disabled() always returns false, so LAVD uses the
+    //    normal CPU selection path
+    // 2. The task is pinned (nr_cpus_allowed == 1), so is_pinned() returns
+    //    true and LAVD handles it correctly
+    //
+    // The actual production bug requires migration_disabled > 1 which is
+    // different from is_pinned() (nr_cpus_allowed == 1). A task can have
+    // nr_cpus_allowed > 1 but still be migration-disabled temporarily.
+    //
+    // To fully reproduce this bug, we would need:
+    // 1. A task with nr_cpus_allowed > 1 (not pinned)
+    // 2. migration_disabled > 1 (temporarily cannot migrate)
+    // 3. The task wakes on a different CPU than where it's currently bound
+    // 4. LAVD tries to dispatch to an idle CPU != current CPU
+
+    eprintln!(
+        "[migration_disabled test] kworker scheduled {} times",
+        trace.schedule_count(Pid(1))
+    );
+    eprintln!(
+        "[migration_disabled test] NOTE: This test documents the production bug \
+         scenario but cannot fully reproduce it because the simulator does not \
+         model migration_disabled. See test docstring for details."
+    );
+}
+
+/// Alternative test: Task with restricted cpumask dispatched to wrong CPU.
+///
+/// This is a simpler variant that tests cpumask validation rather than
+/// migration_disabled. Even though LAVD respects cpumasks in pick_idle_cpu(),
+/// the simulator should validate dispatches.
+///
+/// The kernel validates in `task_can_run_on_remote_rq()`:
+/// ```c
+/// if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+///     return -EINVAL;
+/// ```
+#[test]
+fn test_lavd_pinned_task_cpumask_respected() {
+    let _lock = common::setup_test();
+
+    // Multi-domain setup to exercise cross-domain dispatch paths
+    let sched = DynamicScheduler::lavd_multi_domain(16, 4);
+    sched.lavd_set_power_mode(LavdPowerMode::Performance);
+
+    // Task pinned to CPUs 0-3 (domain 0)
+    let domain0_cpus = vec![CpuId(0), CpuId(1), CpuId(2), CpuId(3)];
+
+    let scenario = Scenario::builder()
+        .cpus(16)
+        // Pinned task in domain 0
+        .task(TaskDef {
+            name: "pinned_domain0".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: workloads::io_bound(200_000, 2_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(domain0_cpus.clone()),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        // Tasks in other domains to create load
+        .task(TaskDef {
+            name: "worker_d1".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(4), CpuId(5), CpuId(6), CpuId(7)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        .task(TaskDef {
+            name: "worker_d2".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: workloads::cpu_bound(10_000_000),
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(8), CpuId(9), CpuId(10), CpuId(11)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        // Waker from a different domain
+        .task(TaskDef {
+            name: "waker_d3".into(),
+            pid: Pid(4),
+            nice: 0,
+            behavior: {
+                let phases = vec![
+                    scx_simulator::task::Phase::Run(300_000),
+                    scx_simulator::task::Phase::Wake(Pid(1)),
+                    scx_simulator::task::Phase::Sleep(3_000_000),
+                ];
+                scx_simulator::task::TaskBehavior {
+                    phases,
+                    repeat: scx_simulator::task::RepeatMode::Forever,
+                }
+            },
+            start_time_ns: 100_000,
+            mm_id: None,
+            allowed_cpus: Some(vec![CpuId(12), CpuId(13), CpuId(14), CpuId(15)]),
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+        })
+        .duration_ms(500)
+        .detect_bpf_errors()
+        .build();
+
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should be scheduled
+    for i in 1..=4 {
+        assert!(
+            trace.schedule_count(Pid(i)) > 0,
+            "task {} was never scheduled",
+            i
+        );
+    }
+
+    // Verify the pinned task only ran on its allowed CPUs
+    let pinned_runs: Vec<_> = trace
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                scx_simulator::trace::TraceKind::SetNextTask { pid } if pid == Pid(1)
+            )
+        })
+        .collect();
+
+    for run_event in &pinned_runs {
+        assert!(
+            domain0_cpus.contains(&run_event.cpu),
+            "pinned task ran on CPU {} which is not in allowed set {:?}",
+            run_event.cpu.0,
+            domain0_cpus
+        );
+    }
+
+    eprintln!(
+        "[cpumask test] pinned task ran {} times, all on allowed CPUs",
+        pinned_runs.len()
+    );
+}
+// ---------------------------------------------------------------------------
 // LAVD-specific tests: Cgroup exhaustion stress test
 // ---------------------------------------------------------------------------
 
