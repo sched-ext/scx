@@ -17,7 +17,7 @@ and real kernel execution, based on trace analysis of the `two_runners.json` wor
 
 ## Quantitative Trace Summary
 
-From a 100ms simulation run:
+### BEFORE Fix (100ms simulation)
 
 | Event Type | Count |
 |------------|-------|
@@ -30,6 +30,22 @@ From a 100ms simulation run:
 | yield re-enqueue | 6 |
 | dispatch | 21 |
 | select_cpu | 8 |
+
+### AFTER Fix (1s simulation, sim-70d93)
+
+| Metric | Value |
+|--------|-------|
+| total_events | 1788 |
+| total_ticks | 150 |
+| total_yields | 0 |
+| total_preempts | 67 |
+| total_sleeps | 100 |
+| total_wakes | 100 |
+| global_dsq_dispatches | 2 |
+| local_dsq_dispatches | 165 |
+
+**Yield ratio**: 0.0% (was 39.5%)
+**Global DSQ ratio**: 1.2% (was 42.5%)
 
 ## Identified Realism Gaps
 
@@ -182,18 +198,22 @@ into a common `UnifiedEvent` type for automated comparison.
 
 ## Conclusion
 
-The simulator provides good coverage of LAVD's core scheduling logic but has
-significant gaps in modeling realistic workload patterns. The spurious yield
-cycles (Gap 1) are the most critical issue, as they exercise code paths that
-real CPU-bound tasks never use.
+**Status after fixes**: The simulator now provides much better coverage of
+LAVD's core scheduling logic. The spurious yield bug (Gap 1) has been fixed,
+reducing yield ratio from 39.5% to 0.0% and global DSQ ratio from 42.5% to 1.2%.
 
 For validation purposes, the current simulator is useful for:
 - DSQ management correctness
 - Weight/vtime calculations
-- Direct dispatch paths
+- Direct dispatch paths (now working correctly)
 - Idle CPU selection logic
+- Task phase lifecycle simulation
+
+Remaining gaps that may affect realism:
+- Gap 2: Tick frequency doesn't match real HZ=1000 kernels
+- Gap 3: No system noise (kworkers, interrupts, etc.)
+- Gap 5: Some kfuncs not traced for comparison
 
 It is less reliable for:
-- End-to-end scheduling fairness measurements
-- Timing-sensitive preemption behavior
-- Realistic throughput estimates
+- Timing-sensitive preemption behavior (due to tick interval differences)
+- Realistic throughput estimates (due to lack of system noise)
