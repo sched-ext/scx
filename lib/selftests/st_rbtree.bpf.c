@@ -760,6 +760,66 @@ __weak int scx_selftest_rbtree_alloc_check(rbtree_t __arg_arena *rbtree)
 	return 0;
 }
 
+extern struct scx_alloc_stats alloc_stats;
+
+/*
+ * Memory leak check: warm up the allocator with one full cycle, then run
+ * 1 M cycles and verify that the arena did not grow by more than 8 MB.
+ */
+__weak int scx_selftest_rbtree_leak(rbtree_t __arg_arena *rbtree)
+{
+	u64 pages_before, pages_after, mem_inc;
+	rbtree_t *tree;
+	int i, ret;
+
+	/* Warm-up: one full cycle to prime the allocator. */
+	tree = rb_create(RB_ALLOC, RB_DEFAULT);
+	if (!tree)
+		return -ENOMEM;
+
+	ret = rb_insert(tree, 1, 0);
+	if (ret)
+		return ret;
+
+	ret = rb_remove(tree, 1);
+	if (ret)
+		return ret;
+
+	ret = rb_destroy(tree);
+	if (ret)
+		return ret;
+
+	pages_before = scx_alloc_get_pages_used();
+
+	bpf_for(i, 0, 1000000) {
+		tree = rb_create(RB_ALLOC, RB_DEFAULT);
+		if (!tree)
+			return -ENOMEM;
+
+		ret = rb_insert(tree, 1, 0);
+		if (ret)
+			return ret;
+
+		ret = rb_remove(tree, 1);
+		if (ret)
+			return ret;
+
+		ret = rb_destroy(tree);
+		if (ret)
+			return ret;
+	}
+
+	pages_after = scx_alloc_get_pages_used();
+
+	mem_inc = (pages_after - pages_before) * PAGE_SIZE;
+	if (mem_inc > (1024 * 1024)) {
+		bpf_printk("Memory leak detected (%llu bytes)", mem_inc);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 __weak int scx_selftest_rbtree_print(rbtree_t __arg_arena *rbtree)
 {
 	rb_print(rbtree);
@@ -804,6 +864,7 @@ int scx_selftest_rbtree(void)
 	SCX_RBTREE_SELFTEST(add_remove_circular_reverse, update);
 	SCX_RBTREE_SELFTEST(add_remove_circular, update);
 	SCX_RBTREE_SELFTEST(alloc_check, standard);
+	SCX_RBTREE_SELFTEST(leak, standard);
 
 	return 0;
 }

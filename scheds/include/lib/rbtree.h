@@ -73,7 +73,7 @@ typedef struct rbtree __arena rbtree_t;
 u64 rb_create_internal(enum rbtree_alloc alloc, enum rbtree_insert_mode insert);
 #define rb_create(alloc, insert) ((rbtree_t *)rb_create_internal((alloc), (insert)))
 
-int rb_destroy(rbtree_t *rbtree);
+int rb_destroy(rbtree_t __arg_arena *rbtree);
 int rb_insert(rbtree_t *rbtree, u64 key, u64 value);
 int rb_remove(rbtree_t *rbtree, u64 key);
 int rb_find(rbtree_t *rbtree, u64 key, u64 *value);
