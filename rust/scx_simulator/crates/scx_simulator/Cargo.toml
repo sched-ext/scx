@@ -9,6 +9,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 libbpf-sys = "=1.6.1"
 libc = "0.2"
 libloading = "0.8"
+rand = { version = "0.8", features = ["small_rng"] }
 scx_perf = { path = "../scx_perf" }
 serde_json = { version = "1", features = ["preserve_order"] }
 tracing = "0.1"

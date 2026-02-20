@@ -14,29 +14,26 @@
 //! - Uses `.duration_ms(4000)` for 4s simulation
 //! - Randomizes task counts, CPU counts, behaviors
 
+use rand::rngs::SmallRng;
+use rand::{RngCore, SeedableRng};
 use scx_simulator::*;
 
 mod common;
 
-/// Simple xorshift32 PRNG for deterministic randomization.
+/// Deterministic PRNG wrapper for stress tests.
 struct Rng {
-    state: u32,
+    inner: SmallRng,
 }
 
 impl Rng {
     fn new(seed: u32) -> Self {
         Self {
-            state: if seed == 0 { 1 } else { seed },
+            inner: SmallRng::seed_from_u64(seed as u64),
         }
     }
 
     fn next_u32(&mut self) -> u32 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.state = x;
-        x
+        self.inner.next_u32()
     }
 
     fn range(&mut self, min: u32, max: u32) -> u32 {

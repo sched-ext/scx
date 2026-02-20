@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
 
+use rand::rngs::SmallRng;
+use rand::RngCore;
 use tracing::debug;
 
 use crate::cpu::{LastStopReason, SimCpu};
@@ -96,8 +98,8 @@ pub struct SimulatorState {
     pub task_raw_to_pid: HashMap<usize, Pid>,
     /// Maps PIDs to raw task_struct pointers (reverse of task_raw_to_pid).
     pub task_pid_to_raw: HashMap<Pid, usize>,
-    /// Deterministic PRNG state (xorshift32).
-    pub prng_state: u32,
+    /// Deterministic PRNG for reproducible simulation.
+    pub rng: SmallRng,
     /// Which ops callback we are currently inside.
     pub ops_context: OpsContext,
     /// Deferred dispatch recorded during `select_cpu` or `enqueue`.
@@ -266,14 +268,9 @@ impl SimulatorState {
             .unwrap_or_else(|| panic!("unknown task_struct pointer {:?}", p))
     }
 
-    /// Deterministic PRNG (xorshift32).
+    /// Deterministic PRNG — delegates to `rand::rngs::SmallRng`.
     pub fn next_prng(&mut self) -> u32 {
-        let mut x = self.prng_state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.prng_state = x;
-        x
+        self.rng.next_u32()
     }
 
     /// Advance a CPU's local clock to at least the event queue time.
@@ -1439,6 +1436,7 @@ mod tests {
     use crate::trace::Trace;
     use crate::types::{CpuId, DsqId, KickFlags, Pid};
     use crate::SIM_LOCK;
+    use rand::SeedableRng;
 
     /// Create a minimal SimulatorState for unit testing.
     fn test_state(nr_cpus: u32) -> SimulatorState {
@@ -1452,7 +1450,7 @@ mod tests {
             task_pid_to_raw: HashMap::new(),
             task_last_cpu: HashMap::new(),
             task_ops_state: HashMap::new(),
-            prng_state: 0xDEAD_BEEF,
+            rng: SmallRng::seed_from_u64(0xDEAD_BEEF),
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
@@ -2086,7 +2084,7 @@ mod tests {
     fn test_prng_deterministic() {
         let _lock = SIM_LOCK.lock().unwrap();
         let mut state = test_state(1);
-        state.prng_state = 12345;
+        state.rng = SmallRng::seed_from_u64(12345);
 
         let cpu = state.current_cpu;
         unsafe { enter_sim(&mut state, cpu) };
@@ -2095,7 +2093,7 @@ mod tests {
         exit_sim();
 
         // Replay with same seed
-        state.prng_state = 12345;
+        state.rng = SmallRng::seed_from_u64(12345);
         let cpu = state.current_cpu;
         unsafe { enter_sim(&mut state, cpu) };
         let a2 = sim_bpf_get_prandom_u32();

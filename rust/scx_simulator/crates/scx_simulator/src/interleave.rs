@@ -24,6 +24,9 @@
 use std::cell::Cell;
 use std::sync::{Condvar, Mutex};
 
+use rand::rngs::SmallRng;
+use rand::{RngCore, SeedableRng};
+
 use crate::kfuncs::{OpsContext, SimulatorState};
 use crate::types::CpuId;
 
@@ -51,8 +54,8 @@ struct TokenState {
     finished_mask: u64,
     /// Total number of workers.
     total: usize,
-    /// PRNG state (xorshift32) for deterministic worker selection.
-    prng: u32,
+    /// Deterministic PRNG for worker selection.
+    rng: SmallRng,
 }
 
 impl TokenState {
@@ -72,22 +75,13 @@ impl TokenState {
         self.n_finished() == self.total
     }
 
-    fn next_prng(&mut self) -> u32 {
-        let mut x = self.prng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.prng = x;
-        x
-    }
-
     /// Pick the next non-finished worker using PRNG.
     fn pick_next(&mut self) -> Option<WorkerId> {
         let n_remaining = self.total - self.n_finished();
         if n_remaining == 0 {
             return None;
         }
-        let idx = (self.next_prng() as usize) % n_remaining;
+        let idx = (self.rng.next_u32() as usize) % n_remaining;
         let mut count = 0;
         for i in 0..self.total {
             if !self.is_finished(WorkerId(i)) {
@@ -111,14 +105,12 @@ impl TokenRing {
             total > 0 && total <= 64,
             "TokenRing supports 1–64 workers, got {total}"
         );
-        // Avoid seed 0 (fixed point for xorshift).
-        let seed = if seed == 0 { 1 } else { seed };
         TokenRing {
             mu: Mutex::new(TokenState {
                 active: None,
                 finished_mask: 0,
                 total,
-                prng: seed,
+                rng: SmallRng::seed_from_u64(seed as u64),
             }),
             cv: Condvar::new(),
         }

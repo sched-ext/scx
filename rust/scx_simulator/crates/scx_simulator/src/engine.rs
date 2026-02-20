@@ -7,6 +7,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::ffi::c_void;
 
+use rand::rngs::SmallRng;
+use rand::{RngCore, SeedableRng};
 use tracing::{debug, info, trace};
 
 use crate::cgroup::{clear_cgroup_registry, install_cgroup_registry, CgroupId, CgroupRegistry};
@@ -108,14 +110,14 @@ impl PartialOrd for Event {
 /// counter in the lower 32 bits. This explores different orderings for
 /// same-timestamp events while remaining deterministic for a given seed.
 ///
-/// The event PRNG is separate from `SimulatorState::prng_state` so that
+/// The event PRNG is separate from `SimulatorState::rng` so that
 /// adding/removing events does not perturb the scheduler's PRNG sequence.
 struct EventQueue {
     heap: BinaryHeap<Reverse<Event>>,
     /// Monotonic counter for unique event identity / fixed-priority ordering.
     seq: u64,
-    /// Separate xorshift32 PRNG for randomized tiebreaking.
-    event_prng: u32,
+    /// Separate PRNG for randomized tiebreaking (independent of simulator PRNG).
+    event_rng: SmallRng,
     /// When true, use insertion-order tiebreaking (monotonic seq).
     fixed_priority: bool,
 }
@@ -124,24 +126,15 @@ impl EventQueue {
     fn new(seed: u32, fixed_priority: bool) -> Self {
         // Derive event PRNG seed from scenario seed but offset it so it's
         // independent of the main simulation PRNG.
-        let event_seed = seed.wrapping_mul(0x9e3779b9).wrapping_add(0xdeadbeef);
-        let event_seed = if event_seed == 0 { 1 } else { event_seed };
+        let event_seed = (seed as u64)
+            .wrapping_mul(0x9e3779b9)
+            .wrapping_add(0xdeadbeef);
         EventQueue {
             heap: BinaryHeap::new(),
             seq: 0,
-            event_prng: event_seed,
+            event_rng: SmallRng::seed_from_u64(event_seed),
             fixed_priority,
         }
-    }
-
-    /// Advance the event PRNG (xorshift32) and return the next value.
-    fn next_prng(&mut self) -> u32 {
-        let mut x = self.event_prng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.event_prng = x;
-        x
     }
 
     /// Compute the `seq` tiebreaker for a new event.
@@ -153,7 +146,7 @@ impl EventQueue {
         } else {
             // Upper 32 bits: random priority; lower 32 bits: monotonic
             // counter for deterministic uniqueness.
-            let random_priority = self.next_prng() as u64;
+            let random_priority = self.event_rng.next_u32() as u64;
             (random_priority << 32) | (s & 0xFFFF_FFFF)
         }
     }
@@ -508,7 +501,7 @@ impl<S: Scheduler> Simulator<S> {
             clock: 0,
             task_raw_to_pid,
             task_pid_to_raw,
-            prng_state: scenario.seed,
+            rng: SmallRng::seed_from_u64(scenario.seed as u64),
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,

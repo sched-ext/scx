@@ -81,6 +81,11 @@ const RUNNING: u32 = 1;
 /// All methods are safe to call from signal handlers. The PRNG is accessed
 /// only by the active worker (enforced by the single-active invariant), so
 /// no CAS is needed on the PRNG state.
+///
+/// NOTE: This intentionally uses a hand-rolled xorshift32 rather than
+/// `rand::rngs::SmallRng` because the PRNG state must live in an `AtomicU32`
+/// for signal-handler safety — standard library RNGs have multi-word state
+/// that cannot be stored atomically.
 pub struct PreemptRing {
     /// Per-worker state: `PARKED` or `RUNNING`.
     workers: Box<[AtomicU32]>,
