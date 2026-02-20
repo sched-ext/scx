@@ -204,11 +204,16 @@ bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask)
 
 /* --- kptr exchange --- */
 
+/*
+ * Atomic pointer exchange: reads old value and stores new value in a single
+ * atomic operation. Required for correctness under preemptive interleaving
+ * where a PMU signal can fire between a non-atomic read and write.
+ *
+ * __sync_lock_test_and_set compiles to XCHG on x86 (inherently locked).
+ */
 void *bpf_kptr_xchg_impl(void **kptr, void *new_val)
 {
-	void *old = *kptr;
-	*kptr = new_val;
-	return old;
+	return __sync_lock_test_and_set(kptr, new_val);
 }
 
 
