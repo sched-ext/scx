@@ -491,6 +491,7 @@ impl ScenarioBuilder {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
         self
     }
@@ -519,6 +520,7 @@ impl ScenarioBuilder {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
         self
     }
@@ -665,6 +667,7 @@ impl ScenarioBuilder {
             parent_pid: None,
             cgroup_name: Some(cgroup.to_string()),
             task_flags: 0,
+            migration_disabled: 0,
         });
         self
     }

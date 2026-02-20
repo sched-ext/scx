@@ -464,3 +464,14 @@ void *sim_task_get_cgroup(struct task_struct *p)
 		return sim_get_root_cgroup();
 	return p->cgroups->dfl_cgrp;
 }
+
+/* Migration disabled counter */
+void sim_task_set_migration_disabled(struct task_struct *p, unsigned short val)
+{
+	p->migration_disabled = val;
+}
+
+unsigned short sim_task_get_migration_disabled(struct task_struct *p)
+{
+	return p->migration_disabled;
+}

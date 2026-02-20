@@ -58,6 +58,7 @@ fn test_pinned_tasks_percpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pin1".into(),
@@ -73,6 +74,7 @@ fn test_pinned_tasks_percpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -88,6 +90,7 @@ fn test_pinned_tasks_percpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -145,6 +148,7 @@ fn test_pinned_and_free_competing_on_same_cpu() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free1".into(),
@@ -160,6 +164,7 @@ fn test_pinned_and_free_competing_on_same_cpu() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free2".into(),
@@ -175,6 +180,7 @@ fn test_pinned_and_free_competing_on_same_cpu() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -221,6 +227,7 @@ fn test_overloaded_cpus_no_idle() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -236,6 +243,7 @@ fn test_overloaded_cpus_no_idle() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t3".into(),
@@ -251,6 +259,7 @@ fn test_overloaded_cpus_no_idle() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t4".into(),
@@ -266,6 +275,7 @@ fn test_overloaded_cpus_no_idle() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -327,6 +337,7 @@ fn test_smt_enabled_idle_core_selection() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -342,6 +353,7 @@ fn test_smt_enabled_idle_core_selection() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -383,6 +395,7 @@ fn test_smt_overloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -398,6 +411,7 @@ fn test_smt_overloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t3".into(),
@@ -413,6 +427,7 @@ fn test_smt_overloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t4".into(),
@@ -428,6 +443,7 @@ fn test_smt_overloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t5".into(),
@@ -443,6 +459,7 @@ fn test_smt_overloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -487,6 +504,7 @@ fn test_smt_pinned_tasks() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -502,6 +520,7 @@ fn test_smt_pinned_tasks() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -550,6 +569,7 @@ fn test_split_vtime_updates() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -565,6 +585,7 @@ fn test_split_vtime_updates() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -612,6 +633,7 @@ fn test_split_vtime_with_pinned() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -627,6 +649,7 @@ fn test_split_vtime_with_pinned() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -659,6 +682,7 @@ fn test_weighted_scheduling() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "light".into(),
@@ -674,6 +698,7 @@ fn test_weighted_scheduling() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -718,6 +743,7 @@ fn test_vtime_clamping_after_sleep() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "busy".into(),
@@ -733,6 +759,7 @@ fn test_vtime_clamping_after_sleep() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -776,6 +803,7 @@ fn test_many_short_tasks_dispatch_pressure() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -812,6 +840,7 @@ fn test_mixed_pinned_free_sleepwake() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pin2".into(),
@@ -827,6 +856,7 @@ fn test_mixed_pinned_free_sleepwake() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free1".into(),
@@ -842,6 +872,7 @@ fn test_mixed_pinned_free_sleepwake() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free2".into(),
@@ -857,6 +888,7 @@ fn test_mixed_pinned_free_sleepwake() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -893,6 +925,7 @@ fn test_delayed_task_start() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "late".into(),
@@ -908,6 +941,7 @@ fn test_delayed_task_start() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -957,6 +991,7 @@ fn test_timer_fires_during_simulation() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500) // Long enough for multiple timer fires
         .build();
@@ -996,6 +1031,7 @@ fn test_wake_chain_pattern() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "mid".into(),
@@ -1008,6 +1044,7 @@ fn test_wake_chain_pattern() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "tail".into(),
@@ -1020,6 +1057,7 @@ fn test_wake_chain_pattern() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -1057,6 +1095,7 @@ fn test_ping_pong_pattern() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong_b".into(),
@@ -1069,6 +1108,7 @@ fn test_ping_pong_pattern() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(50)
         .build();
@@ -1106,6 +1146,7 @@ fn test_many_cpus_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1144,6 +1185,7 @@ fn test_single_task_completes() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(50)
         .build();
@@ -1181,6 +1223,7 @@ fn test_repeat_count_mode() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "forever".into(),
@@ -1196,6 +1239,7 @@ fn test_repeat_count_mode() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -1243,6 +1287,7 @@ fn test_smt_with_split_vtime() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -1258,6 +1303,7 @@ fn test_smt_with_split_vtime() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t3".into(),
@@ -1273,6 +1319,7 @@ fn test_smt_with_split_vtime() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -1357,6 +1404,7 @@ fn test_timer_reconfiguration_path() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500) // Multiple timer intervals (100ms each)
         .build();
@@ -1394,6 +1442,7 @@ fn test_debug_events_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "worker2".into(),
@@ -1409,6 +1458,7 @@ fn test_debug_events_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -1446,6 +1496,7 @@ fn test_debug_events_with_timer_reconfig() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -1483,6 +1534,7 @@ fn test_smt_pinned_timer_reconfig() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -1498,6 +1550,7 @@ fn test_smt_pinned_timer_reconfig() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1538,6 +1591,7 @@ fn test_overloaded_all_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1576,6 +1630,7 @@ fn test_reject_multicpu_pinning() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -1591,6 +1646,7 @@ fn test_reject_multicpu_pinning() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -1624,6 +1680,7 @@ fn test_high_task_churn() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1660,6 +1717,7 @@ fn test_extreme_nice_values() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "low_prio".into(),
@@ -1675,6 +1733,7 @@ fn test_extreme_nice_values() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -1718,6 +1777,7 @@ fn test_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -1733,6 +1793,7 @@ fn test_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -1771,6 +1832,7 @@ fn test_cpu_controller_enabled_pinned() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -1786,6 +1848,7 @@ fn test_cpu_controller_enabled_pinned() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -1825,6 +1888,7 @@ fn test_cpu_controller_enabled_timer_reconfig() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1865,6 +1929,7 @@ fn test_exiting_task_workaround_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "bg".into(),
@@ -1880,6 +1945,7 @@ fn test_exiting_task_workaround_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -1921,6 +1987,7 @@ fn test_reject_multicpu_pinning_two_cpus() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -1936,6 +2003,7 @@ fn test_reject_multicpu_pinning_two_cpus() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -1971,6 +2039,7 @@ fn test_stopping_skip_cell_cycles() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -1986,6 +2055,7 @@ fn test_stopping_skip_cell_cycles() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -2031,6 +2101,7 @@ fn test_split_vtime_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -2046,6 +2117,7 @@ fn test_split_vtime_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -2088,6 +2160,7 @@ fn test_all_features_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -2125,6 +2198,7 @@ fn test_staggered_many_tasks_timer() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -2168,6 +2242,7 @@ fn test_smt_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -2183,6 +2258,7 @@ fn test_smt_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t3".into(),
@@ -2198,6 +2274,7 @@ fn test_smt_cpu_controller_enabled() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -2246,6 +2323,7 @@ fn test_timer_many_reconfigurations() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -2286,6 +2364,7 @@ fn test_dump_cpumask_many_cpus() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -2327,6 +2406,7 @@ fn test_many_debug_events() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -2377,6 +2457,7 @@ fn test_large_cpu_count_all_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 

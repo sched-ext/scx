@@ -29,6 +29,7 @@ fn test_smt_topology() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -44,6 +45,7 @@ fn test_smt_topology() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();

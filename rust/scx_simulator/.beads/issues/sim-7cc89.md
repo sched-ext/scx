@@ -1,10 +1,11 @@
 ---
 title: Model migration_disabled for LAVD SCX_DSQ_LOCAL_ON validation
-status: open
+status: closed
 priority: 1
 issue_type: task
 created_at: 2026-02-20T00:01:02.108082806+00:00
-updated_at: 2026-02-20T00:01:02.108082806+00:00
+updated_at: 2026-02-20T01:35:48.457250852+00:00
+closed_at: 2026-02-20T01:35:48.457250622+00:00
 ---
 
 # Description

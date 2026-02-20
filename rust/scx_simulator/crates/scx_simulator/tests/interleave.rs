@@ -33,6 +33,7 @@ fn test_interleave_smoke() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "t2".into(),
@@ -48,6 +49,7 @@ fn test_interleave_smoke() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(50)
         .build();
@@ -91,6 +93,7 @@ fn test_interleave_determinism() {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .task(TaskDef {
                 name: "t2".into(),
@@ -106,6 +109,7 @@ fn test_interleave_determinism() {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .duration_ms(50)
             .build()
@@ -168,6 +172,7 @@ fn test_interleave_sleep_wake() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "worker".into(),
@@ -183,6 +188,7 @@ fn test_interleave_sleep_wake() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -227,6 +233,7 @@ fn test_interleave_single_cpu_noop() {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .duration_ms(50)
             .build()
@@ -283,6 +290,7 @@ fn test_interleave_multiple_seeds() {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .task(TaskDef {
                 name: "t2".into(),
@@ -298,6 +306,7 @@ fn test_interleave_multiple_seeds() {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .task(TaskDef {
                 name: "t3".into(),
@@ -313,6 +322,7 @@ fn test_interleave_multiple_seeds() {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .duration_ms(50)
             .build();

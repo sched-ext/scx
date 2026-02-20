@@ -148,6 +148,7 @@ fn random_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -185,6 +186,7 @@ fn ping_pong_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .task(TaskDef {
                 name: format!("pong{pair}"),
@@ -197,6 +199,7 @@ fn ping_pong_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             });
     }
 
@@ -215,6 +218,7 @@ fn ping_pong_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -250,6 +254,7 @@ fn wake_chain_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -268,6 +273,7 @@ fn wake_chain_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -311,6 +317,7 @@ fn contention_scenario(rng: &mut Rng, nr_cpus: u32) -> Scenario {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 

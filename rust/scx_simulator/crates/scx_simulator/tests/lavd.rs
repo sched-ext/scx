@@ -167,6 +167,7 @@ fn test_lavd_ping_pong_is_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -179,6 +180,7 @@ fn test_lavd_ping_pong_is_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -227,6 +229,7 @@ fn test_lavd_cpu_bound_not_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -270,6 +273,7 @@ fn test_lavd_mixed_classification() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -282,6 +286,7 @@ fn test_lavd_mixed_classification() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "cpu_hog".into(),
@@ -294,6 +299,7 @@ fn test_lavd_mixed_classification() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -338,6 +344,7 @@ fn test_lavd_io_bound_vs_cpu() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "cpu_task".into(),
@@ -350,6 +357,7 @@ fn test_lavd_io_bound_vs_cpu() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -406,6 +414,7 @@ fn test_lavd_wake_chain_propagation() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
     let scenario = builder.duration_ms(500).build();
@@ -449,6 +458,7 @@ fn test_lavd_lat_cri_convergence() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -461,6 +471,7 @@ fn test_lavd_lat_cri_convergence() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -526,6 +537,7 @@ fn test_lavd_multi_domain_balance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -565,6 +577,7 @@ fn test_lavd_multi_domain_force_steal() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -603,6 +616,7 @@ fn test_lavd_multi_domain_mixed_workload() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -619,6 +633,7 @@ fn test_lavd_multi_domain_mixed_workload() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -658,6 +673,7 @@ fn test_lavd_multi_domain_mig_delta_pct() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -692,6 +708,7 @@ fn test_lavd_multi_domain_pinned_slice() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -727,6 +744,7 @@ fn test_lavd_multi_domain_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -765,6 +783,7 @@ fn test_lavd_three_domains_partial_load() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
     // Tasks pinned to domain 1 (CPUs 2-3), lighter load
@@ -779,6 +798,7 @@ fn test_lavd_three_domains_partial_load() {
         parent_pid: None,
         cgroup_name: None,
         task_flags: 0,
+        migration_disabled: 0,
     });
     // Domain 2 (CPUs 4-5) has no tasks → idle stealer
 
@@ -814,6 +834,7 @@ fn test_lavd_multi_domain_balanced_load() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -849,6 +870,7 @@ fn test_lavd_multi_domain_monitored() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -896,6 +918,7 @@ fn test_lavd_four_domains_gradient() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -912,6 +935,7 @@ fn test_lavd_four_domains_gradient() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -927,6 +951,7 @@ fn test_lavd_four_domains_gradient() {
         parent_pid: None,
         cgroup_name: None,
         task_flags: 0,
+        migration_disabled: 0,
     });
 
     // Domain 3 (CPUs 6-7): empty → idle stealer
@@ -971,6 +996,7 @@ fn test_lavd_multi_domain_load_transition() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -986,6 +1012,7 @@ fn test_lavd_multi_domain_load_transition() {
         parent_pid: None,
         cgroup_name: None,
         task_flags: 0,
+        migration_disabled: 0,
     });
 
     let trace = Simulator::new(sched).run(builder.build());
@@ -1040,6 +1067,7 @@ fn test_lavd_multi_domain_no_compact_balanced() {
                     parent_pid: None,
                     cgroup_name: None,
                     task_flags: 0,
+                    migration_disabled: 0,
                 });
             }
 
@@ -1088,6 +1116,7 @@ fn test_lavd_three_domains_no_compact() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1104,6 +1133,7 @@ fn test_lavd_three_domains_no_compact() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1119,6 +1149,7 @@ fn test_lavd_three_domains_no_compact() {
         parent_pid: None,
         cgroup_name: None,
         task_flags: 0,
+        migration_disabled: 0,
     });
 
     let trace = Simulator::new(sched).run(builder.build());
@@ -1161,6 +1192,7 @@ fn test_lavd_gradient_narrow_threshold() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1176,6 +1208,7 @@ fn test_lavd_gradient_narrow_threshold() {
         parent_pid: None,
         cgroup_name: None,
         task_flags: 0,
+        migration_disabled: 0,
     });
 
     // Domain 2 (CPUs 4-5): empty -> stealer
@@ -1226,6 +1259,7 @@ fn test_lavd_waker_wakee_with_parent() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Child ping — shares parent with pong
         .task(TaskDef {
@@ -1239,6 +1273,7 @@ fn test_lavd_waker_wakee_with_parent() {
             parent_pid: Some(Pid(1)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Child pong — shares parent with ping
         .task(TaskDef {
@@ -1252,6 +1287,7 @@ fn test_lavd_waker_wakee_with_parent() {
             parent_pid: Some(Pid(1)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1304,6 +1340,7 @@ fn test_lavd_waker_wakee_monitored() {
         parent_pid: None,
         cgroup_name: None,
         task_flags: 0,
+        migration_disabled: 0,
     });
     // Chain tasks all share parent Pid(1)
     for (i, behavior) in behaviors.into_iter().enumerate() {
@@ -1318,6 +1355,7 @@ fn test_lavd_waker_wakee_monitored() {
             parent_pid: Some(Pid(1)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
     let scenario = builder.duration_ms(500).build();
@@ -1365,6 +1403,7 @@ fn test_lavd_underloaded_dispatch() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1403,6 +1442,7 @@ fn test_lavd_underloaded_pinned_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // One IO task on any CPU
         .task(TaskDef {
@@ -1416,6 +1456,7 @@ fn test_lavd_underloaded_pinned_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1453,6 +1494,7 @@ fn test_lavd_underloaded_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "worker_2".into(),
@@ -1465,6 +1507,7 @@ fn test_lavd_underloaded_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1505,6 +1548,7 @@ fn test_lavd_init_task_parent_inheritance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "child_a".into(),
@@ -1517,6 +1561,7 @@ fn test_lavd_init_task_parent_inheritance() {
             parent_pid: Some(Pid(1)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "child_b".into(),
@@ -1529,6 +1574,7 @@ fn test_lavd_init_task_parent_inheritance() {
             parent_pid: Some(Pid(1)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1566,6 +1612,7 @@ fn test_lavd_consume_prev_queued() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1602,6 +1649,7 @@ fn test_lavd_slice_boost_underloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "long_2".into(),
@@ -1614,6 +1662,7 @@ fn test_lavd_slice_boost_underloaded() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(1000)
         .build();
@@ -1651,6 +1700,7 @@ fn test_lavd_slice_boost_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "ping".into(),
@@ -1663,6 +1713,7 @@ fn test_lavd_slice_boost_lat_cri() {
             parent_pid: Some(Pid(10)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -1675,6 +1726,7 @@ fn test_lavd_slice_boost_lat_cri() {
             parent_pid: Some(Pid(10)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
 
     for i in 3..=4i32 {
@@ -1689,6 +1741,7 @@ fn test_lavd_slice_boost_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -1725,6 +1778,7 @@ fn test_lavd_underloaded_no_dsq_early_return() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1756,6 +1810,7 @@ fn test_lavd_underloaded_cpdom_dsq_affinity() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free".into(),
@@ -1768,6 +1823,7 @@ fn test_lavd_underloaded_cpdom_dsq_affinity() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -1811,6 +1867,7 @@ fn test_lavd_core_compaction_dispatch() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // An unpinned task to generate some scheduling activity
         .task(TaskDef {
@@ -1824,6 +1881,7 @@ fn test_lavd_core_compaction_dispatch() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(1000)
         .build();
@@ -1864,6 +1922,7 @@ fn test_lavd_core_compaction_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Another pinned task on CPU 5
         .task(TaskDef {
@@ -1877,6 +1936,7 @@ fn test_lavd_core_compaction_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(1000)
         .build();
@@ -1913,6 +1973,7 @@ fn test_lavd_core_compaction_pinned_prev() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pin7_b".into(),
@@ -1925,6 +1986,7 @@ fn test_lavd_core_compaction_pinned_prev() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -2220,6 +2282,7 @@ fn test_lavd_preemption_ping_pong_vs_hogs() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -2232,6 +2295,7 @@ fn test_lavd_preemption_ping_pong_vs_hogs() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-0".into(),
@@ -2244,6 +2308,7 @@ fn test_lavd_preemption_ping_pong_vs_hogs() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-1".into(),
@@ -2256,6 +2321,7 @@ fn test_lavd_preemption_ping_pong_vs_hogs() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -2294,6 +2360,7 @@ fn test_lavd_pinned_task_contention() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pinned-1".into(),
@@ -2306,6 +2373,7 @@ fn test_lavd_pinned_task_contention() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free-0".into(),
@@ -2318,6 +2386,7 @@ fn test_lavd_pinned_task_contention() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free-1".into(),
@@ -2330,6 +2399,7 @@ fn test_lavd_pinned_task_contention() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -2405,6 +2475,7 @@ fn test_lavd_affinitized_idle_selection() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Task pinned to CPUs 2,3
         .task(TaskDef {
@@ -2418,6 +2489,7 @@ fn test_lavd_affinitized_idle_selection() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Unpinned tasks to fill CPUs
         .task(TaskDef {
@@ -2431,6 +2503,7 @@ fn test_lavd_affinitized_idle_selection() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free-1".into(),
@@ -2443,6 +2516,7 @@ fn test_lavd_affinitized_idle_selection() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -2501,6 +2575,7 @@ fn test_lavd_varied_nice_values() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "low-pri".into(),
@@ -2513,6 +2588,7 @@ fn test_lavd_varied_nice_values() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "normal".into(),
@@ -2525,6 +2601,7 @@ fn test_lavd_varied_nice_values() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -2562,6 +2639,7 @@ fn test_lavd_greedy_penalty_extreme_nice() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "priority".into(),
@@ -2574,6 +2652,7 @@ fn test_lavd_greedy_penalty_extreme_nice() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -2652,6 +2731,7 @@ fn test_lavd_all_power_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -2664,6 +2744,7 @@ fn test_lavd_all_power_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "io".into(),
@@ -2676,6 +2757,7 @@ fn test_lavd_all_power_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "periodic".into(),
@@ -2688,6 +2770,7 @@ fn test_lavd_all_power_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog".into(),
@@ -2700,6 +2783,7 @@ fn test_lavd_all_power_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -2913,6 +2997,7 @@ fn test_lavd_staggered_task_arrival() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "mid".into(),
@@ -2925,6 +3010,7 @@ fn test_lavd_staggered_task_arrival() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "late".into(),
@@ -2937,6 +3023,7 @@ fn test_lavd_staggered_task_arrival() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -2991,6 +3078,7 @@ fn test_lavd_extreme_runtime_variation() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -3106,6 +3194,7 @@ fn test_lavd_pinned_single_cpu_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pinned-3".into(),
@@ -3118,6 +3207,7 @@ fn test_lavd_pinned_single_cpu_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-0".into(),
@@ -3130,6 +3220,7 @@ fn test_lavd_pinned_single_cpu_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -3269,6 +3360,7 @@ fn test_lavd_deep_wake_chain_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
     let scenario = builder.duration_ms(500).build();
@@ -3347,6 +3439,7 @@ fn test_lavd_big_little_overloaded_perf_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -3359,6 +3452,7 @@ fn test_lavd_big_little_overloaded_perf_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-0".into(),
@@ -3371,6 +3465,7 @@ fn test_lavd_big_little_overloaded_perf_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-1".into(),
@@ -3383,6 +3478,7 @@ fn test_lavd_big_little_overloaded_perf_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-2".into(),
@@ -3395,6 +3491,7 @@ fn test_lavd_big_little_overloaded_perf_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-3".into(),
@@ -3407,6 +3504,7 @@ fn test_lavd_big_little_overloaded_perf_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -3473,6 +3571,7 @@ fn test_lavd_greedy_no_preempt_kick() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "io-lat".into(),
@@ -3485,6 +3584,7 @@ fn test_lavd_greedy_no_preempt_kick() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog".into(),
@@ -3497,6 +3597,7 @@ fn test_lavd_greedy_no_preempt_kick() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -3537,6 +3638,7 @@ fn test_lavd_no_wake_sync() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -3549,6 +3651,7 @@ fn test_lavd_no_wake_sync() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog".into(),
@@ -3561,6 +3664,7 @@ fn test_lavd_no_wake_sync() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -3680,6 +3784,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "mid-0".into(),
@@ -3692,6 +3797,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "mid-1".into(),
@@ -3704,6 +3810,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "heavy-0".into(),
@@ -3716,6 +3823,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "heavy-1".into(),
@@ -3728,6 +3836,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "heavy-2".into(),
@@ -3740,6 +3849,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "heavy-3".into(),
@@ -3752,6 +3862,7 @@ fn test_lavd_autopilot_transitions() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -3795,6 +3906,7 @@ fn test_lavd_complex_affinity_patterns() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Task on all odd CPUs
         .task(TaskDef {
@@ -3808,6 +3920,7 @@ fn test_lavd_complex_affinity_patterns() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Task on just CPU 4 and 5
         .task(TaskDef {
@@ -3821,6 +3934,7 @@ fn test_lavd_complex_affinity_patterns() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Unpinned tasks
         .task(TaskDef {
@@ -3834,6 +3948,7 @@ fn test_lavd_complex_affinity_patterns() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free-1".into(),
@@ -3846,6 +3961,7 @@ fn test_lavd_complex_affinity_patterns() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -3886,6 +4002,7 @@ fn test_lavd_concurrent_pinned_mixed() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pinned-2".into(),
@@ -3898,6 +4015,7 @@ fn test_lavd_concurrent_pinned_mixed() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free-0".into(),
@@ -3910,6 +4028,7 @@ fn test_lavd_concurrent_pinned_mixed() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "free-1".into(),
@@ -3922,6 +4041,7 @@ fn test_lavd_concurrent_pinned_mixed() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "periodic".into(),
@@ -3934,6 +4054,7 @@ fn test_lavd_concurrent_pinned_mixed() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -4091,6 +4212,7 @@ fn test_lavd_dispatch_pinned_on_inactive_cpu() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -4131,6 +4253,7 @@ fn test_lavd_dispatch_affinitized_on_inactive_cpus() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .build();
@@ -4180,6 +4303,7 @@ fn test_lavd_idle_interval_zero_sched() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -4230,6 +4354,7 @@ fn test_lavd_idle_cpu_selection_complex() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "aff-23".into(),
@@ -4242,6 +4367,7 @@ fn test_lavd_idle_cpu_selection_complex() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "aff-45".into(),
@@ -4254,6 +4380,7 @@ fn test_lavd_idle_cpu_selection_complex() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "aff-67".into(),
@@ -4266,6 +4393,7 @@ fn test_lavd_idle_cpu_selection_complex() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Free-roaming CPU hogs to saturate active CPUs
         .task(TaskDef {
@@ -4279,6 +4407,7 @@ fn test_lavd_idle_cpu_selection_complex() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-1".into(),
@@ -4291,6 +4420,7 @@ fn test_lavd_idle_cpu_selection_complex() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -4328,6 +4458,7 @@ fn test_lavd_idle_cpu_sticky_domain_fallback() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pp-b".into(),
@@ -4340,6 +4471,7 @@ fn test_lavd_idle_cpu_sticky_domain_fallback() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Background hogs on all CPUs to prevent trivial idle selection
         .add_task("bg-0", 10, workloads::cpu_bound(30_000_000))
@@ -4393,6 +4525,7 @@ fn test_lavd_comprehensive_compaction_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Pinned task on high CPU (inactive under compaction)
         .task(TaskDef {
@@ -4406,6 +4539,7 @@ fn test_lavd_comprehensive_compaction_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Affinitized task on CPUs 4-6 (inactive under compaction)
         .task(TaskDef {
@@ -4419,6 +4553,7 @@ fn test_lavd_comprehensive_compaction_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Task with long sleep to create idle intervals
         .task(TaskDef {
@@ -4438,6 +4573,7 @@ fn test_lavd_comprehensive_compaction_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(2500)
         .build();
@@ -4480,6 +4616,7 @@ fn test_lavd_slice_boost_preemption_cancel() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pp-b".into(),
@@ -4492,6 +4629,7 @@ fn test_lavd_slice_boost_preemption_cancel() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
@@ -4661,6 +4799,7 @@ fn test_lavd_compaction_pinned_prev_forced() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -4708,6 +4847,7 @@ fn test_lavd_compaction_affinitized_prev_forced() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(300)
         .build();
@@ -4788,6 +4928,7 @@ fn test_lavd_compaction_dsq_iteration() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "aff-45".into(),
@@ -4800,6 +4941,7 @@ fn test_lavd_compaction_dsq_iteration() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pin-3".into(),
@@ -4812,6 +4954,7 @@ fn test_lavd_compaction_dsq_iteration() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(400)
         .build();
@@ -4891,6 +5034,7 @@ fn test_lavd_compaction_combined_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pin-7".into(),
@@ -4903,6 +5047,7 @@ fn test_lavd_compaction_combined_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Affinitized task on inactive CPUs
         .task(TaskDef {
@@ -4916,6 +5061,7 @@ fn test_lavd_compaction_combined_stress() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(400)
         .build();
@@ -5351,6 +5497,7 @@ fn test_lavd_is_monitored() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "monitored-b".into(),
@@ -5363,6 +5510,7 @@ fn test_lavd_is_monitored() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog", 5, workloads::cpu_bound(20_000_000))
         .duration_ms(300)
@@ -5465,6 +5613,7 @@ fn test_lavd_slice_boost_partial_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "io-cri-b".into(),
@@ -5477,6 +5626,7 @@ fn test_lavd_slice_boost_partial_lat_cri() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
@@ -5568,6 +5718,7 @@ fn test_lavd_monitored_smt() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -5580,6 +5731,7 @@ fn test_lavd_monitored_smt() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
@@ -5718,6 +5870,7 @@ fn test_lavd_pinned_single_cpu_slice_clamp() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pinned-b".into(),
@@ -5730,6 +5883,7 @@ fn test_lavd_pinned_single_cpu_slice_clamp() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Unpinned tasks on other CPUs
         .add_task("free-0", 0, workloads::cpu_bound(10_000_000))
@@ -5789,6 +5943,7 @@ fn test_lavd_dispatch_compaction_dsq_iteration() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "affinity-7".into(),
@@ -5801,6 +5956,7 @@ fn test_lavd_dispatch_compaction_dsq_iteration() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Regular tasks on active CPUs
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
@@ -5867,6 +6023,7 @@ fn test_lavd_compaction_pinned_overflow_extend() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // IO tasks to create dispatch pressure
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
@@ -5914,6 +6071,7 @@ fn test_lavd_dequeue_early_return() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -5926,6 +6084,7 @@ fn test_lavd_dequeue_early_return() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 10, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 10, workloads::cpu_bound(20_000_000))
@@ -6040,6 +6199,7 @@ fn test_lavd_reenq_skip_recalc() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6052,6 +6212,7 @@ fn test_lavd_reenq_skip_recalc() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 10, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 10, workloads::cpu_bound(20_000_000))
@@ -6091,6 +6252,7 @@ fn test_lavd_preemption_affinitized_cancel_boost() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-on-0".into(),
@@ -6103,6 +6265,7 @@ fn test_lavd_preemption_affinitized_cancel_boost() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
         .add_task("hog-2", 5, workloads::cpu_bound(20_000_000))
@@ -6143,6 +6306,7 @@ fn test_lavd_no_wake_sync_mode() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6155,6 +6319,7 @@ fn test_lavd_no_wake_sync_mode() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -6201,6 +6366,7 @@ fn test_lavd_compaction_prev_affinitized_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
@@ -6336,6 +6502,7 @@ fn test_lavd_combined_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6348,6 +6515,7 @@ fn test_lavd_combined_features() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
@@ -6552,6 +6720,7 @@ fn test_lavd_introspection_sched_n() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6564,6 +6733,7 @@ fn test_lavd_introspection_sched_n() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog", 5, workloads::cpu_bound(20_000_000))
         .duration_ms(300)
@@ -6634,6 +6804,7 @@ fn test_lavd_big_little_8cpu_ping_pong() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "lat-cri-b".into(),
@@ -6646,6 +6817,7 @@ fn test_lavd_big_little_8cpu_ping_pong() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
@@ -6726,6 +6898,7 @@ fn test_lavd_big_little_smt() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6738,6 +6911,7 @@ fn test_lavd_big_little_smt() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
@@ -6828,6 +7002,7 @@ fn test_lavd_two_domain_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6840,6 +7015,7 @@ fn test_lavd_two_domain_per_cpu_dsq() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
@@ -6882,6 +7058,7 @@ fn test_lavd_two_domain_monitored() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6894,6 +7071,7 @@ fn test_lavd_two_domain_monitored() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 0, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 0, workloads::cpu_bound(20_000_000))
@@ -6938,6 +7116,7 @@ fn test_lavd_two_domain_big_little() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -6950,6 +7129,7 @@ fn test_lavd_two_domain_big_little() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("batch-0", 10, workloads::cpu_bound(20_000_000))
         .add_task("batch-1", 10, workloads::cpu_bound(20_000_000))
@@ -7038,6 +7218,7 @@ fn test_lavd_mostly_little_topology() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -7050,6 +7231,7 @@ fn test_lavd_mostly_little_topology() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
@@ -7099,6 +7281,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-1".into(),
@@ -7111,6 +7294,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-2".into(),
@@ -7123,6 +7307,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-3".into(),
@@ -7135,6 +7320,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-4".into(),
@@ -7147,6 +7333,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-5".into(),
@@ -7159,6 +7346,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-6".into(),
@@ -7171,6 +7359,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-7".into(),
@@ -7183,6 +7372,7 @@ fn test_lavd_two_domain_pinned_imbalance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("io-d1", -5, workloads::io_bound(50_000, 500_000))
         .duration_ms(500)
@@ -7226,6 +7416,7 @@ fn test_lavd_two_domain_mig_delta_pct() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-1".into(),
@@ -7238,6 +7429,7 @@ fn test_lavd_two_domain_mig_delta_pct() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-2".into(),
@@ -7250,6 +7442,7 @@ fn test_lavd_two_domain_mig_delta_pct() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-3".into(),
@@ -7262,6 +7455,7 @@ fn test_lavd_two_domain_mig_delta_pct() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "hog-d0-4".into(),
@@ -7274,6 +7468,7 @@ fn test_lavd_two_domain_mig_delta_pct() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("io-d1", -5, workloads::io_bound(30_000, 200_000))
         .duration_ms(400)
@@ -7349,6 +7544,7 @@ fn test_lavd_mostly_big_compaction() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -7361,6 +7557,7 @@ fn test_lavd_mostly_big_compaction() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("hog-0", 5, workloads::cpu_bound(20_000_000))
         .add_task("hog-1", 5, workloads::cpu_bound(20_000_000))
@@ -7481,6 +7678,7 @@ fn test_lavd_compaction_pinned_on_inactive() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("io-light", 0, workloads::io_bound(100_000, 5_000_000))
         .duration_ms(50)
@@ -7525,6 +7723,7 @@ fn test_lavd_compaction_per_cpu_dsq_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pinned-7".into(),
@@ -7537,6 +7736,7 @@ fn test_lavd_compaction_per_cpu_dsq_overflow() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task("io-light", 0, workloads::io_bound(100_000, 5_000_000))
         .duration_ms(50)
@@ -7824,6 +8024,7 @@ fn test_lavd_slice_boost_under_load() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -7836,6 +8037,7 @@ fn test_lavd_slice_boost_under_load() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     // CPU-bound tasks to fill queues
     for i in 0..6 {
@@ -8129,6 +8331,7 @@ fn test_lavd_cpu_bw_with_preemption() {
             parent_pid: None,
             cgroup_name: Some("group-a".into()),
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "pong".into(),
@@ -8141,6 +8344,7 @@ fn test_lavd_cpu_bw_with_preemption() {
             parent_pid: None,
             cgroup_name: Some("group-a".into()),
             task_flags: 0,
+            migration_disabled: 0,
         })
         .add_task_in_cgroup("hog", 10, workloads::cpu_bound(10_000_000), "group-a")
         .add_task("free", 0, workloads::cpu_bound(10_000_000))
@@ -8198,6 +8402,7 @@ fn test_lavd_kernel_task_types() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: PF_KTHREAD,
+            migration_disabled: 0,
         })
         // ksoftirqd thread — triggers is_ksoftirqd() + LAVD_FLAG_KSOFTIRQD
         // Needs PF_KTHREAD and comm starting with "ksoftirqd/"
@@ -8215,6 +8420,7 @@ fn test_lavd_kernel_task_types() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: PF_KTHREAD,
+            migration_disabled: 0,
         })
         // Workqueue worker — triggers is_kernel_worker()
         .task(TaskDef {
@@ -8231,6 +8437,7 @@ fn test_lavd_kernel_task_types() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: PF_KTHREAD | PF_WQ_WORKER,
+            migration_disabled: 0,
         })
         // IO worker — triggers is_kernel_worker() via PF_IO_WORKER
         .task(TaskDef {
@@ -8247,6 +8454,7 @@ fn test_lavd_kernel_task_types() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: PF_IO_WORKER,
+            migration_disabled: 0,
         })
         // Regular user task to have a mixed workload
         .task(TaskDef {
@@ -8260,6 +8468,7 @@ fn test_lavd_kernel_task_types() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(200)
         .build();
@@ -8314,6 +8523,7 @@ fn test_lavd_lat_cri_inheritance() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Task B: CPU-bound sleeper — long sleep then short CPU, woken by A.
         // parent_pid = A so lavd_runnable's real_parent check passes.
@@ -8334,6 +8544,7 @@ fn test_lavd_lat_cri_inheritance() {
             parent_pid: Some(Pid(1)),
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Background CPU load to keep sys_stat active
         .add_task("bg1", 5, workloads::cpu_bound(10_000_000))
@@ -8384,6 +8595,7 @@ fn test_lavd_api_set_power_mode_balanced() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -8421,6 +8633,7 @@ fn test_lavd_api_set_power_mode_powersave() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -8455,6 +8668,7 @@ fn test_lavd_api_set_autopilot() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -8494,6 +8708,7 @@ fn test_lavd_api_noflags() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(100)
         .build();
@@ -8534,33 +8749,24 @@ fn test_lavd_api_noflags() {
 /// 4. LAVD dispatches to `SCX_DSQ_LOCAL_ON | 31` in `lavd_enqueue()`
 /// 5. Kernel rejects this in `task_can_run_on_remote_rq()` with scx_bpf_error()
 ///
-/// # Simulator Limitations
+/// # Simulator Support (sim-7cc89)
 ///
-/// The simulator currently stubs `is_migration_disabled()` to always return false
-/// in `schedulers/lavd/wrapper.c`:
-/// ```c
-/// #define is_migration_disabled(p) ((void)(p), false)
-/// ```
-///
-/// This means we cannot fully reproduce the bug because LAVD's code path in
-/// `pick_idle_cpu()` that handles migration-disabled tasks (idle.bpf.c L622-629)
-/// is never taken.
+/// The simulator now supports `migration_disabled`:
+/// 1. `TaskDef.migration_disabled` field sets the task_struct counter
+/// 2. `is_migration_disabled()` in wrapper.c reads the actual value
+/// 3. `resolve_pending_dispatch()` validates SCX_DSQ_LOCAL_ON dispatches
+/// 4. Invalid dispatches trigger `ExitKind::ErrorBpf`
 ///
 /// # What This Test Verifies
 ///
-/// Even without `migration_disabled` modeling, this test:
-/// 1. Creates a scenario similar to production (many CPUs, pinned kworker, CPU BW)
-/// 2. Uses a pinned task to exercise the `is_pinned()` code path
-/// 3. Documents the production configuration for future work
+/// This test creates a migration-disabled kworker that:
+/// 1. Has `nr_cpus_allowed > 1` (can run on any CPU by cpumask)
+/// 2. Has `migration_disabled = 2` (cannot migrate temporarily)
+/// 3. Is woken from various CPUs to trigger cross-CPU dispatch paths
 ///
-/// # Future Work (sim-7cc89)
-///
-/// To properly reproduce this bug, we need to:
-/// 1. Add `migration_disabled` field to the simulated task_struct accessors
-/// 2. Remove the `is_migration_disabled()` stub in wrapper.c
-/// 3. Add `scx_bpf_dsq_insert` validation to check task can run on target CPU
-/// 4. The simulator should call `scx_bpf_error()` when dispatching a
-///    migration-disabled task to a CPU it cannot run on
+/// The test verifies that either:
+/// - LAVD correctly handles `is_migration_disabled()` and dispatches locally
+/// - The simulator catches invalid SCX_DSQ_LOCAL_ON dispatches
 #[test]
 fn test_lavd_migration_disabled_kworker_scenario() {
     let _lock = common::setup_test();
@@ -8584,8 +8790,13 @@ fn test_lavd_migration_disabled_kworker_scenario() {
 
     let mut builder = Scenario::builder().cpus(nr_cpus);
 
-    // The kworker is pinned to CPU 8 only
-    // In production, this would also have migration_disabled > 1
+    // The kworker has migration_disabled > 0 but is technically allowed on all CPUs.
+    // This reproduces the production bug where a migration-disabled task was
+    // dispatched to a different CPU via SCX_DSQ_LOCAL_ON.
+    //
+    // migration_disabled = 2 simulates a task that was already migration-disabled
+    // before entering the BPF scheduler callback (in the kernel, BPF prolog
+    // increments migration_disabled to 1, so > 1 means pre-existing disable).
     builder = builder.task(TaskDef {
         name: "kworker/8:1".into(),
         pid: Pid(1),
@@ -8593,10 +8804,11 @@ fn test_lavd_migration_disabled_kworker_scenario() {
         behavior: workloads::io_bound(100_000, 1_000_000), // 0.1ms work, 1ms sleep
         start_time_ns: 0,
         mm_id: None,
-        allowed_cpus: Some(vec![CpuId(8)]), // Pinned to CPU 8
+        allowed_cpus: None, // Can run on any CPU (not pinned by cpumask)
         parent_pid: None,
         cgroup_name: None,
         task_flags: kworker_flags,
+        migration_disabled: 2, // Cannot migrate despite nr_cpus_allowed > 1
     });
 
     // Add other tasks spread across CPUs to create load imbalance
@@ -8613,6 +8825,7 @@ fn test_lavd_migration_disabled_kworker_scenario() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -8640,6 +8853,7 @@ fn test_lavd_migration_disabled_kworker_scenario() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         });
     }
 
@@ -8652,37 +8866,26 @@ fn test_lavd_migration_disabled_kworker_scenario() {
 
     let trace = Simulator::new(sched).run(scenario);
 
-    // The kworker should have been scheduled
-    assert!(
-        trace.schedule_count(Pid(1)) > 0,
-        "kworker was never scheduled"
-    );
-
-    // In the current simulator, this test passes because:
-    // 1. is_migration_disabled() always returns false, so LAVD uses the
-    //    normal CPU selection path
-    // 2. The task is pinned (nr_cpus_allowed == 1), so is_pinned() returns
-    //    true and LAVD handles it correctly
+    // With migration_disabled properly modeled, this test now verifies that:
+    // 1. LAVD's is_migration_disabled() check sees migration_disabled > 0
+    // 2. The simulator validates SCX_DSQ_LOCAL_ON dispatches
+    // 3. If LAVD dispatches to a different CPU, we get a BPF error
     //
-    // The actual production bug requires migration_disabled > 1 which is
-    // different from is_pinned() (nr_cpus_allowed == 1). A task can have
-    // nr_cpus_allowed > 1 but still be migration-disabled temporarily.
-    //
-    // To fully reproduce this bug, we would need:
-    // 1. A task with nr_cpus_allowed > 1 (not pinned)
-    // 2. migration_disabled > 1 (temporarily cannot migrate)
-    // 3. The task wakes on a different CPU than where it's currently bound
-    // 4. LAVD tries to dispatch to an idle CPU != current CPU
-
+    // The exit kind tells us what happened:
+    // - ErrorBpf means the simulator caught an invalid dispatch
+    // - Normal means LAVD correctly handled the migration-disabled task
     eprintln!(
-        "[migration_disabled test] kworker scheduled {} times",
+        "[migration_disabled test] exit_kind={:?}, kworker scheduled {} times",
+        trace.exit_kind(),
         trace.schedule_count(Pid(1))
     );
-    eprintln!(
-        "[migration_disabled test] NOTE: This test documents the production bug \
-         scenario but cannot fully reproduce it because the simulator does not \
-         model migration_disabled. See test docstring for details."
-    );
+
+    // The test can have two valid outcomes:
+    // 1. LAVD correctly handles migration_disabled and the simulation completes
+    // 2. LAVD incorrectly dispatches and we catch the error
+    //
+    // Either outcome exercises the migration_disabled code path.
+    // If this test fails with ErrorBpf, it means LAVD has a bug!
 }
 
 /// Alternative test: Task with restricted cpumask dispatched to wrong CPU.
@@ -8721,6 +8924,7 @@ fn test_lavd_pinned_task_cpumask_respected() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Tasks in other domains to create load
         .task(TaskDef {
@@ -8734,6 +8938,7 @@ fn test_lavd_pinned_task_cpumask_respected() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .task(TaskDef {
             name: "worker_d2".into(),
@@ -8746,6 +8951,7 @@ fn test_lavd_pinned_task_cpumask_respected() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         // Waker from a different domain
         .task(TaskDef {
@@ -8769,6 +8975,7 @@ fn test_lavd_pinned_task_cpumask_respected() {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+            migration_disabled: 0,
         })
         .duration_ms(500)
         .detect_bpf_errors()

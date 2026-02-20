@@ -435,6 +435,7 @@ mod tests {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .task(TaskDef {
                 name: "pong".into(),
@@ -447,6 +448,7 @@ mod tests {
                 parent_pid: None,
                 cgroup_name: None,
                 task_flags: 0,
+                migration_disabled: 0,
             })
             .duration_ms(1000)
             .build();
