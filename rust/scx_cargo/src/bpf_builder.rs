@@ -375,6 +375,7 @@ impl BpfBuilder {
             .clang(&self.clang.clang)
             .clang_args(&self.cflags)
             .rustfmt("disable_rustfmt")
+            .reference_obj(true)
             .generate(&skel_path)?;
 
         let mut deps = BTreeSet::new();
@@ -404,6 +405,7 @@ impl BpfBuilder {
                 .clang(&self.clang.clang)
                 .clang_args(&self.cflags)
                 .rustfmt("disable_rustfmt")
+                .reference_obj(true)
                 .build_and_generate(&skel_path)
         })?;
 
