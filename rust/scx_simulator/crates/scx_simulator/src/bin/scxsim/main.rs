@@ -89,6 +89,14 @@ struct Cli {
     #[arg(long, conflicts_with = "rbc_ns")]
     no_rbc: bool,
 
+    /// Watchdog timeout for stall detection.
+    ///
+    /// If a runnable task is not scheduled within this duration (simulated
+    /// time), the simulation exits with an error. Accepts durations with
+    /// units: "2s", "500ms", etc. Default: 30s.
+    #[arg(long, value_name = "DURATION")]
+    watchdog_timeout: Option<String>,
+
     /// Enable concurrent callback interleaving at kfunc yield points.
     ///
     /// Runs dispatch callbacks for multiple idle CPUs on separate OS
@@ -212,6 +220,10 @@ fn run(cli: &Cli) -> Result<(), String> {
     if cli.no_rbc {
         scenario.sched_overhead_rbc_ns = Some(0);
     }
+    if let Some(ref timeout) = cli.watchdog_timeout {
+        scenario.watchdog_timeout_ns =
+            Some(parse_duration_ns(timeout).map_err(|e| format!("--watchdog-timeout: {e}"))?);
+    }
 
     // Validate --wprof and --bpf-trace require --real-run vm
     if cli.wprof && cli.real_run != RealRunMode::Vm {
@@ -259,6 +271,10 @@ fn run_simulation(cli: &Cli, scenario: scx_simulator::Scenario) -> Result<(), St
             .write_perfetto_json(&mut file)
             .map_err(|e| format!("failed to write perfetto trace: {e}"))?;
         eprintln!("wrote perfetto trace to {}", path.display());
+    }
+
+    if trace.has_error() {
+        return Err(format!("simulation error: {:?}", trace.exit_kind()));
     }
 
     Ok(())

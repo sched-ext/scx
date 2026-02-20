@@ -3,3 +3,4 @@ trace.proto
 wprof.data
 bpf_trace.log
 .vscode-ctags
+bug_finding/output/
