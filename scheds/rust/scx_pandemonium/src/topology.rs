@@ -11,8 +11,8 @@ use crate::scheduler::Scheduler;
 
 pub struct CpuTopology {
     pub nr_cpus: usize,
-    pub l2_domain: Vec<u32>,              // l2_domain[cpu] = group_id
-    pub l2_groups: Vec<Vec<u32>>,         // l2_groups[group_id] = [cpu, ...]
+    pub l2_domain: Vec<u32>,      // l2_domain[cpu] = group_id
+    pub l2_groups: Vec<Vec<u32>>, // l2_groups[group_id] = [cpu, ...]
 }
 
 impl CpuTopology {
@@ -69,7 +69,11 @@ impl CpuTopology {
             let cpus: Vec<String> = members.iter().map(|c| c.to_string()).collect();
             log_info!("L2 GROUP {}: [{}]", gid, cpus.join(","));
         }
-        log_info!("L2 GROUPS: {} across {} CPUs", self.l2_groups.len(), self.nr_cpus);
+        log_info!(
+            "L2 GROUPS: {} across {} CPUs",
+            self.l2_groups.len(),
+            self.nr_cpus
+        );
     }
 }
 
@@ -132,8 +136,10 @@ mod tests {
             .unwrap()
             .filter(|e| {
                 e.as_ref()
-                    .map(|e| e.file_name().to_string_lossy().starts_with("cpu")
-                         && e.file_name().to_string_lossy()[3..].parse::<u32>().is_ok())
+                    .map(|e| {
+                        e.file_name().to_string_lossy().starts_with("cpu")
+                            && e.file_name().to_string_lossy()[3..].parse::<u32>().is_ok()
+                    })
                     .unwrap_or(false)
             })
             .count();
@@ -149,8 +155,12 @@ mod tests {
         // EVERY CPU MUST HAVE A VALID GROUP ID
         let max_group = topo.l2_groups.len() as u32;
         for cpu in 0..nr_cpus {
-            assert!(topo.l2_domain[cpu] < max_group || topo.l2_domain[cpu] == cpu as u32,
-                "CPU {} has invalid l2 group {}", cpu, topo.l2_domain[cpu]);
+            assert!(
+                topo.l2_domain[cpu] < max_group || topo.l2_domain[cpu] == cpu as u32,
+                "CPU {} has invalid l2 group {}",
+                cpu,
+                topo.l2_domain[cpu]
+            );
         }
 
         // AT LEAST ONE GROUP MUST EXIST

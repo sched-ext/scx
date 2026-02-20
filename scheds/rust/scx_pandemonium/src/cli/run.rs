@@ -26,9 +26,7 @@ fn build_scheduler() -> Result<()> {
     }
 
     let bin = binary_path();
-    let size = std::fs::metadata(&bin)
-        .map(|m| m.len() / 1024)
-        .unwrap_or(0);
+    let size = std::fs::metadata(&bin).map(|m| m.len() / 1024).unwrap_or(0);
     log_info!("Build complete: {} ({} KB)", bin, size);
     Ok(())
 }
@@ -74,7 +72,11 @@ fn capture_dmesg_after(cursor: Option<&str>) -> String {
     relevant.join("\n")
 }
 
-fn save_logs(scheduler_output: &str, dmesg: &str, returncode: i32) -> Result<(String, String, String)> {
+fn save_logs(
+    scheduler_output: &str,
+    dmesg: &str,
+    returncode: i32,
+) -> Result<(String, String, String)> {
     std::fs::create_dir_all(LOG_DIR)?;
 
     let stamp = chrono_stamp();
@@ -116,14 +118,9 @@ fn save_logs(scheduler_output: &str, dmesg: &str, returncode: i32) -> Result<(St
 }
 
 fn chrono_stamp() -> String {
-    let output = Command::new("date")
-        .arg("+%Y%m%d-%H%M%S")
-        .output()
-        .ok();
+    let output = Command::new("date").arg("+%Y%m%d-%H%M%S").output().ok();
     match output {
-        Some(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
 }

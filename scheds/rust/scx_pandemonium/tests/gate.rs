@@ -23,8 +23,8 @@ const ACTIVATION_POLL: Duration = Duration::from_millis(500);
 // HELPERS
 
 fn binary_path() -> String {
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .unwrap_or_else(|_| "/tmp/pandemonium-build".to_string());
+    let target_dir =
+        std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "/tmp/pandemonium-build".to_string());
     format!("{}/release/pandemonium", target_dir)
 }
 
@@ -147,7 +147,7 @@ fn timestamp() -> String {
     let secs = dur.as_secs();
     // APPROXIMATE: GOOD ENOUGH FOR LOG FILENAMES
     let days = secs / 86400;
-    let y = 1970 + (days * 400 / 146097);  // ROUGH YEAR
+    let y = 1970 + (days * 400 / 146097); // ROUGH YEAR
     format!("{}-{:06}", y, secs % 1_000_000)
 }
 
@@ -284,7 +284,9 @@ fn layer3_latency_gate() {
     assert!(
         worst_avg <= avg_limit,
         "AVG LATENCY TOO HIGH: {}us (LIMIT: {}us, {} CORES)",
-        worst_avg, avg_limit, ncpu
+        worst_avg,
+        avg_limit,
+        ncpu
     );
 }
 
@@ -398,12 +400,16 @@ fn layer5_contention_latency() {
     assert!(
         median <= med_limit,
         "CONTENTION MEDIAN TOO HIGH: {:.0}us (LIMIT: {:.0}us, {} CORES)",
-        median, med_limit, ncpu
+        median,
+        med_limit,
+        ncpu
     );
     assert!(
         p99 <= p99_limit,
         "CONTENTION P99 TOO HIGH: {:.0}us (LIMIT: {:.0}us, {} CORES)",
-        p99, p99_limit, ncpu
+        p99,
+        p99_limit,
+        ncpu
     );
 }
 
@@ -441,7 +447,11 @@ fn full_gate() {
     };
     let status = if l2_pass { "PASS" } else { "FAIL" };
     eprintln!("LAYER 2: INTEGRATION ... {}", status);
-    results.push(("LAYER 2: INTEGRATION (LOAD/UNLOAD)".to_string(), Some(l2_pass), l2_detail));
+    results.push((
+        "LAYER 2: INTEGRATION (LOAD/UNLOAD)".to_string(),
+        Some(l2_pass),
+        l2_detail,
+    ));
     if !l2_pass {
         any_fail = true;
     }
@@ -454,7 +464,11 @@ fn full_gate() {
         let has_cyclictest = which("cyclictest");
         if !has_cyclictest {
             eprintln!("LAYER 3: LATENCY GATE ... SKIP");
-            results.push(("LAYER 3: LATENCY GATE".to_string(), None, "cyclictest not installed".to_string()));
+            results.push((
+                "LAYER 3: LATENCY GATE".to_string(),
+                None,
+                "cyclictest not installed".to_string(),
+            ));
         } else {
             let (l3_pass, l3_detail) = match l3 {
                 Ok(()) => (true, String::new()),
@@ -470,7 +484,11 @@ fn full_gate() {
             };
             let status = if l3_pass { "PASS" } else { "FAIL" };
             eprintln!("LAYER 3: LATENCY GATE ... {}", status);
-            results.push(("LAYER 3: LATENCY GATE".to_string(), Some(l3_pass), l3_detail));
+            results.push((
+                "LAYER 3: LATENCY GATE".to_string(),
+                Some(l3_pass),
+                l3_detail,
+            ));
             if !l3_pass {
                 any_fail = true;
             }

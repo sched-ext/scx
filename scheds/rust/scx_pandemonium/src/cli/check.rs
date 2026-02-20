@@ -24,7 +24,11 @@ fn check_kernel_version() -> bool {
                 log_info!("Kernel {} (>= 6.12)", release);
                 return true;
             }
-            log_error!("Kernel {}.{} is too old. PANDEMONIUM requires 6.12+.", major, minor);
+            log_error!(
+                "Kernel {}.{} is too old. PANDEMONIUM requires 6.12+.",
+                major,
+                minor
+            );
             log_error!("sched_ext (CONFIG_SCHED_CLASS_EXT) was merged in Linux 6.12.");
             return false;
         }

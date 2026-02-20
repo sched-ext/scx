@@ -20,7 +20,7 @@ pub fn run_probe(death_pipe_fd: Option<i32>) {
     }
 
     let mut samples: Vec<i64> = Vec::with_capacity(MAX_SAMPLES);
-    
+
     let target_ns: i64 = 10_000_000; // 10MS SLEEP TARGET
     let req = libc::timespec {
         tv_sec: 0,
@@ -29,8 +29,14 @@ pub fn run_probe(death_pipe_fd: Option<i32>) {
 
     // HOT LOOP: MEASURE + BUFFER. ZERO I/O.
     while RUNNING.load(Ordering::Relaxed) && samples.len() < MAX_SAMPLES {
-        let mut t0 = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        let mut t1 = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut t0 = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut t1 = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         unsafe {
             libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t0);
             libc::nanosleep(&req, std::ptr::null_mut());

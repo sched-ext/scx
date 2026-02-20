@@ -8,9 +8,7 @@ fn chrono_stamp() -> String {
         .output()
         .ok();
     match output {
-        Some(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
 }

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use pandemonium::procdb::{
-    ProcessDb, TaskProfile, TaskClassEntry,
-    MIN_CONFIDENCE, MIN_OBSERVATIONS, MAX_PROFILES, STALE_TICKS,
+    ProcessDb, TaskClassEntry, TaskProfile, MAX_PROFILES, MIN_CONFIDENCE, MIN_OBSERVATIONS,
+    STALE_TICKS,
 };
 
 fn offline_db() -> ProcessDb {
@@ -131,24 +131,30 @@ fn tick_caps_at_max_profiles() {
     for i in 1..=(MAX_PROFILES as u64) {
         let mut comm = [0u8; 16];
         comm[0..8].copy_from_slice(&i.to_le_bytes());
-        db.profiles.insert(comm, TaskProfile {
-            tier_votes: [5, 0, 0],
-            avg_runtime_ns: 100000,
-            observations: MIN_OBSERVATIONS,
-            last_seen_tick: tick,
-            ..Default::default()
-        });
+        db.profiles.insert(
+            comm,
+            TaskProfile {
+                tier_votes: [5, 0, 0],
+                avg_runtime_ns: 100000,
+                observations: MIN_OBSERVATIONS,
+                last_seen_tick: tick,
+                ..Default::default()
+            },
+        );
     }
 
     // INSERT ONE MORE ENTRY WITH SLIGHTLY OLDER TIMESTAMP (STILL FRESH)
     let oldest_comm = make_comm(b"oldest_entry");
-    db.profiles.insert(oldest_comm, TaskProfile {
-        tier_votes: [5, 0, 0],
-        avg_runtime_ns: 100000,
-        observations: MIN_OBSERVATIONS,
-        last_seen_tick: tick - 10,
-        ..Default::default()
-    });
+    db.profiles.insert(
+        oldest_comm,
+        TaskProfile {
+            tier_votes: [5, 0, 0],
+            avg_runtime_ns: 100000,
+            observations: MIN_OBSERVATIONS,
+            last_seen_tick: tick - 10,
+            ..Default::default()
+        },
+    );
 
     assert_eq!(db.profiles.len(), MAX_PROFILES + 1);
     db.tick();
@@ -167,12 +173,15 @@ fn summary_counts_confident() {
     db.profiles.insert(make_comm(b"ld"), confident_profile(0));
 
     // ONE NON-CONFIDENT: TOO FEW OBSERVATIONS
-    db.profiles.insert(make_comm(b"new_task"), TaskProfile {
-        tier_votes: [1, 0, 0],
-        avg_runtime_ns: 50000,
-        observations: 1,
-        ..Default::default()
-    });
+    db.profiles.insert(
+        make_comm(b"new_task"),
+        TaskProfile {
+            tier_votes: [1, 0, 0],
+            avg_runtime_ns: 50000,
+            observations: 1,
+            ..Default::default()
+        },
+    );
 
     let (total, confident) = db.summary();
     assert_eq!(total, 3);
@@ -199,24 +208,30 @@ fn save_load_round_trip() {
     let _ = std::fs::remove_file(&path);
 
     let mut db = offline_db();
-    db.profiles.insert(make_comm(b"gcc"), TaskProfile {
-        tier_votes: [10, 0, 0],
-        avg_runtime_ns: 2500000,
-        runtime_dev_ns: 500000,
-        wakeup_freq: 5,
-        csw_rate: 10,
-        observations: 10,
-        last_seen_tick: 50,
-    });
-    db.profiles.insert(make_comm(b"kwin"), TaskProfile {
-        tier_votes: [0, 0, 8],
-        avg_runtime_ns: 50000,
-        runtime_dev_ns: 5000,
-        wakeup_freq: 40,
-        csw_rate: 200,
-        observations: 8,
-        last_seen_tick: 50,
-    });
+    db.profiles.insert(
+        make_comm(b"gcc"),
+        TaskProfile {
+            tier_votes: [10, 0, 0],
+            avg_runtime_ns: 2500000,
+            runtime_dev_ns: 500000,
+            wakeup_freq: 5,
+            csw_rate: 10,
+            observations: 10,
+            last_seen_tick: 50,
+        },
+    );
+    db.profiles.insert(
+        make_comm(b"kwin"),
+        TaskProfile {
+            tier_votes: [0, 0, 8],
+            avg_runtime_ns: 50000,
+            runtime_dev_ns: 5000,
+            wakeup_freq: 40,
+            csw_rate: 200,
+            observations: 8,
+            last_seen_tick: 50,
+        },
+    );
     db.save(&path).unwrap();
 
     let loaded = ProcessDb::load_from_disk(&path).unwrap();
@@ -265,12 +280,15 @@ fn save_skips_non_confident_profiles() {
     // CONFIDENT
     db.profiles.insert(make_comm(b"gcc"), confident_profile(0));
     // NOT CONFIDENT: TOO FEW OBSERVATIONS
-    db.profiles.insert(make_comm(b"new"), TaskProfile {
-        tier_votes: [1, 0, 0],
-        avg_runtime_ns: 50000,
-        observations: 1,
-        ..Default::default()
-    });
+    db.profiles.insert(
+        make_comm(b"new"),
+        TaskProfile {
+            tier_votes: [1, 0, 0],
+            avg_runtime_ns: 50000,
+            observations: 1,
+            ..Default::default()
+        },
+    );
 
     db.save(&path).unwrap();
     let loaded = ProcessDb::load_from_disk(&path).unwrap();
@@ -370,24 +388,30 @@ fn eviction_oldest_first() {
     for i in 0..(MAX_PROFILES as u64) {
         let mut comm = [0u8; 16];
         comm[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-        db.profiles.insert(comm, TaskProfile {
-            tier_votes: [5, 0, 0],
-            avg_runtime_ns: 100000,
-            observations: MIN_OBSERVATIONS,
-            last_seen_tick: tick,
-            ..Default::default()
-        });
+        db.profiles.insert(
+            comm,
+            TaskProfile {
+                tier_votes: [5, 0, 0],
+                avg_runtime_ns: 100000,
+                observations: MIN_OBSERVATIONS,
+                last_seen_tick: tick,
+                ..Default::default()
+            },
+        );
     }
 
     // INSERT ONE MORE WITH OLDER TIMESTAMP
     let victim = make_comm(b"victim");
-    db.profiles.insert(victim, TaskProfile {
-        tier_votes: [5, 0, 0],
-        avg_runtime_ns: 100000,
-        observations: MIN_OBSERVATIONS,
-        last_seen_tick: tick - 5,
-        ..Default::default()
-    });
+    db.profiles.insert(
+        victim,
+        TaskProfile {
+            tier_votes: [5, 0, 0],
+            avg_runtime_ns: 100000,
+            observations: MIN_OBSERVATIONS,
+            last_seen_tick: tick - 5,
+            ..Default::default()
+        },
+    );
 
     assert_eq!(db.profiles.len(), MAX_PROFILES + 1);
     db.tick();
@@ -405,24 +429,30 @@ fn eviction_tie_break_by_observations() {
     for i in 0..(MAX_PROFILES as u64) {
         let mut comm = [0u8; 16];
         comm[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-        db.profiles.insert(comm, TaskProfile {
-            tier_votes: [10, 0, 0],
-            avg_runtime_ns: 100000,
-            observations: 10,
-            last_seen_tick: tick - 5,
-            ..Default::default()
-        });
+        db.profiles.insert(
+            comm,
+            TaskProfile {
+                tier_votes: [10, 0, 0],
+                avg_runtime_ns: 100000,
+                observations: 10,
+                last_seen_tick: tick - 5,
+                ..Default::default()
+            },
+        );
     }
 
     // INSERT ONE MORE WITH SAME TIMESTAMP BUT FEWER OBSERVATIONS
     let victim = make_comm(b"low_obs");
-    db.profiles.insert(victim, TaskProfile {
-        tier_votes: [3, 0, 0],
-        avg_runtime_ns: 100000,
-        observations: 3,
-        last_seen_tick: tick - 5,
-        ..Default::default()
-    });
+    db.profiles.insert(
+        victim,
+        TaskProfile {
+            tier_votes: [3, 0, 0],
+            avg_runtime_ns: 100000,
+            observations: 3,
+            last_seen_tick: tick - 5,
+            ..Default::default()
+        },
+    );
 
     assert_eq!(db.profiles.len(), MAX_PROFILES + 1);
     db.tick();
@@ -441,13 +471,16 @@ fn eviction_deterministic() {
         for i in 0..=(MAX_PROFILES as u64) {
             let mut comm = [0u8; 16];
             comm[0..8].copy_from_slice(&i.to_le_bytes());
-            db.profiles.insert(comm, TaskProfile {
-                tier_votes: [5, 0, 0],
-                avg_runtime_ns: 100000,
-                observations: (i as u32) % 10 + 1,
-                last_seen_tick: tick - (i % 20),
-                ..Default::default()
-            });
+            db.profiles.insert(
+                comm,
+                TaskProfile {
+                    tier_votes: [5, 0, 0],
+                    avg_runtime_ns: 100000,
+                    observations: (i as u32) % 10 + 1,
+                    last_seen_tick: tick - (i % 20),
+                    ..Default::default()
+                },
+            );
         }
 
         db.tick();
@@ -466,7 +499,8 @@ fn eviction_deterministic() {
         assert_eq!(
             db1.profiles.get(&comm).is_some(),
             db2.profiles.get(&comm).is_some(),
-            "MISMATCH AT i={}", i
+            "MISMATCH AT i={}",
+            i
         );
     }
 }
@@ -532,8 +566,8 @@ fn procdb_v1_load_compat() {
     let p = &loaded[&comm];
     assert_eq!(p.avg_runtime_ns, 2_000_000);
     assert_eq!(p.runtime_dev_ns, 0); // ZERO-FILLED
-    assert_eq!(p.wakeup_freq, 0);    // ZERO-FILLED
-    assert_eq!(p.csw_rate, 0);       // ZERO-FILLED
+    assert_eq!(p.wakeup_freq, 0); // ZERO-FILLED
+    assert_eq!(p.csw_rate, 0); // ZERO-FILLED
     assert_eq!(p.observations, 5);
 
     let _ = std::fs::remove_file(&path);
@@ -546,15 +580,18 @@ fn richer_observation_roundtrip() {
     let _ = std::fs::remove_file(&path);
 
     let mut db = offline_db();
-    db.profiles.insert(make_comm(b"firefox"), TaskProfile {
-        tier_votes: [0, 0, 8],
-        avg_runtime_ns: 75000,
-        runtime_dev_ns: 12000,
-        wakeup_freq: 45,
-        csw_rate: 180,
-        observations: 8,
-        last_seen_tick: 100,
-    });
+    db.profiles.insert(
+        make_comm(b"firefox"),
+        TaskProfile {
+            tier_votes: [0, 0, 8],
+            avg_runtime_ns: 75000,
+            runtime_dev_ns: 12000,
+            wakeup_freq: 45,
+            csw_rate: 180,
+            observations: 8,
+            last_seen_tick: 100,
+        },
+    );
     db.save(&path).unwrap();
 
     let loaded = ProcessDb::load_from_disk(&path).unwrap();

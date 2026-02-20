@@ -7,32 +7,42 @@ pub const MAX_SNAPSHOTS: usize = 8192;
 
 #[derive(Clone, Copy)]
 pub struct Snapshot {
-    pub ts_ns:       u64,
-    pub dispatches:  u64,
-    pub idle_hits:   u64,
-    pub shared:      u64,
-    pub preempt:     u64,
-    pub keep_run:    u64,
+    pub ts_ns: u64,
+    pub dispatches: u64,
+    pub idle_hits: u64,
+    pub shared: u64,
+    pub preempt: u64,
+    pub keep_run: u64,
     pub wake_avg_us: u64,
-    pub hard_kicks:  u64,
-    pub soft_kicks:  u64,
+    pub hard_kicks: u64,
+    pub soft_kicks: u64,
     pub lat_idle_us: u64,
     pub lat_kick_us: u64,
 }
 
 pub struct EventLog {
     snapshots: Vec<Snapshot>,
-    head:      usize,
-    len:       usize,
+    head: usize,
+    len: usize,
 }
 
 impl EventLog {
     pub fn new() -> Self {
         Self {
             snapshots: vec![
-                Snapshot { ts_ns: 0, dispatches: 0, idle_hits: 0, shared: 0,
-                           preempt: 0, keep_run: 0, wake_avg_us: 0,
-                           hard_kicks: 0, soft_kicks: 0, lat_idle_us: 0, lat_kick_us: 0 };
+                Snapshot {
+                    ts_ns: 0,
+                    dispatches: 0,
+                    idle_hits: 0,
+                    shared: 0,
+                    preempt: 0,
+                    keep_run: 0,
+                    wake_avg_us: 0,
+                    hard_kicks: 0,
+                    soft_kicks: 0,
+                    lat_idle_us: 0,
+                    lat_kick_us: 0
+                };
                 MAX_SNAPSHOTS
             ],
             head: 0,
@@ -42,10 +52,19 @@ impl EventLog {
 
     // RECORD ONE STATS SNAPSHOT. CALLED ONCE PER SECOND FROM THE MONITOR LOOP.
     // OVERWRITES OLDEST ENTRY WHEN FULL.
-    pub fn snapshot(&mut self, dispatches: u64, idle_hits: u64, shared: u64,
-                    preempt: u64, keep_run: u64, wake_avg_us: u64,
-                    hard_kicks: u64, soft_kicks: u64,
-                    lat_idle_us: u64, lat_kick_us: u64) {
+    pub fn snapshot(
+        &mut self,
+        dispatches: u64,
+        idle_hits: u64,
+        shared: u64,
+        preempt: u64,
+        keep_run: u64,
+        wake_avg_us: u64,
+        hard_kicks: u64,
+        soft_kicks: u64,
+        lat_idle_us: u64,
+        lat_kick_us: u64,
+    ) {
         self.snapshots[self.head] = Snapshot {
             ts_ns: now_ns(),
             dispatches,
@@ -79,10 +98,12 @@ impl EventLog {
 
     // ITERATE SNAPSHOTS IN CHRONOLOGICAL ORDER
     pub fn iter_chronological(&self) -> impl Iterator<Item = &Snapshot> {
-        let start = if self.len < MAX_SNAPSHOTS { 0 } else { self.head };
-        (0..self.len).map(move |i| {
-            &self.snapshots[(start + i) % MAX_SNAPSHOTS]
-        })
+        let start = if self.len < MAX_SNAPSHOTS {
+            0
+        } else {
+            self.head
+        };
+        (0..self.len).map(move |i| &self.snapshots[(start + i) % MAX_SNAPSHOTS])
     }
 
     // DUMP THE TIME SERIES AFTER EXECUTION
@@ -95,24 +116,58 @@ impl EventLog {
         let first = iter.next().unwrap();
         let base_ts = first.ts_ns;
 
-        println!("\n{:<10} {:<12} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {:<8} {:<10} {:<10}",
-            "TIME_S", "DISPATCH/S", "IDLE/S", "SHARED/S", "PREEMPT", "KEEP_RUN", "WAKE_US",
-            "KICK_H", "KICK_S", "LAT_IDLE", "LAT_KICK");
-        println!("{:<10.1} {:<12} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {:<8} {:<10} {:<10}",
-            0.0, first.dispatches, first.idle_hits, first.shared,
-            first.preempt, first.keep_run, first.wake_avg_us,
-            first.hard_kicks, first.soft_kicks, first.lat_idle_us, first.lat_kick_us);
+        println!(
+            "\n{:<10} {:<12} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {:<8} {:<10} {:<10}",
+            "TIME_S",
+            "DISPATCH/S",
+            "IDLE/S",
+            "SHARED/S",
+            "PREEMPT",
+            "KEEP_RUN",
+            "WAKE_US",
+            "KICK_H",
+            "KICK_S",
+            "LAT_IDLE",
+            "LAT_KICK"
+        );
+        println!(
+            "{:<10.1} {:<12} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {:<8} {:<10} {:<10}",
+            0.0,
+            first.dispatches,
+            first.idle_hits,
+            first.shared,
+            first.preempt,
+            first.keep_run,
+            first.wake_avg_us,
+            first.hard_kicks,
+            first.soft_kicks,
+            first.lat_idle_us,
+            first.lat_kick_us
+        );
 
         for s in iter {
             let elapsed_s = (s.ts_ns - base_ts) as f64 / 1_000_000_000.0;
-            println!("{:<10.1} {:<12} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {:<8} {:<10} {:<10}",
-                elapsed_s, s.dispatches, s.idle_hits, s.shared,
-                s.preempt, s.keep_run, s.wake_avg_us,
-                s.hard_kicks, s.soft_kicks, s.lat_idle_us, s.lat_kick_us);
+            println!(
+                "{:<10.1} {:<12} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {:<8} {:<10} {:<10}",
+                elapsed_s,
+                s.dispatches,
+                s.idle_hits,
+                s.shared,
+                s.preempt,
+                s.keep_run,
+                s.wake_avg_us,
+                s.hard_kicks,
+                s.soft_kicks,
+                s.lat_idle_us,
+                s.lat_kick_us
+            );
         }
 
         if self.len == MAX_SNAPSHOTS {
-            println!("\n(RING BUFFER WRAPPED -- SHOWING MOST RECENT {} SNAPSHOTS)", MAX_SNAPSHOTS);
+            println!(
+                "\n(RING BUFFER WRAPPED -- SHOWING MOST RECENT {} SNAPSHOTS)",
+                MAX_SNAPSHOTS
+            );
         }
         println!("TOTAL SNAPSHOTS: {}", self.len);
     }
@@ -145,7 +200,11 @@ impl EventLog {
         println!("  PEAK DISPATCH/S:   {}", peak_d);
         if elapsed_s > 0.0 {
             println!("  AVG DISPATCH/S:    {:.0}", total_d as f64 / elapsed_s);
-            let idle_pct = if total_d > 0 { total_idle as f64 / total_d as f64 * 100.0 } else { 0.0 };
+            let idle_pct = if total_d > 0 {
+                total_idle as f64 / total_d as f64 * 100.0
+            } else {
+                0.0
+            };
             println!("  IDLE HIT RATE:     {:.1}%", idle_pct);
         }
         println!("  ELAPSED:           {:.1}s", elapsed_s);

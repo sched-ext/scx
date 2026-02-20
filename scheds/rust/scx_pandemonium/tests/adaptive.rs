@@ -5,17 +5,13 @@
 // ZERO BPF DEPENDENCIES. RUN OFFLINE.
 
 use pandemonium::tuning::{
-    Regime, TuningKnobs, detect_regime, regime_knobs,
-    samples_per_check_for_regime,
-    compute_stability_score, hibernate_samples_per_check,
-    should_print_telemetry,
-    compute_p99_from_histogram, should_reflex_tighten,
-    HEAVY_ENTER_PCT, HEAVY_EXIT_PCT, LIGHT_ENTER_PCT, LIGHT_EXIT_PCT,
-    LIGHT_DEMOTION_NS, MIXED_DEMOTION_NS, HEAVY_DEMOTION_NS,
-    LIGHT_SAMPLES_PER_CHECK, MIXED_SAMPLES_PER_CHECK, HEAVY_SAMPLES_PER_CHECK,
-    STABILITY_THRESHOLD, HIBERNATE_MULTIPLIER,
-    DEFAULT_LAT_CRI_THRESH_HIGH, DEFAULT_LAT_CRI_THRESH_LOW,
-    HIST_BUCKETS,
+    compute_p99_from_histogram, compute_stability_score, detect_regime,
+    hibernate_samples_per_check, regime_knobs, samples_per_check_for_regime,
+    should_print_telemetry, should_reflex_tighten, Regime, TuningKnobs,
+    DEFAULT_LAT_CRI_THRESH_HIGH, DEFAULT_LAT_CRI_THRESH_LOW, HEAVY_DEMOTION_NS, HEAVY_ENTER_PCT,
+    HEAVY_EXIT_PCT, HEAVY_SAMPLES_PER_CHECK, HIBERNATE_MULTIPLIER, HIST_BUCKETS, LIGHT_DEMOTION_NS,
+    LIGHT_ENTER_PCT, LIGHT_EXIT_PCT, LIGHT_SAMPLES_PER_CHECK, MIXED_DEMOTION_NS,
+    MIXED_SAMPLES_PER_CHECK, STABILITY_THRESHOLD,
 };
 
 // REGIME DETECTION (SCHMITT TRIGGER)
@@ -104,9 +100,9 @@ fn regime_knobs_heavy_values() {
 
 #[test]
 fn demotion_threshold_per_regime() {
-    assert_eq!(LIGHT_DEMOTION_NS, 3_500_000);  // 3.5MS: LENIENT
-    assert_eq!(MIXED_DEMOTION_NS, 2_500_000);  // 2.5MS: CURRENT DEFAULT
-    assert_eq!(HEAVY_DEMOTION_NS, 2_000_000);  // 2.0MS: AGGRESSIVE
+    assert_eq!(LIGHT_DEMOTION_NS, 3_500_000); // 3.5MS: LENIENT
+    assert_eq!(MIXED_DEMOTION_NS, 2_500_000); // 2.5MS: CURRENT DEFAULT
+    assert_eq!(HEAVY_DEMOTION_NS, 2_000_000); // 2.0MS: AGGRESSIVE
 }
 
 #[test]
@@ -121,9 +117,18 @@ fn demotion_threshold_in_knobs() {
 
 #[test]
 fn samples_per_check_per_regime() {
-    assert_eq!(samples_per_check_for_regime(Regime::Light), LIGHT_SAMPLES_PER_CHECK);
-    assert_eq!(samples_per_check_for_regime(Regime::Mixed), MIXED_SAMPLES_PER_CHECK);
-    assert_eq!(samples_per_check_for_regime(Regime::Heavy), HEAVY_SAMPLES_PER_CHECK);
+    assert_eq!(
+        samples_per_check_for_regime(Regime::Light),
+        LIGHT_SAMPLES_PER_CHECK
+    );
+    assert_eq!(
+        samples_per_check_for_regime(Regime::Mixed),
+        MIXED_SAMPLES_PER_CHECK
+    );
+    assert_eq!(
+        samples_per_check_for_regime(Regime::Heavy),
+        HEAVY_SAMPLES_PER_CHECK
+    );
     assert_eq!(LIGHT_SAMPLES_PER_CHECK, 16);
     assert_eq!(MIXED_SAMPLES_PER_CHECK, 32);
     assert_eq!(HEAVY_SAMPLES_PER_CHECK, 64);
@@ -233,7 +238,7 @@ fn per_tier_p99_isolates_tiers() {
     let batch_p99 = compute_p99_from_histogram(&batch_counts);
     let interactive_p99 = compute_p99_from_histogram(&interactive_counts);
 
-    assert_eq!(batch_p99, 50_000);       // 50US
+    assert_eq!(batch_p99, 50_000); // 50US
     assert_eq!(interactive_p99, 1_000_000); // 1MS
 }
 
@@ -281,8 +286,15 @@ fn classifier_thresholds_in_all_regimes() {
     // ALL REGIMES USE THE SAME CLASSIFIER THRESHOLDS (FOR NOW)
     for regime in [Regime::Light, Regime::Mixed, Regime::Heavy] {
         let k = regime_knobs(regime);
-        assert_eq!(k.lat_cri_thresh_high, 32, "high threshold mismatch in {:?}", regime);
-        assert_eq!(k.lat_cri_thresh_low, 8, "low threshold mismatch in {:?}", regime);
+        assert_eq!(
+            k.lat_cri_thresh_high, 32,
+            "high threshold mismatch in {:?}",
+            regime
+        );
+        assert_eq!(
+            k.lat_cri_thresh_low, 8,
+            "low threshold mismatch in {:?}",
+            regime
+        );
     }
 }
-

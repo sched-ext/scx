@@ -5,8 +5,8 @@
 use std::mem::MaybeUninit;
 
 use anyhow::Result;
-use libbpf_rs::MapCore;
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use libbpf_rs::MapCore;
 
 use crate::bpf_skel::*;
 use crate::tuning::TuningKnobs;
@@ -17,7 +17,7 @@ const SCX_EXIT_NONE: i32 = 0;
 const SCX_ECODE_RST_MASK: u64 = 1 << 16;
 
 // SCX DSQ FLAGS (STABLE KERNEL ABI -- sched_ext/sched.h)
-const SCX_DSQ_FLAG_BUILTIN:  u64 = 1u64 << 63;
+const SCX_DSQ_FLAG_BUILTIN: u64 = 1u64 << 63;
 const SCX_DSQ_FLAG_LOCAL_ON: u64 = 1u64 << 62;
 
 // MATCHES struct pandemonium_stats IN BPF (intf.h)
@@ -82,18 +82,18 @@ impl<'a> Scheduler<'a> {
         rodata.ringbuf_active = adaptive;
 
         // POPULATE SCX ENUM VALUES
-        rodata.__SCX_DSQ_FLAG_BUILTIN  = SCX_DSQ_FLAG_BUILTIN;
+        rodata.__SCX_DSQ_FLAG_BUILTIN = SCX_DSQ_FLAG_BUILTIN;
         rodata.__SCX_DSQ_FLAG_LOCAL_ON = SCX_DSQ_FLAG_LOCAL_ON;
-        rodata.__SCX_DSQ_INVALID       = SCX_DSQ_FLAG_BUILTIN;
-        rodata.__SCX_DSQ_GLOBAL        = SCX_DSQ_FLAG_BUILTIN | 1;
-        rodata.__SCX_DSQ_LOCAL         = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON;
-        rodata.__SCX_DSQ_LOCAL_ON      = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON | 1;
+        rodata.__SCX_DSQ_INVALID = SCX_DSQ_FLAG_BUILTIN;
+        rodata.__SCX_DSQ_GLOBAL = SCX_DSQ_FLAG_BUILTIN | 1;
+        rodata.__SCX_DSQ_LOCAL = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON;
+        rodata.__SCX_DSQ_LOCAL_ON = SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON | 1;
         rodata.__SCX_DSQ_LOCAL_CPU_MASK = 0xFFFFFFFF;
 
         // POPULATE SCX_KICK_* ENUM VALUES
-        rodata.__SCX_KICK_IDLE    = 1;
+        rodata.__SCX_KICK_IDLE = 1;
         rodata.__SCX_KICK_PREEMPT = 2;
-        rodata.__SCX_KICK_WAIT    = 4;
+        rodata.__SCX_KICK_WAIT = 4;
 
         // LOAD (VALIDATES BPF WITH KERNEL)
         let mut skel = open_skel.load()?;
@@ -140,7 +140,12 @@ impl<'a> Scheduler<'a> {
         let key = 0u32.to_ne_bytes();
         let mut total = PandemoniumStats::default();
 
-        let percpu_vals = match self.skel.maps.stats_map.lookup_percpu(&key, libbpf_rs::MapFlags::ANY) {
+        let percpu_vals = match self
+            .skel
+            .maps
+            .stats_map
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        {
             Ok(Some(v)) => v,
             _ => return total,
         };
@@ -191,14 +196,22 @@ impl<'a> Scheduler<'a> {
                 std::mem::size_of::<TuningKnobs>(),
             )
         };
-        self.skel.maps.tuning_knobs_map.update(&key, value, libbpf_rs::MapFlags::ANY)?;
+        self.skel
+            .maps
+            .tuning_knobs_map
+            .update(&key, value, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
 
     // READ CURRENT TUNING KNOBS FROM BPF MAP
     pub fn read_tuning_knobs(&self) -> TuningKnobs {
         let key = 0u32.to_ne_bytes();
-        match self.skel.maps.tuning_knobs_map.lookup(&key, libbpf_rs::MapFlags::ANY) {
+        match self
+            .skel
+            .maps
+            .tuning_knobs_map
+            .lookup(&key, libbpf_rs::MapFlags::ANY)
+        {
             Ok(Some(v)) if v.len() >= std::mem::size_of::<TuningKnobs>() => unsafe {
                 std::ptr::read_unaligned(v.as_ptr() as *const TuningKnobs)
             },
@@ -229,7 +242,10 @@ impl<'a> Scheduler<'a> {
     pub fn write_cache_domain(&self, cpu: u32, l2_group: u32) -> Result<()> {
         let key = cpu.to_ne_bytes();
         let val = l2_group.to_ne_bytes();
-        self.skel.maps.cache_domain.update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        self.skel
+            .maps
+            .cache_domain
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
 
@@ -240,7 +256,10 @@ impl<'a> Scheduler<'a> {
         let len = bytes.len().min(15);
         key[..len].copy_from_slice(&bytes[..len]);
         let val = [1u8];
-        self.skel.maps.compositor_map.update(&key, &val, libbpf_rs::MapFlags::ANY)?;
+        self.skel
+            .maps
+            .compositor_map
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
 
@@ -251,12 +270,10 @@ impl<'a> Scheduler<'a> {
         let exit_code = data.uei.exit_code;
 
         if kind != SCX_EXIT_NONE {
-            let reason_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(data.uei.reason.as_ptr() as *const u8, 128)
-            };
-            let msg_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(data.uei.msg.as_ptr() as *const u8, 1024)
-            };
+            let reason_bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(data.uei.reason.as_ptr() as *const u8, 128) };
+            let msg_bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(data.uei.msg.as_ptr() as *const u8, 1024) };
 
             let reason = std::str::from_utf8(reason_bytes)
                 .unwrap_or("unknown")
@@ -284,12 +301,32 @@ impl<'a> Scheduler<'a> {
 
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
-        let _ = self.skel.maps.wake_lat_rb.unpin("/sys/fs/bpf/pandemonium/wake_lat_rb");
+        let _ = self
+            .skel
+            .maps
+            .wake_lat_rb
+            .unpin("/sys/fs/bpf/pandemonium/wake_lat_rb");
         let _ = self.skel.maps.tuning_knobs_map.unpin(KNOBS_PIN);
-        let _ = self.skel.maps.cache_domain.unpin("/sys/fs/bpf/pandemonium/cache_domain");
-        let _ = self.skel.maps.task_class_observe.unpin("/sys/fs/bpf/pandemonium/task_class_observe");
-        let _ = self.skel.maps.task_class_init.unpin("/sys/fs/bpf/pandemonium/task_class_init");
-        let _ = self.skel.maps.compositor_map.unpin("/sys/fs/bpf/pandemonium/compositor_map");
+        let _ = self
+            .skel
+            .maps
+            .cache_domain
+            .unpin("/sys/fs/bpf/pandemonium/cache_domain");
+        let _ = self
+            .skel
+            .maps
+            .task_class_observe
+            .unpin("/sys/fs/bpf/pandemonium/task_class_observe");
+        let _ = self
+            .skel
+            .maps
+            .task_class_init
+            .unpin("/sys/fs/bpf/pandemonium/task_class_init");
+        let _ = self
+            .skel
+            .maps
+            .compositor_map
+            .unpin("/sys/fs/bpf/pandemonium/compositor_map");
         let _ = std::fs::remove_dir("/sys/fs/bpf/pandemonium");
     }
 }

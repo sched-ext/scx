@@ -19,41 +19,43 @@ use libbpf_rs::MapCore;
 
 use crate::procdb::ProcessDb;
 use crate::scheduler::{PandemoniumStats, Scheduler};
-use crate::tuning::{self, Regime, TuningKnobs, regime_knobs, detect_regime, HIST_BUCKETS, HIST_EDGES_NS};
+use crate::tuning::{
+    self, detect_regime, regime_knobs, Regime, TuningKnobs, HIST_BUCKETS, HIST_EDGES_NS,
+};
 
 // REGIME THRESHOLDS, PROFILES, AND KNOB COMPUTATION LIVE IN tuning.rs
 // (ZERO BPF DEPENDENCIES, TESTABLE OFFLINE)
 
 // REFLEX PARAMETERS
 
-const COOLDOWN_CHECKS: u32   = 2;
-const MIN_SLICE_NS: u64      = 500_000;   // 500US FLOOR -- ALLOWS 5 TIGHTEN STEPS FROM 2MS BASELINE
+const COOLDOWN_CHECKS: u32 = 2;
+const MIN_SLICE_NS: u64 = 500_000; // 500US FLOOR -- ALLOWS 5 TIGHTEN STEPS FROM 2MS BASELINE
 
 // GRADUATED RELAX: STEP TOWARD BASELINE AFTER P99 NORMALIZES
-const RELAX_STEP_NS: u64    = 500_000;   // RELAX BY 500US PER TICK
-const RELAX_HOLD_TICKS: u32 = 2;         // WAIT 2S OF GOOD P99 BEFORE STEPPING
+const RELAX_STEP_NS: u64 = 500_000; // RELAX BY 500US PER TICK
+const RELAX_HOLD_TICKS: u32 = 2; // WAIT 2S OF GOOD P99 BEFORE STEPPING
 
 // LOCK-FREE LATENCY HISTOGRAM
 
 // SLEEP PATTERN BUCKETS: CLASSIFY IO-WAIT VS IDLE WORKLOADS
 const SLEEP_BUCKETS: usize = 4;
 const SLEEP_EDGES_NS: [u64; SLEEP_BUCKETS] = [
-    1_000_000,      // 1ms: IO-WAIT (FAST DISK/NETWORK/PIPE)
-    10_000_000,     // 10ms: SHORT IO (TYPICAL DISK READ)
-    100_000_000,    // 100ms: MODERATE (NETWORK, USER INPUT)
-    u64::MAX,       // +INF: IDLE (LONG SLEEP, TIMER, POLLING)
+    1_000_000,   // 1ms: IO-WAIT (FAST DISK/NETWORK/PIPE)
+    10_000_000,  // 10ms: SHORT IO (TYPICAL DISK READ)
+    100_000_000, // 100ms: MODERATE (NETWORK, USER INPUT)
+    u64::MAX,    // +INF: IDLE (LONG SLEEP, TIMER, POLLING)
 ];
 
 // TYPES
 
 #[repr(C)]
 struct WakeLatSample {
-    lat_ns:   u64,
-    sleep_ns: u64,    // HOW LONG TASK SLEPT BEFORE THIS WAKEUP
-    pid:      u32,
-    path:     u8,     // 0=IDLE, 1=HARD_KICK, 2=SOFT_KICK
-    tier:     u8,     // TASK TIER AT WAKEUP TIME
-    _pad:     [u8; 2],
+    lat_ns: u64,
+    sleep_ns: u64, // HOW LONG TASK SLEPT BEFORE THIS WAKEUP
+    pid: u32,
+    path: u8, // 0=IDLE, 1=HARD_KICK, 2=SOFT_KICK
+    tier: u8, // TASK TIER AT WAKEUP TIME
+    _pad: [u8; 2],
 }
 
 // SHARED STATE (ATOMICS ONLY, NO MUTEX)
@@ -94,7 +96,8 @@ impl SharedState {
     }
 
     fn record_sample(&self, lat_ns: u64, tier: u8) {
-        let bucket = HIST_EDGES_NS.iter()
+        let bucket = HIST_EDGES_NS
+            .iter()
             .position(|&edge| lat_ns <= edge)
             .unwrap_or(HIST_BUCKETS - 1);
         self.histogram[bucket].fetch_add(1, Ordering::Relaxed);
@@ -132,7 +135,8 @@ impl SharedState {
     }
 
     fn record_sleep(&self, sleep_ns: u64) {
-        let bucket = SLEEP_EDGES_NS.iter()
+        let bucket = SLEEP_EDGES_NS
+            .iter()
             .position(|&edge| sleep_ns <= edge)
             .unwrap_or(SLEEP_BUCKETS - 1);
         self.sleep_histogram[bucket].fetch_add(1, Ordering::Relaxed);
@@ -179,9 +183,8 @@ pub fn build_ring_buffer(
 ) -> Result<libbpf_rs::RingBuffer<'static>> {
     sched.build_wake_lat_ring_buffer(move |data: &[u8]| -> i32 {
         if data.len() >= std::mem::size_of::<WakeLatSample>() {
-            let sample: WakeLatSample = unsafe {
-                std::ptr::read_unaligned(data.as_ptr() as *const WakeLatSample)
-            };
+            let sample: WakeLatSample =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const WakeLatSample) };
             shared.record_sample(sample.lat_ns, sample.tier);
             if sample.sleep_ns > 0 {
                 shared.record_sleep(sample.sleep_ns);
@@ -339,20 +342,48 @@ pub fn monitor_loop(
         let d_idle_cnt = stats.wake_lat_idle_cnt.wrapping_sub(prev.wake_lat_idle_cnt);
         let d_kick_sum = stats.wake_lat_kick_sum.wrapping_sub(prev.wake_lat_kick_sum);
         let d_kick_cnt = stats.wake_lat_kick_cnt.wrapping_sub(prev.wake_lat_kick_cnt);
-        let lat_idle_us = if d_idle_cnt > 0 { d_idle_sum / d_idle_cnt / 1000 } else { 0 };
-        let lat_kick_us = if d_kick_cnt > 0 { d_kick_sum / d_kick_cnt / 1000 } else { 0 };
+        let lat_idle_us = if d_idle_cnt > 0 {
+            d_idle_sum / d_idle_cnt / 1000
+        } else {
+            0
+        };
+        let lat_kick_us = if d_kick_cnt > 0 {
+            d_kick_sum / d_kick_cnt / 1000
+        } else {
+            0
+        };
         let delta_guard = stats.nr_guard_clamps.wrapping_sub(prev.nr_guard_clamps);
 
         // L2 CACHE AFFINITY DELTAS
         let dl2_hb = stats.nr_l2_hit_batch.wrapping_sub(prev.nr_l2_hit_batch);
         let dl2_mb = stats.nr_l2_miss_batch.wrapping_sub(prev.nr_l2_miss_batch);
-        let dl2_hi = stats.nr_l2_hit_interactive.wrapping_sub(prev.nr_l2_hit_interactive);
-        let dl2_mi = stats.nr_l2_miss_interactive.wrapping_sub(prev.nr_l2_miss_interactive);
-        let dl2_hl = stats.nr_l2_hit_lat_crit.wrapping_sub(prev.nr_l2_hit_lat_crit);
-        let dl2_ml = stats.nr_l2_miss_lat_crit.wrapping_sub(prev.nr_l2_miss_lat_crit);
-        let l2_pct_b = if dl2_hb + dl2_mb > 0 { dl2_hb * 100 / (dl2_hb + dl2_mb) } else { 0 };
-        let l2_pct_i = if dl2_hi + dl2_mi > 0 { dl2_hi * 100 / (dl2_hi + dl2_mi) } else { 0 };
-        let l2_pct_l = if dl2_hl + dl2_ml > 0 { dl2_hl * 100 / (dl2_hl + dl2_ml) } else { 0 };
+        let dl2_hi = stats
+            .nr_l2_hit_interactive
+            .wrapping_sub(prev.nr_l2_hit_interactive);
+        let dl2_mi = stats
+            .nr_l2_miss_interactive
+            .wrapping_sub(prev.nr_l2_miss_interactive);
+        let dl2_hl = stats
+            .nr_l2_hit_lat_crit
+            .wrapping_sub(prev.nr_l2_hit_lat_crit);
+        let dl2_ml = stats
+            .nr_l2_miss_lat_crit
+            .wrapping_sub(prev.nr_l2_miss_lat_crit);
+        let l2_pct_b = if dl2_hb + dl2_mb > 0 {
+            dl2_hb * 100 / (dl2_hb + dl2_mb)
+        } else {
+            0
+        };
+        let l2_pct_i = if dl2_hi + dl2_mi > 0 {
+            dl2_hi * 100 / (dl2_hi + dl2_mi)
+        } else {
+            0
+        };
+        let l2_pct_l = if dl2_hl + dl2_ml > 0 {
+            dl2_hl * 100 / (dl2_hl + dl2_ml)
+        } else {
+            0
+        };
 
         let idle_pct = if delta_d > 0 {
             delta_idle * 100 / delta_d
@@ -395,12 +426,10 @@ pub fn monitor_loop(
                 if relax_counter >= RELAX_HOLD_TICKS {
                     let current = sched.read_tuning_knobs();
                     if current.slice_ns < baseline.slice_ns {
-                        let new_slice = (current.slice_ns + RELAX_STEP_NS)
-                            .min(baseline.slice_ns);
+                        let new_slice = (current.slice_ns + RELAX_STEP_NS).min(baseline.slice_ns);
                         let knobs = TuningKnobs {
                             slice_ns: new_slice,
-                            preempt_thresh_ns: baseline.preempt_thresh_ns
-                                .min(new_slice),
+                            preempt_thresh_ns: baseline.preempt_thresh_ns.min(new_slice),
                             batch_slice_ns: current.batch_slice_ns,
                             ..baseline
                         };
@@ -477,9 +506,16 @@ pub fn monitor_loop(
         }
 
         sched.log.snapshot(
-            delta_d, delta_idle, delta_shared,
-            delta_preempt, delta_keep, wake_avg_us,
-            delta_hard, delta_soft, lat_idle_us, lat_kick_us,
+            delta_d,
+            delta_idle,
+            delta_shared,
+            delta_preempt,
+            delta_keep,
+            wake_avg_us,
+            delta_hard,
+            delta_soft,
+            lat_idle_us,
+            lat_kick_us,
         );
 
         match regime {
@@ -498,7 +534,12 @@ pub fn monitor_loop(
         match db.save(&path) {
             Ok(()) => {
                 let (total, confident) = db.summary();
-                log_info!("PROCDB: SAVED {}/{} PROFILES TO {}", confident, total, path.display());
+                log_info!(
+                    "PROCDB: SAVED {}/{} PROFILES TO {}",
+                    confident,
+                    total,
+                    path.display()
+                );
             }
             Err(e) => log_warn!("PROCDB SAVE FAILED: {}", e),
         }
@@ -511,9 +552,21 @@ pub fn monitor_loop(
     let l2_total_b = final_stats.nr_l2_hit_batch + final_stats.nr_l2_miss_batch;
     let l2_total_i = final_stats.nr_l2_hit_interactive + final_stats.nr_l2_miss_interactive;
     let l2_total_l = final_stats.nr_l2_hit_lat_crit + final_stats.nr_l2_miss_lat_crit;
-    let l2_cum_b = if l2_total_b > 0 { final_stats.nr_l2_hit_batch * 100 / l2_total_b } else { 0 };
-    let l2_cum_i = if l2_total_i > 0 { final_stats.nr_l2_hit_interactive * 100 / l2_total_i } else { 0 };
-    let l2_cum_l = if l2_total_l > 0 { final_stats.nr_l2_hit_lat_crit * 100 / l2_total_l } else { 0 };
+    let l2_cum_b = if l2_total_b > 0 {
+        final_stats.nr_l2_hit_batch * 100 / l2_total_b
+    } else {
+        0
+    };
+    let l2_cum_i = if l2_total_i > 0 {
+        final_stats.nr_l2_hit_interactive * 100 / l2_total_i
+    } else {
+        0
+    };
+    let l2_cum_l = if l2_total_l > 0 {
+        final_stats.nr_l2_hit_lat_crit * 100 / l2_total_l
+    } else {
+        0
+    };
     println!(
         "[KNOBS] regime={} slice_ns={} batch_ns={} preempt_ns={} demotion_ns={} lag={} tightened={} reflex={} ticks=L:{}/M:{}/H:{} l2_hit=B:{}%/I:{}%/L:{}%",
         regime.label(), final_knobs.slice_ns, final_knobs.batch_slice_ns,

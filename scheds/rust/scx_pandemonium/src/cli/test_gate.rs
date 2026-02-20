@@ -47,4 +47,3 @@ pub fn run_test_gate() -> Result<()> {
 
     Ok(())
 }
-

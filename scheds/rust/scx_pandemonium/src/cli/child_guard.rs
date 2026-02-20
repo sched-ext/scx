@@ -70,7 +70,9 @@ impl ChildGuard {
     /// the Drop cleanup. Caller becomes responsible for the process.
     /// Use this when you need wait_with_output() for stdout capture.
     pub fn into_child(mut self) -> Child {
-        self.child.take().expect("ChildGuard: child already consumed")
+        self.child
+            .take()
+            .expect("ChildGuard: child already consumed")
     }
 }
 

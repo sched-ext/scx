@@ -6,43 +6,43 @@
 // DIRECTIONAL HYSTERESIS PREVENTS OSCILLATION AT REGIME BOUNDARIES.
 // WIDE DEAD ZONES: MUST CLEARLY ENTER A REGIME AND CLEARLY LEAVE IT.
 
-pub const HEAVY_ENTER_PCT: u64 = 10;   // ENTER HEAVY: IDLE < 10%
-pub const HEAVY_EXIT_PCT: u64  = 25;   // LEAVE HEAVY: IDLE > 25%
-pub const LIGHT_ENTER_PCT: u64 = 50;   // ENTER LIGHT: IDLE > 50%
-pub const LIGHT_EXIT_PCT: u64  = 30;   // LEAVE LIGHT: IDLE < 30%
+pub const HEAVY_ENTER_PCT: u64 = 10; // ENTER HEAVY: IDLE < 10%
+pub const HEAVY_EXIT_PCT: u64 = 25; // LEAVE HEAVY: IDLE > 25%
+pub const LIGHT_ENTER_PCT: u64 = 50; // ENTER LIGHT: IDLE > 50%
+pub const LIGHT_EXIT_PCT: u64 = 30; // LEAVE LIGHT: IDLE < 30%
 
 // REGIME PROFILES
 // PREEMPT_THRESH CONTROLS WHEN TICK PREEMPTS BATCH TASKS (IF INTERACTIVE WAITING).
 // BATCH_SLICE_NS CONTROLS MAX UNINTERRUPTED BATCH RUN WHEN NO INTERACTIVE WAITING.
 // CPU_BOUND_THRESH_NS CONTROLS DEMOTION THRESHOLD PER REGIME (FEATURE 5).
 
-const LIGHT_SLICE_NS: u64     = 2_000_000;   // 2MS
-const LIGHT_PREEMPT_NS: u64   = 1_000_000;   // 1MS: AGGRESSIVE
-const LIGHT_LAG_SCALE: u64    = 6;
-const LIGHT_BATCH_NS: u64     = 20_000_000;  // 20MS: NO CONTENTION, LET BATCH RIP
+const LIGHT_SLICE_NS: u64 = 2_000_000; // 2MS
+const LIGHT_PREEMPT_NS: u64 = 1_000_000; // 1MS: AGGRESSIVE
+const LIGHT_LAG_SCALE: u64 = 6;
+const LIGHT_BATCH_NS: u64 = 20_000_000; // 20MS: NO CONTENTION, LET BATCH RIP
 
-const MIXED_SLICE_NS: u64     = 1_000_000;   // 1MS: TIGHT INTERACTIVE CONTROL
-const MIXED_PREEMPT_NS: u64   = 1_000_000;   // 1MS: MATCH FOR CLEAN ENFORCEMENT
-const MIXED_LAG_SCALE: u64    = 4;
-const MIXED_BATCH_NS: u64     = 20_000_000;  // 20MS: MATCHES LIGHT/HEAVY/BPF DEFAULT
+const MIXED_SLICE_NS: u64 = 1_000_000; // 1MS: TIGHT INTERACTIVE CONTROL
+const MIXED_PREEMPT_NS: u64 = 1_000_000; // 1MS: MATCH FOR CLEAN ENFORCEMENT
+const MIXED_LAG_SCALE: u64 = 4;
+const MIXED_BATCH_NS: u64 = 20_000_000; // 20MS: MATCHES LIGHT/HEAVY/BPF DEFAULT
 
-const HEAVY_SLICE_NS: u64     = 4_000_000;   // 4MS: WIDER FOR THROUGHPUT
-const HEAVY_PREEMPT_NS: u64   = 2_000_000;   // 2MS: SLIGHTLY RELAXED
-const HEAVY_LAG_SCALE: u64    = 2;
-const HEAVY_BATCH_NS: u64     = 20_000_000;  // 20MS: LET BATCH RIP
+const HEAVY_SLICE_NS: u64 = 4_000_000; // 4MS: WIDER FOR THROUGHPUT
+const HEAVY_PREEMPT_NS: u64 = 2_000_000; // 2MS: SLIGHTLY RELAXED
+const HEAVY_LAG_SCALE: u64 = 2;
+const HEAVY_BATCH_NS: u64 = 20_000_000; // 20MS: LET BATCH RIP
 
 // P99 CEILINGS
 
-const LIGHT_P99_CEIL_NS: u64  = 3_000_000;   // 3MS
-const MIXED_P99_CEIL_NS: u64  = 5_000_000;   // 5MS: BELOW 16MS FRAME BUDGET
-const HEAVY_P99_CEIL_NS: u64  = 10_000_000;  // 10MS: HEAVY LOAD, REALISTIC
+const LIGHT_P99_CEIL_NS: u64 = 3_000_000; // 3MS
+const MIXED_P99_CEIL_NS: u64 = 5_000_000; // 5MS: BELOW 16MS FRAME BUDGET
+const HEAVY_P99_CEIL_NS: u64 = 10_000_000; // 10MS: HEAVY LOAD, REALISTIC
 
 // CPU-BOUND DEMOTION THRESHOLDS
 // PER-REGIME: LENIENT IN LIGHT, AGGRESSIVE IN HEAVY
 
-pub const LIGHT_DEMOTION_NS: u64 = 3_500_000;  // 3.5MS: LENIENT, FEW CONTEND
-pub const MIXED_DEMOTION_NS: u64 = 2_500_000;  // 2.5MS: CURRENT CPU_BOUND_THRESH_NS
-pub const HEAVY_DEMOTION_NS: u64 = 2_000_000;  // 2.0MS: AGGRESSIVE
+pub const LIGHT_DEMOTION_NS: u64 = 3_500_000; // 3.5MS: LENIENT, FEW CONTEND
+pub const MIXED_DEMOTION_NS: u64 = 2_500_000; // 2.5MS: CURRENT CPU_BOUND_THRESH_NS
+pub const HEAVY_DEMOTION_NS: u64 = 2_000_000; // 2.0MS: AGGRESSIVE
 
 // ADAPTIVE SAMPLES_PER_CHECK
 
@@ -54,8 +54,8 @@ pub const HEAVY_SAMPLES_PER_CHECK: u32 = 64;
 // LAT_CRI SCORE BOUNDARIES FOR TIER CLASSIFICATION
 // EXPOSED AS TUNING KNOBS FOR RUNTIME ADJUSTMENT
 
-pub const DEFAULT_LAT_CRI_THRESH_HIGH: u64 = 32;  // >= THIS: LAT_CRITICAL
-pub const DEFAULT_LAT_CRI_THRESH_LOW: u64  = 8;   // >= THIS: INTERACTIVE, BELOW: BATCH
+pub const DEFAULT_LAT_CRI_THRESH_HIGH: u64 = 32; // >= THIS: LAT_CRITICAL
+pub const DEFAULT_LAT_CRI_THRESH_LOW: u64 = 8; // >= THIS: INTERACTIVE, BELOW: BATCH
 
 // TUNING KNOBS
 // MATCHES struct tuning_knobs IN BPF (intf.h)
@@ -202,8 +202,8 @@ pub fn samples_per_check_for_regime(r: Regime) -> u32 {
 // REFLEX THREAD HIBERNATION WHEN SYSTEM IS STABLE.
 // REDUCES P99 COMPUTATION FROM ~1250/SEC TO ~312/SEC DURING STABLE GAMING.
 
-pub const STABILITY_THRESHOLD: u32 = 10;    // CONSECUTIVE STABLE TICKS BEFORE HIBERNATE
-pub const HIBERNATE_MULTIPLIER: u32 = 4;    // 4X SAMPLES_PER_CHECK WHEN STABLE
+pub const STABILITY_THRESHOLD: u32 = 10; // CONSECUTIVE STABLE TICKS BEFORE HIBERNATE
+pub const HIBERNATE_MULTIPLIER: u32 = 4; // 4X SAMPLES_PER_CHECK WHEN STABLE
 
 pub fn compute_stability_score(
     prev_score: u32,
@@ -213,10 +213,7 @@ pub fn compute_stability_score(
     p99_ns: u64,
     p99_ceiling_ns: u64,
 ) -> u32 {
-    if regime_changed
-        || guard_clamps > 0
-        || reflex_events_delta > 0
-        || p99_ns > p99_ceiling_ns / 2
+    if regime_changed || guard_clamps > 0 || reflex_events_delta > 0 || p99_ns > p99_ceiling_ns / 2
     {
         return 0;
     }
@@ -246,18 +243,18 @@ pub fn should_print_telemetry(tick_counter: u64, stability_score: u32) -> bool {
 
 pub const HIST_BUCKETS: usize = 12;
 pub const HIST_EDGES_NS: [u64; HIST_BUCKETS] = [
-    10_000,      // 10us
-    25_000,      // 25us
-    50_000,      // 50us
-    100_000,     // 100us
-    250_000,     // 250us
-    500_000,     // 500us
-    1_000_000,   // 1ms
-    2_000_000,   // 2ms
-    5_000_000,   // 5ms
-    10_000_000,  // 10ms
-    20_000_000,  // 20ms
-    u64::MAX,    // +inf
+    10_000,     // 10us
+    25_000,     // 25us
+    50_000,     // 50us
+    100_000,    // 100us
+    250_000,    // 250us
+    500_000,    // 500us
+    1_000_000,  // 1ms
+    2_000_000,  // 2ms
+    5_000_000,  // 5ms
+    10_000_000, // 10ms
+    20_000_000, // 20ms
+    u64::MAX,   // +inf
 ];
 
 // COMPUTE P99 FROM DRAINED HISTOGRAM COUNTS. PURE FUNCTION.
@@ -283,4 +280,3 @@ pub fn compute_p99_from_histogram(counts: &[u64; HIST_BUCKETS]) -> u64 {
 pub fn should_reflex_tighten(aggregate_p99: u64, interactive_p99: u64, ceiling: u64) -> bool {
     aggregate_p99 > ceiling || interactive_p99 > ceiling
 }
-

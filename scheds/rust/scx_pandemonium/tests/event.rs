@@ -41,9 +41,7 @@ fn ring_buffer_wraps() {
     assert_eq!(log.get(0).dispatches, 9999);
 
     // CHRONOLOGICAL ITERATION STARTS FROM OLDEST (INDEX 1)
-    let ordered: Vec<u64> = log.iter_chronological()
-        .map(|s| s.dispatches)
-        .collect();
+    let ordered: Vec<u64> = log.iter_chronological().map(|s| s.dispatches).collect();
     assert_eq!(ordered[0], 1); // OLDEST SURVIVING ENTRY
     assert_eq!(*ordered.last().unwrap(), 9999); // NEWEST
     assert_eq!(ordered.len(), MAX_SNAPSHOTS);

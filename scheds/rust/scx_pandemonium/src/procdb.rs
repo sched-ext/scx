@@ -68,7 +68,7 @@ const _: () = assert!(std::mem::size_of::<TaskClassEntry>() == 40);
 
 #[derive(Default)]
 pub struct TaskProfile {
-    pub tier_votes: [u32; 3],   // COUNT PER TIER: [BATCH, INTERACTIVE, LAT_CRITICAL]
+    pub tier_votes: [u32; 3], // COUNT PER TIER: [BATCH, INTERACTIVE, LAT_CRITICAL]
     pub avg_runtime_ns: u64,
     pub runtime_dev_ns: u64,
     pub wakeup_freq: u64,
@@ -88,7 +88,8 @@ impl TaskProfile {
     }
 
     pub fn dominant_tier(&self) -> u8 {
-        self.tier_votes.iter()
+        self.tier_votes
+            .iter()
             .enumerate()
             .max_by_key(|(_, c)| *c)
             .map(|(i, _)| i as u8)
@@ -133,7 +134,11 @@ impl ProcessDb {
         let profiles = match Self::load_from_disk(&db_path) {
             Ok(p) => {
                 if !p.is_empty() {
-                    procdb_info!("PROCDB: LOADED {} PROFILES FROM {}", p.len(), db_path.display());
+                    procdb_info!(
+                        "PROCDB: LOADED {} PROFILES FROM {}",
+                        p.len(),
+                        db_path.display()
+                    );
                 }
                 p
             }
@@ -154,7 +159,6 @@ impl ProcessDb {
         Ok(db)
     }
 
-
     // DRAIN OBSERVATIONS FROM BPF LRU MAP, MERGE INTO PROFILES
     pub fn ingest(&mut self) {
         let observe = match &self.observe {
@@ -165,9 +169,8 @@ impl ProcessDb {
         for key in &keys {
             if let Ok(Some(val)) = observe.lookup(key, libbpf_rs::MapFlags::ANY) {
                 if val.len() >= std::mem::size_of::<TaskClassEntry>() {
-                    let entry: TaskClassEntry = unsafe {
-                        std::ptr::read_unaligned(val.as_ptr() as *const TaskClassEntry)
-                    };
+                    let entry: TaskClassEntry =
+                        unsafe { std::ptr::read_unaligned(val.as_ptr() as *const TaskClassEntry) };
 
                     let mut comm = [0u8; 16];
                     let copy_len = key.len().min(16);
@@ -186,8 +189,10 @@ impl ProcessDb {
                         profile.csw_rate = entry.csw_rate;
                     } else {
                         // EWMA: 7/8 OLD + 1/8 NEW
-                        profile.avg_runtime_ns = (profile.avg_runtime_ns * 7 + entry.avg_runtime) / 8;
-                        profile.runtime_dev_ns = (profile.runtime_dev_ns * 7 + entry.runtime_dev) / 8;
+                        profile.avg_runtime_ns =
+                            (profile.avg_runtime_ns * 7 + entry.avg_runtime) / 8;
+                        profile.runtime_dev_ns =
+                            (profile.runtime_dev_ns * 7 + entry.runtime_dev) / 8;
                         profile.wakeup_freq = (profile.wakeup_freq * 7 + entry.wakeup_freq) / 8;
                         profile.csw_rate = (profile.csw_rate * 7 + entry.csw_rate) / 8;
                     }
@@ -206,8 +211,7 @@ impl ProcessDb {
             None => return,
         };
         for (comm, profile) in &self.profiles {
-            if profile.behavioral_confidence() >= MIN_CONFIDENCE
-            {
+            if profile.behavioral_confidence() >= MIN_CONFIDENCE {
                 let entry = TaskClassEntry {
                     tier: profile.dominant_tier(),
                     _pad: [0; 7],
@@ -234,7 +238,9 @@ impl ProcessDb {
 
         // REMOVE PROFILES NOT SEEN IN 60 SECONDS
         let tick = self.tick;
-        let stale: Vec<[u8; 16]> = self.profiles.iter()
+        let stale: Vec<[u8; 16]> = self
+            .profiles
+            .iter()
             .filter(|(_, p)| tick - p.last_seen_tick > STALE_TICKS)
             .map(|(k, _)| *k)
             .collect();
@@ -247,7 +253,9 @@ impl ProcessDb {
 
         // CAP ENTRIES: EVICT OLDEST FIRST, TIE-BREAK BY OBSERVATIONS THEN COMM
         if self.profiles.len() > MAX_PROFILES {
-            let mut entries: Vec<([u8; 16], u64, u32)> = self.profiles.iter()
+            let mut entries: Vec<([u8; 16], u64, u32)> = self
+                .profiles
+                .iter()
                 .map(|(k, v)| (*k, v.last_seen_tick, v.observations))
                 .collect();
             entries.sort_by(|a, b| (a.1, a.2, a.0).cmp(&(b.1, b.2, b.0)));
@@ -264,7 +272,9 @@ impl ProcessDb {
     // (TOTAL PROFILES, CONFIDENT PROFILES)
     pub fn summary(&self) -> (usize, usize) {
         let total = self.profiles.len();
-        let confident = self.profiles.values()
+        let confident = self
+            .profiles
+            .values()
             .filter(|p| p.behavioral_confidence() >= MIN_CONFIDENCE)
             .count();
         (total, confident)
@@ -272,7 +282,9 @@ impl ProcessDb {
 
     // SERIALIZE CONFIDENT PROFILES TO DISK (ATOMIC WRITE)
     pub fn save(&self, path: &Path) -> Result<()> {
-        let entries: Vec<_> = self.profiles.iter()
+        let entries: Vec<_> = self
+            .profiles
+            .iter()
             .filter(|(_, p)| p.behavioral_confidence() >= MIN_CONFIDENCE)
             .collect();
 
@@ -293,15 +305,15 @@ impl ProcessDb {
             let tier = profile.dominant_tier();
             let total_votes: u32 = profile.tier_votes.iter().sum();
 
-            f.write_all(comm.as_slice())?;             // 16 bytes
-            f.write_all(&[tier])?;                     // 1 byte
-            f.write_all(&[0u8; 7])?;                   // 7 bytes pad
-            f.write_all(&profile.avg_runtime_ns.to_le_bytes())?;  // 8 bytes
-            f.write_all(&profile.runtime_dev_ns.to_le_bytes())?;  // 8 bytes
-            f.write_all(&profile.wakeup_freq.to_le_bytes())?;     // 8 bytes
-            f.write_all(&profile.csw_rate.to_le_bytes())?;        // 8 bytes
-            f.write_all(&profile.observations.to_le_bytes())?;    // 4 bytes
-            f.write_all(&total_votes.to_le_bytes())?;  // 4 bytes
+            f.write_all(comm.as_slice())?; // 16 bytes
+            f.write_all(&[tier])?; // 1 byte
+            f.write_all(&[0u8; 7])?; // 7 bytes pad
+            f.write_all(&profile.avg_runtime_ns.to_le_bytes())?; // 8 bytes
+            f.write_all(&profile.runtime_dev_ns.to_le_bytes())?; // 8 bytes
+            f.write_all(&profile.wakeup_freq.to_le_bytes())?; // 8 bytes
+            f.write_all(&profile.csw_rate.to_le_bytes())?; // 8 bytes
+            f.write_all(&profile.observations.to_le_bytes())?; // 4 bytes
+            f.write_all(&total_votes.to_le_bytes())?; // 4 bytes
         }
 
         drop(f);
@@ -345,7 +357,11 @@ impl ProcessDb {
         let count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let expected_size = 12 + count * entry_size;
         if data.len() < expected_size {
-            procdb_warn!("PROCDB: TRUNCATED (EXPECTED {} BYTES, GOT {})", expected_size, data.len());
+            procdb_warn!(
+                "PROCDB: TRUNCATED (EXPECTED {} BYTES, GOT {})",
+                expected_size,
+                data.len()
+            );
             return Ok(HashMap::new());
         }
 
@@ -360,9 +376,7 @@ impl ProcessDb {
             let tier = data[offset] as usize;
             offset += 8; // tier + 7 pad
 
-            let avg_runtime = u64::from_le_bytes(
-                data[offset..offset + 8].try_into().unwrap()
-            );
+            let avg_runtime = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
 
             // V2: READ EXTRA BEHAVIORAL FIELDS
@@ -378,29 +392,28 @@ impl ProcessDb {
                 (0, 0, 0)
             };
 
-            let observations = u32::from_le_bytes(
-                data[offset..offset + 4].try_into().unwrap()
-            );
+            let observations = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             offset += 4;
 
-            let total_votes = u32::from_le_bytes(
-                data[offset..offset + 4].try_into().unwrap()
-            );
+            let total_votes = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             offset += 4;
 
             // RECONSTRUCT: ALL VOTES GO TO DOMINANT TIER (CONFIDENCE = 1.0)
             let mut tier_votes = [0u32; 3];
             tier_votes[tier.min(2)] = total_votes;
 
-            profiles.insert(comm, TaskProfile {
-                tier_votes,
-                avg_runtime_ns: avg_runtime,
-                runtime_dev_ns: runtime_dev,
-                wakeup_freq,
-                csw_rate,
-                observations,
-                last_seen_tick: 0,
-            });
+            profiles.insert(
+                comm,
+                TaskProfile {
+                    tier_votes,
+                    avg_runtime_ns: avg_runtime,
+                    runtime_dev_ns: runtime_dev,
+                    wakeup_freq,
+                    csw_rate,
+                    observations,
+                    last_seen_tick: 0,
+                },
+            );
         }
 
         Ok(profiles)

@@ -191,9 +191,7 @@ fn bench_general(
     for i in 0..iterations {
         log_info!("Iteration {}/{}", i + 1, iterations);
         if let Some(cc) = clean_cmd {
-            let _ = Command::new("sh")
-                .args(["-c", cc])
-                .output();
+            let _ = Command::new("sh").args(["-c", cc]).output();
         }
         match timed_run(cmd) {
             Some(t) => eevdf_times.push(t),
@@ -211,9 +209,7 @@ fn bench_general(
     for i in 0..iterations {
         log_info!("Iteration {}/{}", i + 1, iterations);
         if let Some(cc) = clean_cmd {
-            let _ = Command::new("sh")
-                .args(["-c", cc])
-                .output();
+            let _ = Command::new("sh").args(["-c", cc]).output();
         }
         match timed_run(cmd) {
             Some(t) => pand_times.push(t),
@@ -317,7 +313,10 @@ fn pw_top_snapshot() -> Vec<(String, i64)> {
             continue;
         }
         if let Ok(err) = parts[8].parse::<i64>() {
-            let name = parts[9..].join(" ").trim_start_matches(['+', ' ']).to_string();
+            let name = parts[9..]
+                .join(" ")
+                .trim_start_matches(['+', ' '])
+                .to_string();
             entries.push((name, err));
         }
     }
@@ -413,7 +412,12 @@ fn bench_mixed(sched_args: &[String]) -> Result<()> {
         "{:<16} {:>12} {:>12}",
         "SCHEDULER", "BUILD TIME", "AUDIO XRUNS"
     ));
-    report.push(format!("{} {} {}", "-".repeat(16), "-".repeat(12), "-".repeat(12)));
+    report.push(format!(
+        "{} {} {}",
+        "-".repeat(16),
+        "-".repeat(12),
+        "-".repeat(12)
+    ));
     report.push(format!(
         "{:<16} {:>11.2}s {:>12}",
         "EEVDF", eevdf_time, eevdf_xruns
@@ -479,10 +483,7 @@ fn bench_contention(sched_args: &[String]) -> Result<()> {
         worst: f64,
     }
 
-    let phases: Vec<(&str, bool)> = vec![
-        ("EEVDF (DEFAULT)", false),
-        ("PANDEMONIUM", true),
-    ];
+    let phases: Vec<(&str, bool)> = vec![("EEVDF (DEFAULT)", false), ("PANDEMONIUM", true)];
 
     let mut results = Vec::new();
 
@@ -605,9 +606,8 @@ fn bench_contention(sched_args: &[String]) -> Result<()> {
     report.push(sep.clone());
     report.push("CONTENTION BENCHMARK RESULTS".to_string());
     report.push(sep.clone());
-    report.push(
-        "WORKLOAD: CARGO BUILD --RELEASE + INTERACTIVE PROBE (10MS SLEEP/WAKE)".to_string(),
-    );
+    report
+        .push("WORKLOAD: CARGO BUILD --RELEASE + INTERACTIVE PROBE (10MS SLEEP/WAKE)".to_string());
     report.push(String::new());
     report.push(format!(
         "{:<24} {:>8} {:>8} {:>8} {:>8} {:>8}",

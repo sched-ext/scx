@@ -1,12 +1,12 @@
-pub mod check;
-pub mod probe;
-pub mod run;
 pub mod bench;
-pub mod report;
-pub mod stress;
-pub mod test_gate;
+pub mod check;
 pub mod child_guard;
 pub mod death_pipe;
+pub mod probe;
+pub mod report;
+pub mod run;
+pub mod stress;
+pub mod test_gate;
 pub const TARGET_DIR: &str = "/tmp/pandemonium-build";
 pub const LOG_DIR: &str = "/tmp/pandemonium";
 
@@ -34,4 +34,3 @@ pub fn wait_for_activation(timeout_secs: u64) -> bool {
     }
     false
 }
-
