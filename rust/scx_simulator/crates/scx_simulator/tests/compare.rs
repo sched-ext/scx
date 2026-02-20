@@ -110,3 +110,80 @@ fn test_mitosis_trace_stats() {
         "expected at least 2 tasks in trace stats"
     );
 }
+
+/// Run two_runners.json through LAVD and produce detailed statistics
+/// for comparison with real kernel traces.
+///
+/// This test outputs TraceSummary data and per-task metrics that can be
+/// compared against bpftrace output from `--real-run --bpf-trace`.
+///
+/// Run with: cargo test test_compare_lavd_trace_stats --test compare -- --nocapture
+#[test]
+fn test_compare_lavd_trace_stats() {
+    let _lock = common::setup_test();
+    let json = include_str!("../workloads/two_runners.json");
+    let scenario = load_rtapp(json, 2).unwrap();
+
+    let trace = Simulator::new(DynamicScheduler::lavd(2)).run(scenario);
+
+    // Print high-level summary
+    let summary = trace.summary();
+    eprintln!("\n=== LAVD Trace Statistics (for real-vs-sim comparison) ===\n");
+    eprintln!("{}", summary);
+
+    // Per-task statistics
+    for pid in [Pid(1), Pid(2)] {
+        let name = if pid == Pid(1) { "heavy" } else { "light" };
+        let runtime_ms = trace.total_runtime(pid) / 1_000_000;
+        let schedules = trace.schedule_count(pid);
+        let yields = trace.yield_count(pid);
+        let preempts = trace.preempt_count(pid);
+        let dsq_inserts = trace.dsq_insert_count(pid);
+
+        eprintln!("Task {name} (pid={}):", pid.0);
+        eprintln!("  total_runtime:  {}ms", runtime_ms);
+        eprintln!("  schedule_count: {}", schedules);
+        eprintln!("  yield_count:    {}", yields);
+        eprintln!("  preempt_count:  {}", preempts);
+        eprintln!("  dsq_inserts:    {}", dsq_inserts);
+
+        if let Some((min, max, mean, count)) = trace.run_duration_stats(pid) {
+            eprintln!(
+                "  run_durations:  min={}us max={}us mean={}us count={}",
+                min / 1000,
+                max / 1000,
+                mean / 1000,
+                count
+            );
+        }
+        eprintln!();
+    }
+
+    // Realism gap indicators
+    eprintln!("=== Realism Gap Indicators ===\n");
+
+    let yield_ratio = if summary.total_preempts + summary.total_yields > 0 {
+        summary.total_yields as f64 / (summary.total_preempts + summary.total_yields) as f64
+    } else {
+        0.0
+    };
+    eprintln!(
+        "Yield ratio: {:.1}% (high values for CPU-bound tasks indicate spurious yields)",
+        yield_ratio * 100.0
+    );
+
+    let dsq_ratio = if summary.global_dsq_dispatches + summary.local_dsq_dispatches > 0 {
+        summary.global_dsq_dispatches as f64
+            / (summary.global_dsq_dispatches + summary.local_dsq_dispatches) as f64
+    } else {
+        0.0
+    };
+    eprintln!(
+        "Global DSQ ratio: {:.1}% (real CPU-bound tasks mostly use direct local dispatch)",
+        dsq_ratio * 100.0
+    );
+
+    // Verify basic correctness
+    assert!(trace.total_runtime(Pid(1)) > 0, "heavy task got no runtime");
+    assert!(trace.total_runtime(Pid(2)) > 0, "light task got no runtime");
+}

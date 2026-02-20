@@ -8,6 +8,47 @@ use crate::fmt::FmtTs;
 use crate::task::TaskDef;
 use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
 
+/// Summary statistics from a trace, useful for realism comparison.
+///
+/// This struct captures high-level metrics that can be compared between
+/// simulated and real kernel traces to identify realism gaps.
+#[derive(Debug, Clone, Default)]
+pub struct TraceSummary {
+    /// Total number of trace events recorded.
+    pub total_events: usize,
+    /// Total number of scheduler tick events across all CPUs.
+    pub total_ticks: usize,
+    /// Total number of task yield events (voluntary phase boundary).
+    pub total_yields: usize,
+    /// Total number of task preemption events (slice expiration).
+    pub total_preempts: usize,
+    /// Total number of task sleep events.
+    pub total_sleeps: usize,
+    /// Total number of task wake events.
+    pub total_wakes: usize,
+    /// Total number of CPU idle periods.
+    pub total_idle_periods: usize,
+    /// Count of dispatches to global DSQs.
+    pub global_dsq_dispatches: usize,
+    /// Count of dispatches to local (per-CPU) DSQs.
+    pub local_dsq_dispatches: usize,
+}
+
+impl std::fmt::Display for TraceSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Trace Summary:")?;
+        writeln!(f, "  total_events:          {}", self.total_events)?;
+        writeln!(f, "  total_ticks:           {}", self.total_ticks)?;
+        writeln!(f, "  total_yields:          {}", self.total_yields)?;
+        writeln!(f, "  total_preempts:        {}", self.total_preempts)?;
+        writeln!(f, "  total_sleeps:          {}", self.total_sleeps)?;
+        writeln!(f, "  total_wakes:           {}", self.total_wakes)?;
+        writeln!(f, "  total_idle_periods:    {}", self.total_idle_periods)?;
+        writeln!(f, "  global_dsq_dispatches: {}", self.global_dsq_dispatches)?;
+        writeln!(f, "  local_dsq_dispatches:  {}", self.local_dsq_dispatches)
+    }
+}
+
 /// A single trace event produced by the simulator.
 #[derive(Debug, Clone)]
 pub struct TraceEvent {
@@ -230,6 +271,133 @@ impl Trace {
             .iter()
             .filter(|e| e.cpu == cpu && matches!(e.kind, TraceKind::Tick { .. }))
             .count()
+    }
+
+    /// Count the number of yield events for a task.
+    ///
+    /// Yields occur when a task voluntarily gives up the CPU (phase boundary)
+    /// but remains runnable. High yield counts for CPU-bound tasks may indicate
+    /// a realism gap in the simulation model.
+    pub fn yield_count(&self, pid: Pid) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e.kind, TraceKind::TaskYielded { pid: p } if p == pid))
+            .count()
+    }
+
+    /// Count the number of preemption events for a task.
+    pub fn preempt_count(&self, pid: Pid) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e.kind, TraceKind::TaskPreempted { pid: p } if p == pid))
+            .count()
+    }
+
+    /// Compute run duration statistics for a task.
+    ///
+    /// Returns a tuple of (min, max, mean, count) for run durations in nanoseconds.
+    /// This is useful for comparing simulated vs real traces where real systems
+    /// show more variance due to system noise.
+    pub fn run_duration_stats(&self, pid: Pid) -> Option<(TimeNs, TimeNs, TimeNs, usize)> {
+        let mut durations: Vec<TimeNs> = Vec::new();
+        let mut running_since: Option<TimeNs> = None;
+
+        for event in &self.events {
+            match &event.kind {
+                TraceKind::TaskScheduled { pid: p } if *p == pid => {
+                    running_since = Some(event.time_ns);
+                }
+                TraceKind::TaskPreempted { pid: p }
+                | TraceKind::TaskYielded { pid: p }
+                | TraceKind::TaskSlept { pid: p }
+                | TraceKind::TaskCompleted { pid: p }
+                    if *p == pid =>
+                {
+                    if let Some(start) = running_since.take() {
+                        durations.push(event.time_ns - start);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if durations.is_empty() {
+            return None;
+        }
+
+        let min = *durations.iter().min().unwrap();
+        let max = *durations.iter().max().unwrap();
+        let sum: TimeNs = durations.iter().sum();
+        let mean = sum / durations.len() as TimeNs;
+        Some((min, max, mean, durations.len()))
+    }
+
+    /// Count dispatches through the global DSQ vs local DSQ.
+    ///
+    /// Returns (global_dsq_dispatches, local_dsq_dispatches).
+    /// In real execution, CPU-bound tasks mostly use direct dispatch via
+    /// SCX_DSQ_LOCAL from select_cpu, while simulated tasks may show more
+    /// global DSQ usage due to yield cycles.
+    pub fn dsq_dispatch_counts(&self) -> (usize, usize) {
+        let mut global = 0usize;
+        let mut local = 0usize;
+
+        // DSQ ID 0x8000_0000_0000_0000 | cpu is local DSQ
+        // Other IDs are global DSQs (e.g., 4096 for LAVD)
+        const LOCAL_DSQ_MASK: u64 = 0xC000_0000_0000_0000;
+
+        for event in &self.events {
+            match &event.kind {
+                TraceKind::DsqInsert { dsq_id, .. } | TraceKind::DsqInsertVtime { dsq_id, .. } => {
+                    if dsq_id.0 & LOCAL_DSQ_MASK != 0 {
+                        local += 1;
+                    } else {
+                        global += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (global, local)
+    }
+
+    /// Get a summary of trace statistics useful for realism comparison.
+    ///
+    /// Returns a struct with key metrics for comparing simulated vs real traces.
+    pub fn summary(&self) -> TraceSummary {
+        let mut total_ticks = 0usize;
+        let mut total_yields = 0usize;
+        let mut total_preempts = 0usize;
+        let mut total_sleeps = 0usize;
+        let mut total_wakes = 0usize;
+        let mut total_idle_periods = 0usize;
+
+        for event in &self.events {
+            match &event.kind {
+                TraceKind::Tick { .. } => total_ticks += 1,
+                TraceKind::TaskYielded { .. } => total_yields += 1,
+                TraceKind::TaskPreempted { .. } => total_preempts += 1,
+                TraceKind::TaskSlept { .. } => total_sleeps += 1,
+                TraceKind::TaskWoke { .. } => total_wakes += 1,
+                TraceKind::CpuIdle => total_idle_periods += 1,
+                _ => {}
+            }
+        }
+
+        let (global_dsq, local_dsq) = self.dsq_dispatch_counts();
+
+        TraceSummary {
+            total_events: self.events.len(),
+            total_ticks,
+            total_yields,
+            total_preempts,
+            total_sleeps,
+            total_wakes,
+            total_idle_periods,
+            global_dsq_dispatches: global_dsq,
+            local_dsq_dispatches: local_dsq,
+        }
     }
 
     /// Write the trace in Chrome Trace Event Format JSON, loadable in

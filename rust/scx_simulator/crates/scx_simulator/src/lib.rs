@@ -67,7 +67,7 @@ pub use scenario::{
 };
 pub use stats::{CpuStats, DistributionStats, TaskStats, TraceComparison, TraceStats};
 pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, RepeatMode, TaskBehavior, TaskDef};
-pub use trace::{Trace, TraceEvent, TraceKind};
+pub use trace::{Trace, TraceEvent, TraceKind, TraceSummary};
 pub use types::{CpuId, DsqId, KickFlags, MmId, Pid, TimeNs, Vtime};
 
 use std::sync::Mutex;
