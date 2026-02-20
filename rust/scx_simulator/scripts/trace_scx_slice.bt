@@ -1,0 +1,84 @@
+#!/usr/bin/env bpftrace
+/*
+ * trace_scx_slice.bt - Trace sched_ext with slice information
+ *
+ * This script focuses on getting slice information from p->scx.slice
+ * at task transitions, since fexit on scx_bpf_* kfuncs may not work
+ * in all environments.
+ *
+ * Usage:
+ *   sudo bpftrace scripts/trace_scx_slice.bt > /tmp/scx_trace.log 2>&1
+ *   sudo bpftrace scripts/trace_scx_slice.bt 8 > /tmp/scx_trace.log 2>&1
+ */
+
+#include <linux/sched.h>
+
+BEGIN {
+    @max_cpu = $1 > 0 ? $1 : 4;
+    printf("Tracing sched_ext slice info on CPUs 0-%d. Ctrl-C to stop.\n\n",
+        @max_cpu - 1);
+}
+
+/*
+ * Trace when a task starts running (set_next_task_scx).
+ * At this point, p->scx.slice contains the assigned time slice.
+ *
+ * The first argument to set_next_task_scx is struct rq *rq,
+ * second is struct task_struct *p.
+ */
+kprobe:set_next_task_scx*
+/ cpu < @max_cpu / {
+    $p = (struct task_struct *)arg1;
+    $slice = $p->scx.slice;
+    $pid = $p->pid;
+    $comm = $p->comm;
+    printf("%llu cpu=%d >> running pid=%d comm=%s slice=%llu\n",
+        nsecs, cpu, $pid, $comm, $slice);
+}
+
+/*
+ * Trace when a task stops running (put_prev_task_scx).
+ * We can see how much slice was consumed.
+ */
+kprobe:put_prev_task_scx*
+/ cpu < @max_cpu / {
+    $p = (struct task_struct *)arg1;
+    $slice = $p->scx.slice;
+    $pid = $p->pid;
+    $comm = $p->comm;
+    printf("%llu cpu=%d >> stopping pid=%d comm=%s slice_remaining=%llu\n",
+        nsecs, cpu, $pid, $comm, $slice);
+}
+
+/*
+ * Trace scheduler ticks to see tick frequency.
+ */
+kprobe:task_tick_scx*
+/ cpu < @max_cpu / {
+    $p = (struct task_struct *)arg1;
+    $pid = $p->pid;
+    $comm = $p->comm;
+    $slice = $p->scx.slice;
+    printf("%llu cpu=%d >> tick pid=%d comm=%s slice=%llu\n",
+        nsecs, cpu, $pid, $comm, $slice);
+}
+
+/*
+ * Lifecycle tracepoints for context switches.
+ */
+tracepoint:sched:sched_switch
+/ cpu < @max_cpu / {
+    printf("%llu cpu=%d == sched_switch prev_pid=%d prev_comm=%s prev_state=%ld next_pid=%d next_comm=%s\n",
+        nsecs, cpu, args.prev_pid, args.prev_comm, args.prev_state, args.next_pid, args.next_comm);
+}
+
+tracepoint:sched:sched_wakeup
+/ cpu < @max_cpu / {
+    printf("%llu cpu=%d == sched_wakeup pid=%d comm=%s target_cpu=%d\n",
+        nsecs, cpu, args.pid, args.comm, args.target_cpu);
+}
+
+END {
+    clear(@max_cpu);
+    printf("\nDone.\n");
+}

@@ -1,3 +1,4 @@
 trace.proto
 trace.proto
 wprof.data
+bpf_trace.log

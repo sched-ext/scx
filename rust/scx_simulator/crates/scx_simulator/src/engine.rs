@@ -431,7 +431,7 @@ impl<S: Scheduler> Simulator<S> {
         // Build tasks
         let mut tasks: HashMap<Pid, SimTask> = HashMap::new();
         let mut task_raw_to_pid: HashMap<usize, Pid> = HashMap::new();
-        let mut task_pid_to_raw: HashMap<Pid, usize> = HashMap::new();
+        let task_pid_to_raw: HashMap<Pid, usize> = HashMap::new();
 
         // Allocate a synthetic idle task for bpf_get_current_task_btf() fallback.
         // In the kernel, there's always a task running (idle task on idle CPUs).
@@ -446,7 +446,12 @@ impl<S: Scheduler> Simulator<S> {
             let task = SimTask::new(def, nr_cpus);
             let raw_addr = task.raw() as usize;
             task_raw_to_pid.insert(raw_addr, task.pid);
-            task_pid_to_raw.insert(task.pid, raw_addr);
+            // NOTE: We do NOT insert into task_pid_to_raw here. Registration
+            // is deferred until after init_task completes. This ensures that
+            // self-referencing real_parent pointers (where real_parent == p)
+            // cause bpf_task_from_pid() to return NULL during init_task,
+            // triggering the correct initialization path in scheduler code
+            // (e.g., LAVD's avg_runtime_wall = sys_stat.slice_wall).
             // Set up cpus_ptr — restricted to allowed_cpus if specified
             unsafe {
                 ffi::sim_task_setup_cpus_ptr(task.raw());
@@ -612,7 +617,10 @@ impl<S: Scheduler> Simulator<S> {
             }
         }
 
-        // Call init_task for each task (after scheduler init + cgroup assignment)
+        // Call init_task for each task (after scheduler init + cgroup assignment).
+        // Tasks are registered in task_pid_to_raw AFTER init_task completes.
+        // This ensures self-referencing real_parent pointers don't cause
+        // bpf_task_from_pid to return the task itself during init.
         unsafe {
             let cpu = state.current_cpu;
             kfuncs::enter_sim(&mut state, cpu);
@@ -625,6 +633,11 @@ impl<S: Scheduler> Simulator<S> {
                 };
                 charge_sched_time(&mut state, CpuId(0), "init_task");
                 assert!(rc == 0, "init_task failed for pid={} rc={rc}", task.pid.0);
+
+                // Register task in task_pid_to_raw AFTER init_task completes.
+                // This allows other tasks' init_task to find this task as a parent.
+                state.task_pid_to_raw.insert(task.pid, task.raw() as usize);
+
                 // Notify scheduler of initial cpumask (mirrors kernel enumeration)
                 let cpus_ptr = ffi::sim_task_get_cpus_ptr(task.raw());
                 start_rbc(&mut state);

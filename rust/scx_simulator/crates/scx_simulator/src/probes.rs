@@ -21,6 +21,9 @@ type SysProbeU64 = unsafe extern "C" fn() -> u64;
 ///
 /// Created from a loaded [`DynamicScheduler`] via [`LavdProbes::new`].
 /// All function pointers are valid for the lifetime of the scheduler.
+// Additional C function pointer types for slice boost probes.
+type SysProbeU8 = unsafe extern "C" fn() -> u8;
+
 pub struct LavdProbes {
     lat_cri_fn: TaskProbeU16,
     wait_freq_fn: TaskProbeU64,
@@ -32,6 +35,11 @@ pub struct LavdProbes {
     sys_thr_lat_cri_fn: SysProbeU32,
     sys_nr_sched_fn: SysProbeU64,
     sys_nr_lat_cri_fn: SysProbeU64,
+    // Slice boost debug probes
+    sys_slice_wall_fn: SysProbeU64,
+    sys_nr_queued_task_fn: SysProbeU32,
+    can_boost_slice_fn: SysProbeU8,
+    task_slice_wall_fn: TaskProbeU64,
 }
 
 impl LavdProbes {
@@ -64,6 +72,11 @@ impl LavdProbes {
                 sys_thr_lat_cri_fn: resolve!(b"lavd_probe_sys_thr_lat_cri", SysProbeU32),
                 sys_nr_sched_fn: resolve!(b"lavd_probe_sys_nr_sched", SysProbeU64),
                 sys_nr_lat_cri_fn: resolve!(b"lavd_probe_sys_nr_lat_cri", SysProbeU64),
+                // Slice boost debug probes
+                sys_slice_wall_fn: resolve!(b"lavd_probe_sys_slice_wall", SysProbeU64),
+                sys_nr_queued_task_fn: resolve!(b"lavd_probe_sys_nr_queued_task", SysProbeU32),
+                can_boost_slice_fn: resolve!(b"lavd_probe_can_boost_slice", SysProbeU8),
+                task_slice_wall_fn: resolve!(b"lavd_probe_task_slice_wall", TaskProbeU64),
             }
         }
     }
@@ -134,6 +147,30 @@ impl LavdProbes {
     pub fn sys_nr_lat_cri(&self) -> u64 {
         unsafe { (self.sys_nr_lat_cri_fn)() }
     }
+
+    // -- Slice boost debug probes --
+
+    /// Read `sys_stat.slice_wall` (current target slice for the system).
+    pub fn sys_slice_wall(&self) -> u64 {
+        unsafe { (self.sys_slice_wall_fn)() }
+    }
+
+    /// Read `sys_stat.nr_queued_task` (number of queued tasks).
+    pub fn sys_nr_queued_task(&self) -> u32 {
+        unsafe { (self.sys_nr_queued_task_fn)() }
+    }
+
+    /// Check if `can_boost_slice()` returns true.
+    pub fn can_boost_slice(&self) -> bool {
+        unsafe { (self.can_boost_slice_fn)() != 0 }
+    }
+
+    /// Read `task_ctx.slice_wall` (task's assigned slice).
+    /// # Safety
+    /// `task_raw` must be a valid `task_struct` pointer.
+    pub unsafe fn task_slice_wall(&self, task_raw: *mut c_void) -> u64 {
+        (self.task_slice_wall_fn)(task_raw)
+    }
 }
 
 /// A snapshot of LAVD state at a single probe point.
@@ -150,6 +187,11 @@ pub struct LavdSnapshot {
     pub lat_cri_wakee: u16,
     pub sys_avg_lat_cri: u32,
     pub sys_thr_lat_cri: u32,
+    // Slice boost debug fields
+    pub sys_slice_wall: u64,
+    pub sys_nr_queued_task: u32,
+    pub can_boost_slice: bool,
+    pub task_slice_wall: u64,
 }
 
 /// Accumulates per-task LAVD probe snapshots at each scheduling event.
@@ -200,6 +242,11 @@ impl Monitor for LavdMonitor {
                 lat_cri_wakee: self.probes.lat_cri_wakee(ctx.task_raw),
                 sys_avg_lat_cri: self.probes.sys_avg_lat_cri(),
                 sys_thr_lat_cri: self.probes.sys_thr_lat_cri(),
+                // Slice boost debug probes
+                sys_slice_wall: self.probes.sys_slice_wall(),
+                sys_nr_queued_task: self.probes.sys_nr_queued_task(),
+                can_boost_slice: self.probes.can_boost_slice(),
+                task_slice_wall: self.probes.task_slice_wall(ctx.task_raw),
             });
         }
     }

@@ -834,6 +834,31 @@ u32 lavd_probe_sys_nr_cpus_onln(void)
 	return nr_cpus_onln;
 }
 
+/* Probe for sys_stat.slice_wall (current target slice). */
+u64 lavd_probe_sys_slice_wall(void)
+{
+	return sys_stat.slice_wall;
+}
+
+/* Probe for sys_stat.nr_queued_task. */
+u32 lavd_probe_sys_nr_queued_task(void)
+{
+	return sys_stat.nr_queued_task;
+}
+
+/* Probe for can_boost_slice() result. */
+u8 lavd_probe_can_boost_slice(void)
+{
+	return can_boost_slice() ? 1 : 0;
+}
+
+/* Probe for task's slice_wall from task_ctx. */
+u64 lavd_probe_task_slice_wall(struct task_struct *p)
+{
+	struct task_ctx *taskc = get_task_ctx(p);
+	return taskc ? taskc->slice_wall : 0;
+}
+
 /*
  * Direct setter for sys_stat.nr_active.
  * Used by tests to force the dispatch compaction path
