@@ -155,6 +155,11 @@ pub struct SimulatorState {
     pub interleave: bool,
     /// Preemptive interleaving configuration (None = disabled).
     pub preemptive: Option<PreemptiveConfig>,
+    /// True while inside a concurrent batch (same-timestamp per-CPU events
+    /// being processed in parallel). When set, `process_kicked_cpus` defers
+    /// kicks (accumulates in `kicked_cpus` but does not process) and
+    /// `dispatch_concurrent` is suppressed to prevent nesting.
+    pub in_concurrent_batch: bool,
 }
 
 /// Kernel value of `SCX_TASK_QUEUED` from `enum scx_task_state`.
@@ -1442,6 +1447,7 @@ mod tests {
             bpf_error: None,
             interleave: false,
             preemptive: None,
+            in_concurrent_batch: false,
         }
     }
 

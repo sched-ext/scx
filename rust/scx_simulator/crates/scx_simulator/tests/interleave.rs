@@ -515,6 +515,363 @@ fn test_preemptive_multiple_seeds() {
     }
 }
 
+// ===========================================================================
+// Batch-concurrent tests: same-timestamp per-CPU event interleaving
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Smoke test: batch-concurrent tick interleaving completes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_concurrent_smoke() {
+    let _lock = common::setup_test();
+    // 4 CPUs, 4 tasks, 50ms: ticks on all CPUs fire at TICK_INTERVAL_NS
+    // boundaries and should be processed concurrently.
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .seed(42)
+        .interleave(true)
+        .task(TaskDef {
+            name: "t1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "t2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "t3".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "t4".into(),
+            pid: Pid(4),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(10_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
+    trace.dump();
+
+    // All 4 tasks must be scheduled
+    for pid_val in 1..=4 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task {pid_val} was never scheduled"
+        );
+    }
+
+    // Tick events must appear for all CPUs
+    let tick_cpus: std::collections::HashSet<CpuId> = trace
+        .events()
+        .iter()
+        .filter_map(|e| match e.kind {
+            TraceKind::Tick { pid: _ } => Some(e.cpu),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tick_cpus.len() >= 4,
+        "expected ticks on 4 CPUs, got {:?}",
+        tick_cpus
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Determinism: batch-concurrent produces identical traces for same seed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_concurrent_determinism() {
+    let _lock = common::setup_test();
+    let make_scenario = || {
+        Scenario::builder()
+            .cpus(4)
+            .seed(42)
+            .interleave(true)
+            .task(TaskDef {
+                name: "t1".into(),
+                pid: Pid(1),
+                nice: 0,
+                behavior: TaskBehavior {
+                    phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                    repeat: RepeatMode::Forever,
+                },
+                start_time_ns: 0,
+                mm_id: None,
+                allowed_cpus: None,
+                parent_pid: None,
+                cgroup_name: None,
+                task_flags: 0,
+                migration_disabled: 0,
+            })
+            .task(TaskDef {
+                name: "t2".into(),
+                pid: Pid(2),
+                nice: 0,
+                behavior: TaskBehavior {
+                    phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                    repeat: RepeatMode::Forever,
+                },
+                start_time_ns: 0,
+                mm_id: None,
+                allowed_cpus: None,
+                parent_pid: None,
+                cgroup_name: None,
+                task_flags: 0,
+                migration_disabled: 0,
+            })
+            .task(TaskDef {
+                name: "t3".into(),
+                pid: Pid(3),
+                nice: 0,
+                behavior: TaskBehavior {
+                    phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                    repeat: RepeatMode::Forever,
+                },
+                start_time_ns: 0,
+                mm_id: None,
+                allowed_cpus: None,
+                parent_pid: None,
+                cgroup_name: None,
+                task_flags: 0,
+                migration_disabled: 0,
+            })
+            .task(TaskDef {
+                name: "t4".into(),
+                pid: Pid(4),
+                nice: 0,
+                behavior: TaskBehavior {
+                    phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                    repeat: RepeatMode::Forever,
+                },
+                start_time_ns: 0,
+                mm_id: None,
+                allowed_cpus: None,
+                parent_pid: None,
+                cgroup_name: None,
+                task_flags: 0,
+                migration_disabled: 0,
+            })
+            .duration_ms(50)
+            .build()
+    };
+
+    let trace1 = Simulator::new(DynamicScheduler::simple()).run(make_scenario());
+    let trace2 = Simulator::new(DynamicScheduler::simple()).run(make_scenario());
+
+    assert_eq!(
+        trace1.events().len(),
+        trace2.events().len(),
+        "batch-concurrent traces have different lengths"
+    );
+
+    for (i, (e1, e2)) in trace1
+        .events()
+        .iter()
+        .zip(trace2.events().iter())
+        .enumerate()
+    {
+        assert_eq!(
+            e1.time_ns, e2.time_ns,
+            "event {i}: timestamps differ: {} vs {}",
+            e1.time_ns, e2.time_ns
+        );
+        assert_eq!(
+            e1.cpu, e2.cpu,
+            "event {i}: CPUs differ: {:?} vs {:?}",
+            e1.cpu, e2.cpu
+        );
+        assert_eq!(
+            e1.kind, e2.kind,
+            "event {i}: kinds differ: {:?} vs {:?}",
+            e1.kind, e2.kind
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DSQ contention: 8 tasks on 4 CPUs with short sleep/wake cycles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_concurrent_with_dsq_contention() {
+    let _lock = common::setup_test();
+    // 8 tasks on 4 CPUs, 2ms run / 1ms sleep: frequent dispatch and shared
+    // DSQ contention. This exercises the global DSQ path that scx_simple
+    // uses when tasks aren't directly dispatched during select_cpu.
+    let mut builder = Scenario::builder().cpus(4).seed(42).interleave(true);
+
+    for i in 1..=8 {
+        builder = builder.task(TaskDef {
+            name: format!("w{i}"),
+            pid: Pid(i),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(2_000_000), Phase::Sleep(1_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        });
+    }
+
+    let scenario = builder.duration_ms(50).build();
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
+    trace.dump();
+
+    // All 8 tasks must be scheduled
+    for pid_val in 1..=8 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task {pid_val} was never scheduled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch-concurrent with preemptive interleaving
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_batch_concurrent_preemptive_smoke() {
+    let _lock = common::setup_test();
+    let scenario = Scenario::builder()
+        .cpus(4)
+        .seed(42)
+        .preemptive(PreemptiveConfig::default())
+        .task(TaskDef {
+            name: "t1".into(),
+            pid: Pid(1),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "t2".into(),
+            pid: Pid(2),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "t3".into(),
+            pid: Pid(3),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .task(TaskDef {
+            name: "t4".into(),
+            pid: Pid(4),
+            nice: 0,
+            behavior: TaskBehavior {
+                phases: vec![Phase::Run(5_000_000), Phase::Sleep(3_000_000)],
+                repeat: RepeatMode::Forever,
+            },
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        })
+        .duration_ms(50)
+        .build();
+
+    let trace = Simulator::new(DynamicScheduler::simple()).run(scenario);
+    trace.dump();
+
+    for pid_val in 1..=4 {
+        assert!(
+            trace.schedule_count(Pid(pid_val)) > 0,
+            "task {pid_val} was never scheduled"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Custom timeslice range
 // ---------------------------------------------------------------------------
