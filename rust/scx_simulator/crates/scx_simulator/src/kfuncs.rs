@@ -450,10 +450,18 @@ impl SimulatorState {
             }
         }
 
-        // TODO(sim-7cc89): Check migration_disabled when we model that field.
-        // For now, we only validate cpumask. When migration_disabled is modeled,
-        // we would also check if the task is currently on a different CPU and
-        // has migration_disabled > 0.
+        // Check migration_disabled: task with migration_disabled > 0 cannot be
+        // dispatched to a different CPU than its last known CPU.
+        let migration_disabled =
+            unsafe { ffi::sim_task_get_migration_disabled(task_ptr) };
+        if migration_disabled > 0 {
+            // Migration-disabled task: must dispatch to its last known CPU.
+            if let Some(&last_cpu) = self.task_last_cpu.get(&pid) {
+                if target_cpu != last_cpu {
+                    return Some(DispatchRejectReason::MigrationDisabled);
+                }
+            }
+        }
 
         None
     }

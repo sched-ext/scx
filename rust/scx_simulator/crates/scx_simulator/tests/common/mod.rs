@@ -64,6 +64,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(100)
                 .build();
@@ -105,6 +106,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -120,6 +122,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(100)
                 .build();
@@ -157,6 +160,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -172,6 +176,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(100)
                 .build();
@@ -220,6 +225,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                        migration_disabled: 0,
                     })
                     .task(TaskDef {
                         name: "t2".into(),
@@ -235,6 +241,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                        migration_disabled: 0,
                     })
                     .duration_ms(50)
                     .build()
@@ -296,6 +303,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -311,6 +319,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(500)
                 .build();
@@ -358,6 +367,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(100)
                 .build();
@@ -405,6 +415,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .task(TaskDef {
                     name: "t2".into(),
@@ -420,6 +431,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(100)
                 .build();
@@ -537,6 +549,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 // Add an unpinned task to occupy other CPUs
                 .task(TaskDef {
@@ -553,6 +566,7 @@ macro_rules! scheduler_tests {
             parent_pid: None,
             cgroup_name: None,
             task_flags: 0,
+                    migration_disabled: 0,
                 })
                 .duration_ms(100)
                 .build();

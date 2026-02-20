@@ -60,3 +60,10 @@ void *sim_task_get_cgroup(struct task_struct *p);
 
 /* Override the cgroup in init_task_args before calling init_task */
 void sim_set_init_task_cgroup(void *cgrp);
+
+/* Migration disabled counter
+ * When migration_disabled > 0, the task cannot migrate even if nr_cpus_allowed > 1.
+ * This models the kernel's migration_disabled field which is incremented when
+ * tasks enter BPF code or explicitly disable migration. */
+void sim_task_set_migration_disabled(struct task_struct *p, unsigned short val);
+unsigned short sim_task_get_migration_disabled(struct task_struct *p);

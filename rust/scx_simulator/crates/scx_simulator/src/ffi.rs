@@ -47,6 +47,10 @@ extern "C" {
     // Parent-child relationship
     pub fn sim_task_set_real_parent(child: *mut c_void, parent: *mut c_void);
 
+    // Migration disabled counter
+    pub fn sim_task_set_migration_disabled(p: *mut c_void, val: u16);
+    pub fn sim_task_get_migration_disabled(p: *mut c_void) -> u16;
+
     // Cpumask management (implemented in scx_test_cpumask.c)
     pub fn scx_test_set_all_cpumask(cpu: i32);
     pub fn scx_test_set_idle_cpumask(cpu: i32);

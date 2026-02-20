@@ -133,6 +133,12 @@ pub struct TaskDef {
     /// Common values: `PF_KTHREAD` (0x200000), `PF_WQ_WORKER` (0x20),
     /// `PF_IO_WORKER` (0x10). Kernel tasks have `mm = NULL` automatically.
     pub task_flags: u32,
+    /// Migration disabled counter. When > 0, the task cannot migrate to a
+    /// different CPU even if `nr_cpus_allowed > 1`. This models the kernel's
+    /// `migration_disabled` field which is incremented when tasks enter BPF
+    /// code or explicitly disable migration (e.g., kworkers bound to a CPU).
+    /// Defaults to 0 (migration enabled).
+    pub migration_disabled: u16,
 }
 
 /// A simulated task at runtime.
@@ -199,6 +205,10 @@ impl SimTask {
             // Set comm from the task name (scheduler code reads p->comm)
             let comm = std::ffi::CString::new(def.name.as_str()).unwrap_or_default();
             ffi::sim_task_set_comm(raw, comm.as_ptr());
+            // Set migration_disabled counter
+            if def.migration_disabled > 0 {
+                ffi::sim_task_set_migration_disabled(raw, def.migration_disabled);
+            }
         }
 
         // Initialize run_remaining from the first phase if it's a Run
