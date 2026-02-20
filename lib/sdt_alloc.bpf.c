@@ -584,6 +584,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 	size_t alloc_bytes;
 	void __arena *ptr;
 	size_t padding;
+	u32 page_cnt;
 	u64 addr;
 
 	bpf_spin_lock(&alloc_lock);
@@ -616,9 +617,8 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		 * No free operation so just forget about the previous
 		 * allocation memory.
 		 */
-
-		memory = bpf_arena_alloc_pages(&arena, NULL,
-					       scx_static.max_alloc_bytes / PAGE_SIZE,
+		page_cnt = scx_static.max_alloc_bytes / PAGE_SIZE,
+		memory = bpf_arena_alloc_pages(&arena, NULL, page_cnt,
 					       NUMA_NO_NODE, 0);
 		if (!memory)
 			return (u64)NULL;
@@ -640,6 +640,7 @@ u64 scx_static_alloc_internal(size_t bytes, size_t alignment)
 		 */
 		scx_static.memory = memory;
 		scx_static.off = 0;
+		scx_static.arena_pages_used += page_cnt;
 		addr = (__u64) scx_static.memory + scx_static.off;
 
 		/*
@@ -672,10 +673,17 @@ int scx_static_init(size_t alloc_pages)
 		.max_alloc_bytes = max_bytes,
 		.off = 0,
 		.memory = memory,
+		.arena_pages_used = alloc_pages,
 	};
 	bpf_spin_unlock(&alloc_lock);
 
 	return 0;
+}
+
+__weak
+u64 scx_alloc_get_pages_used(void)
+{
+	return alloc_stats.arena_pages_used + scx_static.arena_pages_used;
 }
 
 __hidden
