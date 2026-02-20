@@ -19,6 +19,7 @@ enum scx_selftest_id {
 	SCX_SELFTEST_ID_RBTREE			= 7,
 	SCX_SELFTEST_ID_TOPOLOGY		= 8,
 	SCX_SELFTEST_ID_BITMAP			= 9,
+	SCX_SELFTEST_ID_RBTREE_LEAK		= 10,
 };
 
 #define SCX_SELFTEST(func, ...)		\
