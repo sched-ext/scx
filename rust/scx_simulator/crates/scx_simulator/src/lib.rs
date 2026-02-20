@@ -40,6 +40,7 @@ pub mod kfuncs;
 pub mod monitor;
 pub mod perf;
 mod perfetto;
+pub mod preempt;
 pub mod probes;
 pub mod rtapp;
 pub mod scenario;
@@ -62,7 +63,7 @@ pub use perf::RbcCounter;
 pub use rtapp::load_rtapp;
 pub use scenario::{
     CgroupBandwidth, CgroupCreateEvent, CgroupDef, CgroupDestroyEvent, CgroupMigrateEvent,
-    CpuPreemptEvent, HotplugEvent, NoiseConfig, OverheadConfig, Scenario,
+    CpuPreemptEvent, HotplugEvent, NoiseConfig, OverheadConfig, PreemptiveConfig, Scenario,
 };
 pub use task::{nice_to_weight, sched_weight_to_cgroup, Phase, RepeatMode, TaskBehavior, TaskDef};
 pub use trace::{Trace, TraceEvent, TraceKind};
