@@ -118,11 +118,6 @@ const volatile u64 perf_config;
 volatile u64 perf_threshold;
 
 /*
- * Enable deferred wakeup.
- */
-const volatile bool deferred_wakeups = true;
-
-/*
  * Sticky perf event (0x0 = disabled). When task's count for this event
  * exceeds perf_sticky_threshold, keep it on the same CPU.
  */
@@ -975,38 +970,6 @@ int enable_primary_cpu(struct cpu_arg *input)
 }
 
 /*
- * Kick idle CPUs with pending tasks.
- *
- * Instead of waking up CPU when tasks are enqueued, we defer the wakeup
- * using this timer handler, in order to have a faster enqueue hot path.
- */
-static int wakeup_timerfn(void *map, int *key, struct bpf_timer *timer)
-{
-	s32 cpu;
-	int err;
-
-	/*
-	 * Iterate over all CPUs and wake up those that have pending tasks
-	 * in their local DSQ.
-	 *
-	 * Note that tasks are only enqueued in ops.enqueue(), but we never
-	 * wake-up the CPUs from there to reduce overhead in the hot path.
-         */
-	bpf_for(cpu, 0, nr_cpu_ids)
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) && is_cpu_idle(cpu))
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	/*
-	 * Re-arm the wakeup timer.
-	 */
-	err = bpf_timer_start(timer, slice_ns, 0);
-	if (err)
-		scx_bpf_error("Failed to re-arm wakeup timer");
-
-	return 0;
-}
-
-/*
  * Return true if the task should attempt a migration, false otherwise.
  */
 static bool task_should_migrate(struct task_struct *p, u64 enq_flags)
@@ -1147,20 +1110,6 @@ s32 BPF_STRUCT_OPS(cosmos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 w
 	return cpu >= 0 ? cpu : prev_cpu;
 }
 
-/*
- * Wake-up @cpu if it's idle.
- */
-static inline void wakeup_cpu(s32 cpu)
-{
-	/*
-	 * If deferred wakeups are enabled all the wakeup events are
-	 * performed asynchronously by wakeup_timerfn().
-	 */
-	if (deferred_wakeups)
-		return;
-
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
 
 void BPF_STRUCT_OPS(cosmos_tick, struct task_struct *p)
 {
@@ -1221,7 +1170,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
 					   task_slice(p), enq_flags);
 			if (cpu != prev_cpu || !scx_bpf_task_running(p))
-				wakeup_cpu(cpu);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -1267,7 +1216,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, task_slice(p), enq_flags);
 			if (cpu != prev_cpu || !scx_bpf_task_running(p))
-				wakeup_cpu(cpu);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -1278,7 +1227,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!is_system_busy()) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, task_slice(p), enq_flags);
 		if (task_should_migrate(p, enq_flags))
-			wakeup_cpu(prev_cpu);
+			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 		return;
 	}
 
@@ -1289,7 +1238,7 @@ void BPF_STRUCT_OPS(cosmos_enqueue, struct task_struct *p, u64 enq_flags)
 				 task_slice(p), task_dl(p, tctx), enq_flags);
 
 	if (task_should_migrate(p, enq_flags))
-		wakeup_cpu(prev_cpu);
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 }
 
 void BPF_STRUCT_OPS(cosmos_dispatch, s32 cpu, struct task_struct *prev)
@@ -1472,8 +1421,6 @@ out_unlock:
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 {
-	struct bpf_timer *timer;
-	u32 key = 0;
 	int err;
 	int cpu;
 	struct cpu_ctx *cctx;
@@ -1503,23 +1450,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(cosmos_init)
 		err = scx_bpf_create_dsq(SHARED_DSQ, -1);
 		if (err) {
 			scx_bpf_error("failed to create shared DSQ: %d", err);
-			return err;
-		}
-	}
-
-	if (deferred_wakeups) {
-		timer = bpf_map_lookup_elem(&wakeup_timer, &key);
-		if (!timer) {
-			scx_bpf_error("Failed to lookup wakeup timer");
-			return -ESRCH;
-		}
-
-		bpf_timer_init(timer, &wakeup_timer, CLOCK_MONOTONIC);
-		bpf_timer_set_callback(timer, wakeup_timerfn);
-
-		err = bpf_timer_start(timer, slice_ns, 0);
-		if (err) {
-			scx_bpf_error("Failed to arm wakeup timer");
 			return err;
 		}
 	}
