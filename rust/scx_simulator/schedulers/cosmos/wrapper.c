@@ -84,29 +84,115 @@ static struct cpu_ctx *cosmos_lookup_percpu_elem(int cpu);
 #define bpf_map_lookup_percpu_elem(map, key, cpu) cosmos_lookup_percpu_elem(cpu)
 
 /*
- * Simulated perf counters.
+ * Simulated PMU kfunc stubs.
  *
- * Use scx_bpf_now() as a monotonic counter. start_counters() records
- * the baseline at task start; stop_counters() reads the current value
- * at task stop. Delta = task runtime in nanoseconds.
+ * The new COSMOS API uses scx_pmu_read() kfunc instead of the old
+ * start_readings map + bpf_perf_event_read_value() approach.
+ *
+ * We simulate PMU counters using scx_bpf_now() as a monotonic counter.
+ * The delta between event_start and event_stop represents task runtime
+ * in nanoseconds, which serves as a simulated "event count".
  *
  * Tasks with runtime > perf_threshold are classified as "event heavy"
  * and routed to the least-busy-event CPU.
  */
 extern u64 scx_bpf_now(void);
 
-static long sim_perf_event_read(void *map, u32 key,
-				struct bpf_perf_event_value *val, u32 size)
+/* Per-task PMU baseline storage (indexed by task pointer hash) */
+#define PMU_TASK_HASH_SIZE 1024
+static u64 pmu_task_baseline[PMU_TASK_HASH_SIZE];
+
+static inline unsigned int pmu_task_hash(struct task_struct *p)
 {
-	(void)map; (void)key; (void)size;
-	val->counter = scx_bpf_now();
-	val->enabled = 1;
-	val->running = 1;
+	return ((unsigned long)p >> 4) % PMU_TASK_HASH_SIZE;
+}
+
+/*
+ * scx_pmu_install - Install a PMU event for tracking.
+ * In simulation, this is a no-op since we use scx_bpf_now() as counter.
+ */
+int scx_pmu_install(u64 event)
+{
+	(void)event;
 	return 0;
 }
-#undef bpf_perf_event_read_value
-#define bpf_perf_event_read_value(map, key, val, size) \
-	sim_perf_event_read(map, key, val, size)
+
+/*
+ * scx_pmu_uninstall - Uninstall a PMU event.
+ * No-op in simulation.
+ */
+int scx_pmu_uninstall(u64 event)
+{
+	(void)event;
+	return 0;
+}
+
+/*
+ * scx_pmu_task_init - Initialize per-task PMU tracking.
+ * No-op in simulation.
+ */
+int scx_pmu_task_init(struct task_struct *p)
+{
+	(void)p;
+	return 0;
+}
+
+/*
+ * scx_pmu_task_fini - Finalize per-task PMU tracking.
+ * No-op in simulation.
+ */
+int scx_pmu_task_fini(struct task_struct *p)
+{
+	(void)p;
+	return 0;
+}
+
+/*
+ * scx_pmu_event_start - Record baseline counter when task starts running.
+ * Stores current scx_bpf_now() value as baseline.
+ */
+int scx_pmu_event_start(struct task_struct *p, bool update)
+{
+	(void)update;
+	pmu_task_baseline[pmu_task_hash(p)] = scx_bpf_now();
+	return 0;
+}
+
+/*
+ * scx_pmu_event_stop - Mark end of PMU event tracking for task.
+ * The actual reading happens in scx_pmu_read().
+ */
+int scx_pmu_event_stop(struct task_struct *p)
+{
+	(void)p;
+	return 0;
+}
+
+/*
+ * scx_pmu_read - Read PMU counter delta for a task.
+ *
+ * Returns the difference between current time and baseline (task runtime).
+ * If clear=true, resets the baseline for the next measurement.
+ */
+int scx_pmu_read(struct task_struct *p, u64 event, u64 *value, bool clear)
+{
+	unsigned int hash = pmu_task_hash(p);
+	u64 now = scx_bpf_now();
+	u64 baseline = pmu_task_baseline[hash];
+
+	(void)event;
+
+	/* Return delta since event_start */
+	if (now >= baseline)
+		*value = now - baseline;
+	else
+		*value = 0;
+
+	if (clear)
+		pmu_task_baseline[hash] = now;
+
+	return 0;
+}
 
 /*
  * BPF timer overrides for deferred wakeups.
@@ -132,20 +218,6 @@ extern void sim_timer_start(unsigned long long nsecs);
 	(sim_timer_start(nsecs), 0)
 
 /*
- * Per-CPU start_readings storage.
- *
- * The BPF start_readings map is PERCPU_ARRAY — each CPU needs its own
- * baseline. Override bpf_map_lookup_elem to route start_readings lookups
- * to this array; all other maps fall through to scx_test_map_lookup_elem.
- *
- * start_readings_map_ptr is set in cosmos_register_maps() after
- * main.bpf.c is included (where start_readings is defined).
- */
-static struct bpf_perf_event_value start_readings_percpu[MAX_SIM_CPUS];
-static void *start_readings_map_ptr;
-static void *wakeup_timer_map_ptr;
-
-/*
  * Static wakeup_timer backing storage.
  * The struct bpf_timer inside is opaque to us — we just need to provide
  * memory for bpf_map_lookup_elem to return. The bpf_timer fields aren't
@@ -153,15 +225,10 @@ static void *wakeup_timer_map_ptr;
  * Size is generous to accommodate any struct wakeup_timer layout.
  */
 static char sim_wakeup_timer_buf[256];
+static void *wakeup_timer_map_ptr;
 
 static void *cosmos_map_lookup(void *map, const void *key)
 {
-	if (map == start_readings_map_ptr && start_readings_map_ptr != NULL) {
-		int cpu = bpf_get_smp_processor_id();
-		if (cpu >= 0 && cpu < MAX_SIM_CPUS)
-			return &start_readings_percpu[cpu];
-		return NULL;
-	}
 	if (map == wakeup_timer_map_ptr && wakeup_timer_map_ptr != NULL)
 		return sim_wakeup_timer_buf;
 	return scx_test_map_lookup_elem(map, key);
@@ -214,7 +281,6 @@ void cosmos_register_maps(void)
 	INIT_SCX_TEST_MAP(&cpu_node_test_map, cpu_node_map);
 	scx_test_map_register(&cpu_node_test_map, &cpu_node_map);
 
-	start_readings_map_ptr = (void *)&start_readings;
 	wakeup_timer_map_ptr = (void *)&wakeup_timer;
 	cosmos_timer_map = (void *)&wakeup_timer;
 }
@@ -248,7 +314,7 @@ void cosmos_setup(unsigned int num_cpus)
 	numa_enabled = false;
 	nr_node_ids = 1;
 	mm_affinity = true;
-	perf_enabled = true;
+	perf_config = 1;  /* Enable PMU tracking (any non-zero value) */
 	deferred_wakeups = true;
 	slice_ns = 20000000;   /* 20ms */
 	slice_lag = 20000000;  /* 20ms */
