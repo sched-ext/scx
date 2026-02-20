@@ -130,3 +130,6 @@ static inline class_rcu_t class_rcu_constructor(void)
 /* BPF spin lock */
 DEFINE_GUARD(spin_lock, struct bpf_spin_lock *, bpf_spin_lock(_T),
 	     bpf_spin_unlock(_T))
+
+/* Task reference from bpf_task_from_pid / bpf_task_acquire */
+DEFINE_FREE(task, struct task_struct *, if (_T) bpf_task_release(_T))

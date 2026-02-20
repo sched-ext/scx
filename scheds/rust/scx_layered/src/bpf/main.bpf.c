@@ -18,6 +18,7 @@
 #include <bpf/bpf_tracing.h>
 
 #include <lib/pmu.h>
+#include <lib/cleanup.bpf.h>
 
 #include "intf.h"
 #include "timer.bpf.h"
@@ -432,29 +433,26 @@ static void layer_cpuset_bpfmask(int layer_id)
 	u8 *u8_ptr;
 	int cpu;
 
-	bpf_rcu_read_lock();
-	bpf_for(cpu, 0, nr_possible_cpus) {
-		u8_ptr = MEMBER_VPTR(layers, [layer_id].cpuset[cpu / 8]);
-		if (!u8_ptr) {
-			bpf_rcu_read_unlock();
-			scx_bpf_error("could not find cpuset byte");
-			return;
-		}
+	scoped_guard(rcu) {
+		bpf_for(cpu, 0, nr_possible_cpus) {
+			u8_ptr = MEMBER_VPTR(layers, [layer_id].cpuset[cpu / 8]);
+			if (!u8_ptr) {
+				scx_bpf_error("could not find cpuset byte");
+				return;
+			}
 
-		layer_cpuset = lookup_layer_cpuset(layer_id);
-		if (!layer_cpuset) {
-			bpf_rcu_read_unlock();
-			scx_bpf_error("uninitialized cpuset");
-			return;
-		}
+			layer_cpuset = lookup_layer_cpuset(layer_id);
+			if (!layer_cpuset) {
+				scx_bpf_error("uninitialized cpuset");
+				return;
+			}
 
-		if (*u8_ptr & (1 << (cpu % 8)))
-			bpf_cpumask_set_cpu(cpu, layer_cpuset);
-		else
-			bpf_cpumask_clear_cpu(cpu, layer_cpuset);
+			if (*u8_ptr & (1 << (cpu % 8)))
+				bpf_cpumask_set_cpu(cpu, layer_cpuset);
+			else
+				bpf_cpumask_clear_cpu(cpu, layer_cpuset);
+		}
 	}
-
-	bpf_rcu_read_unlock();
 }
 
 /*
@@ -478,47 +476,43 @@ __weak s32 refresh_cpumasks(u32 layer_id)
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
 		return 0;
 
-	bpf_rcu_read_lock();
-	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
-	    !(layer_cpumask = cpumaskw->cpumask)) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("can't happen");
-		return 0;
-	}
-
-	bpf_for(cpu, 0, nr_possible_cpus) {
-		u8 *u8_ptr;
-
-		if (!(cpuc = lookup_cpu_ctx(cpu))) {
-			bpf_rcu_read_unlock();
+	scoped_guard(rcu) {
+		if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
+		    !(layer_cpumask = cpumaskw->cpumask)) {
+			scx_bpf_error("can't happen");
 			return 0;
 		}
 
-		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
-			if (*u8_ptr & (1 << (cpu % 8))) {
-				protected_changed = refresh_layer_cpuc(cpuc, layer) || protected_changed;
+		bpf_for(cpu, 0, nr_possible_cpus) {
+			u8 *u8_ptr;
 
-				bpf_cpumask_set_cpu(cpu, layer_cpumask);
-			} else {
-				if (layer->kind == LAYER_KIND_OPEN)
-					cpuc->in_open_layers = false;
-				else if (cpuc->layer_id == layer_id) {
-					cpuc->layer_id = MAX_LAYERS;
-					cpuc->in_open_layers = true;
+			if (!(cpuc = lookup_cpu_ctx(cpu)))
+				return 0;
 
-					/* Belongs to no layer, so none of these hold. */
-					cpuc->protect_owned = false;
-					cpuc->protect_owned_preempt = false;
+			if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
+				if (*u8_ptr & (1 << (cpu % 8))) {
+					protected_changed = refresh_layer_cpuc(cpuc, layer) || protected_changed;
 
+					bpf_cpumask_set_cpu(cpu, layer_cpumask);
+				} else {
+					if (layer->kind == LAYER_KIND_OPEN)
+						cpuc->in_open_layers = false;
+					else if (cpuc->layer_id == layer_id) {
+						cpuc->layer_id = MAX_LAYERS;
+						cpuc->in_open_layers = true;
+
+						/* Belongs to no layer, so none of these hold. */
+						cpuc->protect_owned = false;
+						cpuc->protect_owned_preempt = false;
+
+					}
+					bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 				}
-				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
+			} else {
+				scx_bpf_error("can't happen");
 			}
-		} else {
-			scx_bpf_error("can't happen");
 		}
 	}
-
-	bpf_rcu_read_unlock();
 
 	if (protected_changed)
 		__sync_fetch_and_add(&unprotected_seq, 1);
@@ -1132,7 +1126,7 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 	if (!has_little_cores || !big_cpumask)
 		return cpu;
 
-	struct bpf_cpumask *tmp_cpumask;
+	struct bpf_cpumask *tmp_cpumask __free(bpf_cpumask) = NULL;
 	if (!taskc->layered_mask || !big_cpumask)
 		return cpu;
 
@@ -1142,35 +1136,31 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 	switch (layer->growth_algo) {
 	case GROWTH_ALGO_BIG_LITTLE: {
 		if (!taskc->layered_mask || !big_cpumask)
-			goto out_put;
+			return cpu;
 
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(big_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
 					 prev_cpu, idle_smtmask, layer);
-		goto out_put;
+		return cpu;
 	}
 	case GROWTH_ALGO_LITTLE_BIG: {
 		bpf_cpumask_setall(tmp_cpumask);
 		if (!tmp_cpumask || !big_cpumask)
-			goto out_put;
+			return cpu;
 		bpf_cpumask_xor(tmp_cpumask, cast_mask(big_cpumask),
 				cast_mask(tmp_cpumask));
 		if (!tmp_cpumask || !taskc->layered_mask)
-			goto out_put;
+			return cpu;
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(tmp_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
 					 prev_cpu, idle_smtmask, layer);
-		goto out_put;
+		return cpu;
 	}
 	default:
-		goto out_put;
+		return cpu;
 	}
-
-out_put:
-	bpf_cpumask_release(tmp_cpumask);
-	return cpu;
 }
 
 static __always_inline
@@ -1178,7 +1168,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
 		  bool from_selcpu)
 {
-	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
+	const struct cpumask *layer_cpumask, *layered_cpumask, *cpumask;
 	bool is_float = layer->task_place == PLACEMENT_FLOAT;
 	struct bpf_cpumask *unprot_mask;
 	struct cpu_ctx *prev_cpuc;
@@ -1230,10 +1220,10 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (READ_ONCE(layer->check_no_idle)) {
 		bool has_idle;
-		cpumask = scx_bpf_get_idle_cpumask();
+		const struct cpumask *idle_cpumask __free(idle_cpumask) = scx_bpf_get_idle_cpumask();
 
 		if (layer->kind == LAYER_KIND_CONFINED) {
-			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
+			has_idle = bpf_cpumask_intersects(layered_cpumask, idle_cpumask);
 		} else {
 			maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
 			/*
@@ -1246,14 +1236,12 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 			if (unlikely(!unprot_mask)) {
 				scx_bpf_error("unprotected_cpumask not initialized");
-				scx_bpf_put_idle_cpumask(cpumask);
 				return -1;
 			}
 
-			has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask);
+			has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), idle_cpumask);
 		}
 
-		scx_bpf_put_idle_cpumask(cpumask);
 		if (!has_idle)
 			return -1;
 	}
@@ -1261,7 +1249,9 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if ((nr_llcs > 1 || nr_nodes > 1) &&
 	    !(prev_cpuc = lookup_cpu_ctx(prev_cpu)))
 		return -1;
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
+
+	const struct cpumask *idle_smtmask __free(idle_cpumask) = scx_bpf_get_idle_smtmask();
+	if (!idle_smtmask)
 		return -1;
 
 	if (is_float)
@@ -1273,7 +1263,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	cpu = pick_idle_big_little(layer, taskc, idle_smtmask, prev_cpu);
 	if (cpu >=0)
-		goto out_put;
+		goto out;
 
 	/*
 	 * Try a CPU in the previous LLC.
@@ -1285,16 +1275,16 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 					       prev_cpuc->llc_id, cpus_seq);
 		if (!(cpumask = cast_mask(taskc->layered_llc_mask))) {
 			cpu = -1;
-			goto out_put;
+			goto out;
 		}
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
-			goto out_put;
+			goto out;
 
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
 		    prev_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
 			cpu = -1;
-			goto out_put;
+			goto out;
 		}
 	}
 
@@ -1307,14 +1297,14 @@ no_locality:
 						prev_cpuc->node_id, cpus_seq);
 		if (!(cpumask = cast_mask(taskc->layered_node_mask))) {
 			cpu = -1;
-			goto out_put;
+			goto out;
 		}
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
-			goto out_put;
+			goto out;
 	}
 
 	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
-		goto out_put;
+		goto out;
 
 	/*
 	 * If the layer is an open one, we can try the whole machine.
@@ -1327,13 +1317,13 @@ no_locality:
 
 	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask, layer)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
-		goto out_put;
+		goto out;
 	    }
 	}
 
 	cpu = -1;
 
-out_put:
+out:
 	/*
 	 * Update check_no_idle. Cleared if any idle CPU is found. Set if no
 	 * idle CPU is found for a task without affinity restriction. Use
@@ -1348,7 +1338,6 @@ out_put:
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
 
-	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
 
@@ -1429,7 +1418,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
 	struct task_struct *curr;
-	const struct cpumask *idle_cpumask;
 	bool cand_idle;
 	s32 sib;
 
@@ -1454,23 +1442,20 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cand))
 		return false;
 
-	bpf_rcu_read_lock();
-	curr = __COMPAT_scx_bpf_cpu_curr(cand);
-	if (!curr) {
-		bpf_rcu_read_unlock();
-		return false;
-	}
-
-	if (ext_sched_class_addr && idle_sched_class_addr &&
-	    ((u64)curr->sched_class != ext_sched_class_addr) &&
-	    ((u64)curr->sched_class != idle_sched_class_addr)) {
-		bpf_rcu_read_unlock();
-		if (!(cpuc = lookup_cpu_ctx(-1)))
+	scoped_guard(rcu) {
+		curr = __COMPAT_scx_bpf_cpu_curr(cand);
+		if (!curr)
 			return false;
-		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
-		return false;
+
+		if (ext_sched_class_addr && idle_sched_class_addr &&
+		    ((u64)curr->sched_class != ext_sched_class_addr) &&
+		    ((u64)curr->sched_class != idle_sched_class_addr)) {
+			if (!(cpuc = lookup_cpu_ctx(-1)))
+				return false;
+			gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
+			return false;
+		}
 	}
-	bpf_rcu_read_unlock();
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
@@ -1515,7 +1500,7 @@ preempt:
 	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return true;
 
-	idle_cpumask = scx_bpf_get_idle_cpumask();
+	const struct cpumask *idle_cpumask __free(idle_cpumask) = scx_bpf_get_idle_cpumask();
 
 	/*
 	 * $sib_cpuc is set if @p is an exclusive task, a sibling CPU
@@ -1544,7 +1529,6 @@ preempt:
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
 	}
 
-	scx_bpf_put_idle_cpumask(idle_cpumask);
 	return true;
 }
 
@@ -1563,17 +1547,18 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 
 static void layer_kick_idle_cpu(struct layer *layer)
 {
-	const struct cpumask *layer_cpumask, *idle_smtmask;;
+	const struct cpumask *layer_cpumask;
 	s32 cpu;
 
-	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)))
+		return;
+
+	const struct cpumask *idle_smtmask __free(idle_cpumask) = scx_bpf_get_idle_smtmask();
+	if (!idle_smtmask)
 		return;
 
 	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer)) >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1989,7 +1974,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 			return true;
 		}
 	} else {
-		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
+		const struct cpumask *idle_cpumask __free(idle_cpumask) = scx_bpf_get_idle_cpumask();
 		bool has_idle = false;
 
 		/*
@@ -2006,8 +1991,6 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 				has_idle = bpf_cpumask_intersects(idle_cpumask,
 								  layer_cpumask);
 		}
-
-		scx_bpf_put_idle_cpumask(idle_cpumask);
 
 		if (has_idle) {
 			p->scx.slice = layer->slice_ns;
@@ -2532,18 +2515,18 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 	case MATCH_NICE_EQUALS:
 		return prio_to_nice((s32)p->static_prio) == match->nice;
 	case MATCH_USER_ID_EQUALS:
-		bpf_rcu_read_lock();
-		cred = p->real_cred;
-		if (cred)
-			result = cred->euid.val == match->user_id;
-		bpf_rcu_read_unlock();
+		scoped_guard(rcu) {
+			cred = p->real_cred;
+			if (cred)
+				result = cred->euid.val == match->user_id;
+		}
 		return result;
 	case MATCH_GROUP_ID_EQUALS:
-		bpf_rcu_read_lock();
-		cred = p->real_cred;
-		if (cred)
-			result = cred->egid.val == match->group_id;
-		bpf_rcu_read_unlock();
+		scoped_guard(rcu) {
+			cred = p->real_cred;
+			if (cred)
+				result = cred->egid.val == match->group_id;
+		}
 		return result;
 	case MATCH_PID_EQUALS:
 		return p->pid == match->pid;
@@ -2554,28 +2537,27 @@ static __noinline bool match_one(struct layer *layer, struct layer_match *match,
 	case MATCH_NSPID_EQUALS: {
 		// To do namespace pid matching we need to translate the root
 		// pid from bpf side to the namespace pid.
-		bpf_rcu_read_lock();
-		struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
-		struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
-		if (!p_pid || !pid_ns) {
-			bpf_rcu_read_unlock();
-			return result;
+		pid_t nspid;
+		u64 nsid;
+		scoped_guard(rcu) {
+			struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
+			struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
+			if (!p_pid || !pid_ns)
+				return result;
+			nspid = get_pid_nr_ns(p_pid, pid_ns);
+			nsid = BPF_CORE_READ(pid_ns, ns.inum);
 		}
-		pid_t nspid = get_pid_nr_ns(p_pid, pid_ns);
-		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
-		bpf_rcu_read_unlock();
 		return (u32)nspid == match->pid && nsid == match->nsid;
 	}
 	case MATCH_NS_EQUALS: {
-		bpf_rcu_read_lock();
-		struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
-		struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
-		if (!p_pid || !pid_ns) {
-			bpf_rcu_read_unlock();
-			return result;
+		u64 nsid;
+		scoped_guard(rcu) {
+			struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
+			struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
+			if (!p_pid || !pid_ns)
+				return result;
+			nsid = BPF_CORE_READ(pid_ns, ns.inum);
 		}
-		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
-		bpf_rcu_read_unlock();
 		return nsid == match->nsid;
 	}
 	case MATCH_SCXCMD_JOIN: {
@@ -2945,39 +2927,38 @@ static s32 create_node(u32 node_id)
 	if (ret)
 		return ret;
 
-	bpf_rcu_read_lock();
-	cpumask = nodec->cpumask;
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to lookup node cpumask");
-		return -ENOENT;
-	}
-
-	bpf_for(cpu, 0, nr_possible_cpus) {
-		const volatile u64 *nmask;
-
-		nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
-		if (!nmask) {
-			scx_bpf_error("array index error");
-			ret = -ENOENT;
-			break;
+	scoped_guard(rcu) {
+		cpumask = nodec->cpumask;
+		if (!cpumask) {
+			scx_bpf_error("Failed to lookup node cpumask");
+			return -ENOENT;
 		}
 
-		if (*nmask & (1LLU << (cpu % 64))) {
-			bpf_cpumask_set_cpu(cpu, cpumask);
-			if (!(cpuc = lookup_cpu_ctx(cpu))) {
-				scx_bpf_error("cpu ctx error");
+		bpf_for(cpu, 0, nr_possible_cpus) {
+			const volatile u64 *nmask;
+
+			nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
+			if (!nmask) {
+				scx_bpf_error("array index error");
 				ret = -ENOENT;
 				break;
 			}
 
-			cpuc->node_id = node_id;
-			nodec->nr_cpus++;
+			if (*nmask & (1LLU << (cpu % 64))) {
+				bpf_cpumask_set_cpu(cpu, cpumask);
+				if (!(cpuc = lookup_cpu_ctx(cpu))) {
+					scx_bpf_error("cpu ctx error");
+					ret = -ENOENT;
+					break;
+				}
+
+				cpuc->node_id = node_id;
+				nodec->nr_cpus++;
+			}
 		}
 	}
 
 	dbg("CFG creating node %d with %d cpus", node_id, nodec->nr_cpus);
-	bpf_rcu_read_unlock();
 	return ret;
 }
 
@@ -2998,33 +2979,31 @@ static s32 create_llc(u32 llc_id)
 	if (ret)
 		return ret;
 
-	bpf_rcu_read_lock();
-	cpumask = llcc->cpumask;
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to lookup node cpumask");
-		return -ENOENT;
-	}
-
-	bpf_for(cpu, 0, nr_possible_cpus) {
-		if (!(cpuc = lookup_cpu_ctx(cpu))) {
-			bpf_rcu_read_unlock();
-			scx_bpf_error("cpu ctx error");
+	scoped_guard(rcu) {
+		cpumask = llcc->cpumask;
+		if (!cpumask) {
+			scx_bpf_error("Failed to lookup node cpumask");
 			return -ENOENT;
 		}
 
-		if (cpu_to_llc_id(cpu) != llc_id)
-			continue;
+		bpf_for(cpu, 0, nr_possible_cpus) {
+			if (!(cpuc = lookup_cpu_ctx(cpu))) {
+				scx_bpf_error("cpu ctx error");
+				return -ENOENT;
+			}
 
-		bpf_cpumask_set_cpu(cpu, cpumask);
-		llcc->nr_cpus++;
-		cpuc->llc_id = llc_id;
-		cpuc->hi_fb_dsq_id = hi_fb_dsq_id(llc_id);
-		cpuc->lo_fb_dsq_id = lo_fb_dsq_id(llc_id);
+			if (cpu_to_llc_id(cpu) != llc_id)
+				continue;
+
+			bpf_cpumask_set_cpu(cpu, cpumask);
+			llcc->nr_cpus++;
+			cpuc->llc_id = llc_id;
+			cpuc->hi_fb_dsq_id = hi_fb_dsq_id(llc_id);
+			cpuc->lo_fb_dsq_id = lo_fb_dsq_id(llc_id);
+		}
 	}
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
-	bpf_rcu_read_unlock();
 
 	pmap = &llcc->prox_map;
 	dbg("CFG: LLC[%d] prox_map node/sys=%d/%d",
@@ -3694,7 +3673,7 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
  */
 u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 {
-	struct task_struct *__p, *p = NULL;
+	struct task_struct *__p;
 	struct task_ctx *taskc;
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
@@ -3703,29 +3682,26 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	if (!dsq_id || !jiffies_now)
 		return 0;
 
-	// verifier
-	bpf_rcu_read_lock();
+	guard(rcu)();
 	bpf_for_each(scx_dsq, __p, dsq_id, 0) {
-		/* XXX verifier workaround: drop the following block later */
-		if (p)
-			bpf_task_release(p);
-		if (!(p = bpf_task_from_pid(__p->pid)))
+		struct task_struct *p __free(task) = bpf_task_from_pid(__p->pid);
+		if (!p)
 			continue;
 
 		if (!(taskc = lookup_task_ctx(p)))
-			goto unlock;
+			return 0;
 
 		cur_delay = get_delay_sec(p, jiffies_now);
 		if (cur_delay <= antistall_sec)
 			// check head task in dsq
-			goto unlock;
+			return 0;
 
 		#pragma unroll
 		for (pass = 0; pass < 2; ++pass) bpf_for(cpu, 0, nr_possible_cpus) {
 			const struct cpumask *cpumask;
 
 			if (!(cpumask = cast_mask(taskc->layered_mask)))
-				goto unlock;
+				return 0;
 
 			/* for affinity violating tasks, target all allowed CPUs */
 			if (bpf_cpumask_empty(cpumask))
@@ -3739,7 +3715,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 
 			if (!antistall_dsq || !delay) {
 				scx_bpf_error("can't happen");
-				goto unlock;
+				return 0;
 			}
 
 			if ((pass == 0 && *antistall_dsq == SCX_DSQ_INVALID) ||
@@ -3747,17 +3723,13 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
 				*delay = cur_delay;
 				*antistall_dsq = dsq_id;
-				goto unlock;
+				return 0;
 			}
 		}
 
-		goto unlock;
+		return 0;
 	}
 
-unlock:
-	if (p)
-		bpf_task_release(p);
-	bpf_rcu_read_unlock();
 	return 0;
 }
 
@@ -3833,22 +3805,20 @@ init_layer_cpumasks(int layer_id)
 
 	layer_cpuset_bpfmask(layer_id);
 
-	bpf_rcu_read_lock();
-	/* Look the masks back up to make the verifier happy. */
-	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
-	    !(cpumask = cpumaskw->cpumask) ||
-	    !(cpuset = cpumaskw->cpuset)) {
-		bpf_rcu_read_unlock();
-		return -EINVAL;
-	}
+	scoped_guard(rcu) {
+		/* Look the masks back up to make the verifier happy. */
+		if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
+		    !(cpumask = cpumaskw->cpumask) ||
+		    !(cpuset = cpumaskw->cpuset))
+			return -EINVAL;
 
-	/*
-	 * Start all layers with their full cpuset so that everything runs
-	 * everywhere. This will soon be updated by refresh_cpumasks()
-	 * once the scheduler starts running.
-	 */
-	bpf_cpumask_copy(cpumask, (const struct cpumask *)cpuset);
-	bpf_rcu_read_unlock();
+		/*
+		 * Start all layers with their full cpuset so that everything runs
+		 * everywhere. This will soon be updated by refresh_cpumasks()
+		 * once the scheduler starts running.
+		 */
+		bpf_cpumask_copy(cpumask, (const struct cpumask *)cpuset);
+	}
 
 	return 0;
 }
@@ -4099,48 +4069,40 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask;
 	int i, nr_online_cpus, ret;
 
-	cpumask = bpf_cpumask_create();
+	struct bpf_cpumask *cpumask __free(bpf_cpumask) = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
 
-	tmp_big_cpumask = bpf_cpumask_create();
-	if (!tmp_big_cpumask) {
-		bpf_cpumask_release(cpumask);
+	struct bpf_cpumask *tmp_big_cpumask __free(bpf_cpumask) = bpf_cpumask_create();
+	if (!tmp_big_cpumask)
 		return -ENOMEM;
-	}
 
-	tmp_unprotected_cpumask = bpf_cpumask_create();
-	if (!tmp_unprotected_cpumask) {
-		bpf_cpumask_release(tmp_big_cpumask);
-		bpf_cpumask_release(cpumask);
+	struct bpf_cpumask *tmp_unprotected_cpumask __free(bpf_cpumask) = bpf_cpumask_create();
+	if (!tmp_unprotected_cpumask)
 		return -ENOMEM;
-	}
 
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask, tmp_unprotected_cpumask);
-		if (ret != 0) {
-			bpf_cpumask_release(cpumask);
-			bpf_cpumask_release(tmp_big_cpumask);
-			bpf_cpumask_release(tmp_unprotected_cpumask);
+		if (ret != 0)
 			return ret;
-		}
 	}
 
-	cpumask = bpf_kptr_xchg(&all_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+	struct bpf_cpumask *old;
 
-	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
-	if (tmp_big_cpumask)
-		bpf_cpumask_release(tmp_big_cpumask);
+	old = bpf_kptr_xchg(&all_cpumask, no_free_ptr(cpumask));
+	if (old)
+		bpf_cpumask_release(old);
 
-	tmp_unprotected_cpumask = bpf_kptr_xchg(&unprotected_cpumask, tmp_unprotected_cpumask);
-	if (tmp_unprotected_cpumask)
-		bpf_cpumask_release(tmp_unprotected_cpumask);
+	old = bpf_kptr_xchg(&big_cpumask, no_free_ptr(tmp_big_cpumask));
+	if (old)
+		bpf_cpumask_release(old);
+
+	old = bpf_kptr_xchg(&unprotected_cpumask, no_free_ptr(tmp_unprotected_cpumask));
+	if (old)
+		bpf_cpumask_release(old);
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
