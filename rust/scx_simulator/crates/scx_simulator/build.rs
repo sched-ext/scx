@@ -158,6 +158,12 @@ fn main() {
         scheduler_dir.display()
     );
 
+    // Expose bpftrace script path for --bpf-trace option
+    println!(
+        "cargo:rustc-env=BPFTRACE_SCRIPT={}",
+        workspace_dir.join("scripts/trace_scx_ops.bt").display()
+    );
+
     // Rebuild triggers (relative to workspace root, which is ../../ from crate)
     println!(
         "cargo:rerun-if-changed={}",

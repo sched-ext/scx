@@ -112,8 +112,20 @@ struct Cli {
     /// Requires --real-run vm. When enabled, an extra CPU is added to the VM
     /// and isolated using isolcpus for running the wprof tracer. The trace
     /// file is written to the current working directory.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "bpf_trace")]
     wprof: bool,
+
+    /// Trace scheduler ops callbacks and kfunc calls using bpftrace.
+    ///
+    /// Requires --real-run vm. When enabled, an extra CPU is added to the VM
+    /// and isolated for running bpftrace with trace_scx_ops.bt. This traces
+    /// sched_class entry points, scx_bpf_* kfunc calls with return values,
+    /// and sched_switch/sched_wakeup lifecycle events.
+    ///
+    /// The trace is written to bpf_trace.log in the current working directory.
+    /// This is an alternative to --wprof for comparing simulator vs real runs.
+    #[arg(long, conflicts_with = "wprof")]
+    bpf_trace: bool,
 }
 
 fn main() {
@@ -171,10 +183,22 @@ fn run(cli: &Cli) -> Result<(), String> {
         scenario.sched_overhead_rbc_ns = Some(0);
     }
 
-    // Validate --wprof requires --real-run vm
+    // Validate --wprof and --bpf-trace require --real-run vm
     if cli.wprof && cli.real_run != RealRunMode::Vm {
         return Err("--wprof requires --real-run vm".into());
     }
+    if cli.bpf_trace && cli.real_run != RealRunMode::Vm {
+        return Err("--bpf-trace requires --real-run vm".into());
+    }
+
+    // Determine trace mode
+    let trace_mode = if cli.wprof {
+        real_run::TraceMode::Wprof
+    } else if cli.bpf_trace {
+        real_run::TraceMode::BpfTrace
+    } else {
+        real_run::TraceMode::None
+    };
 
     // Handle --real-run mode
     match cli.real_run {
@@ -182,7 +206,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             run_simulation(cli, scenario)?;
         }
         RealRunMode::Vm => {
-            real_run::run_vm(workload_path, &cli.scheduler, cli.cpus, cli.wprof)?;
+            real_run::run_vm(workload_path, &cli.scheduler, cli.cpus, trace_mode)?;
         }
     }
 

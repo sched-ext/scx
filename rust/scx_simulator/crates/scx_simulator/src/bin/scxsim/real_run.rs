@@ -14,7 +14,24 @@ const RTAPP_BIN: &str = "/home/newton/bin/rt-app";
 const VM_WORKSPACE: &str = "/usr/workspace";
 
 /// Name of the trace file written by wprof.
-const TRACE_FILENAME: &str = "trace.proto";
+const WPROF_TRACE_FILENAME: &str = "trace.proto";
+
+/// Name of the trace file written by bpftrace.
+const BPF_TRACE_FILENAME: &str = "bpf_trace.log";
+
+/// Absolute path to the bpftrace script (resolved at compile time).
+const BPFTRACE_SCRIPT: &str = env!("BPFTRACE_SCRIPT");
+
+/// Which tracing to enable during a VM run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceMode {
+    /// No tracing.
+    None,
+    /// Perfetto trace via wprof.
+    Wprof,
+    /// Ops + kfunc trace via bpftrace (trace_scx_ops.bt).
+    BpfTrace,
+}
 
 /// Run the workload in a virtme-ng VM with the specified scheduler.
 ///
@@ -24,19 +41,25 @@ const TRACE_FILENAME: &str = "trace.proto";
 /// 3. Loads the scheduler and runs rt-app
 /// 4. Captures and displays the output
 ///
-/// When `enable_wprof` is true:
+/// When `trace_mode` is `Wprof`:
 /// - Adds one extra CPU for tracing
 /// - Isolates that CPU using `isolcpus=N` kernel parameter
 /// - Runs wprof pinned to the isolated CPU
-/// - Writes trace to the current working directory
+/// - Writes Perfetto trace to the current working directory
+///
+/// When `trace_mode` is `BpfTrace`:
+/// - Adds one extra CPU for tracing
+/// - Isolates that CPU using `isolcpus=N` kernel parameter
+/// - Runs bpftrace with trace_scx_ops.bt pinned to the isolated CPU
+/// - Writes ops/kfunc trace to bpf_trace.log in the current working directory
 pub fn run_vm(
     workload_path: &Path,
     scheduler: &str,
     nr_cpus: u32,
-    enable_wprof: bool,
+    trace_mode: TraceMode,
 ) -> Result<(), String> {
     // Validate prerequisites
-    validate_prerequisites(scheduler)?;
+    validate_prerequisites(scheduler, trace_mode)?;
 
     // The workload file path will be accessible inside the VM because vng
     // shares the host filesystem. Just use the absolute path.
@@ -44,10 +67,12 @@ pub fn run_vm(
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize workload path: {e}"))?;
 
-    // When wprof is enabled, add an extra CPU for tracing
-    let vm_cpus = if enable_wprof { nr_cpus + 1 } else { nr_cpus };
+    let tracing = trace_mode != TraceMode::None;
+
+    // When tracing is enabled, add an extra CPU for the tracer
+    let vm_cpus = if tracing { nr_cpus + 1 } else { nr_cpus };
     let isolated_cpu = nr_cpus; // The last CPU (0-indexed)
-    let workload_cpus = if enable_wprof {
+    let workload_cpus = if tracing {
         format!("0-{}", nr_cpus - 1)
     } else {
         String::new()
@@ -57,54 +82,87 @@ pub fn run_vm(
     eprintln!("  scheduler:  scx_{scheduler}");
     eprintln!("  workload:   {}", workload_abs.display());
     eprintln!("  cpus:       {nr_cpus}");
-    if enable_wprof {
-        eprintln!("  wprof:      enabled (isolated CPU {isolated_cpu})");
+    match trace_mode {
+        TraceMode::None => {}
+        TraceMode::Wprof => {
+            eprintln!("  trace:      wprof (isolated CPU {isolated_cpu})");
+        }
+        TraceMode::BpfTrace => {
+            eprintln!("  trace:      bpftrace (isolated CPU {isolated_cpu})");
+        }
     }
     eprintln!();
 
     // Build the command to run inside the VM.
     let sched_bin = find_scheduler_binary(scheduler)?;
-    let inner_cmd = if enable_wprof {
-        // With wprof: pin tracer to isolated CPU, run workload on remaining CPUs.
-        // Use -T for Perfetto trace output, -d60000 for 60s max duration.
-        // Send SIGINT to wprof for clean shutdown and trace flush.
-        // Note: We run as root in the VM when wprof is enabled, so no sudo needed.
-        format!(
-            "taskset -c {isolated_cpu} wprof -d60000 -T {VM_WORKSPACE}/{TRACE_FILENAME} &\n\
-             WPROF_PID=$!\n\
-             sleep 0.5\n\
-             {sched_bin} &\n\
-             SCHED_PID=$!\n\
-             sleep 1\n\
-             echo '=== Running rt-app ==='\n\
-             taskset -c {workload_cpus} {RTAPP_BIN} {workload}\n\
-             echo '=== rt-app completed ==='\n\
-             kill -INT $WPROF_PID 2>/dev/null || true\n\
-             kill $SCHED_PID 2>/dev/null || true\n\
-             wait $WPROF_PID 2>/dev/null || true\n\
-             wait $SCHED_PID 2>/dev/null || true",
-            sched_bin = sched_bin.display(),
-            workload = workload_abs.display(),
-        )
-    } else {
-        // Without wprof: standard execution
-        format!(
-            "{sched_bin} &\n\
-             SCHED_PID=$!\n\
-             sleep 1\n\
-             echo '=== Running rt-app ==='\n\
-             {RTAPP_BIN} {workload}\n\
-             echo '=== rt-app completed ==='\n\
-             kill $SCHED_PID 2>/dev/null || true\n\
-             wait $SCHED_PID 2>/dev/null || true",
-            sched_bin = sched_bin.display(),
-            workload = workload_abs.display(),
-        )
+    let inner_cmd = match trace_mode {
+        TraceMode::Wprof => {
+            // With wprof: pin tracer to isolated CPU, run workload on remaining CPUs.
+            // Use -T for Perfetto trace output, -d60000 for 60s max duration.
+            // Send SIGINT to wprof for clean shutdown and trace flush.
+            // Note: We run as root in the VM when tracing is enabled, so no sudo needed.
+            format!(
+                "taskset -c {isolated_cpu} wprof -d60000 -T {VM_WORKSPACE}/{WPROF_TRACE_FILENAME} &\n\
+                 TRACER_PID=$!\n\
+                 sleep 0.5\n\
+                 {sched_bin} &\n\
+                 SCHED_PID=$!\n\
+                 sleep 1\n\
+                 echo '=== Running rt-app ==='\n\
+                 taskset -c {workload_cpus} {RTAPP_BIN} {workload}\n\
+                 echo '=== rt-app completed ==='\n\
+                 kill -INT $TRACER_PID 2>/dev/null || true\n\
+                 kill $SCHED_PID 2>/dev/null || true\n\
+                 wait $TRACER_PID 2>/dev/null || true\n\
+                 wait $SCHED_PID 2>/dev/null || true",
+                sched_bin = sched_bin.display(),
+                workload = workload_abs.display(),
+            )
+        }
+        TraceMode::BpfTrace => {
+            // With bpftrace: pin tracer daemon to isolated CPU, trace workload CPUs.
+            // The script accepts nr_cpus as $1 to filter probes to CPUs 0..nr_cpus-1.
+            // Output goes to a file in the mounted workspace directory.
+            format!(
+                "taskset -c {isolated_cpu} bpftrace {BPFTRACE_SCRIPT} {nr_cpus} \
+                 > {VM_WORKSPACE}/{BPF_TRACE_FILENAME} 2>&1 &\n\
+                 TRACER_PID=$!\n\
+                 sleep 2\n\
+                 {sched_bin} &\n\
+                 SCHED_PID=$!\n\
+                 sleep 1\n\
+                 echo '=== Running rt-app ==='\n\
+                 taskset -c {workload_cpus} {RTAPP_BIN} {workload}\n\
+                 echo '=== rt-app completed ==='\n\
+                 sleep 1\n\
+                 kill $TRACER_PID 2>/dev/null || true\n\
+                 kill $SCHED_PID 2>/dev/null || true\n\
+                 wait $TRACER_PID 2>/dev/null || true\n\
+                 wait $SCHED_PID 2>/dev/null || true",
+                sched_bin = sched_bin.display(),
+                workload = workload_abs.display(),
+            )
+        }
+        TraceMode::None => {
+            // No tracing: standard execution
+            format!(
+                "{sched_bin} &\n\
+                 SCHED_PID=$!\n\
+                 sleep 1\n\
+                 echo '=== Running rt-app ==='\n\
+                 {RTAPP_BIN} {workload}\n\
+                 echo '=== rt-app completed ==='\n\
+                 kill $SCHED_PID 2>/dev/null || true\n\
+                 wait $SCHED_PID 2>/dev/null || true",
+                sched_bin = sched_bin.display(),
+                workload = workload_abs.display(),
+            )
+        }
     };
 
     // Launch vng with the host kernel (-r).
-    // Use root when wprof is enabled (wprof needs CAP_SYS_ADMIN for BPF tracing).
-    let user = if enable_wprof {
+    // Use root when tracing is enabled (bpftrace/wprof need CAP_SYS_ADMIN).
+    let user = if tracing {
         "root".to_string()
     } else {
         std::env::var("USER").unwrap_or_else(|_| "root".into())
@@ -114,10 +172,10 @@ pub fn run_vm(
     let cwd =
         std::env::current_dir().map_err(|e| format!("failed to get current directory: {e}"))?;
 
-    // Build vng command with optional wprof-related flags
+    // Build vng command with optional tracing-related flags
     let mut vng_args = format!("vng -r --user {user} --cpus {vm_cpus} --memory 4G");
 
-    if enable_wprof {
+    if tracing {
         // Add rwdir mount for trace output
         vng_args.push_str(&format!(" --rwdir {VM_WORKSPACE}={}", cwd.display()));
         // Add isolcpus kernel parameter
@@ -138,12 +196,12 @@ pub fn run_vm(
     eprintln!("Launching VM...");
     eprintln!(
         "  vng -r --user {user} --cpus {vm_cpus} --memory 4G{}{}",
-        if enable_wprof {
+        if tracing {
             format!(" --rwdir {VM_WORKSPACE}={}", cwd.display())
         } else {
             String::new()
         },
-        if enable_wprof {
+        if tracing {
             format!(" --append isolcpus={isolated_cpu}")
         } else {
             String::new()
@@ -162,18 +220,26 @@ pub fn run_vm(
     eprintln!();
     eprintln!("=== VM run completed ===");
 
-    // Report trace file location if wprof was enabled
-    if enable_wprof {
-        let trace_path = cwd.join(TRACE_FILENAME);
-        eprintln!();
-        eprintln!("Perfetto trace written to: {}", trace_path.display());
+    // Report trace file location
+    match trace_mode {
+        TraceMode::Wprof => {
+            let trace_path = cwd.join(WPROF_TRACE_FILENAME);
+            eprintln!();
+            eprintln!("Perfetto trace written to: {}", trace_path.display());
+        }
+        TraceMode::BpfTrace => {
+            let trace_path = cwd.join(BPF_TRACE_FILENAME);
+            eprintln!();
+            eprintln!("bpftrace log written to: {}", trace_path.display());
+        }
+        TraceMode::None => {}
     }
 
     Ok(())
 }
 
 /// Validate that all prerequisites are available.
-fn validate_prerequisites(scheduler: &str) -> Result<(), String> {
+fn validate_prerequisites(scheduler: &str, trace_mode: TraceMode) -> Result<(), String> {
     // Check vng
     if !command_exists("vng") {
         return Err("vng (virtme-ng) not found in PATH".into());
@@ -186,6 +252,16 @@ fn validate_prerequisites(scheduler: &str) -> Result<(), String> {
 
     // Check scheduler binary
     find_scheduler_binary(scheduler)?;
+
+    // Check bpftrace when --bpf-trace is requested
+    if trace_mode == TraceMode::BpfTrace {
+        if !command_exists("bpftrace") {
+            return Err("bpftrace not found in PATH (required for --bpf-trace)".into());
+        }
+        if !Path::new(BPFTRACE_SCRIPT).exists() {
+            return Err(format!("bpftrace script not found at {BPFTRACE_SCRIPT}"));
+        }
+    }
 
     Ok(())
 }
