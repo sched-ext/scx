@@ -460,7 +460,7 @@ impl<S: Scheduler> Simulator<S> {
         // Build cgroup registry from scenario definitions and call cgroup_init
         // for each cgroup (including root). In the kernel, cgroup_init is called
         // for all existing cgroups when the scheduler is loaded.
-        let mut cgroup_registry = CgroupRegistry::new(nr_cpus);
+        let mut cgroup_registry = CgroupRegistry::new(nr_cpus, scenario.max_cgroups);
         for cg_def in &scenario.cgroups {
             let parent_cgid = match &cg_def.parent_name {
                 Some(parent) => {

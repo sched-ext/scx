@@ -7,8 +7,17 @@ use scx_simulator::{SimFormat, SIM_LOCK};
 /// Returns the lock guard — hold it for the duration of the test.
 /// `try_init()` is idempotent: first call in the process succeeds,
 /// subsequent calls are silently ignored.
+///
+/// This function handles poisoned locks (from panicked tests) by clearing
+/// the poison and recovering the lock. This is safe because each test
+/// starts with fresh simulator state.
 pub fn setup_test() -> MutexGuard<'static, ()> {
-    let guard = SIM_LOCK.lock().unwrap();
+    let guard = SIM_LOCK.lock().unwrap_or_else(|poisoned| {
+        // A previous test panicked while holding the lock. This is fine
+        // because the simulator state is reset between tests anyway.
+        // Clear the poison and recover.
+        poisoned.into_inner()
+    });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .event_format(SimFormat)
