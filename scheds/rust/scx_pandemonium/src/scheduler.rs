@@ -10,7 +10,7 @@ use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 
 use crate::bpf_skel::*;
 use crate::tuning::TuningKnobs;
-use pandemonium::event::EventLog;
+use scx_pandemonium::event::EventLog;
 
 // SCX EXIT CODES (FROM KERNEL)
 const SCX_EXIT_NONE: i32 = 0;

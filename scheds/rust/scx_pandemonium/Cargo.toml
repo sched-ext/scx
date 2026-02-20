@@ -1,5 +1,5 @@
 [package]
-name = "pandemonium"
+name = "scx_pandemonium"
 version = "4.1.0"
 edition = "2021"
 
