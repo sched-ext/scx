@@ -6,7 +6,8 @@ use clap::{Parser, ValueEnum};
 
 use scx_simulator::scenario::{parse_duration_ns, parse_seed};
 use scx_simulator::{
-    discover_schedulers, load_rtapp, DynamicScheduler, PreemptiveConfig, SimFormat, Simulator,
+    compare_checkpoints, discover_schedulers, drain_determinism_checkpoints,
+    enable_determinism_mode, load_rtapp, DynamicScheduler, PreemptiveConfig, SimFormat, Simulator,
     SIM_LOCK,
 };
 
@@ -157,6 +158,16 @@ struct Cli {
     /// This is an alternative to --wprof for comparing simulator vs real runs.
     #[arg(long, conflicts_with = "wprof")]
     bpf_trace: bool,
+
+    /// Enable strict determinism checking.
+    ///
+    /// Runs the simulation twice with the same seed and configuration,
+    /// enables aggressive determinism mode to collect checkpoints at
+    /// scheduling events, and compares checkpoint sequences from both runs.
+    /// Reports any divergence found and exits with code 1 if determinism
+    /// is violated.
+    #[arg(long)]
+    determinism_check: bool,
 }
 
 fn main() {
@@ -243,6 +254,14 @@ fn run(cli: &Cli) -> Result<(), String> {
         real_run::TraceMode::None
     };
 
+    // Handle --determinism-check mode
+    if cli.determinism_check {
+        if cli.real_run != RealRunMode::Off {
+            return Err("--determinism-check conflicts with --real-run".into());
+        }
+        return run_determinism_check(cli, scenario);
+    }
+
     // Handle --real-run mode
     match cli.real_run {
         RealRunMode::Off => {
@@ -254,6 +273,109 @@ fn run(cli: &Cli) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_determinism_check(cli: &Cli, scenario: scx_simulator::Scenario) -> Result<(), String> {
+    let _lock = SIM_LOCK.lock().unwrap();
+
+    // Run 1: collect checkpoints
+    enable_determinism_mode();
+    let sched1 = load_scheduler(&cli.scheduler, cli.cpus)?;
+    let trace1 = Simulator::new(sched1).run(scenario.clone());
+    let checkpoints1 = drain_determinism_checkpoints();
+
+    if trace1.has_error() {
+        return Err(format!(
+            "simulation error in run 1: {:?}",
+            trace1.exit_kind()
+        ));
+    }
+
+    // Run 2: collect checkpoints with same configuration
+    enable_determinism_mode();
+    let sched2 = load_scheduler(&cli.scheduler, cli.cpus)?;
+    let trace2 = Simulator::new(sched2).run(scenario);
+    let checkpoints2 = drain_determinism_checkpoints();
+
+    if trace2.has_error() {
+        return Err(format!(
+            "simulation error in run 2: {:?}",
+            trace2.exit_kind()
+        ));
+    }
+
+    // Compare checkpoints
+    if let Some(divergence) = compare_checkpoints(&checkpoints1, &checkpoints2) {
+        print_determinism_failure(cli, &divergence, &checkpoints1, &checkpoints2);
+        return Err("determinism check failed".into());
+    }
+
+    eprintln!(
+        "Determinism check PASSED: {} checkpoints matched",
+        checkpoints1.len()
+    );
+    Ok(())
+}
+
+/// Print detailed determinism failure report.
+fn print_determinism_failure(
+    cli: &Cli,
+    divergence: &scx_simulator::CheckpointDivergence,
+    _checkpoints1: &[scx_simulator::DeterminismCheckpoint],
+    _checkpoints2: &[scx_simulator::DeterminismCheckpoint],
+) {
+    let seed = cli.seed.as_deref().unwrap_or("42");
+    eprintln!("DETERMINISM FAILURE at seed {}:", seed);
+    eprintln!(
+        "  Divergence at checkpoint {} ({} event):",
+        divergence.checkpoint_index, divergence.expected.event
+    );
+
+    // RIP comparison
+    let rip_match =
+        divergence.expected.instruction_pointer == divergence.actual.instruction_pointer;
+    eprintln!(
+        "    RIP: 0x{:x} vs 0x{:x} ({})",
+        divergence.expected.instruction_pointer,
+        divergence.actual.instruction_pointer,
+        if rip_match { "match" } else { "MISMATCH" }
+    );
+
+    // RBC comparison
+    let rbc_match = divergence.expected.rbc_count == divergence.actual.rbc_count;
+    eprintln!(
+        "    RBC: {} vs {} ({})",
+        divergence.expected.rbc_count,
+        divergence.actual.rbc_count,
+        if rbc_match { "match" } else { "MISMATCH" }
+    );
+
+    // Memory hash comparison
+    let hash_match = divergence.expected.memory_hash == divergence.actual.memory_hash;
+    eprintln!(
+        "    Memory hash: 0x{:x} vs 0x{:x} ({})",
+        divergence.expected.memory_hash,
+        divergence.actual.memory_hash,
+        if hash_match { "match" } else { "MISMATCH" }
+    );
+
+    // Event type comparison
+    let event_match = divergence.expected.event == divergence.actual.event;
+    if !event_match {
+        eprintln!(
+            "    Event: {} vs {} (MISMATCH)",
+            divergence.expected.event, divergence.actual.event
+        );
+    }
+
+    // CPU ID comparison
+    let cpu_match = divergence.expected.cpu_id == divergence.actual.cpu_id;
+    if !cpu_match {
+        eprintln!(
+            "    CPU: {} vs {} (MISMATCH)",
+            divergence.expected.cpu_id.0, divergence.actual.cpu_id.0
+        );
+    }
 }
 
 fn run_simulation(cli: &Cli, scenario: scx_simulator::Scenario) -> Result<(), String> {

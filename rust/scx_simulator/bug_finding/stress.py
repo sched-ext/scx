@@ -49,6 +49,7 @@ PROCESS_TIMEOUT_SEC = 120
 # Runtime config (set from CLI args in main)
 WATCHDOG_TIMEOUT = DEFAULT_WATCHDOG_TIMEOUT
 SIM_DURATION = DEFAULT_SIM_DURATION
+DETERMINISM_MODE = False
 
 # Global logger (configured in main)
 log: logging.Logger = logging.getLogger("stress")
@@ -154,6 +155,8 @@ class Finding:
             cmd.append("--interleave")
         elif self.config.interleave_mode == "preemptive":
             cmd.append("--preemptive")
+        if self.error_type == "determinism":
+            cmd.append("--determinism-check")
         return " ".join(cmd)
 
 
@@ -162,8 +165,8 @@ class Finding:
 # ---------------------------------------------------------------------------
 
 
-def run_one(config: TestConfig) -> Optional[Finding]:
-    """Run a single simulation and return a Finding if it fails."""
+def build_base_cmd(config: TestConfig) -> list[str]:
+    """Build the base scxsim command for a configuration."""
     cmd = [
         str(SCXSIM),
         str(config.workload),
@@ -177,6 +180,36 @@ def run_one(config: TestConfig) -> Optional[Finding]:
         cmd.append("--interleave")
     elif config.interleave_mode == "preemptive":
         cmd.append("--preemptive")
+    return cmd
+
+
+def classify_error(returncode: int, stderr: str) -> str:
+    """Classify an error based on return code and stderr output."""
+    if returncode < 0:
+        signum = -returncode
+        sig_name = signal.Signals(signum).name
+        return f"crash({sig_name})"
+    elif "DETERMINISM FAILURE" in stderr:
+        return "determinism"
+    elif "ErrorStall" in stderr:
+        return "stall"
+    elif "ErrorBpf" in stderr:
+        return "bpf_error"
+    elif "ErrorDispatchLoopExhausted" in stderr:
+        return "dispatch_loop"
+    elif "ErrorCgroupExhausted" in stderr:
+        return "cgroup_exhausted"
+    else:
+        return "other"
+
+
+def run_one(config: TestConfig) -> Optional[Finding]:
+    """Run a single simulation and return a Finding if it fails."""
+    cmd = build_base_cmd(config)
+
+    # In determinism mode, use --determinism-check flag
+    if DETERMINISM_MODE:
+        cmd.append("--determinism-check")
 
     start = time.monotonic()
     try:
@@ -191,28 +224,13 @@ def run_one(config: TestConfig) -> Optional[Finding]:
         if result.returncode == 0:
             return None
 
-        # Classify the error
-        stderr = result.stderr
-        if result.returncode < 0:
-            signum = -result.returncode
-            sig_name = signal.Signals(signum).name
-            error_type = f"crash({sig_name})"
-        elif "ErrorStall" in stderr:
-            error_type = "stall"
-        elif "ErrorBpf" in stderr:
-            error_type = "bpf_error"
-        elif "ErrorDispatchLoopExhausted" in stderr:
-            error_type = "dispatch_loop"
-        elif "ErrorCgroupExhausted" in stderr:
-            error_type = "cgroup_exhausted"
-        else:
-            error_type = "other"
+        error_type = classify_error(result.returncode, result.stderr)
 
         return Finding(
             config=config,
             error_type=error_type,
             exit_code=result.returncode,
-            stderr=stderr.strip(),
+            stderr=result.stderr.strip(),
             stdout=result.stdout.strip(),
             wall_time_sec=elapsed,
         )
@@ -308,12 +326,18 @@ def main():
         default=DEFAULT_WATCHDOG_TIMEOUT,
         help=f"Watchdog timeout for stall detection (default: {DEFAULT_WATCHDOG_TIMEOUT})",
     )
+    parser.add_argument(
+        "--determinism",
+        action="store_true",
+        help="Enable strict determinism checking: run each seed twice and verify identical behavior",
+    )
     args = parser.parse_args()
 
     # Set global config from CLI args
-    global WATCHDOG_TIMEOUT, SIM_DURATION
+    global WATCHDOG_TIMEOUT, SIM_DURATION, DETERMINISM_MODE
     WATCHDOG_TIMEOUT = args.watchdog
     SIM_DURATION = args.sim_duration
+    DETERMINISM_MODE = args.determinism
 
     # Set up logging first
     log_path = setup_logging()
@@ -338,8 +362,10 @@ def main():
     deadline = time.monotonic() + args.duration * 60
     start_time = time.monotonic()
 
+    mode_str = "determinism" if DETERMINISM_MODE else "standard"
     print(f"Stress test: {args.duration}min, {args.jobs} workers, "
           f"master seed={master_seed}")
+    print(f"Mode: {mode_str}")
     print(f"Schedulers: {', '.join(schedulers)}")
     print(f"Watchdog: {WATCHDOG_TIMEOUT}, sim duration: {SIM_DURATION}")
     print(f"Output: {OUTPUT_DIR}")
@@ -352,6 +378,7 @@ def main():
     log.info(f"Duration: {args.duration} minutes")
     log.info(f"Workers: {args.jobs}")
     log.info(f"Master seed: {master_seed}")
+    log.info(f"Mode: {mode_str}")
     log.info(f"Schedulers: {', '.join(schedulers)}")
     log.info(f"Watchdog timeout: {WATCHDOG_TIMEOUT}")
     log.info(f"Sim duration: {SIM_DURATION}")

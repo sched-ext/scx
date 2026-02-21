@@ -1294,13 +1294,16 @@ fn test_aggressive_determinism_mode() {
 fn test_determinism_mode_disabled_by_default() {
     use scx_simulator::is_determinism_mode_enabled;
 
-    // Determinism mode should be disabled by default
+    // Acquire lock first to ensure no other test is running with determinism mode enabled
+    let _lock = common::setup_test();
+
+    // Determinism mode should be disabled by default (checked after lock acquisition
+    // to avoid race with other tests that may be enabling/disabling it)
     assert!(
         !is_determinism_mode_enabled(),
         "Determinism mode should be disabled by default"
     );
 
-    let _lock = common::setup_test();
     let scenario = preemptive_scenario(2, 2, 42, 10);
 
     // Run without enabling determinism mode
