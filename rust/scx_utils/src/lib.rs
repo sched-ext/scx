@@ -78,6 +78,8 @@ pub use energy_model::PerfState;
 
 mod cpumask;
 pub use cpumask::read_cpulist;
+#[cfg(any(test, feature = "testutils"))]
+pub use cpumask::set_cpumask_test_width;
 pub use cpumask::Cpumask;
 
 mod gpu;
