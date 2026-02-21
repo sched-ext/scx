@@ -156,7 +156,9 @@ Directory Structure
 ```
 
 Each checkout is a complete working copy. Sub-agents can work in different
-checkouts simultaneously without conflicts.
+checkouts simultaneously without conflicts. At the end of each session try 
+to keep all checkouts in sync, all with the same working branches at the same
+tip commits.
 
 Parallel Development Philosophy
 ----------------------------------------
