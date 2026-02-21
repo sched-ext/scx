@@ -22,7 +22,7 @@ use crate::perf;
 use crate::preempt::{is_determinism_mode_enabled, record_checkpoint, CheckpointEvent};
 use crate::scenario::{CgroupCreateEvent, CgroupDestroyEvent, IrqType, Scenario};
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
-use crate::trace::{Trace, TraceKind};
+use crate::trace::{DsqSampleTrigger, Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs};
 
 /// How the simulation terminated.
@@ -1203,6 +1203,14 @@ impl<S: Scheduler> Simulator<S> {
             state.cpus[cpu.0 as usize].local_clock,
             cpu,
             TraceKind::Tick { pid },
+        );
+
+        // Sample all non-builtin DSQ lengths at tick time
+        state.trace.sample_dsq_lengths(
+            state.cpus[cpu.0 as usize].local_clock,
+            &state.dsqs,
+            DsqSampleTrigger::Tick,
+            None, // Sample all DSQs
         );
 
         // Save pre-tick slice to detect if scheduler zeroed it

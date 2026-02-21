@@ -30,7 +30,7 @@ use crate::fmt::FmtN;
 use crate::perf::RbcCounter;
 use crate::scenario::{NoiseConfig, OverheadConfig, PreemptiveConfig};
 use crate::task::OpsTaskState;
-use crate::trace::{DispatchRejectReason, Trace, TraceKind};
+use crate::trace::{DispatchRejectReason, DsqSampleTrigger, Trace, TraceKind};
 use crate::types::{CpuId, DsqId, KickFlags, Pid, TimeNs, Vtime};
 
 /// Nanosecond cost for each simulated kernel function.
@@ -428,9 +428,17 @@ impl SimulatorState {
             Some(target_cpu)
         } else if let Some(vtime) = pd.vtime {
             self.dsqs.insert_vtime(dsq, pd.pid, vtime);
+            // Sample DSQ length after vtime insert
+            let local_t = self.cpus[local_cpu.0 as usize].local_clock;
+            self.trace
+                .sample_dsq_lengths(local_t, &self.dsqs, DsqSampleTrigger::Insert, Some(dsq));
             None
         } else {
             self.dsqs.insert_fifo(dsq, pd.pid);
+            // Sample DSQ length after FIFO insert
+            let local_t = self.cpus[local_cpu.0 as usize].local_clock;
+            self.trace
+                .sample_dsq_lengths(local_t, &self.dsqs, DsqSampleTrigger::Insert, Some(dsq));
             None
         }
     }
@@ -920,6 +928,13 @@ pub extern "C" fn scx_bpf_dsq_move_to_local(dsq_id: u64) -> bool {
                 success: result,
             },
         );
+
+        // Sample DSQ length after consume (if successful and non-builtin)
+        let dsq = DsqId(dsq_id);
+        if result && !dsq.is_builtin() {
+            sim.trace
+                .sample_dsq_lengths(local_t, &sim.dsqs, DsqSampleTrigger::Consume, Some(dsq));
+        }
 
         result
     })

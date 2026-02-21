@@ -3,11 +3,36 @@
 //! Every scheduling action (task scheduled, preempted, slept, woke, CPU idle)
 //! is recorded as a `TraceEvent` with a simulated timestamp and CPU ID.
 
+use crate::dsq::DsqManager;
 use crate::engine::ExitKind;
 use crate::fmt::FmtTs;
 use crate::scenario::IrqType;
 use crate::task::TaskDef;
 use crate::types::{CpuId, DsqId, Pid, TimeNs, Vtime};
+
+/// What triggered a DSQ length sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DsqSampleTrigger {
+    /// Task was inserted into the DSQ.
+    Insert,
+    /// Task was moved from DSQ to local.
+    Consume,
+    /// Periodic sampling (scheduler tick).
+    Tick,
+}
+
+/// A point-in-time sample of a DSQ's length.
+#[derive(Debug, Clone)]
+pub struct DsqLengthSample {
+    /// Simulated time when sample was taken.
+    pub time_ns: TimeNs,
+    /// The DSQ that was sampled.
+    pub dsq_id: DsqId,
+    /// Number of tasks queued at sample time.
+    pub length: usize,
+    /// What triggered this sample.
+    pub trigger: DsqSampleTrigger,
+}
 
 /// Summary statistics from a trace, useful for realism comparison.
 ///
@@ -154,6 +179,8 @@ pub struct Trace {
     task_names: Vec<(Pid, String)>,
     /// How the simulation terminated.
     exit_kind: ExitKind,
+    /// DSQ length samples for analyzing queue behavior under load.
+    dsq_samples: Vec<DsqLengthSample>,
 }
 
 impl Trace {
@@ -164,6 +191,7 @@ impl Trace {
             nr_cpus,
             task_names,
             exit_kind: ExitKind::Normal,
+            dsq_samples: Vec::new(),
         }
     }
 
@@ -411,6 +439,90 @@ impl Trace {
     /// [ui.perfetto.dev](https://ui.perfetto.dev).
     pub fn write_perfetto_json(&self, writer: &mut impl std::io::Write) -> std::io::Result<()> {
         crate::perfetto::write_json(self, writer)
+    }
+
+    // -----------------------------------------------------------------------
+    // DSQ length sampling
+    // -----------------------------------------------------------------------
+
+    /// Sample the length of a specific DSQ or all non-builtin DSQs.
+    ///
+    /// If `dsq_filter` is `Some(id)`, samples only that DSQ.
+    /// If `None`, samples all non-builtin DSQs (used for tick sampling).
+    pub(crate) fn sample_dsq_lengths(
+        &mut self,
+        time_ns: TimeNs,
+        dsqs: &DsqManager,
+        trigger: DsqSampleTrigger,
+        dsq_filter: Option<DsqId>,
+    ) {
+        match dsq_filter {
+            Some(dsq_id) => {
+                // Sample a specific DSQ
+                if !dsq_id.is_builtin() {
+                    let length = dsqs.nr_queued(dsq_id);
+                    self.dsq_samples.push(DsqLengthSample {
+                        time_ns,
+                        dsq_id,
+                        length,
+                        trigger,
+                    });
+                }
+            }
+            None => {
+                // Sample all non-builtin DSQs
+                for dsq_id in dsqs.dsq_ids() {
+                    if !dsq_id.is_builtin() {
+                        let length = dsqs.nr_queued(dsq_id);
+                        self.dsq_samples.push(DsqLengthSample {
+                            time_ns,
+                            dsq_id,
+                            length,
+                            trigger,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get all DSQ length samples.
+    pub fn dsq_samples(&self) -> &[DsqLengthSample] {
+        &self.dsq_samples
+    }
+
+    /// Get the maximum observed length for a specific DSQ.
+    pub fn max_dsq_length(&self, dsq_id: DsqId) -> Option<usize> {
+        self.dsq_samples
+            .iter()
+            .filter(|s| s.dsq_id == dsq_id)
+            .map(|s| s.length)
+            .max()
+    }
+
+    /// Get the average observed length for a specific DSQ.
+    pub fn avg_dsq_length(&self, dsq_id: DsqId) -> Option<f64> {
+        let samples: Vec<_> = self
+            .dsq_samples
+            .iter()
+            .filter(|s| s.dsq_id == dsq_id)
+            .collect();
+        if samples.is_empty() {
+            return None;
+        }
+        let sum: usize = samples.iter().map(|s| s.length).sum();
+        Some(sum as f64 / samples.len() as f64)
+    }
+
+    /// Get the DSQ length at or before a specific time.
+    ///
+    /// Returns the most recent sample for the DSQ at or before the given time.
+    pub fn dsq_length_at_time(&self, dsq_id: DsqId, time_ns: TimeNs) -> Option<usize> {
+        self.dsq_samples
+            .iter()
+            .rev()
+            .find(|s| s.dsq_id == dsq_id && s.time_ns <= time_ns)
+            .map(|s| s.length)
     }
 
     /// Pretty-print the trace for debugging.

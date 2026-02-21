@@ -221,6 +221,11 @@ impl DsqManager {
             .get_mut(&dsq_id)
             .is_some_and(|dsq| dsq.remove_pid(pid))
     }
+
+    /// Iterate over all DSQ IDs.
+    pub fn dsq_ids(&self) -> impl Iterator<Item = DsqId> + '_ {
+        self.dsqs.keys().copied()
+    }
 }
 
 impl Default for DsqManager {
