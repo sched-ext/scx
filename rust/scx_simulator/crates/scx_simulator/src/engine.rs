@@ -425,6 +425,18 @@ impl<S: Scheduler> Simulator<S> {
 
     /// Internal simulation loop shared by `run()` and `run_monitored()`.
     fn run_internal(&self, scenario: Scenario, monitor: &mut dyn Monitor) -> SimulationResult {
+        // Reset global C state that persists between simulation runs.
+        // These static variables are compiled into the main binary (not the
+        // scheduler .so), so they survive across runs and cause non-determinism.
+        //
+        // NOTE: We do NOT call scx_test_map_clear_all() here because maps are
+        // registered during scheduler setup() which happens before run_internal().
+        // Clearing maps here would break map lookups in the scheduler.
+        unsafe {
+            ffi::sim_task_reset();
+            ffi::sim_sdt_reset();
+        }
+
         let nr_cpus = scenario.nr_cpus;
         let smt = scenario.smt_threads_per_core;
 
@@ -514,8 +526,14 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Build simulator state (shared with kfuncs via thread-local)
+        //
+        // NOTE: RBC counter is disabled when interleaving is enabled because:
+        // 1. The PMU counter is thread-local (created with pid=0 for current thread)
+        // 2. In interleave mode, scheduler callbacks run on worker threads
+        // 3. The counter would only count main thread branches, not worker thread branches
+        // 4. Main thread branches during thread::scope are non-deterministic (OS scheduling)
         let rbc_ns = scenario.sched_overhead_rbc_ns.filter(|&ns| ns > 0);
-        let rbc_counter = if rbc_ns.is_some() {
+        let rbc_counter = if rbc_ns.is_some() && !scenario.interleave {
             perf::try_create_rbc_counter()
         } else {
             None

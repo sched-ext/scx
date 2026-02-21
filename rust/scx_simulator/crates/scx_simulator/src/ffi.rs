@@ -87,6 +87,17 @@ extern "C" {
     pub fn sim_css_iter_reset();
     pub fn sim_css_iter_add(cgrp: *mut c_void);
     pub fn sim_css_iter_set_root(root: *mut c_void);
+
+    // Global state reset functions for deterministic re-runs.
+    // These reset lazy-initialization flags and static tables that
+    // persist in the main binary across simulation runs.
+    pub fn sim_task_reset();
+    pub fn sim_sdt_reset();
+
+    // BPF map registry reset (implemented in scx_test_map.c).
+    // Clears the thread-local map registration arrays to prevent
+    // duplicate registrations on subsequent simulation runs.
+    pub fn scx_test_map_clear_all();
 }
 
 // ---------------------------------------------------------------------------

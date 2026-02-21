@@ -475,3 +475,16 @@ unsigned short sim_task_get_migration_disabled(struct task_struct *p)
 {
 	return p->migration_disabled;
 }
+
+/*
+ * Reset global state to allow deterministic re-runs.
+ *
+ * The simulator binary links sim_task.c into the main executable,
+ * so its static variables persist across simulation runs. This function
+ * resets the lazy-initialization flag so the next sim_task_alloc() call
+ * re-initializes the root cgroup structures.
+ */
+void sim_task_reset(void)
+{
+	sim_root_cgroup_initialized = 0;
+}

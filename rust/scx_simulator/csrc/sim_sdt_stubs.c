@@ -24,6 +24,9 @@ extern void *memset(void *s, int c, unsigned long n);
 /* Opaque — we only handle pointers, never dereference task_struct here */
 struct task_struct;
 
+/* Declared in sim_task.c — gets PID from task pointer */
+extern int sim_task_get_pid(struct task_struct *p);
+
 /*
  * Hash table for mapping task_struct* → allocated per-task context.
  *
@@ -42,19 +45,36 @@ static struct sdt_entry sdt_table[SDT_HASH_SLOTS];
 static u64 sdt_data_size;
 static int sdt_initialized;
 
-static unsigned long sdt_hash_ptr(const void *p)
+/*
+ * Hash a task's PID for deterministic hash table placement.
+ *
+ * We hash by PID rather than pointer address because pointer addresses
+ * are not deterministic between simulation runs (calloc returns different
+ * addresses depending on heap state). Using PID ensures the hash table
+ * lookup path is identical across runs, enabling deterministic instruction
+ * counts.
+ */
+static unsigned long sdt_hash_pid(int pid)
 {
 	/* Multiplicative hash — golden ratio constant */
-	unsigned long v = (unsigned long)p;
+	unsigned long v = (unsigned long)pid;
 	v ^= v >> 16;
 	v *= 0x9e3779b97f4a7c15UL;
 	v ^= v >> 32;
 	return v & SDT_HASH_MASK;
 }
 
+/*
+ * Find a slot in the hash table for the given task.
+ *
+ * Uses PID-based hashing for deterministic probe sequences, but stores
+ * and matches by task_struct pointer for correctness (PIDs are unique
+ * per-task but the pointer is the actual key).
+ */
 static struct sdt_entry *sdt_find_slot(struct task_struct *p)
 {
-	unsigned long idx = sdt_hash_ptr(p);
+	int pid = p ? sim_task_get_pid(p) : 0;
+	unsigned long idx = sdt_hash_pid(pid);
 	for (unsigned long i = 0; i < SDT_HASH_SLOTS; i++) {
 		unsigned long slot = (idx + i) & SDT_HASH_MASK;
 		if (sdt_table[slot].key == p || sdt_table[slot].key == (void *)0)
@@ -157,4 +177,29 @@ void scx_task_free(struct task_struct *p)
  */
 void scx_arena_subprog_init(void)
 {
+}
+
+/*
+ * Reset global state to allow deterministic re-runs.
+ *
+ * The simulator binary links sim_sdt_stubs.c into the main executable,
+ * so its static variables persist across simulation runs. This function
+ * resets the SDT hash table state to what it would be after a fresh
+ * scx_task_init() call with the same data_size.
+ *
+ * NOTE: This does NOT reset sdt_initialized to 0 because scx_task_init()
+ * is only called during scheduler load (lavd_setup), not at the start of
+ * each simulation run. If we set sdt_initialized=0, scx_task_alloc would
+ * fail. Instead, we clear the hash table while keeping the initialization
+ * state intact.
+ */
+void sim_sdt_reset(void)
+{
+	/* Clear the hash table to the same state as after scx_task_init().
+	 * memset is deterministic (same instruction count regardless of
+	 * current table contents), unlike iterating and checking each slot. */
+	memset(sdt_table, 0, sizeof(sdt_table));
+	/* Note: sdt_initialized and sdt_data_size are NOT reset here.
+	 * They are set during scheduler load (scx_task_init) and must
+	 * persist across simulation runs with the same scheduler. */
 }

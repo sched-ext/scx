@@ -58,8 +58,12 @@ INCLUDES := -I$(SIMULATOR_DIR)/csrc \
             $(if $(BPF_INCLUDE),-I$(BPF_INCLUDE))
 
 # Shared source files compiled into every .so
+# NOTE: sim_sdt_stubs.c is NOT included here — it's compiled into the main
+# binary and exported via -rdynamic. This ensures there's only one copy of
+# the SDT hash table state, allowing sim_sdt_reset() to work correctly.
+# overrides.c is included to provide weak stubs that the linker can use
+# if the main binary's strong definitions aren't found (they should be).
 SHARED_SRCS := $(SIMULATOR_DIR)/csrc/sim_bpf_stubs.c \
-               $(SIMULATOR_DIR)/csrc/sim_sdt_stubs.c \
                $(SIMULATOR_DIR)/csrc/sim_sigfpe.c \
                $(ROOT_DIR)/lib/scxtest/overrides.c
 
@@ -106,14 +110,6 @@ $(BUILD_DIR)/$(1)_sim_bpf_stubs.o: $(SIMULATOR_DIR)/csrc/sim_bpf_stubs.c | $(BUI
 		-c -o $$@ $$<
 endef
 
-# Per-scheduler sim_sdt_stubs.c -> <name>_sim_sdt_stubs.o
-define SDT_STUBS_RULE
-$(BUILD_DIR)/$(1)_sim_sdt_stubs.o: $(SIMULATOR_DIR)/csrc/sim_sdt_stubs.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) $(EXTRA_INCLUDES_$(1)) $(EXTRA_CFLAGS_$(1)) \
-		-MMD -MF $(BUILD_DIR)/$(1)_sim_sdt_stubs.d \
-		-c -o $$@ $$<
-endef
-
 # Per-scheduler sim_sigfpe.c -> <name>_sim_sigfpe.o
 # NOTE: compiled WITHOUT $(INCLUDES) to avoid vmlinux.h / signal.h conflicts
 # NOTE: compiled WITHOUT coverage flags — the signal handler manually decodes
@@ -136,15 +132,17 @@ $(BUILD_DIR)/$(1)_overrides.o: $(ROOT_DIR)/lib/scxtest/overrides.c | $(BUILD_DIR
 endef
 
 # Link .o files into .so
+# NOTE: sim_sdt_stubs.o is NOT linked here — SDT functions resolve from the
+# main binary via -rdynamic. This ensures there's only one copy of the SDT
+# hash table state, allowing sim_sdt_reset() to work correctly.
 define SO_RULE
-$(BUILD_DIR)/libscx_$(1).so: $(BUILD_DIR)/$(1)_wrapper.o $(BUILD_DIR)/$(1)_sim_bpf_stubs.o $(BUILD_DIR)/$(1)_sim_sdt_stubs.o $(BUILD_DIR)/$(1)_sim_sigfpe.o $(BUILD_DIR)/$(1)_overrides.o
+$(BUILD_DIR)/libscx_$(1).so: $(BUILD_DIR)/$(1)_wrapper.o $(BUILD_DIR)/$(1)_sim_bpf_stubs.o $(BUILD_DIR)/$(1)_sim_sigfpe.o $(BUILD_DIR)/$(1)_overrides.o
 	$(CC) $(LDFLAGS_SO) -o $$@ $$^
 endef
 
 # Instantiate rules for each scheduler
 $(foreach s,$(SCHEDS),$(eval $(call WRAPPER_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call STUBS_RULE,$(s))))
-$(foreach s,$(SCHEDS),$(eval $(call SDT_STUBS_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call SIGFPE_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call OVERRIDES_RULE,$(s))))
 $(foreach s,$(SCHEDS),$(eval $(call SO_RULE,$(s))))

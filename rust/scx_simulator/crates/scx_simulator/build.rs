@@ -54,9 +54,9 @@ fn main() {
     // ---------------------------------------------------------------
 
     // Build the scxtest support library (map emulation, cpumask, test assert).
-    // NOTE: overrides.c is NOT included here — it goes into each .so instead,
-    // so that the .so's weak stubs don't conflict with the main binary's
-    // strong kfunc symbols exported via -rdynamic.
+    // NOTE: overrides.c is NOT included here — it goes into each .so instead.
+    // The .so's weak stubs from overrides.c are overridden by the main binary's
+    // strong kfunc symbols and SDT functions exported via -rdynamic.
     let mut scxtest = cc::Build::new();
     scxtest.files([
         root_dir.join("lib/scxtest/scx_test.c"),
@@ -125,6 +125,19 @@ fn main() {
     // reference them directly — the .so's scheduler code calls them via
     // the bpf_map_lookup_elem macro.
     println!("cargo:rustc-link-arg=-Wl,--undefined=scx_test_map_lookup_elem");
+    // Also export scx_test_map_clear_all for deterministic re-runs.
+    // This clears the thread-local map registry between simulation runs.
+    println!("cargo:rustc-link-arg=-Wl,--undefined=scx_test_map_clear_all");
+
+    // Force SDT (per-task storage) functions into the binary. The .so files
+    // do not include sim_sdt_stubs.c — they resolve these from the main binary.
+    // This ensures there's only one copy of the SDT hash table, allowing
+    // sim_sdt_reset() to work correctly for deterministic re-runs.
+    println!("cargo:rustc-link-arg=-Wl,--undefined=scx_task_init");
+    println!("cargo:rustc-link-arg=-Wl,--undefined=scx_task_alloc");
+    println!("cargo:rustc-link-arg=-Wl,--undefined=scx_task_data");
+    println!("cargo:rustc-link-arg=-Wl,--undefined=scx_task_free");
+    println!("cargo:rustc-link-arg=-Wl,--undefined=scx_arena_subprog_init");
 
     // Link the clang profile runtime when coverage is enabled.
     // This provides __llvm_profile_* symbols for the instrumented .so files.
