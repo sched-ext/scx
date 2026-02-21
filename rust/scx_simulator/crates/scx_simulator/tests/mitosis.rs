@@ -2440,10 +2440,7 @@ fn test_mitosis_basic_cell_isolation() {
         );
     }
 
-    // Cell 1 tasks (PIDs 1,2) should run on CPUs assigned to cell_1 (0,1)
-    // Cell 2 tasks (PIDs 3,4) should run on CPUs assigned to cell_2 (2,3)
-    // NOTE: Mitosis does its own CPU assignment, so the cpuset defines the
-    // allowed set, not necessarily a strict partition. Verify all tasks run.
+    // Collect the set of CPUs used by each cell's tasks.
     let cell1_pids = [Pid(1), Pid(2)];
     let cell2_pids = [Pid(3), Pid(4)];
     let cell1_cpus: std::collections::HashSet<CpuId> = trace
@@ -2459,8 +2456,7 @@ fn test_mitosis_basic_cell_isolation() {
         .map(|e| e.cpu)
         .collect();
 
-    // Verify both cells used CPUs (not necessarily mutually exclusive in simulator,
-    // but at minimum both cells should get scheduled)
+    // Both cells must have been scheduled on at least one CPU.
     assert!(
         !cell1_cpus.is_empty(),
         "cell_1 tasks never scheduled on any CPU"
@@ -2469,6 +2465,31 @@ fn test_mitosis_basic_cell_isolation() {
         !cell2_cpus.is_empty(),
         "cell_2 tasks never scheduled on any CPU"
     );
+
+    // Assert CPU isolation: cells must not share any CPUs.
+    // This mirrors the NO-overlap check in test_cell_isolation.sh.
+    assert!(
+        cell1_cpus.is_disjoint(&cell2_cpus),
+        "CPU overlap between cells: cell_1={cell1_cpus:?}, cell_2={cell2_cpus:?}"
+    );
+
+    // TODO(sim-b7d70): Assert that each cell runs on its CORRECT CPUs
+    // (cell_1 on {0,1}, cell_2 on {2,3}). Currently the simulator does
+    // not prepare the CSS iterator before firing BPF timer callbacks, so
+    // the mitosis timer's bpf_for_each(css, ...) iterates zero cgroups
+    // and never configures cell cpumasks from cpusets. Tasks end up in
+    // cell 0 (root) with access to all CPUs. The no-overlap property
+    // holds only because 4 CPU-bound tasks on 4 CPUs each stay pinned
+    // to their initially-assigned CPU (no migration pressure). Fixing
+    // this requires: (1) preparing the CSS iterator in handle_timer_fired,
+    // and (2) handling task migration after cell reconfiguration so tasks
+    // on wrong-cell CPUs move to correct-cell CPUs.
+    //
+    // Ideally we would also assert:
+    //   let expected_cell1: HashSet<CpuId> = [CpuId(0), CpuId(1)].into();
+    //   let expected_cell2: HashSet<CpuId> = [CpuId(2), CpuId(3)].into();
+    //   assert_eq!(cell1_cpus, expected_cell1);
+    //   assert_eq!(cell2_cpus, expected_cell2);
 }
 
 /// Test dynamic cgroup creation and destruction at runtime.
