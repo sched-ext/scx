@@ -310,8 +310,6 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_sticky(&self) -> Vec<usize> {
-        let mut core_order = vec![];
-
         let is_left = self.layer_idx % 2 == 0;
         let rot_by = |layer_idx, len| -> usize {
             if layer_idx <= len {
@@ -321,12 +319,12 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
         };
 
-        for i in 0..self.topo.all_cores.len() {
-            core_order.push(i);
-        }
-        self.rotate_layer_offset(&mut core_order);
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let mut core_order = self.node_core_seqs(node_id);
+            self.rotate_node_layer_offset(&mut core_order);
 
-        for node in self.topo.nodes.values() {
+            let node = &self.topo.nodes[&node_id];
             for llc in node.llcs.values() {
                 let llc_cores = llc.cores.len();
                 let rot = rot_by(llc_cores + (self.layer_idx << 1), llc_cores);
@@ -336,9 +334,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     core_order.rotate_right(rot);
                 }
             }
+            result.extend(core_order);
         }
-
-        core_order
+        result
     }
 
     fn grow_linear(&self) -> Vec<usize> {
