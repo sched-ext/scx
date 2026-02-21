@@ -970,11 +970,8 @@ mod tests {
             vec![1],
         )];
         let order = get_core_order(&topo, &specs, 0);
-        // With node preference, linear skips rotation → sequential from 0.
-        assert_eq!(
-            order,
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        );
+        // With nodes=[1] hard limit, only node 1 cores appear.
+        assert_eq!(order, vec![8, 9, 10, 11, 12, 13, 14, 15]);
     }
 
     // --- Reverse ---
@@ -1020,6 +1017,50 @@ mod tests {
         let o1 = get_core_order(&topo, &specs, 1);
         // Different seeds should (very likely) produce different orders.
         assert_ne!(o0, o1);
+    }
+
+    #[test]
+    fn test_growth_random_2n_node_contiguous() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Random)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_valid_core_order(&order, 16);
+        // Cores must be grouped by node: one contiguous block of node-0
+        // cores (0-7) and one of node-1 cores (8-15), in either order.
+        let first_node: Vec<usize> = order.iter().take(8).copied().collect();
+        let second_node: Vec<usize> = order.iter().skip(8).copied().collect();
+        assert!(
+            first_node.iter().all(|&c| c < 8) || first_node.iter().all(|&c| c >= 8),
+            "first 8 cores should all belong to the same node: {:?}",
+            order
+        );
+        assert!(
+            second_node.iter().all(|&c| c < 8) || second_node.iter().all(|&c| c >= 8),
+            "last 8 cores should all belong to the same node: {:?}",
+            order
+        );
+    }
+
+    #[test]
+    fn test_growth_random_4n_node_contiguous() {
+        let (topo, _total) = topo_4n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Random)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_valid_core_order(&order, 16);
+        // 4 blocks of 4 cores, each block should be same node.
+        // Node 0: cores 0-3, Node 1: cores 4-7, Node 2: cores 8-11, Node 3: cores 12-15
+        for block_start in (0..16).step_by(4) {
+            let block = &order[block_start..block_start + 4];
+            let node = block[0] / 4;
+            assert!(
+                block.iter().all(|&c| c / 4 == node),
+                "block at {}-{} should all be node {}, got {:?}",
+                block_start,
+                block_start + 3,
+                node,
+                block
+            );
+        }
     }
 
     // --- Topo ---

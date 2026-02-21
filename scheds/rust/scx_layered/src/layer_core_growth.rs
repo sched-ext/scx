@@ -293,11 +293,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         let node = &self.topo.nodes[&node_id];
         node.llcs
             .values()
-            .flat_map(|llc| {
-                llc.cores
-                    .values()
-                    .map(|core| self.cpu_pool.core_seq(core))
-            })
+            .flat_map(|llc| llc.cores.values().map(|core| self.cpu_pool.core_seq(core)))
             .collect()
     }
 
@@ -346,18 +342,34 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_linear(&self) -> Vec<usize> {
-        let mut order = (0..self.topo.all_cores.len()).collect::<Vec<usize>>();
-        // Only rotate if no LLC/node preferences - preserve topology order otherwise
-        if !self.has_topology_preference() {
-            self.rotate_layer_offset(&mut order);
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let mut order = self.node_core_seqs(node_id);
+            // Rotate layers to different starting cores within each node so
+            // they don't all compete for the same cores first.  Skip when LLCs
+            // are explicitly specified — the user chose a particular intra-node
+            // ordering.  Node preferences are fine — node_order() already
+            // handles those and rotation is orthogonal.
+            if self.spec.llcs().is_empty() {
+                self.rotate_node_layer_offset(&mut order);
+            }
+            result.extend(order);
         }
-        order
+        result
     }
 
     fn grow_reverse(&self) -> Vec<usize> {
-        let mut cores = self.grow_linear();
-        cores.reverse();
-        cores
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let mut order = self.node_core_seqs(node_id);
+            // See grow_linear() for why we skip rotation when LLCs are set.
+            if self.spec.llcs().is_empty() {
+                self.rotate_node_layer_offset(&mut order);
+            }
+            order.reverse();
+            result.extend(order);
+        }
+        result
     }
 
     fn grow_round_robin(&self) -> Vec<usize> {
@@ -391,10 +403,14 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_random(&self) -> Vec<usize> {
-        let mut core_order = self.grow_linear();
         fastrand::seed(self.layer_idx.try_into().unwrap());
-        fastrand::shuffle(&mut core_order);
-        core_order
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let mut order = self.node_core_seqs(node_id);
+            fastrand::shuffle(&mut order);
+            result.extend(order);
+        }
+        result
     }
 
     fn grow_big_little(&self) -> Vec<usize> {
