@@ -44,13 +44,14 @@ pub struct CpuPool {
     /// Use for sub-core allocations when turned on.
     available_cpus: Cpumask,
 
-    /// The ID of the first physical core in the system.
-    /// This core is often used as a default for initializing tasks.
+    /// The ID of the first physical CPU in the system.
+    /// Used as a global default when no per-node CPU is suitable.
+    #[allow(dead_code)]
     first_cpu: usize,
 
-    /// The ID of the next free CPU or the fallback CPU if none are available.
-    /// This is used to allocate resources when a task needs to be assigned to a core.
-    pub fallback_cpu: usize,
+    /// Per-node fallback CPU: node_id → cpu_id. Each node has its own
+    /// fallback CPU for draining empty-layer DSQs, avoiding cross-node traffic.
+    pub fallback_cpus: BTreeMap<usize, usize>,
 
     /// Dense sequential core index (0, 1, 2, ...) assigned by walking
     /// topo.nodes → node.llcs → llc.cores in BTreeMap order. Hardware
@@ -102,20 +103,25 @@ impl CpuPool {
             free_llcs,
             available_cpus,
             first_cpu,
-            fallback_cpu: first_cpu,
+            fallback_cpus: BTreeMap::new(),
             core_seq,
             topo,
             allow_partial,
         };
-        cpu_pool.update_fallback_cpu();
+        cpu_pool.update_fallback_cpus();
         Ok(cpu_pool)
     }
 
-    fn update_fallback_cpu(&mut self) {
-        self.fallback_cpu = match self.available_cpus.iter().next() {
-            Some(cpu) => cpu,
-            None => self.first_cpu,
-        };
+    fn update_fallback_cpus(&mut self) {
+        for node in self.topo.nodes.values() {
+            let fb = self
+                .available_cpus
+                .and(&node.span)
+                .iter()
+                .next()
+                .unwrap_or_else(|| node.span.iter().next().unwrap());
+            self.fallback_cpus.insert(node.id, fb);
+        }
     }
 
     fn core_cpu_available(&self, core: &Cpumask) -> usize {
@@ -184,7 +190,7 @@ impl CpuPool {
             max_to_alloc -= core_num_available;
         }
 
-        self.update_fallback_cpu();
+        self.update_fallback_cpus();
         self.check_partial().unwrap();
 
         if !allocated_cpus.is_empty() {
@@ -204,7 +210,7 @@ impl CpuPool {
         }
 
         self.available_cpus = self.available_cpus.or(&cpus_to_free);
-        self.update_fallback_cpu();
+        self.update_fallback_cpus();
 
         self.check_partial()?;
 
@@ -220,7 +226,7 @@ impl CpuPool {
         }
 
         self.available_cpus &= &cpus_to_alloc.not();
-        self.update_fallback_cpu();
+        self.update_fallback_cpus();
 
         self.check_partial()?;
 
@@ -337,11 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn test_new_1n_fallback_cpu() {
+    fn test_new_1n_fallback_cpus() {
         let (topo, _total) = topo_1n();
         let pool = CpuPool::new(topo, false).unwrap();
-        // fallback_cpu should be the first CPU (0).
-        assert_eq!(pool.fallback_cpu, 0);
+        // Single node: fallback_cpus[0] should be the first CPU (0).
+        assert_eq!(pool.fallback_cpus.len(), 1);
+        assert_eq!(pool.fallback_cpus[&0], 0);
     }
 
     #[test]
@@ -670,21 +677,21 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_cpu_updates() {
+    fn test_fallback_cpus_updates() {
         let (topo, total) = topo_1n();
         let allowed = all_cpus_mask(total);
         let order = core_order_sequential(&topo);
         let mut pool = CpuPool::new(topo, false).unwrap();
 
-        assert_eq!(pool.fallback_cpu, 0);
+        assert_eq!(pool.fallback_cpus[&0], 0);
 
         // Allocate core 0 (cpus 0,1). Fallback should move to cpu 2.
         let alloc = pool.alloc_cpus(&allowed, &order, 2).unwrap();
-        assert_eq!(pool.fallback_cpu, 2);
+        assert_eq!(pool.fallback_cpus[&0], 2);
 
         // Free it back. Fallback should return to 0.
         pool.free(&alloc).unwrap();
-        assert_eq!(pool.fallback_cpu, 0);
+        assert_eq!(pool.fallback_cpus[&0], 0);
     }
 
     // --- 2N: node-aware allocation ---

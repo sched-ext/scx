@@ -611,8 +611,8 @@ pub struct SysStats {
     pub fixup_vtime: u64,
     #[stat(desc = "Number of times cpuc->preempting_task didn't come on the CPU")]
     pub preempting_mismatch: u64,
-    #[stat(desc = "fallback CPU")]
-    pub fallback_cpu: u32,
+    #[stat(desc = "per-node fallback CPUs")]
+    pub fallback_cpus: BTreeMap<u32, u32>,
     #[stat(desc = "per-layer statistics")]
     pub fallback_cpu_util: f64,
     #[stat(desc = "fallback CPU util %")]
@@ -626,7 +626,11 @@ pub struct SysStats {
 }
 
 impl SysStats {
-    pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
+    pub fn new(
+        stats: &Stats,
+        bstats: &BpfStats,
+        fallback_cpus: &BTreeMap<usize, usize>,
+    ) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx];
         let total = lsum(LSTAT_SEL_LOCAL)
             + lsum(LSTAT_ENQ_LOCAL)
@@ -675,7 +679,10 @@ impl SysStats {
             skip_preempt: stats.bpf_stats.gstats[GSTAT_SKIP_PREEMPT],
             fixup_vtime: stats.bpf_stats.gstats[GSTAT_FIXUP_VTIME],
             preempting_mismatch: stats.bpf_stats.gstats[GSTAT_PREEMPTING_MISMATCH],
-            fallback_cpu: fallback_cpu as u32,
+            fallback_cpus: fallback_cpus
+                .iter()
+                .map(|(&k, &v)| (k as u32, v as u32))
+                .collect(),
             fallback_cpu_util: stats.bpf_stats.gstats[GSTAT_FB_CPU_USAGE] as f64
                 / elapsed_ns as f64
                 * 100.0,
@@ -699,14 +706,26 @@ impl SysStats {
             fmt_pct(self.lo_fb),
         )?;
 
+        let single_node = self.fallback_cpus.len() == 1;
+        let fb_cpus_str: Vec<String> = self
+            .fallback_cpus
+            .iter()
+            .map(|(n, c)| {
+                if single_node {
+                    format!("{}", c)
+                } else {
+                    format!("N{}:{}", n, c)
+                }
+            })
+            .collect();
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fb_cpu/util={:3}/{:4.1} proc={}ms sys_util_10s={:5.1}",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fb_cpus=[{}]/util={:4.1} proc={}ms sys_util_10s={:5.1}",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
             fmt_pct(self.lo_fb_util),
-            self.fallback_cpu,
+            fb_cpus_str.join(","),
             self.fallback_cpu_util,
             self.proc_ms,
             self.system_cpu_util_ewma,

@@ -436,7 +436,7 @@ lazy_static! {
 ///   ```bash
 ///   $ scx_layered --monitor 1
 ///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
-///   busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
+///   busy= 34.2 util= 1733.6 load=  21744.1 fb_cpus=[n0:1]
 ///     batch    : util/frac=   11.8/  0.7 load/frac=     29.7:  0.1 tasks=  2597
 ///                tot=   3478 local=67.80 open_idle= 0.00 preempt= 0.00 affn_viol= 0.00
 ///                cpus=  2 [  2,  2] 04000001 00000000
@@ -3441,8 +3441,9 @@ impl<'a> Scheduler<'a> {
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
 
-            self.skel.maps.bss_data.as_mut().unwrap().fallback_cpu =
-                self.cpu_pool.fallback_cpu as u32;
+            for (&node_id, &cpu) in &self.cpu_pool.fallback_cpus {
+                self.skel.maps.bss_data.as_mut().unwrap().fallback_cpus[node_id] = cpu as u32;
+            }
 
             for (lidx, layer) in self.layers.iter().enumerate() {
                 self.nr_layer_cpus_ranges[lidx] = (
@@ -3541,7 +3542,7 @@ impl<'a> Scheduler<'a> {
         cpus_ranges: &mut [(usize, usize)],
     ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
-        let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
+        let mut sys_stats = SysStats::new(stats, bstats, &self.cpu_pool.fallback_cpus)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
