@@ -540,29 +540,35 @@ static
 void cbw_free_llc_ctx(struct cgroup *cgrp, struct scx_cgroup_ctx *cgx)
 {
 	struct scx_cgroup_llc_ctx *llcx;
+	scx_atq_t *btq;
 	int i;
 
-	if (!cgrp || !cgx || !cgx->has_llcx)
+	if (!cgrp)
 		return;
 
-	cgx->has_llcx = false;
+	if (cgx) {
+		if (!cgx->has_llcx)
+			return;
+		cgx->has_llcx = false;
+	}
+
 	bpf_for(i, 0, TOPO_NR(LLC)) {
 		llcx = cbw_get_llc_ctx(cgrp, i);
-		if (!llcx)
+		if (!llcx || !(btq = llcx->btq))
 			break;
 
-		if (scx_atq_nr_queued(llcx->btq)) {
+		if (scx_atq_nr_queued(btq)) {
 			cbw_err("Throttled tasks should not be in an existing cgroup: [%llu/%d]",
-				cgx->id, i);
+				cgroup_get_id(cgrp), i);
 		}
 
 		if (cbw_del_llc_ctx(cgrp, i)) {
 			cbw_err("Failed to delete an LLC context: [%llu/%d]",
-				cgx->id, i);
+				cgroup_get_id(cgrp), i);
 			continue;
 		}
 
-		/* TODO: Note that ATQ does not provide an API to delete itself. */
+		scx_atq_destroy(btq);
 	}
 }
 
@@ -862,17 +868,15 @@ int scx_cgroup_bw_init(struct cgroup *cgrp __arg_trusted, struct scx_cgroup_init
 __hidden
 int scx_cgroup_bw_exit(struct cgroup *cgrp __arg_trusted)
 {
-	int ret;
+	int ret = 0;
 
 	cbw_dbg_cgrp();
-	if (cgrp->level > 1) {
-		if ((ret = cbw_update_nr_taskable_descendents(cgrp, -1)))
-			return ret;
-	}
+	if (cgrp->level > 1)
+		ret = cbw_update_nr_taskable_descendents(cgrp, -1);
 
 	cbw_del_cgroup_ctx(cgrp);
 	cbw_free_llc_ctx(cgrp, NULL);
-	return 0;
+	return ret;
 }
 
 /**

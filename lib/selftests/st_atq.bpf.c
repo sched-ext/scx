@@ -226,6 +226,70 @@ int scx_selftest_atq_nr_queued(u64 unused)
 #undef NTASKS_FOR_TEST
 }
 
+extern struct scx_alloc_stats alloc_stats;
+
+/*
+ * Memory leak check: warm up the allocator with one full cycle, then run
+ * 1 M cycles and verify that the arena did not grow by more than 1 MB.
+ */
+__weak int scx_selftest_atq_leak(u64 unused)
+{
+	u64 pages_before, pages_after, mem_inc;
+	scx_task_common *taskc;
+	scx_atq_t *atq;
+	int i, ret;
+
+	/* Pre-allocate a task context to reuse across iterations. */
+	taskc = scx_static_alloc(sizeof(*taskc), 1);
+	if (!taskc)
+		return -ENOMEM;
+
+	/* Warm-up: one full cycle to prime the allocator. */
+	atq = (scx_atq_t *)scx_atq_create(false);
+	if (!atq)
+		return -ENOMEM;
+
+	ret = scx_atq_insert_vtime(atq, taskc, 1);
+	if (ret)
+		return ret;
+
+	if (!scx_atq_pop(atq))
+		return -EINVAL;
+
+	ret = scx_atq_destroy(atq);
+	if (ret)
+		return ret;
+
+	pages_before = scx_alloc_get_pages_used();
+
+	bpf_for(i, 0, 1000000) {
+		atq = (scx_atq_t *)scx_atq_create(false);
+		if (!atq)
+			return -ENOMEM;
+
+		ret = scx_atq_insert_vtime(atq, taskc, 1);
+		if (ret)
+			return ret;
+
+		if (!scx_atq_pop(atq))
+			return -EINVAL;
+
+		ret = scx_atq_destroy(atq);
+		if (ret)
+			return ret;
+	}
+
+	pages_after = scx_alloc_get_pages_used();
+
+	mem_inc = (pages_after - pages_before) * PAGE_SIZE;
+	if (mem_inc > (1024 * 1024)) {
+		bpf_printk("Memory leak detected (%llu bytes)", mem_inc);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 #define SCX_ATQ_SELFTEST(suffix) SCX_SELFTEST(scx_selftest_atq_ ## suffix, (u64)NULL)
 
 __weak
@@ -375,6 +439,7 @@ int scx_selftest_atq(void)
 	SCX_ATQ_SELFTEST(peek_nodestruct);
 	SCX_ATQ_SELFTEST(peek_empty);
 	SCX_ATQ_SELFTEST(sized);
+	SCX_ATQ_SELFTEST(leak);
 
 	return 0;
 }

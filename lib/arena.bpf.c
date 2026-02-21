@@ -10,6 +10,8 @@
 #include <lib/percpu.h>
 #include <lib/cpumask.h>
 #include <lib/topology.h>
+#include <lib/rbtree.h>
+#include <lib/atq.h>
 
 /*
  * "System-call" based API for arenas.
@@ -47,6 +49,18 @@ int arena_init(struct arena_init_args *args)
 	ret = scx_task_init(args->task_ctx_size);
 	if (ret) {
 		bpf_printk("scx_task_init failed with %d", ret);
+		return ret;
+	}
+
+	ret = scx_rb_init();
+	if (ret) {
+		bpf_printk("scx_rb_init failed with %d", ret);
+		return ret;
+	}
+
+	ret = scx_atq_init();
+	if (ret) {
+		bpf_printk("scx_atq_init failed with %d", ret);
 		return ret;
 	}
 
