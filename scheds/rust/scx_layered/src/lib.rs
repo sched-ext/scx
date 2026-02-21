@@ -1152,15 +1152,13 @@ mod tests {
     }
 
     #[test]
-    fn test_growth_little_big_is_reverse_of_big_little() {
+    fn test_growth_little_big_1n() {
         let (topo, _total) = topo_1n();
-        let specs_bl = vec![test_layer_spec("L0", LayerGrowthAlgo::BigLittle)];
-        let specs_lb = vec![test_layer_spec("L0", LayerGrowthAlgo::LittleBig)];
-        let order_bl = get_core_order(&topo, &specs_bl, 0);
-        let order_lb = get_core_order(&topo, &specs_lb, 0);
-        let mut reversed = order_bl.clone();
-        reversed.reverse();
-        assert_eq!(order_lb, reversed);
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::LittleBig)];
+        let order = get_core_order(&topo, &specs, 0);
+        // All cores same type in test topo → stable sort preserves topo order
+        // regardless of sort direction.
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     // --- NodeSpread ---

@@ -412,12 +412,18 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_big_little(&self) -> Vec<usize> {
-        let mut cores: Vec<&Arc<Core>> = self.topo.all_cores.values().collect();
-        cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
-        cores
-            .into_iter()
-            .map(|core| self.cpu_pool.core_seq(core))
-            .collect()
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
+            cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
+            result.extend(
+                cores
+                    .into_iter()
+                    .map(|core| self.cpu_pool.core_seq(core)),
+            );
+        }
+        result
     }
 
     fn grow_node_spread_inner(&self, make_random: bool) -> Vec<usize> {
@@ -524,9 +530,18 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_little_big(&self) -> Vec<usize> {
-        let mut cores = self.grow_big_little();
-        cores.reverse();
-        cores
+        let mut result = Vec::new();
+        for node_id in self.node_order() {
+            let node = &self.topo.nodes[&node_id];
+            let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
+            cores.sort_by(|a, b| b.core_type.cmp(&a.core_type));
+            result.extend(
+                cores
+                    .into_iter()
+                    .map(|core| self.cpu_pool.core_seq(core)),
+            );
+        }
+        result
     }
 
     fn grow_topo(&self) -> Vec<usize> {
