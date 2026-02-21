@@ -62,6 +62,8 @@ pub mod libbpf_clap_opts;
 pub mod ravg;
 
 mod topology;
+#[cfg(any(test, feature = "testutils"))]
+pub use topology::testutils;
 pub use topology::Core;
 pub use topology::CoreType;
 pub use topology::Cpu;

@@ -1126,15 +1126,19 @@ fn create_numa_nodes(
     Ok(nodes)
 }
 
-#[cfg(test)]
-mod tests {
+/// Test topology construction helpers.
+///
+/// Provides [`make_test_topo()`] for building synthetic [`Topology`] instances
+/// with configurable node/LLC/core/HT counts, and [`mask_from_bits()`] for
+/// building [`Cpumask`] values from a list of CPU IDs. Enable via the
+/// `testutils` feature of `scx_utils`.
+#[cfg(any(test, feature = "testutils"))]
+pub mod testutils {
     use super::*;
-    use bitvec::prelude::*;
+    use crate::set_cpumask_test_width;
 
-    // Per-struct helpers that centralize "don't care" fields. When a field is
-    // added to any topology struct, only the corresponding helper needs updating.
-
-    fn test_cpu(id: usize, core_id: usize, llc_id: usize, node_id: usize) -> Cpu {
+    /// Create a [`Cpu`] with the given IDs and default frequencies/capacity.
+    pub fn test_cpu(id: usize, core_id: usize, llc_id: usize, node_id: usize) -> Cpu {
         Cpu {
             id,
             core_id,
@@ -1156,62 +1160,54 @@ mod tests {
         }
     }
 
-    fn test_core(
+    /// Create a [`Core`] from a set of CPUs with the given IDs.
+    pub fn test_core(
         id: usize,
         cpus: BTreeMap<usize, Arc<Cpu>>,
         llc_id: usize,
         node_id: usize,
-        total_cpus: usize,
     ) -> Core {
-        let mut span = bitvec![u64, Lsb0; 0; total_cpus];
+        let mut span = Cpumask::new();
         for &cpu_id in cpus.keys() {
-            span.set(cpu_id, true);
+            span.set_cpu(cpu_id).unwrap();
         }
         Core {
             id,
             kernel_id: id,
             cluster_id: 0,
             cpus,
-            span: Cpumask::from_vec(span.into_vec()),
+            span,
             core_type: CoreType::Big { turbo: false },
             llc_id,
             node_id,
         }
     }
 
-    fn test_llc(
-        id: usize,
-        cores: BTreeMap<usize, Arc<Core>>,
-        node_id: usize,
-        total_cpus: usize,
-    ) -> Llc {
-        let mut span = bitvec![u64, Lsb0; 0; total_cpus];
+    /// Create an [`Llc`] from a set of cores with the given IDs.
+    pub fn test_llc(id: usize, cores: BTreeMap<usize, Arc<Core>>, node_id: usize) -> Llc {
+        let mut span = Cpumask::new();
         for core in cores.values() {
             for &cpu_id in core.cpus.keys() {
-                span.set(cpu_id, true);
+                span.set_cpu(cpu_id).unwrap();
             }
         }
         Llc {
             id,
             kernel_id: id,
             cores,
-            span: Cpumask::from_vec(span.into_vec()),
+            span,
             node_id,
             all_cpus: BTreeMap::new(), // filled by instantiate()
         }
     }
 
-    fn test_node(
-        id: usize,
-        llcs: BTreeMap<usize, Arc<Llc>>,
-        nr_nodes: usize,
-        total_cpus: usize,
-    ) -> Node {
-        let mut span = bitvec![u64, Lsb0; 0; total_cpus];
+    /// Create a [`Node`] from a set of LLCs with the given IDs.
+    pub fn test_node(id: usize, llcs: BTreeMap<usize, Arc<Llc>>, nr_nodes: usize) -> Node {
+        let mut span = Cpumask::new();
         for llc in llcs.values() {
             for core in llc.cores.values() {
                 for &cpu_id in core.cpus.keys() {
-                    span.set(cpu_id, true);
+                    span.set_cpu(cpu_id).unwrap();
                 }
             }
         }
@@ -1219,7 +1215,7 @@ mod tests {
             id,
             distance: vec![10; nr_nodes],
             llcs,
-            span: Cpumask::from_vec(span.into_vec()),
+            span,
             all_cores: BTreeMap::new(), // filled by instantiate()
             all_cpus: BTreeMap::new(),  // filled by instantiate()
             #[cfg(feature = "gpu-topology")]
@@ -1227,13 +1223,23 @@ mod tests {
         }
     }
 
-    fn make_test_topo(
+    /// Build a synthetic [`Topology`] with the specified dimensions.
+    ///
+    /// Returns `(topology, total_cpu_count)`. CPU IDs are assigned
+    /// sequentially starting from 0: node 0's LLCs get the lowest IDs,
+    /// then node 1, etc.
+    ///
+    /// Sets the Cpumask test width override to `total_cpus` so that all
+    /// masks created during the test have consistent width.
+    pub fn make_test_topo(
         nr_nodes: usize,
         llcs_per_node: usize,
         cores_per_llc: usize,
         hts_per_core: usize,
     ) -> (Topology, usize) {
         let total_cpus = nr_nodes * llcs_per_node * cores_per_llc * hts_per_core;
+        set_cpumask_test_width(total_cpus);
+
         let mut cpu_id = 0usize;
         let mut core_id = 0usize;
         let mut llc_id = 0usize;
@@ -1254,38 +1260,38 @@ mod tests {
                     }
                     cores.insert(
                         core_id,
-                        Arc::new(test_core(core_id, cpus, llc_id, node_idx, total_cpus)),
+                        Arc::new(test_core(core_id, cpus, llc_id, node_idx)),
                     );
                     core_id += 1;
                 }
-                llcs.insert(
-                    llc_id,
-                    Arc::new(test_llc(llc_id, cores, node_idx, total_cpus)),
-                );
+                llcs.insert(llc_id, Arc::new(test_llc(llc_id, cores, node_idx)));
                 llc_id += 1;
             }
-            nodes.insert(node_idx, test_node(node_idx, llcs, nr_nodes, total_cpus));
+            nodes.insert(node_idx, test_node(node_idx, llcs, nr_nodes));
         }
 
-        let span = {
-            let mut mask = bitvec![u64, Lsb0; 0; total_cpus];
-            for i in 0..total_cpus {
-                mask.set(i, true);
-            }
-            Cpumask::from_vec(mask.into_vec())
-        };
+        let mut span = Cpumask::new();
+        for i in 0..total_cpus {
+            span.set_cpu(i).unwrap();
+        }
 
         (Topology::instantiate(span, nodes).unwrap(), total_cpus)
     }
 
-    /// Create a Cpumask from a list of set CPU IDs.
-    fn mask_from_bits(total: usize, bits: &[usize]) -> Cpumask {
-        let mut bv = bitvec![u64, Lsb0; 0; total];
+    /// Create a [`Cpumask`] from a list of set CPU IDs.
+    pub fn mask_from_bits(_total: usize, bits: &[usize]) -> Cpumask {
+        let mut mask = Cpumask::new();
         for &b in bits {
-            bv.set(b, true);
+            mask.set_cpu(b).unwrap();
         }
-        Cpumask::from_vec(bv.into_vec())
+        mask
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutils::*;
+    use super::*;
 
     fn grid_output(topo: &Topology, cpumask: &Cpumask) -> String {
         let mut buf = Vec::new();
