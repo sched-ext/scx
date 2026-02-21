@@ -277,6 +277,42 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         vec
     }
 
+    /// Node iteration order: spec.nodes() if set (hard limit), otherwise
+    /// all topo nodes. Spec nodes are validated in Scheduler::init().
+    fn node_order(&self) -> Vec<usize> {
+        let spec_nodes = self.spec.nodes();
+        if spec_nodes.is_empty() {
+            self.topo.nodes.keys().copied().collect()
+        } else {
+            spec_nodes.clone()
+        }
+    }
+
+    /// Sequential core indices (core_seq) belonging to a given node.
+    fn node_core_seqs(&self, node_id: usize) -> Vec<usize> {
+        let node = &self.topo.nodes[&node_id];
+        node.llcs
+            .values()
+            .flat_map(|llc| {
+                llc.cores
+                    .values()
+                    .map(|core| self.cpu_pool.core_seq(core))
+            })
+            .collect()
+    }
+
+    /// Per-node variant of rotate_layer_offset — rotates within a
+    /// node-scoped core vec using node_cores.len() instead of
+    /// all_cores.len().
+    fn rotate_node_layer_offset(&self, vec: &mut Vec<usize>) {
+        if vec.is_empty() {
+            return;
+        }
+        let num_cores = vec.len();
+        let chunk = num_cores.div_ceil(self.layer_specs.len());
+        vec.rotate_right((chunk * self.layer_idx).min(num_cores));
+    }
+
     fn grow_sticky(&self) -> Vec<usize> {
         let mut core_order = vec![];
 
@@ -599,5 +635,171 @@ where
                 self.next()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CpuPool;
+    use scx_utils::testutils::make_test_topo;
+    use std::sync::Arc;
+
+    fn topo_1n() -> Arc<Topology> {
+        let (topo, _) = make_test_topo(1, 2, 4, 2);
+        Arc::new(topo)
+    }
+
+    fn topo_2n() -> Arc<Topology> {
+        let (topo, _) = make_test_topo(2, 2, 4, 2);
+        Arc::new(topo)
+    }
+
+    fn test_spec(algo: LayerGrowthAlgo) -> LayerSpec {
+        let json = r#"{"name":"_","matches":[],"kind":{"Confined":{"util_range":[0.0,1.0]}}}"#;
+        let mut spec: LayerSpec = serde_json::from_str(json).unwrap();
+        spec.kind.common_mut().growth_algo = algo;
+        spec
+    }
+
+    fn test_spec_with_nodes(algo: LayerGrowthAlgo, nodes: Vec<usize>) -> LayerSpec {
+        let mut spec = test_spec(algo);
+        *spec.nodes_mut() = nodes;
+        spec
+    }
+
+    fn make_generator<'a>(
+        cpu_pool: &'a CpuPool,
+        specs: &'a [LayerSpec],
+        spec: &'a LayerSpec,
+        layer_idx: usize,
+        topo: &'a Topology,
+        cpusets: &'a BTreeSet<CpuSet>,
+    ) -> LayerCoreOrderGenerator<'a> {
+        LayerCoreOrderGenerator {
+            cpu_pool,
+            layer_specs: specs,
+            spec,
+            layer_idx,
+            topo,
+            cpusets,
+        }
+    }
+
+    // --- node_order ---
+
+    #[test]
+    fn test_node_order_1n_default() {
+        let topo = topo_1n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![0]);
+    }
+
+    #[test]
+    fn test_node_order_2n_default() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_node_order_2n_with_spec_reversed() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1, 0])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_node_order_2n_with_spec_partial() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        // Spec only mentions node 1; hard limit, no appending.
+        let specs = vec![test_spec_with_nodes(LayerGrowthAlgo::Linear, vec![1])];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        assert_eq!(gen.node_order(), vec![1]);
+    }
+
+    // --- node_core_seqs ---
+
+    #[test]
+    fn test_node_core_seqs_1n() {
+        let topo = topo_1n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        // 1N has 8 cores: all in node 0.
+        let ids = gen.node_core_seqs(0);
+        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_node_core_seqs_2n_partitions() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        let node0 = gen.node_core_seqs(0);
+        let node1 = gen.node_core_seqs(1);
+
+        // Node 0: cores 0-7, Node 1: cores 8-15.
+        assert_eq!(node0, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(node1, vec![8, 9, 10, 11, 12, 13, 14, 15]);
+
+        // Together should be all 16 cores.
+        let mut all: Vec<usize> = node0.into_iter().chain(node1).collect();
+        all.sort();
+        assert_eq!(all, (0..16).collect::<Vec<_>>());
+    }
+
+    // --- rotate_node_layer_offset ---
+
+    #[test]
+    fn test_rotate_node_layer_offset_single_layer() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![test_spec(LayerGrowthAlgo::Linear)];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[0], 0, &topo, &cpusets);
+
+        // With 1 layer, chunk = 8, offset = 0 → no rotation.
+        let mut v = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        gen.rotate_node_layer_offset(&mut v);
+        assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_rotate_node_layer_offset_multi_layer() {
+        let topo = topo_2n();
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let specs = vec![
+            test_spec(LayerGrowthAlgo::Linear),
+            test_spec(LayerGrowthAlgo::Linear),
+        ];
+        let cpusets = BTreeSet::new();
+        let gen = make_generator(&pool, &specs, &specs[1], 1, &topo, &cpusets);
+
+        // Layer idx=1, 2 layers, 8 cores in node → chunk = ceil(8/2) = 4.
+        // rotate_right(4).
+        let mut v = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        gen.rotate_node_layer_offset(&mut v);
+        assert_eq!(v, vec![4, 5, 6, 7, 0, 1, 2, 3]);
     }
 }
