@@ -222,12 +222,11 @@ impl DsqManager {
             .is_some_and(|dsq| dsq.remove_pid(pid))
     }
 
-    /// Iterate over all DSQ IDs.
-    pub fn dsq_ids(&self) -> impl Iterator<Item = DsqId> + '_ {
-        self.dsqs.keys().copied()
-    }
-
-    /// Iterate all DSQ IDs in sorted order for deterministic hashing.
+    /// Iterate all DSQ IDs in sorted order for deterministic iteration.
+    ///
+    /// The internal `dsqs` field is a HashMap, so iteration order is
+    /// non-deterministic. This method sorts keys before returning to
+    /// ensure reproducible behavior.
     pub fn sorted_dsq_ids(&self) -> Vec<DsqId> {
         let mut ids: Vec<_> = self.dsqs.keys().copied().collect();
         ids.sort_by_key(|id| id.0);

@@ -386,26 +386,32 @@ impl<S: Scheduler> Simulator<S> {
     /// Check for stalled runnable tasks (watchdog).
     ///
     /// Iterates all tasks and checks if any Runnable task has been waiting
-    /// longer than the timeout. Returns the first stall error found, if any.
+    /// longer than the timeout. Returns the stall with the lowest PID for
+    /// determinism (HashMap iteration order is non-deterministic).
     fn check_watchdog(
         tasks: &HashMap<Pid, SimTask>,
         current_time: TimeNs,
         timeout_ns: TimeNs,
     ) -> Option<ExitKind> {
+        let mut worst: Option<(Pid, TimeNs)> = None;
         for task in tasks.values() {
             if matches!(task.state, TaskState::Runnable) {
                 if let Some(runnable_at) = task.runnable_at_ns {
                     let runnable_for = current_time.saturating_sub(runnable_at);
                     if runnable_for > timeout_ns {
-                        return Some(ExitKind::ErrorStall {
-                            pid: task.pid,
-                            runnable_for_ns: runnable_for,
-                        });
+                        // Pick the lowest PID for deterministic error reporting.
+                        let dominated = worst.map(|(pid, _)| task.pid < pid).unwrap_or(true);
+                        if dominated {
+                            worst = Some((task.pid, runnable_for));
+                        }
                     }
                 }
             }
         }
-        None
+        worst.map(|(pid, runnable_for_ns)| ExitKind::ErrorStall {
+            pid,
+            runnable_for_ns,
+        })
     }
 
     /// Run a scenario and return the trace.
@@ -672,8 +678,11 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(&mut state, cpu);
             for pid in sorted_pids {
                 let task = &tasks[&pid];
+                // Resolve cgroup map BEFORE start_rbc — HashMap::get() has
+                // non-deterministic branch count due to random hash seeds.
+                let cgrp_raw = task_cgroup_map.get(&task.pid).copied();
                 start_rbc(&mut state);
-                let rc = if let Some(&cgrp_raw) = task_cgroup_map.get(&task.pid) {
+                let rc = if let Some(cgrp_raw) = cgrp_raw {
                     self.scheduler.init_task_in_cgroup(task.raw(), cgrp_raw)
                 } else {
                     self.scheduler.init_task(task.raw())
@@ -942,6 +951,11 @@ impl<S: Scheduler> Simulator<S> {
         }
 
         // Call scheduler dump before exit (mirrors kernel dump on scheduler unload)
+        // IMPORTANT: Sort PIDs for deterministic order. HashMap iteration
+        // is non-deterministic, and scheduler callbacks (dump_task, exit_task)
+        // charge RBC costs that accumulate on the CPU clock.
+        let mut shutdown_pids: Vec<Pid> = tasks.keys().copied().collect();
+        shutdown_pids.sort_by_key(|p| p.0);
         unsafe {
             let cpu = state.current_cpu;
             kfuncs::enter_sim(&mut state, cpu);
@@ -949,7 +963,8 @@ impl<S: Scheduler> Simulator<S> {
             self.scheduler.dump(std::ptr::null_mut());
             charge_sched_time(&mut state, CpuId(0), "dump");
 
-            for task in tasks.values() {
+            for &pid in &shutdown_pids {
+                let task = &tasks[&pid];
                 start_rbc(&mut state);
                 self.scheduler.dump_task(std::ptr::null_mut(), task.raw());
                 charge_sched_time(&mut state, CpuId(0), "dump_task");
@@ -961,9 +976,10 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             let cpu = state.current_cpu;
             kfuncs::enter_sim(&mut state, cpu);
-            for task in tasks.values() {
+            for &pid in &shutdown_pids {
+                let task = &tasks[&pid];
+                debug!(pid = pid.0, "exit_task");
                 start_rbc(&mut state);
-                debug!(pid = task.pid.0, "exit_task");
                 self.scheduler.exit_task(task.raw());
                 charge_sched_time(&mut state, CpuId(0), "exit_task");
             }
@@ -1240,8 +1256,8 @@ impl<S: Scheduler> Simulator<S> {
 
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(pid = pid.0, "tick");
+            start_rbc(state);
             self.scheduler.tick(raw);
             charge_sched_time(state, cpu, "tick");
             maybe_record_checkpoint(state, CheckpointEvent::Tick, cpu);
@@ -1316,8 +1332,8 @@ impl<S: Scheduler> Simulator<S> {
         // Notify the scheduler
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(cpu = cpu.0, "cpu_offline");
+            start_rbc(state);
             self.scheduler.cpu_offline(cpu.0 as i32);
             charge_sched_time(state, cpu, "cpu_offline");
             kfuncs::exit_sim();
@@ -1348,8 +1364,8 @@ impl<S: Scheduler> Simulator<S> {
         // Notify the scheduler
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(cpu = cpu.0, "cpu_online");
+            start_rbc(state);
             self.scheduler.cpu_online(cpu.0 as i32);
             charge_sched_time(state, cpu, "cpu_online");
             kfuncs::exit_sim();
@@ -1776,8 +1792,8 @@ impl<S: Scheduler> Simulator<S> {
         unsafe {
             kfuncs::enter_sim(state, wake_cpu);
             state.waker_task_raw = waker_raw;
-            start_rbc(state);
             debug!(pid = pid.0, "runnable");
+            start_rbc(state);
             self.scheduler.runnable(raw, enq_flags);
             charge_sched_time(state, wake_cpu, "runnable");
             kfuncs::exit_sim();
@@ -1844,8 +1860,8 @@ impl<S: Scheduler> Simulator<S> {
                 // Task was not directly dispatched; call enqueue
                 kfuncs::enter_sim(state, selected_cpu);
                 state.ops_context = OpsContext::Enqueue;
-                start_rbc(state);
                 debug!(pid = pid.0, enq_flags, "enqueue");
+                start_rbc(state);
                 self.scheduler.enqueue(raw, enq_flags);
                 charge_sched_time(state, selected_cpu, "enqueue");
                 maybe_record_checkpoint(state, CheckpointEvent::Enqueue, selected_cpu);
@@ -1950,8 +1966,8 @@ impl<S: Scheduler> Simulator<S> {
 
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(pid = pid.0, runnable = true, "stopping");
+            start_rbc(state);
             self.scheduler.stopping(raw, true); // true = still runnable
             charge_sched_time(state, cpu, "stopping");
             maybe_record_checkpoint(state, CheckpointEvent::Stopping, cpu);
@@ -1983,8 +1999,8 @@ impl<S: Scheduler> Simulator<S> {
             // Re-enqueue the preempted task
             state.ops_context = OpsContext::Enqueue;
             state.set_task_ops_state(pid, OpsTaskState::Queued);
-            start_rbc(state);
             debug!(pid = pid.0, "enqueue (re-enqueue)");
+            start_rbc(state);
             self.scheduler.enqueue(raw, 0);
             charge_sched_time(state, cpu, "enqueue");
             maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
@@ -2079,8 +2095,8 @@ impl<S: Scheduler> Simulator<S> {
 
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(pid = pid.0, still_runnable, "stopping");
+            start_rbc(state);
             self.scheduler.stopping(raw, still_runnable);
             charge_sched_time(state, cpu, "stopping");
             maybe_record_checkpoint(state, CheckpointEvent::Stopping, cpu);
@@ -2104,14 +2120,14 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::enter_sim(state, cpu);
                 let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
                 if ops_state == OpsTaskState::Queued {
-                    start_rbc(state);
                     debug!(pid = pid.0, "dequeue");
+                    start_rbc(state);
                     self.scheduler.dequeue(raw, SCX_DEQ_SLEEP);
                     charge_sched_time(state, cpu, "dequeue");
                     state.set_task_ops_state(pid, OpsTaskState::None);
                 }
-                start_rbc(state);
                 debug!(pid = pid.0, "quiescent");
+                start_rbc(state);
                 self.scheduler.quiescent(raw, SCX_DEQ_SLEEP);
                 charge_sched_time(state, cpu, "quiescent");
                 kfuncs::exit_sim();
@@ -2174,9 +2190,12 @@ impl<S: Scheduler> Simulator<S> {
                     unsafe {
                         kfuncs::enter_sim(state, cpu);
                         state.ops_context = OpsContext::Enqueue;
-                        start_rbc(state);
-                        debug!(pid = pid.0, "enqueue (yield re-enqueue)");
+                        // Set ops state BEFORE start_rbc — set_task_ops_state
+                        // does a HashMap::get() which has non-deterministic
+                        // branch count due to random hash seeds.
                         state.set_task_ops_state(pid, OpsTaskState::Queued);
+                        debug!(pid = pid.0, "enqueue (yield re-enqueue)");
+                        start_rbc(state);
                         self.scheduler.enqueue(raw, 0);
                         charge_sched_time(state, cpu, "enqueue");
                         maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
@@ -2249,8 +2268,10 @@ impl<S: Scheduler> Simulator<S> {
                                     unsafe {
                                         kfuncs::enter_sim(state, cpu);
                                         state.ops_context = OpsContext::Enqueue;
-                                        start_rbc(state);
+                                        // Set ops state BEFORE start_rbc — HashMap::get()
+                                        // in set_scx_flag has non-deterministic branch count.
                                         state.set_task_ops_state(pid, OpsTaskState::Queued);
+                                        start_rbc(state);
                                         self.scheduler.enqueue(raw, 0);
                                         charge_sched_time(state, cpu, "enqueue");
                                         maybe_record_checkpoint(
@@ -2366,8 +2387,8 @@ impl<S: Scheduler> Simulator<S> {
                 kfuncs::enter_sim(state, cpu);
                 state.ops_context = OpsContext::Dispatch;
                 state.kicked_cpus.clear();
-                start_rbc(state);
                 debug!("dispatch");
+                start_rbc(state);
                 self.scheduler.dispatch(cpu.0 as i32, prev_raw);
                 charge_sched_time(state, cpu, "dispatch");
                 maybe_record_checkpoint(state, CheckpointEvent::Dispatch, cpu);
@@ -2445,8 +2466,8 @@ impl<S: Scheduler> Simulator<S> {
             // Notify scheduler that CPU is entering idle (ops.update_idle)
             unsafe {
                 kfuncs::enter_sim(state, cpu);
-                start_rbc(state);
                 debug!("update_idle(idle=true)");
+                start_rbc(state);
                 self.scheduler.update_idle(cpu.0 as i32, true);
                 charge_sched_time(state, cpu, "update_idle");
                 kfuncs::exit_sim();
@@ -2891,7 +2912,14 @@ impl<S: Scheduler> Simulator<S> {
                 max_cgroups,
                 preemptive_cfg.timeslice_min,
                 preemptive_cfg.timeslice_max,
-                preemptive_cfg.cooperative_only,
+                // Force cooperative-only for batch processing: PMU signals
+                // introduce hardware-dependent skid that makes preemption
+                // points non-deterministic, breaking trace reproducibility.
+                // Batch handlers already have cooperative yield points at
+                // every kfunc boundary, providing sufficient interleaving.
+                // PMU-based preemption is reserved for dispatch_concurrent
+                // where the tight C loop has no natural yield points.
+                true,
             );
         } else {
             Self::process_batch_concurrent_cooperative(
@@ -3223,8 +3251,8 @@ impl<S: Scheduler> Simulator<S> {
 
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(pid = pid.0, runnable = true, "stopping (tick preempt)");
+            start_rbc(state);
             self.scheduler.stopping(raw, true);
             charge_sched_time(state, cpu, "stopping");
             maybe_record_checkpoint(state, CheckpointEvent::Stopping, cpu);
@@ -3245,8 +3273,8 @@ impl<S: Scheduler> Simulator<S> {
             kfuncs::enter_sim(state, cpu);
             state.ops_context = OpsContext::Enqueue;
             state.set_task_ops_state(pid, OpsTaskState::Queued);
-            start_rbc(state);
             debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
+            start_rbc(state);
             self.scheduler.enqueue(raw, 0);
             charge_sched_time(state, cpu, "enqueue");
             maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
@@ -3304,8 +3332,8 @@ impl<S: Scheduler> Simulator<S> {
         if was_idle {
             unsafe {
                 kfuncs::enter_sim(state, cpu);
-                start_rbc(state);
                 debug!("update_idle(idle=false)");
+                start_rbc(state);
                 self.scheduler.update_idle(cpu.0 as i32, false);
                 charge_sched_time(state, cpu, "update_idle");
                 kfuncs::exit_sim();
@@ -3325,8 +3353,8 @@ impl<S: Scheduler> Simulator<S> {
             task.enabled = true;
             unsafe {
                 kfuncs::enter_sim(state, cpu);
-                start_rbc(state);
                 debug!(pid = pid.0, "enable");
+                start_rbc(state);
                 self.scheduler.enable(raw);
                 charge_sched_time(state, cpu, "enable");
                 kfuncs::exit_sim();
@@ -3336,8 +3364,8 @@ impl<S: Scheduler> Simulator<S> {
         // Call running
         unsafe {
             kfuncs::enter_sim(state, cpu);
-            start_rbc(state);
             debug!(pid = pid.0, "running");
+            start_rbc(state);
             self.scheduler.running(raw);
             charge_sched_time(state, cpu, "running");
             maybe_record_checkpoint(state, CheckpointEvent::Running, cpu);

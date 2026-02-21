@@ -470,8 +470,8 @@ impl Trace {
                 }
             }
             None => {
-                // Sample all non-builtin DSQs
-                for dsq_id in dsqs.dsq_ids() {
+                // Sample all non-builtin DSQs in sorted order for determinism.
+                for dsq_id in dsqs.sorted_dsq_ids() {
                     if !dsq_id.is_builtin() {
                         let length = dsqs.nr_queued(dsq_id);
                         self.dsq_samples.push(DsqLengthSample {

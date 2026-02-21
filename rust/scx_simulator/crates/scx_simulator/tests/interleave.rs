@@ -1013,31 +1013,21 @@ fn pmu_preemptive_scenario(nr_cpus: u32, nr_tasks: u32, seed: u32, duration_ms: 
     builder.duration_ms(duration_ms).build()
 }
 
-/// Test determinism of true PMU-based preemptive interleaving.
+/// Test determinism of PMU-based preemptive interleaving.
 ///
-/// This tests the full preemptive mode with PMU RBC timers enabled.
-/// RBC is deterministic because it counts only retired (committed) branches,
-/// not speculative ones. See ai_docs/DETERMINISM.md for the full explanation.
+/// This tests preemptive mode with PMU RBC timers enabled. Batch event
+/// processing uses cooperative-only yields (kfunc boundaries) to avoid
+/// non-determinism from PMU skid. PMU-based preemption is reserved for
+/// `dispatch_concurrent`, where the tight C loop has no natural yield
+/// points.
 ///
 /// The test verifies determinism at two levels:
 /// 1. **Trace events**: Same sequence of scheduling events
 /// 2. **Preemption records**: Same (RBC, RIP) pairs at each preemption point
 ///
-/// Note: PMU delivery has inherent "skid" (signal delivery latency), which
-/// could theoretically cause slight variations. In practice, this test passes
-/// reliably because:
-/// 1. The PRNG-driven timeslices are deterministic
-/// 2. The C code executes the same instruction sequence
-/// 3. Worker selection is deterministic via PreemptRing
-///
-/// If this test becomes flaky on certain hardware, it may need to be marked
-/// `#[ignore]` with a comment explaining the hardware-specific skid behavior.
-///
-/// TODO(sim-e0791): Currently failing due to non-determinism in PMU-based
-/// preemptive mode. The events at same timestamp diverge on different CPUs.
-/// Needs investigation of concurrent event batch processing order.
+/// Note: preemption records may show minor variations due to PMU skid
+/// (signal delivery latency), but trace events must be identical.
 #[test]
-#[ignore = "sim-e0791: PMU preemptive mode non-determinism, needs investigation"]
 fn test_preemptive_pmu_determinism() {
     use scx_simulator::{drain_preemption_records, enable_preemption_collection};
 
