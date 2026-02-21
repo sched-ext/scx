@@ -1427,4 +1427,469 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // StickyDynamic lifecycle tests
+    //
+    // The StickyDynamic algorithm in recompute_layer_core_order() is tightly
+    // coupled to the Scheduler struct. These tests simulate the three-phase
+    // algorithm (free → redistribute → spillover) using lightweight state
+    // to verify correctness independent of the full runtime.
+    // =========================================================================
+
+    /// Mirrors the target computation from Scheduler::compute_target_llcs.
+    fn compute_target_llcs(target: usize, topo: &Topology) -> (usize, usize) {
+        let cores_per_llc = topo.all_cores.len() / topo.all_llcs.len();
+        let cpus_per_core = topo.all_cores.first_key_value().unwrap().1.cpus.len();
+        let cpus_per_llc = cores_per_llc * cpus_per_core;
+        let full = target / cpus_per_llc;
+        let extra = target % cpus_per_llc;
+        (full, extra.div_ceil(cpus_per_core))
+    }
+
+    /// Lightweight stand-in for Layer's StickyDynamic state.
+    struct SdLayerState {
+        #[allow(dead_code)]
+        name: String,
+        target_llc_cpus: (usize, usize),
+        assigned_llcs: Vec<usize>,
+    }
+
+    impl SdLayerState {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                target_llc_cpus: (0, 0),
+                assigned_llcs: vec![],
+            }
+        }
+    }
+
+    /// Simulate the three-phase StickyDynamic algorithm from
+    /// Scheduler::recompute_layer_core_order(). The layer_targets are
+    /// (layer_index, target_cpu_count) sorted ascending by target.
+    fn simulate_sd_recompute(
+        free_llcs: &mut Vec<(usize, usize)>,
+        layers: &mut [SdLayerState],
+        layer_targets: &[(usize, usize)],
+        topo: &Topology,
+    ) {
+        // Phase 1: Free LLCs from shrinking layers (iterate in reverse).
+        for &(idx, target) in layer_targets.iter().rev() {
+            let layer = &mut layers[idx];
+            let old_tlc = layer.target_llc_cpus;
+            let new_tlc = compute_target_llcs(target, topo);
+            let mut to_free = (old_tlc.0 as i32 - new_tlc.0 as i32).max(0) as usize;
+            while to_free > 0 && !layer.assigned_llcs.is_empty() {
+                let llc = layer.assigned_llcs.pop().unwrap();
+                free_llcs.push((llc, 0));
+                to_free -= 1;
+            }
+        }
+
+        // Phase 2: Redistribute freed LLCs to growing layers (iterate in reverse).
+        for &(idx, target) in layer_targets.iter().rev() {
+            let layer = &mut layers[idx];
+            let old_tlc = layer.target_llc_cpus;
+            let new_tlc = compute_target_llcs(target, topo);
+            let mut to_alloc = (new_tlc.0 as i32 - old_tlc.0 as i32).max(0) as usize;
+            while to_alloc > 0 && !free_llcs.is_empty() && to_alloc <= free_llcs.len() {
+                let llc = free_llcs.pop().unwrap().0;
+                layer.assigned_llcs.push(llc);
+                to_alloc -= 1;
+            }
+            layer.target_llc_cpus = new_tlc;
+        }
+
+        // Phase 3: Spillover (extra cores from free LLCs, consumed tracking).
+        // We don't track core_order here — just verify the consumed counts.
+        let cores_per_llc = topo.all_cores.len() / topo.all_llcs.len();
+        let cpus_per_core = topo.all_cores.first_key_value().unwrap().1.cpus.len();
+        let cpus_per_llc = cores_per_llc * cpus_per_core;
+
+        for &(idx, _) in layer_targets.iter() {
+            let tlc = layers[idx].target_llc_cpus;
+            let mut extra = tlc.1;
+            for i in 0..free_llcs.len() {
+                let avail = cpus_per_llc - free_llcs[i].1;
+                let used = extra.min(avail);
+                free_llcs[i].1 += used;
+                extra -= used;
+                if extra == 0 {
+                    break;
+                }
+            }
+        }
+
+        // Reset consumed entries.
+        for entry in free_llcs.iter_mut() {
+            entry.1 = 0;
+        }
+    }
+
+    // --- compute_target_llcs ---
+
+    #[test]
+    fn test_compute_target_llcs_1n() {
+        let (topo, _total) = topo_1n();
+        // 1N: 8 cores, 2 LLCs → 4 cores/LLC, 2 HTs/core → 8 cpus/LLC
+        assert_eq!(compute_target_llcs(0, &topo), (0, 0));
+        assert_eq!(compute_target_llcs(1, &topo), (0, 1)); // 1 cpu = 0 full + 1 extra core
+        assert_eq!(compute_target_llcs(2, &topo), (0, 1)); // 2 cpus = 1 core
+        assert_eq!(compute_target_llcs(3, &topo), (0, 2)); // 3 cpus = 2 cores (ceil)
+        assert_eq!(compute_target_llcs(8, &topo), (1, 0)); // exactly 1 LLC
+        assert_eq!(compute_target_llcs(9, &topo), (1, 1)); // 1 LLC + 1 extra core
+        assert_eq!(compute_target_llcs(16, &topo), (2, 0)); // exactly 2 LLCs
+    }
+
+    #[test]
+    fn test_compute_target_llcs_2n() {
+        let (topo, _total) = topo_2n();
+        // 2N: 16 cores, 4 LLCs → 4 cores/LLC, 2 HTs/core → 8 cpus/LLC
+        assert_eq!(compute_target_llcs(0, &topo), (0, 0));
+        assert_eq!(compute_target_llcs(8, &topo), (1, 0));
+        assert_eq!(compute_target_llcs(16, &topo), (2, 0));
+        assert_eq!(compute_target_llcs(24, &topo), (3, 0));
+        assert_eq!(compute_target_llcs(32, &topo), (4, 0));
+        assert_eq!(compute_target_llcs(10, &topo), (1, 1)); // 8+2 = 1 LLC + 1 core
+        assert_eq!(compute_target_llcs(15, &topo), (1, 4)); // 8+7 = 1 LLC + 4 cores (ceil(7/2))
+    }
+
+    // --- StickyDynamic lifecycle: single layer ---
+
+    #[test]
+    fn test_sd_single_layer_grow_from_zero() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+        // Target: 8 cpus = 1 full LLC.
+        let targets = vec![(0, 8)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 1);
+        assert_eq!(layers[0].target_llc_cpus, (1, 0));
+        assert_eq!(pool.free_llcs.len(), 1); // 1 LLC remains free
+    }
+
+    #[test]
+    fn test_sd_single_layer_grow_to_all() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+        let targets = vec![(0, 16)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 2);
+        assert_eq!(layers[0].target_llc_cpus, (2, 0));
+        assert_eq!(pool.free_llcs.len(), 0);
+    }
+
+    #[test]
+    fn test_sd_single_layer_grow_then_shrink() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+
+        // Grow to 2 LLCs.
+        let targets = vec![(0, 16)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 2);
+        assert_eq!(pool.free_llcs.len(), 0);
+
+        // Shrink to 1 LLC.
+        let targets = vec![(0, 8)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 1);
+        assert_eq!(pool.free_llcs.len(), 1);
+    }
+
+    #[test]
+    fn test_sd_single_layer_grow_shrink_roundtrip() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let initial_free = pool.free_llcs.clone();
+        let mut layers = vec![SdLayerState::new("L0")];
+
+        // Grow.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 16)], &topo);
+        // Shrink back to zero.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 0)], &topo);
+
+        assert_eq!(layers[0].assigned_llcs.len(), 0);
+        assert_eq!(pool.free_llcs.len(), initial_free.len());
+    }
+
+    // --- StickyDynamic lifecycle: spillover ---
+
+    #[test]
+    fn test_sd_spillover_extra_cores() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+        // Target: 10 cpus = 1 full LLC (8) + 2 cpus (1 core) spillover.
+        let targets = vec![(0, 10)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 1);
+        assert_eq!(layers[0].target_llc_cpus, (1, 1)); // 1 full LLC, 1 extra core
+    }
+
+    // --- StickyDynamic lifecycle: multiple competing layers ---
+
+    #[test]
+    fn test_sd_two_layers_compete() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+        // Both layers want 1 LLC each. Sort ascending: smaller target first.
+        let targets = vec![(0, 8), (1, 8)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+
+        // Each should get 1 LLC.
+        assert_eq!(layers[0].assigned_llcs.len(), 1);
+        assert_eq!(layers[1].assigned_llcs.len(), 1);
+        assert_eq!(pool.free_llcs.len(), 0);
+        // They should have different LLCs.
+        assert_ne!(layers[0].assigned_llcs[0], layers[1].assigned_llcs[0]);
+    }
+
+    #[test]
+    fn test_sd_two_layers_one_shrinks_other_grows() {
+        let (topo, _total) = topo_1n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+        // Initial: L0 gets 2 LLCs.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 16), (1, 0)], &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 2);
+        assert_eq!(layers[1].assigned_llcs.len(), 0);
+
+        // Now L0 shrinks to 1, L1 grows to 1. Ascending sort: (1,8),(0,8).
+        let targets = vec![(1, 8), (0, 8)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 1);
+        assert_eq!(layers[1].assigned_llcs.len(), 1);
+    }
+
+    // --- StickyDynamic lifecycle: 2N node-blind behavior ---
+
+    #[test]
+    fn test_sd_2n_llc_assignment_is_node_blind() {
+        // CRITICAL BASELINE: Document that StickyDynamic grabs LLCs from
+        // any node without node awareness. This is the behavior we want
+        // to change with the per-node CpuPool split.
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+
+        // Target: 2 full LLCs.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 16)], &topo);
+
+        // Current behavior: LLCs are popped from free_llcs which is in
+        // LLC ID order. The assigned LLCs may span nodes.
+        let assigned = &layers[0].assigned_llcs;
+        assert_eq!(assigned.len(), 2);
+
+        // Document: free_llcs starts as [(0,0),(1,0),(2,0),(3,0)].
+        // Pop gives LLC 3, then LLC 2 — both on node 1.
+        // With 2 LLCs requested, we get LLCs from the END of free_llcs.
+        // This is node-blind: the algorithm doesn't consider which node
+        // the LLCs belong to.
+        //
+        // After per-node split: each node's CpuPool will have its own
+        // free_llcs, so assignments will be node-local.
+    }
+
+    #[test]
+    fn test_sd_2n_two_layers_cross_node() {
+        // With 4 LLCs across 2 nodes, two layers each wanting 2 LLCs
+        // will get LLCs from a mix of nodes.
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+        let targets = vec![(0, 16), (1, 16)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+
+        assert_eq!(layers[0].assigned_llcs.len(), 2);
+        assert_eq!(layers[1].assigned_llcs.len(), 2);
+        assert_eq!(pool.free_llcs.len(), 0);
+
+        // Document cross-node assignment. The actual LLC IDs assigned
+        // depend on pop order from free_llcs, which is node-blind.
+        let all_assigned: Vec<usize> = layers
+            .iter()
+            .flat_map(|l| l.assigned_llcs.iter().copied())
+            .collect();
+        let mut sorted = all_assigned.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "all 4 LLCs should be assigned");
+    }
+
+    #[test]
+    fn test_sd_2n_grow_shrink_roundtrip() {
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let initial_free_count = pool.free_llcs.len();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+        // Grow both.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 16), (1, 16)], &topo);
+        assert_eq!(pool.free_llcs.len(), 0);
+
+        // Shrink both.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 0), (1, 0)], &topo);
+        assert_eq!(pool.free_llcs.len(), initial_free_count);
+        assert_eq!(layers[0].assigned_llcs.len(), 0);
+        assert_eq!(layers[1].assigned_llcs.len(), 0);
+    }
+
+    // --- StickyDynamic lifecycle: 4N tests ---
+
+    /// Verify LLC conservation: free + assigned across all layers = total.
+    fn assert_llc_conservation_flat(
+        free_llcs: &[(usize, usize)],
+        layers: &[SdLayerState],
+        total_llcs: usize,
+    ) {
+        let assigned: usize = layers.iter().map(|l| l.assigned_llcs.len()).sum();
+        assert_eq!(
+            free_llcs.len() + assigned,
+            total_llcs,
+            "LLC conservation violated: {} free + {} assigned != {}",
+            free_llcs.len(),
+            assigned,
+            total_llcs
+        );
+    }
+
+    #[test]
+    fn test_compute_target_llcs_4n() {
+        let (topo, _total) = topo_4n();
+        // 4N: 16 cores, 8 LLCs → 2 cores/LLC, 2 HTs/core → 4 cpus/LLC
+        assert_eq!(compute_target_llcs(0, &topo), (0, 0));
+        assert_eq!(compute_target_llcs(4, &topo), (1, 0)); // exactly 1 LLC
+        assert_eq!(compute_target_llcs(5, &topo), (1, 1)); // 1 LLC + 1 extra core
+        assert_eq!(compute_target_llcs(8, &topo), (2, 0)); // exactly 2 LLCs
+        assert_eq!(compute_target_llcs(32, &topo), (8, 0)); // all 8 LLCs
+    }
+
+    #[test]
+    fn test_sd_4n_single_layer_grow_to_all() {
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+        let targets = vec![(0, 32)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 8);
+        assert_eq!(pool.free_llcs.len(), 0);
+        assert_llc_conservation_flat(&pool.free_llcs, &layers, 8);
+    }
+
+    #[test]
+    fn test_sd_4n_four_layers_compete() {
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![
+            SdLayerState::new("L0"),
+            SdLayerState::new("L1"),
+            SdLayerState::new("L2"),
+            SdLayerState::new("L3"),
+        ];
+        // Each layer wants 2 LLCs (8 cpus). 4 × 2 = 8 LLCs total.
+        let targets = vec![(0, 8), (1, 8), (2, 8), (3, 8)];
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &targets, &topo);
+        for (i, layer) in layers.iter().enumerate() {
+            assert_eq!(
+                layer.assigned_llcs.len(),
+                2,
+                "layer {} should have 2 LLCs",
+                i
+            );
+        }
+        assert_eq!(pool.free_llcs.len(), 0);
+        assert_llc_conservation_flat(&pool.free_llcs, &layers, 8);
+    }
+
+    #[test]
+    fn test_sd_4n_grow_shrink_roundtrip() {
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let initial_free = pool.free_llcs.len();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+        // Grow: L0 gets 4 LLCs, L1 gets 4 LLCs.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 16), (1, 16)], &topo);
+        assert_eq!(pool.free_llcs.len(), 0);
+        assert_llc_conservation_flat(&pool.free_llcs, &layers, 8);
+
+        // Shrink both to zero.
+        simulate_sd_recompute(&mut pool.free_llcs, &mut layers, &[(0, 0), (1, 0)], &topo);
+        assert_eq!(pool.free_llcs.len(), initial_free);
+        assert_llc_conservation_flat(&pool.free_llcs, &layers, 8);
+    }
+
+    #[test]
+    fn test_sd_stress_grow_shrink_cycles() {
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+        // 5-cycle pattern: grow L0, grow L1, shrink L0, grow L0 again, shrink both.
+        let cycles: Vec<Vec<(usize, usize)>> = vec![
+            vec![(0, 16)],          // L0: 0→4 LLCs
+            vec![(0, 16), (1, 16)], // L1: 0→4 LLCs
+            vec![(0, 8), (1, 16)],  // L0: 4→2 LLCs
+            vec![(0, 16), (1, 16)], // L0: 2→4 LLCs
+            vec![(0, 0), (1, 0)],   // both → 0
+        ];
+        for (step, targets) in cycles.iter().enumerate() {
+            simulate_sd_recompute(&mut pool.free_llcs, &mut layers, targets, &topo);
+            assert_llc_conservation_flat(&pool.free_llcs, &layers, 8);
+            // Verify no LLC appears in multiple layers.
+            let mut all: Vec<usize> = layers
+                .iter()
+                .flat_map(|l| l.assigned_llcs.iter().copied())
+                .collect();
+            let before = all.len();
+            all.sort();
+            all.dedup();
+            assert_eq!(all.len(), before, "step {}: duplicate LLC assignment", step);
+        }
+    }
+
+    #[test]
+    fn test_sd_stress_competing_layers_oscillate() {
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![
+            SdLayerState::new("L0"),
+            SdLayerState::new("L1"),
+            SdLayerState::new("L2"),
+            SdLayerState::new("L3"),
+        ];
+
+        // 6 cycles: layers oscillate between high and low demand.
+        let cycles: Vec<Vec<(usize, usize)>> = vec![
+            vec![(0, 8), (1, 8), (2, 8), (3, 8)],   // each 2 LLCs
+            vec![(0, 16), (1, 0), (2, 16), (3, 0)], // L0,L2 grow, L1,L3 shrink
+            vec![(0, 0), (1, 16), (2, 0), (3, 16)], // swap
+            vec![(0, 4), (1, 4), (2, 4), (3, 4)],   // each 1 LLC
+            vec![(0, 12), (1, 12), (2, 4), (3, 4)], // L0,L1 grow to 3, L2,L3 stay at 1
+            vec![(0, 0), (1, 0), (2, 0), (3, 0)],   // all shrink to 0
+        ];
+        for (step, targets) in cycles.iter().enumerate() {
+            simulate_sd_recompute(&mut pool.free_llcs, &mut layers, targets, &topo);
+            assert_llc_conservation_flat(&pool.free_llcs, &layers, 8);
+            let mut all: Vec<usize> = layers
+                .iter()
+                .flat_map(|l| l.assigned_llcs.iter().copied())
+                .collect();
+            let before = all.len();
+            all.sort();
+            all.dedup();
+            assert_eq!(all.len(), before, "step {}: duplicate LLC assignment", step);
+        }
+        // After final shrink, all LLCs should be free.
+        assert_eq!(pool.free_llcs.len(), 8);
+    }
 }
