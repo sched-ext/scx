@@ -1,10 +1,11 @@
 ---
 title: CSS iterator not populated before BPF timer callbacks
-status: open
+status: closed
 priority: 1
 issue_type: task
 created_at: 2026-02-21T21:38:17.566436619+00:00
-updated_at: 2026-02-21T21:38:17.566436619+00:00
+updated_at: 2026-02-21T22:25:07.573299230+00:00
+closed_at: 2026-02-21T22:25:07.573299119+00:00
 ---
 
 # Description
