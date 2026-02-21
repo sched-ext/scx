@@ -87,7 +87,7 @@ u64 unprotected_seq = 0;
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
-u32 fallback_cpu;
+u32 fallback_cpus[MAX_NUMA_NODES];
 u32 layered_root_tgid = 0;
 
 u32 empty_layer_ids[MAX_LAYERS];
@@ -1765,7 +1765,7 @@ skip_ddsp:
 	 *
 	 * When racing against layer CPU allocation updates, tasks with full
 	 * affninty may end up in the DSQs of an empty layer. They are handled
-	 * by the fallback_cpu.
+	 * by the per-node fallback CPUs.
 	 *
 	 * FIXME: ->allow_node_aligned is a hack to support node-affine tasks
 	 * without making the whole scheduler node aware and should only be used
@@ -2326,12 +2326,13 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Prioritize empty layers on the fallback CPU. empty_layer_ids array
-	 * can be resized asynchronously by userland. As unoccupied slots are
-	 * filled with MAX_LAYERS, excluding IDs matching MAX_LAYERS makes it
-	 * safe.
+	 * Prioritize empty layers on per-node fallback CPUs. empty_layer_ids
+	 * array can be resized asynchronously by userland. As unoccupied slots
+	 * are filled with MAX_LAYERS, excluding IDs matching MAX_LAYERS makes
+	 * it safe.
 	 */
-	if (cpuc->cpu == fallback_cpu &&
+	if (cpuc->node_id < MAX_NUMA_NODES &&
+	    cpuc->cpu == fallback_cpus[cpuc->node_id] &&
 	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
 			       MAX_LAYERS, cpuc, llcc)) {
 		cpuc->running_fallback = true;

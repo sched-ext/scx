@@ -36,6 +36,9 @@ nvml-wrapper = "0.11.0"
 nix = { version = "0.30.1", features = ["sched"] }
 sysinfo = "0.35.2"
 
+[dev-dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.26", features = ["testutils"] }
+
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
 
