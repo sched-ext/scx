@@ -5,6 +5,18 @@
 //! the "token" at each kfunc yield point, enabling deterministic
 //! exploration of different interleavings.
 //!
+//! ## Determinism
+//!
+//! Interleaving is fully deterministic for a given seed:
+//! - PRNG determines worker selection order
+//! - Token passing serializes all state access
+//! - Same seed → same interleaving → same trace
+//!
+//! This enables the stress testing methodology: explore many seeds to find
+//! bugs, then reproduce failures with the same seed for debugging.
+//!
+//! See `ai_docs/DETERMINISM.md` for the full explanation.
+//!
 //! ## Architecture
 //!
 //! The orchestrator (engine thread) spawns one worker per CPU in the

@@ -19,6 +19,7 @@ use crate::fmt::FmtN;
 use crate::kfuncs::{self, OpsContext, SimulatorState};
 use crate::monitor::{Monitor, ProbeContext, ProbePoint};
 use crate::perf;
+use crate::preempt::{is_determinism_mode_enabled, record_checkpoint, CheckpointEvent};
 use crate::scenario::{CgroupCreateEvent, CgroupDestroyEvent, IrqType, Scenario};
 use crate::task::{OpsTaskState, Phase, SimTask, TaskState};
 use crate::trace::{Trace, TraceKind};
@@ -348,6 +349,33 @@ fn charge_sched_time(state: &mut SimulatorState, cpu: CpuId, ops: &str) {
             );
         }
     }
+}
+
+/// Record a determinism checkpoint after a scheduler callback.
+///
+/// Only records if aggressive determinism mode is enabled.
+/// The `event` parameter identifies the callback type.
+#[inline]
+fn maybe_record_checkpoint(state: &SimulatorState, event: CheckpointEvent, cpu: CpuId) {
+    if !is_determinism_mode_enabled() {
+        return;
+    }
+
+    // Read RBC count if available
+    let rbc_count = state
+        .rbc_counter
+        .as_ref()
+        .and_then(|rbc| rbc.read().ok())
+        .unwrap_or(0);
+
+    // Compute memory hash
+    let memory_hash = state.compute_state_hash();
+
+    // Instruction pointer is 0 for engine-driven checkpoints (not signal-driven).
+    // Signal-driven preemption points have real RIP values.
+    let instruction_pointer = 0;
+
+    record_checkpoint(event, instruction_pointer, rbc_count, memory_hash, cpu);
 }
 
 impl<S: Scheduler> Simulator<S> {
@@ -1179,6 +1207,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, "tick");
             self.scheduler.tick(raw);
             charge_sched_time(state, cpu, "tick");
+            maybe_record_checkpoint(state, CheckpointEvent::Tick, cpu);
             kfuncs::exit_sim();
         }
 
@@ -1239,6 +1268,7 @@ impl<S: Scheduler> Simulator<S> {
                     start_rbc(state);
                     self.scheduler.enqueue(raw, 0);
                     charge_sched_time(state, cpu, "enqueue");
+                    maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
                     state.ops_context = OpsContext::None;
                     state.resolve_pending_dispatch(cpu);
                     kfuncs::exit_sim();
@@ -1731,6 +1761,7 @@ impl<S: Scheduler> Simulator<S> {
             let selected_cpu_raw = self.scheduler.select_cpu(raw, prev_cpu.0 as i32, enq_flags);
             let selected_cpu = CpuId(selected_cpu_raw as u32);
             charge_sched_time(state, selected_cpu, "select_cpu");
+            maybe_record_checkpoint(state, CheckpointEvent::SelectCpu, selected_cpu);
             state.ops_context = OpsContext::None;
             state.waker_task_raw = None;
             state.current_cpu = selected_cpu;
@@ -1780,6 +1811,7 @@ impl<S: Scheduler> Simulator<S> {
                 debug!(pid = pid.0, enq_flags, "enqueue");
                 self.scheduler.enqueue(raw, enq_flags);
                 charge_sched_time(state, selected_cpu, "enqueue");
+                maybe_record_checkpoint(state, CheckpointEvent::Enqueue, selected_cpu);
                 state.ops_context = OpsContext::None;
                 // Resolve any deferred dispatch from enqueue
                 // (SCX_DSQ_LOCAL resolves to the task's assigned CPU)
@@ -1885,6 +1917,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, runnable = true, "stopping");
             self.scheduler.stopping(raw, true); // true = still runnable
             charge_sched_time(state, cpu, "stopping");
+            maybe_record_checkpoint(state, CheckpointEvent::Stopping, cpu);
             kfuncs::exit_sim();
         }
 
@@ -1917,6 +1950,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, "enqueue (re-enqueue)");
             self.scheduler.enqueue(raw, 0);
             charge_sched_time(state, cpu, "enqueue");
+            maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
             state.ops_context = OpsContext::None;
             state.resolve_pending_dispatch(cpu);
             kfuncs::exit_sim();
@@ -2012,6 +2046,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, still_runnable, "stopping");
             self.scheduler.stopping(raw, still_runnable);
             charge_sched_time(state, cpu, "stopping");
+            maybe_record_checkpoint(state, CheckpointEvent::Stopping, cpu);
             kfuncs::exit_sim();
         }
 
@@ -2107,6 +2142,7 @@ impl<S: Scheduler> Simulator<S> {
                         state.set_task_ops_state(pid, OpsTaskState::Queued);
                         self.scheduler.enqueue(raw, 0);
                         charge_sched_time(state, cpu, "enqueue");
+                        maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
                         state.ops_context = OpsContext::None;
                         state.resolve_pending_dispatch(cpu);
                         kfuncs::exit_sim();
@@ -2180,6 +2216,11 @@ impl<S: Scheduler> Simulator<S> {
                                         state.set_task_ops_state(pid, OpsTaskState::Queued);
                                         self.scheduler.enqueue(raw, 0);
                                         charge_sched_time(state, cpu, "enqueue");
+                                        maybe_record_checkpoint(
+                                            state,
+                                            CheckpointEvent::Enqueue,
+                                            cpu,
+                                        );
                                         state.ops_context = OpsContext::None;
                                         state.resolve_pending_dispatch(cpu);
                                         kfuncs::exit_sim();
@@ -2292,6 +2333,7 @@ impl<S: Scheduler> Simulator<S> {
                 debug!("dispatch");
                 self.scheduler.dispatch(cpu.0 as i32, prev_raw);
                 charge_sched_time(state, cpu, "dispatch");
+                maybe_record_checkpoint(state, CheckpointEvent::Dispatch, cpu);
                 state.ops_context = OpsContext::None;
                 // Flush any deferred dispatch from dispatch() callback
                 // (SCX_DSQ_LOCAL resolves to the dispatching CPU)
@@ -3146,6 +3188,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, runnable = true, "stopping (tick preempt)");
             self.scheduler.stopping(raw, true);
             charge_sched_time(state, cpu, "stopping");
+            maybe_record_checkpoint(state, CheckpointEvent::Stopping, cpu);
             kfuncs::exit_sim();
         }
 
@@ -3167,6 +3210,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, "enqueue (re-enqueue after tick preempt)");
             self.scheduler.enqueue(raw, 0);
             charge_sched_time(state, cpu, "enqueue");
+            maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
             state.ops_context = OpsContext::None;
             state.resolve_pending_dispatch(cpu);
             kfuncs::exit_sim();
@@ -3257,6 +3301,7 @@ impl<S: Scheduler> Simulator<S> {
             debug!(pid = pid.0, "running");
             self.scheduler.running(raw);
             charge_sched_time(state, cpu, "running");
+            maybe_record_checkpoint(state, CheckpointEvent::Running, cpu);
             kfuncs::exit_sim();
         }
 

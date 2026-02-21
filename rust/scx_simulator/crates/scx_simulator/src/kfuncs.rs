@@ -467,6 +467,59 @@ impl SimulatorState {
 
         None
     }
+
+    /// Compute a hash of scheduler-visible state for determinism checking.
+    ///
+    /// This hashes:
+    /// - DSQ contents (global and per-CPU local DSQs)
+    /// - Per-CPU current task and local clock
+    /// - Task ops state
+    ///
+    /// The hash is used to detect state divergence between runs.
+    pub fn compute_state_hash(&self) -> u64 {
+        use crate::preempt::{fnv1a_combine, fnv1a_hash_u64};
+
+        let mut hash = fnv1a_hash_u64(0xdeadbeef0001u64);
+
+        // Hash global DSQ contents (ordered by priority)
+        let global_pids = self.dsqs.ordered_pids(DsqId::GLOBAL);
+        hash = fnv1a_combine(hash, fnv1a_hash_u64(global_pids.len() as u64));
+        for pid in global_pids {
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
+        }
+
+        // Hash per-CPU state
+        for (i, cpu) in self.cpus.iter().enumerate() {
+            // CPU index
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(i as u64));
+            // Current task
+            let current = cpu.current_task.map(|p| p.0 as u64).unwrap_or(0);
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(current));
+            // Local DSQ contents
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(cpu.local_dsq.len() as u64));
+            for pid in &cpu.local_dsq {
+                hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
+            }
+            // Online status
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(cpu.is_online as u64));
+        }
+
+        // Hash task ops state (deterministic ordering by pid)
+        let mut ops_pids: Vec<_> = self.task_ops_state.keys().collect();
+        ops_pids.sort();
+        hash = fnv1a_combine(hash, fnv1a_hash_u64(ops_pids.len() as u64));
+        for pid in ops_pids {
+            let state = self
+                .task_ops_state
+                .get(pid)
+                .copied()
+                .unwrap_or(OpsTaskState::None);
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(state as u64));
+        }
+
+        hash
+    }
 }
 
 // ---------------------------------------------------------------------------
