@@ -6,6 +6,7 @@ mod bpf_skel;
 mod stats;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -116,167 +117,52 @@ lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
     static ref DFL_DISALLOW_OPEN_AFTER_US: u64 = 2 * scx_enums.SCX_SLICE_DFL / 1000;
     static ref DFL_DISALLOW_PREEMPT_AFTER_US: u64 = 4 * scx_enums.SCX_SLICE_DFL / 1000;
-    static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
-        specs: vec![
-            LayerSpec {
-                name: "batch".into(),
-                comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![
-                    vec![LayerMatch::CgroupPrefix("system.slice/".into())],
-                    vec![LayerMatch::NiceAbove(0)],
-                ],
-                kind: LayerKind::Confined {
-                    util_range: (0.8, 0.9),
-                    cpus_range: Some((0, 16)),
-                    cpus_range_frac: None,
-                    protected: false,
-                    membw_gb: None,
-                    common: LayerCommon {
-                        min_exec_us: 1000,
-                        yield_ignore: 0.0,
-                        preempt: false,
-                        preempt_first: false,
-                        exclusive: false,
-                        allow_node_aligned: false,
-                        skip_remote_node: false,
-                        prev_over_idle_core: false,
-                        idle_smt: None,
-                        slice_us: 20000,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 1000.0,
-                        growth_algo: LayerGrowthAlgo::Sticky,
-                        idle_resume_us: None,
-                        perf: 1024,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-            LayerSpec {
-                name: "immediate".into(),
-                comment: Some("tasks under workload.slice with nice value < 0".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![vec![
-                    LayerMatch::CgroupPrefix("workload.slice/".into()),
-                    LayerMatch::NiceBelow(0),
-                ]],
-                kind: LayerKind::Open {
-                    common: LayerCommon {
-                        min_exec_us: 100,
-                        yield_ignore: 0.25,
-                        preempt: true,
-                        preempt_first: false,
-                        exclusive: true,
-                        allow_node_aligned: true,
-                        skip_remote_node: false,
-                        prev_over_idle_core: true,
-                        idle_smt: None,
-                        slice_us: 20000,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 0.0,
-                        growth_algo: LayerGrowthAlgo::Sticky,
-                        perf: 1024,
-                        idle_resume_us: None,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-            LayerSpec {
-                name: "stress-ng".into(),
-                comment: Some("stress-ng test layer".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![
-                    vec![LayerMatch::CommPrefix("stress-ng".into()),],
-                    vec![LayerMatch::PcommPrefix("stress-ng".into()),]
-                ],
-                kind: LayerKind::Confined {
-                    cpus_range: None,
-                    util_range: (0.2, 0.8),
-                    protected: false,
-                    cpus_range_frac: None,
-                    membw_gb: None,
-                    common: LayerCommon {
-                        min_exec_us: 800,
-                        yield_ignore: 0.0,
-                        preempt: true,
-                        preempt_first: false,
-                        exclusive: false,
-                        allow_node_aligned: false,
-                        skip_remote_node: false,
-                        prev_over_idle_core: false,
-                        idle_smt: None,
-                        slice_us: 800,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 0.0,
-                        growth_algo: LayerGrowthAlgo::Topo,
-                        perf: 1024,
-                        idle_resume_us: None,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-            LayerSpec {
-                name: "normal".into(),
-                comment: Some("the rest".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![vec![]],
-                kind: LayerKind::Grouped {
-                    cpus_range: None,
-                    util_range: (0.5, 0.6),
-                    util_includes_open_cputime: true,
-                    protected: false,
-                    cpus_range_frac: None,
-                    membw_gb: None,
-                    common: LayerCommon {
-                        min_exec_us: 200,
-                        yield_ignore: 0.0,
-                        preempt: false,
-                        preempt_first: false,
-                        exclusive: false,
-                        allow_node_aligned: false,
-                        skip_remote_node: false,
-                        prev_over_idle_core: false,
-                        idle_smt: None,
-                        slice_us: 20000,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 100.0,
-                        growth_algo: LayerGrowthAlgo::Linear,
-                        perf: 1024,
-                        idle_resume_us: None,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-        ],
-    };
+    static ref EXAMPLE_CONFIG: LayerConfig = serde_json::from_str(
+        r#"[
+          {
+            "name": "batch",
+            "comment": "tasks under system.slice or tasks with nice value > 0",
+            "matches": [[{"CgroupPrefix": "system.slice/"}], [{"NiceAbove": 0}]],
+            "kind": {"Confined": {
+              "util_range": [0.8, 0.9], "cpus_range": [0, 16],
+              "min_exec_us": 1000, "slice_us": 20000, "weight": 100,
+              "xllc_mig_min_us": 1000.0, "perf": 1024
+            }}
+          },
+          {
+            "name": "immediate",
+            "comment": "tasks under workload.slice with nice value < 0",
+            "matches": [[{"CgroupPrefix": "workload.slice/"}, {"NiceBelow": 0}]],
+            "kind": {"Open": {
+              "min_exec_us": 100, "yield_ignore": 0.25, "slice_us": 20000,
+              "preempt": true, "exclusive": true,
+              "allow_node_aligned": true, "prev_over_idle_core": true,
+              "weight": 100, "perf": 1024
+            }}
+          },
+          {
+            "name": "stress-ng",
+            "comment": "stress-ng test layer",
+            "matches": [[{"CommPrefix": "stress-ng"}], [{"PcommPrefix": "stress-ng"}]],
+            "kind": {"Confined": {
+              "util_range": [0.2, 0.8],
+              "min_exec_us": 800, "preempt": true, "slice_us": 800,
+              "weight": 100, "growth_algo": "Topo", "perf": 1024
+            }}
+          },
+          {
+            "name": "normal",
+            "comment": "the rest",
+            "matches": [[]],
+            "kind": {"Grouped": {
+              "util_range": [0.5, 0.6], "util_includes_open_cputime": true,
+              "min_exec_us": 200, "slice_us": 20000, "weight": 100,
+              "xllc_mig_min_us": 100.0, "growth_algo": "Linear", "perf": 1024
+            }}
+          }
+        ]"#,
+    )
+    .unwrap();
 }
 
 /// scx_layered: A highly configurable multi-layer sched_ext scheduler
@@ -550,7 +436,7 @@ lazy_static! {
 ///   ```bash
 ///   $ scx_layered --monitor 1
 ///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
-///   busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
+///   busy= 34.2 util= 1733.6 load=  21744.1 fb_cpus=[n0:1]
 ///     batch    : util/frac=   11.8/  0.7 load/frac=     29.7:  0.1 tasks=  2597
 ///                tot=   3478 local=67.80 open_idle= 0.00 preempt= 0.00 affn_viol= 0.00
 ///                cpus=  2 [  2,  2] 04000001 00000000
@@ -2459,6 +2345,49 @@ impl<'a> Scheduler<'a> {
             layer_specs.to_vec()
         };
 
+        // Validate that spec node/LLC references exist in the topology.
+        for spec in layer_specs.iter() {
+            let mut seen = BTreeSet::new();
+            for &node_id in spec.nodes().iter() {
+                if !topo.nodes.contains_key(&node_id) {
+                    bail!(
+                        "layer {:?}: nodes references node {} which does not \
+                         exist in the topology (available: {:?})",
+                        spec.name,
+                        node_id,
+                        topo.nodes.keys().collect::<Vec<_>>()
+                    );
+                }
+                if !seen.insert(node_id) {
+                    bail!(
+                        "layer {:?}: nodes contains duplicate node {}",
+                        spec.name,
+                        node_id
+                    );
+                }
+            }
+
+            seen.clear();
+            for &llc_id in spec.llcs().iter() {
+                if !topo.all_llcs.contains_key(&llc_id) {
+                    bail!(
+                        "layer {:?}: llcs references LLC {} which does not \
+                         exist in the topology (available: {:?})",
+                        spec.name,
+                        llc_id,
+                        topo.all_llcs.keys().collect::<Vec<_>>()
+                    );
+                }
+                if !seen.insert(llc_id) {
+                    bail!(
+                        "layer {:?}: llcs contains duplicate LLC {}",
+                        spec.name,
+                        llc_id
+                    );
+                }
+            }
+        }
+
         // Check kernel features
         init_libbpf_logging(None);
         let kfuncs_in_syscall = scx_bpf_compat::kfuncs_supported_in_syscall()?;
@@ -3107,12 +3036,12 @@ impl<'a> Scheduler<'a> {
                 new_tlc,
                 to_free,
                 layer.assigned_llcs.len(),
-                self.cpu_pool.free_llcs.len()
+                self.cpu_pool.total_free_llcs()
             );
 
             while to_free > 0 && layer.assigned_llcs.len() > 0 {
                 let llc = layer.assigned_llcs.pop().unwrap();
-                self.cpu_pool.free_llcs.push((llc, 0));
+                self.cpu_pool.return_llc(llc);
                 to_free -= 1;
 
                 debug!(" layer={} freed_llc={}", layer.name, llc);
@@ -3120,7 +3049,14 @@ impl<'a> Scheduler<'a> {
         }
         debug!(" free: after pass: free_llcs={:?}", self.cpu_pool.free_llcs);
 
+        let all_layer_nodes: Vec<&[usize]> = self
+            .layer_specs
+            .iter()
+            .map(|s| s.nodes().as_slice())
+            .collect();
+
         // Redistribute the freed LLCs to growing layers.
+        // Use the layer's spec.nodes ordering (mirroring node_order()).
         for &(idx, target) in layer_targets.iter().rev() {
             let layer = &mut self.layers[idx];
             let old_tlc = layer.target_llc_cpus;
@@ -3131,26 +3067,33 @@ impl<'a> Scheduler<'a> {
             }
 
             let mut to_alloc = (new_tlc.0 as i32 - old_tlc.0 as i32).max(0) as usize;
+            let node_order = layer_core_growth::node_order(
+                self.layer_specs[idx].nodes(),
+                &self.topo,
+                idx,
+                &all_layer_nodes,
+            );
 
             debug!(
-                " alloc: layer={} old_tlc={:?} new_tlc={:?} to_alloc={} assigned={} free={}",
+                " alloc: layer={} old_tlc={:?} new_tlc={:?} to_alloc={} assigned={} free={} node_order={:?}",
                 layer.name,
                 old_tlc,
                 new_tlc,
                 to_alloc,
                 layer.assigned_llcs.len(),
-                self.cpu_pool.free_llcs.len()
+                self.cpu_pool.total_free_llcs(),
+                node_order,
             );
 
-            while to_alloc > 0
-                && self.cpu_pool.free_llcs.len() > 0
-                && to_alloc <= self.cpu_pool.free_llcs.len()
-            {
-                let llc = self.cpu_pool.free_llcs.pop().unwrap().0;
-                layer.assigned_llcs.push(llc);
-                to_alloc -= 1;
+            while to_alloc > 0 {
+                if let Some(llc) = self.cpu_pool.take_llc(&node_order) {
+                    layer.assigned_llcs.push(llc);
+                    to_alloc -= 1;
 
-                debug!(" layer={} alloc_llc={}", layer.name, llc);
+                    debug!(" layer={} alloc_llc={}", layer.name, llc);
+                } else {
+                    break; // no more free LLCs on preferred node(s)
+                }
             }
 
             debug!(
@@ -3163,7 +3106,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Spillover overflowing cores into free LLCs. Bigger layers get to take
-        // a chunk before smaller layers.
+        // a chunk before smaller layers. Walk per-node using spec.nodes ordering.
         for &(idx, _) in layer_targets.iter() {
             let mut core_order = vec![];
             let layer = &mut self.layers[idx];
@@ -3174,37 +3117,47 @@ impl<'a> Scheduler<'a> {
 
             let tlc = layer.target_llc_cpus;
             let mut extra = tlc.1;
-            // TODO(kkd): Move this logic into cpu_pool? What's the best place?
             let cores_per_llc = self.topo.all_cores.len() / self.topo.all_llcs.len();
             let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
             let cpus_per_llc = cores_per_llc * cpus_per_core;
 
-            // Consume from front since we pop from the back.
-            for i in 0..self.cpu_pool.free_llcs.len() {
-                let free_vec = &mut self.cpu_pool.free_llcs;
-                // Available CPUs in LLC.
-                let avail = cpus_per_llc - free_vec[i].1;
-                // The amount we'll use.
-                let mut used = extra.min(avail);
-                let cores_to_add = used;
+            let node_order = layer_core_growth::node_order(
+                self.layer_specs[idx].nodes(),
+                &self.topo,
+                idx,
+                &all_layer_nodes,
+            );
 
-                let shift = free_vec[i].1;
-                free_vec[i].1 += used;
-
-                let llc_id = free_vec[i].0;
-                let llc = self.topo.all_llcs.get(&llc_id).unwrap();
-
-                for core in llc.cores.iter().skip(shift) {
-                    if used == 0 {
-                        break;
-                    }
-                    core_order.push(core.1.id);
-                    used -= 1;
-                }
-
-                extra -= cores_to_add;
+            // Consume from front of each node's list since we pop from the back.
+            'outer: for node_id in &node_order {
                 if extra == 0 {
                     break;
+                }
+                if let Some(node_llcs) = self.cpu_pool.free_llcs.get_mut(node_id) {
+                    for entry in node_llcs.iter_mut() {
+                        if extra == 0 {
+                            break 'outer;
+                        }
+                        let avail = cpus_per_llc - entry.1;
+                        let mut used = extra.min(avail);
+                        let cores_to_add = used;
+
+                        let shift = entry.1;
+                        entry.1 += used;
+
+                        let llc_id = entry.0;
+                        let llc = self.topo.all_llcs.get(&llc_id).unwrap();
+
+                        for core in llc.cores.iter().skip(shift) {
+                            if used == 0 {
+                                break;
+                            }
+                            core_order.push(core.1.id);
+                            used -= 1;
+                        }
+
+                        extra -= cores_to_add;
+                    }
                 }
             }
 
@@ -3213,8 +3166,10 @@ impl<'a> Scheduler<'a> {
         }
 
         // Reset consumed entries in free LLCs.
-        for i in 0..self.cpu_pool.free_llcs.len() {
-            self.cpu_pool.free_llcs[i].1 = 0;
+        for node_llcs in self.cpu_pool.free_llcs.values_mut() {
+            for entry in node_llcs.iter_mut() {
+                entry.1 = 0;
+            }
         }
 
         for &(idx, _) in layer_targets.iter() {
@@ -3500,8 +3455,9 @@ impl<'a> Scheduler<'a> {
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
 
-            self.skel.maps.bss_data.as_mut().unwrap().fallback_cpu =
-                self.cpu_pool.fallback_cpu as u32;
+            for (&node_id, &cpu) in &self.cpu_pool.fallback_cpus {
+                self.skel.maps.bss_data.as_mut().unwrap().fallback_cpus[node_id] = cpu as u32;
+            }
 
             for (lidx, layer) in self.layers.iter().enumerate() {
                 self.nr_layer_cpus_ranges[lidx] = (
@@ -3600,7 +3556,7 @@ impl<'a> Scheduler<'a> {
         cpus_ranges: &mut [(usize, usize)],
     ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
-        let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
+        let mut sys_stats = SysStats::new(stats, bstats, &self.cpu_pool.fallback_cpus)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);

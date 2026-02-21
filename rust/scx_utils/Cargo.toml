@@ -59,6 +59,7 @@ default = []
 gpu-topology = ["dep:nvml-wrapper", "dep:nvml-wrapper-sys"]
 autopower = ["dep:zbus"]
 deprecated-build-support = ["dep:scx_cargo"]
+testutils = []
 
 [[example]]
 name = "mangolog"
