@@ -116,167 +116,52 @@ lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
     static ref DFL_DISALLOW_OPEN_AFTER_US: u64 = 2 * scx_enums.SCX_SLICE_DFL / 1000;
     static ref DFL_DISALLOW_PREEMPT_AFTER_US: u64 = 4 * scx_enums.SCX_SLICE_DFL / 1000;
-    static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
-        specs: vec![
-            LayerSpec {
-                name: "batch".into(),
-                comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![
-                    vec![LayerMatch::CgroupPrefix("system.slice/".into())],
-                    vec![LayerMatch::NiceAbove(0)],
-                ],
-                kind: LayerKind::Confined {
-                    util_range: (0.8, 0.9),
-                    cpus_range: Some((0, 16)),
-                    cpus_range_frac: None,
-                    protected: false,
-                    membw_gb: None,
-                    common: LayerCommon {
-                        min_exec_us: 1000,
-                        yield_ignore: 0.0,
-                        preempt: false,
-                        preempt_first: false,
-                        exclusive: false,
-                        allow_node_aligned: false,
-                        skip_remote_node: false,
-                        prev_over_idle_core: false,
-                        idle_smt: None,
-                        slice_us: 20000,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 1000.0,
-                        growth_algo: LayerGrowthAlgo::Sticky,
-                        idle_resume_us: None,
-                        perf: 1024,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-            LayerSpec {
-                name: "immediate".into(),
-                comment: Some("tasks under workload.slice with nice value < 0".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![vec![
-                    LayerMatch::CgroupPrefix("workload.slice/".into()),
-                    LayerMatch::NiceBelow(0),
-                ]],
-                kind: LayerKind::Open {
-                    common: LayerCommon {
-                        min_exec_us: 100,
-                        yield_ignore: 0.25,
-                        preempt: true,
-                        preempt_first: false,
-                        exclusive: true,
-                        allow_node_aligned: true,
-                        skip_remote_node: false,
-                        prev_over_idle_core: true,
-                        idle_smt: None,
-                        slice_us: 20000,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 0.0,
-                        growth_algo: LayerGrowthAlgo::Sticky,
-                        perf: 1024,
-                        idle_resume_us: None,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-            LayerSpec {
-                name: "stress-ng".into(),
-                comment: Some("stress-ng test layer".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![
-                    vec![LayerMatch::CommPrefix("stress-ng".into()),],
-                    vec![LayerMatch::PcommPrefix("stress-ng".into()),]
-                ],
-                kind: LayerKind::Confined {
-                    cpus_range: None,
-                    util_range: (0.2, 0.8),
-                    protected: false,
-                    cpus_range_frac: None,
-                    membw_gb: None,
-                    common: LayerCommon {
-                        min_exec_us: 800,
-                        yield_ignore: 0.0,
-                        preempt: true,
-                        preempt_first: false,
-                        exclusive: false,
-                        allow_node_aligned: false,
-                        skip_remote_node: false,
-                        prev_over_idle_core: false,
-                        idle_smt: None,
-                        slice_us: 800,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 0.0,
-                        growth_algo: LayerGrowthAlgo::Topo,
-                        perf: 1024,
-                        idle_resume_us: None,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-            LayerSpec {
-                name: "normal".into(),
-                comment: Some("the rest".into()),
-                cpuset: None,
-                template: None,
-                matches: vec![vec![]],
-                kind: LayerKind::Grouped {
-                    cpus_range: None,
-                    util_range: (0.5, 0.6),
-                    util_includes_open_cputime: true,
-                    protected: false,
-                    cpus_range_frac: None,
-                    membw_gb: None,
-                    common: LayerCommon {
-                        min_exec_us: 200,
-                        yield_ignore: 0.0,
-                        preempt: false,
-                        preempt_first: false,
-                        exclusive: false,
-                        allow_node_aligned: false,
-                        skip_remote_node: false,
-                        prev_over_idle_core: false,
-                        idle_smt: None,
-                        slice_us: 20000,
-                        fifo: false,
-                        weight: DEFAULT_LAYER_WEIGHT,
-                        disallow_open_after_us: None,
-                        disallow_preempt_after_us: None,
-                        xllc_mig_min_us: 100.0,
-                        growth_algo: LayerGrowthAlgo::Linear,
-                        perf: 1024,
-                        idle_resume_us: None,
-                        nodes: vec![],
-                        llcs: vec![],
-                        member_expire_ms: 0,
-                        placement: LayerPlacement::Standard,
-                    },
-                },
-            },
-        ],
-    };
+    static ref EXAMPLE_CONFIG: LayerConfig = serde_json::from_str(
+        r#"[
+          {
+            "name": "batch",
+            "comment": "tasks under system.slice or tasks with nice value > 0",
+            "matches": [[{"CgroupPrefix": "system.slice/"}], [{"NiceAbove": 0}]],
+            "kind": {"Confined": {
+              "util_range": [0.8, 0.9], "cpus_range": [0, 16],
+              "min_exec_us": 1000, "slice_us": 20000, "weight": 100,
+              "xllc_mig_min_us": 1000.0, "perf": 1024
+            }}
+          },
+          {
+            "name": "immediate",
+            "comment": "tasks under workload.slice with nice value < 0",
+            "matches": [[{"CgroupPrefix": "workload.slice/"}, {"NiceBelow": 0}]],
+            "kind": {"Open": {
+              "min_exec_us": 100, "yield_ignore": 0.25, "slice_us": 20000,
+              "preempt": true, "exclusive": true,
+              "allow_node_aligned": true, "prev_over_idle_core": true,
+              "weight": 100, "perf": 1024
+            }}
+          },
+          {
+            "name": "stress-ng",
+            "comment": "stress-ng test layer",
+            "matches": [[{"CommPrefix": "stress-ng"}], [{"PcommPrefix": "stress-ng"}]],
+            "kind": {"Confined": {
+              "util_range": [0.2, 0.8],
+              "min_exec_us": 800, "preempt": true, "slice_us": 800,
+              "weight": 100, "growth_algo": "Topo", "perf": 1024
+            }}
+          },
+          {
+            "name": "normal",
+            "comment": "the rest",
+            "matches": [[]],
+            "kind": {"Grouped": {
+              "util_range": [0.5, 0.6], "util_includes_open_cputime": true,
+              "min_exec_us": 200, "slice_us": 20000, "weight": 100,
+              "xllc_mig_min_us": 100.0, "growth_algo": "Linear", "perf": 1024
+            }}
+          }
+        ]"#,
+    )
+    .unwrap();
 }
 
 /// scx_layered: A highly configurable multi-layer sched_ext scheduler
