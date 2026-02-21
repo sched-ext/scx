@@ -2641,13 +2641,28 @@ fn test_mitosis_dynamic_cell_lifecycle() {
 /// Test CPU borrowing via the select_cpu path.
 ///
 /// Models the CPU borrowing test from test_cell_isolation.sh:
-/// Two cells — one busy with high-frequency wakeup tasks (pipe stressor),
-/// one idle. The busy cell's tasks should be able to "borrow" CPUs from
-/// the idle cell when the scheduler enables borrowing.
+/// Two cells -- one busy with high-frequency wakeup tasks (pipe stressor),
+/// one idle. With borrowing enabled, the busy cell's tasks should be able
+/// to "borrow" CPUs from the idle cell.
 ///
-/// In the simulator, "borrowing" means tasks from an overloaded cell
-/// get dispatched to CPUs assigned to the idle cell. The select_cpu
-/// path is exercised by tasks that do frequent sleep/wake cycles.
+/// ## Simulator limitation
+///
+/// The mitosis BPF scheduler has no explicit borrowing global. Cell isolation
+/// relies on the BPF CSS iterator (`bpf_for_each(css, ...)`) inside
+/// `update_timer_cb` to partition cpumasks per-cell based on cpusets.
+/// The simulator does not populate the CSS iterator before timer callbacks
+/// (engine.rs never calls `prepare_css_iter`), so cells never get
+/// reconfigured -- all tasks remain in cell 0 with a full cpumask.
+///
+/// Consequently, tasks run on ALL CPUs rather than being confined to their
+/// cell's cpuset. This test asserts that behavior: tasks spread across all
+/// 4 CPUs (including idle-cell CPUs 2, 3), and each task gets a fair share
+/// of runtime.
+///
+/// TODO(sim-b7d70): When the simulator populates the CSS iterator before
+/// timer callbacks, update this test to assert proper cell isolation
+/// (tasks confined to CPUs 0, 1) and then add a borrowing assertion once
+/// the BPF source gains a borrowing mechanism.
 #[test]
 fn test_mitosis_cpu_borrowing_select_cpu() {
     let _lock = common::setup_test();
@@ -2740,24 +2755,47 @@ fn test_mitosis_cpu_borrowing_select_cpu() {
         );
     }
 
-    // With borrowing, tasks from busy_cell should be able to run on
-    // idle_cell's CPUs (2, 3). Check if any busy-cell task was
-    // scheduled on CPU 2 or 3.
+    // Collect which CPUs each task was scheduled on
     let busy_pids = [Pid(1), Pid(2), Pid(3), Pid(4)];
     let idle_cpus = [CpuId(2), CpuId(3)];
-    let borrowed = trace.events().iter().any(|e| {
-        matches!(e.kind, TraceKind::TaskScheduled { pid }
-                if busy_pids.contains(&pid) && idle_cpus.contains(&e.cpu))
-    });
+    let cross_cell_events: Vec<_> = trace
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(e.kind, TraceKind::TaskScheduled { pid }
+                    if busy_pids.contains(&pid) && idle_cpus.contains(&e.cpu))
+        })
+        .collect();
 
-    // NOTE: Whether borrowing actually occurs depends on the scheduler's
-    // internal logic. The test verifies the scenario runs without crashing.
-    // If borrowing is not enabled by default, this just verifies basic
-    // scheduling correctness.
-    if borrowed {
-        // Great — borrowing occurred as expected
+    // Due to the simulator limitation (CSS iterator not populated before
+    // timer callbacks), cell isolation does not take effect. All tasks
+    // remain in cell 0 with a full cpumask and spread across all CPUs.
+    // Assert this known behavior so the test fails if the simulator is
+    // fixed (at which point this assertion should be updated).
+    // TODO(sim-b7d70): flip this to assert cross_cell_events.is_empty()
+    // once the simulator populates CSS iterators for timer callbacks.
+    assert!(
+        !cross_cell_events.is_empty(),
+        "Expected cross-cell scheduling (simulator does not enforce cell \
+         isolation due to unpopulated CSS iterator), but none occurred"
+    );
+
+    // Verify fair runtime distribution: each task should get roughly
+    // equal runtime (within 3x of the average).
+    let runtimes: Vec<u64> = busy_pids
+        .iter()
+        .map(|pid| trace.total_runtime(*pid))
+        .collect();
+    let avg = runtimes.iter().sum::<u64>() / runtimes.len() as u64;
+    for (i, &rt) in runtimes.iter().enumerate() {
+        assert!(
+            rt >= avg / 3,
+            "task {} got unfairly low runtime: {} vs avg {}",
+            busy_pids[i].0,
+            rt,
+            avg
+        );
     }
-    // Even without borrowing, all tasks should complete successfully
 }
 
 /// Test CPU borrowing via the enqueue path.
@@ -2765,6 +2803,21 @@ fn test_mitosis_cpu_borrowing_select_cpu() {
 /// Similar to scenario 3 but uses pure CPU-bound spinners (stress-ng --cpu
 /// pattern) instead of pipe stressors. Pure CPU spinners don't do frequent
 /// wakeups, so they exercise the enqueue borrowing path rather than select_cpu.
+///
+/// ## Simulator limitation
+///
+/// Same as `test_mitosis_cpu_borrowing_select_cpu`: the simulator does not
+/// populate the CSS iterator before timer callbacks, so cell isolation never
+/// takes effect. All tasks remain in cell 0 and spread across all CPUs.
+///
+/// This test asserts that spinners use all 4 CPUs (including idle-cell CPUs)
+/// and get fair runtime. With 4 pure spinners on 4 CPUs, each spinner
+/// should get dedicated CPU time.
+///
+/// TODO(sim-b7d70): When the simulator populates the CSS iterator before
+/// timer callbacks, update this test to assert proper cell isolation
+/// (spinners confined to CPUs 0, 1) and then add a borrowing assertion
+/// once the BPF source gains a borrowing mechanism.
 #[test]
 fn test_mitosis_cpu_borrowing_enqueue() {
     let _lock = common::setup_test();
@@ -2855,17 +2908,55 @@ fn test_mitosis_cpu_borrowing_enqueue() {
         );
     }
 
-    // Check if any tasks were borrowed to idle CPUs
+    // Check whether any busy-cell task was scheduled on idle-cell CPUs.
+    // Due to the simulator limitation (CSS iterator not populated),
+    // cell isolation does not take effect -- tasks spread everywhere.
     let busy_pids = [Pid(1), Pid(2), Pid(3), Pid(4)];
     let idle_cpus = [CpuId(2), CpuId(3)];
-    let borrowed = trace.events().iter().any(|e| {
-        matches!(e.kind, TraceKind::TaskScheduled { pid }
-                if busy_pids.contains(&pid) && idle_cpus.contains(&e.cpu))
-    });
-    // Log whether borrowing occurred (it depends on scheduler config)
-    if borrowed {
-        // Borrowing via enqueue path occurred
+    let cross_cell_events: Vec<_> = trace
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(e.kind, TraceKind::TaskScheduled { pid }
+                    if busy_pids.contains(&pid) && idle_cpus.contains(&e.cpu))
+        })
+        .collect();
+
+    // TODO(sim-b7d70): flip this to assert cross_cell_events.is_empty()
+    // once the simulator populates CSS iterators for timer callbacks.
+    assert!(
+        !cross_cell_events.is_empty(),
+        "Expected cross-cell scheduling (simulator does not enforce cell \
+         isolation due to unpopulated CSS iterator), but none occurred"
+    );
+
+    // With 4 spinners and 4 CPUs (no cell isolation), each spinner should
+    // get roughly 1 CPU worth of runtime. Assert fair distribution.
+    let runtimes: Vec<u64> = busy_pids
+        .iter()
+        .map(|pid| trace.total_runtime(*pid))
+        .collect();
+    let avg = runtimes.iter().sum::<u64>() / runtimes.len() as u64;
+    for (i, &rt) in runtimes.iter().enumerate() {
+        assert!(
+            rt >= avg / 3,
+            "spinner {} got unfairly low runtime: {} vs avg {}",
+            busy_pids[i].0,
+            rt,
+            avg
+        );
     }
+
+    // With 4 spinners on 4 CPUs, total runtime should approach
+    // 200ms * 4 CPUs = 800ms total. Assert we get at least 50% utilization.
+    let total_runtime: u64 = runtimes.iter().sum();
+    let expected_min = 200_000_000u64 * 4 / 2; // 400ms
+    assert!(
+        total_runtime >= expected_min,
+        "total runtime {} < expected minimum {} (50% of 4 CPUs * 200ms)",
+        total_runtime,
+        expected_min
+    );
 }
 
 /// Test demand-based CPU rebalancing.
