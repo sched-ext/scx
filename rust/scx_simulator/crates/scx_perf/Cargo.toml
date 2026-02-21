@@ -1,0 +1,11 @@
+[package]
+name = "scx_perf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Minimal PMU-based Retired Branch Conditional (RBC) counter"
+
+[dependencies]
+libc = "0.2"
+perf-event-open-sys = "5"
+tracing = "0.1"

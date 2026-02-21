@@ -1,0 +1,8 @@
+# Minibeads-specific configuration options
+# This file contains options that are NOT compatible with upstream bd
+
+# Use hash-based issue IDs instead of sequential numbers
+# When true, issues are named like: prefix-a1b2c3 (based on content hash)
+# When false, issues are named like: prefix-1, prefix-2, ... (sequential)
+# Default: false
+mb-hash-ids: true

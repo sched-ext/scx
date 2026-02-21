@@ -30,6 +30,8 @@ members = [
     "tools/vmlinux_docify",
     "tools/xtask",
 ]
+# scx_simulator is a standalone workspace for scheduler testing/development
+exclude = ["rust/scx_simulator"]
 resolver = "2"
 
 [profile.release]

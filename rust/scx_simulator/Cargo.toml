@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/scx_simulator",
+    "crates/scx_perf",
+    "crates/scx_cgroup_tree",
+]
+resolver = "2"
