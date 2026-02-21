@@ -226,6 +226,13 @@ impl DsqManager {
     pub fn dsq_ids(&self) -> impl Iterator<Item = DsqId> + '_ {
         self.dsqs.keys().copied()
     }
+
+    /// Iterate all DSQ IDs in sorted order for deterministic hashing.
+    pub fn sorted_dsq_ids(&self) -> Vec<DsqId> {
+        let mut ids: Vec<_> = self.dsqs.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
 }
 
 impl Default for DsqManager {

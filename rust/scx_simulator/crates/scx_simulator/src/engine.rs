@@ -3123,7 +3123,11 @@ impl<S: Scheduler> Simulator<S> {
         if state.in_concurrent_batch {
             return;
         }
-        let kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
+        // Sort by CPU ID for deterministic processing order.
+        // HashMap::drain() has non-deterministic iteration order, which would
+        // cause different CPUs to claim tasks from shared DSQs in different runs.
+        let mut kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
+        kicked.sort_by_key(|(cpu, _)| cpu.0);
         for (kicked_cpu, flags) in kicked {
             if Some(kicked_cpu) == exclude_cpu {
                 continue;

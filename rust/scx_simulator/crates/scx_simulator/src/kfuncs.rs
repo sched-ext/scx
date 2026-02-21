@@ -479,8 +479,8 @@ impl SimulatorState {
     /// Compute a hash of scheduler-visible state for determinism checking.
     ///
     /// This hashes:
-    /// - DSQ contents (global and per-CPU local DSQs)
-    /// - Per-CPU current task and local clock
+    /// - All DSQ contents (scheduler-created and builtin, in sorted order)
+    /// - Per-CPU current task and local DSQ
     /// - Task ops state
     ///
     /// The hash is used to detect state divergence between runs.
@@ -489,11 +489,18 @@ impl SimulatorState {
 
         let mut hash = fnv1a_hash_u64(0xdeadbeef0001u64);
 
-        // Hash global DSQ contents (ordered by priority)
-        let global_pids = self.dsqs.ordered_pids(DsqId::GLOBAL);
-        hash = fnv1a_combine(hash, fnv1a_hash_u64(global_pids.len() as u64));
-        for pid in global_pids {
-            hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
+        // Hash ALL DSQ contents in sorted order (not just GLOBAL).
+        // Schedulers create custom DSQs (e.g., tickless uses SHARED_DSQ=0)
+        // that must be included for complete state comparison.
+        let dsq_ids = self.dsqs.sorted_dsq_ids();
+        hash = fnv1a_combine(hash, fnv1a_hash_u64(dsq_ids.len() as u64));
+        for dsq_id in dsq_ids {
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(dsq_id.0));
+            let pids = self.dsqs.ordered_pids(dsq_id);
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(pids.len() as u64));
+            for pid in pids {
+                hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
+            }
         }
 
         // Hash per-CPU state
@@ -524,6 +531,20 @@ impl SimulatorState {
                 .unwrap_or(OpsTaskState::None);
             hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
             hash = fnv1a_combine(hash, fnv1a_hash_u64(state as u64));
+        }
+
+        // Hash kicked_cpus (deterministic ordering by CPU id)
+        let mut kicked_cpus: Vec<_> = self.kicked_cpus.keys().copied().collect();
+        kicked_cpus.sort_by_key(|cpu| cpu.0);
+        hash = fnv1a_combine(hash, fnv1a_hash_u64(kicked_cpus.len() as u64));
+        for cpu in kicked_cpus {
+            let flags = self
+                .kicked_cpus
+                .get(&cpu)
+                .copied()
+                .unwrap_or(KickFlags::NONE);
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(cpu.0 as u64));
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(flags.raw()));
         }
 
         hash

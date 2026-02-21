@@ -72,6 +72,10 @@ impl KickFlags {
     pub fn insert(&mut self, other: KickFlags) {
         self.0 |= other.0;
     }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 /// Simulated time in nanoseconds.
