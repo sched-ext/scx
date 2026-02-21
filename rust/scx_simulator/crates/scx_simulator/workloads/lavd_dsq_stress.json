@@ -1,0 +1,105 @@
+{
+    "global": {
+        "duration": 1,
+        "default_policy": "SCHED_OTHER",
+        "calibration": 19
+    },
+    "tasks": {
+        "cpu0": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu1": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu2": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu3": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu4": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu5": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu6": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu7": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu8": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu9": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu10": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu11": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu12": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu13": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu14": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        },
+        "cpu15": {
+            "priority": 0,
+            "loop": -1,
+            "cpus": [0, 1, 2, 3],
+            "run": 5000
+        }
+    }
+}

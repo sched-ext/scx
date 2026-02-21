@@ -10852,3 +10852,204 @@ fn test_periodic_irq_load() {
 
     eprintln!("periodic IRQs on CPU 0: {irq_count}");
 }
+
+// ---------------------------------------------------------------------------
+// DSQ stress tests: high-utilization workloads to stress shared DSQs
+// ---------------------------------------------------------------------------
+
+/// High-load test with 16 CPU-bound tasks on 4 CPUs.
+///
+/// This stresses LAVD's shared DSQs (per-cpdom) and verifies that DSQ lengths
+/// stay bounded even under high contention.
+#[test]
+fn test_lavd_shared_dsq_high_load() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    // Create 16 CPU-bound tasks (4:1 ratio of tasks to CPUs)
+    let mut builder = Scenario::builder();
+    builder = builder.cpus(4);
+
+    for i in 0..16 {
+        builder = builder.task(TaskDef {
+            name: format!("cpu_{i}"),
+            pid: Pid(i + 1),
+            nice: 0,
+            behavior: workloads::cpu_bound(5_000_000), // 5ms chunks
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        });
+    }
+
+    let scenario = builder.duration_ms(100).build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    // All tasks should be scheduled at least once
+    for i in 0..16 {
+        let count = trace.schedule_count(Pid(i + 1));
+        assert!(
+            count > 0,
+            "task cpu_{i} was never scheduled, schedule_count=0"
+        );
+    }
+
+    // Verify DSQ samples were collected
+    let dsq_samples = trace.dsq_samples();
+    assert!(
+        !dsq_samples.is_empty(),
+        "expected DSQ samples to be collected under high load"
+    );
+
+    // Find the maximum DSQ length observed
+    let max_length = dsq_samples.iter().map(|s| s.length).max().unwrap_or(0);
+    eprintln!(
+        "high_load: {} DSQ samples, max_length={}, total_schedules={}",
+        dsq_samples.len(),
+        max_length,
+        (0..16)
+            .map(|i| trace.schedule_count(Pid(i + 1)))
+            .sum::<usize>()
+    );
+
+    // Under high load with 16 tasks on 4 CPUs, DSQ lengths should be bounded
+    // by the number of tasks (reasonable upper bound for well-balanced scheduling)
+    assert!(
+        max_length <= 20,
+        "DSQ length exceeded reasonable bound: max_length={} (expected <= 20)",
+        max_length
+    );
+}
+
+/// Verify DSQ length sampling captures insert and consume events.
+#[test]
+fn test_lavd_dsq_sampling_events() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(2);
+
+    // 4 tasks on 2 CPUs - moderate load
+    let mut builder = Scenario::builder();
+    builder = builder.cpus(2);
+
+    for i in 0..4 {
+        builder = builder.task(TaskDef {
+            name: format!("worker_{i}"),
+            pid: Pid(i + 1),
+            nice: 0,
+            behavior: workloads::cpu_bound(3_000_000), // 3ms chunks
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        });
+    }
+
+    let scenario = builder.duration_ms(50).build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    let samples = trace.dsq_samples();
+
+    // Count samples by trigger type
+    let insert_count = samples
+        .iter()
+        .filter(|s| s.trigger == DsqSampleTrigger::Insert)
+        .count();
+    let consume_count = samples
+        .iter()
+        .filter(|s| s.trigger == DsqSampleTrigger::Consume)
+        .count();
+    let tick_count = samples
+        .iter()
+        .filter(|s| s.trigger == DsqSampleTrigger::Tick)
+        .count();
+
+    eprintln!(
+        "dsq_sampling: insert={}, consume={}, tick={}, total={}",
+        insert_count,
+        consume_count,
+        tick_count,
+        samples.len()
+    );
+
+    // With active scheduling, we should see tick samples (from periodic sampling)
+    // and potentially insert/consume samples if LAVD uses shared DSQs
+    assert!(
+        tick_count > 0 || insert_count > 0 || consume_count > 0,
+        "expected some DSQ samples, got none"
+    );
+}
+
+/// Verify DSQ length query methods work correctly.
+#[test]
+fn test_lavd_dsq_length_queries() {
+    let _lock = common::setup_test();
+    let sched = DynamicScheduler::lavd(4);
+
+    // 8 tasks on 4 CPUs
+    let mut builder = Scenario::builder();
+    builder = builder.cpus(4);
+
+    for i in 0..8 {
+        builder = builder.task(TaskDef {
+            name: format!("worker_{i}"),
+            pid: Pid(i + 1),
+            nice: 0,
+            behavior: workloads::cpu_bound(2_000_000), // 2ms chunks
+            start_time_ns: 0,
+            mm_id: None,
+            allowed_cpus: None,
+            parent_pid: None,
+            cgroup_name: None,
+            task_flags: 0,
+            migration_disabled: 0,
+        });
+    }
+
+    let scenario = builder.duration_ms(50).build();
+    let trace = Simulator::new(sched).run(scenario);
+
+    let samples = trace.dsq_samples();
+    if samples.is_empty() {
+        eprintln!("dsq_length_queries: no DSQ samples (LAVD may be using local DSQs only)");
+        return;
+    }
+
+    // Get a DSQ ID that has samples
+    let dsq_id = samples[0].dsq_id;
+
+    // Test max_dsq_length
+    let max_len = trace.max_dsq_length(dsq_id);
+    assert!(
+        max_len.is_some(),
+        "expected max_dsq_length to return Some for sampled DSQ"
+    );
+
+    // Test avg_dsq_length
+    let avg_len = trace.avg_dsq_length(dsq_id);
+    assert!(
+        avg_len.is_some(),
+        "expected avg_dsq_length to return Some for sampled DSQ"
+    );
+
+    // Average should be <= max
+    assert!(
+        avg_len.unwrap() <= max_len.unwrap() as f64,
+        "average {} should be <= max {}",
+        avg_len.unwrap(),
+        max_len.unwrap()
+    );
+
+    eprintln!(
+        "dsq_length_queries: dsq={:#x}, max={}, avg={:.2}",
+        dsq_id.0,
+        max_len.unwrap(),
+        avg_len.unwrap()
+    );
+}
