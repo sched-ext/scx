@@ -839,4 +839,592 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // Growth algorithm tests
+    // =========================================================================
+
+    fn test_layer_spec(name: &str, algo: LayerGrowthAlgo) -> LayerSpec {
+        let json = r#"{"name":"_","matches":[],"kind":{"Confined":{"util_range":[0.0,1.0]}}}"#;
+        let mut spec: LayerSpec = serde_json::from_str(json).unwrap();
+        spec.name = name.to_string();
+        spec.kind.common_mut().growth_algo = algo;
+        spec
+    }
+
+    fn test_layer_spec_with_nodes(
+        name: &str,
+        algo: LayerGrowthAlgo,
+        nodes: Vec<usize>,
+    ) -> LayerSpec {
+        let mut spec = test_layer_spec(name, algo);
+        *spec.nodes_mut() = nodes;
+        spec
+    }
+
+    fn test_layer_spec_with_llcs(name: &str, algo: LayerGrowthAlgo, llcs: Vec<usize>) -> LayerSpec {
+        let mut spec = test_layer_spec(name, algo);
+        *spec.llcs_mut() = llcs;
+        spec
+    }
+
+    /// Verify a core_order contains all expected cores with no duplicates.
+    fn assert_valid_core_order(order: &[usize], nr_cores: usize) {
+        assert_eq!(
+            order.len(),
+            nr_cores,
+            "core_order length {} != expected {}",
+            order.len(),
+            nr_cores
+        );
+        let mut seen = std::collections::HashSet::new();
+        for &core in order {
+            assert!(
+                core < nr_cores,
+                "core {} out of range [0, {})",
+                core,
+                nr_cores
+            );
+            assert!(seen.insert(core), "duplicate core {} in order", core);
+        }
+    }
+
+    fn get_core_order(topo: &Arc<Topology>, specs: &[LayerSpec], layer_idx: usize) -> Vec<usize> {
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let orders = LayerGrowthAlgo::layer_core_orders(&pool, specs, topo).unwrap();
+        orders[&layer_idx].clone()
+    }
+
+    // --- Sticky ---
+
+    #[test]
+    fn test_growth_sticky_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Sticky)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Single layer, idx=0: per-LLC rotation cycles back to identity.
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_growth_sticky_2n() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Sticky)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    #[test]
+    fn test_growth_sticky_multi_layer_offsets() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![
+            test_layer_spec("L0", LayerGrowthAlgo::Sticky),
+            test_layer_spec("L1", LayerGrowthAlgo::Sticky),
+            test_layer_spec("L2", LayerGrowthAlgo::Sticky),
+        ];
+        let o0 = get_core_order(&topo, &specs, 0);
+        let o1 = get_core_order(&topo, &specs, 1);
+        let o2 = get_core_order(&topo, &specs, 2);
+        // Each layer should have a different starting point.
+        assert_ne!(o0[0], o1[0], "L0 and L1 should start at different cores");
+        assert_ne!(o1[0], o2[0], "L1 and L2 should start at different cores");
+        // All should be valid.
+        assert_valid_core_order(&o0, 8);
+        assert_valid_core_order(&o1, 8);
+        assert_valid_core_order(&o2, 8);
+    }
+
+    // --- Linear ---
+
+    #[test]
+    fn test_growth_linear_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Linear)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_growth_linear_2n() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Linear)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    #[test]
+    fn test_growth_linear_preserves_topo_order_with_nodes() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec_with_nodes(
+            "L0",
+            LayerGrowthAlgo::Linear,
+            vec![1],
+        )];
+        let order = get_core_order(&topo, &specs, 0);
+        // With node preference, linear skips rotation → sequential from 0.
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    // --- Reverse ---
+
+    #[test]
+    fn test_growth_reverse_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Reverse)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_eq!(order, vec![7, 6, 5, 4, 3, 2, 1, 0]);
+    }
+
+    // --- Random ---
+
+    #[test]
+    fn test_growth_random_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Random)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Random is a seeded shuffle — not sequential.
+        assert_valid_core_order(&order, 8);
+        assert_ne!(order, vec![0, 1, 2, 3, 4, 5, 6, 7], "should be shuffled");
+    }
+
+    #[test]
+    fn test_growth_random_deterministic_with_same_idx() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Random)];
+        let order1 = get_core_order(&topo, &specs, 0);
+        let order2 = get_core_order(&topo, &specs, 0);
+        // Same layer_idx → same seed → same order.
+        assert_eq!(order1, order2);
+    }
+
+    #[test]
+    fn test_growth_random_different_idx_different_order() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![
+            test_layer_spec("L0", LayerGrowthAlgo::Random),
+            test_layer_spec("L1", LayerGrowthAlgo::Random),
+        ];
+        let o0 = get_core_order(&topo, &specs, 0);
+        let o1 = get_core_order(&topo, &specs, 1);
+        // Different seeds should (very likely) produce different orders.
+        assert_ne!(o0, o1);
+    }
+
+    // --- Topo ---
+
+    #[test]
+    fn test_growth_topo_no_pref_falls_back_to_roundrobin() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Topo)];
+        let order = get_core_order(&topo, &specs, 0);
+        // No nodes/llcs specified → falls back to RoundRobin.
+        let rr_specs = vec![test_layer_spec("L0", LayerGrowthAlgo::RoundRobin)];
+        let rr_order = get_core_order(&topo, &rr_specs, 0);
+        assert_eq!(order, rr_order);
+    }
+
+    #[test]
+    fn test_growth_topo_with_llc_pref() {
+        let (topo, _total) = topo_2n();
+        // Prefer LLC 2 (node 1).
+        let specs = vec![test_layer_spec_with_llcs(
+            "L0",
+            LayerGrowthAlgo::Topo,
+            vec![2],
+        )];
+        let order = get_core_order(&topo, &specs, 0);
+        // LLC 2 cores (8-11) should appear first.
+        let llc2_cores: Vec<usize> = (8..12).collect();
+        for &core in &llc2_cores {
+            assert!(
+                order.iter().position(|&c| c == core).unwrap() < 4,
+                "LLC2 core {} should be in first 4 positions",
+                core
+            );
+        }
+    }
+
+    #[test]
+    fn test_growth_topo_with_node_pref() {
+        let (topo, _total) = topo_2n();
+        // Prefer node 1.
+        let specs = vec![test_layer_spec_with_nodes(
+            "L0",
+            LayerGrowthAlgo::Topo,
+            vec![1],
+        )];
+        let order = get_core_order(&topo, &specs, 0);
+        // Node 1 cores (8-15) should appear first.
+        for &core in &order[..8] {
+            assert!(
+                core >= 8 && core < 16,
+                "core {} should be node 1 (8-15)",
+                core
+            );
+        }
+    }
+
+    // --- RoundRobin ---
+
+    #[test]
+    fn test_growth_roundrobin_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::RoundRobin)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Seeded interleave across LLCs: alternates LLC0/LLC1 cores.
+        assert_eq!(order, vec![2, 6, 3, 4, 1, 7, 0, 5]);
+    }
+
+    #[test]
+    fn test_growth_roundrobin_2n_interleaves() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::RoundRobin)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Seeded interleave across 4 LLCs on 2 nodes.
+        assert_eq!(
+            order,
+            vec![6, 12, 0, 10, 7, 14, 2, 9, 5, 15, 1, 8, 4, 13, 3, 11]
+        );
+    }
+
+    // --- BigLittle / LittleBig ---
+
+    #[test]
+    fn test_growth_big_little_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::BigLittle)];
+        let order = get_core_order(&topo, &specs, 0);
+        // All cores are same type in test topo → topo order.
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_growth_little_big_is_reverse_of_big_little() {
+        let (topo, _total) = topo_1n();
+        let specs_bl = vec![test_layer_spec("L0", LayerGrowthAlgo::BigLittle)];
+        let specs_lb = vec![test_layer_spec("L0", LayerGrowthAlgo::LittleBig)];
+        let order_bl = get_core_order(&topo, &specs_bl, 0);
+        let order_lb = get_core_order(&topo, &specs_lb, 0);
+        let mut reversed = order_bl.clone();
+        reversed.reverse();
+        assert_eq!(order_lb, reversed);
+    }
+
+    // --- NodeSpread ---
+
+    #[test]
+    fn test_growth_node_spread_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpread)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Single node → degenerates to sequential.
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_growth_node_spread_2n_interleaves() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpread)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Alternates node0/node1 cores: 0,8, 1,9, 2,10, ...
+        assert_eq!(
+            order,
+            vec![0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]
+        );
+    }
+
+    #[test]
+    fn test_growth_node_spread_reverse_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpreadReverse)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Single node → reverse of sequential.
+        assert_eq!(order, vec![7, 6, 5, 4, 3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_growth_node_spread_random_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpreadRandom)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Shuffled within single node — valid permutation but not sequential.
+        assert_valid_core_order(&order, 8);
+        assert_ne!(order, vec![0, 1, 2, 3, 4, 5, 6, 7], "should be shuffled");
+    }
+
+    // --- RandomTopo ---
+
+    #[test]
+    fn test_growth_random_topo_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::RandomTopo)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Randomized within topology levels — shuffled permutation.
+        assert_valid_core_order(&order, 8);
+        assert_ne!(order, vec![0, 1, 2, 3, 4, 5, 6, 7], "should be shuffled");
+    }
+
+    #[test]
+    fn test_growth_random_topo_2n() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::RandomTopo)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_valid_core_order(&order, 16);
+        assert_ne!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            "should be shuffled"
+        );
+    }
+
+    // --- StickyDynamic ---
+
+    #[test]
+    fn test_growth_sticky_dynamic_same_as_sticky() {
+        let (topo, _total) = topo_1n();
+        let specs_s = vec![test_layer_spec("L0", LayerGrowthAlgo::Sticky)];
+        let specs_sd = vec![test_layer_spec("L0", LayerGrowthAlgo::StickyDynamic)];
+        let order_s = get_core_order(&topo, &specs_s, 0);
+        let order_sd = get_core_order(&topo, &specs_sd, 0);
+        assert_eq!(
+            order_s, order_sd,
+            "StickyDynamic initial order should match Sticky"
+        );
+    }
+
+    #[test]
+    fn test_growth_sticky_dynamic_2n() {
+        let (topo, _total) = topo_2n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::StickyDynamic)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Initial order matches Sticky (verified in test_growth_sticky_dynamic_same_as_sticky).
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    // --- CpuSetSpread (host-dependent, verify basic invariants) ---
+
+    #[test]
+    fn test_growth_cpuset_spread_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::CpuSetSpread)];
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo).unwrap();
+        let order = &orders[&0];
+        // CpuSetSpread reads /sys/fs/cgroup, results are host-dependent.
+        // Just verify no duplicates and all cores are valid.
+        let mut seen = std::collections::HashSet::new();
+        for &core in order {
+            assert!(core < 8, "core {} out of range", core);
+            assert!(seen.insert(core), "duplicate core {}", core);
+        }
+    }
+
+    #[test]
+    fn test_growth_cpuset_spread_reverse_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::CpuSetSpreadReverse)];
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo).unwrap();
+        let order = &orders[&0];
+        let mut seen = std::collections::HashSet::new();
+        for &core in order {
+            assert!(core < 8, "core {} out of range", core);
+            assert!(seen.insert(core), "duplicate core {}", core);
+        }
+    }
+
+    #[test]
+    fn test_growth_cpuset_spread_random_1n() {
+        let (topo, _total) = topo_1n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::CpuSetSpreadRandom)];
+        let pool = CpuPool::new(topo.clone(), false).unwrap();
+        let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo).unwrap();
+        let order = &orders[&0];
+        let mut seen = std::collections::HashSet::new();
+        for &core in order {
+            assert!(core < 8, "core {} out of range", core);
+            assert!(seen.insert(core), "duplicate core {}", core);
+        }
+    }
+
+    // --- All algorithms produce valid orders on 2N ---
+
+    #[test]
+    fn test_alloc_free_realloc_all_deterministic() {
+        let deterministic_algos = vec![
+            LayerGrowthAlgo::Sticky,
+            LayerGrowthAlgo::Linear,
+            LayerGrowthAlgo::Reverse,
+            LayerGrowthAlgo::RoundRobin,
+            LayerGrowthAlgo::BigLittle,
+            LayerGrowthAlgo::LittleBig,
+            LayerGrowthAlgo::NodeSpread,
+            LayerGrowthAlgo::NodeSpreadReverse,
+            LayerGrowthAlgo::StickyDynamic,
+        ];
+        for algo in deterministic_algos {
+            let (topo, total) = topo_1n();
+            let allowed = all_cpus_mask(total);
+            let specs = vec![test_layer_spec("L0", algo.clone())];
+            let order = get_core_order(&topo, &specs, 0);
+            let mut pool = CpuPool::new(topo, false).unwrap();
+            let initial = pool.available_cpus().weight();
+
+            // Alloc 8, alloc 4, free first 8, re-alloc 4 → from freed set.
+            let alloc1 = pool.alloc_cpus(&allowed, &order, 8).unwrap();
+            let _alloc2 = pool.alloc_cpus(&allowed, &order, 4).unwrap();
+            pool.free(&alloc1).unwrap();
+            assert_eq!(
+                pool.available_cpus().weight(),
+                initial - _alloc2.weight(),
+                "{:?}: wrong available count after free",
+                algo
+            );
+            let alloc3 = pool.alloc_cpus(&allowed, &order, 4).unwrap();
+            for cpu in alloc3.iter() {
+                assert!(
+                    alloc1.test_cpu(cpu),
+                    "{:?}: cpu {} should come from freed alloc1",
+                    algo,
+                    cpu
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_all_algos_valid_on_2n() {
+        let (topo, _total) = topo_2n();
+        let algos = vec![
+            LayerGrowthAlgo::Sticky,
+            LayerGrowthAlgo::Linear,
+            LayerGrowthAlgo::Reverse,
+            LayerGrowthAlgo::Random,
+            LayerGrowthAlgo::Topo,
+            LayerGrowthAlgo::RoundRobin,
+            LayerGrowthAlgo::BigLittle,
+            LayerGrowthAlgo::LittleBig,
+            LayerGrowthAlgo::NodeSpread,
+            LayerGrowthAlgo::NodeSpreadReverse,
+            LayerGrowthAlgo::NodeSpreadRandom,
+            LayerGrowthAlgo::RandomTopo,
+            LayerGrowthAlgo::StickyDynamic,
+        ];
+        for algo in algos {
+            let specs = vec![test_layer_spec("L0", algo.clone())];
+            let pool = CpuPool::new(topo.clone(), false).unwrap();
+            let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo)
+                .unwrap_or_else(|e| panic!("{:?} failed: {}", algo, e));
+            let order = &orders[&0];
+            assert_valid_core_order(order, 16);
+        }
+    }
+
+    // --- 4N growth algorithm tests ---
+
+    #[test]
+    fn test_all_algos_valid_on_4n() {
+        let (topo, _total) = topo_4n();
+        let algos = vec![
+            LayerGrowthAlgo::Sticky,
+            LayerGrowthAlgo::Linear,
+            LayerGrowthAlgo::Reverse,
+            LayerGrowthAlgo::Random,
+            LayerGrowthAlgo::Topo,
+            LayerGrowthAlgo::RoundRobin,
+            LayerGrowthAlgo::BigLittle,
+            LayerGrowthAlgo::LittleBig,
+            LayerGrowthAlgo::NodeSpread,
+            LayerGrowthAlgo::NodeSpreadReverse,
+            LayerGrowthAlgo::NodeSpreadRandom,
+            LayerGrowthAlgo::RandomTopo,
+            LayerGrowthAlgo::StickyDynamic,
+        ];
+        for algo in algos {
+            let specs = vec![test_layer_spec("L0", algo.clone())];
+            let pool = CpuPool::new(topo.clone(), false).unwrap();
+            let orders = LayerGrowthAlgo::layer_core_orders(&pool, &specs, &topo)
+                .unwrap_or_else(|e| panic!("{:?} failed: {}", algo, e));
+            let order = &orders[&0];
+            assert_valid_core_order(order, 16);
+        }
+    }
+
+    #[test]
+    fn test_growth_sticky_4n() {
+        let (topo, _total) = topo_4n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::Sticky)];
+        let order = get_core_order(&topo, &specs, 0);
+        // Single layer, idx=0: identity order across all 16 cores.
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    #[test]
+    fn test_growth_sticky_4n_multi_layer() {
+        let (topo, _total) = topo_4n();
+        let specs = vec![
+            test_layer_spec("L0", LayerGrowthAlgo::Sticky),
+            test_layer_spec("L1", LayerGrowthAlgo::Sticky),
+            test_layer_spec("L2", LayerGrowthAlgo::Sticky),
+            test_layer_spec("L3", LayerGrowthAlgo::Sticky),
+        ];
+        let o0 = get_core_order(&topo, &specs, 0);
+        let o1 = get_core_order(&topo, &specs, 1);
+        let o2 = get_core_order(&topo, &specs, 2);
+        let o3 = get_core_order(&topo, &specs, 3);
+        // Each layer should start at a different core.
+        let starts: Vec<usize> = vec![o0[0], o1[0], o2[0], o3[0]];
+        let mut unique = starts.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            4,
+            "4 layers should have 4 different starting cores, got {:?}",
+            starts
+        );
+        // All should be valid permutations.
+        for order in [&o0, &o1, &o2, &o3] {
+            assert_valid_core_order(order, 16);
+        }
+    }
+
+    #[test]
+    fn test_growth_node_spread_4n_interleaves() {
+        let (topo, _total) = topo_4n();
+        let specs = vec![test_layer_spec("L0", LayerGrowthAlgo::NodeSpread)];
+        let order = get_core_order(&topo, &specs, 0);
+        assert_valid_core_order(&order, 16);
+        // Every 4 consecutive cores should span all 4 nodes.
+        // Node 0: cores 0-3, Node 1: cores 4-7, Node 2: cores 8-11, Node 3: cores 12-15
+        for chunk_start in (0..16).step_by(4) {
+            let chunk = &order[chunk_start..chunk_start + 4];
+            let mut nodes: Vec<usize> = chunk.iter().map(|&c| c / 4).collect();
+            nodes.sort();
+            nodes.dedup();
+            assert_eq!(
+                nodes.len(),
+                4,
+                "cores {:?} at positions {}-{} should span 4 nodes",
+                chunk,
+                chunk_start,
+                chunk_start + 3
+            );
+        }
+    }
 }
