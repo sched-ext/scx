@@ -256,6 +256,17 @@ impl Default for LayerGrowthAlgo {
     }
 }
 
+/// Node iteration order: spec_nodes if set (hard limit), otherwise all topo
+/// nodes. Used by both growth algorithms and StickyDynamic's runtime LLC
+/// trading.
+pub fn node_order(spec_nodes: &[usize], topo: &Topology) -> Vec<usize> {
+    if spec_nodes.is_empty() {
+        topo.nodes.keys().copied().collect()
+    } else {
+        spec_nodes.to_vec()
+    }
+}
+
 struct LayerCoreOrderGenerator<'a> {
     cpu_pool: &'a CpuPool,
     layer_specs: &'a [LayerSpec],
@@ -277,15 +288,8 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         vec
     }
 
-    /// Node iteration order: spec.nodes() if set (hard limit), otherwise
-    /// all topo nodes. Spec nodes are validated in Scheduler::init().
     fn node_order(&self) -> Vec<usize> {
-        let spec_nodes = self.spec.nodes();
-        if spec_nodes.is_empty() {
-            self.topo.nodes.keys().copied().collect()
-        } else {
-            spec_nodes.clone()
-        }
+        node_order(self.spec.nodes(), self.topo)
     }
 
     /// Sequential core indices (core_seq) belonging to a given node.

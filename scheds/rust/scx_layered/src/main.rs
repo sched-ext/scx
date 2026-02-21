@@ -3036,12 +3036,12 @@ impl<'a> Scheduler<'a> {
                 new_tlc,
                 to_free,
                 layer.assigned_llcs.len(),
-                self.cpu_pool.free_llcs.len()
+                self.cpu_pool.total_free_llcs()
             );
 
             while to_free > 0 && layer.assigned_llcs.len() > 0 {
                 let llc = layer.assigned_llcs.pop().unwrap();
-                self.cpu_pool.free_llcs.push((llc, 0));
+                self.cpu_pool.return_llc(llc);
                 to_free -= 1;
 
                 debug!(" layer={} freed_llc={}", layer.name, llc);
@@ -3050,6 +3050,7 @@ impl<'a> Scheduler<'a> {
         debug!(" free: after pass: free_llcs={:?}", self.cpu_pool.free_llcs);
 
         // Redistribute the freed LLCs to growing layers.
+        // Use the layer's spec.nodes ordering (mirroring node_order()).
         for &(idx, target) in layer_targets.iter().rev() {
             let layer = &mut self.layers[idx];
             let old_tlc = layer.target_llc_cpus;
@@ -3060,26 +3061,29 @@ impl<'a> Scheduler<'a> {
             }
 
             let mut to_alloc = (new_tlc.0 as i32 - old_tlc.0 as i32).max(0) as usize;
+            let node_order =
+                layer_core_growth::node_order(self.layer_specs[idx].nodes(), &self.topo);
 
             debug!(
-                " alloc: layer={} old_tlc={:?} new_tlc={:?} to_alloc={} assigned={} free={}",
+                " alloc: layer={} old_tlc={:?} new_tlc={:?} to_alloc={} assigned={} free={} node_order={:?}",
                 layer.name,
                 old_tlc,
                 new_tlc,
                 to_alloc,
                 layer.assigned_llcs.len(),
-                self.cpu_pool.free_llcs.len()
+                self.cpu_pool.total_free_llcs(),
+                node_order,
             );
 
-            while to_alloc > 0
-                && self.cpu_pool.free_llcs.len() > 0
-                && to_alloc <= self.cpu_pool.free_llcs.len()
-            {
-                let llc = self.cpu_pool.free_llcs.pop().unwrap().0;
-                layer.assigned_llcs.push(llc);
-                to_alloc -= 1;
+            while to_alloc > 0 {
+                if let Some(llc) = self.cpu_pool.take_llc(&node_order) {
+                    layer.assigned_llcs.push(llc);
+                    to_alloc -= 1;
 
-                debug!(" layer={} alloc_llc={}", layer.name, llc);
+                    debug!(" layer={} alloc_llc={}", layer.name, llc);
+                } else {
+                    break; // no more free LLCs on preferred node(s)
+                }
             }
 
             debug!(
@@ -3092,7 +3096,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Spillover overflowing cores into free LLCs. Bigger layers get to take
-        // a chunk before smaller layers.
+        // a chunk before smaller layers. Walk per-node using spec.nodes ordering.
         for &(idx, _) in layer_targets.iter() {
             let mut core_order = vec![];
             let layer = &mut self.layers[idx];
@@ -3103,37 +3107,43 @@ impl<'a> Scheduler<'a> {
 
             let tlc = layer.target_llc_cpus;
             let mut extra = tlc.1;
-            // TODO(kkd): Move this logic into cpu_pool? What's the best place?
             let cores_per_llc = self.topo.all_cores.len() / self.topo.all_llcs.len();
             let cpus_per_core = self.topo.all_cores.first_key_value().unwrap().1.cpus.len();
             let cpus_per_llc = cores_per_llc * cpus_per_core;
 
-            // Consume from front since we pop from the back.
-            for i in 0..self.cpu_pool.free_llcs.len() {
-                let free_vec = &mut self.cpu_pool.free_llcs;
-                // Available CPUs in LLC.
-                let avail = cpus_per_llc - free_vec[i].1;
-                // The amount we'll use.
-                let mut used = extra.min(avail);
-                let cores_to_add = used;
+            let node_order =
+                layer_core_growth::node_order(self.layer_specs[idx].nodes(), &self.topo);
 
-                let shift = free_vec[i].1;
-                free_vec[i].1 += used;
-
-                let llc_id = free_vec[i].0;
-                let llc = self.topo.all_llcs.get(&llc_id).unwrap();
-
-                for core in llc.cores.iter().skip(shift) {
-                    if used == 0 {
-                        break;
-                    }
-                    core_order.push(core.1.id);
-                    used -= 1;
-                }
-
-                extra -= cores_to_add;
+            // Consume from front of each node's list since we pop from the back.
+            'outer: for node_id in &node_order {
                 if extra == 0 {
                     break;
+                }
+                if let Some(node_llcs) = self.cpu_pool.free_llcs.get_mut(node_id) {
+                    for entry in node_llcs.iter_mut() {
+                        if extra == 0 {
+                            break 'outer;
+                        }
+                        let avail = cpus_per_llc - entry.1;
+                        let mut used = extra.min(avail);
+                        let cores_to_add = used;
+
+                        let shift = entry.1;
+                        entry.1 += used;
+
+                        let llc_id = entry.0;
+                        let llc = self.topo.all_llcs.get(&llc_id).unwrap();
+
+                        for core in llc.cores.iter().skip(shift) {
+                            if used == 0 {
+                                break;
+                            }
+                            core_order.push(core.1.id);
+                            used -= 1;
+                        }
+
+                        extra -= cores_to_add;
+                    }
                 }
             }
 
@@ -3142,8 +3152,10 @@ impl<'a> Scheduler<'a> {
         }
 
         // Reset consumed entries in free LLCs.
-        for i in 0..self.cpu_pool.free_llcs.len() {
-            self.cpu_pool.free_llcs[i].1 = 0;
+        for node_llcs in self.cpu_pool.free_llcs.values_mut() {
+            for entry in node_llcs.iter_mut() {
+                entry.1 = 0;
+            }
         }
 
         for &(idx, _) in layer_targets.iter() {
