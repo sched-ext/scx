@@ -2347,4 +2347,482 @@ mod tests {
         );
         assert_eq!(pool.total_free_llcs(), 2); // node 1 still free
     }
+
+    // --- Cross-node overflow, shrink-back, and oscillation ---
+
+    /// Count how many of a layer's LLCs are on a given node.
+    fn llcs_on_node(layer: &SdLayerState, topo: &Topology, node: usize) -> usize {
+        layer
+            .assigned_llcs
+            .iter()
+            .filter(|&&llc| topo.all_llcs[&llc].node_id == node)
+            .count()
+    }
+
+    /// Assert no LLC appears in more than one layer.
+    fn assert_no_duplicate_llcs(layers: &[SdLayerState], step: &str) {
+        let mut all: Vec<usize> = layers
+            .iter()
+            .flat_map(|l| l.assigned_llcs.iter().copied())
+            .collect();
+        let before = all.len();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), before, "{}: duplicate LLC assignment", step);
+    }
+
+    #[test]
+    fn test_sd_2n_overflow_across_nodes_and_shrink_back() {
+        // Unpinned layer grows beyond node 0 capacity, overflows to node 1,
+        // then shrinks back to fit on node 0. Repeat 5 times to verify
+        // stable oscillation without LLC leaks.
+        // 2N: 4 LLCs (2/node), 8 cpus/LLC.
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+
+        for cycle in 0..5 {
+            // Grow to 24 cpus = 3 LLCs: fills node 0 (2) + 1 from node 1.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 24)], &topo);
+            assert_eq!(
+                layers[0].assigned_llcs.len(),
+                3,
+                "cycle {}: should have 3 LLCs",
+                cycle
+            );
+            assert_eq!(
+                llcs_on_node(&layers[0], &topo, 0),
+                2,
+                "cycle {}: node 0 should have 2 LLCs",
+                cycle
+            );
+            assert_eq!(
+                llcs_on_node(&layers[0], &topo, 1),
+                1,
+                "cycle {}: node 1 should have 1 overflow LLC",
+                cycle
+            );
+            assert_llc_conservation(&pool, &layers, 4);
+
+            // Shrink to 16 cpus = 2 LLCs: fits on node 0, releases node 1 LLC.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 16)], &topo);
+            assert_eq!(
+                layers[0].assigned_llcs.len(),
+                2,
+                "cycle {}: should have 2 LLCs after shrink",
+                cycle
+            );
+            assert_eq!(
+                llcs_on_node(&layers[0], &topo, 0),
+                2,
+                "cycle {}: both LLCs should be on node 0 after shrink",
+                cycle
+            );
+            assert_eq!(
+                llcs_on_node(&layers[0], &topo, 1),
+                0,
+                "cycle {}: node 1 should have 0 LLCs after shrink",
+                cycle
+            );
+            assert_llc_conservation(&pool, &layers, 4);
+        }
+    }
+
+    #[test]
+    fn test_sd_2n_two_layers_cross_node_oscillation() {
+        // Two layers with different node preferences oscillate load.
+        // L0 prefers [0,1], L1 prefers [1,0]. When one overflows, it
+        // borrows from the other's preferred node. Repeat 4 times.
+        // 2N: 4 LLCs (2/node), 8 cpus/LLC.
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+        layers[0].spec_nodes = vec![0, 1]; // prefers node 0
+        layers[1].spec_nodes = vec![1, 0]; // prefers node 1
+
+        for cycle in 0..4 {
+            // Phase A: L0=24 cpus (3 LLCs, overflow), L1=8 cpus (1 LLC).
+            let targets = vec![(1, 8), (0, 24)]; // sorted ascending by target
+            simulate_sd_recompute(&mut pool, &mut layers, &targets, &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 3, "cycle {} A: L0", cycle);
+            assert_eq!(layers[1].assigned_llcs.len(), 1, "cycle {} A: L1", cycle);
+            assert_llc_conservation(&pool, &layers, 4);
+            assert_no_duplicate_llcs(&layers, &format!("cycle {} A", cycle));
+
+            // Phase B: L0=8 cpus (1 LLC), L1=24 cpus (3 LLCs, overflow).
+            let targets = vec![(0, 8), (1, 24)]; // sorted ascending
+            simulate_sd_recompute(&mut pool, &mut layers, &targets, &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 1, "cycle {} B: L0", cycle);
+            assert_eq!(layers[1].assigned_llcs.len(), 3, "cycle {} B: L1", cycle);
+            assert_llc_conservation(&pool, &layers, 4);
+            assert_no_duplicate_llcs(&layers, &format!("cycle {} B", cycle));
+        }
+    }
+
+    #[test]
+    fn test_sd_2n_unpinned_two_layers_compete_full_range() {
+        // Two unpinned layers go through phases: one takes all, other takes
+        // all, split evenly, then uneven split. Repeat 3 times.
+        // 2N: 4 LLCs, 8 cpus/LLC, 32 cpus total.
+        let (topo, _total) = topo_2n();
+
+        for _cycle in 0..3 {
+            let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+            let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+
+            // Phase A: L0=32 cpus (4 LLCs), L1=0.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 32), (1, 0)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 4);
+            assert_eq!(layers[1].assigned_llcs.len(), 0);
+            assert_llc_conservation(&pool, &layers, 4);
+
+            // Phase B: L0=0, L1=32 cpus (4 LLCs).
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 0), (1, 32)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 0);
+            assert_eq!(layers[1].assigned_llcs.len(), 4);
+            assert_llc_conservation(&pool, &layers, 4);
+
+            // Phase C: L0=16, L1=16 (each 2 LLCs).
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 16), (1, 16)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 2);
+            assert_eq!(layers[1].assigned_llcs.len(), 2);
+            assert_llc_conservation(&pool, &layers, 4);
+            assert_no_duplicate_llcs(&layers, "phase C");
+
+            // Phase D: L0=24 (3 LLCs), L1=8 (1 LLC).
+            simulate_sd_recompute(&mut pool, &mut layers, &[(1, 8), (0, 24)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 3);
+            assert_eq!(layers[1].assigned_llcs.len(), 1);
+            assert_llc_conservation(&pool, &layers, 4);
+            assert_no_duplicate_llcs(&layers, "phase D");
+        }
+    }
+
+    #[test]
+    fn test_sd_4n_overflow_three_nodes() {
+        // Layer pinned to node 0 with fallback to all nodes. Grows from 0
+        // through all 8 LLCs (filling 3+ nodes), then shrinks back to 0.
+        // Verify node 0 LLCs are retained, overflow to other nodes, and
+        // shrink releases non-preferred-node LLCs first.
+        // 4N: 8 LLCs (2/node), 4 cpus/LLC.
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+        // Unpinned: node_order = [0,1,2,3], so fills node 0 first.
+
+        let grow_targets: Vec<usize> = vec![4, 8, 12, 16, 20, 24];
+        let expected_llcs: Vec<usize> = vec![1, 2, 3, 4, 5, 6];
+
+        // Grow phase.
+        for (i, (&target, &exp)) in grow_targets.iter().zip(expected_llcs.iter()).enumerate() {
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, target)], &topo);
+            assert_eq!(
+                layers[0].assigned_llcs.len(),
+                exp,
+                "grow step {}: target {} cpus should give {} LLCs",
+                i,
+                target,
+                exp
+            );
+            // Node 0 should always retain its 2 LLCs once filled.
+            if exp >= 2 {
+                assert_eq!(
+                    llcs_on_node(&layers[0], &topo, 0),
+                    2,
+                    "grow step {}: node 0 should have 2 LLCs",
+                    i
+                );
+            }
+            assert_llc_conservation(&pool, &layers, 8);
+        }
+
+        // At 6 LLCs, should span 3 nodes (2+2+2).
+        assert!(
+            llcs_on_node(&layers[0], &topo, 0) == 2
+                && llcs_on_node(&layers[0], &topo, 1) == 2
+                && llcs_on_node(&layers[0], &topo, 2) == 2,
+            "at 6 LLCs should span nodes 0,1,2 with 2 each"
+        );
+
+        // Shrink phase: 24→20→16→12→8→4→0.
+        let shrink_targets: Vec<usize> = vec![20, 16, 12, 8, 4, 0];
+        let expected_llcs: Vec<usize> = vec![5, 4, 3, 2, 1, 0];
+
+        for (i, (&target, &exp)) in shrink_targets.iter().zip(expected_llcs.iter()).enumerate() {
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, target)], &topo);
+            assert_eq!(
+                layers[0].assigned_llcs.len(),
+                exp,
+                "shrink step {}: target {} cpus should give {} LLCs",
+                i,
+                target,
+                exp
+            );
+            // Node 0 LLCs should be released last.
+            if exp >= 2 {
+                assert_eq!(
+                    llcs_on_node(&layers[0], &topo, 0),
+                    2,
+                    "shrink step {}: node 0 should retain 2 LLCs",
+                    i
+                );
+            }
+            assert_llc_conservation(&pool, &layers, 8);
+        }
+        assert_eq!(pool.total_free_llcs(), 8);
+    }
+
+    #[test]
+    fn test_sd_4n_three_layers_node_pinned_compete() {
+        // L0 pinned node 0, L1 pinned node 1, L2 pinned node 2.
+        // Each grows to fill their node (2 LLCs), then all shrink to 1,
+        // then L0 grows unpinned to grab free LLCs.
+        // 4N: 8 LLCs (2/node), 4 cpus/LLC.
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![
+            SdLayerState::new("L0"),
+            SdLayerState::new("L1"),
+            SdLayerState::new("L2"),
+        ];
+        layers[0].spec_nodes = vec![0];
+        layers[1].spec_nodes = vec![1];
+        layers[2].spec_nodes = vec![2];
+
+        // Each layer fills its node (2 LLCs = 8 cpus).
+        let targets = vec![(0, 8), (1, 8), (2, 8)];
+        simulate_sd_recompute(&mut pool, &mut layers, &targets, &topo);
+        for (i, layer) in layers.iter().enumerate() {
+            assert_eq!(layer.assigned_llcs.len(), 2, "L{} should have 2 LLCs", i);
+            assert_eq!(
+                llcs_on_node(layer, &topo, i),
+                2,
+                "L{} should be on node {}",
+                i,
+                i
+            );
+        }
+        assert_eq!(pool.total_free_llcs(), 2); // node 3 free
+        assert_llc_conservation(&pool, &layers, 8);
+        assert_no_duplicate_llcs(&layers, "fill phase");
+
+        // All shrink to 1 LLC each.
+        let targets = vec![(0, 4), (1, 4), (2, 4)];
+        simulate_sd_recompute(&mut pool, &mut layers, &targets, &topo);
+        for (i, layer) in layers.iter().enumerate() {
+            assert_eq!(layer.assigned_llcs.len(), 1, "L{} should have 1 LLC", i);
+        }
+        assert_eq!(pool.total_free_llcs(), 5); // 3 freed + 2 from node 3
+        assert_llc_conservation(&pool, &layers, 8);
+
+        // L0 becomes unpinned and grows to 24 cpus (6 LLCs), L1+L2 stay at 0.
+        layers[0].spec_nodes = vec![];
+        let targets = vec![(0, 24), (1, 0), (2, 0)];
+        simulate_sd_recompute(&mut pool, &mut layers, &targets, &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 6);
+        assert_eq!(layers[1].assigned_llcs.len(), 0);
+        assert_eq!(layers[2].assigned_llcs.len(), 0);
+        assert_eq!(pool.total_free_llcs(), 2);
+        assert_llc_conservation(&pool, &layers, 8);
+    }
+
+    #[test]
+    fn test_sd_4n_mixed_pinned_unpinned_cycles() {
+        // L0 pinned to node 0, L1 unpinned. The algorithm allocates largest
+        // targets first (reverse iteration). target_llc_cpus tracks desired
+        // count, so a pinned layer's target should not exceed its node capacity
+        // to avoid over-freeing in subsequent shrinks.
+        // 4N: 8 LLCs (2/node), 4 cpus/LLC. Node 0 has 2 LLCs = 8 cpus.
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0"), SdLayerState::new("L1")];
+        layers[0].spec_nodes = vec![0]; // pinned to node 0
+
+        for cycle in 0..3 {
+            let label = format!("cycle {}", cycle);
+
+            // Phase A: L0=8 (fills N0, 2 LLCs), L1=4 (1 LLC from elsewhere).
+            // L0 has larger target → allocates first.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(1, 4), (0, 8)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 2, "{} A: L0", label);
+            assert_eq!(
+                llcs_on_node(&layers[0], &topo, 0),
+                2,
+                "{} A: L0 on node 0",
+                label
+            );
+            assert_eq!(layers[1].assigned_llcs.len(), 1, "{} A: L1", label);
+            assert_llc_conservation(&pool, &layers, 8);
+            assert_no_duplicate_llcs(&layers, &format!("{} A", label));
+
+            // Phase B: L0=4 (1 LLC), L1=4 (1 LLC). L0 shrinks.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 4), (1, 4)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 1, "{} B: L0", label);
+            assert_eq!(layers[1].assigned_llcs.len(), 1, "{} B: L1", label);
+            assert_llc_conservation(&pool, &layers, 8);
+
+            // Phase C: L0=0, L1=32 (all 8 LLCs). L1 takes everything.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 0), (1, 32)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 0, "{} C: L0", label);
+            assert_eq!(layers[1].assigned_llcs.len(), 8, "{} C: L1", label);
+            assert_eq!(pool.total_free_llcs(), 0, "{} C: free", label);
+            assert_llc_conservation(&pool, &layers, 8);
+
+            // Phase D: L0=8 (2 LLCs), L1=0. L0 grabs N0 LLCs back.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(1, 0), (0, 8)], &topo);
+            assert_eq!(layers[0].assigned_llcs.len(), 2, "{} D: L0", label);
+            assert_eq!(
+                llcs_on_node(&layers[0], &topo, 0),
+                2,
+                "{} D: L0 back on node 0",
+                label
+            );
+            assert_eq!(layers[1].assigned_llcs.len(), 0, "{} D: L1", label);
+            assert_llc_conservation(&pool, &layers, 8);
+
+            // Reset for next cycle: both to 0.
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 0), (1, 0)], &topo);
+        }
+    }
+
+    // --- Stability and edge cases ---
+
+    #[test]
+    fn test_sd_2n_repeated_same_target_is_stable() {
+        // Layer at steady state should not change LLC assignments when
+        // simulated repeatedly with the same target.
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+
+        // Grow to 2 LLCs.
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 16)], &topo);
+        let stable_llcs = layers[0].assigned_llcs.clone();
+        assert_eq!(stable_llcs.len(), 2);
+
+        // Repeat 10 times — should be identical each time.
+        for i in 0..10 {
+            simulate_sd_recompute(&mut pool, &mut layers, &[(0, 16)], &topo);
+            assert_eq!(
+                layers[0].assigned_llcs, stable_llcs,
+                "iteration {}: LLCs should be unchanged",
+                i
+            );
+            assert_llc_conservation(&pool, &layers, 4);
+        }
+    }
+
+    #[test]
+    fn test_sd_4n_all_layers_at_zero_then_grow() {
+        // 4 layers all start at 0, then all grow simultaneously to 2 LLCs each.
+        // 4N: 8 LLCs, 4 cpus/LLC.
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![
+            SdLayerState::new("L0"),
+            SdLayerState::new("L1"),
+            SdLayerState::new("L2"),
+            SdLayerState::new("L3"),
+        ];
+
+        // All at zero.
+        simulate_sd_recompute(
+            &mut pool,
+            &mut layers,
+            &[(0, 0), (1, 0), (2, 0), (3, 0)],
+            &topo,
+        );
+        for layer in &layers {
+            assert_eq!(layer.assigned_llcs.len(), 0);
+        }
+        assert_eq!(pool.total_free_llcs(), 8);
+
+        // All grow to 2 LLCs (8 cpus) simultaneously.
+        simulate_sd_recompute(
+            &mut pool,
+            &mut layers,
+            &[(0, 8), (1, 8), (2, 8), (3, 8)],
+            &topo,
+        );
+        for (i, layer) in layers.iter().enumerate() {
+            assert_eq!(layer.assigned_llcs.len(), 2, "L{} should have 2 LLCs", i);
+        }
+        assert_eq!(pool.total_free_llcs(), 0);
+        assert_llc_conservation(&pool, &layers, 8);
+        assert_no_duplicate_llcs(&layers, "all grow");
+    }
+
+    #[test]
+    fn test_sd_2n_overflow_shrink_releases_remote_first() {
+        // Verify that when shrinking, the last-allocated (overflow) LLCs
+        // from remote nodes are released before local ones.
+        // 2N: 4 LLCs, 8 cpus/LLC.
+        let (topo, _total) = topo_2n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+
+        // Grow to 4 LLCs (all).
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 32)], &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 4);
+        // First 2 should be from node 0, last 2 from node 1.
+        assert_eq!(llcs_on_node(&layers[0], &topo, 0), 2);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 1), 2);
+
+        // Shrink to 3 LLCs. The last allocated (from node 1) should be freed.
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 24)], &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 3);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 0), 2);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 1), 1);
+
+        // Shrink to 2 LLCs. The other node 1 LLC should be freed.
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 16)], &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 2);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 0), 2);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 1), 0);
+
+        // Shrink to 1 LLC. Now a node 0 LLC is released.
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 8)], &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 1);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 0), 1);
+        assert_llc_conservation(&pool, &layers, 4);
+    }
+
+    #[test]
+    fn test_sd_4n_spec_nodes_overflow_to_unspecified() {
+        // Layer with spec_nodes=[2,3] fills both nodes, then there's nowhere
+        // else to allocate (spec_nodes is a hard limit).
+        // 4N: 8 LLCs (2/node), 4 cpus/LLC. Nodes 2,3 have 4 LLCs total.
+        let (topo, _total) = topo_4n();
+        let mut pool = CpuPool::new(topo.clone(), false).unwrap();
+        let mut layers = vec![SdLayerState::new("L0")];
+        layers[0].spec_nodes = vec![2, 3];
+
+        // Target 16 cpus = 4 LLCs. Nodes 2+3 have exactly 4.
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 16)], &topo);
+        assert_eq!(layers[0].assigned_llcs.len(), 4);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 2), 2);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 3), 2);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 0), 0);
+        assert_eq!(llcs_on_node(&layers[0], &topo, 1), 0);
+
+        // Target 24 cpus = 6 LLCs. But only 4 available on nodes 2,3.
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 24)], &topo);
+        assert_eq!(
+            layers[0].assigned_llcs.len(),
+            4,
+            "can't exceed spec_nodes capacity"
+        );
+        assert_llc_conservation(&pool, &layers, 8);
+
+        // Shrink to 0, then grow with changed spec_nodes (now unpinned).
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 0)], &topo);
+        layers[0].spec_nodes = vec![];
+        simulate_sd_recompute(&mut pool, &mut layers, &[(0, 24)], &topo);
+        assert_eq!(
+            layers[0].assigned_llcs.len(),
+            6,
+            "unpinned can use all nodes"
+        );
+        assert_llc_conservation(&pool, &layers, 8);
+    }
 }
