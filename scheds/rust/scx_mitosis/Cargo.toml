@@ -19,6 +19,8 @@ itertools = "0.13.0"
 lazy_static = "1.5.0"
 libbpf-rs = "=0.26.0"
 libc = "0.2.175"
+inotify = "0.11"
+nix = { version = "0.30", features = ["event"] }
 crossbeam = "0.8.4"
 maplit = "1.0.2"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.22" }
@@ -31,6 +33,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parkin
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.0.27" }
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 enable_backtrace = []
