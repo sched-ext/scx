@@ -2959,16 +2959,36 @@ fn test_mitosis_cpu_borrowing_enqueue() {
     );
 }
 
-/// Test demand-based CPU rebalancing.
+/// Test demand-based CPU rebalancing scenario.
 ///
 /// Models the rebalancing test from test_cell_isolation.sh:
-/// Two cells with equal initial CPU splits. One cell gets heavy load while
-/// the other is idle. After the rebalancing threshold is reached, the busy
-/// cell should be assigned more CPUs than the idle cell.
+/// Two cells with equal initial CPU splits. One cell gets heavy load
+/// (8 tasks on 4 CPUs = 2x oversubscribed) while the other is idle.
 ///
-/// In the simulator, we can't directly observe rebalancing metrics like
-/// the real scheduler's monitor JSON, but we verify the scenario runs
-/// correctly and all tasks are scheduled.
+/// In the real scheduler, the userspace daemon detects imbalance via
+/// monitoring and reassigns CPUs between cells (--enable-rebalancing).
+/// This is NOT a BPF-level feature -- the BPF scheduler only constrains
+/// tasks to their cell's cpumask. Rebalancing is implemented in the
+/// userspace daemon (main.rs) by modifying cgroup cpusets.
+///
+/// TODO(sim-b7d70): The simulator cannot test demand-based rebalancing
+/// because:
+/// 1. Rebalancing is a userspace daemon feature, not a BPF operation.
+///    The BPF scheduler's timer callback (update_timer_cb) assigns CPUs
+///    to cells based on cgroup cpusets, but never moves CPUs between
+///    cells based on demand.
+/// 2. Cell isolation itself doesn't work because the CSS iterator
+///    (bpf_for_each(css, ...)) is not populated before the timer fires,
+///    so the timer callback iterates zero cgroups and skips cell
+///    assignment.  All tasks remain in the root cell with all CPUs.
+/// 3. Fixing the CSS iterator (populating it in handle_timer_fired)
+///    causes select_cpu to return out-of-range CPUs due to a struct
+///    cpuset type mismatch between BPF CO-RE accessors and the
+///    simulator's struct layout.
+///
+/// For now, we verify the oversubscribed scenario runs correctly:
+/// all tasks get fair runtime, are actively scheduled, and the
+/// simulation completes without error.
 #[test]
 fn test_mitosis_demand_rebalancing() {
     let _lock = common::setup_test();
@@ -3115,7 +3135,14 @@ fn test_mitosis_demand_rebalancing() {
     let trace = Simulator::new(sched).run(scenario);
     trace.dump();
 
-    // All busy tasks should get runtime
+    // Verify simulation completed without error
+    assert!(
+        matches!(trace.exit_kind(), ExitKind::Normal),
+        "simulation exited with error: {:?}",
+        trace.exit_kind()
+    );
+
+    // All 8 hog tasks should get runtime
     for pid in 1..=8 {
         assert!(
             trace.total_runtime(Pid(pid)) > 0,
@@ -3123,22 +3150,51 @@ fn test_mitosis_demand_rebalancing() {
         );
     }
 
-    // Check whether tasks from busy_cell ended up running on idle_cell CPUs
-    // (evidence of rebalancing/borrowing)
+    // Each task should be scheduled many times (300ms / 600us period ~ 500 times)
+    for pid in 1..=8 {
+        let count = trace.schedule_count(Pid(pid));
+        assert!(
+            count >= 100,
+            "hog {pid} should be scheduled frequently, got {count}"
+        );
+    }
+
+    // With 8 tasks on 8 CPUs (cell isolation not active, see TODO above),
+    // the scheduler should distribute work across all CPUs.
     let busy_pids: Vec<Pid> = (1..=8).map(Pid).collect();
-    let idle_cpus = [CpuId(4), CpuId(5), CpuId(6), CpuId(7)];
-    let on_idle_cpus = trace
+    let cpus_used: std::collections::HashSet<CpuId> = trace
         .events()
         .iter()
         .filter(|e| {
             matches!(e.kind, TraceKind::TaskScheduled { pid }
-                if busy_pids.contains(&pid) && idle_cpus.contains(&e.cpu))
+                if busy_pids.contains(&pid))
         })
-        .count();
+        .map(|e| e.cpu)
+        .collect();
+    assert!(
+        cpus_used.len() >= 4,
+        "tasks should use at least 4 CPUs, used {}",
+        cpus_used.len()
+    );
 
-    // Whether rebalancing occurs depends on scheduler config,
-    // but the scenario should run without crashes
-    let _ = on_idle_cpus; // avoid unused warning
+    // Verify fair scheduling: no single task should hog all the runtime.
+    // With 8 equal-priority tasks, the max runtime should be at most 3x
+    // the min runtime (generous bound for scheduling jitter).
+    let runtimes: Vec<u64> = (1..=8).map(|p| trace.total_runtime(Pid(p))).collect();
+    let max_rt = *runtimes.iter().max().unwrap();
+    let min_rt = *runtimes.iter().min().unwrap();
+    assert!(
+        min_rt > 0 && max_rt <= min_rt * 3,
+        "unfair scheduling: min_rt={min_rt} max_rt={max_rt}, ratio={:.1}",
+        max_rt as f64 / min_rt as f64
+    );
+
+    // TODO(sim-b7d70): When cell isolation is fixed, add assertions that:
+    // - Before timer fires (0-100ms): tasks run freely on all 8 CPUs
+    // - After timer fires (100ms+): busy_cell tasks only run on CPUs 0-3
+    // - idle_cell CPUs (4-7) are truly idle after cell assignment
+    // This requires fixing the CSS iterator population in handle_timer_fired
+    // and resolving the struct cpuset type mismatch.
 }
 
 /// Test cpuset change detection.
