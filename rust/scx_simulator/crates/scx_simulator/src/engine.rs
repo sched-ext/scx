@@ -1132,7 +1132,9 @@ impl<S: Scheduler> Simulator<S> {
                     &to_cgroup,
                     state,
                     tasks,
+                    events,
                     cgroup_registry,
+                    monitor,
                 );
             }
             EventKind::CgroupCreate(event) => {
@@ -1500,15 +1502,24 @@ impl<S: Scheduler> Simulator<S> {
     /// Handle a cgroup migration: move a task between cgroups.
     ///
     /// In the kernel, this is triggered by writing a PID to cgroup.procs.
-    /// The engine calls `cgroup_move` and updates the task's C-side cgroup.
+    ///
+    /// Mirror kernel sched_change guard: dequeue before cgroup_move,
+    /// enqueue after (kernel/sched/core.c:9119-9138). The kernel's
+    /// `sched_move_task` wraps `cgroup_move` in a dequeue/enqueue bracket:
+    /// if the task is queued, it is dequeued first, then after the BPF
+    /// callback updates cell/DSQ metadata, the task is re-enqueued so it
+    /// lands in the correct DSQ for its new cgroup.
+    #[allow(clippy::too_many_arguments)]
     fn handle_cgroup_migrate(
         &self,
         pid: Pid,
         from_name: &str,
         to_name: &str,
         state: &mut SimulatorState,
-        tasks: &HashMap<Pid, SimTask>,
+        tasks: &mut HashMap<Pid, SimTask>,
+        events: &mut EventQueue,
         cgroup_registry: &CgroupRegistry,
+        monitor: &mut dyn Monitor,
     ) {
         let task = match tasks.get(&pid) {
             Some(t) => t,
@@ -1529,20 +1540,99 @@ impl<S: Scheduler> Simulator<S> {
             "CGROUP MIGRATE"
         );
 
-        // Update the task's cgroup in C-side
         let raw = task.raw();
+        let was_queued = task.state == TaskState::Runnable;
+        let cpu = state.current_cpu;
+
+        // --- sched_change_begin: dequeue if queued ---
+        if was_queued {
+            self.cgroup_migrate_dequeue(pid, raw, cpu, state);
+        }
+
+        // Update the task's cgroup in C-side
         unsafe {
             ffi::sim_task_set_cgroup(raw, to_info.raw());
         }
 
         // Call cgroup_move
         unsafe {
-            let cpu = state.current_cpu;
             kfuncs::enter_sim(state, cpu);
             start_rbc(state);
             self.scheduler
                 .cgroup_move(raw, from_info.raw(), to_info.raw());
             charge_sched_time(state, cpu, "cgroup_move");
+            kfuncs::exit_sim();
+        }
+
+        // --- sched_change_end: re-enqueue if was queued ---
+        if was_queued {
+            self.cgroup_migrate_enqueue(pid, raw, cpu, state);
+        }
+
+        // Process CPUs kicked by cgroup_move or re-enqueue callbacks
+        self.process_kicked_cpus(None, state, tasks, events, monitor);
+    }
+
+    /// Dequeue a task before cgroup migration (sched_change_begin).
+    ///
+    /// Removes the task from its current DSQ (global, per-cell, or local)
+    /// and calls `ops.dequeue` if the task is still in the BPF scheduler's
+    /// queue (OpsTaskState::Queued).
+    fn cgroup_migrate_dequeue(
+        &self,
+        pid: Pid,
+        raw: *mut c_void,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+    ) {
+        // Remove from global/per-cell DSQs
+        state.dsqs.remove_pid_from_all(pid);
+
+        // Remove from any CPU's local DSQ
+        for sim_cpu in &mut state.cpus {
+            if let Some(pos) = sim_cpu.local_dsq.iter().position(|&p| p == pid) {
+                sim_cpu.local_dsq.remove(pos);
+                break;
+            }
+        }
+
+        // If still in BPF scheduler queue, call ops.dequeue (flags=0, not sleep)
+        let ops_state = state.task_ops_state.get(&pid).copied().unwrap_or_default();
+        if ops_state == OpsTaskState::Queued {
+            unsafe {
+                kfuncs::enter_sim(state, cpu);
+                debug!(pid = pid.0, "dequeue (cgroup_migrate)");
+                start_rbc(state);
+                self.scheduler.dequeue(raw, 0);
+                charge_sched_time(state, cpu, "dequeue");
+                state.set_task_ops_state(pid, OpsTaskState::None);
+                kfuncs::exit_sim();
+            }
+        }
+    }
+
+    /// Re-enqueue a task after cgroup migration (sched_change_end).
+    ///
+    /// Calls `ops.enqueue` so the BPF scheduler dispatches the task to
+    /// the correct DSQ based on its updated cgroup/cell metadata.
+    fn cgroup_migrate_enqueue(
+        &self,
+        pid: Pid,
+        raw: *mut c_void,
+        cpu: CpuId,
+        state: &mut SimulatorState,
+    ) {
+        unsafe {
+            kfuncs::enter_sim(state, cpu);
+            state.ops_context = OpsContext::Enqueue;
+            state.set_task_ops_state(pid, OpsTaskState::Queued);
+            debug!(pid = pid.0, "enqueue (cgroup_migrate)");
+            start_rbc(state);
+            self.scheduler.enqueue(raw, 0);
+            charge_sched_time(state, cpu, "enqueue");
+            maybe_record_checkpoint(state, CheckpointEvent::Enqueue, cpu);
+            state.ops_context = OpsContext::None;
+            state.resolve_pending_dispatch(cpu);
             kfuncs::exit_sim();
         }
     }

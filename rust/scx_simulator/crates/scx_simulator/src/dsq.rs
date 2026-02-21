@@ -222,6 +222,20 @@ impl DsqManager {
             .is_some_and(|dsq| dsq.remove_pid(pid))
     }
 
+    /// Remove a PID from whichever DSQ it is in. Returns true if found.
+    ///
+    /// Scans all DSQs since we don't track the per-task DSQ mapping.
+    /// Used by `handle_cgroup_migrate` to dequeue a task before the
+    /// BPF `cgroup_move` callback updates its cell/DSQ metadata.
+    pub fn remove_pid_from_all(&mut self, pid: Pid) -> bool {
+        for dsq in self.dsqs.values_mut() {
+            if dsq.remove_pid(pid) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Iterate all DSQ IDs in sorted order for deterministic iteration.
     ///
     /// The internal `dsqs` field is a HashMap, so iteration order is
