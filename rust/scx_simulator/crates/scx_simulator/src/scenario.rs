@@ -188,6 +188,10 @@ pub struct PreemptiveConfig {
     pub timeslice_min: u64,
     /// Maximum timeslice in retired conditional branches.
     pub timeslice_max: u64,
+    /// If true, disable PMU timers and use only cooperative yields at kfunc
+    /// boundaries. This ensures deterministic interleaving regardless of
+    /// hardware behavior. Default: false (use PMU when available).
+    pub cooperative_only: bool,
 }
 
 impl Default for PreemptiveConfig {
@@ -195,6 +199,21 @@ impl Default for PreemptiveConfig {
         PreemptiveConfig {
             timeslice_min: 100,
             timeslice_max: 1000,
+            cooperative_only: false,
+        }
+    }
+}
+
+impl PreemptiveConfig {
+    /// Create a cooperative-only preemptive config (no PMU timers).
+    ///
+    /// This mode uses the futex-based `PreemptRing` for token passing but
+    /// disables PMU timers, yielding only at kfunc boundaries. The result
+    /// is fully deterministic interleaving.
+    pub fn cooperative_only() -> Self {
+        PreemptiveConfig {
+            cooperative_only: true,
+            ..Default::default()
         }
     }
 }

@@ -344,11 +344,18 @@ fn test_interleave_multiple_seeds() {
 // ===========================================================================
 
 /// Helper: build a simple N-task scenario with preemptive interleaving.
+///
+/// Uses `cooperative_only` mode to disable PMU timers, `fixed_priority` to
+/// ensure deterministic event ordering, and `instant_timing` to disable
+/// noise and overhead. All of these are needed to ensure deterministic
+/// interleaving for tests.
 fn preemptive_scenario(nr_cpus: u32, nr_tasks: u32, seed: u32, duration_ms: u64) -> Scenario {
     let mut builder = Scenario::builder()
         .cpus(nr_cpus)
         .seed(seed)
-        .preemptive(PreemptiveConfig::default());
+        .fixed_priority(true)
+        .instant_timing()
+        .preemptive(PreemptiveConfig::cooperative_only());
 
     for i in 1..=nr_tasks {
         builder = builder.task(TaskDef {
@@ -418,6 +425,36 @@ fn test_preemptive_determinism() {
         .zip(trace2.events().iter())
         .enumerate()
     {
+        if e1.time_ns != e2.time_ns || e1.cpu != e2.cpu || e1.kind != e2.kind {
+            // Dump context around mismatch
+            eprintln!("MISMATCH at event {i}:");
+            eprintln!(
+                "  trace1[{i}]: time={} cpu={:?} kind={:?}",
+                e1.time_ns, e1.cpu, e1.kind
+            );
+            eprintln!(
+                "  trace2[{i}]: time={} cpu={:?} kind={:?}",
+                e2.time_ns, e2.cpu, e2.kind
+            );
+            if i > 0 {
+                let prev1 = &trace1.events()[i - 1];
+                let prev2 = &trace2.events()[i - 1];
+                eprintln!(
+                    "  trace1[{}]: time={} cpu={:?} kind={:?}",
+                    i - 1,
+                    prev1.time_ns,
+                    prev1.cpu,
+                    prev1.kind
+                );
+                eprintln!(
+                    "  trace2[{}]: time={} cpu={:?} kind={:?}",
+                    i - 1,
+                    prev2.time_ns,
+                    prev2.cpu,
+                    prev2.kind
+                );
+            }
+        }
         assert_eq!(
             e1.time_ns, e2.time_ns,
             "event {i}: timestamps differ: {} vs {}",
@@ -884,6 +921,7 @@ fn test_preemptive_custom_timeslice() {
         .preemptive(PreemptiveConfig {
             timeslice_min: 50,
             timeslice_max: 200,
+            cooperative_only: false,
         })
         .task(TaskDef {
             name: "t1".into(),

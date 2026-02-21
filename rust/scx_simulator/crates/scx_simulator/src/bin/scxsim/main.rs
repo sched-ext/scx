@@ -207,6 +207,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         scenario.preemptive = Some(PreemptiveConfig {
             timeslice_min: cli.timeslice_min,
             timeslice_max: cli.timeslice_max,
+            cooperative_only: false,
         });
         scenario.interleave = true;
     }

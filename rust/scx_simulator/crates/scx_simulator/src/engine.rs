@@ -2436,6 +2436,7 @@ impl<S: Scheduler> Simulator<S> {
         if let Some(ref preemptive_cfg) = state.preemptive {
             let timeslice_min = preemptive_cfg.timeslice_min;
             let timeslice_max = preemptive_cfg.timeslice_max;
+            let cooperative_only = preemptive_cfg.cooperative_only;
             self.dispatch_concurrent_preemptive(
                 &dispatch_cpus,
                 &state_send,
@@ -2443,6 +2444,7 @@ impl<S: Scheduler> Simulator<S> {
                 interleave_seed,
                 timeslice_min,
                 timeslice_max,
+                cooperative_only,
             );
         } else {
             self.dispatch_concurrent_cooperative(
@@ -2546,9 +2548,12 @@ impl<S: Scheduler> Simulator<S> {
                     let schp = sched_ref.0 as *const S;
 
                     interleave::install(ring_ref, worker_id);
-                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     ring_ref.wait_for_token(worker_id);
+
+                    // Enter sim AFTER acquiring the token to avoid racing on
+                    // SimulatorState.current_cpu with other workers.
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     unsafe {
                         let sim = &mut *sp;
@@ -2583,6 +2588,7 @@ impl<S: Scheduler> Simulator<S> {
     /// preempted mid-C-code by a PMU timer overflow signal. If the PMU
     /// is unavailable (VMs, containers), falls back to cooperative-only
     /// interleaving with the `PreemptRing`.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_concurrent_preemptive(
         &self,
         dispatch_cpus: &[CpuId],
@@ -2591,6 +2597,7 @@ impl<S: Scheduler> Simulator<S> {
         seed: u32,
         timeslice_min: u64,
         timeslice_max: u64,
+        cooperative_only: bool,
     ) {
         use crate::interleave::WorkerId;
         use crate::preempt::{self, PreemptRing};
@@ -2621,25 +2628,38 @@ impl<S: Scheduler> Simulator<S> {
                     let schp = sched_ref.0 as *const S;
 
                     // Create per-thread PMU timer (may be unavailable in VMs).
-                    let timer = perf::try_create_rbc_timer();
-                    let timer_fd = match &timer {
-                        Some(t) => {
-                            // Route overflow signal to this thread.
-                            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
-                            if let Err(e) = t.set_signal_delivery(tid, preempt::PREEMPT_SIGNAL) {
-                                tracing::warn!(
-                                    "preemptive interleave: signal delivery \
-                                     setup failed: {e}"
-                                );
-                                -1
-                            } else {
-                                t.raw_fd()
+                    // Skip if cooperative_only mode is requested.
+                    let (timer, timer_fd) = if cooperative_only {
+                        (None, -1)
+                    } else {
+                        let timer = perf::try_create_rbc_timer();
+                        let timer_fd = match &timer {
+                            Some(t) => {
+                                // Route overflow signal to this thread.
+                                let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+                                if let Err(e) = t.set_signal_delivery(tid, preempt::PREEMPT_SIGNAL)
+                                {
+                                    tracing::warn!(
+                                        "preemptive interleave: signal delivery \
+                                         setup failed: {e}"
+                                    );
+                                    -1
+                                } else {
+                                    t.raw_fd()
+                                }
                             }
-                        }
-                        None => -1,
+                            None => -1,
+                        };
+                        (timer, timer_fd)
                     };
 
-                    if timer_fd >= 0 {
+                    if cooperative_only {
+                        debug!(
+                            worker = i,
+                            cpu = cpu.0,
+                            "preempt: cooperative-only (by config)"
+                        );
+                    } else if timer_fd >= 0 {
                         debug!(worker = i, cpu = cpu.0, "preempt: PMU timer armed");
                     } else {
                         debug!(
@@ -2649,9 +2669,12 @@ impl<S: Scheduler> Simulator<S> {
                         );
                     }
                     preempt::install(ring_ref, worker_id, timer_fd, timeslice_min, timeslice_max);
-                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     ring_ref.wait_for_token(worker_id);
+
+                    // Enter sim AFTER acquiring the token to avoid racing on
+                    // SimulatorState.current_cpu with other workers.
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     // Arm the PMU timer before entering scheduler C code.
                     if timer_fd >= 0 {
@@ -2789,6 +2812,7 @@ impl<S: Scheduler> Simulator<S> {
                 max_cgroups,
                 preemptive_cfg.timeslice_min,
                 preemptive_cfg.timeslice_max,
+                preemptive_cfg.cooperative_only,
             );
         } else {
             Self::process_batch_concurrent_cooperative(
@@ -2849,9 +2873,11 @@ impl<S: Scheduler> Simulator<S> {
                     let sp = state_ref.0;
 
                     interleave::install(ring_ref, worker_id);
-                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
-
                     ring_ref.wait_for_token(worker_id);
+
+                    // Enter sim AFTER acquiring the token to avoid racing on
+                    // SimulatorState.current_cpu with other workers.
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     // Process all events for this CPU sequentially.
                     // Yields happen at kfunc boundaries within handlers.
@@ -2903,6 +2929,7 @@ impl<S: Scheduler> Simulator<S> {
         max_cgroups: u32,
         timeslice_min: u64,
         timeslice_max: u64,
+        cooperative_only: bool,
     ) {
         use crate::interleave::WorkerId;
         use crate::preempt::{self, PreemptRing};
@@ -2928,26 +2955,36 @@ impl<S: Scheduler> Simulator<S> {
                     let sp = state_ref.0;
 
                     // Create per-thread PMU timer.
-                    let timer = perf::try_create_rbc_timer();
-                    let timer_fd = match &timer {
-                        Some(t) => {
-                            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
-                            if let Err(e) = t.set_signal_delivery(tid, preempt::PREEMPT_SIGNAL) {
-                                tracing::warn!(
-                                    "batch preemptive: signal delivery setup failed: {e}"
-                                );
-                                -1
-                            } else {
-                                t.raw_fd()
+                    // Skip if cooperative_only mode is requested.
+                    let (timer, timer_fd) = if cooperative_only {
+                        (None, -1)
+                    } else {
+                        let timer = perf::try_create_rbc_timer();
+                        let timer_fd = match &timer {
+                            Some(t) => {
+                                let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+                                if let Err(e) = t.set_signal_delivery(tid, preempt::PREEMPT_SIGNAL)
+                                {
+                                    tracing::warn!(
+                                        "batch preemptive: signal delivery setup failed: {e}"
+                                    );
+                                    -1
+                                } else {
+                                    t.raw_fd()
+                                }
                             }
-                        }
-                        None => -1,
+                            None => -1,
+                        };
+                        (timer, timer_fd)
                     };
 
                     preempt::install(ring_ref, worker_id, timer_fd, timeslice_min, timeslice_max);
-                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     ring_ref.wait_for_token(worker_id);
+
+                    // Enter sim AFTER acquiring the token to avoid racing on
+                    // SimulatorState.current_cpu with other workers.
+                    unsafe { kfuncs::enter_sim(&mut *sp, cpu) };
 
                     // Don't arm the PMU timer upfront. Unlike
                     // dispatch_concurrent_preemptive (which runs a tight

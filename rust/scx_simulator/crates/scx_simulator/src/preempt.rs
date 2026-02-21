@@ -78,9 +78,8 @@ const RUNNING: u32 = 1;
 
 /// Signal-safe token ring using atomics and futex.
 ///
-/// All methods are safe to call from signal handlers. The PRNG is accessed
-/// only by the active worker (enforced by the single-active invariant), so
-/// no CAS is needed on the PRNG state.
+/// All methods are safe to call from signal handlers. The PRNG access is
+/// serialized using a spinlock to ensure deterministic ordering.
 ///
 /// NOTE: This intentionally uses a hand-rolled xorshift32 rather than
 /// `rand::rngs::SmallRng` because the PRNG state must live in an `AtomicU32`
@@ -89,7 +88,7 @@ const RUNNING: u32 = 1;
 pub struct PreemptRing {
     /// Per-worker state: `PARKED` or `RUNNING`.
     workers: Box<[AtomicU32]>,
-    /// PRNG state (xorshift32). Only the active worker mutates this.
+    /// PRNG state (xorshift32). Access is serialized via CAS in `next_prng()`.
     prng: AtomicU32,
     /// Total number of workers.
     total: usize,
@@ -126,13 +125,22 @@ impl PreemptRing {
         }
     }
 
+    /// Atomically advance the xorshift32 PRNG and return the new value.
+    ///
+    /// Uses CAS loop to ensure atomic read-modify-write, preventing races
+    /// where two threads could load the same state and skip PRNG values.
     fn next_prng(&self) -> u32 {
-        let mut x = self.prng.load(SeqCst);
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.prng.store(x, SeqCst);
-        x
+        loop {
+            let old = self.prng.load(SeqCst);
+            let mut x = old;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            if self.prng.compare_exchange(old, x, SeqCst, SeqCst).is_ok() {
+                return x;
+            }
+            // CAS failed - another thread updated the PRNG; retry.
+        }
     }
 
     fn pick_next(&self) -> Option<WorkerId> {
