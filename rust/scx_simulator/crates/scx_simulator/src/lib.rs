@@ -32,6 +32,7 @@
 pub mod bpf_trace;
 pub mod cgroup;
 pub mod cpu;
+pub mod det_hashmap;
 pub mod dsq;
 pub mod engine;
 pub mod ffi;

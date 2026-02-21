@@ -4,7 +4,7 @@
 //! clock, CPU/task state, and drives the scheduler through its ops callbacks.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::ffi::c_void;
 
 use rand::rngs::SmallRng;
@@ -551,9 +551,9 @@ impl<S: Scheduler> Simulator<S> {
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
-            kicked_cpus: HashMap::new(),
+            kicked_cpus: BTreeMap::new(),
             task_last_cpu: HashMap::new(),
-            task_ops_state: HashMap::new(),
+            task_ops_state: BTreeMap::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
             waker_task_raw: None,
@@ -660,10 +660,18 @@ impl<S: Scheduler> Simulator<S> {
         // Tasks are registered in task_pid_to_raw AFTER init_task completes.
         // This ensures self-referencing real_parent pointers don't cause
         // bpf_task_from_pid to return the task itself during init.
+        //
+        // IMPORTANT: Sort PIDs for deterministic init_task order. HashMap
+        // iteration is non-deterministic, and schedulers like LAVD have
+        // state that depends on which tasks are already registered (via
+        // bpf_task_from_pid parent lookups).
+        let mut sorted_pids: Vec<Pid> = tasks.keys().copied().collect();
+        sorted_pids.sort_by_key(|p| p.0);
         unsafe {
             let cpu = state.current_cpu;
             kfuncs::enter_sim(&mut state, cpu);
-            for task in tasks.values() {
+            for pid in sorted_pids {
+                let task = &tasks[&pid];
                 start_rbc(&mut state);
                 let rc = if let Some(&cgrp_raw) = task_cgroup_map.get(&task.pid) {
                     self.scheduler.init_task_in_cgroup(task.raw(), cgrp_raw)
@@ -859,8 +867,11 @@ impl<S: Scheduler> Simulator<S> {
                         monitor,
                     );
                 } else {
-                    // Single CPU or empty: sequential
-                    for event in per_cpu.into_values().flatten() {
+                    // Single CPU or empty: sequential.
+                    // Sort for deterministic order (HashMap iteration is non-deterministic).
+                    let mut events_flat: Vec<Event> = per_cpu.into_values().flatten().collect();
+                    events_flat.sort();
+                    for event in events_flat {
                         if let Some(err) = self.process_event(
                             event,
                             &mut state,
@@ -3123,11 +3134,9 @@ impl<S: Scheduler> Simulator<S> {
         if state.in_concurrent_batch {
             return;
         }
-        // Sort by CPU ID for deterministic processing order.
-        // HashMap::drain() has non-deterministic iteration order, which would
-        // cause different CPUs to claim tasks from shared DSQs in different runs.
-        let mut kicked: Vec<(CpuId, KickFlags)> = state.kicked_cpus.drain().collect();
-        kicked.sort_by_key(|(cpu, _)| cpu.0);
+        // BTreeMap iterates in sorted key order, ensuring deterministic processing.
+        // Use std::mem::take to drain all entries (BTreeMap::drain requires a range).
+        let kicked = std::mem::take(&mut state.kicked_cpus);
         for (kicked_cpu, flags) in kicked {
             if Some(kicked_cpu) == exclude_cpu {
                 continue;

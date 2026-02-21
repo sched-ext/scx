@@ -263,13 +263,16 @@ impl CgroupRegistry {
         while let Some(cgid) = stack.pop() {
             if let Some(info) = self.cgroups.get(&cgid) {
                 result.push(info);
-                // Add children in reverse order so they come out in order
-                let children: Vec<CgroupId> = self
+                // Add children in reverse sorted order so they come out in
+                // ascending order. Sorting ensures deterministic traversal
+                // since HashMap iteration order is non-deterministic.
+                let mut children: Vec<CgroupId> = self
                     .cgroups
                     .values()
                     .filter(|c| c.parent_cgid == cgid && c.cgid != cgid)
                     .map(|c| c.cgid)
                     .collect();
+                children.sort_by_key(|c| c.0);
                 for child_cgid in children.into_iter().rev() {
                     stack.push(child_cgid);
                 }

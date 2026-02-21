@@ -15,7 +15,7 @@
 // would be meaningless.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::ptr;
 
@@ -109,14 +109,16 @@ pub struct SimulatorState {
     pub dsq_iter: Option<DsqIterState>,
     /// CPUs kicked via `scx_bpf_kick_cpu` during a callback.
     /// The engine processes these after the callback returns.
-    pub kicked_cpus: HashMap<CpuId, KickFlags>,
+    /// Uses BTreeMap for deterministic iteration order.
+    pub kicked_cpus: BTreeMap<CpuId, KickFlags>,
     /// Per-task last CPU (set when a task starts running).
     /// Used by `scx_bpf_task_cpu` to return the correct value.
     pub task_last_cpu: HashMap<Pid, CpuId>,
     /// Per-task SCX ops_state (mirrors kernel's `SCX_OPSS_*`).
     /// Tracks whether the task is `Queued` (in the BPF scheduler) or `None`
     /// (dispatched / not queued). Used to gate `ops.dequeue()`.
-    pub task_ops_state: HashMap<Pid, OpsTaskState>,
+    /// Uses BTreeMap for deterministic iteration order.
+    pub task_ops_state: BTreeMap<Pid, OpsTaskState>,
     /// Flag set by `scx_bpf_reenqueue_local` during `cpu_release`.
     /// The engine drains the local DSQ and re-enqueues tasks after the
     /// callback returns.
@@ -519,30 +521,16 @@ impl SimulatorState {
             hash = fnv1a_combine(hash, fnv1a_hash_u64(cpu.is_online as u64));
         }
 
-        // Hash task ops state (deterministic ordering by pid)
-        let mut ops_pids: Vec<_> = self.task_ops_state.keys().collect();
-        ops_pids.sort();
-        hash = fnv1a_combine(hash, fnv1a_hash_u64(ops_pids.len() as u64));
-        for pid in ops_pids {
-            let state = self
-                .task_ops_state
-                .get(pid)
-                .copied()
-                .unwrap_or(OpsTaskState::None);
+        // Hash task ops state (BTreeMap iterates in sorted key order)
+        hash = fnv1a_combine(hash, fnv1a_hash_u64(self.task_ops_state.len() as u64));
+        for (pid, state) in &self.task_ops_state {
             hash = fnv1a_combine(hash, fnv1a_hash_u64(pid.0 as u64));
-            hash = fnv1a_combine(hash, fnv1a_hash_u64(state as u64));
+            hash = fnv1a_combine(hash, fnv1a_hash_u64(*state as u64));
         }
 
-        // Hash kicked_cpus (deterministic ordering by CPU id)
-        let mut kicked_cpus: Vec<_> = self.kicked_cpus.keys().copied().collect();
-        kicked_cpus.sort_by_key(|cpu| cpu.0);
-        hash = fnv1a_combine(hash, fnv1a_hash_u64(kicked_cpus.len() as u64));
-        for cpu in kicked_cpus {
-            let flags = self
-                .kicked_cpus
-                .get(&cpu)
-                .copied()
-                .unwrap_or(KickFlags::NONE);
+        // Hash kicked_cpus (BTreeMap iterates in sorted key order)
+        hash = fnv1a_combine(hash, fnv1a_hash_u64(self.kicked_cpus.len() as u64));
+        for (cpu, flags) in &self.kicked_cpus {
             hash = fnv1a_combine(hash, fnv1a_hash_u64(cpu.0 as u64));
             hash = fnv1a_combine(hash, fnv1a_hash_u64(flags.raw()));
         }
@@ -1538,12 +1526,12 @@ mod tests {
             task_raw_to_pid: HashMap::new(),
             task_pid_to_raw: HashMap::new(),
             task_last_cpu: HashMap::new(),
-            task_ops_state: HashMap::new(),
+            task_ops_state: BTreeMap::new(),
             rng: SmallRng::seed_from_u64(0xDEAD_BEEF),
             ops_context: OpsContext::None,
             pending_dispatch: None,
             dsq_iter: None,
-            kicked_cpus: HashMap::new(),
+            kicked_cpus: BTreeMap::new(),
             reenqueue_local_requested: false,
             pending_timer_ns: None,
             waker_task_raw: None,
