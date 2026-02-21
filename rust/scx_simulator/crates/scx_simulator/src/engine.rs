@@ -538,21 +538,13 @@ impl<S: Scheduler> Simulator<S> {
 
         // Build simulator state (shared with kfuncs via thread-local)
         //
-        // NOTE: RBC counter is disabled in several cases:
-        // 1. Interleave mode: The PMU counter is thread-local (pid=0), but
-        //    interleave mode runs scheduler callbacks on worker threads whose
-        //    branches are not captured.
-        // 2. Determinism mode: Hardware PMU counters produce non-deterministic
-        //    counts across runs (different ASLR addresses cause different
-        //    branch patterns in calloc/memset, and PMU skid varies). Using
-        //    these counts to advance local_clock makes scx_bpf_now()
-        //    non-deterministic, which changes scheduler vtime calculations
-        //    and DSQ ordering between runs with the same seed.
+        // NOTE: RBC counter is disabled when interleaving is enabled because:
+        // 1. The PMU counter is thread-local (created with pid=0 for current thread)
+        // 2. In interleave mode, scheduler callbacks run on worker threads
+        // 3. The counter would only count main thread branches, not worker thread branches
+        // 4. Main thread branches during thread::scope are non-deterministic (OS scheduling)
         let rbc_ns = scenario.sched_overhead_rbc_ns.filter(|&ns| ns > 0);
-        let rbc_counter = if rbc_ns.is_some()
-            && !scenario.interleave
-            && !crate::preempt::is_determinism_mode_enabled()
-        {
+        let rbc_counter = if rbc_ns.is_some() && !scenario.interleave {
             perf::try_create_rbc_counter()
         } else {
             None
