@@ -370,6 +370,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         result
     }
 
+    /// Deliberately cross-node: interleaves cores across shuffled nodes and
+    /// LLCs to balance load across the entire system rather than filling one
+    /// node first.
     fn grow_round_robin(&self) -> Vec<usize> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
 
@@ -417,15 +420,13 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             let node = &self.topo.nodes[&node_id];
             let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
             cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
-            result.extend(
-                cores
-                    .into_iter()
-                    .map(|core| self.cpu_pool.core_seq(core)),
-            );
+            result.extend(cores.into_iter().map(|core| self.cpu_pool.core_seq(core)));
         }
         result
     }
 
+    /// Deliberately cross-node: interleaves cores across NUMA nodes so that
+    /// the layer spreads evenly across nodes as it grows.
     fn grow_node_spread_inner(&self, make_random: bool) -> Vec<usize> {
         let mut cores: Vec<usize> = Vec::new();
         let mut node_core_vecs: Vec<Vec<usize>> = Vec::new();
@@ -472,16 +473,20 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         cores
     }
 
+    /// Deliberately cross-node: reverse of NodeSpread interleaving.
     fn grow_node_spread_reverse(&self) -> Vec<usize> {
         let mut cores = self.grow_node_spread();
         cores.reverse();
         cores
     }
 
+    /// Deliberately cross-node: interleaves cores across NUMA nodes linearly.
     fn grow_node_spread(&self) -> Vec<usize> {
         return self.grow_node_spread_inner(false);
     }
 
+    /// Deliberately cross-node: interleaves cores across NUMA nodes with
+    /// randomized per-node ordering.
     fn grow_node_spread_random(&self) -> Vec<usize> {
         return self.grow_node_spread_inner(true);
     }
@@ -573,15 +578,15 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             let node = &self.topo.nodes[&node_id];
             let mut cores: Vec<&Arc<Core>> = node.all_cores.values().collect();
             cores.sort_by(|a, b| b.core_type.cmp(&a.core_type));
-            result.extend(
-                cores
-                    .into_iter()
-                    .map(|core| self.cpu_pool.core_seq(core)),
-            );
+            result.extend(cores.into_iter().map(|core| self.cpu_pool.core_seq(core)));
         }
         result
     }
 
+    /// Not node-aware: unlike other algorithms that use node_order() to hard-
+    /// limit iteration to spec_nodes, Topo treats nodes and LLCs as a union —
+    /// spec_llcs cores from ALL nodes come first, then spec_nodes cores fill in
+    /// the rest. With no preferences, falls back to RoundRobin.
     fn grow_topo(&self) -> Vec<usize> {
         let spec_nodes = self.spec.nodes();
         let spec_llcs = self.spec.llcs();
@@ -629,6 +634,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         }
     }
 
+    /// Deliberately cross-node: randomly selects a node, then a random LLC
+    /// within it, then randomly iterates cores — topology-sticky but with
+    /// random cross-node visitation order.
     fn grow_random_topo(&self) -> Vec<usize> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
 
